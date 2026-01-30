@@ -1,0 +1,32 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+*.profraw
+*.profdata
+coverage/
+
+# Benchmarks
+criterion/
+
+# Build artifacts
+*.so
+*.dylib
+*.dll
+*.a
+
+# Logs
+*.log

@@ -1,0 +1,25 @@
+[package]
+name = "ulttui"
+description = "TUI framework with native protocol + ANSI fallback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Protocol
+ultty-protocol = { workspace = true }
+
+# Fallback rendering
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

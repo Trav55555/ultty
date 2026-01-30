@@ -1,0 +1,55 @@
+//! # ultimate-tui
+//!
+//! A TUI framework that works in any terminal, with native acceleration
+//! when running in Ultty.
+//!
+//! ## Quick Start
+//!
+//! ```rust,ignore
+//! use ulttui::prelude::*;
+//!
+//! struct App { count: i32 }
+//!
+//! impl Application for App {
+//!     type Message = ();
+//!     
+//!     fn view(&self) -> impl View {
+//!         Text::new(format!("Count: {}", self.count))
+//!     }
+//! }
+//!
+//! fn main() {
+//!     App { count: 0 }.run().unwrap();
+//! }
+//! ```
+//!
+//! ## Features
+//!
+//! - **Dual-mode rendering**: Native protocol in Ultty, ANSI fallback elsewhere
+//! - **Declarative UI**: Build UIs as functions of state
+//! - **Elm architecture**: Message → Update → View
+//! - **Flexible layouts**: Flexbox and Grid via Taffy
+//! - **Built-in widgets**: Text, Input, Button, ScrollView, etc.
+
+pub mod app;
+pub mod backend;
+pub mod event;
+pub mod layout;
+pub mod state;
+pub mod vim;
+pub mod widgets;
+
+/// Prelude for convenient imports.
+pub mod prelude {
+    pub use crate::app::{App, Application};
+    pub use crate::event::Event;
+    pub use crate::layout::{Column, Row};
+    pub use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
+    pub use crate::widgets::{Button, List, ScrollView, Text, TextInput, View};
+
+    // Re-export protocol types
+    pub use ultty_protocol::{Color, Constraints, Dimension, Style};
+
+    // Re-export vim types from protocol
+    pub use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator};
+}

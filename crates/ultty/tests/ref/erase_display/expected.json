@@ -1,0 +1,5 @@
+{
+  "actions": [
+    { "action": "EraseInDisplay", "params": 2 }
+  ]
+}

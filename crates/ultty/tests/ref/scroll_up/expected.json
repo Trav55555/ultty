@@ -1,0 +1,5 @@
+{
+  "actions": [
+    { "action": "ScrollUp", "params": 3 }
+  ]
+}

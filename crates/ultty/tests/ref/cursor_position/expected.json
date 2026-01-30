@@ -1,0 +1,5 @@
+{
+  "actions": [
+    { "action": "CursorPosition", "params": { "row": 10, "col": 20 } }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "actions": [
+    { "action": "SetAttribute", "params": { "attr": "Bold" } }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "actions": [
+    {
+      "action": "SetAttribute",
+      "params": {
+        "attr": "ForegroundColor",
+        "value": {
+          "type": "Named",
+          "value": "Red"
+        }
+      }
+    }
+  ]
+}

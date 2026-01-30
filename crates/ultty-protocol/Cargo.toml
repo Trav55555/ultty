@@ -1,0 +1,15 @@
+[package]
+name = "ultty-protocol"
+description = "Wire protocol for Ultty terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+zerocopy = { workspace = true }
+thiserror = { workspace = true }
+taffy = { workspace = true }  # For layout constraint types
+
+[dev-dependencies]
+proptest = "1.4"  # Property-based testing for serialization

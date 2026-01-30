@@ -1,0 +1,6 @@
+{
+  "actions": [
+    { "action": "SaveCursorPosition", "params": null },
+    { "action": "RestoreCursorPosition", "params": null }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "actions": [
+    { "action": "CursorDown", "params": 3 }
+  ]
+}
