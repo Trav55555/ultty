@@ -72,7 +72,7 @@ pub enum Key {
 /// Modifier keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Modifiers {
-    bits: u8,
+    pub(crate) bits: u8,
 }
 
 impl Modifiers {

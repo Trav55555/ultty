@@ -23,7 +23,11 @@ pub enum ProtocolError {
 
     /// Invalid UTF-8 in string field.
     #[error("invalid UTF-8: {0}")]
-    InvalidUtf8(#[from] std::string::FromUtf8Error),
+    InvalidUtf8(String),
+
+    /// Invalid data in message.
+    #[error("invalid data: {0}")]
+    InvalidData(String),
 
     /// Invalid enum variant.
     #[error("invalid {enum_name} variant: {value}")]

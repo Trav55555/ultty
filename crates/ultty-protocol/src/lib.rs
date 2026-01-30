@@ -13,17 +13,19 @@
 //! ## Example
 //!
 //! ```rust
-//! use ultty_protocol::{AppMessage, RegionId, Constraints};
+//! use ultty_protocol::{AppMessage, RegionId, Constraints, Style, Encode};
 //!
 //! // Create a region
 //! let msg = AppMessage::CreateRegion {
 //!     id: RegionId(1),
 //!     parent: RegionId::ROOT,
+//!     insert_index: -1,
 //!     constraints: Constraints::default(),
+//!     style: Style::default(),
 //! };
 //!
 //! // Encode for wire
-//! let bytes = msg.encode();
+//! let bytes = msg.encode_to_bytes();
 //! ```
 
 mod codec;
