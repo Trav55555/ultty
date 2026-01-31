@@ -70,6 +70,7 @@ pub struct Cursor {
     pub position: CursorPosition,
     pub visible: bool,
     pub shape: CursorShape,
+    pub blinking: bool,
     /// Saved cursor for ESC 7 / ESC 8
     saved: Option<CursorPosition>,
 }
@@ -80,6 +81,7 @@ impl Default for Cursor {
             position: CursorPosition::origin(),
             visible: true,
             shape: CursorShape::Block,
+            blinking: true, // Default is blinking
             saved: None,
         }
     }
@@ -210,26 +212,83 @@ impl Grid {
 
     /// Write a character at the cursor position and advance.
     pub fn write_char(&mut self, c: char) {
+        use unicode_width::UnicodeWidthChar;
+
         let col = self.cursor.position.col;
         let row = self.cursor.position.row;
 
-        if col < self.dims.cols && row < self.dims.rows {
-            // Copy attrs first to avoid borrow conflict
-            let attrs = self.attrs;
-            if let Some(cell) = self.cell_mut(col, row) {
-                cell.set_char(c);
-                cell.copy_attrs_from(&attrs);
-            }
-            self.cursor.position.col += 1;
+        if row >= self.dims.rows {
+            return;
+        }
 
-            // Handle wrap
-            if self.cursor.position.col >= self.dims.cols {
-                self.cursor.position.col = 0;
-                self.cursor.position.row += 1;
-                if self.cursor.position.row >= self.dims.rows {
-                    self.scroll_up(1);
-                    self.cursor.position.row = self.dims.rows - 1;
-                }
+        // Get character width (0 for control chars, 1 for normal, 2 for wide)
+        let width = c.width().unwrap_or(0) as u16;
+
+        if width == 0 {
+            // Zero-width character (combining, control) - for now, skip
+            // TODO: Handle combining characters properly
+            return;
+        }
+
+        // Check if we need to wrap before writing
+        if col + width > self.dims.cols {
+            // Mark current row as wrapped (soft wrap)
+            if let Some(r) = self.row_mut(row) {
+                r.set_wrapped(true);
+            }
+            // Wrap to next line
+            self.cursor.position.col = 0;
+            self.cursor.position.row += 1;
+            if self.cursor.position.row >= self.dims.rows {
+                self.scroll_up(1);
+                self.cursor.position.row = self.dims.rows - 1;
+            }
+        }
+
+        let col = self.cursor.position.col;
+        let row = self.cursor.position.row;
+
+        // Copy attrs first to avoid borrow conflict
+        let attrs = self.attrs;
+
+        // Write the character
+        if let Some(cell) = self.cell_mut(col, row) {
+            cell.set_char(c);
+            cell.copy_attrs_from(&attrs);
+
+            // Handle wide characters
+            if width > 1 {
+                cell.set_flag(CellFlags::WIDE_CHAR);
+            } else {
+                cell.unset_flag(CellFlags::WIDE_CHAR);
+            }
+            cell.unset_flag(CellFlags::WIDE_CHAR_SPACER);
+        }
+
+        // If wide character, put spacer in next cell
+        if width > 1 && col + 1 < self.dims.cols {
+            if let Some(spacer) = self.cell_mut(col + 1, row) {
+                spacer.set_char(' ');
+                spacer.copy_attrs_from(&attrs);
+                spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
+                spacer.unset_flag(CellFlags::WIDE_CHAR);
+            }
+        }
+
+        // Advance cursor by character width
+        self.cursor.position.col += width;
+
+        // Handle wrap after writing
+        if self.cursor.position.col >= self.dims.cols {
+            // Mark current row as wrapped (soft wrap) since we're continuing to next line
+            if let Some(r) = self.rows.get_mut(row as usize) {
+                r.set_wrapped(true);
+            }
+            self.cursor.position.col = 0;
+            self.cursor.position.row += 1;
+            if self.cursor.position.row >= self.dims.rows {
+                self.scroll_up(1);
+                self.cursor.position.row = self.dims.rows - 1;
             }
         }
     }
@@ -499,20 +558,23 @@ impl Grid {
         self.mark_dirty(self.cursor.position.row);
     }
 
-    /// Resize the grid.
+    /// Resize the grid with reflow.
     pub fn resize(&mut self, new_dims: Dimensions) {
         if new_dims == self.dims {
             return;
         }
 
-        // Resize existing rows
-        for row in &mut self.rows {
-            row.resize(new_dims.cols);
+        let old_cols = self.dims.cols;
+        let new_cols = new_dims.cols;
+
+        // Perform reflow if width changed
+        if old_cols != new_cols {
+            self.reflow(new_cols);
         }
 
         // Add or remove rows
         while self.rows.len() < new_dims.rows as usize {
-            self.rows.push(Row::new(new_dims.cols));
+            self.rows.push(Row::new(new_cols));
         }
         self.rows.truncate(new_dims.rows as usize);
 
@@ -522,6 +584,77 @@ impl Grid {
 
         self.dims = new_dims;
         self.dirty = vec![true; new_dims.rows as usize];
+    }
+
+    /// Reflow lines to a new width.
+    ///
+    /// This handles soft-wrapped lines by joining them together and re-wrapping
+    /// to the new width. Hard line breaks (actual newlines) are preserved.
+    fn reflow(&mut self, new_cols: u16) {
+        use crate::grid::cell::Cell;
+
+        if self.rows.is_empty() {
+            return;
+        }
+
+        // Collect all logical lines (sequences of wrapped rows form one logical line)
+        let mut logical_lines: Vec<Vec<Cell>> = Vec::new();
+        let mut current_line: Vec<Cell> = Vec::new();
+
+        for row in self.rows.drain(..) {
+            // Append this row's non-blank cells to current logical line
+            for cell in row.cells() {
+                current_line.push(cell.clone());
+            }
+
+            // If this row wasn't wrapped, this logical line ends here
+            if !row.is_wrapped() {
+                // Trim trailing empty cells
+                while current_line.last().map_or(false, |c| c.is_blank()) {
+                    current_line.pop();
+                }
+                logical_lines.push(std::mem::take(&mut current_line));
+            }
+        }
+
+        // Don't forget any remaining cells
+        if !current_line.is_empty() {
+            while current_line.last().map_or(false, |c| c.is_blank()) {
+                current_line.pop();
+            }
+            logical_lines.push(current_line);
+        }
+
+        // Now re-wrap each logical line to new width
+        for line in logical_lines {
+            if line.is_empty() {
+                // Empty line - just add an empty row
+                self.rows.push(Row::new(new_cols));
+                continue;
+            }
+
+            let mut pos = 0;
+            while pos < line.len() {
+                let mut new_row = Row::new(new_cols);
+                let mut col = 0u16;
+
+                while col < new_cols && pos < line.len() {
+                    let cell = &line[pos];
+                    if let Some(dest) = new_row.get_mut(col) {
+                        *dest = cell.clone();
+                    }
+                    col += 1;
+                    pos += 1;
+                }
+
+                // If there's more content, mark this row as wrapped
+                if pos < line.len() {
+                    new_row.set_wrapped(true);
+                }
+
+                self.rows.push(new_row);
+            }
+        }
     }
 
     /// Mark a row as dirty (needs redrawing).
@@ -644,6 +777,41 @@ mod tests {
         assert_eq!(grid.cell(0, 0).unwrap().char(), 'A');
         assert_eq!(grid.dimensions().cols, 20);
         assert_eq!(grid.dimensions().rows, 10);
+    }
+
+    #[test]
+    fn reflow_on_narrow() {
+        // Create a 10-column grid and write 15 characters
+        let mut grid = Grid::new(Dimensions::new(10, 5));
+        for c in "Hello World!!!!".chars() {
+            grid.write_char(c);
+        }
+        // Content should be on rows 0 and 1 (wrapped at col 10)
+        assert!(grid.row(0).unwrap().is_wrapped()); // First row wrapped
+
+        // Now widen to 20 columns
+        grid.resize(Dimensions::new(20, 5));
+        // Content should now fit on one row
+        let row0_text = grid.row(0).unwrap().text_trimmed();
+        assert_eq!(row0_text, "Hello World!!!!");
+        assert!(!grid.row(0).unwrap().is_wrapped());
+    }
+
+    #[test]
+    fn reflow_on_widen() {
+        // Create a 20-column grid with content
+        let mut grid = Grid::new(Dimensions::new(20, 5));
+        for c in "Hello World!!!!".chars() {
+            grid.write_char(c);
+        }
+        assert_eq!(grid.row(0).unwrap().text_trimmed(), "Hello World!!!!");
+
+        // Narrow to 10 columns - should wrap
+        grid.resize(Dimensions::new(10, 5));
+        // Content should now be split across two rows
+        assert!(grid.row(0).unwrap().is_wrapped());
+        assert_eq!(grid.row(0).unwrap().text_trimmed(), "Hello Worl");
+        assert_eq!(grid.row(1).unwrap().text_trimmed(), "d!!!!");
     }
 
     #[test]

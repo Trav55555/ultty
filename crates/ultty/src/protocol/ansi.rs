@@ -151,6 +151,11 @@ pub enum Action {
     /// Switch back to main screen buffer (CSI ?1049l)
     LeaveAlternateScreen,
 
+    /// Set cursor style (DECSCUSR - CSI Ps SP q)
+    /// 0/1 = blinking block, 2 = steady block, 3 = blinking underline,
+    /// 4 = steady underline, 5 = blinking bar, 6 = steady bar
+    SetCursorStyle(u8),
+
     // === OSC Sequences ===
     /// Set window/icon title (OSC 0, 1, 2)
     SetTitle(String),
@@ -314,6 +319,8 @@ pub struct AnsiParser {
     params: Vec<u16>,
     current_param: Option<u16>,
     is_private: bool,
+    /// Intermediate byte for CSI sequences (e.g., space in `CSI Ps SP q`)
+    intermediate: Option<u8>,
     osc_buffer: Vec<u8>,
     dcs_buffer: Vec<u8>,
     dcs_params: Vec<u16>,
@@ -327,6 +334,7 @@ impl AnsiParser {
             params: Vec::with_capacity(16),
             current_param: None,
             is_private: false,
+            intermediate: None,
             osc_buffer: Vec::new(),
             dcs_buffer: Vec::new(),
             dcs_params: Vec::new(),
@@ -367,6 +375,7 @@ impl AnsiParser {
         self.params.clear();
         self.current_param = None;
         self.is_private = false;
+        self.intermediate = None;
         self.osc_buffer.clear();
         self.dcs_buffer.clear();
         self.dcs_params.clear();
@@ -483,9 +492,9 @@ impl AnsiParser {
             0x1B => {
                 self.state = State::Escape;
             }
-            // Intermediate bytes - we don't handle these yet
+            // Intermediate bytes (e.g., space in DECSCUSR)
             0x20..=0x2F => {
-                // Skip intermediates for now
+                self.intermediate = Some(byte);
             }
             _ => {
                 self.reset();
@@ -521,9 +530,9 @@ impl AnsiParser {
             0x1B => {
                 self.state = State::Escape;
             }
-            // Intermediate bytes
+            // Intermediate bytes (e.g., space in DECSCUSR)
             0x20..=0x2F => {
-                // Skip for now
+                self.intermediate = Some(byte);
             }
             _ => {
                 self.reset();
@@ -593,6 +602,12 @@ impl AnsiParser {
 
             // Device attributes
             b'c' => callback(Action::DeviceAttributes),
+
+            // Cursor style (DECSCUSR) - CSI Ps SP q
+            b'q' if self.intermediate == Some(b' ') => {
+                let style = self.params.first().copied().unwrap_or(0) as u8;
+                callback(Action::SetCursorStyle(style));
+            }
 
             // Mode set/reset
             b'h' if self.is_private => {

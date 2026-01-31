@@ -95,6 +95,8 @@ pub struct Terminal {
     shell_integration: ShellIntegration,
     /// Inline images (Sixel, etc.)
     images: ImageStore,
+    /// Pending responses to send back to PTY
+    pending_responses: Vec<Vec<u8>>,
 }
 
 impl Terminal {
@@ -109,7 +111,23 @@ impl Terminal {
             title: String::new(),
             shell_integration: ShellIntegration::default(),
             images: ImageStore::new(),
+            pending_responses: Vec::new(),
         }
+    }
+
+    /// Queue a response to send back to the PTY.
+    pub fn queue_response(&mut self, response: Vec<u8>) {
+        self.pending_responses.push(response);
+    }
+
+    /// Take all pending responses (clears the queue).
+    pub fn take_responses(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.pending_responses)
+    }
+
+    /// Check if there are pending responses.
+    pub fn has_pending_responses(&self) -> bool {
+        !self.pending_responses.is_empty()
     }
 
     /// Get the active buffer.

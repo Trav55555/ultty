@@ -24,6 +24,13 @@ pub enum TerminalEvent {
     Bell,
     /// Window title changed.
     TitleChanged(String),
+    /// Set clipboard content (OSC 52).
+    SetClipboard {
+        /// Clipboard target: 'c' for clipboard, 's' for selection
+        clipboard: char,
+        /// Decoded text content
+        data: String,
+    },
 }
 
 /// The terminal event loop.
@@ -252,10 +259,29 @@ impl EventLoop {
                 Action::SetTitle(title) => {
                     events.push(TerminalEvent::TitleChanged(title.clone()));
                 }
+                Action::SetClipboard { clipboard, data } => {
+                    events.push(TerminalEvent::SetClipboard {
+                        clipboard: *clipboard,
+                        data: data.clone(),
+                    });
+                }
                 _ => {}
             }
             handler.handle(action);
         });
+
+        // Send any pending responses back to the PTY
+        self.send_pending_responses();
+    }
+
+    /// Send any pending terminal responses to the PTY.
+    fn send_pending_responses(&mut self) {
+        let responses = self.terminal.take_responses();
+        for response in responses {
+            if let Err(e) = self.child.write_all(&response) {
+                tracing::warn!("Failed to send terminal response: {}", e);
+            }
+        }
     }
 
     /// Run the event loop with a callback.

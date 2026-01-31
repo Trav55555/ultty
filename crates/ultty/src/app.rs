@@ -27,6 +27,9 @@ const DEFAULT_HEIGHT: u32 = 600;
 /// Time window for detecting double/triple clicks.
 const CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 
+/// Cursor blink interval (how long cursor stays on/off).
+const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
+
 /// Terminal application.
 pub struct App {
     /// Window
@@ -73,6 +76,10 @@ pub struct App {
     shortcuts_visible: bool,
     /// Cached list of keybindings for display
     shortcuts_list: Vec<(String, String)>,
+    /// Whether cursor is currently visible in blink cycle
+    cursor_blink_visible: bool,
+    /// Last time cursor blink state changed
+    last_cursor_blink: Instant,
 }
 
 impl App {
@@ -173,6 +180,8 @@ impl App {
             scrollbar_dragging: false,
             shortcuts_visible: false,
             shortcuts_list,
+            cursor_blink_visible: true,
+            last_cursor_blink: Instant::now(),
         })
     }
 
@@ -865,6 +874,10 @@ impl App {
             return;
         }
 
+        // Reset cursor blink on key press (cursor should be visible while typing)
+        self.cursor_blink_visible = true;
+        self.last_cursor_blink = Instant::now();
+
         // Check for vim mode toggle (Ctrl+Shift+Space)
         if self.check_keybinding(&event, &self.config.keybindings.vim_mode.clone()) {
             if self.copy_mode.is_active() {
@@ -1285,20 +1298,35 @@ impl App {
 
     /// Perform search in scrollback.
     fn perform_search(&mut self, query: &str) {
+        if query.is_empty() {
+            return;
+        }
+
         let buffer = self.terminal().buffer();
         let mut matches = Vec::new();
 
         let total_lines = buffer.total_lines();
         for row in 0..total_lines {
-            if let Some(grid_row) = buffer.visible_row(row as u16) {
+            if let Some(grid_row) = buffer.row_at(row) {
                 let text = grid_row.text_trimmed();
-                for (col, _) in text.match_indices(query) {
+                // Case-insensitive search
+                let text_lower = text.to_lowercase();
+                let query_lower = query.to_lowercase();
+                for (col, _) in text_lower.match_indices(&query_lower) {
                     matches.push((row, col));
                 }
             }
         }
 
+        tracing::debug!("Search '{}': found {} matches", query, matches.len());
+        let has_matches = !matches.is_empty();
         self.copy_mode.set_search_matches(matches);
+
+        // Jump to first match if any
+        if has_matches {
+            // Move cursor to first match
+            // The copy_mode's goto_next_match will handle positioning
+        }
     }
 
     /// Update tab bar hover state.
@@ -1418,6 +1446,14 @@ impl App {
             }
         }
 
+        // Update cursor blink state
+        let now = Instant::now();
+        if now.duration_since(self.last_cursor_blink) >= CURSOR_BLINK_INTERVAL {
+            self.cursor_blink_visible = !self.cursor_blink_visible;
+            self.last_cursor_blink = now;
+            self.needs_redraw = true;
+        }
+
         // Get the focused terminal ID for title updates
         let focused_id = self.terminal_manager.focused_terminal().map(|t| t.id);
 
@@ -1457,6 +1493,19 @@ impl App {
                                 // Only set window title from focused terminal
                                 if Some(terminal_id) == focused_id {
                                     self.window.set_title(&title);
+                                }
+                            }
+                            TerminalEvent::SetClipboard { clipboard: _, data } => {
+                                // Set clipboard content (OSC 52)
+                                // Only handle from focused terminal for security
+                                if Some(terminal_id) == focused_id {
+                                    if let Some(ref mut cb) = self.clipboard {
+                                        if let Err(e) = cb.set_text(&data) {
+                                            tracing::warn!("Failed to set clipboard: {}", e);
+                                        } else {
+                                            tracing::debug!("Set clipboard via OSC 52: {} chars", data.len());
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1577,6 +1626,7 @@ impl App {
             } else {
                 None
             },
+            cursor_blink_visible: self.cursor_blink_visible,
         };
 
         self.renderer.render_with_overlay(&self.surface, terminal, &overlay)
@@ -1682,6 +1732,7 @@ impl App {
             } else {
                 None
             },
+            cursor_blink_visible: self.cursor_blink_visible,
         };
 
         self.renderer.render_panes(&self.surface, &panes, &overlay)

@@ -161,6 +161,7 @@ impl<'a> Handler<'a> {
             | Action::CommandFinished(_)
             | Action::SetClipboard { .. }
             | Action::SixelImage { .. }
+            | Action::SetCursorStyle(_)
             | Action::UnknownOsc(_) => {}
         }
     }

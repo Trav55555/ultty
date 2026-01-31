@@ -15,7 +15,7 @@ pub use pipeline::RenderPipeline;
 pub use text::TextRenderer;
 
 use crate::config::{ColorConfig, FontConfig};
-use crate::grid::{CellFlags, Color, ImageId, Terminal, TerminalImage};
+use crate::grid::{CellFlags, Color, CursorShape, ImageId, Terminal, TerminalImage};
 use crate::tabs::TabBarState;
 use crate::url::DetectedUrl;
 use crate::vim::{CopyMode, Selection as VimSelection};
@@ -97,6 +97,8 @@ pub struct OverlayState<'a> {
     pub shortcuts_visible: bool,
     /// Keybindings to display in shortcuts overlay
     pub keybindings: Option<&'a [(String, String)]>,
+    /// Whether cursor should be visible in current blink phase
+    pub cursor_blink_visible: bool,
 }
 
 impl<'a> Default for OverlayState<'a> {
@@ -110,6 +112,7 @@ impl<'a> Default for OverlayState<'a> {
             bell_active: false,
             shortcuts_visible: false,
             keybindings: None,
+            cursor_blink_visible: true, // Default visible
         }
     }
 }
@@ -610,7 +613,7 @@ impl Renderer {
         };
 
         // Build vertex data for backgrounds and text
-        let (bg_vertices, bg_indices) = self.build_background_vertices(terminal);
+        let (bg_vertices, bg_indices) = self.build_background_vertices(terminal, overlay);
 
         // Create background vertex/index buffers
         let bg_vertex_buffer = self
@@ -1121,7 +1124,7 @@ impl Renderer {
             self.pane_offset_y = pane.y + self.tab_bar_height;
 
             // Render pane backgrounds
-            let (bg_v, bg_i) = self.build_background_vertices_with_offset(terminal);
+            let (bg_v, bg_i) = self.build_background_vertices_with_offset(terminal, overlay);
             if !bg_v.is_empty() {
                 let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("pane_bg_vb"),
@@ -1355,7 +1358,7 @@ impl Renderer {
     }
 
     /// Build background vertices with pane offset.
-    fn build_background_vertices_with_offset(&self, terminal: &Terminal) -> (Vec<Vertex>, Vec<u32>) {
+    fn build_background_vertices_with_offset(&self, terminal: &Terminal, overlay: &OverlayState) -> (Vec<Vertex>, Vec<u32>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
@@ -1414,13 +1417,91 @@ impl Renderer {
         }
 
         // Draw cursor
-        if terminal.buffer().grid().cursor().visible {
-            let cursor = terminal.buffer().grid().cursor();
+        let cursor = terminal.buffer().grid().cursor();
+        let should_show_cursor = cursor.visible
+            && (!cursor.blinking || overlay.cursor_blink_visible);
+
+        if should_show_cursor {
             let cursor_color = self.color_scheme.cursor;
-            self.emit_quad_with_offset(&mut vertices, &mut indices, cursor.position.col, cursor.position.col + 1, cursor.position.row, cursor_color);
+            let col = cursor.position.col;
+            let row = cursor.position.row;
+
+            match cursor.shape {
+                CursorShape::Block => {
+                    self.emit_quad_with_offset(&mut vertices, &mut indices, col, col + 1, row, cursor_color);
+                }
+                CursorShape::Underline => {
+                    self.emit_cursor_underline_with_offset(&mut vertices, &mut indices, col, row, cursor_color);
+                }
+                CursorShape::Bar => {
+                    self.emit_cursor_bar_with_offset(&mut vertices, &mut indices, col, row, cursor_color);
+                }
+            }
         }
 
         (vertices, indices)
+    }
+
+    /// Emit a thin underline cursor with pane offset.
+    fn emit_cursor_underline_with_offset(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        col: u16,
+        row: u16,
+        color: Rgba,
+    ) {
+        let x0 = col as f32 * self.cell_width + self.pane_offset_x;
+        let x1 = (col + 1) as f32 * self.cell_width + self.pane_offset_x;
+        let underline_height = 2.0f32.min(self.cell_height * 0.15);
+        let y0 = (row + 1) as f32 * self.cell_height + self.pane_offset_y - underline_height;
+        let y1 = (row + 1) as f32 * self.cell_height + self.pane_offset_y;
+
+        let base_idx = vertices.len() as u32;
+        let color_arr = color.to_array();
+
+        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: color_arr });
+        vertices.push(Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color: color_arr });
+        vertices.push(Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color: color_arr });
+        vertices.push(Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color: color_arr });
+
+        indices.push(base_idx);
+        indices.push(base_idx + 1);
+        indices.push(base_idx + 2);
+        indices.push(base_idx);
+        indices.push(base_idx + 2);
+        indices.push(base_idx + 3);
+    }
+
+    /// Emit a thin bar cursor with pane offset.
+    fn emit_cursor_bar_with_offset(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        col: u16,
+        row: u16,
+        color: Rgba,
+    ) {
+        let bar_width = 2.0f32.min(self.cell_width * 0.15);
+        let x0 = col as f32 * self.cell_width + self.pane_offset_x;
+        let x1 = x0 + bar_width;
+        let y0 = row as f32 * self.cell_height + self.pane_offset_y;
+        let y1 = (row + 1) as f32 * self.cell_height + self.pane_offset_y;
+
+        let base_idx = vertices.len() as u32;
+        let color_arr = color.to_array();
+
+        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: color_arr });
+        vertices.push(Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color: color_arr });
+        vertices.push(Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color: color_arr });
+        vertices.push(Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color: color_arr });
+
+        indices.push(base_idx);
+        indices.push(base_idx + 1);
+        indices.push(base_idx + 2);
+        indices.push(base_idx);
+        indices.push(base_idx + 2);
+        indices.push(base_idx + 3);
     }
 
     /// Emit a quad with pane offset.
@@ -2189,7 +2270,7 @@ impl Renderer {
     }
 
     /// Build background vertex data from terminal state.
-    fn build_background_vertices(&self, terminal: &Terminal) -> (Vec<Vertex>, Vec<u32>) {
+    fn build_background_vertices(&self, terminal: &Terminal, overlay: &OverlayState) -> (Vec<Vertex>, Vec<u32>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
@@ -2269,21 +2350,114 @@ impl Renderer {
         }
 
         // Draw cursor
-        if terminal.buffer().grid().cursor().visible {
-            let cursor = terminal.buffer().grid().cursor();
-            let cursor_color = self.color_scheme.cursor;
+        let cursor = terminal.buffer().grid().cursor();
+        // Only draw if visible and (not blinking or blink phase is visible)
+        let should_show_cursor = cursor.visible
+            && (!cursor.blinking || overlay.cursor_blink_visible);
 
-            self.emit_quad(
-                &mut vertices,
-                &mut indices,
-                cursor.position.col,
-                cursor.position.col + 1,
-                cursor.position.row,
-                cursor_color,
-            );
+        if should_show_cursor {
+            let cursor_color = self.color_scheme.cursor;
+            let col = cursor.position.col;
+            let row = cursor.position.row;
+
+            match cursor.shape {
+                CursorShape::Block => {
+                    // Full cell block cursor
+                    self.emit_quad(
+                        &mut vertices,
+                        &mut indices,
+                        col,
+                        col + 1,
+                        row,
+                        cursor_color,
+                    );
+                }
+                CursorShape::Underline => {
+                    // Thin underline cursor (bottom 2 pixels of cell)
+                    self.emit_cursor_underline(
+                        &mut vertices,
+                        &mut indices,
+                        col,
+                        row,
+                        cursor_color,
+                    );
+                }
+                CursorShape::Bar => {
+                    // Thin bar cursor (left 2 pixels of cell)
+                    self.emit_cursor_bar(
+                        &mut vertices,
+                        &mut indices,
+                        col,
+                        row,
+                        cursor_color,
+                    );
+                }
+            }
         }
 
         (vertices, indices)
+    }
+
+    /// Emit a thin underline cursor at the bottom of a cell.
+    fn emit_cursor_underline(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        col: u16,
+        row: u16,
+        color: Rgba,
+    ) {
+        let x0 = col as f32 * self.cell_width;
+        let x1 = (col + 1) as f32 * self.cell_width;
+        let underline_height = 2.0f32.min(self.cell_height * 0.15);
+        let y0 = (row + 1) as f32 * self.cell_height + self.tab_bar_height - underline_height;
+        let y1 = (row + 1) as f32 * self.cell_height + self.tab_bar_height;
+
+        let base_idx = vertices.len() as u32;
+        let color_arr = color.to_array();
+
+        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: color_arr });
+        vertices.push(Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color: color_arr });
+        vertices.push(Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color: color_arr });
+        vertices.push(Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color: color_arr });
+
+        indices.push(base_idx);
+        indices.push(base_idx + 1);
+        indices.push(base_idx + 2);
+        indices.push(base_idx);
+        indices.push(base_idx + 2);
+        indices.push(base_idx + 3);
+    }
+
+    /// Emit a thin bar cursor at the left of a cell.
+    fn emit_cursor_bar(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        col: u16,
+        row: u16,
+        color: Rgba,
+    ) {
+        let bar_width = 2.0f32.min(self.cell_width * 0.15);
+        let x0 = col as f32 * self.cell_width;
+        let x1 = x0 + bar_width;
+        let y0 = row as f32 * self.cell_height + self.tab_bar_height;
+        let y1 = (row + 1) as f32 * self.cell_height + self.tab_bar_height;
+
+        let base_idx = vertices.len() as u32;
+        let color_arr = color.to_array();
+
+        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: color_arr });
+        vertices.push(Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color: color_arr });
+        vertices.push(Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color: color_arr });
+        vertices.push(Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color: color_arr });
+
+        indices.push(base_idx);
+        indices.push(base_idx + 1);
+        indices.push(base_idx + 2);
+        indices.push(base_idx);
+        indices.push(base_idx + 2);
+        indices.push(base_idx + 3);
     }
 
     /// Emit a quad for a cell range (offset by tab bar height).

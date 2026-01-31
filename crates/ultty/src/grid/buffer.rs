@@ -131,6 +131,20 @@ impl Buffer {
         }
     }
 
+    /// Get a row by absolute index (for searching all content).
+    ///
+    /// Index 0 is the oldest history row.
+    /// Indices beyond history access the current grid.
+    pub fn row_at(&self, absolute_index: usize) -> Option<&Row> {
+        let history_len = self.history.len();
+        if absolute_index < history_len {
+            self.history.get(absolute_index)
+        } else {
+            let grid_index = absolute_index - history_len;
+            self.grid.row(grid_index as u16)
+        }
+    }
+
     /// Clear scrollback history.
     pub fn clear_history(&mut self) {
         self.history.clear();

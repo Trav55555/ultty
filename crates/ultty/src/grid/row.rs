@@ -12,6 +12,8 @@ pub struct Row {
     cells: Vec<Cell>,
     /// Track if this row has been modified
     dirty: bool,
+    /// Whether this row is wrapped (continues on next line due to soft wrap)
+    wrapped: bool,
 }
 
 impl Row {
@@ -20,7 +22,21 @@ impl Row {
         Self {
             cells: vec![Cell::default(); width as usize],
             dirty: true,
+            wrapped: false,
         }
+    }
+
+    /// Check if this row is wrapped (soft-wrapped to next line).
+    #[inline]
+    pub fn is_wrapped(&self) -> bool {
+        self.wrapped
+    }
+
+    /// Set the wrapped flag.
+    #[inline]
+    pub fn set_wrapped(&mut self, wrapped: bool) {
+        self.wrapped = wrapped;
+        self.dirty = true;
     }
 
     /// Get the width of the row.
@@ -47,6 +63,7 @@ impl Row {
         for cell in &mut self.cells {
             cell.clear();
         }
+        self.wrapped = false;
         self.dirty = true;
     }
 

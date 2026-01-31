@@ -135,15 +135,58 @@ impl<'a> TerminalHandler<'a> {
 
             // Terminal queries
             Action::ReportCursorPosition => {
-                // TODO: Send cursor position report
+                // Send cursor position report: CSI row ; col R
+                let row = self.terminal.grid().cursor().position.row + 1; // 1-based
+                let col = self.terminal.grid().cursor().position.col + 1; // 1-based
+                let response = format!("\x1b[{};{}R", row, col);
+                self.terminal.queue_response(response.into_bytes());
             }
             Action::DeviceAttributes => {
-                // TODO: Send device attributes
+                // Send primary device attributes
+                // We identify as VT220 with various capabilities:
+                // 1 = 132 columns, 2 = printer port, 6 = selective erase,
+                // 22 = ANSI color, 29 = ANSI text locator
+                // Response: CSI ? 62 ; 1 ; 2 ; 6 ; 22 ; 29 c
+                let response = b"\x1b[?62;1;2;6;22;29c".to_vec();
+                self.terminal.queue_response(response);
             }
 
             // Control characters
             Action::Bell => {
-                // TODO: Trigger bell (audio or visual)
+                // Bell is handled by the event loop emitting TerminalEvent::Bell
+            }
+
+            // Cursor style (DECSCUSR)
+            Action::SetCursorStyle(style) => {
+                use crate::grid::CursorShape;
+                let cursor = self.terminal.grid_mut().cursor_mut();
+                match style {
+                    0 | 1 => {
+                        cursor.shape = CursorShape::Block;
+                        cursor.blinking = true;
+                    }
+                    2 => {
+                        cursor.shape = CursorShape::Block;
+                        cursor.blinking = false;
+                    }
+                    3 => {
+                        cursor.shape = CursorShape::Underline;
+                        cursor.blinking = true;
+                    }
+                    4 => {
+                        cursor.shape = CursorShape::Underline;
+                        cursor.blinking = false;
+                    }
+                    5 => {
+                        cursor.shape = CursorShape::Bar;
+                        cursor.blinking = true;
+                    }
+                    6 => {
+                        cursor.shape = CursorShape::Bar;
+                        cursor.blinking = false;
+                    }
+                    _ => {} // Unknown style, ignore
+                }
             }
             Action::Newline => {
                 if !self.terminal.is_alternate_screen() {
