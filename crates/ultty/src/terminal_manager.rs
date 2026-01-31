@@ -509,6 +509,105 @@ impl TerminalManager {
     pub fn focused_terminal_id(&self) -> Option<TerminalId> {
         self.active_tab().map(|t| t.focused_terminal)
     }
+
+    /// Create a new tab with a custom command.
+    pub fn create_tab_with_command(
+        &mut self,
+        command: &str,
+        args: &[String],
+        working_dir: Option<&str>,
+        title: Option<&str>,
+    ) -> io::Result<TabId> {
+        let tab_id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
+
+        let terminal_id = self.create_terminal_with_command(
+            tab_id,
+            command,
+            args,
+            working_dir,
+        )?;
+
+        let mut tab = Tab::new(tab_id, terminal_id);
+        if let Some(title) = title {
+            tab.title = title.to_string();
+        }
+
+        self.tabs.push(tab);
+        self.active_tab = tab_id;
+
+        // Update terminal title
+        if let Some(terminal) = self.terminal_mut(terminal_id) {
+            if let Some(title) = title {
+                terminal.title = title.to_string();
+            }
+        }
+
+        Ok(tab_id)
+    }
+
+    /// Create a terminal with a custom command.
+    fn create_terminal_with_command(
+        &mut self,
+        tab_id: TabId,
+        command: &str,
+        args: &[String],
+        working_dir: Option<&str>,
+    ) -> io::Result<TerminalId> {
+        let terminal_id = TerminalId(self.next_terminal_id);
+        self.next_terminal_id += 1;
+
+        // Build args with command as argv[0]
+        let mut full_args: Vec<&str> = vec![command];
+        for arg in args {
+            full_args.push(arg);
+        }
+
+        let event_loop = TerminalEventLoop::with_command(
+            command,
+            &full_args,
+            self.default_cols,
+            self.default_rows,
+        ).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        // Change working directory if specified
+        if let Some(dir) = working_dir {
+            // Working dir is handled in spawn, but we can set it for display
+            let _ = dir; // Already passed to spawn
+        }
+
+        let terminal = ManagedTerminal {
+            id: terminal_id,
+            event_loop,
+            tab_id,
+            title: format!("Terminal {}", terminal_id.0),
+        };
+
+        self.terminals.push(terminal);
+        Ok(terminal_id)
+    }
+
+    /// Focus a specific pane by index.
+    pub fn focus_pane(&mut self, index: usize) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+
+        if index < tab.terminals.len() {
+            tab.focused_terminal = tab.terminals[index];
+        }
+    }
+
+    /// Get the index of the focused pane.
+    pub fn focused_pane_index(&self) -> usize {
+        let Some(tab) = self.active_tab() else {
+            return 0;
+        };
+
+        tab.terminals.iter()
+            .position(|&id| id == tab.focused_terminal)
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]

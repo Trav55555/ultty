@@ -151,6 +151,16 @@ impl<'a> Handler<'a> {
             Action::LeaveAlternateScreen => {
                 // TODO: Switch back to main screen buffer
             }
+
+            // OSC sequences are handled by TerminalHandler, not the simple grid handler
+            Action::SetTitle(_)
+            | Action::SetWorkingDirectory(_)
+            | Action::PromptStart
+            | Action::CommandStart
+            | Action::CommandExecuted
+            | Action::CommandFinished(_)
+            | Action::SetClipboard { .. }
+            | Action::UnknownOsc(_) => {}
         }
     }
 
@@ -203,8 +213,14 @@ impl<'a> Handler<'a> {
             Mode::FocusReporting => {
                 // TODO: Track focus reporting mode
             }
-            Mode::MouseTracking => {
-                // TODO: Track mouse tracking mode
+            Mode::MouseX10
+            | Mode::MouseNormal
+            | Mode::MouseButtonEvent
+            | Mode::MouseAnyEvent
+            | Mode::MouseUtf8
+            | Mode::MouseSgr
+            | Mode::MouseUrxvt => {
+                // Mouse modes are handled by TerminalHandler, not the simple grid handler
             }
             Mode::OriginMode => {
                 // TODO: Track origin mode

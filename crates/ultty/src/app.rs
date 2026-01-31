@@ -3,7 +3,7 @@
 use ultty::config::{Config, KeybindingConfig};
 use ultty::config_watcher::ConfigWatcher;
 use ultty::event_loop::TerminalEvent;
-use ultty::grid::{SelectionMode, SelectionPoint};
+use ultty::grid::{MouseButton as TerminalMouseButton, SelectionMode, SelectionPoint};
 use ultty::renderer::{OverlayState, Renderer, ScrollbarState};
 use ultty::tabs::TabBarState;
 use ultty::terminal_manager::TerminalManager;
@@ -122,9 +122,8 @@ impl App {
         let (cols, rows) = renderer.terminal_dimensions();
         tracing::info!("Terminal size: {}x{}", cols, rows);
 
-        // Create terminal manager with initial terminal
-        let terminal_manager = TerminalManager::new(cols, rows)
-            .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e))?;
+        // Create terminal manager - with launch profile if configured
+        let terminal_manager = Self::create_terminal_manager(&config, cols, rows)?;
 
         // Try to create clipboard
         let clipboard = Clipboard::new().ok();
@@ -166,6 +165,72 @@ impl App {
             bell_active_until: None,
             scrollbar_dragging: false,
         })
+    }
+
+    /// Create terminal manager, optionally using a launch profile.
+    fn create_terminal_manager(config: &Config, cols: u16, rows: u16) -> Result<TerminalManager> {
+        // Check if a default profile is configured
+        if let Some(ref profile_name) = config.profiles.default {
+            if let Some(profile) = config.profiles.profiles.get(profile_name) {
+                tracing::info!("Using launch profile: {}", profile_name);
+                return Self::create_manager_from_profile(profile, cols, rows);
+            } else {
+                tracing::warn!("Default profile '{}' not found, using default shell", profile_name);
+            }
+        }
+
+        // No profile configured, use default shell
+        TerminalManager::new(cols, rows)
+            .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e))
+    }
+
+    /// Create terminal manager from a launch profile.
+    fn create_manager_from_profile(
+        profile: &ultty::config::LaunchProfile,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TerminalManager> {
+
+        // Create an empty manager first
+        let mut manager = TerminalManager::new(cols, rows)
+            .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e))?;
+
+        // If profile has tabs, close the default tab and create configured ones
+        if !profile.tabs.is_empty() {
+            // Close the default tab that was created
+            if let Some(tab) = manager.active_tab() {
+                let tab_id = tab.id;
+                manager.close_tab(tab_id);
+            }
+
+            // Get default shell for tabs without explicit command
+            let default_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+
+            // Create tabs from profile
+            for tab_config in &profile.tabs {
+                let command = tab_config.command.as_deref().unwrap_or(&default_shell);
+
+                let working_dir = tab_config.working_dir.as_deref()
+                    .or(profile.working_dir.as_deref());
+
+                let title = tab_config.title.as_deref();
+
+                manager.create_tab_with_command(
+                    command,
+                    &tab_config.args,
+                    working_dir,
+                    title,
+                ).map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
+
+                tracing::info!(
+                    "Created tab: {} (command: {})",
+                    title.unwrap_or("unnamed"),
+                    command
+                );
+            }
+        }
+
+        Ok(manager)
     }
 
     /// Run the application.
@@ -272,6 +337,9 @@ impl App {
                 self.mouse_pos = position;
                 if self.mouse_pressed {
                     self.handle_mouse_drag();
+                } else if self.terminal().track_mouse_motion() {
+                    // AnyEvent mode reports motion even without button pressed
+                    self.handle_mouse_motion();
                 }
                 self.update_tab_hover();
                 self.update_cursor_for_url();
@@ -284,6 +352,13 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 self.needs_redraw = true;
+            }
+            WindowEvent::Focused(focused) => {
+                if self.terminal().modes().focus_reporting {
+                    // Send focus in/out escape sequence
+                    let seq = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                    let _ = self.send_input(seq);
+                }
             }
             _ => {}
         }
@@ -300,12 +375,47 @@ impl App {
 
     /// Handle mouse button press/release.
     fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
-        if button != MouseButton::Left && button != MouseButton::Middle {
+        if button != MouseButton::Left
+            && button != MouseButton::Middle
+            && button != MouseButton::Right
+        {
             return;
         }
 
         let x = self.mouse_pos.x as f32;
         let y = self.mouse_pos.y as f32;
+
+        // Check if mouse tracking is enabled and send event to PTY
+        if self.terminal().mouse_tracking_enabled() {
+            // Don't intercept UI elements when mouse tracking is on
+            if self.tab_bar.visible && y < self.tab_bar.height() {
+                // Still allow tab bar interaction
+            } else if self.is_in_scrollbar(x, y) {
+                // Still allow scrollbar interaction
+            } else {
+                // Convert to cell coordinates and send to terminal
+                let (col, row) =
+                    self.pixel_to_cell(self.mouse_pos.x, self.mouse_pos.y - self.tab_bar.height() as f64);
+                let term_button = match button {
+                    MouseButton::Left => TerminalMouseButton::Left,
+                    MouseButton::Middle => TerminalMouseButton::Middle,
+                    MouseButton::Right => TerminalMouseButton::Right,
+                    _ => return,
+                };
+                let pressed = state == ElementState::Pressed;
+                let term_button = if !pressed {
+                    TerminalMouseButton::Release
+                } else {
+                    term_button
+                };
+                if let Some(bytes) =
+                    self.terminal().encode_mouse_event(term_button, col, row, pressed, false)
+                {
+                    let _ = self.send_input(&bytes);
+                }
+                return;
+            }
+        }
 
         match state {
             ElementState::Pressed => {
@@ -466,11 +576,39 @@ impl App {
             return; // Dragging in tab bar area
         }
 
+        // Check if motion tracking is enabled
+        if self.terminal().track_mouse_motion() && self.mouse_pressed {
+            let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
+            // When button is held, report as Left button for drag
+            if let Some(bytes) =
+                self.terminal().encode_mouse_event(TerminalMouseButton::Left, col, row, true, true)
+            {
+                let _ = self.send_input(&bytes);
+            }
+            return;
+        }
+
         let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
         let point = SelectionPoint::new(col as i32, row as i32);
 
         self.terminal_mut().update_selection(point);
         self.needs_redraw = true;
+    }
+
+    /// Handle mouse motion without button pressed (for AnyEvent mode).
+    fn handle_mouse_motion(&mut self) {
+        let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
+        if adjusted_y < 0.0 {
+            return; // In tab bar area
+        }
+
+        let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
+        // Motion without button uses Release (3) + motion flag (32) = 35
+        if let Some(bytes) =
+            self.terminal().encode_mouse_event(TerminalMouseButton::Release, col, row, true, true)
+        {
+            let _ = self.send_input(&bytes);
+        }
     }
 
     /// Check if a position is within the scrollbar area.
@@ -586,6 +724,25 @@ impl App {
         };
 
         if lines == 0 {
+            return;
+        }
+
+        // Check if mouse tracking is enabled - send scroll events to PTY
+        if self.terminal().mouse_tracking_enabled() {
+            let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
+            let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y.max(0.0));
+            let button = if lines > 0 {
+                TerminalMouseButton::ScrollUp
+            } else {
+                TerminalMouseButton::ScrollDown
+            };
+            let count = lines.unsigned_abs() as usize;
+            for _ in 0..count {
+                if let Some(bytes) = self.terminal().encode_mouse_event(button, col, row, true, false)
+                {
+                    let _ = self.send_input(&bytes);
+                }
+            }
             return;
         }
 

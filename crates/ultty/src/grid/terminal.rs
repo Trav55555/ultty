@@ -2,6 +2,36 @@
 
 use super::{Buffer, CursorPosition, Dimensions, Grid};
 
+/// Mouse tracking mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseMode {
+    /// No mouse tracking
+    #[default]
+    None,
+    /// X10 mouse tracking (button press only)
+    X10,
+    /// Normal tracking (press and release)
+    Normal,
+    /// Button event tracking (press, release, motion with button)
+    ButtonEvent,
+    /// Any event tracking (all motion)
+    AnyEvent,
+}
+
+/// Mouse encoding format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseEncoding {
+    /// Default X10 encoding (limited to 223 cols/rows)
+    #[default]
+    X10,
+    /// UTF-8 encoding
+    Utf8,
+    /// SGR extended encoding (CSI < ... M/m)
+    Sgr,
+    /// URXVT encoding
+    Urxvt,
+}
+
 /// Terminal modes that affect behavior.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TerminalModes {
@@ -17,6 +47,25 @@ pub struct TerminalModes {
     pub origin_mode: bool,
     /// Insert mode (insert vs replace)
     pub insert_mode: bool,
+    /// Mouse tracking mode
+    pub mouse_mode: MouseMode,
+    /// Mouse encoding format
+    pub mouse_encoding: MouseEncoding,
+}
+
+/// Shell integration state for tracking command execution.
+#[derive(Debug, Clone, Default)]
+pub struct ShellIntegration {
+    /// Current working directory (from OSC 7)
+    pub working_directory: Option<String>,
+    /// Line where current prompt started
+    pub prompt_line: Option<u16>,
+    /// Line where current command started
+    pub command_line: Option<u16>,
+    /// Whether a command is currently executing
+    pub command_executing: bool,
+    /// Last command exit code
+    pub last_exit_code: Option<i32>,
 }
 
 /// Terminal state with main and alternate screen buffers.
@@ -26,6 +75,7 @@ pub struct TerminalModes {
 /// - Alternate screen buffer (for full-screen apps)
 /// - Terminal modes
 /// - Selection state
+/// - Shell integration state
 #[derive(Debug)]
 pub struct Terminal {
     /// Main screen buffer (with scrollback)
@@ -40,6 +90,8 @@ pub struct Terminal {
     selection: Option<Selection>,
     /// Window title
     title: String,
+    /// Shell integration state
+    shell_integration: ShellIntegration,
 }
 
 impl Terminal {
@@ -52,6 +104,7 @@ impl Terminal {
             modes: TerminalModes::default(),
             selection: None,
             title: String::new(),
+            shell_integration: ShellIntegration::default(),
         }
     }
 
@@ -273,12 +326,225 @@ impl Terminal {
         self.title = title;
     }
 
+    /// Get shell integration state.
+    pub fn shell_integration(&self) -> &ShellIntegration {
+        &self.shell_integration
+    }
+
+    /// Get the working directory (from OSC 7).
+    pub fn working_directory(&self) -> Option<&str> {
+        self.shell_integration.working_directory.as_deref()
+    }
+
+    /// Set working directory (from OSC 7 file://host/path).
+    pub fn set_working_directory(&mut self, uri: String) {
+        // Parse file:// URI to extract path
+        let path = if uri.starts_with("file://") {
+            // Skip file://hostname/ prefix
+            if let Some(path_start) = uri[7..].find('/') {
+                uri[7 + path_start..].to_string()
+            } else {
+                uri[7..].to_string()
+            }
+        } else {
+            uri
+        };
+
+        // URL decode the path
+        let decoded = percent_decode(&path);
+        self.shell_integration.working_directory = Some(decoded);
+        tracing::debug!("Working directory set to: {:?}", self.shell_integration.working_directory);
+    }
+
+    /// Mark prompt start (OSC 133;A).
+    pub fn mark_prompt_start(&mut self) {
+        let row = self.grid().cursor().position.row;
+        self.shell_integration.prompt_line = Some(row);
+        self.shell_integration.command_executing = false;
+        tracing::trace!("Prompt started at line {}", row);
+    }
+
+    /// Mark command start (OSC 133;B).
+    pub fn mark_command_start(&mut self) {
+        let row = self.grid().cursor().position.row;
+        self.shell_integration.command_line = Some(row);
+        tracing::trace!("Command started at line {}", row);
+    }
+
+    /// Mark command executed (OSC 133;C).
+    pub fn mark_command_executed(&mut self) {
+        self.shell_integration.command_executing = true;
+        tracing::trace!("Command executing");
+    }
+
+    /// Mark command finished (OSC 133;D).
+    pub fn mark_command_finished(&mut self, exit_code: Option<i32>) {
+        self.shell_integration.command_executing = false;
+        self.shell_integration.last_exit_code = exit_code;
+        tracing::trace!("Command finished with exit code: {:?}", exit_code);
+    }
+
     /// Resize the terminal.
     pub fn resize(&mut self, new_dims: Dimensions) {
         self.main.resize(new_dims);
         self.alternate.resize(new_dims);
         self.selection = None;
     }
+
+    /// Check if mouse tracking is enabled.
+    pub fn mouse_tracking_enabled(&self) -> bool {
+        self.modes.mouse_mode != MouseMode::None
+    }
+
+    /// Check if motion events should be tracked.
+    pub fn track_mouse_motion(&self) -> bool {
+        matches!(
+            self.modes.mouse_mode,
+            MouseMode::ButtonEvent | MouseMode::AnyEvent
+        )
+    }
+
+    /// Generate mouse event bytes for the terminal.
+    ///
+    /// Returns None if mouse tracking is disabled.
+    pub fn encode_mouse_event(
+        &self,
+        button: MouseButton,
+        x: u16,
+        y: u16,
+        pressed: bool,
+        motion: bool,
+    ) -> Option<Vec<u8>> {
+        if self.modes.mouse_mode == MouseMode::None {
+            return None;
+        }
+
+        // X10 mode only reports button presses
+        if self.modes.mouse_mode == MouseMode::X10 && !pressed {
+            return None;
+        }
+
+        // Check if we should report motion
+        if motion {
+            match self.modes.mouse_mode {
+                MouseMode::AnyEvent => {}
+                MouseMode::ButtonEvent if pressed => {}
+                _ => return None,
+            }
+        }
+
+        // Encode based on format
+        match self.modes.mouse_encoding {
+            MouseEncoding::Sgr => Some(self.encode_mouse_sgr(button, x, y, pressed, motion)),
+            MouseEncoding::X10 | MouseEncoding::Utf8 => {
+                Some(self.encode_mouse_x10(button, x, y, pressed, motion))
+            }
+            MouseEncoding::Urxvt => Some(self.encode_mouse_urxvt(button, x, y, pressed, motion)),
+        }
+    }
+
+    /// Encode mouse event in SGR format (CSI < Cb ; Cx ; Cy M/m).
+    fn encode_mouse_sgr(
+        &self,
+        button: MouseButton,
+        x: u16,
+        y: u16,
+        pressed: bool,
+        motion: bool,
+    ) -> Vec<u8> {
+        let mut cb = match button {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+            MouseButton::Release => 3,
+            MouseButton::ScrollUp => 64,
+            MouseButton::ScrollDown => 65,
+        };
+
+        if motion {
+            cb += 32;
+        }
+
+        let suffix = if pressed || matches!(button, MouseButton::ScrollUp | MouseButton::ScrollDown) {
+            'M'
+        } else {
+            'm'
+        };
+
+        format!("\x1b[<{};{};{}{}", cb, x + 1, y + 1, suffix).into_bytes()
+    }
+
+    /// Encode mouse event in X10 format.
+    fn encode_mouse_x10(
+        &self,
+        button: MouseButton,
+        x: u16,
+        y: u16,
+        pressed: bool,
+        motion: bool,
+    ) -> Vec<u8> {
+        let mut cb = match button {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+            MouseButton::Release => 3,
+            MouseButton::ScrollUp => 64,
+            MouseButton::ScrollDown => 65,
+        };
+
+        if motion {
+            cb += 32;
+        }
+        if !pressed && !matches!(button, MouseButton::ScrollUp | MouseButton::ScrollDown) {
+            cb = 3; // Release
+        }
+
+        // Add 32 to make printable, clamp to 223
+        let cb = (cb + 32).min(255) as u8;
+        let cx = ((x + 1).min(223) + 32) as u8;
+        let cy = ((y + 1).min(223) + 32) as u8;
+
+        vec![b'\x1b', b'[', b'M', cb, cx, cy]
+    }
+
+    /// Encode mouse event in URXVT format.
+    fn encode_mouse_urxvt(
+        &self,
+        button: MouseButton,
+        x: u16,
+        y: u16,
+        pressed: bool,
+        motion: bool,
+    ) -> Vec<u8> {
+        let mut cb = match button {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+            MouseButton::Release => 3,
+            MouseButton::ScrollUp => 64,
+            MouseButton::ScrollDown => 65,
+        };
+
+        if motion {
+            cb += 32;
+        }
+        if !pressed && !matches!(button, MouseButton::ScrollUp | MouseButton::ScrollDown) {
+            cb = 3;
+        }
+
+        format!("\x1b[{};{};{}M", cb + 32, x + 1, y + 1).into_bytes()
+    }
+}
+
+/// Mouse button for tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    Release,
+    ScrollUp,
+    ScrollDown,
 }
 
 /// Selection point (can be negative for scroll offset).
@@ -332,6 +598,32 @@ impl Selection {
     pub fn is_empty(&self) -> bool {
         self.start == self.end
     }
+}
+
+/// Simple percent-decoding for file paths (e.g., %20 -> space).
+fn percent_decode(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            // Try to parse next two chars as hex
+            let hex: String = chars.by_ref().take(2).collect();
+            if hex.len() == 2 {
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    output.push(byte as char);
+                    continue;
+                }
+            }
+            // Invalid escape, keep as-is
+            output.push('%');
+            output.push_str(&hex);
+        } else {
+            output.push(c);
+        }
+    }
+
+    output
 }
 
 #[cfg(test)]

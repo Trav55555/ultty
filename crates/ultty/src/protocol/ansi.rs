@@ -150,6 +150,31 @@ pub enum Action {
 
     /// Switch back to main screen buffer (CSI ?1049l)
     LeaveAlternateScreen,
+
+    // === OSC Sequences ===
+    /// Set window/icon title (OSC 0, 1, 2)
+    SetTitle(String),
+
+    /// Set working directory (OSC 7)
+    SetWorkingDirectory(String),
+
+    /// Shell integration: prompt start (OSC 133;A)
+    PromptStart,
+
+    /// Shell integration: command start (OSC 133;B)
+    CommandStart,
+
+    /// Shell integration: command executed (OSC 133;C)
+    CommandExecuted,
+
+    /// Shell integration: command finished with exit code (OSC 133;D;exitcode)
+    CommandFinished(Option<i32>),
+
+    /// Set clipboard content (OSC 52)
+    SetClipboard { clipboard: char, data: String },
+
+    /// Unknown OSC sequence (for debugging)
+    UnknownOsc(String),
 }
 
 /// Text attributes settable via SGR sequences.
@@ -227,8 +252,20 @@ pub enum Mode {
     BracketedPaste,
     /// Focus reporting (CSI ?1004h/l)
     FocusReporting,
-    /// Mouse tracking modes
-    MouseTracking,
+    /// X10 mouse tracking - button press only (CSI ?9h/l)
+    MouseX10,
+    /// Normal mouse tracking - press and release (CSI ?1000h/l)
+    MouseNormal,
+    /// Button event mouse tracking - with motion (CSI ?1002h/l)
+    MouseButtonEvent,
+    /// Any event mouse tracking - all motion (CSI ?1003h/l)
+    MouseAnyEvent,
+    /// UTF-8 mouse encoding (CSI ?1005h/l)
+    MouseUtf8,
+    /// SGR extended mouse encoding (CSI ?1006h/l)
+    MouseSgr,
+    /// URXVT mouse encoding (CSI ?1015h/l)
+    MouseUrxvt,
     /// Origin mode (CSI ?6h/l)
     OriginMode,
     /// Auto-wrap mode (CSI ?7h/l)
@@ -560,8 +597,15 @@ impl AnsiParser {
             1 => Some(Action::SetMode(Mode::ApplicationCursorKeys)),
             6 => Some(Action::SetMode(Mode::OriginMode)),
             7 => Some(Action::SetMode(Mode::AutoWrap)),
+            9 => Some(Action::SetMode(Mode::MouseX10)),
             25 => Some(Action::SetMode(Mode::CursorVisible)),
+            1000 => Some(Action::SetMode(Mode::MouseNormal)),
+            1002 => Some(Action::SetMode(Mode::MouseButtonEvent)),
+            1003 => Some(Action::SetMode(Mode::MouseAnyEvent)),
             1004 => Some(Action::SetMode(Mode::FocusReporting)),
+            1005 => Some(Action::SetMode(Mode::MouseUtf8)),
+            1006 => Some(Action::SetMode(Mode::MouseSgr)),
+            1015 => Some(Action::SetMode(Mode::MouseUrxvt)),
             1049 => Some(Action::EnterAlternateScreen),
             2004 => Some(Action::SetMode(Mode::BracketedPaste)),
             _ => None,
@@ -574,8 +618,15 @@ impl AnsiParser {
             1 => Some(Action::ResetMode(Mode::ApplicationCursorKeys)),
             6 => Some(Action::ResetMode(Mode::OriginMode)),
             7 => Some(Action::ResetMode(Mode::AutoWrap)),
+            9 => Some(Action::ResetMode(Mode::MouseX10)),
             25 => Some(Action::ResetMode(Mode::CursorVisible)),
+            1000 => Some(Action::ResetMode(Mode::MouseNormal)),
+            1002 => Some(Action::ResetMode(Mode::MouseButtonEvent)),
+            1003 => Some(Action::ResetMode(Mode::MouseAnyEvent)),
             1004 => Some(Action::ResetMode(Mode::FocusReporting)),
+            1005 => Some(Action::ResetMode(Mode::MouseUtf8)),
+            1006 => Some(Action::ResetMode(Mode::MouseSgr)),
+            1015 => Some(Action::ResetMode(Mode::MouseUrxvt)),
             1049 => Some(Action::LeaveAlternateScreen),
             2004 => Some(Action::ResetMode(Mode::BracketedPaste)),
             _ => None,
@@ -726,7 +777,7 @@ impl AnsiParser {
     }
 
     /// OSC string state - accumulating OSC content.
-    fn osc_string<F>(&mut self, byte: u8, _callback: &mut F)
+    fn osc_string<F>(&mut self, byte: u8, callback: &mut F)
     where
         F: FnMut(Action),
     {
@@ -735,15 +786,97 @@ impl AnsiParser {
             0x1B => {
                 // Might be start of ST, need to check next byte
                 // For now, just reset
+                self.dispatch_osc(callback);
                 self.reset();
             }
             // BEL also terminates OSC
             0x07 => {
-                // TODO: Process OSC content
+                self.dispatch_osc(callback);
                 self.reset();
             }
             _ => {
                 self.osc_buffer.push(byte);
+            }
+        }
+    }
+
+    /// Dispatch OSC sequence based on accumulated buffer.
+    fn dispatch_osc<F>(&mut self, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        let content = String::from_utf8_lossy(&self.osc_buffer);
+
+        // OSC format: code ; data
+        if let Some(semicolon_pos) = content.find(';') {
+            let code = &content[..semicolon_pos];
+            let data = &content[semicolon_pos + 1..];
+
+            match code {
+                // Set window title (OSC 0, 1, 2)
+                "0" | "1" | "2" => {
+                    callback(Action::SetTitle(data.to_string()));
+                }
+                // Set working directory (OSC 7)
+                // Format: file://hostname/path
+                "7" => {
+                    callback(Action::SetWorkingDirectory(data.to_string()));
+                }
+                // Clipboard (OSC 52)
+                // Format: clipboard;base64data
+                "52" => {
+                    if let Some(semi_pos) = data.find(';') {
+                        let clipboard = data.chars().next().unwrap_or('c');
+                        let b64data = &data[semi_pos + 1..];
+                        // Decode base64
+                        if let Ok(decoded) = base64_decode(b64data) {
+                            if let Ok(text) = String::from_utf8(decoded) {
+                                callback(Action::SetClipboard {
+                                    clipboard,
+                                    data: text,
+                                });
+                            }
+                        }
+                    }
+                }
+                // Shell integration (OSC 133)
+                "133" => {
+                    self.dispatch_shell_integration(data, callback);
+                }
+                _ => {
+                    // Unknown OSC - log for debugging
+                    tracing::debug!("Unknown OSC sequence: {}", content);
+                }
+            }
+        } else if let Ok(code) = content.parse::<u16>() {
+            // Some OSC sequences have no data (just the code)
+            if code == 133 {
+                // Bare OSC 133 - treat as prompt start
+                callback(Action::PromptStart);
+            }
+        }
+    }
+
+    /// Parse shell integration OSC 133 sequences.
+    fn dispatch_shell_integration<F>(&self, data: &str, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        // OSC 133 ; type [; args]
+        let mut parts = data.splitn(2, ';');
+        let cmd_type = parts.next().unwrap_or("");
+        let args = parts.next().unwrap_or("");
+
+        match cmd_type {
+            "A" => callback(Action::PromptStart),
+            "B" => callback(Action::CommandStart),
+            "C" => callback(Action::CommandExecuted),
+            "D" => {
+                let exit_code = args.parse::<i32>().ok();
+                callback(Action::CommandFinished(exit_code));
+            }
+            _ => {
+                tracing::debug!("Unknown shell integration type: {}", cmd_type);
             }
         }
     }
@@ -769,6 +902,33 @@ impl Default for AnsiParser {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Simple base64 decoder for OSC 52 clipboard data.
+fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    fn char_to_val(c: u8) -> Option<u8> {
+        ALPHABET.iter().position(|&x| x == c).map(|p| p as u8)
+    }
+
+    let input: Vec<u8> = input.bytes().filter(|&b| b != b'=' && b != b'\n' && b != b'\r').collect();
+    let mut output = Vec::with_capacity(input.len() * 3 / 4);
+
+    for chunk in input.chunks(4) {
+        let vals: Vec<u8> = chunk.iter().filter_map(|&c| char_to_val(c)).collect();
+        if vals.len() >= 2 {
+            output.push((vals[0] << 2) | (vals[1] >> 4));
+            if vals.len() >= 3 {
+                output.push((vals[1] << 4) | (vals[2] >> 2));
+                if vals.len() >= 4 {
+                    output.push((vals[2] << 6) | vals[3]);
+                }
+            }
+        }
+    }
+
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -905,6 +1065,53 @@ mod tests {
         assert_eq!(
             parse(b"\x1b[?25l"),
             vec![Action::ResetMode(Mode::CursorVisible)]
+        );
+    }
+
+    #[test]
+    fn osc_set_title() {
+        // OSC 0 ; title BEL
+        assert_eq!(
+            parse(b"\x1b]0;My Terminal\x07"),
+            vec![Action::SetTitle("My Terminal".to_string())]
+        );
+        // OSC 2 ; title BEL
+        assert_eq!(
+            parse(b"\x1b]2;Window Title\x07"),
+            vec![Action::SetTitle("Window Title".to_string())]
+        );
+    }
+
+    #[test]
+    fn osc_working_directory() {
+        // OSC 7 ; file://host/path BEL
+        assert_eq!(
+            parse(b"\x1b]7;file://localhost/home/user\x07"),
+            vec![Action::SetWorkingDirectory(
+                "file://localhost/home/user".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn osc_shell_integration() {
+        // Prompt start
+        assert_eq!(parse(b"\x1b]133;A\x07"), vec![Action::PromptStart]);
+
+        // Command start
+        assert_eq!(parse(b"\x1b]133;B\x07"), vec![Action::CommandStart]);
+
+        // Command executed
+        assert_eq!(parse(b"\x1b]133;C\x07"), vec![Action::CommandExecuted]);
+
+        // Command finished with exit code
+        assert_eq!(
+            parse(b"\x1b]133;D;0\x07"),
+            vec![Action::CommandFinished(Some(0))]
+        );
+        assert_eq!(
+            parse(b"\x1b]133;D;1\x07"),
+            vec![Action::CommandFinished(Some(1))]
         );
     }
 }

@@ -20,7 +20,10 @@ pub use cell::{Cell, CellFlags, Color};
 pub use handler::Handler;
 pub use row::Row;
 pub use term_handler::TerminalHandler;
-pub use terminal::{Selection, SelectionMode, SelectionPoint, Terminal, TerminalModes};
+pub use terminal::{
+    MouseButton, MouseEncoding, MouseMode, Selection, SelectionMode, SelectionPoint,
+    ShellIntegration, Terminal, TerminalModes,
+};
 
 use std::ops::{Index, IndexMut};
 

@@ -1,6 +1,6 @@
 //! Handler that applies ANSI parser actions to the Terminal.
 
-use crate::grid::{CellFlags, Terminal};
+use crate::grid::{CellFlags, MouseEncoding, MouseMode, Terminal};
 use crate::protocol::ansi::{Action, Attribute, Color as AnsiColor, Mode, NamedColor};
 
 use super::cell::Color;
@@ -162,6 +162,33 @@ impl<'a> TerminalHandler<'a> {
             Action::LeaveAlternateScreen => {
                 self.terminal.leave_alternate_screen();
             }
+
+            // OSC sequences
+            Action::SetTitle(title) => {
+                self.terminal.set_title(title);
+            }
+            Action::SetWorkingDirectory(path) => {
+                self.terminal.set_working_directory(path);
+            }
+            Action::PromptStart => {
+                self.terminal.mark_prompt_start();
+            }
+            Action::CommandStart => {
+                self.terminal.mark_command_start();
+            }
+            Action::CommandExecuted => {
+                self.terminal.mark_command_executed();
+            }
+            Action::CommandFinished(exit_code) => {
+                self.terminal.mark_command_finished(exit_code);
+            }
+            Action::SetClipboard { clipboard: _, data: _ } => {
+                // Clipboard is handled at the app level, not terminal level
+                // The terminal handler ignores this and the app will handle it
+            }
+            Action::UnknownOsc(_) => {
+                // Ignore unknown OSC sequences
+            }
         }
     }
 
@@ -214,8 +241,56 @@ impl<'a> TerminalHandler<'a> {
             Mode::FocusReporting => {
                 self.terminal.modes_mut().focus_reporting = enabled;
             }
-            Mode::MouseTracking => {
-                // TODO: Implement mouse tracking modes
+            // Mouse tracking modes
+            Mode::MouseX10 => {
+                self.terminal.modes_mut().mouse_mode = if enabled {
+                    MouseMode::X10
+                } else {
+                    MouseMode::None
+                };
+            }
+            Mode::MouseNormal => {
+                self.terminal.modes_mut().mouse_mode = if enabled {
+                    MouseMode::Normal
+                } else {
+                    MouseMode::None
+                };
+            }
+            Mode::MouseButtonEvent => {
+                self.terminal.modes_mut().mouse_mode = if enabled {
+                    MouseMode::ButtonEvent
+                } else {
+                    MouseMode::None
+                };
+            }
+            Mode::MouseAnyEvent => {
+                self.terminal.modes_mut().mouse_mode = if enabled {
+                    MouseMode::AnyEvent
+                } else {
+                    MouseMode::None
+                };
+            }
+            // Mouse encoding modes
+            Mode::MouseUtf8 => {
+                if enabled {
+                    self.terminal.modes_mut().mouse_encoding = MouseEncoding::Utf8;
+                } else {
+                    self.terminal.modes_mut().mouse_encoding = MouseEncoding::X10;
+                }
+            }
+            Mode::MouseSgr => {
+                if enabled {
+                    self.terminal.modes_mut().mouse_encoding = MouseEncoding::Sgr;
+                } else {
+                    self.terminal.modes_mut().mouse_encoding = MouseEncoding::X10;
+                }
+            }
+            Mode::MouseUrxvt => {
+                if enabled {
+                    self.terminal.modes_mut().mouse_encoding = MouseEncoding::Urxvt;
+                } else {
+                    self.terminal.modes_mut().mouse_encoding = MouseEncoding::X10;
+                }
             }
             Mode::OriginMode => {
                 self.terminal.modes_mut().origin_mode = enabled;
@@ -336,5 +411,103 @@ mod tests {
         assert!(!term.modes().application_cursor_keys);
         process(&mut term, b"\x1b[?1h");
         assert!(term.modes().application_cursor_keys);
+    }
+
+    #[test]
+    fn mouse_tracking_modes() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+
+        // Default: no mouse tracking
+        assert_eq!(term.modes().mouse_mode, MouseMode::None);
+        assert!(!term.mouse_tracking_enabled());
+
+        // X10 mode (press only)
+        process(&mut term, b"\x1b[?9h");
+        assert_eq!(term.modes().mouse_mode, MouseMode::X10);
+        assert!(term.mouse_tracking_enabled());
+        process(&mut term, b"\x1b[?9l");
+        assert_eq!(term.modes().mouse_mode, MouseMode::None);
+
+        // Normal mode (press and release)
+        process(&mut term, b"\x1b[?1000h");
+        assert_eq!(term.modes().mouse_mode, MouseMode::Normal);
+        assert!(term.mouse_tracking_enabled());
+        assert!(!term.track_mouse_motion());
+        process(&mut term, b"\x1b[?1000l");
+        assert_eq!(term.modes().mouse_mode, MouseMode::None);
+
+        // Button event mode (with motion when pressed)
+        process(&mut term, b"\x1b[?1002h");
+        assert_eq!(term.modes().mouse_mode, MouseMode::ButtonEvent);
+        assert!(term.track_mouse_motion());
+        process(&mut term, b"\x1b[?1002l");
+        assert_eq!(term.modes().mouse_mode, MouseMode::None);
+
+        // Any event mode (all motion)
+        process(&mut term, b"\x1b[?1003h");
+        assert_eq!(term.modes().mouse_mode, MouseMode::AnyEvent);
+        assert!(term.track_mouse_motion());
+        process(&mut term, b"\x1b[?1003l");
+        assert_eq!(term.modes().mouse_mode, MouseMode::None);
+    }
+
+    #[test]
+    fn mouse_encoding_modes() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+
+        // Default: X10 encoding
+        assert_eq!(term.modes().mouse_encoding, MouseEncoding::X10);
+
+        // UTF-8 encoding
+        process(&mut term, b"\x1b[?1005h");
+        assert_eq!(term.modes().mouse_encoding, MouseEncoding::Utf8);
+        process(&mut term, b"\x1b[?1005l");
+        assert_eq!(term.modes().mouse_encoding, MouseEncoding::X10);
+
+        // SGR encoding
+        process(&mut term, b"\x1b[?1006h");
+        assert_eq!(term.modes().mouse_encoding, MouseEncoding::Sgr);
+        process(&mut term, b"\x1b[?1006l");
+        assert_eq!(term.modes().mouse_encoding, MouseEncoding::X10);
+
+        // URXVT encoding
+        process(&mut term, b"\x1b[?1015h");
+        assert_eq!(term.modes().mouse_encoding, MouseEncoding::Urxvt);
+        process(&mut term, b"\x1b[?1015l");
+        assert_eq!(term.modes().mouse_encoding, MouseEncoding::X10);
+    }
+
+    #[test]
+    fn mouse_event_encoding_sgr() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+
+        // Enable SGR mouse mode
+        process(&mut term, b"\x1b[?1000h"); // Normal tracking
+        process(&mut term, b"\x1b[?1006h"); // SGR encoding
+
+        // Test left button press at column 10, row 5
+        let event = term
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, false)
+            .unwrap();
+        assert_eq!(event, b"\x1b[<0;11;6M"); // 0-indexed to 1-indexed
+
+        // Test left button release - SGR uses Left button with pressed=false
+        let event = term
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, false, false)
+            .unwrap();
+        assert_eq!(event, b"\x1b[<0;11;6m"); // lowercase 'm' for release
+
+        // Test scroll up
+        let event = term
+            .encode_mouse_event(crate::grid::MouseButton::ScrollUp, 10, 5, true, false)
+            .unwrap();
+        assert_eq!(event, b"\x1b[<64;11;6M"); // scroll up is button code 64
+
+        // Test motion tracking
+        process(&mut term, b"\x1b[?1003h"); // Any event mode
+        let event = term
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, true)
+            .unwrap();
+        assert_eq!(event, b"\x1b[<32;11;6M"); // motion flag adds 32
     }
 }
