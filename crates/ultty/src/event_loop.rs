@@ -70,6 +70,32 @@ impl EventLoop {
         })
     }
 
+    /// Create a new event loop with a shell in a specific working directory.
+    pub fn new_with_dir(cols: u16, rows: u16, working_dir: &str) -> io::Result<Self> {
+        let size = PtySize::new(cols, rows);
+        let child = Child::spawn_shell_in_dir(size, working_dir)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        let terminal = Terminal::new(Dimensions::new(cols, rows));
+        let parser = AnsiParser::new();
+
+        let poller = Poller::new()?;
+
+        // Register PTY fd for reading
+        unsafe {
+            poller.add(child.pty().as_raw_fd(), Event::readable(0))?;
+        }
+
+        Ok(Self {
+            child,
+            terminal,
+            parser,
+            read_buf: vec![0u8; 65536],
+            events: Vec::new(),
+            poller,
+        })
+    }
+
     /// Create with a specific command.
     pub fn with_command(
         program: &str,
@@ -212,8 +238,22 @@ impl EventLoop {
 
     /// Process a chunk of bytes from the PTY.
     fn process_bytes(&mut self, data: &[u8]) {
+        use crate::protocol::ansi::Action;
+
         let mut handler = TerminalHandler::new(&mut self.terminal);
+        let events = &mut self.events;
+
         self.parser.feed(data, |action| {
+            // Check for actions that produce events before handling
+            match &action {
+                Action::Bell => {
+                    events.push(TerminalEvent::Bell);
+                }
+                Action::SetTitle(title) => {
+                    events.push(TerminalEvent::TitleChanged(title.clone()));
+                }
+                _ => {}
+            }
             handler.handle(action);
         });
     }

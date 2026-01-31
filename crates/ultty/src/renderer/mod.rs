@@ -15,7 +15,7 @@ pub use pipeline::RenderPipeline;
 pub use text::TextRenderer;
 
 use crate::config::{ColorConfig, FontConfig};
-use crate::grid::{CellFlags, Color, Terminal};
+use crate::grid::{CellFlags, Color, ImageId, Terminal, TerminalImage};
 use crate::tabs::TabBarState;
 use crate::url::DetectedUrl;
 use crate::vim::{CopyMode, Selection as VimSelection};
@@ -93,6 +93,10 @@ pub struct OverlayState<'a> {
     pub scrollbar: Option<ScrollbarState>,
     /// Visual bell active (border flash)
     pub bell_active: bool,
+    /// Keyboard shortcuts overlay visible
+    pub shortcuts_visible: bool,
+    /// Keybindings to display in shortcuts overlay
+    pub keybindings: Option<&'a [(String, String)]>,
 }
 
 impl<'a> Default for OverlayState<'a> {
@@ -104,6 +108,8 @@ impl<'a> Default for OverlayState<'a> {
             tab_bar: None,
             scrollbar: None,
             bell_active: false,
+            shortcuts_visible: false,
+            keybindings: None,
         }
     }
 }
@@ -334,6 +340,14 @@ impl Uniforms {
     }
 }
 
+/// Cached GPU texture for a terminal image.
+struct CachedImageTexture {
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    width: u32,
+    height: u32,
+}
+
 /// GPU renderer for the terminal.
 pub struct Renderer {
     /// wgpu device
@@ -344,6 +358,8 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     /// Render pipeline for backgrounds
     bg_pipeline: RenderPipeline,
+    /// Render pipeline for images
+    image_pipeline: Option<ImagePipeline>,
     /// Text renderer
     text_renderer: TextRenderer,
     /// Color scheme
@@ -363,6 +379,15 @@ pub struct Renderer {
     pane_offset_y: f32,
     /// Window opacity (0.0-1.0)
     opacity: f32,
+    /// Cached image textures
+    image_cache: std::collections::HashMap<ImageId, CachedImageTexture>,
+}
+
+/// Pipeline for rendering images.
+struct ImagePipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
 }
 
 impl Renderer {
@@ -483,6 +508,7 @@ impl Renderer {
             queue,
             config,
             bg_pipeline,
+            image_pipeline: None, // Created lazily when needed
             text_renderer,
             color_scheme: ColorScheme::default(),
             cell_width,
@@ -493,6 +519,7 @@ impl Renderer {
             pane_offset_x: 0.0,
             pane_offset_y: 0.0,
             opacity: 1.0,
+            image_cache: std::collections::HashMap::new(),
         })
     }
 
@@ -867,10 +894,103 @@ impl Renderer {
             }
         }
 
+        // Render keyboard shortcuts overlay if visible
+        if overlay.shortcuts_visible {
+            if let Some(keybindings) = overlay.keybindings {
+                self.render_shortcuts_overlay(&mut encoder, &view, keybindings);
+            }
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())
+    }
+
+    /// Render the keyboard shortcuts overlay.
+    fn render_shortcuts_overlay(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        keybindings: &[(String, String)],
+    ) {
+        let (vertices, indices) = self.build_shortcuts_overlay_vertices(keybindings);
+        if vertices.is_empty() {
+            return;
+        }
+
+        // Separate background vertices (quads) from text vertices
+        // The first several vertices are background quads (backdrop, modal, borders)
+        // Text vertices come after
+        // We need to count how many background quads we have
+        // Each quad has 4 vertices and 6 indices
+        // Let's render all vertices with bg_pipeline first (for backgrounds) then text_pipeline
+
+        // For simplicity, render everything with the background pipeline
+        // The text vertices will use the text renderer which has its own atlas
+
+        // Count background quads: backdrop (1) + modal (1) + 4 borders + separator (1) = 7 quads = 28 vertices
+        // Actually let's just render everything together since emit_rect uses Vertex which works with bg_pipeline
+
+        let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("shortcuts_vb"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("shortcuts_ib"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        // Render with background pipeline (handles colored quads)
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shortcuts_bg_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            rp.set_pipeline(self.bg_pipeline.pipeline());
+            rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+            rp.set_vertex_buffer(0, vb.slice(..));
+            rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..indices.len() as u32, 0, 0..1);
+        }
+
+        // Render text with text pipeline
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shortcuts_text_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            rp.set_pipeline(self.text_renderer.pipeline());
+            rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+            rp.set_bind_group(1, self.text_renderer.atlas_bind_group(), &[]);
+            rp.set_vertex_buffer(0, vb.slice(..));
+            rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..indices.len() as u32, 0, 0..1);
+        }
     }
 
     /// Render multiple terminal panes.
@@ -1218,6 +1338,13 @@ impl Renderer {
                         rp.draw_indexed(0..text_indices.len() as u32, 0, 0..1);
                     }
                 }
+            }
+        }
+
+        // Render keyboard shortcuts overlay if visible
+        if overlay.shortcuts_visible {
+            if let Some(keybindings) = overlay.keybindings {
+                self.render_shortcuts_overlay(&mut encoder, &view, keybindings);
             }
         }
 
@@ -1835,6 +1962,189 @@ impl Renderer {
         (vertices, indices)
     }
 
+    /// Build keyboard shortcuts overlay vertices.
+    /// Displays a centered modal with all available keybindings.
+    fn build_shortcuts_overlay_vertices(
+        &mut self,
+        keybindings: &[(String, String)],
+    ) -> (Vec<Vertex>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let padding = 20.0;
+        let line_height = self.cell_height * 1.5;
+        let title = "Keyboard Shortcuts";
+
+        // Calculate dimensions
+        let max_key_width = keybindings
+            .iter()
+            .map(|(k, _)| k.len())
+            .max()
+            .unwrap_or(10) as f32
+            * self.cell_width
+            * 0.6;
+        let max_desc_width = keybindings
+            .iter()
+            .map(|(_, d)| d.len())
+            .max()
+            .unwrap_or(20) as f32
+            * self.cell_width
+            * 0.6;
+        let content_width = max_key_width + max_desc_width + padding * 3.0;
+        let content_height = (keybindings.len() as f32 + 2.0) * line_height + padding * 2.0;
+
+        // Center the modal
+        let modal_width = content_width.max(300.0);
+        let modal_height = content_height.min(self.config.height as f32 - 100.0);
+        let modal_x = (self.config.width as f32 - modal_width) / 2.0;
+        let modal_y = (self.config.height as f32 - modal_height) / 2.0;
+
+        // Draw semi-transparent backdrop
+        let backdrop_color = Rgba::new(0.0, 0.0, 0.0, 0.7);
+        self.emit_rect(
+            &mut vertices,
+            &mut indices,
+            0.0,
+            0.0,
+            self.config.width as f32,
+            self.config.height as f32,
+            backdrop_color,
+        );
+
+        // Draw modal background
+        let modal_bg = Rgba::new(0.15, 0.15, 0.15, 0.95);
+        self.emit_rect(
+            &mut vertices,
+            &mut indices,
+            modal_x,
+            modal_y,
+            modal_width,
+            modal_height,
+            modal_bg,
+        );
+
+        // Draw modal border
+        let border_color = Rgba::new(0.4, 0.4, 0.4, 1.0);
+        let border_width = 2.0;
+        // Top border
+        self.emit_rect(
+            &mut vertices,
+            &mut indices,
+            modal_x,
+            modal_y,
+            modal_width,
+            border_width,
+            border_color,
+        );
+        // Bottom border
+        self.emit_rect(
+            &mut vertices,
+            &mut indices,
+            modal_x,
+            modal_y + modal_height - border_width,
+            modal_width,
+            border_width,
+            border_color,
+        );
+        // Left border
+        self.emit_rect(
+            &mut vertices,
+            &mut indices,
+            modal_x,
+            modal_y,
+            border_width,
+            modal_height,
+            border_color,
+        );
+        // Right border
+        self.emit_rect(
+            &mut vertices,
+            &mut indices,
+            modal_x + modal_width - border_width,
+            modal_y,
+            border_width,
+            modal_height,
+            border_color,
+        );
+
+        // Draw title
+        let title_color = Rgba::new(0.9, 0.9, 0.9, 1.0);
+        let (title_vertices, title_indices) = self.text_renderer.build_label_vertices(
+            title,
+            modal_x + padding,
+            modal_y + padding,
+            modal_width - padding * 2.0,
+            title_color,
+        );
+        let base_idx = vertices.len() as u32;
+        vertices.extend(title_vertices);
+        indices.extend(title_indices.iter().map(|i| i + base_idx));
+
+        // Draw separator line under title
+        let sep_y = modal_y + padding + line_height;
+        self.emit_rect(
+            &mut vertices,
+            &mut indices,
+            modal_x + padding,
+            sep_y,
+            modal_width - padding * 2.0,
+            1.0,
+            Rgba::new(0.3, 0.3, 0.3, 1.0),
+        );
+
+        // Draw keybindings
+        let key_color = Rgba::new(0.6, 0.8, 1.0, 1.0); // Light blue for keys
+        let desc_color = Rgba::new(0.8, 0.8, 0.8, 1.0); // Light gray for descriptions
+
+        let start_y = sep_y + line_height * 0.5;
+        for (i, (key, desc)) in keybindings.iter().enumerate() {
+            let y = start_y + (i as f32 + 1.0) * line_height;
+            if y + line_height > modal_y + modal_height - padding {
+                break; // Don't overflow the modal
+            }
+
+            // Draw key
+            let (key_vertices, key_indices) = self.text_renderer.build_label_vertices(
+                key,
+                modal_x + padding,
+                y,
+                max_key_width + padding,
+                key_color,
+            );
+            let base_idx = vertices.len() as u32;
+            vertices.extend(key_vertices);
+            indices.extend(key_indices.iter().map(|i| i + base_idx));
+
+            // Draw description
+            let (desc_vertices, desc_indices) = self.text_renderer.build_label_vertices(
+                desc,
+                modal_x + padding + max_key_width + padding,
+                y,
+                max_desc_width + padding,
+                desc_color,
+            );
+            let base_idx = vertices.len() as u32;
+            vertices.extend(desc_vertices);
+            indices.extend(desc_indices.iter().map(|i| i + base_idx));
+        }
+
+        // Draw footer hint
+        let footer = "Press Esc or F1 to close";
+        let footer_color = Rgba::new(0.5, 0.5, 0.5, 1.0);
+        let (footer_vertices, footer_indices) = self.text_renderer.build_label_vertices(
+            footer,
+            modal_x + padding,
+            modal_y + modal_height - padding - line_height * 0.5,
+            modal_width - padding * 2.0,
+            footer_color,
+        );
+        let base_idx = vertices.len() as u32;
+        vertices.extend(footer_vertices);
+        indices.extend(footer_indices.iter().map(|i| i + base_idx));
+
+        (vertices, indices)
+    }
+
     /// Emit a rectangle (helper for tab bar).
     fn emit_rect(
         &self,
@@ -2022,6 +2332,249 @@ impl Renderer {
         indices.push(base_idx);
         indices.push(base_idx + 2);
         indices.push(base_idx + 3);
+    }
+
+    /// Build vertices for rendering terminal images.
+    fn build_image_vertices(&self, terminal: &Terminal) -> (Vec<Vertex>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        // For each image in the terminal's image store
+        for image in terminal.images().images() {
+            // Calculate screen position based on cell coordinates
+            let x0 = image.start_col as f32 * self.cell_width + self.pane_offset_x;
+            let y0 = image.start_row as f32 * self.cell_height + self.tab_bar_height + self.pane_offset_y;
+            let x1 = x0 + image.cell_width as f32 * self.cell_width;
+            let y1 = y0 + image.cell_height as f32 * self.cell_height;
+
+            let base_idx = vertices.len() as u32;
+
+            // White color (the texture provides the actual color)
+            let color = [1.0f32, 1.0, 1.0, 1.0];
+
+            vertices.push(Vertex {
+                position: [x0, y0],
+                tex_coord: [0.0, 0.0],
+                color,
+            });
+            vertices.push(Vertex {
+                position: [x1, y0],
+                tex_coord: [1.0, 0.0],
+                color,
+            });
+            vertices.push(Vertex {
+                position: [x1, y1],
+                tex_coord: [1.0, 1.0],
+                color,
+            });
+            vertices.push(Vertex {
+                position: [x0, y1],
+                tex_coord: [0.0, 1.0],
+                color,
+            });
+
+            indices.push(base_idx);
+            indices.push(base_idx + 1);
+            indices.push(base_idx + 2);
+            indices.push(base_idx);
+            indices.push(base_idx + 2);
+            indices.push(base_idx + 3);
+        }
+
+        (vertices, indices)
+    }
+
+    /// Upload an image to the GPU and cache it.
+    fn upload_image(&mut self, image: &TerminalImage) -> bool {
+        if self.image_cache.contains_key(&image.id) {
+            return true;
+        }
+
+        // Ensure image pipeline exists
+        if self.image_pipeline.is_none() {
+            self.create_image_pipeline();
+        }
+
+        let Some(pipeline) = &self.image_pipeline else {
+            return false;
+        };
+
+        // Create texture
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("image_texture"),
+            size: wgpu::Extent3d {
+                width: image.width,
+                height: image.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // Upload pixel data
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &image.data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(image.width * 4),
+                rows_per_image: Some(image.height),
+            },
+            wgpu::Extent3d {
+                width: image.width,
+                height: image.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // Create texture view
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create bind group
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("image_bind_group"),
+            layout: &pipeline.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
+                },
+            ],
+        });
+
+        self.image_cache.insert(
+            image.id,
+            CachedImageTexture {
+                texture,
+                bind_group,
+                width: image.width,
+                height: image.height,
+            },
+        );
+
+        true
+    }
+
+    /// Create the image rendering pipeline.
+    fn create_image_pipeline(&mut self) {
+        // Image shader (same as text shader but for images)
+        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("image_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("image.wgsl").into()),
+        });
+
+        // Create bind group layout for image texture
+        let bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("image_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        // Create sampler
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("image_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // Get uniform bind group layout from existing pipeline
+        let uniform_bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("image_uniform_bind_group_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        // Create pipeline layout
+        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("image_pipeline_layout"),
+            bind_group_layouts: &[&uniform_bind_group_layout, &bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Create render pipeline
+        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("image_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        self.image_pipeline = Some(ImagePipeline {
+            pipeline,
+            bind_group_layout,
+            sampler,
+        });
+    }
+
+    /// Check if there are images to render.
+    pub fn has_images(&self, terminal: &Terminal) -> bool {
+        !terminal.images().is_empty()
     }
 }
 

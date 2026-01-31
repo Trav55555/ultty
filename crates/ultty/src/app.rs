@@ -69,6 +69,10 @@ pub struct App {
     bell_active_until: Option<Instant>,
     /// Scrollbar dragging state
     scrollbar_dragging: bool,
+    /// Keyboard shortcuts overlay visible
+    shortcuts_visible: bool,
+    /// Cached list of keybindings for display
+    shortcuts_list: Vec<(String, String)>,
 }
 
 impl App {
@@ -143,6 +147,9 @@ impl App {
             tracing::info!("Config hot-reload enabled");
         }
 
+        // Build shortcuts list before moving config
+        let shortcuts_list = Self::build_shortcuts_list(&config.keybindings);
+
         Ok(Self {
             window,
             surface,
@@ -164,11 +171,48 @@ impl App {
             config_watcher,
             bell_active_until: None,
             scrollbar_dragging: false,
+            shortcuts_visible: false,
+            shortcuts_list,
         })
     }
 
-    /// Create terminal manager, optionally using a launch profile.
+    /// Build the list of keyboard shortcuts for display.
+    fn build_shortcuts_list(keybindings: &ultty::config::KeybindingConfig) -> Vec<(String, String)> {
+        vec![
+            (keybindings.copy.clone(), "Copy selection".to_string()),
+            (keybindings.paste.clone(), "Paste from clipboard".to_string()),
+            (keybindings.new_tab.clone(), "New tab".to_string()),
+            (keybindings.close_tab.clone(), "Close tab".to_string()),
+            (keybindings.next_tab.clone(), "Next tab".to_string()),
+            (keybindings.prev_tab.clone(), "Previous tab".to_string()),
+            (keybindings.split_horizontal.clone(), "Split horizontal".to_string()),
+            (keybindings.split_vertical.clone(), "Split vertical".to_string()),
+            (keybindings.focus_pane_left.clone(), "Focus pane left".to_string()),
+            (keybindings.focus_pane_right.clone(), "Focus pane right".to_string()),
+            (keybindings.focus_pane_up.clone(), "Focus pane up".to_string()),
+            (keybindings.focus_pane_down.clone(), "Focus pane down".to_string()),
+            (keybindings.close_pane.clone(), "Close pane".to_string()),
+            (keybindings.vim_mode.clone(), "Toggle vim mode".to_string()),
+            (keybindings.reload_config.clone(), "Reload config".to_string()),
+            (keybindings.show_shortcuts.clone(), "Show/hide shortcuts".to_string()),
+        ]
+    }
+
+    /// Create terminal manager, optionally using a launch profile or restoring from session.
     fn create_terminal_manager(config: &Config, cols: u16, rows: u16) -> Result<TerminalManager> {
+        // Try to restore session if enabled
+        if config.behavior.restore_session {
+            if let Some(session) = ultty::session::SessionData::load_last() {
+                tracing::info!("Restoring previous session with {} tabs", session.tabs.len());
+                match Self::create_manager_from_session(&session, cols, rows) {
+                    Ok(manager) => return Ok(manager),
+                    Err(e) => {
+                        tracing::warn!("Failed to restore session: {}, using default", e);
+                    }
+                }
+            }
+        }
+
         // Check if a default profile is configured
         if let Some(ref profile_name) = config.profiles.default {
             if let Some(profile) = config.profiles.profiles.get(profile_name) {
@@ -231,6 +275,26 @@ impl App {
         }
 
         Ok(manager)
+    }
+
+    /// Create terminal manager from a saved session.
+    fn create_manager_from_session(
+        session: &ultty::session::SessionData,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TerminalManager> {
+        TerminalManager::from_session(session, cols, rows)
+            .map_err(|e| anyhow::anyhow!("Failed to restore session: {}", e))
+    }
+
+    /// Save the current session.
+    fn save_session(&self) {
+        let session = self.terminal_manager.to_session_data();
+        if let Err(e) = session.save_as_last() {
+            tracing::warn!("Failed to save session: {}", e);
+        } else {
+            tracing::info!("Session saved");
+        }
     }
 
     /// Run the application.
@@ -322,6 +386,7 @@ impl App {
         match event {
             WindowEvent::CloseRequested => {
                 tracing::info!("Close requested");
+                self.save_session();
                 return true;
             }
             WindowEvent::Resized(size) => {
@@ -895,6 +960,23 @@ impl App {
 
         if self.check_keybinding(&event, &self.config.keybindings.reload_config.clone()) {
             self.reload_config();
+            return;
+        }
+
+        if self.check_keybinding(&event, &self.config.keybindings.show_shortcuts.clone()) {
+            self.shortcuts_visible = !self.shortcuts_visible;
+            self.needs_redraw = true;
+            return;
+        }
+
+        // Close shortcuts overlay with Escape
+        if self.shortcuts_visible {
+            if let Key::Named(NamedKey::Escape) = &event.logical_key {
+                self.shortcuts_visible = false;
+                self.needs_redraw = true;
+                return;
+            }
+            // Block other keys while shortcuts overlay is visible
             return;
         }
 
@@ -1489,6 +1571,12 @@ impl App {
                 None
             },
             bell_active,
+            shortcuts_visible: self.shortcuts_visible,
+            keybindings: if self.shortcuts_visible {
+                Some(&self.shortcuts_list)
+            } else {
+                None
+            },
         };
 
         self.renderer.render_with_overlay(&self.surface, terminal, &overlay)
@@ -1588,6 +1676,12 @@ impl App {
             },
             scrollbar: scrollbar.filter(|s| s.is_visible()),
             bell_active,
+            shortcuts_visible: self.shortcuts_visible,
+            keybindings: if self.shortcuts_visible {
+                Some(&self.shortcuts_list)
+            } else {
+                None
+            },
         };
 
         self.renderer.render_panes(&self.surface, &panes, &overlay)

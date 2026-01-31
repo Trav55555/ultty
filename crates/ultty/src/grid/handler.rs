@@ -103,8 +103,8 @@ impl<'a> Handler<'a> {
             // Scrolling
             Action::ScrollUp(n) => self.grid.scroll_up(n),
             Action::ScrollDown(n) => self.grid.scroll_down(n),
-            Action::SetScrollingRegion { top: _, bottom: _ } => {
-                // TODO: Implement scroll region
+            Action::SetScrollingRegion { top, bottom } => {
+                self.grid.set_scroll_region(top, bottom);
             }
 
             // Cursor save/restore
@@ -152,7 +152,7 @@ impl<'a> Handler<'a> {
                 // TODO: Switch back to main screen buffer
             }
 
-            // OSC sequences are handled by TerminalHandler, not the simple grid handler
+            // OSC/DCS sequences are handled by TerminalHandler, not the simple grid handler
             Action::SetTitle(_)
             | Action::SetWorkingDirectory(_)
             | Action::PromptStart
@@ -160,6 +160,7 @@ impl<'a> Handler<'a> {
             | Action::CommandExecuted
             | Action::CommandFinished(_)
             | Action::SetClipboard { .. }
+            | Action::SixelImage { .. }
             | Action::UnknownOsc(_) => {}
         }
     }

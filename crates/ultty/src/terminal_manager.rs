@@ -608,6 +608,161 @@ impl TerminalManager {
             .position(|&id| id == tab.focused_terminal)
             .unwrap_or(0)
     }
+
+    /// Extract session data from the current state.
+    pub fn to_session_data(&self) -> crate::session::SessionData {
+        use crate::session::{SessionData, TabData, TerminalData};
+
+        let active_tab_index = self.tabs.iter()
+            .position(|t| t.id == self.active_tab)
+            .unwrap_or(0);
+
+        let tabs = self.tabs.iter().map(|tab| {
+            let terminals = tab.terminals.iter().filter_map(|&tid| {
+                self.terminals.iter().find(|t| t.id == tid).map(|t| {
+                    let working_dir: Option<String> = t.event_loop
+                        .terminal()
+                        .working_directory()
+                        .map(|s| s.to_string());
+                    TerminalData {
+                        title: t.title.clone(),
+                        working_directory: working_dir,
+                        is_focused: tid == tab.focused_terminal,
+                    }
+                })
+            }).collect();
+
+            // Get working directory from the first terminal or focused terminal
+            let working_directory: Option<String> = tab.terminals.first()
+                .and_then(|&tid| self.terminals.iter().find(|t| t.id == tid))
+                .and_then(|t| t.event_loop.terminal().working_directory())
+                .map(|s| s.to_string());
+
+            TabData {
+                title: tab.title.clone(),
+                working_directory,
+                terminals,
+                split_direction: match tab.split_direction {
+                    SplitDirection::Horizontal => "Horizontal".to_string(),
+                    SplitDirection::Vertical => "Vertical".to_string(),
+                },
+            }
+        }).collect();
+
+        SessionData {
+            version: 1,
+            timestamp: String::new(), // Will be filled by SessionData
+            tabs,
+            active_tab_index,
+        }
+    }
+
+    /// Create a terminal manager from session data.
+    pub fn from_session(session: &crate::session::SessionData, cols: u16, rows: u16) -> io::Result<Self> {
+        if session.tabs.is_empty() {
+            // No tabs in session, create default
+            return Self::new(cols, rows);
+        }
+
+        let mut manager = Self {
+            terminals: Vec::new(),
+            tabs: Vec::new(),
+            active_tab: TabId::new(0),
+            next_terminal_id: 0,
+            next_tab_id: 0,
+            default_cols: cols,
+            default_rows: rows,
+        };
+
+        for (i, tab_data) in session.tabs.iter().enumerate() {
+            // Create tab
+            let tab_id = TabId(manager.next_tab_id);
+            manager.next_tab_id += 1;
+
+            // Create at least one terminal for this tab
+            let terminal_count = tab_data.terminals.len().max(1);
+            let mut terminal_ids = Vec::new();
+            let mut focused_terminal_id = None;
+
+            for (j, term_data) in tab_data.terminals.iter().take(terminal_count).enumerate() {
+                let tid = TerminalId(manager.next_terminal_id);
+                manager.next_terminal_id += 1;
+
+                // Create terminal with working directory if available
+                let mut terminal = if let Some(ref wd) = term_data.working_directory {
+                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, wd)?
+                } else if let Some(ref wd) = tab_data.working_directory {
+                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, wd)?
+                } else {
+                    ManagedTerminal::new(tid, tab_id, cols, rows)?
+                };
+
+                terminal.title = term_data.title.clone();
+                manager.terminals.push(terminal);
+                terminal_ids.push(tid);
+
+                if term_data.is_focused || j == 0 {
+                    focused_terminal_id = Some(tid);
+                }
+            }
+
+            // If no terminals were created (empty terminals list), create one
+            if terminal_ids.is_empty() {
+                let tid = TerminalId(manager.next_terminal_id);
+                manager.next_terminal_id += 1;
+                let mut terminal = if let Some(ref wd) = tab_data.working_directory {
+                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, wd)?
+                } else {
+                    ManagedTerminal::new(tid, tab_id, cols, rows)?
+                };
+                terminal.title = tab_data.title.clone();
+                manager.terminals.push(terminal);
+                terminal_ids.push(tid);
+                focused_terminal_id = Some(tid);
+            }
+
+            let split_direction = match tab_data.split_direction.as_str() {
+                "Vertical" => SplitDirection::Vertical,
+                _ => SplitDirection::Horizontal,
+            };
+
+            let tab = Tab {
+                id: tab_id,
+                terminals: terminal_ids,
+                focused_terminal: focused_terminal_id.unwrap(),
+                title: tab_data.title.clone(),
+                split_direction,
+            };
+
+            manager.tabs.push(tab);
+
+            // Set active tab
+            if i == session.active_tab_index {
+                manager.active_tab = tab_id;
+            }
+        }
+
+        Ok(manager)
+    }
+}
+
+impl ManagedTerminal {
+    /// Create a new managed terminal with a specific working directory.
+    pub fn new_with_dir(
+        id: TerminalId,
+        tab_id: TabId,
+        cols: u16,
+        rows: u16,
+        working_dir: &str,
+    ) -> io::Result<Self> {
+        let event_loop = TerminalEventLoop::new_with_dir(cols, rows, working_dir)?;
+        Ok(Self {
+            id,
+            event_loop,
+            tab_id,
+            title: format!("Terminal {}", id.0),
+        })
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 //! Handler that applies ANSI parser actions to the Terminal.
 
-use crate::grid::{CellFlags, MouseEncoding, MouseMode, Terminal};
+use crate::grid::{decode_sixel, CellFlags, MouseEncoding, MouseMode, Terminal, TerminalImage};
 use crate::protocol::ansi::{Action, Attribute, Color as AnsiColor, Mode, NamedColor};
 
 use super::cell::Color;
@@ -108,8 +108,8 @@ impl<'a> TerminalHandler<'a> {
                 }
             }
             Action::ScrollDown(n) => self.terminal.grid_mut().scroll_down(n),
-            Action::SetScrollingRegion { top: _, bottom: _ } => {
-                // TODO: Implement scroll region
+            Action::SetScrollingRegion { top, bottom } => {
+                self.terminal.grid_mut().set_scroll_region(top, bottom);
             }
 
             // Cursor save/restore
@@ -185,6 +185,14 @@ impl<'a> TerminalHandler<'a> {
             Action::SetClipboard { clipboard: _, data: _ } => {
                 // Clipboard is handled at the app level, not terminal level
                 // The terminal handler ignores this and the app will handle it
+            }
+            Action::SixelImage {
+                aspect_ratio: _,
+                background,
+                horizontal_grid: _,
+                data,
+            } => {
+                self.handle_sixel_image(&data, background);
             }
             Action::UnknownOsc(_) => {
                 // Ignore unknown OSC sequences
@@ -299,6 +307,55 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.modes_mut().auto_wrap = enabled;
             }
         }
+    }
+
+    /// Handle a Sixel image.
+    fn handle_sixel_image(&mut self, data: &[u8], background: u16) {
+        // Decode the sixel data
+        let Some((pixels, width, height)) = decode_sixel(data, background) else {
+            tracing::warn!("Failed to decode sixel image");
+            return;
+        };
+
+        // Get current cursor position for image placement
+        let cursor = self.terminal.grid().cursor();
+        let start_col = cursor.position.col;
+        let start_row = cursor.position.row;
+
+        // Calculate cell dimensions
+        // Assume standard cell size of 8x16 pixels (this should come from config)
+        // TODO: Get actual cell dimensions from renderer
+        let cell_pixel_width = 8u32;
+        let cell_pixel_height = 16u32;
+
+        let cell_width = ((width + cell_pixel_width - 1) / cell_pixel_width) as u16;
+        let cell_height = ((height + cell_pixel_height - 1) / cell_pixel_height) as u16;
+
+        // Allocate image ID and create the image
+        let id = self.terminal.images_mut().allocate_id();
+        let image = TerminalImage {
+            id,
+            width,
+            height,
+            data: pixels,
+            start_col,
+            start_row,
+            cell_width,
+            cell_height,
+        };
+
+        tracing::debug!(
+            "Decoded sixel image: {}x{} pixels, {}x{} cells at ({}, {})",
+            width,
+            height,
+            cell_width,
+            cell_height,
+            start_col,
+            start_row
+        );
+
+        // Add the image to the terminal
+        self.terminal.add_image(image);
     }
 }
 

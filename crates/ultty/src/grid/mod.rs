@@ -7,10 +7,12 @@
 //! - [`Buffer`] - Grid with scrollback history
 //! - [`Terminal`] - Full terminal state with alternate screen and selection
 //! - [`Handler`] - Applies ANSI parser actions to the terminal
+//! - [`ImageStore`] - Storage for inline images (Sixel, etc.)
 
 mod buffer;
 mod cell;
 mod handler;
+mod image;
 mod row;
 mod term_handler;
 mod terminal;
@@ -18,6 +20,7 @@ mod terminal;
 pub use buffer::Buffer;
 pub use cell::{Cell, CellFlags, Color};
 pub use handler::Handler;
+pub use image::{decode_sixel, ImageId, ImageStore, TerminalImage};
 pub use row::Row;
 pub use term_handler::TerminalHandler;
 pub use terminal::{
@@ -103,6 +106,23 @@ pub enum CursorShape {
     Bar,
 }
 
+/// Scroll region bounds (inclusive, 0-indexed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollRegion {
+    pub top: u16,
+    pub bottom: u16,
+}
+
+impl ScrollRegion {
+    pub fn new(top: u16, bottom: u16) -> Self {
+        Self { top, bottom }
+    }
+
+    pub fn contains(&self, row: u16) -> bool {
+        row >= self.top && row <= self.bottom
+    }
+}
+
 /// The visible terminal grid.
 ///
 /// This stores the current screen content as a 2D array of cells.
@@ -116,6 +136,8 @@ pub struct Grid {
     attrs: Cell,
     /// Dirty rows that need redrawing (bitset would be more efficient)
     dirty: Vec<bool>,
+    /// Scroll region (None means full screen)
+    scroll_region: Option<ScrollRegion>,
 }
 
 impl Grid {
@@ -130,6 +152,7 @@ impl Grid {
             cursor: Cursor::default(),
             attrs: Cell::default(),
             dirty,
+            scroll_region: None,
         }
     }
 
@@ -245,7 +268,9 @@ impl Grid {
 
     /// Newline - move cursor down, scrolling if needed.
     pub fn newline(&mut self) {
-        if self.cursor.position.row + 1 >= self.dims.rows {
+        let bottom = self.scroll_region.map(|r| r.bottom).unwrap_or(self.dims.rows - 1);
+
+        if self.cursor.position.row >= bottom {
             self.scroll_up(1);
         } else {
             self.cursor.position.row += 1;
@@ -265,36 +290,131 @@ impl Grid {
         self.cursor.position.col = next_tab.min(self.dims.cols - 1);
     }
 
-    /// Scroll the grid up by n lines.
-    pub fn scroll_up(&mut self, n: u16) {
-        let n = n as usize;
-        if n >= self.rows.len() {
-            self.clear();
-            return;
+    /// Set the scroll region (1-based top and bottom, inclusive).
+    /// Pass (1, rows) to reset to full screen.
+    pub fn set_scroll_region(&mut self, top: u16, bottom: u16) {
+        // Convert from 1-based to 0-based
+        let top = top.saturating_sub(1);
+        let bottom = bottom.saturating_sub(1).min(self.dims.rows - 1);
+
+        if top >= bottom {
+            // Invalid region, reset to full screen
+            self.scroll_region = None;
+        } else if top == 0 && bottom >= self.dims.rows - 1 {
+            // Full screen, no need to track
+            self.scroll_region = None;
+        } else {
+            self.scroll_region = Some(ScrollRegion::new(top, bottom));
         }
 
-        // Remove top rows and add new blank rows at bottom
-        self.rows.drain(0..n);
-        for _ in 0..n {
-            self.rows.push(Row::new(self.dims.cols));
-        }
-        self.mark_all_dirty();
+        // Move cursor to home position (top-left of scroll region if origin mode)
+        // For now, just move to absolute top-left
+        self.cursor.position.row = top;
+        self.cursor.position.col = 0;
     }
 
-    /// Scroll the grid down by n lines.
-    pub fn scroll_down(&mut self, n: u16) {
+    /// Get the current scroll region.
+    pub fn scroll_region(&self) -> Option<ScrollRegion> {
+        self.scroll_region
+    }
+
+    /// Get the effective scroll region (returns full screen if none set).
+    pub fn effective_scroll_region(&self) -> ScrollRegion {
+        self.scroll_region.unwrap_or(ScrollRegion::new(0, self.dims.rows - 1))
+    }
+
+    /// Scroll the grid up by n lines (within scroll region).
+    pub fn scroll_up(&mut self, n: u16) {
+        let region = self.effective_scroll_region();
         let n = n as usize;
-        if n >= self.rows.len() {
-            self.clear();
+        let region_height = (region.bottom - region.top + 1) as usize;
+
+        if n >= region_height {
+            // Clear the entire scroll region
+            for row_idx in region.top..=region.bottom {
+                if let Some(row) = self.rows.get_mut(row_idx as usize) {
+                    row.clear();
+                }
+                self.mark_dirty(row_idx);
+            }
             return;
         }
 
-        // Remove bottom rows and add new blank rows at top
-        self.rows.truncate(self.rows.len() - n);
-        for _ in 0..n {
-            self.rows.insert(0, Row::new(self.dims.cols));
+        // Move rows up within the region
+        for i in 0..n {
+            let src_row = region.top as usize + n + i;
+            let dst_row = region.top as usize + i;
+
+            if src_row <= region.bottom as usize {
+                // Can't use swap here easily, so clone
+                let src = self.rows[src_row].clone();
+                self.rows[dst_row] = src;
+            }
         }
-        self.mark_all_dirty();
+
+        // Shift remaining rows
+        for row_idx in (region.top as usize + n)..=(region.bottom as usize - n) {
+            let src_row = row_idx + n;
+            if src_row <= region.bottom as usize {
+                let src = self.rows[src_row].clone();
+                self.rows[row_idx] = src;
+            }
+        }
+
+        // Clear the bottom n rows of the region
+        for i in 0..n {
+            let row_idx = region.bottom as usize - i;
+            if row_idx >= region.top as usize {
+                self.rows[row_idx] = Row::new(self.dims.cols);
+            }
+        }
+
+        // Mark affected rows dirty
+        for row_idx in region.top..=region.bottom {
+            self.mark_dirty(row_idx);
+        }
+    }
+
+    /// Scroll the grid down by n lines (within scroll region).
+    pub fn scroll_down(&mut self, n: u16) {
+        let region = self.effective_scroll_region();
+        let n = n as usize;
+        let region_height = (region.bottom - region.top + 1) as usize;
+
+        if n >= region_height {
+            // Clear the entire scroll region
+            for row_idx in region.top..=region.bottom {
+                if let Some(row) = self.rows.get_mut(row_idx as usize) {
+                    row.clear();
+                }
+                self.mark_dirty(row_idx);
+            }
+            return;
+        }
+
+        // Move rows down within the region (from bottom to top to avoid overwriting)
+        for i in (0..(region_height - n)).rev() {
+            let src_row = region.top as usize + i;
+            let dst_row = src_row + n;
+
+            if dst_row <= region.bottom as usize {
+                let src = self.rows[src_row].clone();
+                self.rows[dst_row] = src;
+            }
+        }
+
+        // Clear the top n rows of the region
+        for i in 0..n {
+            let row_idx = region.top as usize + i;
+            if row_idx <= region.bottom as usize {
+                self.rows[row_idx] = Row::new(self.dims.cols);
+            }
+        }
+
+        // Mark affected rows dirty
+        for row_idx in region.top..=region.bottom {
+            self.mark_dirty(row_idx);
+        }
     }
 
     /// Erase from cursor to end of display.
@@ -548,5 +668,131 @@ mod tests {
 
         assert_eq!(grid.cursor().position.row, 9);
         assert_eq!(grid.cursor().position.col, 19);
+    }
+
+    #[test]
+    fn scroll_region_basic() {
+        let mut grid = Grid::new(Dimensions::new(10, 10));
+
+        // Set scroll region to rows 3-7 (1-indexed, so 2-6 in 0-indexed)
+        grid.set_scroll_region(3, 7);
+
+        let region = grid.scroll_region().unwrap();
+        assert_eq!(region.top, 2);
+        assert_eq!(region.bottom, 6);
+    }
+
+    #[test]
+    fn scroll_region_full_screen_reset() {
+        let mut grid = Grid::new(Dimensions::new(10, 10));
+
+        // Set a scroll region
+        grid.set_scroll_region(3, 7);
+        assert!(grid.scroll_region().is_some());
+
+        // Reset to full screen
+        grid.set_scroll_region(1, 10);
+        assert!(grid.scroll_region().is_none());
+    }
+
+    #[test]
+    fn scroll_up_in_region() {
+        let mut grid = Grid::new(Dimensions::new(5, 10));
+
+        // Write content on each row
+        for row in 0..10 {
+            grid.cursor.position.row = row;
+            grid.cursor.position.col = 0;
+            grid.write_char((b'A' + row as u8) as char); // A, B, C, etc.
+        }
+
+        // Set scroll region to rows 3-7 (1-indexed: rows 2-6 in 0-indexed)
+        grid.set_scroll_region(3, 7);
+
+        // Scroll up within region
+        grid.scroll_up(1);
+
+        // Rows outside region should be unchanged
+        assert_eq!(grid.cell(0, 0).unwrap().char(), 'A'); // Row 0 unchanged
+        assert_eq!(grid.cell(0, 1).unwrap().char(), 'B'); // Row 1 unchanged
+
+        // Rows inside region shifted up
+        assert_eq!(grid.cell(0, 2).unwrap().char(), 'D'); // Was row 3, now row 2
+        assert_eq!(grid.cell(0, 5).unwrap().char(), 'G'); // Was row 6, now row 5
+
+        // Bottom of region should be blank
+        assert_eq!(grid.cell(0, 6).unwrap().char(), ' '); // Cleared
+
+        // Row below region unchanged
+        assert_eq!(grid.cell(0, 7).unwrap().char(), 'H');
+    }
+
+    #[test]
+    fn scroll_down_in_region() {
+        let mut grid = Grid::new(Dimensions::new(5, 10));
+
+        // Write content on each row
+        for row in 0..10 {
+            grid.cursor.position.row = row;
+            grid.cursor.position.col = 0;
+            grid.write_char((b'A' + row as u8) as char);
+        }
+
+        // Set scroll region to rows 3-7 (1-indexed: rows 2-6 in 0-indexed)
+        grid.set_scroll_region(3, 7);
+
+        // Scroll down within region
+        grid.scroll_down(1);
+
+        // Rows outside region should be unchanged
+        assert_eq!(grid.cell(0, 0).unwrap().char(), 'A');
+        assert_eq!(grid.cell(0, 1).unwrap().char(), 'B');
+
+        // Top of region should be blank
+        assert_eq!(grid.cell(0, 2).unwrap().char(), ' '); // Cleared
+
+        // Rows inside region shifted down
+        assert_eq!(grid.cell(0, 3).unwrap().char(), 'C'); // Was row 2, now row 3
+        assert_eq!(grid.cell(0, 6).unwrap().char(), 'F'); // Was row 5, now row 6
+
+        // Row below region unchanged
+        assert_eq!(grid.cell(0, 7).unwrap().char(), 'H');
+    }
+
+    #[test]
+    fn newline_respects_scroll_region() {
+        let mut grid = Grid::new(Dimensions::new(5, 10));
+
+        // Write content
+        for row in 0..10 {
+            grid.cursor.position.row = row;
+            grid.cursor.position.col = 0;
+            grid.write_char((b'A' + row as u8) as char);
+        }
+
+        // Set scroll region to rows 3-7 (1-indexed: rows 2-6 in 0-indexed)
+        grid.set_scroll_region(3, 7);
+
+        // Move cursor to bottom of scroll region
+        grid.cursor.position.row = 6;
+        grid.cursor.position.col = 0;
+
+        // Newline should scroll within region
+        grid.newline();
+
+        // Cursor should still be at bottom of region
+        assert_eq!(grid.cursor.position.row, 6);
+
+        // Content above region unchanged
+        assert_eq!(grid.cell(0, 1).unwrap().char(), 'B');
+
+        // Region scrolled up
+        assert_eq!(grid.cell(0, 2).unwrap().char(), 'D'); // Was C, now D
+
+        // Bottom of region cleared
+        assert_eq!(grid.cell(0, 6).unwrap().char(), ' ');
+
+        // Below region unchanged
+        assert_eq!(grid.cell(0, 7).unwrap().char(), 'H');
     }
 }

@@ -1,6 +1,6 @@
 //! Terminal state management with alternate screen support.
 
-use super::{Buffer, CursorPosition, Dimensions, Grid};
+use super::{Buffer, CursorPosition, Dimensions, Grid, ImageStore, TerminalImage};
 
 /// Mouse tracking mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -76,6 +76,7 @@ pub struct ShellIntegration {
 /// - Terminal modes
 /// - Selection state
 /// - Shell integration state
+/// - Inline images
 #[derive(Debug)]
 pub struct Terminal {
     /// Main screen buffer (with scrollback)
@@ -92,6 +93,8 @@ pub struct Terminal {
     title: String,
     /// Shell integration state
     shell_integration: ShellIntegration,
+    /// Inline images (Sixel, etc.)
+    images: ImageStore,
 }
 
 impl Terminal {
@@ -105,6 +108,7 @@ impl Terminal {
             selection: None,
             title: String::new(),
             shell_integration: ShellIntegration::default(),
+            images: ImageStore::new(),
         }
     }
 
@@ -382,6 +386,41 @@ impl Terminal {
         self.shell_integration.command_executing = false;
         self.shell_integration.last_exit_code = exit_code;
         tracing::trace!("Command finished with exit code: {:?}", exit_code);
+    }
+
+    /// Get the image store.
+    pub fn images(&self) -> &ImageStore {
+        &self.images
+    }
+
+    /// Get mutable access to the image store.
+    pub fn images_mut(&mut self) -> &mut ImageStore {
+        &mut self.images
+    }
+
+    /// Add a Sixel image at the current cursor position.
+    ///
+    /// The image will be placed starting at the cursor position.
+    /// The cursor advances past the image after placement.
+    pub fn add_image(&mut self, image: TerminalImage) {
+        let cell_width = image.cell_width;
+        let cell_height = image.cell_height;
+
+        self.images.add(image);
+
+        // Move cursor past the image
+        // For now, just advance by the width on the same line
+        // TODO: Handle multi-line images properly
+        let new_col = self.grid().cursor().position.col.saturating_add(cell_width);
+        if new_col < self.dimensions().cols {
+            self.grid_mut().cursor_mut().position.col = new_col;
+        }
+
+        tracing::debug!(
+            "Added image: {}x{} cells at cursor",
+            cell_width,
+            cell_height
+        );
     }
 
     /// Resize the terminal.

@@ -28,6 +28,14 @@ impl Child {
         Self::spawn(&shell, &[&shell], &working_dir, size)
     }
 
+    /// Spawn a shell in a specific working directory.
+    pub fn spawn_shell_in_dir(size: PtySize, working_dir: &str) -> Result<Self> {
+        let shell = default_shell();
+        let wd = std::path::PathBuf::from(working_dir);
+        let wd = if wd.exists() { wd } else { current_dir() };
+        Self::spawn(&shell, &[&shell], &wd, size)
+    }
+
     /// Spawn a command in a PTY.
     pub fn spawn(
         program: &str,

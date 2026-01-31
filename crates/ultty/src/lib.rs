@@ -14,6 +14,7 @@ pub mod pty;
 pub mod event_loop;
 pub mod renderer;
 pub mod scene;
+pub mod session;
 pub mod tabs;
 pub mod terminal_manager;
 pub mod tmux;

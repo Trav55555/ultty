@@ -247,6 +247,8 @@ pub struct KeybindingConfig {
     pub vim_mode: String,
     /// Reload configuration
     pub reload_config: String,
+    /// Show keyboard shortcuts overlay
+    pub show_shortcuts: String,
     /// Additional custom keybindings
     #[serde(flatten)]
     pub custom: HashMap<String, String>,
@@ -270,6 +272,7 @@ impl Default for KeybindingConfig {
             close_pane: "ctrl+shift+x".to_string(),
             vim_mode: "ctrl+shift+space".to_string(),
             reload_config: "ctrl+shift+r".to_string(),
+            show_shortcuts: "f1".to_string(),
             custom: HashMap::new(),
         }
     }
@@ -347,6 +350,8 @@ pub struct BehaviorConfig {
     pub close_on_exit: bool,
     /// Window opacity (0.0-1.0, 1.0 = fully opaque)
     pub opacity: f32,
+    /// Restore previous session on startup
+    pub restore_session: bool,
 }
 
 impl Default for BehaviorConfig {
@@ -359,6 +364,7 @@ impl Default for BehaviorConfig {
             bell_sound: false, // Sound off by default
             close_on_exit: true,
             opacity: 1.0,
+            restore_session: false, // Disabled by default
         }
     }
 }

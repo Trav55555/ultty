@@ -173,6 +173,19 @@ pub enum Action {
     /// Set clipboard content (OSC 52)
     SetClipboard { clipboard: char, data: String },
 
+    /// Sixel image data (DCS q ... ST)
+    /// Contains: aspect ratio params and raw sixel data
+    SixelImage {
+        /// Pixel aspect ratio parameter
+        aspect_ratio: u16,
+        /// Background color mode (0=device default, 1=no change, 2=set to 0)
+        background: u16,
+        /// Horizontal grid size
+        horizontal_grid: u16,
+        /// Raw sixel data bytes
+        data: Vec<u8>,
+    },
+
     /// Unknown OSC sequence (for debugging)
     UnknownOsc(String),
 }
@@ -302,6 +315,8 @@ pub struct AnsiParser {
     current_param: Option<u16>,
     is_private: bool,
     osc_buffer: Vec<u8>,
+    dcs_buffer: Vec<u8>,
+    dcs_params: Vec<u16>,
 }
 
 impl AnsiParser {
@@ -313,6 +328,8 @@ impl AnsiParser {
             current_param: None,
             is_private: false,
             osc_buffer: Vec::new(),
+            dcs_buffer: Vec::new(),
+            dcs_params: Vec::new(),
         }
     }
 
@@ -351,6 +368,8 @@ impl AnsiParser {
         self.current_param = None;
         self.is_private = false;
         self.osc_buffer.clear();
+        self.dcs_buffer.clear();
+        self.dcs_params.clear();
     }
 
     /// Ground state - normal character processing.
@@ -404,6 +423,8 @@ impl AnsiParser {
             // DCS - Device Control String
             b'P' => {
                 self.state = State::DcsString;
+                self.dcs_buffer.clear();
+                self.dcs_params.clear();
             }
             // Save cursor (ESC 7)
             b'7' => {
@@ -882,17 +903,73 @@ impl AnsiParser {
     }
 
     /// DCS string state.
-    fn dcs_string<F>(&mut self, byte: u8, _callback: &mut F)
+    fn dcs_string<F>(&mut self, byte: u8, callback: &mut F)
     where
         F: FnMut(Action),
     {
         match byte {
+            // ST (String Terminator) - ESC \
             0x1B => {
-                // Might be start of ST
+                // Might be start of ST, dispatch and reset
+                self.dispatch_dcs(callback);
+                self.reset();
+            }
+            // CAN/SUB abort the sequence
+            0x18 | 0x1A => {
                 self.reset();
             }
             _ => {
                 // Accumulate DCS content
+                self.dcs_buffer.push(byte);
+            }
+        }
+    }
+
+    /// Dispatch DCS sequence (primarily Sixel).
+    fn dispatch_dcs<F>(&mut self, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        if self.dcs_buffer.is_empty() {
+            return;
+        }
+
+        // Check for Sixel: first character should be 'q' after params
+        // DCS format: ESC P params q <sixel data> ST
+        // When we get here, params are in dcs_params, buffer starts with 'q' or params
+
+        // Find the 'q' that starts sixel data
+        let content = &self.dcs_buffer;
+        if let Some(q_pos) = content.iter().position(|&b| b == b'q') {
+            // Parse params before 'q' (semicolon-separated)
+            let param_bytes = &content[..q_pos];
+            let mut params = Vec::new();
+            let mut current = 0u16;
+
+            for &b in param_bytes {
+                match b {
+                    b'0'..=b'9' => {
+                        current = current.saturating_mul(10).saturating_add((b - b'0') as u16);
+                    }
+                    b';' => {
+                        params.push(current);
+                        current = 0;
+                    }
+                    _ => {}
+                }
+            }
+            params.push(current); // Push last param
+
+            // Get sixel data after 'q'
+            let sixel_data = content[q_pos + 1..].to_vec();
+
+            if !sixel_data.is_empty() {
+                callback(Action::SixelImage {
+                    aspect_ratio: params.first().copied().unwrap_or(0),
+                    background: params.get(1).copied().unwrap_or(0),
+                    horizontal_grid: params.get(2).copied().unwrap_or(0),
+                    data: sixel_data,
+                });
             }
         }
     }
