@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "ultty"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ultty"
 path = "src/main.rs"
@@ -19,20 +23,52 @@ taffy = { workspace = true }
 # GPU Rendering
 wgpu = { workspace = true }
 winit = { workspace = true }
+bytemuck = { workspace = true }
 
 # Text
 cosmic-text = { workspace = true }
 
 # Async
 tokio = { workspace = true }
+pollster = "0.3"
+
+# Clipboard
+arboard = "3.4"
 
 # Utilities
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
+
+# Configuration
+toml = "0.8"
+dirs = "5.0"
+notify = "6.1"
+
+# URL detection
+regex = "1.10"
+open = "5.0"
+
+# PTY
+nix = { version = "0.29", features = ["term", "process", "signal", "fs"] }
+libc = "0.2"
+signal-hook = "0.3"
+polling = "3.4"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+insta = { workspace = true }
+tempfile = "3.10"
+toml = "0.8"
+
+[[bench]]
+name = "parser"
+harness = false
+
+[[bench]]
+name = "grid"
+harness = false

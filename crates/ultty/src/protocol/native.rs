@@ -1,6 +1,6 @@
 //! Native binary protocol handler.
 
-use ultty_protocol::{AppMessage, Decode, TerminalMessage};
+use ultty_protocol::{AppMessage, TerminalMessage};
 
 /// Native protocol connection handler.
 pub struct NativeProtocol {

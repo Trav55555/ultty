@@ -1,0 +1,340 @@
+//! Handler that applies ANSI parser actions to the Terminal.
+
+use crate::grid::{CellFlags, Terminal};
+use crate::protocol::ansi::{Action, Attribute, Color as AnsiColor, Mode, NamedColor};
+
+use super::cell::Color;
+
+/// Applies parser actions to a Terminal.
+///
+/// This handler is the bridge between the ANSI parser and the terminal.
+/// It translates parser [`Action`]s into terminal mutations, properly
+/// handling alternate screen, modes, and scrollback.
+pub struct TerminalHandler<'a> {
+    terminal: &'a mut Terminal,
+}
+
+impl<'a> TerminalHandler<'a> {
+    /// Create a new handler for the given terminal.
+    pub fn new(terminal: &'a mut Terminal) -> Self {
+        Self { terminal }
+    }
+
+    /// Handle a single parser action.
+    pub fn handle(&mut self, action: Action) {
+        match action {
+            Action::Print(c) => self.terminal.grid_mut().write_char(c),
+
+            Action::Execute(_code) => {
+                // C0 controls handled separately
+            }
+
+            // Cursor movement
+            Action::CursorUp(n) => self.terminal.grid_mut().cursor_up(n),
+            Action::CursorDown(n) => self.terminal.grid_mut().cursor_down(n),
+            Action::CursorForward(n) => self.terminal.grid_mut().cursor_right(n),
+            Action::CursorBack(n) => self.terminal.grid_mut().cursor_left(n),
+            Action::CursorNextLine(n) => {
+                self.terminal.grid_mut().cursor_down(n);
+                self.terminal.grid_mut().carriage_return();
+            }
+            Action::CursorPreviousLine(n) => {
+                self.terminal.grid_mut().cursor_up(n);
+                self.terminal.grid_mut().carriage_return();
+            }
+            Action::CursorHorizontalAbsolute(col) => {
+                let row = self.terminal.grid().cursor().position.row + 1;
+                self.terminal.grid_mut().set_cursor_position(row, col);
+            }
+            Action::CursorPosition { row, col } => {
+                self.terminal.grid_mut().set_cursor_position(row, col);
+            }
+
+            // Erase operations
+            Action::EraseInDisplay(mode) => match mode {
+                0 => self.terminal.grid_mut().erase_below(),
+                1 => self.terminal.grid_mut().erase_above(),
+                2 | 3 => self.terminal.grid_mut().clear(),
+                _ => {}
+            },
+            Action::EraseInLine(mode) => match mode {
+                0 => self.terminal.grid_mut().erase_line_right(),
+                1 => self.terminal.grid_mut().erase_line_left(),
+                2 => self.terminal.grid_mut().erase_line(),
+                _ => {}
+            },
+            Action::EraseCharacters(n) => {
+                let col = self.terminal.grid().cursor().position.col;
+                let row = self.terminal.grid().cursor().position.row;
+                for i in 0..n {
+                    if let Some(cell) = self.terminal.grid_mut().cell_mut(col + i, row) {
+                        cell.clear();
+                    }
+                }
+            }
+
+            // Line operations
+            Action::InsertLines(n) => {
+                for _ in 0..n {
+                    self.terminal.grid_mut().scroll_down(1);
+                }
+            }
+            Action::DeleteLines(n) => {
+                for _ in 0..n {
+                    self.terminal.grid_mut().scroll_up(1);
+                }
+            }
+            Action::DeleteCharacters(n) => {
+                let row_idx = self.terminal.grid().cursor().position.row;
+                let col = self.terminal.grid().cursor().position.col;
+                if let Some(row) = self.terminal.grid_mut().row_mut(row_idx) {
+                    row.delete_cells(col, n);
+                }
+            }
+            Action::InsertCharacters(n) => {
+                let row_idx = self.terminal.grid().cursor().position.row;
+                let col = self.terminal.grid().cursor().position.col;
+                if let Some(row) = self.terminal.grid_mut().row_mut(row_idx) {
+                    row.insert_cells(col, n);
+                }
+            }
+
+            // Scrolling (use buffer for scrollback on main screen)
+            Action::ScrollUp(n) => {
+                if !self.terminal.is_alternate_screen() {
+                    self.terminal.buffer_mut().scroll_grid_up(n);
+                } else {
+                    self.terminal.grid_mut().scroll_up(n);
+                }
+            }
+            Action::ScrollDown(n) => self.terminal.grid_mut().scroll_down(n),
+            Action::SetScrollingRegion { top: _, bottom: _ } => {
+                // TODO: Implement scroll region
+            }
+
+            // Cursor save/restore
+            Action::SaveCursorPosition => self.terminal.grid_mut().cursor_mut().save(),
+            Action::RestoreCursorPosition => self.terminal.grid_mut().cursor_mut().restore(),
+
+            // Text attributes
+            Action::SetAttribute(attr) => self.apply_attribute(attr),
+            Action::ResetAttributes => self.terminal.grid_mut().reset_attrs(),
+
+            // Modes
+            Action::SetMode(mode) => self.set_mode(mode, true),
+            Action::ResetMode(mode) => self.set_mode(mode, false),
+
+            // Tabs
+            Action::Tab => self.terminal.grid_mut().tab(),
+            Action::SetTabStop => {
+                // TODO: Implement custom tab stops
+            }
+            Action::ClearTabStop(_) => {
+                // TODO: Implement tab stop clearing
+            }
+
+            // Terminal queries
+            Action::ReportCursorPosition => {
+                // TODO: Send cursor position report
+            }
+            Action::DeviceAttributes => {
+                // TODO: Send device attributes
+            }
+
+            // Control characters
+            Action::Bell => {
+                // TODO: Trigger bell (audio or visual)
+            }
+            Action::Newline => {
+                if !self.terminal.is_alternate_screen() {
+                    self.terminal.buffer_mut().newline();
+                } else {
+                    self.terminal.grid_mut().newline();
+                }
+            }
+            Action::CarriageReturn => self.terminal.grid_mut().carriage_return(),
+            Action::Backspace => self.terminal.grid_mut().backspace(),
+
+            // Screen modes
+            Action::EnterAlternateScreen => {
+                self.terminal.enter_alternate_screen();
+            }
+            Action::LeaveAlternateScreen => {
+                self.terminal.leave_alternate_screen();
+            }
+        }
+    }
+
+    /// Apply a text attribute to the current style.
+    fn apply_attribute(&mut self, attr: Attribute) {
+        let attrs = self.terminal.grid().attrs().clone();
+        let mut new_attrs = attrs;
+
+        match attr {
+            Attribute::Bold => new_attrs.flags_mut().set(CellFlags::BOLD),
+            Attribute::Dim => new_attrs.flags_mut().set(CellFlags::DIM),
+            Attribute::Italic => new_attrs.flags_mut().set(CellFlags::ITALIC),
+            Attribute::Underline => new_attrs.flags_mut().set(CellFlags::UNDERLINE),
+            Attribute::Blink => new_attrs.flags_mut().set(CellFlags::BLINK),
+            Attribute::Reverse => new_attrs.flags_mut().set(CellFlags::REVERSE),
+            Attribute::Hidden => new_attrs.flags_mut().set(CellFlags::HIDDEN),
+            Attribute::Strikethrough => new_attrs.flags_mut().set(CellFlags::STRIKETHROUGH),
+
+            Attribute::NoBold => new_attrs.flags_mut().unset(CellFlags::BOLD),
+            Attribute::NoItalic => new_attrs.flags_mut().unset(CellFlags::ITALIC),
+            Attribute::NoUnderline => new_attrs.flags_mut().unset(CellFlags::UNDERLINE),
+            Attribute::NoBlink => new_attrs.flags_mut().unset(CellFlags::BLINK),
+            Attribute::NoReverse => new_attrs.flags_mut().unset(CellFlags::REVERSE),
+            Attribute::NoHidden => new_attrs.flags_mut().unset(CellFlags::HIDDEN),
+            Attribute::NoStrikethrough => new_attrs.flags_mut().unset(CellFlags::STRIKETHROUGH),
+
+            Attribute::ForegroundColor(color) => {
+                new_attrs.set_fg(convert_color(color));
+            }
+            Attribute::BackgroundColor(color) => {
+                new_attrs.set_bg(convert_color(color));
+            }
+        }
+
+        self.terminal.grid_mut().set_attrs(new_attrs);
+    }
+
+    /// Set or reset a terminal mode.
+    fn set_mode(&mut self, mode: Mode, enabled: bool) {
+        match mode {
+            Mode::CursorVisible => {
+                self.terminal.grid_mut().cursor_mut().visible = enabled;
+            }
+            Mode::ApplicationCursorKeys => {
+                self.terminal.modes_mut().application_cursor_keys = enabled;
+            }
+            Mode::BracketedPaste => {
+                self.terminal.modes_mut().bracketed_paste = enabled;
+            }
+            Mode::FocusReporting => {
+                self.terminal.modes_mut().focus_reporting = enabled;
+            }
+            Mode::MouseTracking => {
+                // TODO: Implement mouse tracking modes
+            }
+            Mode::OriginMode => {
+                self.terminal.modes_mut().origin_mode = enabled;
+            }
+            Mode::AutoWrap => {
+                self.terminal.modes_mut().auto_wrap = enabled;
+            }
+        }
+    }
+}
+
+/// Convert an ANSI parser color to a grid color.
+fn convert_color(color: AnsiColor) -> Color {
+    match color {
+        AnsiColor::Default => Color::Default,
+        AnsiColor::Named(named) => Color::Named(convert_named_color(named)),
+        AnsiColor::Indexed(idx) => Color::Indexed(idx),
+        AnsiColor::Rgb { r, g, b } => Color::Rgb(r, g, b),
+    }
+}
+
+/// Convert a named color to its palette index.
+fn convert_named_color(named: NamedColor) -> u8 {
+    match named {
+        NamedColor::Black => 0,
+        NamedColor::Red => 1,
+        NamedColor::Green => 2,
+        NamedColor::Yellow => 3,
+        NamedColor::Blue => 4,
+        NamedColor::Magenta => 5,
+        NamedColor::Cyan => 6,
+        NamedColor::White => 7,
+        NamedColor::BrightBlack => 8,
+        NamedColor::BrightRed => 9,
+        NamedColor::BrightGreen => 10,
+        NamedColor::BrightYellow => 11,
+        NamedColor::BrightBlue => 12,
+        NamedColor::BrightMagenta => 13,
+        NamedColor::BrightCyan => 14,
+        NamedColor::BrightWhite => 15,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grid::Dimensions;
+    use crate::protocol::ansi::AnsiParser;
+
+    fn process(terminal: &mut Terminal, input: &[u8]) {
+        let mut parser = AnsiParser::new();
+        let mut handler = TerminalHandler::new(terminal);
+        parser.feed(input, |action| handler.handle(action));
+    }
+
+    #[test]
+    fn print_hello() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+        process(&mut term, b"Hello");
+
+        assert_eq!(term.grid().cell(0, 0).unwrap().char(), 'H');
+        assert_eq!(term.grid().cell(4, 0).unwrap().char(), 'o');
+    }
+
+    #[test]
+    fn alternate_screen_escape() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+
+        // Write to main
+        process(&mut term, b"Main");
+        assert_eq!(term.grid().cell(0, 0).unwrap().char(), 'M');
+
+        // Enter alternate screen
+        process(&mut term, b"\x1b[?1049h");
+        assert!(term.is_alternate_screen());
+        assert_eq!(term.grid().cell(0, 0).unwrap().char(), ' ');
+
+        // Write to alternate
+        process(&mut term, b"Alt");
+        assert_eq!(term.grid().cell(0, 0).unwrap().char(), 'A');
+
+        // Leave alternate screen
+        process(&mut term, b"\x1b[?1049l");
+        assert!(!term.is_alternate_screen());
+        assert_eq!(term.grid().cell(0, 0).unwrap().char(), 'M');
+    }
+
+    #[test]
+    fn scroll_to_history() {
+        let mut term = Terminal::new(Dimensions::new(10, 3));
+
+        // Fill screen and scroll
+        process(&mut term, b"Line1\r\n");
+        process(&mut term, b"Line2\r\n");
+        process(&mut term, b"Line3\r\n");
+        process(&mut term, b"Line4\r\n");
+
+        // Line1 should be in history now
+        assert!(term.buffer().history_len() > 0);
+    }
+
+    #[test]
+    fn modes_tracked() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+
+        assert!(!term.modes().bracketed_paste);
+        process(&mut term, b"\x1b[?2004h");
+        assert!(term.modes().bracketed_paste);
+
+        process(&mut term, b"\x1b[?2004l");
+        assert!(!term.modes().bracketed_paste);
+    }
+
+    #[test]
+    fn application_cursor_keys() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+
+        assert!(!term.modes().application_cursor_keys);
+        process(&mut term, b"\x1b[?1h");
+        assert!(term.modes().application_cursor_keys);
+    }
+}

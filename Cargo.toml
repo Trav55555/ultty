@@ -31,6 +31,7 @@ tokio = { version = "1.42", features = ["full"] }
 # GPU Rendering
 wgpu = "0.19"
 winit = "0.29"
+bytemuck = { version = "1.14", features = ["derive"] }
 
 # Text Rendering
 cosmic-text = "0.11"

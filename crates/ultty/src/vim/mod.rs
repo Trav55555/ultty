@@ -454,6 +454,11 @@ impl CopyMode {
     pub fn search_query(&self) -> &str {
         &self.search_query
     }
+
+    /// Get the search matches and current match index.
+    pub fn search_matches(&self) -> (&[(usize, usize)], usize) {
+        (&self.search_matches, self.current_match)
+    }
 }
 
 /// Selection region in the scrollback buffer.
