@@ -178,6 +178,12 @@ pub enum Action {
     /// Set clipboard content (OSC 52)
     SetClipboard { clipboard: char, data: String },
 
+    /// Start hyperlink (OSC 8 with URI)
+    StartHyperlink(String),
+
+    /// End hyperlink (OSC 8 with empty URI)
+    EndHyperlink,
+
     /// Sixel image data (DCS q ... ST)
     /// Contains: aspect ratio params and raw sixel data
     SixelImage {
@@ -288,6 +294,18 @@ pub enum Mode {
     OriginMode,
     /// Auto-wrap mode (CSI ?7h/l)
     AutoWrap,
+    /// Reverse video mode (CSI ?5h/l) - swap fg/bg
+    ReverseVideo,
+    /// Alternate screen buffer (CSI ?47h/l)
+    AlternateScreen,
+    /// Alternate screen buffer with clear (CSI ?1047h/l)
+    AlternateScreenClear,
+    /// Save cursor and switch to alternate screen (CSI ?1049h/l)
+    AlternateScreenSaveCursor,
+    /// Cursor blink (CSI ?12h/l)
+    CursorBlink,
+    /// Column mode - 132 vs 80 columns (CSI ?3h/l)
+    ColumnMode132,
 }
 
 /// Parser state machine states.
@@ -631,10 +649,14 @@ impl AnsiParser {
     fn private_mode_set(&self, param: u16) -> Option<Action> {
         match param {
             1 => Some(Action::SetMode(Mode::ApplicationCursorKeys)),
+            3 => Some(Action::SetMode(Mode::ColumnMode132)),
+            5 => Some(Action::SetMode(Mode::ReverseVideo)),
             6 => Some(Action::SetMode(Mode::OriginMode)),
             7 => Some(Action::SetMode(Mode::AutoWrap)),
             9 => Some(Action::SetMode(Mode::MouseX10)),
+            12 => Some(Action::SetMode(Mode::CursorBlink)),
             25 => Some(Action::SetMode(Mode::CursorVisible)),
+            47 => Some(Action::SetMode(Mode::AlternateScreen)),
             1000 => Some(Action::SetMode(Mode::MouseNormal)),
             1002 => Some(Action::SetMode(Mode::MouseButtonEvent)),
             1003 => Some(Action::SetMode(Mode::MouseAnyEvent)),
@@ -642,7 +664,8 @@ impl AnsiParser {
             1005 => Some(Action::SetMode(Mode::MouseUtf8)),
             1006 => Some(Action::SetMode(Mode::MouseSgr)),
             1015 => Some(Action::SetMode(Mode::MouseUrxvt)),
-            1049 => Some(Action::EnterAlternateScreen),
+            1047 => Some(Action::SetMode(Mode::AlternateScreenClear)),
+            1049 => Some(Action::SetMode(Mode::AlternateScreenSaveCursor)),
             2004 => Some(Action::SetMode(Mode::BracketedPaste)),
             _ => None,
         }
@@ -652,10 +675,14 @@ impl AnsiParser {
     fn private_mode_reset(&self, param: u16) -> Option<Action> {
         match param {
             1 => Some(Action::ResetMode(Mode::ApplicationCursorKeys)),
+            3 => Some(Action::ResetMode(Mode::ColumnMode132)),
+            5 => Some(Action::ResetMode(Mode::ReverseVideo)),
             6 => Some(Action::ResetMode(Mode::OriginMode)),
             7 => Some(Action::ResetMode(Mode::AutoWrap)),
             9 => Some(Action::ResetMode(Mode::MouseX10)),
+            12 => Some(Action::ResetMode(Mode::CursorBlink)),
             25 => Some(Action::ResetMode(Mode::CursorVisible)),
+            47 => Some(Action::ResetMode(Mode::AlternateScreen)),
             1000 => Some(Action::ResetMode(Mode::MouseNormal)),
             1002 => Some(Action::ResetMode(Mode::MouseButtonEvent)),
             1003 => Some(Action::ResetMode(Mode::MouseAnyEvent)),
@@ -663,7 +690,8 @@ impl AnsiParser {
             1005 => Some(Action::ResetMode(Mode::MouseUtf8)),
             1006 => Some(Action::ResetMode(Mode::MouseSgr)),
             1015 => Some(Action::ResetMode(Mode::MouseUrxvt)),
-            1049 => Some(Action::LeaveAlternateScreen),
+            1047 => Some(Action::ResetMode(Mode::AlternateScreenClear)),
+            1049 => Some(Action::ResetMode(Mode::AlternateScreenSaveCursor)),
             2004 => Some(Action::ResetMode(Mode::BracketedPaste)),
             _ => None,
         }
@@ -872,6 +900,22 @@ impl AnsiParser {
                                     data: text,
                                 });
                             }
+                        }
+                    }
+                }
+                // Hyperlinks (OSC 8)
+                // Format: 8;params;uri (params typically empty or id=xxx)
+                "8" => {
+                    // data format: params;uri
+                    if let Some(semi_pos) = data.find(';') {
+                        let _params = &data[..semi_pos];
+                        let uri = &data[semi_pos + 1..];
+                        if uri.is_empty() {
+                            // End hyperlink
+                            callback(Action::EndHyperlink);
+                        } else {
+                            // Start hyperlink
+                            callback(Action::StartHyperlink(uri.to_string()));
                         }
                     }
                 }
@@ -1144,8 +1188,35 @@ mod tests {
 
     #[test]
     fn alternate_screen() {
-        assert_eq!(parse(b"\x1b[?1049h"), vec![Action::EnterAlternateScreen]);
-        assert_eq!(parse(b"\x1b[?1049l"), vec![Action::LeaveAlternateScreen]);
+        // Mode 1049 - save cursor and switch to alternate screen
+        assert_eq!(
+            parse(b"\x1b[?1049h"),
+            vec![Action::SetMode(Mode::AlternateScreenSaveCursor)]
+        );
+        assert_eq!(
+            parse(b"\x1b[?1049l"),
+            vec![Action::ResetMode(Mode::AlternateScreenSaveCursor)]
+        );
+
+        // Mode 47 - simple alternate screen
+        assert_eq!(
+            parse(b"\x1b[?47h"),
+            vec![Action::SetMode(Mode::AlternateScreen)]
+        );
+        assert_eq!(
+            parse(b"\x1b[?47l"),
+            vec![Action::ResetMode(Mode::AlternateScreen)]
+        );
+
+        // Mode 1047 - alternate screen with clear
+        assert_eq!(
+            parse(b"\x1b[?1047h"),
+            vec![Action::SetMode(Mode::AlternateScreenClear)]
+        );
+        assert_eq!(
+            parse(b"\x1b[?1047l"),
+            vec![Action::ResetMode(Mode::AlternateScreenClear)]
+        );
     }
 
     #[test]
@@ -1204,6 +1275,27 @@ mod tests {
         assert_eq!(
             parse(b"\x1b]133;D;1\x07"),
             vec![Action::CommandFinished(Some(1))]
+        );
+    }
+
+    #[test]
+    fn osc_hyperlinks() {
+        // Start hyperlink (OSC 8 ; params ; uri BEL)
+        assert_eq!(
+            parse(b"\x1b]8;;https://example.com\x07"),
+            vec![Action::StartHyperlink("https://example.com".to_string())]
+        );
+
+        // Start hyperlink with id parameter
+        assert_eq!(
+            parse(b"\x1b]8;id=link1;https://github.com\x07"),
+            vec![Action::StartHyperlink("https://github.com".to_string())]
+        );
+
+        // End hyperlink (empty URI)
+        assert_eq!(
+            parse(b"\x1b]8;;\x07"),
+            vec![Action::EndHyperlink]
         );
     }
 }

@@ -140,6 +140,9 @@ pub struct Grid {
     dirty: Vec<bool>,
     /// Scroll region (None means full screen)
     scroll_region: Option<ScrollRegion>,
+    /// Combining characters storage: (row, col) -> additional chars
+    /// Only cells with HAS_COMBINING flag have entries here
+    combining: std::collections::HashMap<(u16, u16), Vec<char>>,
 }
 
 impl Grid {
@@ -155,6 +158,7 @@ impl Grid {
             attrs: Cell::default(),
             dirty,
             scroll_region: None,
+            combining: std::collections::HashMap::new(),
         }
     }
 
@@ -186,6 +190,59 @@ impl Grid {
     /// Reset attributes to default.
     pub fn reset_attrs(&mut self) {
         self.attrs = Cell::default();
+    }
+
+    /// Get mutable access to current text attributes.
+    pub fn attrs_mut(&mut self) -> &mut Cell {
+        &mut self.attrs
+    }
+
+    /// Set the current hyperlink ID for new characters.
+    pub fn set_hyperlink_id(&mut self, id: u32) {
+        self.attrs.set_hyperlink_id(id);
+    }
+
+    // === Combining characters (grapheme clusters) ===
+
+    /// Add a combining character to a cell.
+    fn add_combining_char(&mut self, row: u16, col: u16, c: char) {
+        // Set the flag on the cell
+        if let Some(cell) = self.cell_mut(col, row) {
+            cell.set_flag(CellFlags::HAS_COMBINING);
+        }
+
+        // Add to the combining map
+        self.combining
+            .entry((row, col))
+            .or_insert_with(Vec::new)
+            .push(c);
+    }
+
+    /// Get combining characters for a cell.
+    pub fn combining_chars(&self, row: u16, col: u16) -> Option<&[char]> {
+        self.combining.get(&(row, col)).map(|v| v.as_slice())
+    }
+
+    /// Get the full grapheme for a cell (base char + combining chars).
+    pub fn grapheme(&self, row: u16, col: u16) -> Option<String> {
+        let cell = self.cell(col, row)?;
+        let base = cell.char();
+        if cell.has_flag(CellFlags::HAS_COMBINING) {
+            if let Some(combining) = self.combining_chars(row, col) {
+                let mut s = String::with_capacity(1 + combining.len());
+                s.push(base);
+                for &c in combining {
+                    s.push(c);
+                }
+                return Some(s);
+            }
+        }
+        Some(base.to_string())
+    }
+
+    /// Clear combining characters for a cell.
+    fn clear_combining(&mut self, row: u16, col: u16) {
+        self.combining.remove(&(row, col));
     }
 
     /// Get a row by index.
@@ -225,8 +282,16 @@ impl Grid {
         let width = c.width().unwrap_or(0) as u16;
 
         if width == 0 {
-            // Zero-width character (combining, control) - for now, skip
-            // TODO: Handle combining characters properly
+            // Zero-width character - could be combining mark or control char
+            // Try to attach combining characters to the previous cell
+            if col > 0 {
+                // Attach to previous cell
+                self.add_combining_char(row, col - 1, c);
+            } else if row > 0 {
+                // Previous row, last column
+                self.add_combining_char(row - 1, self.dims.cols - 1, c);
+            }
+            // Otherwise ignore (no previous cell to attach to)
             return;
         }
 
@@ -251,10 +316,14 @@ impl Grid {
         // Copy attrs first to avoid borrow conflict
         let attrs = self.attrs;
 
+        // Clear any combining characters from previous content
+        self.clear_combining(row, col);
+
         // Write the character
         if let Some(cell) = self.cell_mut(col, row) {
             cell.set_char(c);
             cell.copy_attrs_from(&attrs);
+            cell.unset_flag(CellFlags::HAS_COMBINING);
 
             // Handle wide characters
             if width > 1 {
@@ -683,6 +752,19 @@ impl Grid {
         }
     }
 
+    /// Check if any row is dirty.
+    pub fn has_dirty(&self) -> bool {
+        self.dirty.iter().any(|&d| d)
+    }
+
+    /// Get indices of dirty rows.
+    pub fn dirty_rows(&self) -> impl Iterator<Item = u16> + '_ {
+        self.dirty
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &d)| if d { Some(i as u16) } else { None })
+    }
+
     /// Iterate over all rows.
     pub fn rows(&self) -> impl Iterator<Item = &Row> {
         self.rows.iter()
@@ -962,5 +1044,87 @@ mod tests {
 
         // Below region unchanged
         assert_eq!(grid.cell(0, 7).unwrap().char(), 'H');
+    }
+
+    #[test]
+    fn combining_characters() {
+        let mut grid = Grid::new(Dimensions::new(10, 5));
+
+        // Write 'e' followed by combining acute accent (é)
+        grid.write_char('e');
+        grid.write_char('\u{0301}'); // Combining acute accent
+
+        // Base character should be at col 0
+        assert_eq!(grid.cell(0, 0).unwrap().char(), 'e');
+        assert!(grid.cell(0, 0).unwrap().has_flag(CellFlags::HAS_COMBINING));
+
+        // Cursor should still be at col 1 (combining char doesn't advance cursor)
+        assert_eq!(grid.cursor().position.col, 1);
+
+        // Full grapheme should include both characters
+        let grapheme = grid.grapheme(0, 0).unwrap();
+        assert_eq!(grapheme, "e\u{0301}");
+    }
+
+    #[test]
+    fn combining_char_cleared_on_overwrite() {
+        let mut grid = Grid::new(Dimensions::new(10, 5));
+
+        // Write 'e' with combining accent
+        grid.write_char('e');
+        grid.write_char('\u{0301}');
+
+        assert!(grid.cell(0, 0).unwrap().has_flag(CellFlags::HAS_COMBINING));
+
+        // Go back and overwrite
+        grid.cursor.position.col = 0;
+        grid.write_char('X');
+
+        // Combining chars should be cleared
+        assert!(!grid.cell(0, 0).unwrap().has_flag(CellFlags::HAS_COMBINING));
+        assert_eq!(grid.grapheme(0, 0).unwrap(), "X");
+    }
+
+    #[test]
+    fn dirty_tracking() {
+        let mut grid = Grid::new(Dimensions::new(10, 5));
+
+        // New grid should have all rows dirty
+        assert!(grid.has_dirty());
+        assert!(grid.is_dirty(0));
+        assert!(grid.is_dirty(4));
+
+        // Clear dirty flags
+        grid.clear_dirty();
+        assert!(!grid.has_dirty());
+        assert!(!grid.is_dirty(0));
+
+        // Writing a character marks that row dirty
+        grid.write_char('A');
+        assert!(grid.has_dirty());
+        assert!(grid.is_dirty(0));
+        assert!(!grid.is_dirty(1));
+
+        // Clear and verify
+        grid.clear_dirty();
+        assert!(!grid.has_dirty());
+
+        // Accessing a cell mutably marks row dirty
+        let _ = grid.cell_mut(5, 2);
+        assert!(grid.is_dirty(2));
+        assert!(!grid.is_dirty(0));
+    }
+
+    #[test]
+    fn dirty_rows_iterator() {
+        let mut grid = Grid::new(Dimensions::new(10, 5));
+        grid.clear_dirty();
+
+        // Mark specific rows
+        let _ = grid.cell_mut(0, 1);
+        let _ = grid.cell_mut(0, 3);
+
+        let dirty: Vec<u16> = grid.dirty_rows().collect();
+        assert_eq!(dirty, vec![1, 3]);
     }
 }

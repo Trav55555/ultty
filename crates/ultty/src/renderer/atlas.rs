@@ -1,6 +1,7 @@
 //! Glyph atlas for caching rendered glyphs.
 //!
 //! Uses a texture atlas to store rasterized glyphs for efficient GPU rendering.
+//! Implements LRU eviction when the atlas becomes full.
 
 use cosmic_text::{CacheKey, SwashCache, SwashContent, SwashImage};
 use std::collections::HashMap;
@@ -11,6 +12,9 @@ const ATLAS_SIZE: u32 = 2048;
 
 /// Padding between glyphs in the atlas.
 const GLYPH_PADDING: u32 = 1;
+
+/// Maximum number of cached glyphs before triggering cleanup.
+const MAX_CACHED_GLYPHS: usize = 4096;
 
 /// Information about a cached glyph.
 #[derive(Debug, Clone, Copy)]
@@ -23,6 +27,14 @@ pub struct GlyphInfo {
     /// Offset from baseline
     pub left: f32,
     pub top: f32,
+}
+
+/// Entry in the glyph cache with LRU tracking.
+#[derive(Debug, Clone, Copy)]
+struct CacheEntry {
+    info: GlyphInfo,
+    /// Last access time (monotonic counter)
+    last_access: u64,
 }
 
 /// Row in the atlas for shelf-packing algorithm.
@@ -42,8 +54,8 @@ pub struct GlyphAtlas {
     bind_group: wgpu::BindGroup,
     /// Bind group layout
     bind_group_layout: wgpu::BindGroupLayout,
-    /// Cached glyphs
-    cache: HashMap<CacheKey, GlyphInfo>,
+    /// Cached glyphs with LRU tracking
+    cache: HashMap<CacheKey, CacheEntry>,
     /// Swash cache for rasterization
     swash_cache: SwashCache,
     /// Current rows in the atlas (shelf packing)
@@ -52,6 +64,12 @@ pub struct GlyphAtlas {
     current_y: u32,
     /// Queue reference
     queue: Arc<wgpu::Queue>,
+    /// Access counter for LRU tracking
+    access_counter: u64,
+    /// Number of cache hits (for stats)
+    cache_hits: u64,
+    /// Number of cache misses (for stats)
+    cache_misses: u64,
 }
 
 impl GlyphAtlas {
@@ -129,11 +147,14 @@ impl GlyphAtlas {
             _view: view,
             bind_group,
             bind_group_layout,
-            cache: HashMap::new(),
+            cache: HashMap::with_capacity(1024),
             swash_cache: SwashCache::new(),
             rows: Vec::new(),
             current_y: 0,
             queue,
+            access_counter: 0,
+            cache_hits: 0,
+            cache_misses: 0,
         }
     }
 
@@ -154,8 +175,18 @@ impl GlyphAtlas {
         cache_key: CacheKey,
     ) -> Option<GlyphInfo> {
         // Check cache first
-        if let Some(info) = self.cache.get(&cache_key) {
-            return Some(*info);
+        if let Some(entry) = self.cache.get_mut(&cache_key) {
+            self.access_counter += 1;
+            entry.last_access = self.access_counter;
+            self.cache_hits += 1;
+            return Some(entry.info);
+        }
+
+        self.cache_misses += 1;
+
+        // Check if we need to evict before adding
+        if self.cache.len() >= MAX_CACHED_GLYPHS {
+            self.evict_lru();
         }
 
         // Rasterize the glyph using uncached method to get owned data
@@ -167,8 +198,44 @@ impl GlyphAtlas {
         self.process_image(cache_key, image)
     }
 
+    /// Evict least recently used glyphs to make room.
+    fn evict_lru(&mut self) {
+        // Find the 25% least recently used glyphs
+        let evict_count = self.cache.len() / 4;
+        if evict_count == 0 {
+            return;
+        }
+
+        // Collect access times and keys
+        let mut entries: Vec<_> = self.cache.iter()
+            .map(|(k, v)| (*k, v.last_access))
+            .collect();
+
+        // Sort by access time (oldest first)
+        entries.sort_by_key(|(_, access)| *access);
+
+        // Remove oldest entries
+        for (key, _) in entries.into_iter().take(evict_count) {
+            self.cache.remove(&key);
+        }
+
+        // Reset atlas allocation (we'll need to re-upload glyphs)
+        // This is a simple approach - a more sophisticated approach would
+        // track which regions are freed and reuse them
+        self.rows.clear();
+        self.current_y = 0;
+
+        tracing::debug!(
+            "Evicted {} glyphs from atlas, {} remaining",
+            evict_count,
+            self.cache.len()
+        );
+    }
+
     /// Process a rasterized glyph image.
     fn process_image(&mut self, cache_key: CacheKey, image: SwashImage) -> Option<GlyphInfo> {
+        self.access_counter += 1;
+
         // Skip empty glyphs
         if image.placement.width == 0 || image.placement.height == 0 {
             // Return a zero-size glyph info
@@ -179,7 +246,10 @@ impl GlyphAtlas {
                 left: image.placement.left as f32,
                 top: image.placement.top as f32,
             };
-            self.cache.insert(cache_key, info);
+            self.cache.insert(cache_key, CacheEntry {
+                info,
+                last_access: self.access_counter,
+            });
             return Some(info);
         }
 
@@ -235,7 +305,10 @@ impl GlyphAtlas {
             top: image.placement.top as f32,
         };
 
-        self.cache.insert(cache_key, info);
+        self.cache.insert(cache_key, CacheEntry {
+            info,
+            last_access: self.access_counter,
+        });
         Some(info)
     }
 
@@ -280,8 +353,38 @@ impl GlyphAtlas {
     }
 
     /// Get cache statistics.
-    pub fn stats(&self) -> (usize, u32) {
-        (self.cache.len(), self.current_y)
+    pub fn stats(&self) -> AtlasStats {
+        AtlasStats {
+            cached_glyphs: self.cache.len(),
+            atlas_usage: self.current_y,
+            cache_hits: self.cache_hits,
+            cache_misses: self.cache_misses,
+        }
+    }
+}
+
+/// Statistics about the glyph atlas.
+#[derive(Debug, Clone, Copy)]
+pub struct AtlasStats {
+    /// Number of cached glyphs
+    pub cached_glyphs: usize,
+    /// Current Y position in atlas (indicates usage)
+    pub atlas_usage: u32,
+    /// Number of cache hits
+    pub cache_hits: u64,
+    /// Number of cache misses
+    pub cache_misses: u64,
+}
+
+impl AtlasStats {
+    /// Calculate cache hit rate as a percentage.
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.cache_hits + self.cache_misses;
+        if total == 0 {
+            0.0
+        } else {
+            (self.cache_hits as f64 / total as f64) * 100.0
+        }
     }
 }
 

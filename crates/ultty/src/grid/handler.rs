@@ -162,6 +162,8 @@ impl<'a> Handler<'a> {
             | Action::SetClipboard { .. }
             | Action::SixelImage { .. }
             | Action::SetCursorStyle(_)
+            | Action::StartHyperlink(_)
+            | Action::EndHyperlink
             | Action::UnknownOsc(_) => {}
         }
     }
@@ -229,6 +231,14 @@ impl<'a> Handler<'a> {
             }
             Mode::AutoWrap => {
                 // TODO: Track auto-wrap mode
+            }
+            Mode::ReverseVideo
+            | Mode::CursorBlink
+            | Mode::ColumnMode132
+            | Mode::AlternateScreen
+            | Mode::AlternateScreenClear
+            | Mode::AlternateScreenSaveCursor => {
+                // These modes are handled by TerminalHandler, not the simple grid handler
             }
         }
     }

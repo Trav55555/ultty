@@ -105,6 +105,47 @@ impl UrlDetector {
         &self.urls
     }
 
+    /// Detect OSC 8 hyperlinks from terminal cells.
+    ///
+    /// This scans visible cells for hyperlink IDs and adds them to the detected URLs.
+    /// The `get_hyperlink` function maps cell hyperlink IDs to their URIs.
+    pub fn detect_hyperlinks<F, G>(&mut self, rows: u16, cols: u16, get_cell_hyperlink: F, get_hyperlink_uri: G)
+    where
+        F: Fn(u16, u16) -> u32,  // (row, col) -> hyperlink_id
+        G: Fn(u32) -> Option<String>,  // hyperlink_id -> uri
+    {
+        if !self.enabled {
+            return;
+        }
+
+        for row_idx in 0..rows {
+            let mut col = 0u16;
+            while col < cols {
+                let hyperlink_id = get_cell_hyperlink(row_idx, col);
+                if hyperlink_id != 0 {
+                    // Found a hyperlink, scan for its extent
+                    let start_col = col;
+                    while col < cols && get_cell_hyperlink(row_idx, col) == hyperlink_id {
+                        col += 1;
+                    }
+                    let end_col = col;
+
+                    // Get the URI for this hyperlink
+                    if let Some(uri) = get_hyperlink_uri(hyperlink_id) {
+                        self.urls.push(DetectedUrl {
+                            url: uri,
+                            start_col,
+                            end_col,
+                            row: row_idx,
+                        });
+                    }
+                } else {
+                    col += 1;
+                }
+            }
+        }
+    }
+
     /// Find a URL at the given position.
     pub fn url_at(&self, col: u16, row: u16) -> Option<&DetectedUrl> {
         self.urls.iter().find(|u| u.contains(col, row))

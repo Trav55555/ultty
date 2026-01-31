@@ -10,7 +10,7 @@ mod atlas;
 mod pipeline;
 mod text;
 
-pub use atlas::GlyphAtlas;
+pub use atlas::{AtlasStats, GlyphAtlas};
 pub use pipeline::RenderPipeline;
 pub use text::TextRenderer;
 
@@ -575,6 +575,11 @@ impl Renderer {
         self.opacity = opacity.clamp(0.0, 1.0);
     }
 
+    /// Enable or disable ligatures.
+    pub fn set_ligatures(&mut self, enabled: bool) {
+        self.text_renderer.set_ligatures(enabled);
+    }
+
     /// Render the terminal to a surface.
     pub fn render(
         &mut self,
@@ -662,6 +667,9 @@ impl Renderer {
             render_pass.set_index_buffer(bg_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
         }
+
+        // Render images (Sixel, etc.) after backgrounds, before text
+        self.render_images(&mut encoder, &view, terminal)?;
 
         // Render tab bar if visible
         if !tab_bar_vertices.is_empty() {
@@ -2749,6 +2757,90 @@ impl Renderer {
     /// Check if there are images to render.
     pub fn has_images(&self, terminal: &Terminal) -> bool {
         !terminal.images().is_empty()
+    }
+
+    /// Render terminal images (Sixel, etc.).
+    fn render_images(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        terminal: &Terminal,
+    ) -> Result<(), wgpu::SurfaceError> {
+        if terminal.images().is_empty() {
+            return Ok(());
+        }
+
+        // Ensure we have an image pipeline
+        if self.image_pipeline.is_none() {
+            self.create_image_pipeline();
+        }
+
+        // Upload any new images to GPU
+        for image in terminal.images().images() {
+            self.upload_image(image);
+        }
+
+        // For each image, render it with its own texture
+        for image in terminal.images().images() {
+            let Some(cached) = self.image_cache.get(&image.id) else {
+                continue;
+            };
+
+            // Build vertices for this single image
+            let x0 = image.start_col as f32 * self.cell_width;
+            let y0 = image.start_row as f32 * self.cell_height + self.tab_bar_height;
+            let x1 = x0 + image.cell_width as f32 * self.cell_width;
+            let y1 = y0 + image.cell_height as f32 * self.cell_height;
+
+            let color = [1.0f32, 1.0, 1.0, 1.0];
+            let vertices = vec![
+                Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color },
+                Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color },
+                Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color },
+                Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color },
+            ];
+            let indices: Vec<u32> = vec![0, 1, 2, 0, 2, 3];
+
+            let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("image_vertex_buffer"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+            let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("image_index_buffer"),
+                contents: bytemuck::cast_slice(&indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+            // Render pass for this image
+            {
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("image_render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                let pipeline = &self.image_pipeline.as_ref().unwrap().pipeline;
+                render_pass.set_pipeline(pipeline);
+                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                render_pass.set_bind_group(1, &cached.bind_group, &[]);
+                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+            }
+        }
+
+        Ok(())
     }
 }
 

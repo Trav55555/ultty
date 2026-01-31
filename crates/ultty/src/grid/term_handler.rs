@@ -237,6 +237,16 @@ impl<'a> TerminalHandler<'a> {
             } => {
                 self.handle_sixel_image(&data, background);
             }
+            Action::StartHyperlink(uri) => {
+                self.terminal.start_hyperlink(uri);
+                // Also set the hyperlink_id on the grid's current attrs
+                let id = self.terminal.current_hyperlink_id();
+                self.terminal.grid_mut().set_hyperlink_id(id);
+            }
+            Action::EndHyperlink => {
+                self.terminal.end_hyperlink();
+                self.terminal.grid_mut().set_hyperlink_id(0);
+            }
             Action::UnknownOsc(_) => {
                 // Ignore unknown OSC sequences
             }
@@ -348,6 +358,41 @@ impl<'a> TerminalHandler<'a> {
             }
             Mode::AutoWrap => {
                 self.terminal.modes_mut().auto_wrap = enabled;
+            }
+            Mode::ReverseVideo => {
+                self.terminal.modes_mut().reverse_video = enabled;
+            }
+            Mode::CursorBlink => {
+                self.terminal.grid_mut().cursor_mut().blinking = enabled;
+            }
+            Mode::ColumnMode132 => {
+                // 132 column mode - just log for now, actual resize requires window coordination
+                tracing::debug!("Column mode {} requested", if enabled { "132" } else { "80" });
+            }
+            Mode::AlternateScreen => {
+                if enabled {
+                    self.terminal.enter_alternate_screen();
+                } else {
+                    self.terminal.leave_alternate_screen();
+                }
+            }
+            Mode::AlternateScreenClear => {
+                if enabled {
+                    self.terminal.enter_alternate_screen();
+                    self.terminal.grid_mut().clear();
+                } else {
+                    self.terminal.leave_alternate_screen();
+                }
+            }
+            Mode::AlternateScreenSaveCursor => {
+                if enabled {
+                    self.terminal.grid_mut().cursor_mut().save();
+                    self.terminal.enter_alternate_screen();
+                    self.terminal.grid_mut().clear();
+                } else {
+                    self.terminal.leave_alternate_screen();
+                    self.terminal.grid_mut().cursor_mut().restore();
+                }
             }
         }
     }

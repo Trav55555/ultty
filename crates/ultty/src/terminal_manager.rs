@@ -275,6 +275,13 @@ impl TerminalManager {
         self.terminals.iter_mut().find(|t| t.id == id)
     }
 
+    /// Clear dirty flags on all terminals after rendering.
+    pub fn clear_dirty(&mut self) {
+        for terminal in &mut self.terminals {
+            terminal.event_loop.terminal_mut().clear_dirty();
+        }
+    }
+
     /// Get all tabs.
     pub fn tabs(&self) -> &[Tab] {
         &self.tabs

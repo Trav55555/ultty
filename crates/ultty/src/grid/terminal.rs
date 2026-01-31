@@ -51,6 +51,8 @@ pub struct TerminalModes {
     pub mouse_mode: MouseMode,
     /// Mouse encoding format
     pub mouse_encoding: MouseEncoding,
+    /// Reverse video mode (swap fg/bg colors)
+    pub reverse_video: bool,
 }
 
 /// Shell integration state for tracking command execution.
@@ -97,6 +99,12 @@ pub struct Terminal {
     images: ImageStore,
     /// Pending responses to send back to PTY
     pending_responses: Vec<Vec<u8>>,
+    /// Hyperlink ID to URI mapping (OSC 8)
+    hyperlinks: std::collections::HashMap<u32, String>,
+    /// Next hyperlink ID to assign
+    next_hyperlink_id: u32,
+    /// Current hyperlink ID (0 = none, applied to new cells)
+    current_hyperlink_id: u32,
 }
 
 impl Terminal {
@@ -112,6 +120,9 @@ impl Terminal {
             shell_integration: ShellIntegration::default(),
             images: ImageStore::new(),
             pending_responses: Vec::new(),
+            hyperlinks: std::collections::HashMap::new(),
+            next_hyperlink_id: 1, // 0 means no hyperlink
+            current_hyperlink_id: 0,
         }
     }
 
@@ -416,6 +427,53 @@ impl Terminal {
         &mut self.images
     }
 
+    // === Hyperlink support (OSC 8) ===
+
+    /// Start a hyperlink with the given URI.
+    ///
+    /// All subsequent characters will be associated with this hyperlink
+    /// until `end_hyperlink` is called.
+    pub fn start_hyperlink(&mut self, uri: String) {
+        let id = self.next_hyperlink_id;
+        self.next_hyperlink_id = self.next_hyperlink_id.wrapping_add(1);
+        if self.next_hyperlink_id == 0 {
+            self.next_hyperlink_id = 1; // Skip 0, which means no hyperlink
+        }
+        self.hyperlinks.insert(id, uri);
+        self.current_hyperlink_id = id;
+    }
+
+    /// End the current hyperlink.
+    pub fn end_hyperlink(&mut self) {
+        self.current_hyperlink_id = 0;
+    }
+
+    /// Get the current hyperlink ID to apply to new cells.
+    pub fn current_hyperlink_id(&self) -> u32 {
+        self.current_hyperlink_id
+    }
+
+    /// Look up a hyperlink URI by ID.
+    pub fn hyperlink(&self, id: u32) -> Option<&str> {
+        self.hyperlinks.get(&id).map(|s| s.as_str())
+    }
+
+    /// Get hyperlink at a specific cell position.
+    pub fn hyperlink_at(&self, row: u16, col: u16) -> Option<&str> {
+        let cell = self.buffer().grid().cell(row, col)?;
+        let id = cell.hyperlink_id();
+        if id != 0 {
+            self.hyperlink(id)
+        } else {
+            None
+        }
+    }
+
+    /// Get all hyperlinks (for URL detection).
+    pub fn all_hyperlinks(&self) -> &std::collections::HashMap<u32, String> {
+        &self.hyperlinks
+    }
+
     /// Add a Sixel image at the current cursor position.
     ///
     /// The image will be placed starting at the cursor position.
@@ -446,6 +504,22 @@ impl Terminal {
         self.main.resize(new_dims);
         self.alternate.resize(new_dims);
         self.selection = None;
+    }
+
+    // === Damage tracking ===
+
+    /// Check if the active buffer has any dirty content.
+    pub fn has_dirty(&self) -> bool {
+        self.buffer().has_dirty()
+    }
+
+    /// Clear dirty flags after rendering.
+    pub fn clear_dirty(&mut self) {
+        if self.using_alternate {
+            self.alternate.clear_dirty();
+        } else {
+            self.main.clear_dirty();
+        }
     }
 
     /// Check if mouse tracking is enabled.

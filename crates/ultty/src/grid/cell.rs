@@ -18,6 +18,9 @@ impl CellFlags {
     pub const STRIKETHROUGH: CellFlags = CellFlags(1 << 7);
     pub const WIDE_CHAR: CellFlags = CellFlags(1 << 8);
     pub const WIDE_CHAR_SPACER: CellFlags = CellFlags(1 << 9);
+    pub const HYPERLINK: CellFlags = CellFlags(1 << 10);
+    /// Cell has combining characters stored in the grid's combining map
+    pub const HAS_COMBINING: CellFlags = CellFlags(1 << 11);
 
     #[inline]
     pub fn contains(self, other: CellFlags) -> bool {
@@ -123,6 +126,8 @@ pub struct Cell {
     bg: Color,
     /// Style flags
     flags: CellFlags,
+    /// Hyperlink ID (0 = no hyperlink, non-zero indexes into terminal's hyperlink map)
+    hyperlink_id: u32,
 }
 
 impl Default for Cell {
@@ -132,6 +137,7 @@ impl Default for Cell {
             fg: Color::Default,
             bg: Color::Default,
             flags: CellFlags::NONE,
+            hyperlink_id: 0,
         }
     }
 }
@@ -147,7 +153,13 @@ impl Cell {
 
     /// Create a cell with all attributes specified.
     pub fn with_attrs(c: char, fg: Color, bg: Color, flags: CellFlags) -> Self {
-        Self { c, fg, bg, flags }
+        Self {
+            c,
+            fg,
+            bg,
+            flags,
+            hyperlink_id: 0,
+        }
     }
 
     /// Get the character.
@@ -216,18 +228,42 @@ impl Cell {
         self.flags.contains(flag)
     }
 
+    /// Get the hyperlink ID (0 = no hyperlink).
+    #[inline]
+    pub fn hyperlink_id(&self) -> u32 {
+        self.hyperlink_id
+    }
+
+    /// Set the hyperlink ID.
+    #[inline]
+    pub fn set_hyperlink_id(&mut self, id: u32) {
+        self.hyperlink_id = id;
+        if id != 0 {
+            self.flags.set(CellFlags::HYPERLINK);
+        } else {
+            self.flags.unset(CellFlags::HYPERLINK);
+        }
+    }
+
+    /// Check if this cell has a hyperlink.
+    #[inline]
+    pub fn has_hyperlink(&self) -> bool {
+        self.hyperlink_id != 0
+    }
+
     /// Clear the cell to default state.
     #[inline]
     pub fn clear(&mut self) {
         *self = Self::default();
     }
 
-    /// Copy attributes (colors, flags) from another cell, keeping the character.
+    /// Copy attributes (colors, flags, hyperlink) from another cell, keeping the character.
     #[inline]
     pub fn copy_attrs_from(&mut self, other: &Cell) {
         self.fg = other.fg;
         self.bg = other.bg;
         self.flags = other.flags;
+        self.hyperlink_id = other.hyperlink_id;
     }
 
     /// Check if this is a blank cell.

@@ -7,6 +7,7 @@ use ultty::grid::{MouseButton as TerminalMouseButton, SelectionMode, SelectionPo
 use ultty::renderer::{OverlayState, Renderer, ScrollbarState};
 use ultty::tabs::TabBarState;
 use ultty::terminal_manager::TerminalManager;
+use ultty::tmux::TmuxController;
 use ultty::url::UrlDetector;
 use ultty::vim::{CopyMode, CopyModeResult, Selection as VimSelection};
 use ultty_protocol::{Key as ProtocolKey, Modifiers as ProtocolModifiers};
@@ -80,6 +81,8 @@ pub struct App {
     cursor_blink_visible: bool,
     /// Last time cursor blink state changed
     last_cursor_blink: Instant,
+    /// Tmux integration controller
+    tmux: TmuxController,
 }
 
 impl App {
@@ -157,6 +160,12 @@ impl App {
         // Build shortcuts list before moving config
         let shortcuts_list = Self::build_shortcuts_list(&config.keybindings);
 
+        // Initialize tmux controller for passthrough support
+        let tmux = TmuxController::new();
+        if tmux.is_nested() && config.tmux.auto_detect {
+            tracing::info!("Running inside tmux, passthrough mode enabled");
+        }
+
         Ok(Self {
             window,
             surface,
@@ -182,6 +191,7 @@ impl App {
             shortcuts_list,
             cursor_blink_visible: true,
             last_cursor_blink: Instant::now(),
+            tmux,
         })
     }
 
@@ -1376,22 +1386,57 @@ impl App {
             return;
         }
 
-        // Collect row text first to avoid borrow conflicts
-        let rows: Vec<String> = {
+        // Collect row text and hyperlink data first to avoid borrow conflicts
+        let (rows, dims, hyperlink_grid, hyperlink_map): (Vec<String>, _, Vec<Vec<u32>>, std::collections::HashMap<u32, String>) = {
             let terminal = self.terminal();
             let dims = terminal.dimensions();
-            (0..dims.rows)
+            let rows: Vec<String> = (0..dims.rows)
                 .map(|row| {
                     terminal.buffer().visible_row(row)
                         .map(|r| r.text_trimmed())
                         .unwrap_or_default()
                 })
-                .collect()
+                .collect();
+
+            // Collect hyperlink IDs from visible cells
+            let hyperlink_grid: Vec<Vec<u32>> = (0..dims.rows)
+                .map(|row| {
+                    (0..dims.cols)
+                        .map(|col| {
+                            terminal.buffer().grid().cell(row, col)
+                                .map(|c| c.hyperlink_id())
+                                .unwrap_or(0)
+                        })
+                        .collect()
+                })
+                .collect();
+
+            // Copy hyperlink map
+            let hyperlink_map: std::collections::HashMap<u32, String> = terminal.all_hyperlinks()
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+
+            (rows, dims, hyperlink_grid, hyperlink_map)
         };
 
+        // Detect regex-based URLs
         self.url_detector.detect(rows.len() as u16, |row| {
             rows.get(row as usize).cloned().unwrap_or_default()
         });
+
+        // Detect OSC 8 hyperlinks
+        self.url_detector.detect_hyperlinks(
+            dims.rows,
+            dims.cols,
+            |row, col| {
+                hyperlink_grid.get(row as usize)
+                    .and_then(|r| r.get(col as usize))
+                    .copied()
+                    .unwrap_or(0)
+            },
+            |id| hyperlink_map.get(&id).cloned(),
+        );
     }
 
     /// Reload configuration from disk.
@@ -1405,6 +1450,9 @@ impl App {
 
         // Update opacity
         self.renderer.set_opacity(new_config.behavior.opacity);
+
+        // Update ligatures setting
+        self.renderer.set_ligatures(new_config.font.ligatures);
 
         // Update URL detection setting
         self.url_detector.set_enabled(new_config.behavior.url_detection);
@@ -1499,7 +1547,19 @@ impl App {
                                 // Set clipboard content (OSC 52)
                                 // Only handle from focused terminal for security
                                 if Some(terminal_id) == focused_id {
-                                    if let Some(ref mut cb) = self.clipboard {
+                                    // If running inside tmux, use passthrough to reach outer terminal
+                                    if self.tmux.is_nested() && self.config.tmux.passthrough {
+                                        // Send OSC 52 wrapped in tmux passthrough
+                                        use base64::Engine;
+                                        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+                                        let osc52 = format!("\x1b]52;c;{}\x07", encoded);
+                                        let passthrough = TmuxController::wrap_passthrough(osc52.as_bytes());
+                                        // Write to stdout to reach outer terminal
+                                        use std::io::Write;
+                                        let _ = std::io::stdout().write_all(&passthrough);
+                                        let _ = std::io::stdout().flush();
+                                        tracing::debug!("Set clipboard via OSC 52 passthrough: {} chars", data.len());
+                                    } else if let Some(ref mut cb) = self.clipboard {
                                         if let Err(e) = cb.set_text(&data) {
                                             tracing::warn!("Failed to set clipboard: {}", e);
                                         } else {
@@ -1566,7 +1626,10 @@ impl App {
         };
 
         match result {
-            Ok(()) => {}
+            Ok(()) => {
+                // Clear dirty flags after successful render
+                self.terminal_manager.clear_dirty();
+            }
             Err(wgpu::SurfaceError::Lost) => {
                 let size = self.window.inner_size();
                 self.renderer.resize(&self.surface, size.width, size.height);

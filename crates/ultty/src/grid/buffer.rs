@@ -188,6 +188,18 @@ impl Buffer {
             self.grid.newline();
         }
     }
+
+    // === Damage tracking ===
+
+    /// Check if any visible content is dirty.
+    pub fn has_dirty(&self) -> bool {
+        self.grid.has_dirty()
+    }
+
+    /// Clear dirty flags after rendering.
+    pub fn clear_dirty(&mut self) {
+        self.grid.clear_dirty();
+    }
 }
 
 #[cfg(test)]

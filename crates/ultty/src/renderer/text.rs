@@ -127,6 +127,16 @@ impl TextRenderer {
         (self.cell_width, self.cell_height)
     }
 
+    /// Enable or disable ligatures.
+    pub fn set_ligatures(&mut self, enabled: bool) {
+        self.ligatures = enabled;
+    }
+
+    /// Check if ligatures are enabled.
+    pub fn ligatures(&self) -> bool {
+        self.ligatures
+    }
+
     /// Render text from terminal state.
     pub fn render(
         &mut self,
@@ -246,6 +256,13 @@ impl TextRenderer {
                     continue;
                 }
 
+                // Get the full grapheme (base char + combining chars)
+                let grapheme = if cell.has_flag(CellFlags::HAS_COMBINING) {
+                    grid.grapheme(row_idx, col_idx).unwrap_or_else(|| ch.to_string())
+                } else {
+                    ch.to_string()
+                };
+
                 // Determine foreground color
                 let fg_color = if cell.has_flag(CellFlags::REVERSE) {
                     color_scheme.resolve(cell.bg(), false)
@@ -265,14 +282,13 @@ impl TextRenderer {
                     continue;
                 }
 
-                // Shape the character
-                let char_str = ch.to_string();
+                // Shape the grapheme (base char + combining chars)
                 let attrs = if self.font_family.is_empty() {
                     Attrs::new().family(Family::Monospace)
                 } else {
                     Attrs::new().family(Family::Name(&self.font_family))
                 };
-                buffer.set_text(&mut self.font_system, &char_str, attrs, shaping);
+                buffer.set_text(&mut self.font_system, &grapheme, attrs, shaping);
 
                 // Get the glyph from the layout
                 if let Some(run) = buffer.layout_runs().next() {
@@ -489,7 +505,7 @@ impl TextRenderer {
     }
 
     /// Get cache statistics.
-    pub fn cache_stats(&self) -> (usize, u32) {
+    pub fn cache_stats(&self) -> super::atlas::AtlasStats {
         self.atlas.stats()
     }
 }
