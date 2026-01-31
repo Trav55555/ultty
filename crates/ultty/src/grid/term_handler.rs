@@ -247,6 +247,22 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.end_hyperlink();
                 self.terminal.grid_mut().set_hyperlink_id(0);
             }
+            Action::Notification { title: _, body: _ } => {
+                // Notification is handled at the app level, not terminal level
+                // The terminal handler ignores this and the app will handle it
+            }
+            Action::KittyKeyboardPush(flags) => {
+                self.terminal.push_kitty_keyboard_mode(flags);
+            }
+            Action::KittyKeyboardPop => {
+                self.terminal.pop_kitty_keyboard_mode();
+            }
+            Action::KittyKeyboardQuery => {
+                // Send current keyboard mode flags
+                let flags = self.terminal.modes().kitty_keyboard_flags;
+                let response = format!("\x1b[?{}u", flags);
+                self.terminal.queue_response(response.into_bytes());
+            }
             Action::UnknownOsc(_) => {
                 // Ignore unknown OSC sequences
             }

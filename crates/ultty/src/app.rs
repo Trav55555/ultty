@@ -214,6 +214,7 @@ impl App {
             (keybindings.vim_mode.clone(), "Toggle vim mode".to_string()),
             (keybindings.reload_config.clone(), "Reload config".to_string()),
             (keybindings.show_shortcuts.clone(), "Show/hide shortcuts".to_string()),
+            (keybindings.cycle_theme.clone(), "Cycle color theme".to_string()),
         ]
     }
 
@@ -591,18 +592,23 @@ impl App {
                 self.last_click_time = now;
                 self.last_click_pos = (col, row);
 
-                // Start selection based on click count
-                let mode = match self.click_count {
-                    1 => SelectionMode::Normal,
-                    2 => SelectionMode::Normal, // Word selection handled differently
-                    3 => SelectionMode::Line,
-                    _ => SelectionMode::Normal,
+                // Start selection based on click count and modifiers
+                // Alt+drag enables block/rectangular selection
+                let mode = if self.modifiers.alt_key() && self.click_count == 1 {
+                    SelectionMode::Block
+                } else {
+                    match self.click_count {
+                        1 => SelectionMode::Normal,
+                        2 => SelectionMode::Normal, // Word selection handled differently
+                        3 => SelectionMode::Line,
+                        _ => SelectionMode::Normal,
+                    }
                 };
 
                 let point = SelectionPoint::new(col as i32, row as i32);
 
-                if self.click_count == 2 {
-                    // Word selection - find word boundaries
+                if self.click_count == 2 && !self.modifiers.alt_key() {
+                    // Word selection - find word boundaries (not in block mode)
                     self.select_word(col, row);
                 } else {
                     self.terminal_mut().start_selection(point, mode);
@@ -989,6 +995,11 @@ impl App {
         if self.check_keybinding(&event, &self.config.keybindings.show_shortcuts.clone()) {
             self.shortcuts_visible = !self.shortcuts_visible;
             self.needs_redraw = true;
+            return;
+        }
+
+        if self.check_keybinding(&event, &self.config.keybindings.cycle_theme.clone()) {
+            self.cycle_theme();
             return;
         }
 
@@ -1463,6 +1474,36 @@ impl App {
         tracing::info!("Configuration reloaded");
     }
 
+    /// Cycle through available color themes.
+    fn cycle_theme(&mut self) {
+        let theme_names: Vec<String> = self.config.colors.theme_names();
+        if theme_names.is_empty() {
+            return;
+        }
+
+        // Find current theme index
+        let current = self.config.colors.theme.as_deref().unwrap_or("");
+        let current_idx = theme_names.iter().position(|n| n == current).unwrap_or(0);
+
+        // Move to next theme (wrap around)
+        let next_idx = (current_idx + 1) % theme_names.len();
+        let next_name = &theme_names[next_idx];
+
+        // Apply the theme
+        if let Some(theme) = self.config.colors.get_theme(next_name).cloned() {
+            self.config.colors.apply_theme(&theme);
+            self.config.colors.theme = Some(next_name.clone());
+
+            // Update renderer
+            self.renderer.set_color_scheme(
+                ultty::renderer::ColorScheme::from_config(&self.config.colors)
+            );
+
+            self.needs_redraw = true;
+            tracing::info!("Switched to theme: {}", theme.name);
+        }
+    }
+
     /// Handle window resize.
     fn handle_resize(&mut self, size: PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
@@ -1566,6 +1607,13 @@ impl App {
                                             tracing::debug!("Set clipboard via OSC 52: {} chars", data.len());
                                         }
                                     }
+                                }
+                            }
+                            TerminalEvent::Notification { title, body } => {
+                                // Desktop notification (OSC 9/777)
+                                // Only show from focused terminal
+                                if Some(terminal_id) == focused_id {
+                                    Self::show_notification(&title, &body);
                                 }
                             }
                         }
@@ -1799,6 +1847,31 @@ impl App {
         };
 
         self.renderer.render_panes(&self.surface, &panes, &overlay)
+    }
+
+    /// Show a desktop notification.
+    fn show_notification(title: &str, body: &str) {
+        use notify_rust::Notification;
+
+        let title = if title.is_empty() { "Ultty" } else { title };
+
+        std::thread::spawn({
+            let title = title.to_string();
+            let body = body.to_string();
+            move || {
+                if let Err(e) = Notification::new()
+                    .summary(&title)
+                    .body(&body)
+                    .appname("Ultty")
+                    .timeout(5000)
+                    .show()
+                {
+                    tracing::warn!("Failed to show notification: {}", e);
+                } else {
+                    tracing::debug!("Showed notification: {} - {}", title, body);
+                }
+            }
+        });
     }
 }
 

@@ -83,16 +83,136 @@ pub struct ColorConfig {
     pub selection: RgbaColor,
     /// 16-color palette
     pub palette: PaletteConfig,
+    /// Named color themes (can be cycled with keybinding)
+    #[serde(default)]
+    pub themes: HashMap<String, ThemeConfig>,
+    /// Currently active theme name (if using themes)
+    pub theme: Option<String>,
 }
 
-impl Default for ColorConfig {
+/// A named color theme.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ThemeConfig {
+    /// Theme display name
+    pub name: String,
+    #[serde(deserialize_with = "deserialize_color")]
+    pub foreground: RgbColor,
+    #[serde(deserialize_with = "deserialize_color")]
+    pub background: RgbColor,
+    #[serde(deserialize_with = "deserialize_color")]
+    pub cursor: RgbColor,
+    #[serde(deserialize_with = "deserialize_color_with_alpha")]
+    pub selection: RgbaColor,
+    pub palette: Option<PaletteConfig>,
+}
+
+impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
+            name: String::new(),
             foreground: RgbColor::new(0xE5, 0xE5, 0xE5),
             background: RgbColor::new(0x1E, 0x1E, 0x1E),
             cursor: RgbColor::new(0xFF, 0xFF, 0xFF),
             selection: RgbaColor::new(0x4D, 0x4D, 0x4D, 0x80),
-            palette: PaletteConfig::default(),
+            palette: None,
+        }
+    }
+}
+
+impl ThemeConfig {
+    /// Create a light theme.
+    pub fn light() -> Self {
+        Self {
+            name: "Light".to_string(),
+            foreground: RgbColor::new(0x00, 0x00, 0x00),
+            background: RgbColor::new(0xFF, 0xFF, 0xFF),
+            cursor: RgbColor::new(0x00, 0x00, 0x00),
+            selection: RgbaColor::new(0xAD, 0xD8, 0xE6, 0x80),
+            palette: Some(PaletteConfig::light()),
+        }
+    }
+
+    /// Create a dark theme.
+    pub fn dark() -> Self {
+        Self {
+            name: "Dark".to_string(),
+            foreground: RgbColor::new(0xE5, 0xE5, 0xE5),
+            background: RgbColor::new(0x1E, 0x1E, 0x1E),
+            cursor: RgbColor::new(0xFF, 0xFF, 0xFF),
+            selection: RgbaColor::new(0x4D, 0x4D, 0x4D, 0x80),
+            palette: None,
+        }
+    }
+
+    /// Create the Everforest dark theme.
+    pub fn everforest() -> Self {
+        Self {
+            name: "Everforest".to_string(),
+            foreground: RgbColor::new(0xD3, 0xC6, 0xAA),  // fg
+            background: RgbColor::new(0x2D, 0x35, 0x3B),  // bg_dim
+            cursor: RgbColor::new(0xD3, 0xC6, 0xAA),
+            selection: RgbaColor::new(0x54, 0x3A, 0x48, 0x80),  // visual
+            palette: Some(PaletteConfig::everforest()),
+        }
+    }
+
+    /// Create the Everforest light theme.
+    pub fn everforest_light() -> Self {
+        Self {
+            name: "Everforest Light".to_string(),
+            foreground: RgbColor::new(0x5C, 0x6A, 0x72),  // fg
+            background: RgbColor::new(0xFD, 0xF6, 0xE3),  // bg_dim
+            cursor: RgbColor::new(0x5C, 0x6A, 0x72),
+            selection: RgbaColor::new(0xE6, 0xE2, 0xCC, 0x80),
+            palette: Some(PaletteConfig::everforest_light()),
+        }
+    }
+}
+
+impl Default for ColorConfig {
+    fn default() -> Self {
+        // Include built-in themes
+        let mut themes = HashMap::new();
+        themes.insert("everforest".to_string(), ThemeConfig::everforest());
+        themes.insert("everforest-light".to_string(), ThemeConfig::everforest_light());
+        themes.insert("dark".to_string(), ThemeConfig::dark());
+        themes.insert("light".to_string(), ThemeConfig::light());
+
+        // Use Everforest as default
+        let everforest = ThemeConfig::everforest();
+
+        Self {
+            foreground: everforest.foreground,
+            background: everforest.background,
+            cursor: everforest.cursor,
+            selection: everforest.selection,
+            palette: PaletteConfig::everforest(),
+            themes,
+            theme: Some("everforest".to_string()),
+        }
+    }
+}
+
+impl ColorConfig {
+    /// Get the list of available theme names.
+    pub fn theme_names(&self) -> Vec<String> {
+        self.themes.keys().cloned().collect()
+    }
+
+    /// Get a theme by name.
+    pub fn get_theme(&self, name: &str) -> Option<&ThemeConfig> {
+        self.themes.get(name)
+    }
+
+    /// Apply a theme to this color config.
+    pub fn apply_theme(&mut self, theme: &ThemeConfig) {
+        self.foreground = theme.foreground;
+        self.background = theme.background;
+        self.cursor = theme.cursor;
+        self.selection = theme.selection;
+        if let Some(ref palette) = theme.palette {
+            self.palette = palette.clone();
         }
     }
 }
@@ -182,6 +302,78 @@ impl PaletteConfig {
             self.bright_white,
         ]
     }
+
+    /// Create a light-themed palette.
+    pub fn light() -> Self {
+        Self {
+            // Light theme uses darker colors for contrast on white background
+            black: RgbColor::new(0x00, 0x00, 0x00),
+            red: RgbColor::new(0xC9, 0x1B, 0x00),
+            green: RgbColor::new(0x00, 0xC2, 0x00),
+            yellow: RgbColor::new(0xC7, 0xC4, 0x00),
+            blue: RgbColor::new(0x00, 0x00, 0xDB),
+            magenta: RgbColor::new(0xC9, 0x30, 0xC7),
+            cyan: RgbColor::new(0x00, 0xC5, 0xC7),
+            white: RgbColor::new(0xC7, 0xC7, 0xC7),
+            // Bright colors
+            bright_black: RgbColor::new(0x67, 0x67, 0x67),
+            bright_red: RgbColor::new(0xFF, 0x6D, 0x67),
+            bright_green: RgbColor::new(0x5F, 0xF9, 0x67),
+            bright_yellow: RgbColor::new(0xFE, 0xFB, 0x67),
+            bright_blue: RgbColor::new(0x68, 0x71, 0xFF),
+            bright_magenta: RgbColor::new(0xFF, 0x76, 0xFF),
+            bright_cyan: RgbColor::new(0x5F, 0xFD, 0xFF),
+            bright_white: RgbColor::new(0xFF, 0xFF, 0xFF),
+        }
+    }
+
+    /// Create Everforest dark palette.
+    pub fn everforest() -> Self {
+        Self {
+            // Everforest dark colors
+            black: RgbColor::new(0x4B, 0x56, 0x5C),   // bg2
+            red: RgbColor::new(0xE6, 0x7E, 0x80),     // red
+            green: RgbColor::new(0xA7, 0xC0, 0x80),   // green
+            yellow: RgbColor::new(0xDB, 0xBC, 0x7F),  // yellow
+            blue: RgbColor::new(0x7F, 0xBB, 0xB3),    // blue
+            magenta: RgbColor::new(0xD6, 0x99, 0xB6), // purple
+            cyan: RgbColor::new(0x83, 0xC0, 0x92),    // aqua
+            white: RgbColor::new(0xD3, 0xC6, 0xAA),   // fg
+            // Bright colors (slightly brighter versions)
+            bright_black: RgbColor::new(0x5C, 0x6A, 0x72),
+            bright_red: RgbColor::new(0xF8, 0x5C, 0x50),
+            bright_green: RgbColor::new(0xB8, 0xD1, 0x8F),
+            bright_yellow: RgbColor::new(0xE6, 0x98, 0x75), // orange
+            bright_blue: RgbColor::new(0x8F, 0xCC, 0xC4),
+            bright_magenta: RgbColor::new(0xE6, 0xAA, 0xC7),
+            bright_cyan: RgbColor::new(0x94, 0xD1, 0xA3),
+            bright_white: RgbColor::new(0xE5, 0xDF, 0xC5),
+        }
+    }
+
+    /// Create Everforest light palette.
+    pub fn everforest_light() -> Self {
+        Self {
+            // Everforest light colors
+            black: RgbColor::new(0x5C, 0x6A, 0x72),   // fg
+            red: RgbColor::new(0xF8, 0x55, 0x52),     // red
+            green: RgbColor::new(0x8D, 0xA1, 0x01),   // green
+            yellow: RgbColor::new(0xDF, 0xA0, 0x00),  // yellow
+            blue: RgbColor::new(0x35, 0xA7, 0x7C),    // blue
+            magenta: RgbColor::new(0xDF, 0x69, 0xBA), // purple
+            cyan: RgbColor::new(0x3A, 0x94, 0xC5),    // aqua
+            white: RgbColor::new(0xFD, 0xF6, 0xE3),   // bg
+            // Bright colors
+            bright_black: RgbColor::new(0x82, 0x92, 0x9C),
+            bright_red: RgbColor::new(0xE6, 0x7E, 0x80),
+            bright_green: RgbColor::new(0xA7, 0xC0, 0x80),
+            bright_yellow: RgbColor::new(0xE6, 0x98, 0x75), // orange
+            bright_blue: RgbColor::new(0x7F, 0xBB, 0xB3),
+            bright_magenta: RgbColor::new(0xD6, 0x99, 0xB6),
+            bright_cyan: RgbColor::new(0x83, 0xC0, 0x92),
+            bright_white: RgbColor::new(0xFF, 0xFF, 0xF0),
+        }
+    }
 }
 
 /// Font configuration.
@@ -252,6 +444,8 @@ pub struct KeybindingConfig {
     pub reload_config: String,
     /// Show keyboard shortcuts overlay
     pub show_shortcuts: String,
+    /// Cycle through color themes
+    pub cycle_theme: String,
     /// Additional custom keybindings
     #[serde(flatten)]
     pub custom: HashMap<String, String>,
@@ -276,6 +470,7 @@ impl Default for KeybindingConfig {
             vim_mode: "ctrl+shift+space".to_string(),
             reload_config: "ctrl+shift+r".to_string(),
             show_shortcuts: "f1".to_string(),
+            cycle_theme: "ctrl+shift+n".to_string(),
             custom: HashMap::new(),
         }
     }

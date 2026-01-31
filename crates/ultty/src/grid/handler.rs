@@ -164,6 +164,10 @@ impl<'a> Handler<'a> {
             | Action::SetCursorStyle(_)
             | Action::StartHyperlink(_)
             | Action::EndHyperlink
+            | Action::Notification { .. }
+            | Action::KittyKeyboardPush(_)
+            | Action::KittyKeyboardPop
+            | Action::KittyKeyboardQuery
             | Action::UnknownOsc(_) => {}
         }
     }

@@ -184,6 +184,18 @@ pub enum Action {
     /// End hyperlink (OSC 8 with empty URI)
     EndHyperlink,
 
+    /// Desktop notification (OSC 9 or OSC 777)
+    Notification { title: String, body: String },
+
+    /// Kitty keyboard protocol: push mode with flags (CSI > flags u)
+    KittyKeyboardPush(u8),
+
+    /// Kitty keyboard protocol: pop mode (CSI < u)
+    KittyKeyboardPop,
+
+    /// Kitty keyboard protocol: query mode (CSI ? u)
+    KittyKeyboardQuery,
+
     /// Sixel image data (DCS q ... ST)
     /// Contains: aspect ratio params and raw sixel data
     SixelImage {
@@ -490,6 +502,12 @@ impl AnsiParser {
                 self.is_private = true;
                 self.state = State::CsiPrivate;
             }
+            // Kitty keyboard protocol prefix indicators
+            b'>' | b'<' => {
+                // Store as intermediate for Kitty keyboard handling
+                self.intermediate = Some(byte);
+                self.state = State::CsiParam;
+            }
             // Digit - start parameter
             b'0'..=b'9' => {
                 let digit = (byte - b'0') as u16;
@@ -605,7 +623,28 @@ impl AnsiParser {
 
             // Cursor save/restore
             b's' => callback(Action::SaveCursorPosition),
-            b'u' => callback(Action::RestoreCursorPosition),
+            b'u' => {
+                // Check for Kitty keyboard protocol sequences
+                match self.intermediate {
+                    Some(b'>') => {
+                        // CSI > flags u - push keyboard mode
+                        let flags = self.params.first().copied().unwrap_or(0) as u8;
+                        callback(Action::KittyKeyboardPush(flags));
+                    }
+                    Some(b'<') => {
+                        // CSI < u - pop keyboard mode
+                        callback(Action::KittyKeyboardPop);
+                    }
+                    None if self.is_private => {
+                        // CSI ? u - query keyboard mode
+                        callback(Action::KittyKeyboardQuery);
+                    }
+                    _ => {
+                        // Regular restore cursor position
+                        callback(Action::RestoreCursorPosition);
+                    }
+                }
+            }
 
             // SGR (text attributes)
             b'm' => self.dispatch_sgr(callback),
@@ -919,9 +958,26 @@ impl AnsiParser {
                         }
                     }
                 }
+                // Desktop notification - iTerm2 style (OSC 9)
+                "9" => {
+                    callback(Action::Notification {
+                        title: String::new(),
+                        body: data.to_string(),
+                    });
+                }
                 // Shell integration (OSC 133)
                 "133" => {
                     self.dispatch_shell_integration(data, callback);
+                }
+                // Desktop notification - rxvt/urxvt style (OSC 777)
+                // Format: 777;notify;title;body
+                "777" => {
+                    let parts: Vec<&str> = data.splitn(3, ';').collect();
+                    if parts.first() == Some(&"notify") {
+                        let title = parts.get(1).unwrap_or(&"").to_string();
+                        let body = parts.get(2).unwrap_or(&"").to_string();
+                        callback(Action::Notification { title, body });
+                    }
                 }
                 _ => {
                     // Unknown OSC - log for debugging
@@ -1296,6 +1352,63 @@ mod tests {
         assert_eq!(
             parse(b"\x1b]8;;\x07"),
             vec![Action::EndHyperlink]
+        );
+    }
+
+    #[test]
+    fn osc_notifications() {
+        // OSC 9 - iTerm2 notification (body only)
+        assert_eq!(
+            parse(b"\x1b]9;Build complete!\x07"),
+            vec![Action::Notification {
+                title: String::new(),
+                body: "Build complete!".to_string()
+            }]
+        );
+
+        // OSC 777 - rxvt/urxvt notification (with title and body)
+        assert_eq!(
+            parse(b"\x1b]777;notify;Build;Build finished successfully\x07"),
+            vec![Action::Notification {
+                title: "Build".to_string(),
+                body: "Build finished successfully".to_string()
+            }]
+        );
+
+        // OSC 777 with just title
+        assert_eq!(
+            parse(b"\x1b]777;notify;Alert;\x07"),
+            vec![Action::Notification {
+                title: "Alert".to_string(),
+                body: String::new()
+            }]
+        );
+    }
+
+    #[test]
+    fn kitty_keyboard_protocol() {
+        // CSI > flags u - push keyboard mode
+        assert_eq!(
+            parse(b"\x1b[>1u"),
+            vec![Action::KittyKeyboardPush(1)]
+        );
+
+        // Push with multiple flags (disambiguate + report events)
+        assert_eq!(
+            parse(b"\x1b[>3u"),
+            vec![Action::KittyKeyboardPush(3)]
+        );
+
+        // CSI < u - pop keyboard mode
+        assert_eq!(
+            parse(b"\x1b[<u"),
+            vec![Action::KittyKeyboardPop]
+        );
+
+        // CSI ? u - query keyboard mode
+        assert_eq!(
+            parse(b"\x1b[?u"),
+            vec![Action::KittyKeyboardQuery]
         );
     }
 }

@@ -31,6 +31,13 @@ pub enum TerminalEvent {
         /// Decoded text content
         data: String,
     },
+    /// Desktop notification (OSC 9/777).
+    Notification {
+        /// Notification title (may be empty for OSC 9)
+        title: String,
+        /// Notification body/message
+        body: String,
+    },
 }
 
 /// The terminal event loop.
@@ -263,6 +270,12 @@ impl EventLoop {
                     events.push(TerminalEvent::SetClipboard {
                         clipboard: *clipboard,
                         data: data.clone(),
+                    });
+                }
+                Action::Notification { title, body } => {
+                    events.push(TerminalEvent::Notification {
+                        title: title.clone(),
+                        body: body.clone(),
                     });
                 }
                 _ => {}

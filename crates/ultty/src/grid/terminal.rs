@@ -53,6 +53,24 @@ pub struct TerminalModes {
     pub mouse_encoding: MouseEncoding,
     /// Reverse video mode (swap fg/bg colors)
     pub reverse_video: bool,
+    /// Kitty keyboard protocol flags
+    /// Bits: 0=disambiguate, 1=report event types, 2=report alternate keys,
+    ///       3=report all keys as escape, 4=report associated text
+    pub kitty_keyboard_flags: u8,
+}
+
+/// Kitty keyboard protocol flag bits.
+pub mod kitty_keyboard {
+    /// Disambiguate escape codes
+    pub const DISAMBIGUATE: u8 = 1 << 0;
+    /// Report event types (press/repeat/release)
+    pub const REPORT_EVENTS: u8 = 1 << 1;
+    /// Report alternate keys
+    pub const REPORT_ALTERNATE: u8 = 1 << 2;
+    /// Report all keys as escape codes
+    pub const REPORT_ALL: u8 = 1 << 3;
+    /// Report associated text
+    pub const REPORT_TEXT: u8 = 1 << 4;
 }
 
 /// Shell integration state for tracking command execution.
@@ -105,6 +123,8 @@ pub struct Terminal {
     next_hyperlink_id: u32,
     /// Current hyperlink ID (0 = none, applied to new cells)
     current_hyperlink_id: u32,
+    /// Stack of Kitty keyboard mode flags
+    kitty_keyboard_stack: Vec<u8>,
 }
 
 impl Terminal {
@@ -123,6 +143,7 @@ impl Terminal {
             hyperlinks: std::collections::HashMap::new(),
             next_hyperlink_id: 1, // 0 means no hyperlink
             current_hyperlink_id: 0,
+            kitty_keyboard_stack: Vec::new(),
         }
     }
 
@@ -472,6 +493,27 @@ impl Terminal {
     /// Get all hyperlinks (for URL detection).
     pub fn all_hyperlinks(&self) -> &std::collections::HashMap<u32, String> {
         &self.hyperlinks
+    }
+
+    /// Push Kitty keyboard mode with given flags onto the stack.
+    pub fn push_kitty_keyboard_mode(&mut self, flags: u8) {
+        self.kitty_keyboard_stack.push(flags);
+        self.modes.kitty_keyboard_flags = flags;
+        tracing::debug!("Pushed Kitty keyboard mode: flags={}", flags);
+    }
+
+    /// Pop Kitty keyboard mode from the stack.
+    pub fn pop_kitty_keyboard_mode(&mut self) {
+        if self.kitty_keyboard_stack.pop().is_some() {
+            // Restore previous flags or 0 if stack is empty
+            self.modes.kitty_keyboard_flags = self.kitty_keyboard_stack.last().copied().unwrap_or(0);
+            tracing::debug!("Popped Kitty keyboard mode: flags={}", self.modes.kitty_keyboard_flags);
+        }
+    }
+
+    /// Check if Kitty keyboard protocol is active.
+    pub fn kitty_keyboard_active(&self) -> bool {
+        self.modes.kitty_keyboard_flags != 0
     }
 
     /// Add a Sixel image at the current cursor position.
