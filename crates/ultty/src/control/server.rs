@@ -8,10 +8,7 @@ use std::time::Duration;
 use polling::{Event, Events, Poller};
 use tracing::{debug, error, info, warn};
 
-use ultty_protocol::control::{
-    control_socket_path, ControlData, ControlRequest, ControlResponse, TabInfo, TerminalInfo,
-    VersionInfo,
-};
+use ultty_protocol::control::{control_socket_path, ControlData, ControlRequest, ControlResponse};
 
 const LISTENER_KEY: usize = 0;
 const CLIENT_KEY_BASE: usize = 100;

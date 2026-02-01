@@ -396,6 +396,7 @@ impl Uniforms {
 }
 
 /// Cached GPU texture for a terminal image.
+#[allow(dead_code)] // Infrastructure for Sixel/image rendering pipeline
 struct CachedImageTexture {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
@@ -2737,7 +2738,7 @@ impl Renderer {
         indices.push(base_idx + 3);
     }
 
-    /// Build vertices for rendering terminal images.
+    #[allow(dead_code)]
     fn build_image_vertices(&self, terminal: &Terminal) -> (Vec<Vertex>, Vec<u32>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();

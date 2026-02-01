@@ -64,17 +64,12 @@ pub struct TerminalModes {
     pub synchronized_update: bool,
 }
 
-/// Kitty keyboard protocol flag bits.
+#[allow(dead_code)]
 pub mod kitty_keyboard {
-    /// Disambiguate escape codes
     pub const DISAMBIGUATE: u8 = 1 << 0;
-    /// Report event types (press/repeat/release)
     pub const REPORT_EVENTS: u8 = 1 << 1;
-    /// Report alternate keys
     pub const REPORT_ALTERNATE: u8 = 1 << 2;
-    /// Report all keys as escape codes
     pub const REPORT_ALL: u8 = 1 << 3;
-    /// Report associated text
     pub const REPORT_TEXT: u8 = 1 << 4;
 }
 
@@ -278,11 +273,7 @@ impl Terminal {
                 // Character-wise selection
                 for row_idx in start.row..=end.row {
                     if let Some(row) = buffer.visible_row(row_idx as u16) {
-                        let start_col = if row_idx == start.row {
-                            start.col
-                        } else {
-                            0
-                        };
+                        let start_col = if row_idx == start.row { start.col } else { 0 };
                         let end_col = if row_idx == end.row {
                             end.col
                         } else {
@@ -415,7 +406,10 @@ impl Terminal {
         // URL decode the path
         let decoded = percent_decode(&path);
         self.shell_integration.working_directory = Some(decoded);
-        tracing::debug!("Working directory set to: {:?}", self.shell_integration.working_directory);
+        tracing::debug!(
+            "Working directory set to: {:?}",
+            self.shell_integration.working_directory
+        );
     }
 
     /// Mark prompt start (OSC 133;A).
@@ -514,8 +508,12 @@ impl Terminal {
     pub fn pop_kitty_keyboard_mode(&mut self) {
         if self.kitty_keyboard_stack.pop().is_some() {
             // Restore previous flags or 0 if stack is empty
-            self.modes.kitty_keyboard_flags = self.kitty_keyboard_stack.last().copied().unwrap_or(0);
-            tracing::debug!("Popped Kitty keyboard mode: flags={}", self.modes.kitty_keyboard_flags);
+            self.modes.kitty_keyboard_flags =
+                self.kitty_keyboard_stack.last().copied().unwrap_or(0);
+            tracing::debug!(
+                "Popped Kitty keyboard mode: flags={}",
+                self.modes.kitty_keyboard_flags
+            );
         }
     }
 
@@ -642,11 +640,15 @@ impl Terminal {
 
         // Encode based on format
         match self.modes.mouse_encoding {
-            MouseEncoding::Sgr => Some(self.encode_mouse_sgr(button, x, y, pressed, motion, modifiers)),
+            MouseEncoding::Sgr => {
+                Some(self.encode_mouse_sgr(button, x, y, pressed, motion, modifiers))
+            }
             MouseEncoding::X10 | MouseEncoding::Utf8 => {
                 Some(self.encode_mouse_x10(button, x, y, pressed, motion, modifiers))
             }
-            MouseEncoding::Urxvt => Some(self.encode_mouse_urxvt(button, x, y, pressed, motion, modifiers)),
+            MouseEncoding::Urxvt => {
+                Some(self.encode_mouse_urxvt(button, x, y, pressed, motion, modifiers))
+            }
         }
     }
 
@@ -676,7 +678,8 @@ impl Terminal {
             cb += 32;
         }
 
-        let suffix = if pressed || matches!(button, MouseButton::ScrollUp | MouseButton::ScrollDown) {
+        let suffix = if pressed || matches!(button, MouseButton::ScrollUp | MouseButton::ScrollDown)
+        {
             'M'
         } else {
             'm'
@@ -784,7 +787,12 @@ pub struct MouseModifiers {
 impl MouseModifiers {
     /// Create new mouse modifiers.
     pub fn new(shift: bool, alt: bool, ctrl: bool, meta: bool) -> Self {
-        Self { shift, alt, ctrl, meta }
+        Self {
+            shift,
+            alt,
+            ctrl,
+            meta,
+        }
     }
 
     /// Get the modifier bits to add to the button code.

@@ -3,7 +3,7 @@
 //! This module provides tools for capturing terminal state and comparing
 //! against expected output, allowing autonomous verification of rendering.
 
-use crate::grid::{CellFlags, Grid, Terminal};
+use crate::grid::{CellFlags, Terminal};
 use std::fmt::Write;
 
 /// A snapshot of terminal state for comparison.
@@ -104,7 +104,10 @@ impl TerminalSnapshot {
 
     /// Check if a specific row contains text.
     pub fn row_contains(&self, row: u16, needle: &str) -> bool {
-        self.text.get(row as usize).map(|r| r.contains(needle)).unwrap_or(false)
+        self.text
+            .get(row as usize)
+            .map(|r| r.contains(needle))
+            .unwrap_or(false)
     }
 
     /// Count non-empty rows.
@@ -114,7 +117,9 @@ impl TerminalSnapshot {
 
     /// Check if there are cells with non-default colors.
     pub fn has_colors(&self) -> bool {
-        self.attrs.iter().any(|row| row.iter().any(|a| a.has_fg || a.has_bg))
+        self.attrs
+            .iter()
+            .any(|row| row.iter().any(|a| a.has_fg || a.has_bg))
     }
 
     /// Check if there are cells with reverse video.
@@ -124,7 +129,11 @@ impl TerminalSnapshot {
 
     /// Count cells with specific attribute.
     pub fn count_bold(&self) -> usize {
-        self.attrs.iter().flat_map(|r| r.iter()).filter(|a| a.bold).count()
+        self.attrs
+            .iter()
+            .flat_map(|r| r.iter())
+            .filter(|a| a.bold)
+            .count()
     }
 
     /// Generate a visual representation for debugging.
