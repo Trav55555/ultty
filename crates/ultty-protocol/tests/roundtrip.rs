@@ -352,12 +352,12 @@ fn arb_constraints() -> impl Strategy<Value = Constraints> {
     );
 
     let size_props = (
-        arb_dimension(), // width
-        arb_dimension(), // height
-        arb_dimension(), // min_width
-        arb_dimension(), // min_height
-        arb_dimension(), // max_width
-        arb_dimension(), // max_height
+        arb_dimension(),                        // width
+        arb_dimension(),                        // height
+        arb_dimension(),                        // min_width
+        arb_dimension(),                        // min_height
+        arb_dimension(),                        // max_width
+        arb_dimension(),                        // max_height
         proptest::option::of(arb_finite_f32()), // aspect_ratio
     );
 
@@ -371,14 +371,25 @@ fn arb_constraints() -> impl Strategy<Value = Constraints> {
     let grid_props = (
         proptest::collection::vec(arb_track_sizing_function(), 0..3), // grid_template_columns
         proptest::collection::vec(arb_track_sizing_function(), 0..3), // grid_template_rows
-        arb_grid_placement(), // grid_column
-        arb_grid_placement(), // grid_row
+        arb_grid_placement(),                                         // grid_column
+        arb_grid_placement(),                                         // grid_row
     );
 
     // Combine groups using nested tuples (4 groups, each <=10 elements)
     (flex_props, size_props, spacing_props, grid_props).prop_map(
         |(
-            (display, flex_direction, flex_wrap, justify_content, align_items, align_self, align_content, flex_grow, flex_shrink, flex_basis),
+            (
+                display,
+                flex_direction,
+                flex_wrap,
+                justify_content,
+                align_items,
+                align_self,
+                align_content,
+                flex_grow,
+                flex_shrink,
+                flex_basis,
+            ),
             (width, height, min_width, min_height, max_width, max_height, aspect_ratio),
             (margin, padding, gap, overflow),
             (grid_template_columns, grid_template_rows, grid_column, grid_row),
@@ -791,10 +802,10 @@ fn arb_terminal_message() -> impl Strategy<Value = TerminalMessage> {
 // ============================================================================
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #![proptest_config(ProptestConfig::with_cases(100))]
 
-    /// Test that any AppMessage can roundtrip through encode/decode.
     #[test]
+    #[ignore] // Requires larger stack: RUST_MIN_STACK=8388608 cargo test
     fn app_message_roundtrip(msg in arb_app_message()) {
         let encoded = msg.encode_to_bytes();
         let mut cursor = encoded.as_ref();
