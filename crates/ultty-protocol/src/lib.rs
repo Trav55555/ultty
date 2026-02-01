@@ -30,6 +30,7 @@
 
 mod codec;
 mod content;
+pub mod control;
 mod error;
 mod events;
 mod layout;

@@ -22,6 +22,16 @@ struct VertexOutput {
     @location(0) color: vec4<f32>,
 }
 
+// Convert sRGB to linear color space.
+// Colors from hex values are in sRGB space; GPU expects linear for sRGB framebuffer.
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        return c / 12.92;
+    } else {
+        return pow((c + 0.055) / 1.055, 2.4);
+    }
+}
+
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
@@ -32,7 +42,14 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
+    // Convert sRGB vertex colors to linear for correct rendering
+    let linear_color = vec4<f32>(
+        srgb_to_linear(in.color.r),
+        srgb_to_linear(in.color.g),
+        srgb_to_linear(in.color.b),
+        in.color.a  // Alpha is not gamma-encoded
+    );
+    return linear_color;
 }
 "#;
 
@@ -62,6 +79,16 @@ struct VertexOutput {
     @location(1) color: vec4<f32>,
 }
 
+// Convert sRGB to linear color space.
+// Colors from hex values are in sRGB space; GPU expects linear for sRGB framebuffer.
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        return c / 12.92;
+    } else {
+        return pow((c + 0.055) / 1.055, 2.4);
+    }
+}
+
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
@@ -74,7 +101,13 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let alpha = textureSample(t_glyph, s_glyph, in.tex_coord).r;
-    return vec4<f32>(in.color.rgb, in.color.a * alpha);
+    // Convert sRGB vertex colors to linear for correct rendering
+    let linear_color = vec3<f32>(
+        srgb_to_linear(in.color.r),
+        srgb_to_linear(in.color.g),
+        srgb_to_linear(in.color.b)
+    );
+    return vec4<f32>(linear_color, in.color.a * alpha);
 }
 "#;
 

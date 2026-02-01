@@ -318,6 +318,10 @@ pub enum Mode {
     CursorBlink,
     /// Column mode - 132 vs 80 columns (CSI ?3h/l)
     ColumnMode132,
+    /// Alternate scroll mode (CSI ?1007h/l) - scroll alternate screen instead of sending keys
+    AlternateScrollMode,
+    /// Synchronized update mode (CSI ?2026h/l) - batch updates for flicker-free rendering
+    SynchronizedUpdate,
 }
 
 /// Parser state machine states.
@@ -337,6 +341,10 @@ enum State {
     OscString,
     /// In DCS sequence (ESC P)
     DcsString,
+    /// Character set designation for G0 (ESC ()
+    CharsetDesignateG0,
+    /// Character set designation for G1 (ESC ))
+    CharsetDesignateG1,
 }
 
 /// ANSI parser state machine.
@@ -354,6 +362,16 @@ pub struct AnsiParser {
     osc_buffer: Vec<u8>,
     dcs_buffer: Vec<u8>,
     dcs_params: Vec<u16>,
+    /// Buffer for accumulating UTF-8 multi-byte sequences
+    utf8_buffer: Vec<u8>,
+    /// Number of remaining bytes expected in current UTF-8 sequence
+    utf8_remaining: u8,
+    /// Active character set for G0 (false = ASCII, true = DEC Special Graphics)
+    g0_charset_graphics: bool,
+    /// Active character set for G1
+    g1_charset_graphics: bool,
+    /// Which charset is currently active (false = G0, true = G1)
+    using_g1: bool,
 }
 
 impl AnsiParser {
@@ -368,6 +386,11 @@ impl AnsiParser {
             osc_buffer: Vec::new(),
             dcs_buffer: Vec::new(),
             dcs_params: Vec::new(),
+            utf8_buffer: Vec::with_capacity(4),
+            utf8_remaining: 0,
+            g0_charset_graphics: false,
+            g1_charset_graphics: false,
+            using_g1: false,
         }
     }
 
@@ -396,10 +419,14 @@ impl AnsiParser {
             State::CsiPrivate | State::CsiParam => self.csi_param(byte, callback),
             State::OscString => self.osc_string(byte, callback),
             State::DcsString => self.dcs_string(byte, callback),
+            State::CharsetDesignateG0 | State::CharsetDesignateG1 => {
+                self.charset_designate(byte, callback)
+            }
         }
     }
 
     /// Reset parser to ground state.
+    /// Note: charset state is preserved across resets (only cleared on hard reset).
     fn reset(&mut self) {
         self.state = State::Ground;
         self.params.clear();
@@ -409,6 +436,10 @@ impl AnsiParser {
         self.osc_buffer.clear();
         self.dcs_buffer.clear();
         self.dcs_params.clear();
+        self.utf8_buffer.clear();
+        self.utf8_remaining = 0;
+        // Note: g0/g1 charset state is intentionally NOT reset here
+        // as it persists across escape sequences
     }
 
     /// Ground state - normal character processing.
@@ -416,6 +447,32 @@ impl AnsiParser {
     where
         F: FnMut(Action),
     {
+        // If we're in the middle of a UTF-8 sequence, handle continuation
+        if self.utf8_remaining > 0 {
+            if byte & 0xC0 == 0x80 {
+                // Valid continuation byte
+                self.utf8_buffer.push(byte);
+                self.utf8_remaining -= 1;
+
+                if self.utf8_remaining == 0 {
+                    // Complete sequence - decode and emit
+                    if let Ok(s) = std::str::from_utf8(&self.utf8_buffer) {
+                        for c in s.chars() {
+                            callback(Action::Print(c));
+                        }
+                    }
+                    self.utf8_buffer.clear();
+                }
+                return;
+            } else {
+                // Invalid continuation - emit replacement char and process this byte normally
+                callback(Action::Print('\u{FFFD}'));
+                self.utf8_buffer.clear();
+                self.utf8_remaining = 0;
+                // Fall through to process current byte
+            }
+        }
+
         match byte {
             // ESC - start escape sequence
             0x1B => {
@@ -427,16 +484,52 @@ impl AnsiParser {
             0x09 => callback(Action::Tab),
             0x0A | 0x0B | 0x0C => callback(Action::Newline),
             0x0D => callback(Action::CarriageReturn),
+            // SO (Shift Out) - switch to G1 charset
+            0x0E => {
+                self.using_g1 = true;
+            }
+            // SI (Shift In) - switch to G0 charset
+            0x0F => {
+                self.using_g1 = false;
+            }
             // Other C0 controls
             0x00..=0x1F => callback(Action::Execute(byte)),
-            // Printable ASCII
-            0x20..=0x7E => callback(Action::Print(byte as char)),
+            // Printable ASCII - with DEC Special Graphics translation if active
+            0x20..=0x7E => {
+                let ch = if self.is_graphics_charset_active() {
+                    Self::translate_dec_graphics(byte).unwrap_or(byte as char)
+                } else {
+                    byte as char
+                };
+                callback(Action::Print(ch));
+            }
             // DEL - ignore
             0x7F => {}
-            // High bytes - could be UTF-8, for now treat as printable
-            0x80..=0xFF => {
-                // TODO: Proper UTF-8 handling
-                callback(Action::Print(byte as char));
+            // UTF-8 continuation byte without lead - invalid, emit replacement
+            0x80..=0xBF => {
+                callback(Action::Print('\u{FFFD}'));
+            }
+            // UTF-8 2-byte sequence lead (0xC0-0xDF)
+            0xC0..=0xDF => {
+                self.utf8_buffer.clear();
+                self.utf8_buffer.push(byte);
+                self.utf8_remaining = 1;
+            }
+            // UTF-8 3-byte sequence lead (0xE0-0xEF)
+            0xE0..=0xEF => {
+                self.utf8_buffer.clear();
+                self.utf8_buffer.push(byte);
+                self.utf8_remaining = 2;
+            }
+            // UTF-8 4-byte sequence lead (0xF0-0xF7)
+            0xF0..=0xF7 => {
+                self.utf8_buffer.clear();
+                self.utf8_buffer.push(byte);
+                self.utf8_remaining = 3;
+            }
+            // Invalid UTF-8 lead bytes (0xF8-0xFF) - emit replacement
+            0xF8..=0xFF => {
+                callback(Action::Print('\u{FFFD}'));
             }
         }
     }
@@ -484,11 +577,65 @@ impl AnsiParser {
             0x1B => {
                 // Stay in escape state
             }
+            // G0 character set designation (ESC ()
+            b'(' => {
+                self.state = State::CharsetDesignateG0;
+            }
+            // G1 character set designation (ESC ))
+            b')' => {
+                self.state = State::CharsetDesignateG1;
+            }
             // Anything else - abort and return to ground
             _ => {
                 self.reset();
             }
         }
+    }
+
+    /// Character set designation (ESC ( X or ESC ) X)
+    /// Handles G0/G1 character set selection used by ncurses applications.
+    fn charset_designate<F>(&mut self, byte: u8, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        let _ = callback; // May be used in future for charset change notifications
+
+        // Determine if this is G0 or G1 based on the state we entered from
+        let is_g0 = self.state == State::CharsetDesignateG0;
+
+        // Common character set designators:
+        // 'B' - ASCII (USASCII)
+        // '0' - DEC Special Graphics (line drawing)
+        // 'A' - UK National (treated as ASCII)
+        // '<' - DEC Supplemental (treated as ASCII)
+        match byte {
+            b'0' => {
+                // DEC Special Graphics - enable line drawing translation
+                if is_g0 {
+                    self.g0_charset_graphics = true;
+                } else {
+                    self.g1_charset_graphics = true;
+                }
+            }
+            b'B' | b'A' | b'<' | b'>' | b'1' | b'2' => {
+                // ASCII or other charset - disable line drawing
+                if is_g0 {
+                    self.g0_charset_graphics = false;
+                } else {
+                    self.g1_charset_graphics = false;
+                }
+            }
+            _ => {
+                // Unknown charset designator - treat as ASCII
+                tracing::debug!("Unknown charset designator: {}", byte as char);
+                if is_g0 {
+                    self.g0_charset_graphics = false;
+                } else {
+                    self.g1_charset_graphics = false;
+                }
+            }
+        }
+        self.reset();
     }
 
     /// CSI entry - just entered CSI sequence.
@@ -703,9 +850,11 @@ impl AnsiParser {
             1005 => Some(Action::SetMode(Mode::MouseUtf8)),
             1006 => Some(Action::SetMode(Mode::MouseSgr)),
             1015 => Some(Action::SetMode(Mode::MouseUrxvt)),
+            1007 => Some(Action::SetMode(Mode::AlternateScrollMode)),
             1047 => Some(Action::SetMode(Mode::AlternateScreenClear)),
             1049 => Some(Action::SetMode(Mode::AlternateScreenSaveCursor)),
             2004 => Some(Action::SetMode(Mode::BracketedPaste)),
+            2026 => Some(Action::SetMode(Mode::SynchronizedUpdate)),
             _ => None,
         }
     }
@@ -729,9 +878,11 @@ impl AnsiParser {
             1005 => Some(Action::ResetMode(Mode::MouseUtf8)),
             1006 => Some(Action::ResetMode(Mode::MouseSgr)),
             1015 => Some(Action::ResetMode(Mode::MouseUrxvt)),
+            1007 => Some(Action::ResetMode(Mode::AlternateScrollMode)),
             1047 => Some(Action::ResetMode(Mode::AlternateScreenClear)),
             1049 => Some(Action::ResetMode(Mode::AlternateScreenSaveCursor)),
             2004 => Some(Action::ResetMode(Mode::BracketedPaste)),
+            2026 => Some(Action::ResetMode(Mode::SynchronizedUpdate)),
             _ => None,
         }
     }
@@ -990,6 +1141,90 @@ impl AnsiParser {
                 // Bare OSC 133 - treat as prompt start
                 callback(Action::PromptStart);
             }
+        }
+    }
+
+    /// Check if the currently active charset is DEC Special Graphics.
+    fn is_graphics_charset_active(&self) -> bool {
+        if self.using_g1 {
+            self.g1_charset_graphics
+        } else {
+            self.g0_charset_graphics
+        }
+    }
+
+    /// Translate a byte to DEC Special Graphics character.
+    /// Returns None if the byte doesn't map to a special character (passthrough).
+    fn translate_dec_graphics(byte: u8) -> Option<char> {
+        // DEC Special Graphics character set mapping
+        // Characters 0x5F-0x7E map to line-drawing and other symbols
+        match byte {
+            // Blank (space)
+            0x5F => Some(' '),
+            // Diamond
+            0x60 => Some('◆'),
+            // Checkerboard
+            0x61 => Some('▒'),
+            // Horizontal tab symbol
+            0x62 => Some('␉'),
+            // Form feed symbol
+            0x63 => Some('␌'),
+            // Carriage return symbol
+            0x64 => Some('␍'),
+            // Line feed symbol
+            0x65 => Some('␊'),
+            // Degree symbol
+            0x66 => Some('°'),
+            // Plus/minus
+            0x67 => Some('±'),
+            // Newline symbol
+            0x68 => Some('␤'),
+            // Vertical tab symbol
+            0x69 => Some('␋'),
+            // Lower right corner
+            0x6A => Some('┘'),
+            // Upper right corner
+            0x6B => Some('┐'),
+            // Upper left corner
+            0x6C => Some('┌'),
+            // Lower left corner
+            0x6D => Some('└'),
+            // Crossing lines (plus)
+            0x6E => Some('┼'),
+            // Scan line 1 (top)
+            0x6F => Some('⎺'),
+            // Scan line 3
+            0x70 => Some('⎻'),
+            // Horizontal line (middle)
+            0x71 => Some('─'),
+            // Scan line 7
+            0x72 => Some('⎼'),
+            // Scan line 9 (bottom)
+            0x73 => Some('⎽'),
+            // Left tee
+            0x74 => Some('├'),
+            // Right tee
+            0x75 => Some('┤'),
+            // Bottom tee
+            0x76 => Some('┴'),
+            // Top tee
+            0x77 => Some('┬'),
+            // Vertical line
+            0x78 => Some('│'),
+            // Less than or equal
+            0x79 => Some('≤'),
+            // Greater than or equal
+            0x7A => Some('≥'),
+            // Pi
+            0x7B => Some('π'),
+            // Not equal
+            0x7C => Some('≠'),
+            // UK pound
+            0x7D => Some('£'),
+            // Bullet/centered dot
+            0x7E => Some('·'),
+            // Characters before 0x5F are passed through unchanged
+            _ => None,
         }
     }
 
@@ -1409,6 +1644,187 @@ mod tests {
         assert_eq!(
             parse(b"\x1b[?u"),
             vec![Action::KittyKeyboardQuery]
+        );
+    }
+
+    #[test]
+    fn utf8_two_byte_chars() {
+        // 2-byte UTF-8: é (U+00E9) = 0xC3 0xA9
+        assert_eq!(
+            parse(b"\xC3\xA9"),
+            vec![Action::Print('é')]
+        );
+        // â (U+00E2) = 0xC3 0xA2
+        assert_eq!(
+            parse(b"\xC3\xA2"),
+            vec![Action::Print('â')]
+        );
+        // Mixed ASCII and UTF-8
+        assert_eq!(
+            parse(b"caf\xC3\xA9"),
+            vec![
+                Action::Print('c'),
+                Action::Print('a'),
+                Action::Print('f'),
+                Action::Print('é')
+            ]
+        );
+    }
+
+    #[test]
+    fn utf8_three_byte_chars() {
+        // 3-byte UTF-8: 中 (U+4E2D) = 0xE4 0xB8 0xAD
+        assert_eq!(
+            parse(b"\xE4\xB8\xAD"),
+            vec![Action::Print('中')]
+        );
+        // € (U+20AC) = 0xE2 0x82 0xAC
+        assert_eq!(
+            parse(b"\xE2\x82\xAC"),
+            vec![Action::Print('€')]
+        );
+    }
+
+    #[test]
+    fn utf8_four_byte_chars() {
+        // 4-byte UTF-8: 😀 (U+1F600) = 0xF0 0x9F 0x98 0x80
+        assert_eq!(
+            parse(b"\xF0\x9F\x98\x80"),
+            vec![Action::Print('😀')]
+        );
+        // 🦀 (U+1F980) = 0xF0 0x9F 0xA6 0x80
+        assert_eq!(
+            parse(b"\xF0\x9F\xA6\x80"),
+            vec![Action::Print('🦀')]
+        );
+    }
+
+    #[test]
+    fn utf8_invalid_continuation() {
+        // Lead byte followed by non-continuation - should emit replacement char
+        // then process the next byte normally
+        assert_eq!(
+            parse(b"\xC3X"),
+            vec![Action::Print('\u{FFFD}'), Action::Print('X')]
+        );
+    }
+
+    #[test]
+    fn utf8_orphan_continuation() {
+        // Continuation byte without lead - emit replacement char
+        assert_eq!(
+            parse(b"\x80"),
+            vec![Action::Print('\u{FFFD}')]
+        );
+        assert_eq!(
+            parse(b"\xBF"),
+            vec![Action::Print('\u{FFFD}')]
+        );
+    }
+
+    #[test]
+    fn utf8_invalid_lead_bytes() {
+        // Invalid lead bytes 0xF8-0xFF - emit replacement char
+        assert_eq!(
+            parse(b"\xF8"),
+            vec![Action::Print('\u{FFFD}')]
+        );
+        assert_eq!(
+            parse(b"\xFF"),
+            vec![Action::Print('\u{FFFD}')]
+        );
+    }
+
+    #[test]
+    fn utf8_mixed_with_escape_sequences() {
+        // UTF-8 chars mixed with ANSI escapes
+        assert_eq!(
+            parse(b"\xC3\xA9\x1b[1m"),
+            vec![Action::Print('é'), Action::SetAttribute(Attribute::Bold)]
+        );
+    }
+
+    #[test]
+    fn dec_special_graphics_line_drawing() {
+        // ESC ( 0 switches to DEC Special Graphics (G0)
+        // 'x' (0x78) should become vertical line │
+        // 'q' (0x71) should become horizontal line ─
+        // 'l' (0x6C) should become upper left corner ┌
+        // ESC ( B switches back to ASCII
+        assert_eq!(
+            parse(b"\x1b(0lqx\x1b(B"),
+            vec![
+                Action::Print('┌'),  // l = upper left corner
+                Action::Print('─'),  // q = horizontal line
+                Action::Print('│'),  // x = vertical line
+            ]
+        );
+    }
+
+    #[test]
+    fn dec_special_graphics_corners() {
+        // All four corners
+        assert_eq!(
+            parse(b"\x1b(0lkjm\x1b(B"),
+            vec![
+                Action::Print('┌'),  // l = upper left
+                Action::Print('┐'),  // k = upper right
+                Action::Print('┘'),  // j = lower right
+                Action::Print('└'),  // m = lower left
+            ]
+        );
+    }
+
+    #[test]
+    fn dec_special_graphics_tees_and_cross() {
+        // Tee characters and crossing lines
+        assert_eq!(
+            parse(b"\x1b(0tuvwn\x1b(B"),
+            vec![
+                Action::Print('├'),  // t = left tee
+                Action::Print('┤'),  // u = right tee
+                Action::Print('┴'),  // v = bottom tee
+                Action::Print('┬'),  // w = top tee
+                Action::Print('┼'),  // n = crossing lines
+            ]
+        );
+    }
+
+    #[test]
+    fn dec_special_graphics_switch_back() {
+        // After ESC ( B, characters should be normal ASCII
+        assert_eq!(
+            parse(b"\x1b(0x\x1b(Bx"),
+            vec![
+                Action::Print('│'),  // x in graphics mode = vertical line
+                Action::Print('x'),  // x in ASCII mode = x
+            ]
+        );
+    }
+
+    #[test]
+    fn dec_special_graphics_g1_charset() {
+        // ESC ) 0 sets G1 to graphics, SO (0x0E) switches to G1
+        // SI (0x0F) switches back to G0
+        assert_eq!(
+            parse(b"\x1b)0\x0Ex\x0Fx"),
+            vec![
+                Action::Print('│'),  // x after SO with G1=graphics
+                Action::Print('x'),  // x after SI with G0=ASCII
+            ]
+        );
+    }
+
+    #[test]
+    fn dec_special_graphics_ascii_passthrough() {
+        // Characters before 0x5F should pass through unchanged in graphics mode
+        assert_eq!(
+            parse(b"\x1b(0ABC\x1b(B"),
+            vec![
+                Action::Print('A'),  // Passthrough
+                Action::Print('B'),  // Passthrough
+                Action::Print('C'),  // Passthrough
+            ]
         );
     }
 }

@@ -1,9 +1,17 @@
 //! Terminal application state and main loop.
 
+use anyhow::Result;
+use arboard::Clipboard;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use ultty::config::{Config, KeybindingConfig};
 use ultty::config_watcher::ConfigWatcher;
+use ultty::control::ControlServer;
 use ultty::event_loop::TerminalEvent;
-use ultty::grid::{MouseButton as TerminalMouseButton, SelectionMode, SelectionPoint};
+use ultty::grid::{
+    MouseButton as TerminalMouseButton, MouseModifiers, SelectionMode, SelectionPoint,
+};
+use ultty::protocol::ProtocolServer;
 use ultty::renderer::{OverlayState, Renderer, ScrollbarState};
 use ultty::tabs::TabBarState;
 use ultty::terminal_manager::TerminalManager;
@@ -11,10 +19,6 @@ use ultty::tmux::TmuxController;
 use ultty::url::UrlDetector;
 use ultty::vim::{CopyMode, CopyModeResult, Selection as VimSelection};
 use ultty_protocol::{Key as ProtocolKey, Modifiers as ProtocolModifiers};
-use anyhow::Result;
-use arboard::Clipboard;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -83,6 +87,12 @@ pub struct App {
     last_cursor_blink: Instant,
     /// Tmux integration controller
     tmux: TmuxController,
+    /// Auto-dump countdown (frames remaining until dump, 0 = disabled)
+    auto_dump_frames: u32,
+    /// Native protocol server for TUI apps
+    protocol_server: Option<ProtocolServer>,
+    /// Control server for CLI automation (ulttyctl)
+    control_server: Option<ControlServer>,
 }
 
 impl App {
@@ -166,6 +176,10 @@ impl App {
             tracing::info!("Running inside tmux, passthrough mode enabled");
         }
 
+        // Start native protocol server for TUI apps
+        let protocol_server = Self::start_protocol_server();
+        let control_server = Self::start_control_server();
+
         Ok(Self {
             window,
             surface,
@@ -192,29 +206,98 @@ impl App {
             cursor_blink_visible: true,
             last_cursor_blink: Instant::now(),
             tmux,
+            // Check for auto-dump environment variable (number of frames to wait)
+            auto_dump_frames: std::env::var("ULTTY_AUTO_DUMP")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+            protocol_server,
+            control_server,
         })
     }
 
+    fn start_control_server() -> Option<ControlServer> {
+        match ControlServer::new() {
+            Ok(server) => {
+                tracing::info!("Control server started at {:?}", server.socket_path());
+                Some(server)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start control server: {}", e);
+                None
+            }
+        }
+    }
+
     /// Build the list of keyboard shortcuts for display.
-    fn build_shortcuts_list(keybindings: &ultty::config::KeybindingConfig) -> Vec<(String, String)> {
+    fn build_shortcuts_list(
+        keybindings: &ultty::config::KeybindingConfig,
+    ) -> Vec<(String, String)> {
         vec![
             (keybindings.copy.clone(), "Copy selection".to_string()),
-            (keybindings.paste.clone(), "Paste from clipboard".to_string()),
+            (
+                keybindings.paste.clone(),
+                "Paste from clipboard".to_string(),
+            ),
             (keybindings.new_tab.clone(), "New tab".to_string()),
             (keybindings.close_tab.clone(), "Close tab".to_string()),
             (keybindings.next_tab.clone(), "Next tab".to_string()),
             (keybindings.prev_tab.clone(), "Previous tab".to_string()),
-            (keybindings.split_horizontal.clone(), "Split horizontal".to_string()),
-            (keybindings.split_vertical.clone(), "Split vertical".to_string()),
-            (keybindings.focus_pane_left.clone(), "Focus pane left".to_string()),
-            (keybindings.focus_pane_right.clone(), "Focus pane right".to_string()),
-            (keybindings.focus_pane_up.clone(), "Focus pane up".to_string()),
-            (keybindings.focus_pane_down.clone(), "Focus pane down".to_string()),
+            (
+                keybindings.split_horizontal.clone(),
+                "Split horizontal".to_string(),
+            ),
+            (
+                keybindings.split_vertical.clone(),
+                "Split vertical".to_string(),
+            ),
+            (
+                keybindings.focus_pane_left.clone(),
+                "Focus pane left".to_string(),
+            ),
+            (
+                keybindings.focus_pane_right.clone(),
+                "Focus pane right".to_string(),
+            ),
+            (
+                keybindings.focus_pane_up.clone(),
+                "Focus pane up".to_string(),
+            ),
+            (
+                keybindings.focus_pane_down.clone(),
+                "Focus pane down".to_string(),
+            ),
             (keybindings.close_pane.clone(), "Close pane".to_string()),
             (keybindings.vim_mode.clone(), "Toggle vim mode".to_string()),
-            (keybindings.reload_config.clone(), "Reload config".to_string()),
-            (keybindings.show_shortcuts.clone(), "Show/hide shortcuts".to_string()),
-            (keybindings.cycle_theme.clone(), "Cycle color theme".to_string()),
+            (
+                keybindings.reload_config.clone(),
+                "Reload config".to_string(),
+            ),
+            (
+                keybindings.show_shortcuts.clone(),
+                "Show/hide shortcuts".to_string(),
+            ),
+            (
+                keybindings.cycle_theme.clone(),
+                "Cycle color theme".to_string(),
+            ),
+            (
+                keybindings.font_increase.clone(),
+                "Increase font size".to_string(),
+            ),
+            (
+                keybindings.font_decrease.clone(),
+                "Decrease font size".to_string(),
+            ),
+            (
+                keybindings.font_reset.clone(),
+                "Reset font size".to_string(),
+            ),
+            (
+                keybindings.screenshot.clone(),
+                "Take screenshot".to_string(),
+            ),
+            (keybindings.debug_dump.clone(), "Debug dump".to_string()),
         ]
     }
 
@@ -223,7 +306,10 @@ impl App {
         // Try to restore session if enabled
         if config.behavior.restore_session {
             if let Some(session) = ultty::session::SessionData::load_last() {
-                tracing::info!("Restoring previous session with {} tabs", session.tabs.len());
+                tracing::info!(
+                    "Restoring previous session with {} tabs",
+                    session.tabs.len()
+                );
                 match Self::create_manager_from_session(&session, cols, rows) {
                     Ok(manager) => return Ok(manager),
                     Err(e) => {
@@ -239,7 +325,10 @@ impl App {
                 tracing::info!("Using launch profile: {}", profile_name);
                 return Self::create_manager_from_profile(profile, cols, rows);
             } else {
-                tracing::warn!("Default profile '{}' not found, using default shell", profile_name);
+                tracing::warn!(
+                    "Default profile '{}' not found, using default shell",
+                    profile_name
+                );
             }
         }
 
@@ -254,7 +343,6 @@ impl App {
         cols: u16,
         rows: u16,
     ) -> Result<TerminalManager> {
-
         // Create an empty manager first
         let mut manager = TerminalManager::new(cols, rows)
             .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e))?;
@@ -274,17 +362,16 @@ impl App {
             for tab_config in &profile.tabs {
                 let command = tab_config.command.as_deref().unwrap_or(&default_shell);
 
-                let working_dir = tab_config.working_dir.as_deref()
+                let working_dir = tab_config
+                    .working_dir
+                    .as_deref()
                     .or(profile.working_dir.as_deref());
 
                 let title = tab_config.title.as_deref();
 
-                manager.create_tab_with_command(
-                    command,
-                    &tab_config.args,
-                    working_dir,
-                    title,
-                ).map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
+                manager
+                    .create_tab_with_command(command, &tab_config.args, working_dir, title)
+                    .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
 
                 tracing::info!(
                     "Created tab: {} (command: {})",
@@ -314,6 +401,33 @@ impl App {
             tracing::warn!("Failed to save session: {}", e);
         } else {
             tracing::info!("Session saved");
+        }
+    }
+
+    fn start_protocol_server() -> Option<ProtocolServer> {
+        let socket_path = Self::default_socket_path();
+
+        match ProtocolServer::new(&socket_path) {
+            Ok(server) => {
+                std::env::set_var("ULTTY_SOCKET", server.socket_path());
+                tracing::info!(
+                    "Native protocol server started at {:?}",
+                    server.socket_path()
+                );
+                Some(server)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start protocol server: {}", e);
+                None
+            }
+        }
+    }
+
+    fn default_socket_path() -> std::path::PathBuf {
+        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+            std::path::PathBuf::from(runtime_dir).join("ultty.sock")
+        } else {
+            std::path::PathBuf::from(format!("/tmp/ultty-{}.sock", std::process::id()))
         }
     }
 
@@ -376,15 +490,14 @@ impl App {
     /// Update the tab bar state from the terminal manager.
     fn update_tab_bar(&mut self) {
         let total_width = self.window.inner_size().width as f32;
-        let active_tab_id = self.terminal_manager.active_tab()
+        let active_tab_id = self
+            .terminal_manager
+            .active_tab()
             .map(|t| t.id)
             .unwrap_or_else(|| ultty::terminal_manager::TabId::new(0));
 
-        self.tab_bar.update(
-            self.terminal_manager.tabs(),
-            active_tab_id,
-            total_width,
-        );
+        self.tab_bar
+            .update(self.terminal_manager.tabs(), active_tab_id, total_width);
 
         // Update renderer's tab bar height for dimension calculations
         let new_height = self.tab_bar.height();
@@ -458,6 +571,16 @@ impl App {
         (col, row)
     }
 
+    /// Convert winit modifiers to terminal mouse modifiers.
+    fn mouse_modifiers(&self) -> MouseModifiers {
+        MouseModifiers::new(
+            self.modifiers.shift_key(),
+            self.modifiers.alt_key(),
+            self.modifiers.control_key(),
+            self.modifiers.super_key(),
+        )
+    }
+
     /// Handle mouse button press/release.
     fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
         if button != MouseButton::Left
@@ -479,8 +602,10 @@ impl App {
                 // Still allow scrollbar interaction
             } else {
                 // Convert to cell coordinates and send to terminal
-                let (col, row) =
-                    self.pixel_to_cell(self.mouse_pos.x, self.mouse_pos.y - self.tab_bar.height() as f64);
+                let (col, row) = self.pixel_to_cell(
+                    self.mouse_pos.x,
+                    self.mouse_pos.y - self.tab_bar.height() as f64,
+                );
                 let term_button = match button {
                     MouseButton::Left => TerminalMouseButton::Left,
                     MouseButton::Middle => TerminalMouseButton::Middle,
@@ -493,8 +618,10 @@ impl App {
                 } else {
                     term_button
                 };
+                let mods = self.mouse_modifiers();
                 if let Some(bytes) =
-                    self.terminal().encode_mouse_event(term_button, col, row, pressed, false)
+                    self.terminal()
+                        .encode_mouse_event(term_button, col, row, pressed, false, mods)
                 {
                     let _ = self.send_input(&bytes);
                 }
@@ -561,7 +688,10 @@ impl App {
                     return;
                 }
 
-                let (col, row) = self.pixel_to_cell(self.mouse_pos.x, self.mouse_pos.y - self.tab_bar.height() as f64);
+                let (col, row) = self.pixel_to_cell(
+                    self.mouse_pos.x,
+                    self.mouse_pos.y - self.tab_bar.height() as f64,
+                );
 
                 // Check for Ctrl+Click on URL
                 if self.modifiers.control_key() && self.url_detector.is_enabled() {
@@ -670,9 +800,15 @@ impl App {
         if self.terminal().track_mouse_motion() && self.mouse_pressed {
             let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
             // When button is held, report as Left button for drag
-            if let Some(bytes) =
-                self.terminal().encode_mouse_event(TerminalMouseButton::Left, col, row, true, true)
-            {
+            let mods = self.mouse_modifiers();
+            if let Some(bytes) = self.terminal().encode_mouse_event(
+                TerminalMouseButton::Left,
+                col,
+                row,
+                true,
+                true,
+                mods,
+            ) {
                 let _ = self.send_input(&bytes);
             }
             return;
@@ -694,9 +830,15 @@ impl App {
 
         let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
         // Motion without button uses Release (3) + motion flag (32) = 35
-        if let Some(bytes) =
-            self.terminal().encode_mouse_event(TerminalMouseButton::Release, col, row, true, true)
-        {
+        let mods = self.mouse_modifiers();
+        if let Some(bytes) = self.terminal().encode_mouse_event(
+            TerminalMouseButton::Release,
+            col,
+            row,
+            true,
+            true,
+            mods,
+        ) {
             let _ = self.send_input(&bytes);
         }
     }
@@ -798,13 +940,16 @@ impl App {
         if let Some((start_col, end_col)) = word_bounds {
             let start = SelectionPoint::new(start_col as i32, row as i32);
             let end = SelectionPoint::new(end_col as i32, row as i32);
-            self.terminal_mut().start_selection(start, SelectionMode::Normal);
+            self.terminal_mut()
+                .start_selection(start, SelectionMode::Normal);
             self.terminal_mut().update_selection(end);
         }
     }
 
     /// Handle scroll wheel.
     fn handle_scroll(&mut self, delta: MouseScrollDelta) {
+        // winit scroll delta: positive y = scroll UP (wheel rolled away from user)
+        // This should reveal content ABOVE (scroll up in terminal terms)
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => y as i32,
             MouseScrollDelta::PixelDelta(pos) => {
@@ -821,21 +966,62 @@ impl App {
         if self.terminal().mouse_tracking_enabled() {
             let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
             let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y.max(0.0));
+            // Terminal scroll: positive lines = scroll up (button 64)
+            // Button 64 = scroll up, Button 65 = scroll down
             let button = if lines > 0 {
                 TerminalMouseButton::ScrollUp
             } else {
                 TerminalMouseButton::ScrollDown
             };
             let count = lines.unsigned_abs() as usize;
+            let mods = self.mouse_modifiers();
+
+            // Debug: log scroll events
+            tracing::debug!(
+                "Mouse scroll: lines={}, button={:?}, pos=({},{}), mode={:?}",
+                lines,
+                button,
+                col,
+                row,
+                self.terminal().modes().mouse_mode
+            );
+
             for _ in 0..count {
-                if let Some(bytes) = self.terminal().encode_mouse_event(button, col, row, true, false)
+                if let Some(bytes) = self
+                    .terminal()
+                    .encode_mouse_event(button, col, row, true, false, mods)
                 {
+                    tracing::debug!(
+                        "Sending scroll bytes: {:?}",
+                        String::from_utf8_lossy(&bytes)
+                    );
                     let _ = self.send_input(&bytes);
                 }
             }
             return;
         }
 
+        // Check if in alternate screen with alternate scroll mode
+        // In this case, send arrow keys instead of scrolling
+        let in_alternate = self.terminal().is_alternate_screen();
+        let alternate_scroll = self.terminal().modes().alternate_scroll;
+
+        if in_alternate && alternate_scroll {
+            // Send arrow keys for scrolling in alternate screen
+            let count = lines.unsigned_abs() as usize;
+            let arrow = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" }; // Up : Down
+            for _ in 0..count {
+                let _ = self.send_input(arrow);
+            }
+            return;
+        }
+
+        // In alternate screen without alternate_scroll, ignore scroll
+        if in_alternate {
+            return;
+        }
+
+        // Normal mode: scroll the scrollback buffer
         let buffer = self.terminal_mut().buffer_mut();
 
         if lines > 0 {
@@ -1003,6 +1189,32 @@ impl App {
             return;
         }
 
+        // Font size shortcuts
+        if self.check_keybinding(&event, &self.config.keybindings.font_increase.clone()) {
+            self.change_font_size(true);
+            return;
+        }
+        if self.check_keybinding(&event, &self.config.keybindings.font_decrease.clone()) {
+            self.change_font_size(false);
+            return;
+        }
+        if self.check_keybinding(&event, &self.config.keybindings.font_reset.clone()) {
+            self.reset_font_size();
+            return;
+        }
+
+        // Screenshot shortcut
+        if self.check_keybinding(&event, &self.config.keybindings.screenshot.clone()) {
+            self.take_screenshot();
+            return;
+        }
+
+        // Debug dump shortcut
+        if self.check_keybinding(&event, &self.config.keybindings.debug_dump.clone()) {
+            self.debug_dump_terminal();
+            return;
+        }
+
         // Close shortcuts overlay with Escape
         if self.shortcuts_visible {
             if let Key::Named(NamedKey::Escape) = &event.logical_key {
@@ -1021,7 +1233,10 @@ impl App {
         }
 
         // Clear selection on any key press (except modifiers)
-        if !matches!(event.logical_key, Key::Named(NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super)) {
+        if !matches!(
+            event.logical_key,
+            Key::Named(NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super)
+        ) {
             self.terminal_mut().clear_selection();
         }
 
@@ -1048,6 +1263,7 @@ impl App {
         // Convert key to terminal input
         let input: Option<&[u8]> = match &event.logical_key {
             Key::Named(named) => match named {
+                NamedKey::Space => Some(b" "),
                 NamedKey::Enter => Some(b"\r"),
                 NamedKey::Backspace => Some(b"\x7f"),
                 NamedKey::Tab => Some(b"\t"),
@@ -1098,11 +1314,77 @@ impl App {
                 tracing::warn!("Failed to send input: {}", e);
             }
         } else if let Key::Character(c) = &event.logical_key {
-            // Send regular character input
             if let Err(e) = self.send_input(c.as_bytes()) {
                 tracing::warn!("Failed to send input: {}", e);
             }
         }
+
+        self.forward_key_to_native_sessions(&event);
+    }
+
+    fn forward_key_to_native_sessions(&mut self, event: &KeyEvent) {
+        let Some(ref mut server) = self.protocol_server else {
+            return;
+        };
+
+        if server.session_count() == 0 {
+            return;
+        }
+
+        let protocol_key = match &event.logical_key {
+            Key::Named(named) => match named {
+                NamedKey::Escape => Some(ProtocolKey::Escape),
+                NamedKey::Enter => Some(ProtocolKey::Enter),
+                NamedKey::Tab => Some(ProtocolKey::Tab),
+                NamedKey::Backspace => Some(ProtocolKey::Backspace),
+                NamedKey::Delete => Some(ProtocolKey::Delete),
+                NamedKey::Insert => Some(ProtocolKey::Insert),
+                NamedKey::Home => Some(ProtocolKey::Home),
+                NamedKey::End => Some(ProtocolKey::End),
+                NamedKey::PageUp => Some(ProtocolKey::PageUp),
+                NamedKey::PageDown => Some(ProtocolKey::PageDown),
+                NamedKey::ArrowUp => Some(ProtocolKey::Up),
+                NamedKey::ArrowDown => Some(ProtocolKey::Down),
+                NamedKey::ArrowLeft => Some(ProtocolKey::Left),
+                NamedKey::ArrowRight => Some(ProtocolKey::Right),
+                NamedKey::Space => Some(ProtocolKey::Char(' ')),
+                NamedKey::F1 => Some(ProtocolKey::Function(1)),
+                NamedKey::F2 => Some(ProtocolKey::Function(2)),
+                NamedKey::F3 => Some(ProtocolKey::Function(3)),
+                NamedKey::F4 => Some(ProtocolKey::Function(4)),
+                NamedKey::F5 => Some(ProtocolKey::Function(5)),
+                NamedKey::F6 => Some(ProtocolKey::Function(6)),
+                NamedKey::F7 => Some(ProtocolKey::Function(7)),
+                NamedKey::F8 => Some(ProtocolKey::Function(8)),
+                NamedKey::F9 => Some(ProtocolKey::Function(9)),
+                NamedKey::F10 => Some(ProtocolKey::Function(10)),
+                NamedKey::F11 => Some(ProtocolKey::Function(11)),
+                NamedKey::F12 => Some(ProtocolKey::Function(12)),
+                _ => None,
+            },
+            Key::Character(c) => c.chars().next().map(ProtocolKey::Char),
+            _ => None,
+        };
+
+        let Some(key) = protocol_key else {
+            return;
+        };
+
+        let mut modifiers = ProtocolModifiers::NONE;
+        if self.modifiers.shift_key() {
+            modifiers = modifiers.union(ProtocolModifiers::SHIFT);
+        }
+        if self.modifiers.control_key() {
+            modifiers = modifiers.union(ProtocolModifiers::CTRL);
+        }
+        if self.modifiers.alt_key() {
+            modifiers = modifiers.union(ProtocolModifiers::ALT);
+        }
+        if self.modifiers.super_key() {
+            modifiers = modifiers.union(ProtocolModifiers::META);
+        }
+
+        server.broadcast_key(key, modifiers);
     }
 
     /// Check if a key event matches a configured keybinding.
@@ -1148,9 +1430,7 @@ impl App {
                 };
                 parsed.key == key_name
             }
-            Key::Character(c) => {
-                parsed.key == c.to_lowercase()
-            }
+            Key::Character(c) => parsed.key == c.to_lowercase(),
             _ => false,
         }
     }
@@ -1165,7 +1445,8 @@ impl App {
         let viewport_rows = dims.rows as usize;
         let viewport_cols = dims.cols as usize;
 
-        self.copy_mode.enter(total_rows, viewport_rows, viewport_cols);
+        self.copy_mode
+            .enter(total_rows, viewport_rows, viewport_cols);
         tracing::debug!("Entered copy mode");
     }
 
@@ -1271,11 +1552,20 @@ impl App {
         let mut text = String::new();
 
         match selection {
-            VimSelection::Char { start_row, start_col, end_row, end_col } => {
+            VimSelection::Char {
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+            } => {
                 for row in *start_row..=*end_row {
                     if let Some(grid_row) = buffer.visible_row(row as u16) {
                         let sc = if row == *start_row { *start_col } else { 0 };
-                        let ec = if row == *end_row { *end_col } else { grid_row.width() as usize - 1 };
+                        let ec = if row == *end_row {
+                            *end_col
+                        } else {
+                            grid_row.width() as usize - 1
+                        };
 
                         for col in sc..=ec {
                             if let Some(cell) = grid_row.get(col as u16) {
@@ -1298,7 +1588,12 @@ impl App {
                     }
                 }
             }
-            VimSelection::Block { start_row, start_col, end_row, end_col } => {
+            VimSelection::Block {
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+            } => {
                 for row in *start_row..=*end_row {
                     if let Some(grid_row) = buffer.visible_row(row as u16) {
                         for col in *start_col..=*end_col {
@@ -1398,12 +1693,19 @@ impl App {
         }
 
         // Collect row text and hyperlink data first to avoid borrow conflicts
-        let (rows, dims, hyperlink_grid, hyperlink_map): (Vec<String>, _, Vec<Vec<u32>>, std::collections::HashMap<u32, String>) = {
+        let (rows, dims, hyperlink_grid, hyperlink_map): (
+            Vec<String>,
+            _,
+            Vec<Vec<u32>>,
+            std::collections::HashMap<u32, String>,
+        ) = {
             let terminal = self.terminal();
             let dims = terminal.dimensions();
             let rows: Vec<String> = (0..dims.rows)
                 .map(|row| {
-                    terminal.buffer().visible_row(row)
+                    terminal
+                        .buffer()
+                        .visible_row(row)
                         .map(|r| r.text_trimmed())
                         .unwrap_or_default()
                 })
@@ -1414,7 +1716,10 @@ impl App {
                 .map(|row| {
                     (0..dims.cols)
                         .map(|col| {
-                            terminal.buffer().grid().cell(row, col)
+                            terminal
+                                .buffer()
+                                .grid()
+                                .cell(row, col)
                                 .map(|c| c.hyperlink_id())
                                 .unwrap_or(0)
                         })
@@ -1423,7 +1728,8 @@ impl App {
                 .collect();
 
             // Copy hyperlink map
-            let hyperlink_map: std::collections::HashMap<u32, String> = terminal.all_hyperlinks()
+            let hyperlink_map: std::collections::HashMap<u32, String> = terminal
+                .all_hyperlinks()
                 .iter()
                 .map(|(k, v)| (*k, v.clone()))
                 .collect();
@@ -1441,7 +1747,8 @@ impl App {
             dims.rows,
             dims.cols,
             |row, col| {
-                hyperlink_grid.get(row as usize)
+                hyperlink_grid
+                    .get(row as usize)
                     .and_then(|r| r.get(col as usize))
                     .copied()
                     .unwrap_or(0)
@@ -1450,14 +1757,48 @@ impl App {
         );
     }
 
+    /// Handle pending column resize requests (DECCOLM - 132/80 column mode).
+    ///
+    /// Some legacy applications use CSI ?3h to switch to 132-column mode
+    /// and CSI ?3l to switch back to 80-column mode. This resizes the window
+    /// to accommodate the requested column count.
+    fn handle_column_resize_requests(&mut self) {
+        // Check if focused terminal has a pending resize request
+        if let Some(terminal) = self.terminal_manager.focused_terminal_mut() {
+            if let Some(columns) = terminal
+                .event_loop
+                .terminal_mut()
+                .take_column_resize_request()
+            {
+                // Calculate new window size based on column count
+                let (cell_width, _) = self.renderer.cell_dimensions();
+                let new_width = (columns as f32 * cell_width) as u32;
+                let current_height = self.window.inner_size().height;
+
+                // Request window resize
+                let new_size = PhysicalSize::new(new_width, current_height);
+                if let Some(_) = self.window.request_inner_size(new_size) {
+                    tracing::info!(
+                        "Requested window resize to {} columns ({} pixels wide)",
+                        columns,
+                        new_width
+                    );
+                }
+
+                self.needs_redraw = true;
+            }
+        }
+    }
+
     /// Reload configuration from disk.
     fn reload_config(&mut self) {
         let new_config = Config::load();
 
         // Update color scheme
-        self.renderer.set_color_scheme(
-            ultty::renderer::ColorScheme::from_config(&new_config.colors)
-        );
+        self.renderer
+            .set_color_scheme(ultty::renderer::ColorScheme::from_config(
+                &new_config.colors,
+            ));
 
         // Update opacity
         self.renderer.set_opacity(new_config.behavior.opacity);
@@ -1466,12 +1807,177 @@ impl App {
         self.renderer.set_ligatures(new_config.font.ligatures);
 
         // Update URL detection setting
-        self.url_detector.set_enabled(new_config.behavior.url_detection);
+        self.url_detector
+            .set_enabled(new_config.behavior.url_detection);
 
         self.config = new_config;
         self.needs_redraw = true;
 
         tracing::info!("Configuration reloaded");
+    }
+
+    /// Change font size (increase or decrease).
+    fn change_font_size(&mut self, increase: bool) {
+        let new_size = if increase {
+            self.renderer.increase_font_size()
+        } else {
+            self.renderer.decrease_font_size()
+        };
+
+        tracing::info!("Font size: {:.1}pt", new_size);
+
+        // Terminal dimensions changed - resize all terminals
+        let (cols, rows) = self.renderer.terminal_dimensions();
+        if let Err(e) = self.terminal_manager.resize_all(cols, rows) {
+            tracing::warn!("Failed to resize terminals after font change: {}", e);
+        }
+
+        self.needs_redraw = true;
+    }
+
+    /// Reset font size to default.
+    fn reset_font_size(&mut self) {
+        let default_size = self.config.font.size;
+        let new_size = self.renderer.set_font_size(default_size);
+
+        tracing::info!("Font size reset to: {:.1}pt", new_size);
+
+        // Terminal dimensions changed - resize all terminals
+        let (cols, rows) = self.renderer.terminal_dimensions();
+        if let Err(e) = self.terminal_manager.resize_all(cols, rows) {
+            tracing::warn!("Failed to resize terminals after font reset: {}", e);
+        }
+
+        self.needs_redraw = true;
+    }
+
+    /// Take a screenshot of the terminal.
+    fn take_screenshot(&mut self) {
+        // Generate filename with timestamp
+        let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+        let filename = format!("ultty-screenshot-{}.png", timestamp);
+
+        // Try Pictures directory first, then current directory
+        let path = dirs::picture_dir()
+            .map(|p| p.join("Screenshots").join(&filename))
+            .unwrap_or_else(|| std::path::PathBuf::from(&filename));
+
+        // Ensure directory exists
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        // Get terminal reference
+        let terminal = self
+            .terminal_manager
+            .focused_terminal()
+            .map(|t| t.event_loop.terminal())
+            .expect("No focused terminal");
+
+        // Use default overlay state for clean screenshot
+        let overlay = OverlayState::default();
+
+        // Capture screenshot
+        match self.renderer.capture_screenshot(terminal, &overlay, &path) {
+            Ok(()) => {
+                tracing::info!("Screenshot saved to {}", path.display());
+                // Show notification if possible
+                if let Ok(notif) = notify_rust::Notification::new()
+                    .summary("Screenshot Saved")
+                    .body(&format!("Saved to {}", path.display()))
+                    .show()
+                {
+                    drop(notif);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to capture screenshot: {}", e);
+            }
+        }
+    }
+
+    /// Dump terminal state to a file for debugging.
+    fn debug_dump_terminal(&self) {
+        use std::io::Write;
+
+        let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+        let filename = format!("/tmp/ultty-debug-{}.txt", timestamp);
+
+        let terminal = self.terminal();
+        let grid = terminal.grid();
+        let dims = grid.dimensions();
+        let cursor = grid.cursor();
+
+        let mut output = String::new();
+
+        // Header
+        output.push_str(&format!("=== Ultty Terminal Debug Dump ===\n"));
+        output.push_str(&format!("Timestamp: {}\n", timestamp));
+        output.push_str(&format!(
+            "Dimensions: {}x{} (cols x rows)\n",
+            dims.cols, dims.rows
+        ));
+        output.push_str(&format!(
+            "Cursor: row={}, col={}\n",
+            cursor.position.row, cursor.position.col
+        ));
+        output.push_str(&format!(
+            "Modes: origin={}, autowrap={}\n",
+            terminal.modes().origin_mode,
+            terminal.modes().auto_wrap
+        ));
+        if let Some(region) = grid.scroll_region() {
+            output.push_str(&format!(
+                "Scroll region: top={}, bottom={}\n",
+                region.top, region.bottom
+            ));
+        }
+        output.push_str("\n=== Grid Content ===\n");
+
+        // Dump grid content with row numbers
+        for row_idx in 0..dims.rows {
+            output.push_str(&format!("{:3}|", row_idx));
+            if let Some(row) = grid.row(row_idx) {
+                for col_idx in 0..dims.cols {
+                    if let Some(cell) = row.get(col_idx) {
+                        let ch = cell.char();
+                        // Replace control characters with visible representation
+                        let display_char = if ch.is_control() || ch == '\0' {
+                            '·'
+                        } else if ch == ' ' {
+                            ' '
+                        } else {
+                            ch
+                        };
+                        output.push(display_char);
+                    } else {
+                        output.push('·');
+                    }
+                }
+            }
+            output.push_str("|\n");
+        }
+
+        output.push_str(&format!("\n=== End of Dump ===\n"));
+
+        // Write to file
+        match std::fs::File::create(&filename) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(output.as_bytes()) {
+                    tracing::error!("Failed to write debug dump: {}", e);
+                } else {
+                    tracing::info!("Debug dump saved to {}", filename);
+                    // Also show notification
+                    let _ = notify_rust::Notification::new()
+                        .summary("Debug Dump Saved")
+                        .body(&format!("Saved to {}", filename))
+                        .show();
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to create debug dump file: {}", e);
+            }
+        }
     }
 
     /// Cycle through available color themes.
@@ -1495,9 +2001,10 @@ impl App {
             self.config.colors.theme = Some(next_name.clone());
 
             // Update renderer
-            self.renderer.set_color_scheme(
-                ultty::renderer::ColorScheme::from_config(&self.config.colors)
-            );
+            self.renderer
+                .set_color_scheme(ultty::renderer::ColorScheme::from_config(
+                    &self.config.colors,
+                ));
 
             self.needs_redraw = true;
             tracing::info!("Switched to theme: {}", theme.name);
@@ -1522,6 +2029,11 @@ impl App {
             tracing::warn!("Failed to resize terminals: {}", e);
         }
 
+        if let Some(ref mut server) = self.protocol_server {
+            server.set_viewport(size.width as f32, size.height as f32);
+            server.broadcast_resize(cols as u16, rows as u16);
+        }
+
         self.needs_redraw = true;
     }
 
@@ -1533,6 +2045,20 @@ impl App {
                 tracing::info!("Config file changed, reloading...");
                 self.reload_config();
             }
+        }
+
+        // Poll native protocol server for TUI app messages
+        if let Some(ref mut server) = self.protocol_server {
+            if let Err(e) = server.poll(Some(Duration::ZERO)) {
+                tracing::warn!("Protocol server poll error: {}", e);
+            }
+        }
+
+        if let Some(ref mut server) = self.control_server {
+            if let Err(e) = server.poll(Some(Duration::ZERO)) {
+                tracing::warn!("Control server poll error: {}", e);
+            }
+            self.handle_control_requests();
         }
 
         // Update cursor blink state
@@ -1561,13 +2087,18 @@ impl App {
                                 }
                             }
                             TerminalEvent::ChildExited { status } => {
-                                tracing::info!("Terminal {:?} exited with status {}", terminal_id, status);
+                                tracing::info!(
+                                    "Terminal {:?} exited with status {}",
+                                    terminal_id,
+                                    status
+                                );
                             }
                             TerminalEvent::Bell => {
                                 if Some(terminal_id) == focused_id {
                                     // Visual bell - flash border for 100ms
                                     if self.config.behavior.bell_visual {
-                                        self.bell_active_until = Some(Instant::now() + Duration::from_millis(100));
+                                        self.bell_active_until =
+                                            Some(Instant::now() + Duration::from_millis(100));
                                         self.needs_redraw = true;
                                     }
                                     // Audio bell (if enabled)
@@ -1592,19 +2123,27 @@ impl App {
                                     if self.tmux.is_nested() && self.config.tmux.passthrough {
                                         // Send OSC 52 wrapped in tmux passthrough
                                         use base64::Engine;
-                                        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+                                        let encoded =
+                                            base64::engine::general_purpose::STANDARD.encode(&data);
                                         let osc52 = format!("\x1b]52;c;{}\x07", encoded);
-                                        let passthrough = TmuxController::wrap_passthrough(osc52.as_bytes());
+                                        let passthrough =
+                                            TmuxController::wrap_passthrough(osc52.as_bytes());
                                         // Write to stdout to reach outer terminal
                                         use std::io::Write;
                                         let _ = std::io::stdout().write_all(&passthrough);
                                         let _ = std::io::stdout().flush();
-                                        tracing::debug!("Set clipboard via OSC 52 passthrough: {} chars", data.len());
+                                        tracing::debug!(
+                                            "Set clipboard via OSC 52 passthrough: {} chars",
+                                            data.len()
+                                        );
                                     } else if let Some(ref mut cb) = self.clipboard {
                                         if let Err(e) = cb.set_text(&data) {
                                             tracing::warn!("Failed to set clipboard: {}", e);
                                         } else {
-                                            tracing::debug!("Set clipboard via OSC 52: {} chars", data.len());
+                                            tracing::debug!(
+                                                "Set clipboard via OSC 52: {} chars",
+                                                data.len()
+                                            );
                                         }
                                     }
                                 }
@@ -1634,6 +2173,9 @@ impl App {
                 if content_changed {
                     self.update_url_detection();
                 }
+
+                // Check for column mode resize requests (DECCOLM - 132/80 column mode)
+                self.handle_column_resize_requests();
             }
             Err(e) => {
                 tracing::error!("Terminal error: {}", e);
@@ -1689,11 +2231,21 @@ impl App {
                 tracing::warn!("Render error: {}", e);
             }
         }
+
+        // Handle auto-dump countdown
+        if self.auto_dump_frames > 0 {
+            self.auto_dump_frames -= 1;
+            if self.auto_dump_frames == 0 {
+                tracing::info!("Auto-dump triggered");
+                self.debug_dump_terminal();
+            }
+        }
     }
 
     /// Render a single terminal pane.
     fn render_single_pane(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let terminal = self.terminal_manager
+        let terminal = self
+            .terminal_manager
             .focused_terminal()
             .map(|t| t.event_loop.terminal())
             .expect("No focused terminal");
@@ -1708,7 +2260,8 @@ impl App {
         );
 
         // Check if bell is still active
-        let bell_active = self.bell_active_until
+        let bell_active = self
+            .bell_active_until
             .map(|until| Instant::now() < until)
             .unwrap_or(false);
 
@@ -1740,7 +2293,19 @@ impl App {
             cursor_blink_visible: self.cursor_blink_visible,
         };
 
-        self.renderer.render_with_overlay(&self.surface, terminal, &overlay)
+        if let Some(ref server) = self.protocol_server {
+            if server.session_count() > 0 {
+                return self.renderer.render_with_native_sessions(
+                    &self.surface,
+                    terminal,
+                    &overlay,
+                    server.sessions(),
+                );
+            }
+        }
+
+        self.renderer
+            .render_with_overlay(&self.surface, terminal, &overlay)
     }
 
     /// Render multiple panes.
@@ -1804,21 +2369,20 @@ impl App {
         };
 
         // Calculate scrollbar state from focused terminal
-        let scrollbar = self.terminal_manager
-            .focused_terminal()
-            .map(|t| {
-                let terminal = t.event_loop.terminal();
-                let buffer = terminal.buffer();
-                let dims = terminal.dimensions();
-                ScrollbarState::new(
-                    buffer.total_lines(),
-                    dims.rows as usize,
-                    buffer.scroll_offset(),
-                )
-            });
+        let scrollbar = self.terminal_manager.focused_terminal().map(|t| {
+            let terminal = t.event_loop.terminal();
+            let buffer = terminal.buffer();
+            let dims = terminal.dimensions();
+            ScrollbarState::new(
+                buffer.total_lines(),
+                dims.rows as usize,
+                buffer.scroll_offset(),
+            )
+        });
 
         // Check if bell is still active
-        let bell_active = self.bell_active_until
+        let bell_active = self
+            .bell_active_until
             .map(|until| Instant::now() < until)
             .unwrap_or(false);
 
@@ -1872,6 +2436,328 @@ impl App {
                 }
             }
         });
+    }
+
+    fn handle_control_requests(&mut self) {
+        use ultty_protocol::control::{
+            ControlData, ControlRequest, ControlResponse, TabInfo, TerminalInfo, VersionInfo,
+        };
+
+        let requests = {
+            let Some(ref mut server) = self.control_server else {
+                return;
+            };
+            server.take_pending_requests()
+        };
+
+        let mut responses: Vec<(usize, ControlResponse)> = Vec::new();
+
+        for (client_key, request) in requests {
+            let response = match request {
+                ControlRequest::Ping => ControlResponse::Data(ControlData::Pong),
+
+                ControlRequest::Version => {
+                    ControlResponse::Data(ControlData::Version(VersionInfo {
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        protocol_version: ultty_protocol::PROTOCOL_VERSION,
+                        git_hash: option_env!("GIT_HASH").map(String::from),
+                    }))
+                }
+
+                ControlRequest::GetInfo => {
+                    if let Some(terminal) = self.terminal_manager.focused_terminal() {
+                        let term = terminal.event_loop.terminal();
+                        let dims = term.grid().dimensions();
+                        let cursor = term.grid().cursor();
+                        let active_idx = self
+                            .terminal_manager
+                            .tabs()
+                            .iter()
+                            .position(|t| {
+                                self.terminal_manager
+                                    .active_tab()
+                                    .map_or(false, |a| a.id == t.id)
+                            })
+                            .unwrap_or(0);
+                        ControlResponse::Data(ControlData::Info(TerminalInfo {
+                            cols: dims.cols,
+                            rows: dims.rows,
+                            cursor_col: cursor.position.col,
+                            cursor_row: cursor.position.row,
+                            current_tab: active_idx,
+                            tab_count: self.terminal_manager.tab_count(),
+                            focused: true,
+                            cwd: None,
+                        }))
+                    } else {
+                        ControlResponse::Error {
+                            code: 1,
+                            message: "No active terminal".to_string(),
+                        }
+                    }
+                }
+
+                ControlRequest::ListTabs => {
+                    let active_tab_id = self.terminal_manager.active_tab().map(|t| t.id);
+                    let tabs: Vec<TabInfo> = self
+                        .terminal_manager
+                        .tabs()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, tab)| TabInfo {
+                            index: i,
+                            title: tab.title.clone(),
+                            active: Some(tab.id) == active_tab_id,
+                            pid: None,
+                            cwd: None,
+                        })
+                        .collect();
+                    ControlResponse::Data(ControlData::Tabs(tabs))
+                }
+
+                ControlRequest::GetText {
+                    include_scrollback: _,
+                    scrollback_lines: _,
+                } => {
+                    if let Some(terminal) = self.terminal_manager.focused_terminal() {
+                        let term = terminal.event_loop.terminal();
+                        let dims = term.grid().dimensions();
+                        let mut text = String::new();
+                        for row in 0..dims.rows {
+                            for col in 0..dims.cols {
+                                if let Some(cell) = term.grid().cell(col, row) {
+                                    text.push(cell.char());
+                                }
+                            }
+                            text.push('\n');
+                        }
+                        ControlResponse::Text(text)
+                    } else {
+                        ControlResponse::Error {
+                            code: 1,
+                            message: "No active terminal".to_string(),
+                        }
+                    }
+                }
+
+                ControlRequest::GetSelection => ControlResponse::Data(ControlData::Selection(None)),
+
+                ControlRequest::SendText { text } => {
+                    if let Some(terminal) = self.terminal_manager.focused_terminal_mut() {
+                        let _ = terminal.event_loop.send_input(text.as_bytes());
+                        ControlResponse::Ok
+                    } else {
+                        ControlResponse::Error {
+                            code: 1,
+                            message: "No active terminal".to_string(),
+                        }
+                    }
+                }
+
+                ControlRequest::SendKey { key, modifiers } => {
+                    self.forward_key_to_pty(&key, modifiers);
+                    ControlResponse::Ok
+                }
+
+                ControlRequest::SendRaw { data } => {
+                    if let Some(terminal) = self.terminal_manager.focused_terminal_mut() {
+                        let _ = terminal.event_loop.send_input(&data);
+                        ControlResponse::Ok
+                    } else {
+                        ControlResponse::Error {
+                            code: 1,
+                            message: "No active terminal".to_string(),
+                        }
+                    }
+                }
+
+                ControlRequest::NewTab {
+                    title,
+                    command,
+                    args,
+                    working_dir,
+                } => {
+                    let result = if let Some(cmd) = command {
+                        self.terminal_manager.create_tab_with_command(
+                            &cmd,
+                            &args,
+                            working_dir.as_deref(),
+                            title.as_deref(),
+                        )
+                    } else {
+                        self.terminal_manager.create_tab()
+                    };
+
+                    match result {
+                        Ok(_) => {
+                            self.update_tab_bar();
+                            self.needs_redraw = true;
+                            ControlResponse::Ok
+                        }
+                        Err(e) => ControlResponse::Error {
+                            code: 2,
+                            message: format!("Failed to create tab: {}", e),
+                        },
+                    }
+                }
+
+                ControlRequest::SwitchTab { index } => {
+                    if index < self.terminal_manager.tab_count() {
+                        self.terminal_manager.switch_to_tab(index);
+                        self.update_tab_bar();
+                        self.needs_redraw = true;
+                        ControlResponse::Ok
+                    } else {
+                        ControlResponse::Error {
+                            code: 3,
+                            message: format!("Tab index {} out of range", index),
+                        }
+                    }
+                }
+
+                ControlRequest::CloseTab { index } => {
+                    let tabs = self.terminal_manager.tabs();
+                    let active_idx = tabs
+                        .iter()
+                        .position(|t| {
+                            self.terminal_manager
+                                .active_tab()
+                                .map_or(false, |a| a.id == t.id)
+                        })
+                        .unwrap_or(0);
+                    let idx = index.unwrap_or(active_idx);
+                    if self.terminal_manager.tab_count() > 1 && idx < tabs.len() {
+                        let tab_id = tabs[idx].id;
+                        self.terminal_manager.close_tab(tab_id);
+                        self.update_tab_bar();
+                        self.needs_redraw = true;
+                        ControlResponse::Ok
+                    } else {
+                        ControlResponse::Error {
+                            code: 4,
+                            message: "Cannot close last tab or invalid index".to_string(),
+                        }
+                    }
+                }
+
+                ControlRequest::RunCommand { command, args } => {
+                    if let Some(terminal) = self.terminal_manager.focused_terminal_mut() {
+                        let cmd_line = if args.is_empty() {
+                            format!("{}\n", command)
+                        } else {
+                            format!("{} {}\n", command, args.join(" "))
+                        };
+                        let _ = terminal.event_loop.send_input(cmd_line.as_bytes());
+                        ControlResponse::Ok
+                    } else {
+                        ControlResponse::Error {
+                            code: 1,
+                            message: "No active terminal".to_string(),
+                        }
+                    }
+                }
+
+                ControlRequest::FocusWindow => {
+                    self.window.focus_window();
+                    ControlResponse::Ok
+                }
+
+                ControlRequest::ToggleFullscreen => {
+                    use winit::window::Fullscreen;
+                    let current = self.window.fullscreen();
+                    if current.is_some() {
+                        self.window.set_fullscreen(None);
+                    } else {
+                        self.window
+                            .set_fullscreen(Some(Fullscreen::Borderless(None)));
+                    }
+                    ControlResponse::Ok
+                }
+
+                ControlRequest::Resize { width, height } => {
+                    let _ = self
+                        .window
+                        .request_inner_size(PhysicalSize::new(width, height));
+                    ControlResponse::Ok
+                }
+
+                ControlRequest::SetOpacity { opacity } => {
+                    self.renderer.set_opacity(opacity.clamp(0.0, 1.0));
+                    self.needs_redraw = true;
+                    ControlResponse::Ok
+                }
+            };
+
+            responses.push((client_key, response));
+        }
+
+        if let Some(ref mut server) = self.control_server {
+            for (client_key, response) in responses {
+                server.send_response(client_key, &response);
+            }
+        }
+    }
+
+    fn forward_key_to_pty(
+        &mut self,
+        key: &ultty_protocol::Key,
+        modifiers: ultty_protocol::Modifiers,
+    ) {
+        let Some(terminal) = self.terminal_manager.focused_terminal_mut() else {
+            return;
+        };
+
+        let ctrl = modifiers.contains(ultty_protocol::Modifiers::CTRL);
+        let alt = modifiers.contains(ultty_protocol::Modifiers::ALT);
+
+        let bytes: Vec<u8> = match key {
+            ultty_protocol::Key::Char(c) => {
+                if ctrl && c.is_ascii_alphabetic() {
+                    vec![(c.to_ascii_lowercase() as u8) - b'a' + 1]
+                } else if alt {
+                    let mut v = vec![0x1b];
+                    let mut buf = [0u8; 4];
+                    v.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                    v
+                } else {
+                    let mut buf = [0u8; 4];
+                    c.encode_utf8(&mut buf).as_bytes().to_vec()
+                }
+            }
+            ultty_protocol::Key::Enter => vec![b'\r'],
+            ultty_protocol::Key::Tab => vec![b'\t'],
+            ultty_protocol::Key::Escape => vec![0x1b],
+            ultty_protocol::Key::Backspace => vec![0x7f],
+            ultty_protocol::Key::Delete => b"\x1b[3~".to_vec(),
+            ultty_protocol::Key::Insert => b"\x1b[2~".to_vec(),
+            ultty_protocol::Key::Home => b"\x1b[H".to_vec(),
+            ultty_protocol::Key::End => b"\x1b[F".to_vec(),
+            ultty_protocol::Key::PageUp => b"\x1b[5~".to_vec(),
+            ultty_protocol::Key::PageDown => b"\x1b[6~".to_vec(),
+            ultty_protocol::Key::Up => b"\x1b[A".to_vec(),
+            ultty_protocol::Key::Down => b"\x1b[B".to_vec(),
+            ultty_protocol::Key::Right => b"\x1b[C".to_vec(),
+            ultty_protocol::Key::Left => b"\x1b[D".to_vec(),
+            ultty_protocol::Key::Function(n) => match n {
+                1 => b"\x1bOP".to_vec(),
+                2 => b"\x1bOQ".to_vec(),
+                3 => b"\x1bOR".to_vec(),
+                4 => b"\x1bOS".to_vec(),
+                5 => b"\x1b[15~".to_vec(),
+                6 => b"\x1b[17~".to_vec(),
+                7 => b"\x1b[18~".to_vec(),
+                8 => b"\x1b[19~".to_vec(),
+                9 => b"\x1b[20~".to_vec(),
+                10 => b"\x1b[21~".to_vec(),
+                11 => b"\x1b[23~".to_vec(),
+                12 => b"\x1b[24~".to_vec(),
+                _ => vec![],
+            },
+        };
+
+        if !bytes.is_empty() {
+            let _ = terminal.event_loop.send_input(&bytes);
+        }
     }
 }
 

@@ -28,6 +28,10 @@ impl Text {
 }
 
 impl View for Text {
+    fn content(&self) -> ultty_protocol::Content {
+        ultty_protocol::Content::Text(ultty_protocol::TextContent::new(&self.content))
+    }
+
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         let paragraph = Paragraph::new(self.content.as_str());
         frame.render_widget(paragraph, area);
@@ -60,6 +64,14 @@ impl RichText {
 }
 
 impl View for RichText {
+    fn content(&self) -> ultty_protocol::Content {
+        let mut rich = ultty_protocol::RichText::new();
+        for (text, style) in &self.spans {
+            rich = rich.span(text.clone(), style.clone());
+        }
+        ultty_protocol::Content::RichText(rich)
+    }
+
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         use ratatui::style::{Modifier, Style as RStyle};
         use ratatui::text::Span;
@@ -442,6 +454,17 @@ impl TextInput {
 }
 
 impl View for TextInput {
+    fn content(&self) -> ultty_protocol::Content {
+        ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(
+            ultty_protocol::InputWidget {
+                value: self.value.clone(),
+                placeholder: self.placeholder.clone(),
+                multiline: self.multiline,
+                password: false,
+            },
+        ))
+    }
+
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         use ratatui::style::{Color as RColor, Modifier, Style as RStyle};
         use ratatui::text::Span;
@@ -472,6 +495,49 @@ impl View for TextInput {
 
         let paragraph = Paragraph::new(line);
         frame.render_widget(paragraph, area);
+    }
+
+    fn is_focusable(&self) -> bool {
+        true
+    }
+
+    fn on_key(&mut self, key: &crate::event::KeyEvent) -> Option<super::FocusAction> {
+        use crate::event::Key;
+
+        if self.vim_state.mode == VimMode::Insert {
+            match key.key {
+                Key::Escape => {
+                    self.vim_state.mode = VimMode::Normal;
+                    return Some(super::FocusAction::Consumed);
+                }
+                Key::Char(c) => {
+                    let chars: Vec<char> = self.value.chars().collect();
+                    let before: String = chars[..self.cursor].iter().collect();
+                    let after: String = chars[self.cursor..].iter().collect();
+                    self.value = format!("{}{}{}", before, c, after);
+                    self.cursor += 1;
+                    return Some(super::FocusAction::Consumed);
+                }
+                Key::Backspace if self.cursor > 0 => {
+                    self.delete_range(self.cursor - 1, self.cursor);
+                    return Some(super::FocusAction::Consumed);
+                }
+                Key::Tab if key.modifiers.shift => return Some(super::FocusAction::Previous),
+                Key::Tab => return Some(super::FocusAction::Next),
+                _ => {}
+            }
+        } else {
+            match key.key {
+                Key::Char('i') => {
+                    self.vim_state.mode = VimMode::Insert;
+                    return Some(super::FocusAction::Consumed);
+                }
+                Key::Tab if key.modifiers.shift => return Some(super::FocusAction::Previous),
+                Key::Tab => return Some(super::FocusAction::Next),
+                _ => {}
+            }
+        }
+        None
     }
 }
 

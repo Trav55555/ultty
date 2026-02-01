@@ -24,8 +24,8 @@ pub use image::{decode_sixel, ImageId, ImageStore, TerminalImage};
 pub use row::Row;
 pub use term_handler::TerminalHandler;
 pub use terminal::{
-    MouseButton, MouseEncoding, MouseMode, Selection, SelectionMode, SelectionPoint,
-    ShellIntegration, Terminal, TerminalModes,
+    MouseButton, MouseEncoding, MouseMode, MouseModifiers, Selection, SelectionMode,
+    SelectionPoint, ShellIntegration, Terminal, TerminalModes,
 };
 
 use std::ops::{Index, IndexMut};
@@ -391,6 +391,17 @@ impl Grid {
 
     /// Carriage return - move cursor to column 0.
     pub fn carriage_return(&mut self) {
+        // If we're at column 0 (just wrapped from previous line) and receive CR,
+        // it means the previous line's wrap was not a content continuation.
+        // Clear the wrapped flag to prevent incorrect merging during resize reflow.
+        // This handles shells like zsh that wrap to fill the line then CR back.
+        if self.cursor.position.col == 0 && self.cursor.position.row > 0 {
+            if let Some(prev_row) = self.rows.get_mut((self.cursor.position.row - 1) as usize) {
+                if prev_row.is_wrapped() {
+                    prev_row.set_wrapped(false);
+                }
+            }
+        }
         self.cursor.position.col = 0;
     }
 
@@ -603,6 +614,11 @@ impl Grid {
                     cell.clear();
                 }
             }
+            // Erasing to end of line means this line ends here (hard break),
+            // so clear the wrapped flag. This is important for proper reflow
+            // when resizing - content after an erase-to-EOL should not be
+            // considered a continuation of this line.
+            row.set_wrapped(false);
         }
         self.mark_dirty(self.cursor.position.row);
     }
@@ -724,6 +740,62 @@ impl Grid {
                 self.rows.push(new_row);
             }
         }
+    }
+
+    /// Set rows directly (used by Buffer during reflow).
+    pub fn set_rows(&mut self, rows: Vec<Row>, new_dims: Dimensions) {
+        self.rows = rows;
+        self.dims = new_dims;
+
+        // Ensure correct number of rows
+        while self.rows.len() < new_dims.rows as usize {
+            self.rows.push(Row::new(new_dims.cols));
+        }
+        self.rows.truncate(new_dims.rows as usize);
+
+        // Clamp cursor position
+        self.cursor.position.col = self.cursor.position.col.min(new_dims.cols.saturating_sub(1));
+        self.cursor.position.row = self.cursor.position.row.min(new_dims.rows.saturating_sub(1));
+
+        // Mark all dirty
+        self.dirty = vec![true; new_dims.rows as usize];
+    }
+
+    /// Prepend rows at the top (used when growing viewport to pull from history).
+    pub fn prepend_rows(&mut self, rows: Vec<Row>) {
+        let count = rows.len();
+        if count == 0 {
+            return;
+        }
+
+        // Insert at beginning, then truncate from end
+        for row in rows.into_iter().rev() {
+            self.rows.insert(0, row);
+        }
+        self.rows.truncate(self.dims.rows as usize);
+
+        // Adjust cursor position down by the number of inserted rows
+        self.cursor.position.row = (self.cursor.position.row + count as u16)
+            .min(self.dims.rows.saturating_sub(1));
+
+        // Mark all dirty
+        self.mark_all_dirty();
+    }
+
+    /// Remove rows from the top (used when shrinking viewport).
+    pub fn remove_top_rows(&mut self, count: usize) {
+        if count == 0 || count >= self.rows.len() {
+            return;
+        }
+
+        // Remove from the beginning
+        self.rows.drain(..count);
+
+        // Adjust cursor position up
+        self.cursor.position.row = self.cursor.position.row.saturating_sub(count as u16);
+
+        // Mark all dirty
+        self.mark_all_dirty();
     }
 
     /// Mark a row as dirty (needs redrawing).

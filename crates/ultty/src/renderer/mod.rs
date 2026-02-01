@@ -174,6 +174,28 @@ impl Rgba {
     pub fn to_array(&self) -> [f32; 4] {
         [self.r, self.g, self.b, self.a]
     }
+
+    /// Convert from sRGB to linear color space.
+    ///
+    /// Colors from hex values (like #1D2021) are in sRGB space.
+    /// When rendering to an sRGB framebuffer, wgpu expects the clear color
+    /// to be in linear space - it will apply gamma encoding automatically.
+    /// Without this conversion, colors appear washed out (dark grays look light gray).
+    pub fn to_linear(&self) -> Self {
+        fn srgb_to_linear(c: f32) -> f32 {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        Self {
+            r: srgb_to_linear(self.r),
+            g: srgb_to_linear(self.g),
+            b: srgb_to_linear(self.b),
+            a: self.a, // Alpha is not gamma-encoded
+        }
+    }
 }
 
 impl Default for Rgba {
@@ -293,6 +315,36 @@ impl ColorScheme {
                 let gray = (idx - 232) * 10 + 8;
                 Rgba::from_u8(gray, gray, gray)
             }
+        }
+    }
+
+    pub fn resolve_protocol_color(&self, color: &ultty_protocol::Color) -> Rgba {
+        match color {
+            ultty_protocol::Color::Named(named) => {
+                use ultty_protocol::NamedColor;
+                match named {
+                    NamedColor::Black => self.named[0],
+                    NamedColor::Red => self.named[1],
+                    NamedColor::Green => self.named[2],
+                    NamedColor::Yellow => self.named[3],
+                    NamedColor::Blue => self.named[4],
+                    NamedColor::Magenta => self.named[5],
+                    NamedColor::Cyan => self.named[6],
+                    NamedColor::White => self.named[7],
+                    NamedColor::BrightBlack => self.named[8],
+                    NamedColor::BrightRed => self.named[9],
+                    NamedColor::BrightGreen => self.named[10],
+                    NamedColor::BrightYellow => self.named[11],
+                    NamedColor::BrightBlue => self.named[12],
+                    NamedColor::BrightMagenta => self.named[13],
+                    NamedColor::BrightCyan => self.named[14],
+                    NamedColor::BrightWhite => self.named[15],
+                    NamedColor::Foreground => self.foreground,
+                    NamedColor::Background => self.background,
+                }
+            }
+            ultty_protocol::Color::Rgb(r, g, b) => Rgba::from_u8(*r, *g, *b),
+            ultty_protocol::Color::Indexed(idx) => self.indexed_color(*idx),
         }
     }
 }
@@ -580,6 +632,37 @@ impl Renderer {
         self.text_renderer.set_ligatures(enabled);
     }
 
+    /// Get the current font size.
+    pub fn font_size(&self) -> f32 {
+        self.text_renderer.font_size()
+    }
+
+    /// Set the font size and update cell dimensions.
+    /// Returns the new font size (may be clamped).
+    pub fn set_font_size(&mut self, size: f32) -> f32 {
+        self.text_renderer.set_font_size(size);
+        let (cell_width, cell_height) = self.text_renderer.cell_dimensions();
+        self.cell_width = cell_width;
+        self.cell_height = cell_height;
+        self.text_renderer.font_size()
+    }
+
+    /// Increase font size by a step.
+    pub fn increase_font_size(&mut self) -> f32 {
+        let current = self.font_size();
+        // Use larger steps for larger sizes
+        let step = if current >= 20.0 { 2.0 } else { 1.0 };
+        self.set_font_size(current + step)
+    }
+
+    /// Decrease font size by a step.
+    pub fn decrease_font_size(&mut self) -> f32 {
+        let current = self.font_size();
+        // Use larger steps for larger sizes
+        let step = if current > 20.0 { 2.0 } else { 1.0 };
+        self.set_font_size(current - step)
+    }
+
     /// Render the terminal to a surface.
     pub fn render(
         &mut self,
@@ -639,6 +722,8 @@ impl Renderer {
 
         // Render pass
         {
+            // Convert sRGB colors to linear space for correct rendering in sRGB framebuffer
+            let linear_bg = self.color_scheme.background.to_linear();
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminal_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -647,9 +732,9 @@ impl Renderer {
                     ops: wgpu::Operations {
                         // Pre-multiplied alpha for transparency support
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: self.color_scheme.background.r as f64 * self.opacity as f64,
-                            g: self.color_scheme.background.g as f64 * self.opacity as f64,
-                            b: self.color_scheme.background.b as f64 * self.opacity as f64,
+                            r: linear_bg.r as f64 * self.opacity as f64,
+                            g: linear_bg.g as f64 * self.opacity as f64,
+                            b: linear_bg.b as f64 * self.opacity as f64,
                             a: self.opacity as f64,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -918,6 +1003,140 @@ impl Renderer {
         Ok(())
     }
 
+    pub fn render_with_native_sessions<'a>(
+        &mut self,
+        surface: &wgpu::Surface,
+        terminal: &Terminal,
+        overlay: &OverlayState,
+        sessions: impl Iterator<Item = &'a crate::protocol::NativeSession>,
+    ) -> Result<(), wgpu::SurfaceError> {
+        self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
+
+        let output = surface.get_current_texture()?;
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("render_encoder"),
+            });
+
+        let (tab_bar_vertices, tab_bar_indices) = if let Some(tab_bar) = overlay.tab_bar {
+            self.build_tab_bar_vertices(tab_bar)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        let (bg_vertices, bg_indices) = self.build_background_vertices(terminal, overlay);
+
+        let bg_vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("bg_vertex_buffer"),
+                contents: bytemuck::cast_slice(&bg_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+        let bg_index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("bg_index_buffer"),
+                contents: bytemuck::cast_slice(&bg_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+        {
+            let linear_bg = self.color_scheme.background.to_linear();
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("terminal_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: linear_bg.r as f64 * self.opacity as f64,
+                            g: linear_bg.g as f64 * self.opacity as f64,
+                            b: linear_bg.b as f64 * self.opacity as f64,
+                            a: self.opacity as f64,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(self.bg_pipeline.pipeline());
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, bg_vertex_buffer.slice(..));
+            render_pass.set_index_buffer(bg_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
+        }
+
+        self.render_images(&mut encoder, &view, terminal)?;
+
+        if !tab_bar_vertices.is_empty() {
+            let tab_bar_vertex_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tab_bar_vertex_buffer"),
+                    contents: bytemuck::cast_slice(&tab_bar_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let tab_bar_index_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tab_bar_index_buffer"),
+                    contents: bytemuck::cast_slice(&tab_bar_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("tab_bar_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(self.bg_pipeline.pipeline());
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, tab_bar_vertex_buffer.slice(..));
+            render_pass.set_index_buffer(tab_bar_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..tab_bar_indices.len() as u32, 0, 0..1);
+        }
+
+        self.text_renderer.render(
+            &mut encoder,
+            &view,
+            terminal,
+            &self.color_scheme,
+            self.cell_width,
+            self.cell_height,
+            self.tab_bar_height,
+            &self.uniform_bind_group,
+        )?;
+
+        for session in sessions {
+            self.render_native_session(&mut encoder, &view, session);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+
+        Ok(())
+    }
+
     /// Render the keyboard shortcuts overlay.
     fn render_shortcuts_overlay(
         &mut self,
@@ -1026,6 +1245,8 @@ impl Renderer {
             });
 
         // Clear screen with background color
+        // Convert sRGB colors to linear space for correct rendering in sRGB framebuffer
+        let linear_bg = self.color_scheme.background.to_linear();
         {
             encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear_pass"),
@@ -1035,9 +1256,9 @@ impl Renderer {
                     ops: wgpu::Operations {
                         // Pre-multiplied alpha for transparency support
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: self.color_scheme.background.r as f64 * self.opacity as f64,
-                            g: self.color_scheme.background.g as f64 * self.opacity as f64,
-                            b: self.color_scheme.background.b as f64 * self.opacity as f64,
+                            r: linear_bg.r as f64 * self.opacity as f64,
+                            g: linear_bg.g as f64 * self.opacity as f64,
+                            b: linear_bg.b as f64 * self.opacity as f64,
                             a: self.opacity as f64,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -2842,6 +3063,743 @@ impl Renderer {
 
         Ok(())
     }
+
+    /// Capture a screenshot of the terminal to a PNG file.
+    ///
+    /// This renders the terminal to an offscreen texture and saves it as PNG.
+    pub fn capture_screenshot(
+        &mut self,
+        terminal: &Terminal,
+        overlay: &OverlayState,
+        path: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        use wgpu::util::DeviceExt;
+
+        let width = self.config.width;
+        let height = self.config.height;
+
+        // Create a texture we can copy from
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("screenshot_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Update tab bar height from overlay state
+        self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
+
+        // Create encoder
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("screenshot_encoder"),
+        });
+
+        // Build vertex data for backgrounds
+        let (bg_vertices, bg_indices) = self.build_background_vertices(terminal, overlay);
+
+        // Create background vertex/index buffers
+        let bg_vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("screenshot_bg_vertex_buffer"),
+                contents: bytemuck::cast_slice(&bg_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+        let bg_index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("screenshot_bg_index_buffer"),
+                contents: bytemuck::cast_slice(&bg_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+        // Render pass for backgrounds
+        {
+            let linear_bg = self.color_scheme.background.to_linear();
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("screenshot_bg_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: linear_bg.r as f64 * self.opacity as f64,
+                            g: linear_bg.g as f64 * self.opacity as f64,
+                            b: linear_bg.b as f64 * self.opacity as f64,
+                            a: self.opacity as f64,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(self.bg_pipeline.pipeline());
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, bg_vertex_buffer.slice(..));
+            render_pass.set_index_buffer(bg_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
+        }
+
+        // Render text
+        let _ = self.text_renderer.render(
+            &mut encoder,
+            &view,
+            terminal,
+            &self.color_scheme,
+            self.cell_width,
+            self.cell_height,
+            self.tab_bar_height,
+            &self.uniform_bind_group,
+        );
+
+        // Note: cursor is already included in build_background_vertices
+
+        // Calculate buffer size with proper alignment
+        let bytes_per_pixel = 4u32; // RGBA or BGRA
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+        let buffer_size = (padded_bytes_per_row * height) as u64;
+
+        // Create output buffer
+        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("screenshot_buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        // Copy texture to buffer
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &output_buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // Submit and wait
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Map buffer and read data
+        let buffer_slice = output_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()??;
+
+        // Get the data
+        let data = buffer_slice.get_mapped_range();
+
+        // Convert from padded to unpadded and handle BGRA -> RGBA if needed
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            let row_start = (y * padded_bytes_per_row) as usize;
+            let row_end = row_start + (width * bytes_per_pixel) as usize;
+            let row = &data[row_start..row_end];
+
+            // wgpu typically uses BGRA, convert to RGBA for PNG
+            for chunk in row.chunks(4) {
+                if self.config.format == wgpu::TextureFormat::Bgra8UnormSrgb
+                    || self.config.format == wgpu::TextureFormat::Bgra8Unorm
+                {
+                    // BGRA -> RGBA
+                    pixels.push(chunk[2]); // R
+                    pixels.push(chunk[1]); // G
+                    pixels.push(chunk[0]); // B
+                    pixels.push(chunk[3]); // A
+                } else {
+                    // Already RGBA
+                    pixels.extend_from_slice(chunk);
+                }
+            }
+        }
+
+        drop(data);
+        output_buffer.unmap();
+
+        // Save as PNG
+        let file = std::fs::File::create(path)?;
+        let writer = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(writer, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&pixels)?;
+
+        tracing::info!("Screenshot saved to {}", path.display());
+        Ok(())
+    }
+
+    pub fn render_native_session(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        session: &crate::protocol::NativeSession,
+    ) {
+        use ultty_protocol::Content;
+        use wgpu::util::DeviceExt;
+
+        let scene = session.scene();
+        let mut bg_vertices = Vec::new();
+        let mut bg_indices = Vec::new();
+        let mut text_vertices = Vec::new();
+        let mut text_indices = Vec::new();
+
+        for region in scene.iter_depth_first() {
+            if region.id == ultty_protocol::RegionId::ROOT {
+                continue;
+            }
+
+            let layout = &region.computed;
+            if layout.width <= 0.0 || layout.height <= 0.0 {
+                continue;
+            }
+
+            let x = layout.x * self.cell_width;
+            let y = layout.y * self.cell_height + self.tab_bar_height;
+            let w = layout.width * self.cell_width;
+            let h = layout.height * self.cell_height;
+
+            if let Some(bg_color) = &region.style.bg {
+                let color = self.color_scheme.resolve_protocol_color(bg_color);
+                let base_idx = bg_vertices.len() as u32;
+
+                bg_vertices.push(Vertex {
+                    position: [x, y],
+                    tex_coord: [0.0, 0.0],
+                    color: [color.r, color.g, color.b, color.a * region.style.opacity],
+                });
+                bg_vertices.push(Vertex {
+                    position: [x + w, y],
+                    tex_coord: [1.0, 0.0],
+                    color: [color.r, color.g, color.b, color.a * region.style.opacity],
+                });
+                bg_vertices.push(Vertex {
+                    position: [x + w, y + h],
+                    tex_coord: [1.0, 1.0],
+                    color: [color.r, color.g, color.b, color.a * region.style.opacity],
+                });
+                bg_vertices.push(Vertex {
+                    position: [x, y + h],
+                    tex_coord: [0.0, 1.0],
+                    color: [color.r, color.g, color.b, color.a * region.style.opacity],
+                });
+
+                bg_indices.extend_from_slice(&[
+                    base_idx,
+                    base_idx + 1,
+                    base_idx + 2,
+                    base_idx,
+                    base_idx + 2,
+                    base_idx + 3,
+                ]);
+            }
+
+            match &region.content {
+                Content::Text(text_content) => {
+                    let fg_color = region
+                        .style
+                        .fg
+                        .as_ref()
+                        .map(|c| self.color_scheme.resolve_protocol_color(c))
+                        .unwrap_or(self.color_scheme.foreground);
+
+                    let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                        &text_content.text,
+                        x,
+                        y,
+                        fg_color,
+                        region.style.bold,
+                        region.style.italic,
+                    );
+
+                    let base_idx = text_vertices.len() as u32;
+                    text_vertices.extend(verts);
+                    text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                }
+                Content::RichText(rich_text) => {
+                    let mut cursor_x = x;
+                    for span in &rich_text.spans {
+                        let fg_color = span
+                            .style
+                            .fg
+                            .as_ref()
+                            .map(|c| self.color_scheme.resolve_protocol_color(c))
+                            .unwrap_or_else(|| {
+                                region
+                                    .style
+                                    .fg
+                                    .as_ref()
+                                    .map(|c| self.color_scheme.resolve_protocol_color(c))
+                                    .unwrap_or(self.color_scheme.foreground)
+                            });
+
+                        let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
+                            &span.text,
+                            cursor_x,
+                            y,
+                            fg_color,
+                            span.style.bold || region.style.bold,
+                            span.style.italic || region.style.italic,
+                        );
+
+                        let base_idx = text_vertices.len() as u32;
+                        text_vertices.extend(verts);
+                        text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                        cursor_x += advance;
+                    }
+                }
+                Content::Widget(widget) => {
+                    self.render_widget_content(
+                        widget,
+                        x,
+                        y,
+                        w,
+                        h,
+                        &region.style,
+                        &mut bg_vertices,
+                        &mut bg_indices,
+                        &mut text_vertices,
+                        &mut text_indices,
+                    );
+                }
+                Content::None => {}
+            }
+        }
+
+        if !bg_vertices.is_empty() {
+            let bg_vb = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("native_bg_vb"),
+                    contents: bytemuck::cast_slice(&bg_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let bg_ib = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("native_bg_ib"),
+                    contents: bytemuck::cast_slice(&bg_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("native_bg_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            rp.set_pipeline(self.bg_pipeline.pipeline());
+            rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+            rp.set_vertex_buffer(0, bg_vb.slice(..));
+            rp.set_index_buffer(bg_ib.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
+        }
+
+        if !text_vertices.is_empty() {
+            let text_vb = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("native_text_vb"),
+                    contents: bytemuck::cast_slice(&text_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let text_ib = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("native_text_ib"),
+                    contents: bytemuck::cast_slice(&text_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("native_text_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            rp.set_pipeline(self.text_renderer.pipeline());
+            rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+            rp.set_bind_group(1, self.text_renderer.atlas_bind_group(), &[]);
+            rp.set_vertex_buffer(0, text_vb.slice(..));
+            rp.set_index_buffer(text_ib.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..text_indices.len() as u32, 0, 0..1);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_widget_content(
+        &mut self,
+        widget: &ultty_protocol::WidgetContent,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        region_style: &ultty_protocol::Style,
+        bg_vertices: &mut Vec<Vertex>,
+        bg_indices: &mut Vec<u32>,
+        text_vertices: &mut Vec<Vertex>,
+        text_indices: &mut Vec<u32>,
+    ) {
+        use ultty_protocol::WidgetContent;
+
+        match widget {
+            WidgetContent::Progress(progress) => {
+                let bar_height = h.min(self.cell_height);
+                let bar_y = y + (h - bar_height) / 2.0;
+                let filled_width = w * progress.value.clamp(0.0, 1.0);
+
+                let bg_color = self.color_scheme.named[8];
+                let fg_color = region_style
+                    .fg
+                    .as_ref()
+                    .map(|c| self.color_scheme.resolve_protocol_color(c))
+                    .unwrap_or(self.color_scheme.named[2]);
+
+                let base_idx = bg_vertices.len() as u32;
+                bg_vertices.push(Vertex {
+                    position: [x, bar_y],
+                    tex_coord: [0.0, 0.0],
+                    color: [bg_color.r, bg_color.g, bg_color.b, 0.5],
+                });
+                bg_vertices.push(Vertex {
+                    position: [x + w, bar_y],
+                    tex_coord: [1.0, 0.0],
+                    color: [bg_color.r, bg_color.g, bg_color.b, 0.5],
+                });
+                bg_vertices.push(Vertex {
+                    position: [x + w, bar_y + bar_height],
+                    tex_coord: [1.0, 1.0],
+                    color: [bg_color.r, bg_color.g, bg_color.b, 0.5],
+                });
+                bg_vertices.push(Vertex {
+                    position: [x, bar_y + bar_height],
+                    tex_coord: [0.0, 1.0],
+                    color: [bg_color.r, bg_color.g, bg_color.b, 0.5],
+                });
+                bg_indices.extend_from_slice(&[
+                    base_idx,
+                    base_idx + 1,
+                    base_idx + 2,
+                    base_idx,
+                    base_idx + 2,
+                    base_idx + 3,
+                ]);
+
+                if filled_width > 0.0 {
+                    let base_idx = bg_vertices.len() as u32;
+                    bg_vertices.push(Vertex {
+                        position: [x, bar_y],
+                        tex_coord: [0.0, 0.0],
+                        color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                    });
+                    bg_vertices.push(Vertex {
+                        position: [x + filled_width, bar_y],
+                        tex_coord: [1.0, 0.0],
+                        color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                    });
+                    bg_vertices.push(Vertex {
+                        position: [x + filled_width, bar_y + bar_height],
+                        tex_coord: [1.0, 1.0],
+                        color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                    });
+                    bg_vertices.push(Vertex {
+                        position: [x, bar_y + bar_height],
+                        tex_coord: [0.0, 1.0],
+                        color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                    });
+                    bg_indices.extend_from_slice(&[
+                        base_idx,
+                        base_idx + 1,
+                        base_idx + 2,
+                        base_idx,
+                        base_idx + 2,
+                        base_idx + 3,
+                    ]);
+                }
+
+                if let Some(label) = &progress.label {
+                    let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                        label,
+                        x + w + self.cell_width,
+                        y,
+                        self.color_scheme.foreground,
+                        false,
+                        false,
+                    );
+                    let base_idx = text_vertices.len() as u32;
+                    text_vertices.extend(verts);
+                    text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                }
+            }
+            WidgetContent::Spinner(spinner) => {
+                static SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                let frame_idx = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    / 80) as usize
+                    % SPINNER_FRAMES.len();
+                let spinner_char = SPINNER_FRAMES[frame_idx];
+
+                let fg_color = region_style
+                    .fg
+                    .as_ref()
+                    .map(|c| self.color_scheme.resolve_protocol_color(c))
+                    .unwrap_or(self.color_scheme.named[6]);
+
+                let text = if let Some(label) = &spinner.label {
+                    format!("{} {}", spinner_char, label)
+                } else {
+                    spinner_char.to_string()
+                };
+
+                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                    &text,
+                    x,
+                    y,
+                    fg_color,
+                    false,
+                    false,
+                );
+                let base_idx = text_vertices.len() as u32;
+                text_vertices.extend(verts);
+                text_indices.extend(idxs.iter().map(|i| i + base_idx));
+            }
+            WidgetContent::Input(input) => {
+                let border_color = self.color_scheme.named[8];
+                let base_idx = bg_vertices.len() as u32;
+                bg_vertices.push(Vertex {
+                    position: [x, y],
+                    tex_coord: [0.0, 0.0],
+                    color: [border_color.r, border_color.g, border_color.b, 0.3],
+                });
+                bg_vertices.push(Vertex {
+                    position: [x + w, y],
+                    tex_coord: [1.0, 0.0],
+                    color: [border_color.r, border_color.g, border_color.b, 0.3],
+                });
+                bg_vertices.push(Vertex {
+                    position: [x + w, y + h],
+                    tex_coord: [1.0, 1.0],
+                    color: [border_color.r, border_color.g, border_color.b, 0.3],
+                });
+                bg_vertices.push(Vertex {
+                    position: [x, y + h],
+                    tex_coord: [0.0, 1.0],
+                    color: [border_color.r, border_color.g, border_color.b, 0.3],
+                });
+                bg_indices.extend_from_slice(&[
+                    base_idx,
+                    base_idx + 1,
+                    base_idx + 2,
+                    base_idx,
+                    base_idx + 2,
+                    base_idx + 3,
+                ]);
+
+                let display_text = if input.value.is_empty() {
+                    &input.placeholder
+                } else if input.password {
+                    &"•".repeat(input.value.len())
+                } else {
+                    &input.value
+                };
+
+                let text_color = if input.value.is_empty() {
+                    self.color_scheme.named[8]
+                } else {
+                    self.color_scheme.foreground
+                };
+
+                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                    display_text,
+                    x + self.cell_width * 0.5,
+                    y,
+                    text_color,
+                    false,
+                    false,
+                );
+                let base_idx = text_vertices.len() as u32;
+                text_vertices.extend(verts);
+                text_indices.extend(idxs.iter().map(|i| i + base_idx));
+            }
+            WidgetContent::Markdown(md) => {
+                self.render_markdown_content(
+                    &md.source,
+                    x,
+                    y,
+                    w,
+                    text_vertices,
+                    text_indices,
+                );
+            }
+            WidgetContent::Code(code) => {
+                self.render_code_content(
+                    &code.source,
+                    &code.language,
+                    code.line_numbers,
+                    x,
+                    y,
+                    text_vertices,
+                    text_indices,
+                );
+            }
+        }
+    }
+
+    fn render_markdown_content(
+        &mut self,
+        source: &str,
+        x: f32,
+        y: f32,
+        _width: f32,
+        text_vertices: &mut Vec<Vertex>,
+        text_indices: &mut Vec<u32>,
+    ) {
+        let mut cursor_y = y;
+        let line_height = self.cell_height;
+
+        for line in source.lines() {
+            let (text, bold, color) = if line.starts_with("### ") {
+                (&line[4..], true, self.color_scheme.named[6])
+            } else if line.starts_with("## ") {
+                (&line[3..], true, self.color_scheme.named[5])
+            } else if line.starts_with("# ") {
+                (&line[2..], true, self.color_scheme.named[4])
+            } else if line.starts_with("```") {
+                (line, false, self.color_scheme.named[8])
+            } else if line.starts_with("- ") || line.starts_with("* ") {
+                let bullet_text = format!("• {}", &line[2..]);
+                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                    &bullet_text,
+                    x,
+                    cursor_y,
+                    self.color_scheme.foreground,
+                    false,
+                    false,
+                );
+                let base_idx = text_vertices.len() as u32;
+                text_vertices.extend(verts);
+                text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                cursor_y += line_height;
+                continue;
+            } else {
+                (line, false, self.color_scheme.foreground)
+            };
+
+            let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                text,
+                x,
+                cursor_y,
+                color,
+                bold,
+                false,
+            );
+            let base_idx = text_vertices.len() as u32;
+            text_vertices.extend(verts);
+            text_indices.extend(idxs.iter().map(|i| i + base_idx));
+            cursor_y += line_height;
+        }
+    }
+
+    fn render_code_content(
+        &mut self,
+        source: &str,
+        _language: &str,
+        line_numbers: bool,
+        x: f32,
+        y: f32,
+        text_vertices: &mut Vec<Vertex>,
+        text_indices: &mut Vec<u32>,
+    ) {
+        let mut cursor_y = y;
+        let line_height = self.cell_height;
+        let code_color = self.color_scheme.named[7];
+        let line_num_color = self.color_scheme.named[8];
+
+        for (idx, line) in source.lines().enumerate() {
+            let mut cursor_x = x;
+
+            if line_numbers {
+                let line_num = format!("{:4} ", idx + 1);
+                let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
+                    &line_num,
+                    cursor_x,
+                    cursor_y,
+                    line_num_color,
+                    false,
+                    false,
+                );
+                let base_idx = text_vertices.len() as u32;
+                text_vertices.extend(verts);
+                text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                cursor_x += advance;
+            }
+
+            let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                line,
+                cursor_x,
+                cursor_y,
+                code_color,
+                false,
+                false,
+            );
+            let base_idx = text_vertices.len() as u32;
+            text_vertices.extend(verts);
+            text_indices.extend(idxs.iter().map(|i| i + base_idx));
+            cursor_y += line_height;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2896,6 +3854,43 @@ mod tests {
 
         let arr = color.to_array();
         assert_eq!(arr.len(), 4);
+    }
+
+    #[test]
+    fn srgb_to_linear_conversion() {
+        // Test the sRGB to linear conversion
+        // Black stays black
+        let black = Rgba::new(0.0, 0.0, 0.0, 1.0);
+        let linear_black = black.to_linear();
+        assert!((linear_black.r).abs() < 0.0001);
+        assert!((linear_black.g).abs() < 0.0001);
+        assert!((linear_black.b).abs() < 0.0001);
+
+        // White stays white
+        let white = Rgba::new(1.0, 1.0, 1.0, 1.0);
+        let linear_white = white.to_linear();
+        assert!((linear_white.r - 1.0).abs() < 0.0001);
+        assert!((linear_white.g - 1.0).abs() < 0.0001);
+        assert!((linear_white.b - 1.0).abs() < 0.0001);
+
+        // Mid gray in sRGB (~0.5) should be darker in linear (~0.214)
+        let mid_gray = Rgba::new(0.5, 0.5, 0.5, 1.0);
+        let linear_mid = mid_gray.to_linear();
+        assert!((linear_mid.r - 0.214).abs() < 0.01);
+
+        // Gruvbox dark background #1D2021 (29, 32, 33) -> ~(0.114, 0.125, 0.129) sRGB
+        // Should convert to much darker linear values
+        let gruvbox_bg = Rgba::from_u8(0x1D, 0x20, 0x21);
+        let linear_gruvbox = gruvbox_bg.to_linear();
+        // Linear values should be much smaller (< 0.02)
+        assert!(linear_gruvbox.r < 0.02, "Expected r < 0.02, got {}", linear_gruvbox.r);
+        assert!(linear_gruvbox.g < 0.02, "Expected g < 0.02, got {}", linear_gruvbox.g);
+        assert!(linear_gruvbox.b < 0.02, "Expected b < 0.02, got {}", linear_gruvbox.b);
+
+        // Alpha should not be affected
+        let with_alpha = Rgba::new(0.5, 0.5, 0.5, 0.75);
+        let linear_alpha = with_alpha.to_linear();
+        assert!((linear_alpha.a - 0.75).abs() < 0.0001);
     }
 
     #[test]

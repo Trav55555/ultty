@@ -103,6 +103,9 @@ impl Pty {
     /// Resize the PTY.
     pub fn resize(&self, size: PtySize) -> Result<()> {
         let winsize = size.to_winsize();
+        // SAFETY: self.master is a valid, open file descriptor for a PTY master.
+        // TIOCSWINSZ is a standard ioctl that sets the window size, and winsize
+        // is a valid pointer to a properly initialized Winsize struct.
         unsafe {
             if libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &winsize) < 0 {
                 return Err(PtyError::ResizeFailed(nix::Error::last()));
@@ -196,6 +199,9 @@ impl SlavePty {
 fn get_slave_name(master_fd: RawFd) -> Result<String> {
     // Use ptsname_r for thread safety
     let mut name_buf = [0u8; 256];
+    // SAFETY: master_fd is a valid PTY master file descriptor obtained from openpty.
+    // name_buf is a valid, properly sized buffer (256 bytes, sufficient for /dev/pts/N).
+    // ptsname_r is thread-safe unlike ptsname, and writes a null-terminated string.
     unsafe {
         if libc::ptsname_r(
             master_fd,

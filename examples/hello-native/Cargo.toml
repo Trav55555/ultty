@@ -1,0 +1,11 @@
+[package]
+name = "hello-native"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ultty-protocol = { path = "../../crates/ultty-protocol" }
+bytes = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

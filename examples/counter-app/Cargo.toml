@@ -1,0 +1,9 @@
+[package]
+name = "counter-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ulttui = { workspace = true }
+ultty-protocol = { workspace = true }
+anyhow = { workspace = true }

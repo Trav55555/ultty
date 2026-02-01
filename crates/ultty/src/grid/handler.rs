@@ -241,7 +241,9 @@ impl<'a> Handler<'a> {
             | Mode::ColumnMode132
             | Mode::AlternateScreen
             | Mode::AlternateScreenClear
-            | Mode::AlternateScreenSaveCursor => {
+            | Mode::AlternateScreenSaveCursor
+            | Mode::AlternateScrollMode
+            | Mode::SynchronizedUpdate => {
                 // These modes are handled by TerminalHandler, not the simple grid handler
             }
         }

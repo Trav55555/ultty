@@ -1,0 +1,13 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+assertion_line: 121
+expression: output
+---
+┌List [4/4]──────────────────┐
+│Apple                       │
+│Banana                      │
+│Cherry                      │
+│Date                        │
+│                            │
+│                            │
+└────────────────────────────┘

@@ -45,6 +45,10 @@ impl Child {
     ) -> Result<Self> {
         let (pty, slave) = Pty::open_with_size(size)?;
 
+        // SAFETY: fork() is safe to call here because:
+        // - We're single-threaded at this point (no other threads holding locks)
+        // - The PTY file descriptors are set up correctly before fork
+        // - The child process will exec immediately, avoiding post-fork issues
         match unsafe { fork() }.map_err(PtyError::ForkFailed)? {
             ForkResult::Parent { child } => {
                 // Parent process - we're the terminal emulator
@@ -227,6 +231,9 @@ fn setup_child(slave: SlavePty, program: &str, args: &[&str], working_dir: &Path
     let slave_fd = slave.into_raw_fd();
 
     // Set the slave as the controlling terminal
+    // SAFETY: slave_fd is a valid PTY slave file descriptor. We're in a new session
+    // (after setsid), so TIOCSCTTY will set this terminal as our controlling terminal.
+    // The third argument (0) means don't steal the terminal from another session.
     unsafe {
         if libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) < 0 {
             std::process::exit(1);

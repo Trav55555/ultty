@@ -145,27 +145,51 @@ impl ThemeConfig {
         }
     }
 
-    /// Create the Everforest dark theme.
-    pub fn everforest() -> Self {
+    /// Create the Gruvbox Dark theme (hard contrast) - classic dark theme.
+    pub fn gruvbox_dark() -> Self {
         Self {
-            name: "Everforest".to_string(),
-            foreground: RgbColor::new(0xD3, 0xC6, 0xAA),  // fg
-            background: RgbColor::new(0x2D, 0x35, 0x3B),  // bg_dim
-            cursor: RgbColor::new(0xD3, 0xC6, 0xAA),
-            selection: RgbaColor::new(0x54, 0x3A, 0x48, 0x80),  // visual
-            palette: Some(PaletteConfig::everforest()),
+            name: "Gruvbox Dark".to_string(),
+            foreground: RgbColor::new(0xEB, 0xDB, 0xB2),  // fg
+            background: RgbColor::new(0x1D, 0x20, 0x21),  // bg0_h (hard) - darkest
+            cursor: RgbColor::new(0xFE, 0x80, 0x19),      // orange cursor
+            selection: RgbaColor::new(0x45, 0x85, 0x88, 0x80),  // blue selection
+            palette: Some(PaletteConfig::gruvbox_dark()),
         }
     }
 
-    /// Create the Everforest light theme.
-    pub fn everforest_light() -> Self {
+    /// Create the Tokyo Night theme - very dark, cool tones.
+    pub fn tokyo_night() -> Self {
         Self {
-            name: "Everforest Light".to_string(),
-            foreground: RgbColor::new(0x5C, 0x6A, 0x72),  // fg
-            background: RgbColor::new(0xFD, 0xF6, 0xE3),  // bg_dim
-            cursor: RgbColor::new(0x5C, 0x6A, 0x72),
-            selection: RgbaColor::new(0xE6, 0xE2, 0xCC, 0x80),
-            palette: Some(PaletteConfig::everforest_light()),
+            name: "Tokyo Night".to_string(),
+            foreground: RgbColor::new(0xA9, 0xB1, 0xD6),  // fg
+            background: RgbColor::new(0x1A, 0x1B, 0x26),  // bg - very dark
+            cursor: RgbColor::new(0x7A, 0xA2, 0xF7),      // blue cursor
+            selection: RgbaColor::new(0x28, 0x2D, 0x42, 0xC0),  // dark blue selection
+            palette: Some(PaletteConfig::tokyo_night()),
+        }
+    }
+
+    /// Create the Catppuccin Mocha theme - modern dark theme.
+    pub fn catppuccin_mocha() -> Self {
+        Self {
+            name: "Catppuccin Mocha".to_string(),
+            foreground: RgbColor::new(0xCD, 0xD6, 0xF4),  // text
+            background: RgbColor::new(0x1E, 0x1E, 0x2E),  // base
+            cursor: RgbColor::new(0xF5, 0xE0, 0xDC),      // rosewater cursor
+            selection: RgbaColor::new(0x45, 0x47, 0x5A, 0xC0),  // surface1
+            palette: Some(PaletteConfig::catppuccin_mocha()),
+        }
+    }
+
+    /// Create the Everforest Dark theme - comfortable green-based dark theme.
+    pub fn everforest_dark() -> Self {
+        Self {
+            name: "Everforest Dark".to_string(),
+            foreground: RgbColor::new(0xD3, 0xC6, 0xAA),  // fg
+            background: RgbColor::new(0x27, 0x2E, 0x33),  // bg0
+            cursor: RgbColor::new(0xA7, 0xC0, 0x80),      // green cursor
+            selection: RgbaColor::new(0x3D, 0x48, 0x4D, 0xC0),  // bg3
+            palette: Some(PaletteConfig::everforest_dark()),
         }
     }
 }
@@ -174,22 +198,24 @@ impl Default for ColorConfig {
     fn default() -> Self {
         // Include built-in themes
         let mut themes = HashMap::new();
-        themes.insert("everforest".to_string(), ThemeConfig::everforest());
-        themes.insert("everforest-light".to_string(), ThemeConfig::everforest_light());
+        themes.insert("everforest-dark".to_string(), ThemeConfig::everforest_dark());
+        themes.insert("tokyo-night".to_string(), ThemeConfig::tokyo_night());
+        themes.insert("gruvbox-dark".to_string(), ThemeConfig::gruvbox_dark());
+        themes.insert("catppuccin-mocha".to_string(), ThemeConfig::catppuccin_mocha());
         themes.insert("dark".to_string(), ThemeConfig::dark());
         themes.insert("light".to_string(), ThemeConfig::light());
 
-        // Use Everforest as default
-        let everforest = ThemeConfig::everforest();
+        // Use Catppuccin Mocha as default - good contrast, modern look
+        let default_theme = ThemeConfig::catppuccin_mocha();
 
         Self {
-            foreground: everforest.foreground,
-            background: everforest.background,
-            cursor: everforest.cursor,
-            selection: everforest.selection,
-            palette: PaletteConfig::everforest(),
+            foreground: default_theme.foreground,
+            background: default_theme.background,
+            cursor: default_theme.cursor,
+            selection: default_theme.selection,
+            palette: PaletteConfig::catppuccin_mocha(),
             themes,
-            theme: Some("everforest".to_string()),
+            theme: Some("catppuccin-mocha".to_string()),
         }
     }
 }
@@ -327,11 +353,83 @@ impl PaletteConfig {
         }
     }
 
-    /// Create Everforest dark palette.
-    pub fn everforest() -> Self {
+    /// Create Gruvbox Dark palette (hard contrast).
+    pub fn gruvbox_dark() -> Self {
         Self {
-            // Everforest dark colors
-            black: RgbColor::new(0x4B, 0x56, 0x5C),   // bg2
+            // Gruvbox dark colors - classic warm dark theme
+            black: RgbColor::new(0x28, 0x28, 0x28),   // bg
+            red: RgbColor::new(0xCC, 0x24, 0x1D),     // red
+            green: RgbColor::new(0x98, 0x97, 0x1A),   // green
+            yellow: RgbColor::new(0xD7, 0x99, 0x21),  // yellow
+            blue: RgbColor::new(0x45, 0x85, 0x88),    // blue
+            magenta: RgbColor::new(0xB1, 0x62, 0x86), // purple
+            cyan: RgbColor::new(0x68, 0x9D, 0x6A),    // aqua
+            white: RgbColor::new(0xA8, 0x99, 0x84),   // fg4
+            // Bright colors
+            bright_black: RgbColor::new(0x92, 0x83, 0x74),  // gray
+            bright_red: RgbColor::new(0xFB, 0x49, 0x34),    // bright red
+            bright_green: RgbColor::new(0xB8, 0xBB, 0x26),  // bright green
+            bright_yellow: RgbColor::new(0xFA, 0xBD, 0x2F), // bright yellow
+            bright_blue: RgbColor::new(0x83, 0xA5, 0x98),   // bright blue
+            bright_magenta: RgbColor::new(0xD3, 0x86, 0x9B),// bright purple
+            bright_cyan: RgbColor::new(0x8E, 0xC0, 0x7C),   // bright aqua
+            bright_white: RgbColor::new(0xEB, 0xDB, 0xB2),  // fg
+        }
+    }
+
+    /// Create Tokyo Night palette - very dark, cool tones.
+    pub fn tokyo_night() -> Self {
+        Self {
+            // Tokyo Night colors - modern dark theme
+            black: RgbColor::new(0x32, 0x34, 0x4A),   // terminal black
+            red: RgbColor::new(0xF7, 0x76, 0x8E),     // red
+            green: RgbColor::new(0x9E, 0xCE, 0x6A),   // green
+            yellow: RgbColor::new(0xE0, 0xAF, 0x68),  // yellow
+            blue: RgbColor::new(0x7A, 0xA2, 0xF7),    // blue
+            magenta: RgbColor::new(0xAD, 0x8E, 0xE6), // magenta
+            cyan: RgbColor::new(0x44, 0x9D, 0xAB),    // cyan
+            white: RgbColor::new(0x78, 0x7C, 0x99),   // fg_dark
+            // Bright colors
+            bright_black: RgbColor::new(0x44, 0x4B, 0x6A),  // comment
+            bright_red: RgbColor::new(0xFF, 0x7A, 0x93),    // bright red
+            bright_green: RgbColor::new(0xB9, 0xF2, 0x7C),  // bright green
+            bright_yellow: RgbColor::new(0xFF, 0x9E, 0x64), // orange
+            bright_blue: RgbColor::new(0x7D, 0xA6, 0xFF),   // bright blue
+            bright_magenta: RgbColor::new(0xBB, 0x9A, 0xF7),// bright magenta
+            bright_cyan: RgbColor::new(0x0D, 0xB9, 0xD7),   // bright cyan
+            bright_white: RgbColor::new(0xAC, 0xB0, 0xD0),  // fg
+        }
+    }
+
+    /// Create Catppuccin Mocha palette - modern dark theme.
+    pub fn catppuccin_mocha() -> Self {
+        Self {
+            // Catppuccin Mocha colors
+            black: RgbColor::new(0x45, 0x47, 0x5A),   // surface1
+            red: RgbColor::new(0xF3, 0x8B, 0xA8),     // red
+            green: RgbColor::new(0xA6, 0xE3, 0xA1),   // green
+            yellow: RgbColor::new(0xF9, 0xE2, 0xAF),  // yellow
+            blue: RgbColor::new(0x89, 0xB4, 0xFA),    // blue
+            magenta: RgbColor::new(0xF5, 0xC2, 0xE7), // pink
+            cyan: RgbColor::new(0x94, 0xE2, 0xD5),    // teal
+            white: RgbColor::new(0xBA, 0xC2, 0xDE),   // subtext1
+            // Bright colors
+            bright_black: RgbColor::new(0x58, 0x5B, 0x70),  // surface2
+            bright_red: RgbColor::new(0xF3, 0x8B, 0xA8),    // red
+            bright_green: RgbColor::new(0xA6, 0xE3, 0xA1),  // green
+            bright_yellow: RgbColor::new(0xF9, 0xE2, 0xAF), // yellow
+            bright_blue: RgbColor::new(0x89, 0xB4, 0xFA),   // blue
+            bright_magenta: RgbColor::new(0xF5, 0xC2, 0xE7),// pink
+            bright_cyan: RgbColor::new(0x94, 0xE2, 0xD5),   // teal
+            bright_white: RgbColor::new(0xA6, 0xAD, 0xC8),  // subtext0
+        }
+    }
+
+    /// Create Everforest Dark palette - comfortable green-based theme.
+    pub fn everforest_dark() -> Self {
+        Self {
+            // Everforest Dark colors
+            black: RgbColor::new(0x4B, 0x56, 0x5C),   // bg3
             red: RgbColor::new(0xE6, 0x7E, 0x80),     // red
             green: RgbColor::new(0xA7, 0xC0, 0x80),   // green
             yellow: RgbColor::new(0xDB, 0xBC, 0x7F),  // yellow
@@ -339,39 +437,15 @@ impl PaletteConfig {
             magenta: RgbColor::new(0xD6, 0x99, 0xB6), // purple
             cyan: RgbColor::new(0x83, 0xC0, 0x92),    // aqua
             white: RgbColor::new(0xD3, 0xC6, 0xAA),   // fg
-            // Bright colors (slightly brighter versions)
-            bright_black: RgbColor::new(0x5C, 0x6A, 0x72),
-            bright_red: RgbColor::new(0xF8, 0x5C, 0x50),
-            bright_green: RgbColor::new(0xB8, 0xD1, 0x8F),
-            bright_yellow: RgbColor::new(0xE6, 0x98, 0x75), // orange
-            bright_blue: RgbColor::new(0x8F, 0xCC, 0xC4),
-            bright_magenta: RgbColor::new(0xE6, 0xAA, 0xC7),
-            bright_cyan: RgbColor::new(0x94, 0xD1, 0xA3),
-            bright_white: RgbColor::new(0xE5, 0xDF, 0xC5),
-        }
-    }
-
-    /// Create Everforest light palette.
-    pub fn everforest_light() -> Self {
-        Self {
-            // Everforest light colors
-            black: RgbColor::new(0x5C, 0x6A, 0x72),   // fg
-            red: RgbColor::new(0xF8, 0x55, 0x52),     // red
-            green: RgbColor::new(0x8D, 0xA1, 0x01),   // green
-            yellow: RgbColor::new(0xDF, 0xA0, 0x00),  // yellow
-            blue: RgbColor::new(0x35, 0xA7, 0x7C),    // blue
-            magenta: RgbColor::new(0xDF, 0x69, 0xBA), // purple
-            cyan: RgbColor::new(0x3A, 0x94, 0xC5),    // aqua
-            white: RgbColor::new(0xFD, 0xF6, 0xE3),   // bg
             // Bright colors
-            bright_black: RgbColor::new(0x82, 0x92, 0x9C),
-            bright_red: RgbColor::new(0xE6, 0x7E, 0x80),
-            bright_green: RgbColor::new(0xA7, 0xC0, 0x80),
+            bright_black: RgbColor::new(0x5C, 0x68, 0x70),  // bg4
+            bright_red: RgbColor::new(0xE6, 0x7E, 0x80),    // red
+            bright_green: RgbColor::new(0xA7, 0xC0, 0x80),  // green
             bright_yellow: RgbColor::new(0xE6, 0x98, 0x75), // orange
-            bright_blue: RgbColor::new(0x7F, 0xBB, 0xB3),
-            bright_magenta: RgbColor::new(0xD6, 0x99, 0xB6),
-            bright_cyan: RgbColor::new(0x83, 0xC0, 0x92),
-            bright_white: RgbColor::new(0xFF, 0xFF, 0xF0),
+            bright_blue: RgbColor::new(0x7F, 0xBB, 0xB3),   // blue
+            bright_magenta: RgbColor::new(0xD6, 0x99, 0xB6),// purple
+            bright_cyan: RgbColor::new(0x83, 0xC0, 0x92),   // aqua
+            bright_white: RgbColor::new(0xD3, 0xC6, 0xAA),  // fg
         }
     }
 }
@@ -393,7 +467,10 @@ pub struct FontConfig {
 impl Default for FontConfig {
     fn default() -> Self {
         Self {
-            family: String::new(), // Empty means system monospace
+            // Empty string means use system monospace font, which has better
+            // Unicode coverage and fallback for box-drawing characters.
+            // Users can override this in config.toml with a specific font.
+            family: String::new(),
             size: 14.0,
             line_height: 1.2,
             ligatures: true,
@@ -446,6 +523,16 @@ pub struct KeybindingConfig {
     pub show_shortcuts: String,
     /// Cycle through color themes
     pub cycle_theme: String,
+    /// Increase font size
+    pub font_increase: String,
+    /// Decrease font size
+    pub font_decrease: String,
+    /// Reset font size to default
+    pub font_reset: String,
+    /// Take a screenshot of the terminal
+    pub screenshot: String,
+    /// Dump terminal state to file for debugging
+    pub debug_dump: String,
     /// Additional custom keybindings
     #[serde(flatten)]
     pub custom: HashMap<String, String>,
@@ -471,6 +558,11 @@ impl Default for KeybindingConfig {
             reload_config: "ctrl+shift+r".to_string(),
             show_shortcuts: "f1".to_string(),
             cycle_theme: "ctrl+shift+n".to_string(),
+            font_increase: "ctrl+=".to_string(),
+            font_decrease: "ctrl+-".to_string(),
+            font_reset: "ctrl+0".to_string(),
+            screenshot: "ctrl+shift+s".to_string(),
+            debug_dump: "ctrl+shift+d".to_string(),
             custom: HashMap::new(),
         }
     }

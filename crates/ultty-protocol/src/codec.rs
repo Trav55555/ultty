@@ -13,16 +13,28 @@ use crate::{
         CodeWidget, Content, InputWidget, MarkdownWidget, ProgressWidget, RichText, Span,
         SpinnerWidget, TextAlign, TextContent, TextOverflow, TextWrap, WidgetContent,
     },
-    events::{FocusEvent, InputEvent, InputType, Key, Modifiers, MouseButton, ResizeEvent, ScrollEvent},
+    events::{
+        FocusEvent, InputEvent, InputType, Key, Modifiers, MouseButton, ResizeEvent, ScrollEvent,
+    },
     layout::{
-        AlignContent, AlignItems, AlignSelf, Constraints, Dimension, Display, Edges,
-        FlexDirection, FlexWrap, GridLine, GridPlacement, JustifyContent, Overflow, OverflowAxis,
-        Size, TrackSizingFunction,
+        AlignContent, AlignItems, AlignSelf, Constraints, Dimension, Display, Edges, FlexDirection,
+        FlexWrap, GridLine, GridPlacement, JustifyContent, Overflow, OverflowAxis, Size,
+        TrackSizingFunction,
     },
     messages::{ComputedRegionLayout, FrameId, LayoutTrigger},
     style::{BorderEdges, BorderStyle, BorderType, Color, NamedColor, Style},
     AppMessage, ProtocolError, RegionId, Result, TerminalMessage, FRAME_MAGIC,
 };
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Maximum allowed string length (1 MB) to prevent OOM attacks.
+const MAX_STRING_LEN: usize = 1024 * 1024;
+
+/// Maximum allowed region count in a layout message to prevent OOM attacks.
+const MAX_REGION_COUNT: usize = 10_000;
 
 // ============================================================================
 // Traits
@@ -59,11 +71,23 @@ fn encode_string(s: &str, buf: &mut BytesMut) {
 
 fn decode_string(buf: &mut impl Buf) -> Result<String> {
     if buf.remaining() < 4 {
-        return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: 4,
+            have: buf.remaining(),
+        });
     }
     let len = buf.get_u32_le() as usize;
+    if len > MAX_STRING_LEN {
+        return Err(ProtocolError::InvalidData(format!(
+            "string length {} exceeds maximum {}",
+            len, MAX_STRING_LEN
+        )));
+    }
     if buf.remaining() < len {
-        return Err(ProtocolError::UnexpectedEof { needed: len, have: buf.remaining() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: len,
+            have: buf.remaining(),
+        });
     }
     let mut bytes = vec![0u8; len];
     buf.copy_to_slice(&mut bytes);
@@ -82,13 +106,19 @@ fn encode_option_f32(opt: Option<f32>, buf: &mut BytesMut) {
 
 fn decode_option_f32(buf: &mut impl Buf) -> Result<Option<f32>> {
     if buf.remaining() < 1 {
-        return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: 1,
+            have: buf.remaining(),
+        });
     }
     match buf.get_u8() {
         0 => Ok(None),
         1 => {
             if buf.remaining() < 4 {
-                return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() });
+                return Err(ProtocolError::UnexpectedEof {
+                    needed: 4,
+                    have: buf.remaining(),
+                });
             }
             Ok(Some(buf.get_f32_le()))
         }
@@ -108,7 +138,10 @@ fn encode_option_string(opt: &Option<String>, buf: &mut BytesMut) {
 
 fn decode_option_string(buf: &mut impl Buf) -> Result<Option<String>> {
     if buf.remaining() < 1 {
-        return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: 1,
+            have: buf.remaining(),
+        });
     }
     match buf.get_u8() {
         0 => Ok(None),
@@ -130,7 +163,10 @@ impl Encode for RegionId {
 impl Decode for RegionId {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         if buf.remaining() < 4 {
-            return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 4,
+                have: buf.remaining(),
+            });
         }
         Ok(RegionId(buf.get_u32_le()))
     }
@@ -145,7 +181,10 @@ impl Encode for FrameId {
 impl Decode for FrameId {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         if buf.remaining() < 4 {
-            return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 4,
+                have: buf.remaining(),
+            });
         }
         Ok(FrameId(buf.get_u32_le()))
     }
@@ -164,7 +203,10 @@ impl Encode for NamedColor {
 impl Decode for NamedColor {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         if buf.remaining() < 1 {
-            return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
         }
         let val = buf.get_u8();
         match val {
@@ -186,7 +228,10 @@ impl Decode for NamedColor {
             15 => Ok(NamedColor::BrightWhite),
             16 => Ok(NamedColor::Foreground),
             17 => Ok(NamedColor::Background),
-            _ => Err(ProtocolError::InvalidData(format!("invalid named color: {}", val))),
+            _ => Err(ProtocolError::InvalidData(format!(
+                "invalid named color: {}",
+                val
+            ))),
         }
     }
 }
@@ -215,23 +260,35 @@ impl Encode for Color {
 impl Decode for Color {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         if buf.remaining() < 1 {
-            return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
         }
         match buf.get_u8() {
             0 => Ok(Color::Named(NamedColor::decode(buf)?)),
             1 => {
                 if buf.remaining() < 3 {
-                    return Err(ProtocolError::UnexpectedEof { needed: 3, have: buf.remaining() });
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 3,
+                        have: buf.remaining(),
+                    });
                 }
                 Ok(Color::Rgb(buf.get_u8(), buf.get_u8(), buf.get_u8()))
             }
             2 => {
                 if buf.remaining() < 1 {
-                    return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() });
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 1,
+                        have: buf.remaining(),
+                    });
                 }
                 Ok(Color::Indexed(buf.get_u8()))
             }
-            t => Err(ProtocolError::InvalidData(format!("invalid color type: {}", t))),
+            t => Err(ProtocolError::InvalidData(format!(
+                "invalid color type: {}",
+                t
+            ))),
         }
     }
 }
@@ -248,7 +305,10 @@ fn encode_option_color(opt: &Option<Color>, buf: &mut BytesMut) {
 
 fn decode_option_color(buf: &mut impl Buf) -> Result<Option<Color>> {
     if buf.remaining() < 1 {
-        return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: 1,
+            have: buf.remaining(),
+        });
     }
     match buf.get_u8() {
         0 => Ok(None),
@@ -270,7 +330,10 @@ impl Encode for BorderType {
 impl Decode for BorderType {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         if buf.remaining() < 1 {
-            return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
         }
         match buf.get_u8() {
             0 => Ok(BorderType::None),
@@ -280,14 +343,20 @@ impl Decode for BorderType {
             4 => Ok(BorderType::Rounded),
             5 => Ok(BorderType::Dashed),
             6 => Ok(BorderType::Ascii),
-            v => Err(ProtocolError::InvalidData(format!("invalid border type: {}", v))),
+            v => Err(ProtocolError::InvalidData(format!(
+                "invalid border type: {}",
+                v
+            ))),
         }
     }
 }
 
 impl Encode for BorderEdges {
     fn encode(&self, buf: &mut BytesMut) {
-        let bits = (self.top as u8) | ((self.right as u8) << 1) | ((self.bottom as u8) << 2) | ((self.left as u8) << 3);
+        let bits = (self.top as u8)
+            | ((self.right as u8) << 1)
+            | ((self.bottom as u8) << 2)
+            | ((self.left as u8) << 3);
         buf.put_u8(bits);
     }
 }
@@ -295,7 +364,10 @@ impl Encode for BorderEdges {
 impl Decode for BorderEdges {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         if buf.remaining() < 1 {
-            return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
         }
         let bits = buf.get_u8();
         Ok(BorderEdges {
@@ -322,7 +394,10 @@ impl Decode for BorderStyle {
             edges: BorderEdges::decode(buf)?,
             radius: {
                 if buf.remaining() < 1 {
-                    return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() });
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 1,
+                        have: buf.remaining(),
+                    });
                 }
                 buf.get_u8()
             },
@@ -340,7 +415,10 @@ impl Encode for Style {
         encode_option_color(&self.bg, buf);
         self.border.encode(buf);
         encode_option_color(&self.border_color, buf);
-        let flags = (self.bold as u8) | ((self.italic as u8) << 1) | ((self.underline as u8) << 2) | ((self.dim as u8) << 3);
+        let flags = (self.bold as u8)
+            | ((self.italic as u8) << 1)
+            | ((self.underline as u8) << 2)
+            | ((self.dim as u8) << 3);
         buf.put_u8(flags);
         buf.put_f32_le(self.opacity);
     }
@@ -353,7 +431,10 @@ impl Decode for Style {
         let border = BorderStyle::decode(buf)?;
         let border_color = decode_option_color(buf)?;
         if buf.remaining() < 5 {
-            return Err(ProtocolError::UnexpectedEof { needed: 5, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 5,
+                have: buf.remaining(),
+            });
         }
         let flags = buf.get_u8();
         let opacity = buf.get_f32_le();
@@ -379,11 +460,26 @@ impl Encode for Dimension {
     fn encode(&self, buf: &mut BytesMut) {
         match self {
             Dimension::Auto => buf.put_u8(0),
-            Dimension::Cells(v) => { buf.put_u8(1); buf.put_f32_le(*v); }
-            Dimension::Percent(v) => { buf.put_u8(2); buf.put_f32_le(*v); }
-            Dimension::Fr(v) => { buf.put_u8(3); buf.put_f32_le(*v); }
-            Dimension::Vw(v) => { buf.put_u8(4); buf.put_f32_le(*v); }
-            Dimension::Vh(v) => { buf.put_u8(5); buf.put_f32_le(*v); }
+            Dimension::Cells(v) => {
+                buf.put_u8(1);
+                buf.put_f32_le(*v);
+            }
+            Dimension::Percent(v) => {
+                buf.put_u8(2);
+                buf.put_f32_le(*v);
+            }
+            Dimension::Fr(v) => {
+                buf.put_u8(3);
+                buf.put_f32_le(*v);
+            }
+            Dimension::Vw(v) => {
+                buf.put_u8(4);
+                buf.put_f32_le(*v);
+            }
+            Dimension::Vh(v) => {
+                buf.put_u8(5);
+                buf.put_f32_le(*v);
+            }
             Dimension::MinContent => buf.put_u8(6),
             Dimension::MaxContent => buf.put_u8(7),
         }
@@ -393,18 +489,64 @@ impl Encode for Dimension {
 impl Decode for Dimension {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         if buf.remaining() < 1 {
-            return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
         }
         match buf.get_u8() {
             0 => Ok(Dimension::Auto),
-            1 => { if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); } Ok(Dimension::Cells(buf.get_f32_le())) }
-            2 => { if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); } Ok(Dimension::Percent(buf.get_f32_le())) }
-            3 => { if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); } Ok(Dimension::Fr(buf.get_f32_le())) }
-            4 => { if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); } Ok(Dimension::Vw(buf.get_f32_le())) }
-            5 => { if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); } Ok(Dimension::Vh(buf.get_f32_le())) }
+            1 => {
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
+                Ok(Dimension::Cells(buf.get_f32_le()))
+            }
+            2 => {
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
+                Ok(Dimension::Percent(buf.get_f32_le()))
+            }
+            3 => {
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
+                Ok(Dimension::Fr(buf.get_f32_le()))
+            }
+            4 => {
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
+                Ok(Dimension::Vw(buf.get_f32_le()))
+            }
+            5 => {
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
+                Ok(Dimension::Vh(buf.get_f32_le()))
+            }
             6 => Ok(Dimension::MinContent),
             7 => Ok(Dimension::MaxContent),
-            v => Err(ProtocolError::InvalidData(format!("invalid dimension type: {}", v))),
+            v => Err(ProtocolError::InvalidData(format!(
+                "invalid dimension type: {}",
+                v
+            ))),
         }
     }
 }
@@ -455,21 +597,34 @@ impl Encode for Overflow {
 impl Decode for Overflow {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         if buf.remaining() < 2 {
-            return Err(ProtocolError::UnexpectedEof { needed: 2, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 2,
+                have: buf.remaining(),
+            });
         }
         let x = match buf.get_u8() {
             0 => OverflowAxis::Visible,
             1 => OverflowAxis::Hidden,
             2 => OverflowAxis::Scroll,
             3 => OverflowAxis::Auto,
-            v => return Err(ProtocolError::InvalidData(format!("invalid overflow axis: {}", v))),
+            v => {
+                return Err(ProtocolError::InvalidData(format!(
+                    "invalid overflow axis: {}",
+                    v
+                )))
+            }
         };
         let y = match buf.get_u8() {
             0 => OverflowAxis::Visible,
             1 => OverflowAxis::Hidden,
             2 => OverflowAxis::Scroll,
             3 => OverflowAxis::Auto,
-            v => return Err(ProtocolError::InvalidData(format!("invalid overflow axis: {}", v))),
+            v => {
+                return Err(ProtocolError::InvalidData(format!(
+                    "invalid overflow axis: {}",
+                    v
+                )))
+            }
         };
         Ok(Overflow { x, y })
     }
@@ -479,8 +634,14 @@ impl Encode for GridLine {
     fn encode(&self, buf: &mut BytesMut) {
         match self {
             GridLine::Auto => buf.put_u8(0),
-            GridLine::Line(n) => { buf.put_u8(1); buf.put_i16_le(*n); }
-            GridLine::Span(n) => { buf.put_u8(2); buf.put_u16_le(*n); }
+            GridLine::Line(n) => {
+                buf.put_u8(1);
+                buf.put_i16_le(*n);
+            }
+            GridLine::Span(n) => {
+                buf.put_u8(2);
+                buf.put_u16_le(*n);
+            }
         }
     }
 }
@@ -488,13 +649,35 @@ impl Encode for GridLine {
 impl Decode for GridLine {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         if buf.remaining() < 1 {
-            return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
         }
         match buf.get_u8() {
             0 => Ok(GridLine::Auto),
-            1 => { if buf.remaining() < 2 { return Err(ProtocolError::UnexpectedEof { needed: 2, have: buf.remaining() }); } Ok(GridLine::Line(buf.get_i16_le())) }
-            2 => { if buf.remaining() < 2 { return Err(ProtocolError::UnexpectedEof { needed: 2, have: buf.remaining() }); } Ok(GridLine::Span(buf.get_u16_le())) }
-            v => Err(ProtocolError::InvalidData(format!("invalid grid line type: {}", v))),
+            1 => {
+                if buf.remaining() < 2 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 2,
+                        have: buf.remaining(),
+                    });
+                }
+                Ok(GridLine::Line(buf.get_i16_le()))
+            }
+            2 => {
+                if buf.remaining() < 2 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 2,
+                        have: buf.remaining(),
+                    });
+                }
+                Ok(GridLine::Span(buf.get_u16_le()))
+            }
+            v => Err(ProtocolError::InvalidData(format!(
+                "invalid grid line type: {}",
+                v
+            ))),
         }
     }
 }
@@ -518,8 +701,15 @@ impl Decode for GridPlacement {
 impl Encode for TrackSizingFunction {
     fn encode(&self, buf: &mut BytesMut) {
         match self {
-            TrackSizingFunction::Single(d) => { buf.put_u8(0); d.encode(buf); }
-            TrackSizingFunction::MinMax(a, b) => { buf.put_u8(1); a.encode(buf); b.encode(buf); }
+            TrackSizingFunction::Single(d) => {
+                buf.put_u8(0);
+                d.encode(buf);
+            }
+            TrackSizingFunction::MinMax(a, b) => {
+                buf.put_u8(1);
+                a.encode(buf);
+                b.encode(buf);
+            }
             TrackSizingFunction::Repeat(count, dims) => {
                 buf.put_u8(2);
                 buf.put_u16_le(*count);
@@ -535,14 +725,23 @@ impl Encode for TrackSizingFunction {
 impl Decode for TrackSizingFunction {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         if buf.remaining() < 1 {
-            return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
         }
         match buf.get_u8() {
             0 => Ok(TrackSizingFunction::Single(Dimension::decode(buf)?)),
-            1 => Ok(TrackSizingFunction::MinMax(Dimension::decode(buf)?, Dimension::decode(buf)?)),
+            1 => Ok(TrackSizingFunction::MinMax(
+                Dimension::decode(buf)?,
+                Dimension::decode(buf)?,
+            )),
             2 => {
                 if buf.remaining() < 6 {
-                    return Err(ProtocolError::UnexpectedEof { needed: 6, have: buf.remaining() });
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 6,
+                        have: buf.remaining(),
+                    });
                 }
                 let count = buf.get_u16_le();
                 let len = buf.get_u32_le() as usize;
@@ -552,7 +751,10 @@ impl Decode for TrackSizingFunction {
                 }
                 Ok(TrackSizingFunction::Repeat(count, dims))
             }
-            v => Err(ProtocolError::InvalidData(format!("invalid track sizing function: {}", v))),
+            v => Err(ProtocolError::InvalidData(format!(
+                "invalid track sizing function: {}",
+                v
+            ))),
         }
     }
 }
@@ -566,7 +768,10 @@ fn encode_vec_track(vec: &[TrackSizingFunction], buf: &mut BytesMut) {
 
 fn decode_vec_track(buf: &mut impl Buf) -> Result<Vec<TrackSizingFunction>> {
     if buf.remaining() < 4 {
-        return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: 4,
+            have: buf.remaining(),
+        });
     }
     let len = buf.get_u32_le() as usize;
     let mut vec = Vec::with_capacity(len);
@@ -609,27 +814,45 @@ impl Encode for Constraints {
 impl Decode for Constraints {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         if buf.remaining() < 15 {
-            return Err(ProtocolError::UnexpectedEof { needed: 15, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 15,
+                have: buf.remaining(),
+            });
         }
         let display = match buf.get_u8() {
             0 => Display::Block,
             1 => Display::Flex,
             2 => Display::Grid,
             3 => Display::None,
-            v => return Err(ProtocolError::InvalidData(format!("invalid display: {}", v))),
+            v => {
+                return Err(ProtocolError::InvalidData(format!(
+                    "invalid display: {}",
+                    v
+                )))
+            }
         };
         let flex_direction = match buf.get_u8() {
             0 => FlexDirection::Row,
             1 => FlexDirection::RowReverse,
             2 => FlexDirection::Column,
             3 => FlexDirection::ColumnReverse,
-            v => return Err(ProtocolError::InvalidData(format!("invalid flex direction: {}", v))),
+            v => {
+                return Err(ProtocolError::InvalidData(format!(
+                    "invalid flex direction: {}",
+                    v
+                )))
+            }
         };
         let flex_wrap = match buf.get_u8() {
             0 => FlexWrap::NoWrap,
             1 => FlexWrap::Wrap,
             2 => FlexWrap::WrapReverse,
-            v => return Err(ProtocolError::InvalidData(format!("invalid flex wrap: {}", v))),
+            v => {
+                return Err(ProtocolError::InvalidData(format!(
+                    "invalid flex wrap: {}",
+                    v
+                )))
+            }
         };
         let justify_content = match buf.get_u8() {
             0 => JustifyContent::Start,
@@ -638,7 +861,12 @@ impl Decode for Constraints {
             3 => JustifyContent::SpaceBetween,
             4 => JustifyContent::SpaceAround,
             5 => JustifyContent::SpaceEvenly,
-            v => return Err(ProtocolError::InvalidData(format!("invalid justify content: {}", v))),
+            v => {
+                return Err(ProtocolError::InvalidData(format!(
+                    "invalid justify content: {}",
+                    v
+                )))
+            }
         };
         let align_items = match buf.get_u8() {
             0 => AlignItems::Start,
@@ -646,7 +874,12 @@ impl Decode for Constraints {
             2 => AlignItems::Center,
             3 => AlignItems::Baseline,
             4 => AlignItems::Stretch,
-            v => return Err(ProtocolError::InvalidData(format!("invalid align items: {}", v))),
+            v => {
+                return Err(ProtocolError::InvalidData(format!(
+                    "invalid align items: {}",
+                    v
+                )))
+            }
         };
         let align_self = match buf.get_u8() {
             0 => AlignSelf::Auto,
@@ -655,7 +888,12 @@ impl Decode for Constraints {
             3 => AlignSelf::Center,
             4 => AlignSelf::Baseline,
             5 => AlignSelf::Stretch,
-            v => return Err(ProtocolError::InvalidData(format!("invalid align self: {}", v))),
+            v => {
+                return Err(ProtocolError::InvalidData(format!(
+                    "invalid align self: {}",
+                    v
+                )))
+            }
         };
         let align_content = match buf.get_u8() {
             0 => AlignContent::Start,
@@ -665,7 +903,12 @@ impl Decode for Constraints {
             4 => AlignContent::SpaceAround,
             5 => AlignContent::SpaceEvenly,
             6 => AlignContent::Stretch,
-            v => return Err(ProtocolError::InvalidData(format!("invalid align content: {}", v))),
+            v => {
+                return Err(ProtocolError::InvalidData(format!(
+                    "invalid align content: {}",
+                    v
+                )))
+            }
         };
         let flex_grow = buf.get_f32_le();
         let flex_shrink = buf.get_f32_le();
@@ -720,49 +963,79 @@ impl Decode for Constraints {
 // ============================================================================
 
 impl Encode for TextWrap {
-    fn encode(&self, buf: &mut BytesMut) { buf.put_u8(*self as u8); }
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u8(*self as u8);
+    }
 }
 
 impl Decode for TextWrap {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
         match buf.get_u8() {
             0 => Ok(TextWrap::None),
             1 => Ok(TextWrap::Char),
             2 => Ok(TextWrap::Word),
-            v => Err(ProtocolError::InvalidData(format!("invalid text wrap: {}", v))),
+            v => Err(ProtocolError::InvalidData(format!(
+                "invalid text wrap: {}",
+                v
+            ))),
         }
     }
 }
 
 impl Encode for TextAlign {
-    fn encode(&self, buf: &mut BytesMut) { buf.put_u8(*self as u8); }
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u8(*self as u8);
+    }
 }
 
 impl Decode for TextAlign {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
         match buf.get_u8() {
             0 => Ok(TextAlign::Left),
             1 => Ok(TextAlign::Center),
             2 => Ok(TextAlign::Right),
-            v => Err(ProtocolError::InvalidData(format!("invalid text align: {}", v))),
+            v => Err(ProtocolError::InvalidData(format!(
+                "invalid text align: {}",
+                v
+            ))),
         }
     }
 }
 
 impl Encode for TextOverflow {
-    fn encode(&self, buf: &mut BytesMut) { buf.put_u8(*self as u8); }
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u8(*self as u8);
+    }
 }
 
 impl Decode for TextOverflow {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
         match buf.get_u8() {
             0 => Ok(TextOverflow::Clip),
             1 => Ok(TextOverflow::Ellipsis),
             2 => Ok(TextOverflow::Fade),
-            v => Err(ProtocolError::InvalidData(format!("invalid text overflow: {}", v))),
+            v => Err(ProtocolError::InvalidData(format!(
+                "invalid text overflow: {}",
+                v
+            ))),
         }
     }
 }
@@ -814,7 +1087,12 @@ impl Encode for RichText {
 
 impl Decode for RichText {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); }
+        if buf.remaining() < 4 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 4,
+                have: buf.remaining(),
+            });
+        }
         let len = buf.get_u32_le() as usize;
         let mut spans = Vec::with_capacity(len);
         for _ in 0..len {
@@ -836,18 +1114,34 @@ impl Decode for InputWidget {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         let value = decode_string(buf)?;
         let placeholder = decode_string(buf)?;
-        if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
         let flags = buf.get_u8();
-        Ok(InputWidget { value, placeholder, multiline: flags & 1 != 0, password: flags & 2 != 0 })
+        Ok(InputWidget {
+            value,
+            placeholder,
+            multiline: flags & 1 != 0,
+            password: flags & 2 != 0,
+        })
     }
 }
 
 impl Encode for MarkdownWidget {
-    fn encode(&self, buf: &mut BytesMut) { encode_string(&self.source, buf); }
+    fn encode(&self, buf: &mut BytesMut) {
+        encode_string(&self.source, buf);
+    }
 }
 
 impl Decode for MarkdownWidget {
-    fn decode(buf: &mut impl Buf) -> Result<Self> { Ok(MarkdownWidget { source: decode_string(buf)? }) }
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        Ok(MarkdownWidget {
+            source: decode_string(buf)?,
+        })
+    }
 }
 
 impl Encode for CodeWidget {
@@ -862,8 +1156,17 @@ impl Decode for CodeWidget {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         let source = decode_string(buf)?;
         let language = decode_string(buf)?;
-        if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
-        Ok(CodeWidget { source, language, line_numbers: buf.get_u8() != 0 })
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
+        Ok(CodeWidget {
+            source,
+            language,
+            line_numbers: buf.get_u8() != 0,
+        })
     }
 }
 
@@ -876,41 +1179,78 @@ impl Encode for ProgressWidget {
 
 impl Decode for ProgressWidget {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); }
-        Ok(ProgressWidget { value: buf.get_f32_le(), label: decode_option_string(buf)? })
+        if buf.remaining() < 4 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 4,
+                have: buf.remaining(),
+            });
+        }
+        Ok(ProgressWidget {
+            value: buf.get_f32_le(),
+            label: decode_option_string(buf)?,
+        })
     }
 }
 
 impl Encode for SpinnerWidget {
-    fn encode(&self, buf: &mut BytesMut) { encode_option_string(&self.label, buf); }
+    fn encode(&self, buf: &mut BytesMut) {
+        encode_option_string(&self.label, buf);
+    }
 }
 
 impl Decode for SpinnerWidget {
-    fn decode(buf: &mut impl Buf) -> Result<Self> { Ok(SpinnerWidget { label: decode_option_string(buf)? }) }
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        Ok(SpinnerWidget {
+            label: decode_option_string(buf)?,
+        })
+    }
 }
 
 impl Encode for WidgetContent {
     fn encode(&self, buf: &mut BytesMut) {
         match self {
-            WidgetContent::Input(w) => { buf.put_u8(0); w.encode(buf); }
-            WidgetContent::Markdown(w) => { buf.put_u8(1); w.encode(buf); }
-            WidgetContent::Code(w) => { buf.put_u8(2); w.encode(buf); }
-            WidgetContent::Progress(w) => { buf.put_u8(3); w.encode(buf); }
-            WidgetContent::Spinner(w) => { buf.put_u8(4); w.encode(buf); }
+            WidgetContent::Input(w) => {
+                buf.put_u8(0);
+                w.encode(buf);
+            }
+            WidgetContent::Markdown(w) => {
+                buf.put_u8(1);
+                w.encode(buf);
+            }
+            WidgetContent::Code(w) => {
+                buf.put_u8(2);
+                w.encode(buf);
+            }
+            WidgetContent::Progress(w) => {
+                buf.put_u8(3);
+                w.encode(buf);
+            }
+            WidgetContent::Spinner(w) => {
+                buf.put_u8(4);
+                w.encode(buf);
+            }
         }
     }
 }
 
 impl Decode for WidgetContent {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
         match buf.get_u8() {
             0 => Ok(WidgetContent::Input(InputWidget::decode(buf)?)),
             1 => Ok(WidgetContent::Markdown(MarkdownWidget::decode(buf)?)),
             2 => Ok(WidgetContent::Code(CodeWidget::decode(buf)?)),
             3 => Ok(WidgetContent::Progress(ProgressWidget::decode(buf)?)),
             4 => Ok(WidgetContent::Spinner(SpinnerWidget::decode(buf)?)),
-            v => Err(ProtocolError::InvalidData(format!("invalid widget type: {}", v))),
+            v => Err(ProtocolError::InvalidData(format!(
+                "invalid widget type: {}",
+                v
+            ))),
         }
     }
 }
@@ -919,22 +1259,39 @@ impl Encode for Content {
     fn encode(&self, buf: &mut BytesMut) {
         match self {
             Content::None => buf.put_u8(0),
-            Content::Text(t) => { buf.put_u8(1); t.encode(buf); }
-            Content::RichText(r) => { buf.put_u8(2); r.encode(buf); }
-            Content::Widget(w) => { buf.put_u8(3); w.encode(buf); }
+            Content::Text(t) => {
+                buf.put_u8(1);
+                t.encode(buf);
+            }
+            Content::RichText(r) => {
+                buf.put_u8(2);
+                r.encode(buf);
+            }
+            Content::Widget(w) => {
+                buf.put_u8(3);
+                w.encode(buf);
+            }
         }
     }
 }
 
 impl Decode for Content {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
         match buf.get_u8() {
             0 => Ok(Content::None),
             1 => Ok(Content::Text(TextContent::decode(buf)?)),
             2 => Ok(Content::RichText(RichText::decode(buf)?)),
             3 => Ok(Content::Widget(WidgetContent::decode(buf)?)),
-            v => Err(ProtocolError::InvalidData(format!("invalid content type: {}", v))),
+            v => Err(ProtocolError::InvalidData(format!(
+                "invalid content type: {}",
+                v
+            ))),
         }
     }
 }
@@ -944,19 +1301,29 @@ impl Decode for Content {
 // ============================================================================
 
 impl Encode for MouseButton {
-    fn encode(&self, buf: &mut BytesMut) { buf.put_u8(*self as u8); }
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u8(*self as u8);
+    }
 }
 
 impl Decode for MouseButton {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
         match buf.get_u8() {
             0 => Ok(MouseButton::Left),
             1 => Ok(MouseButton::Middle),
             2 => Ok(MouseButton::Right),
             3 => Ok(MouseButton::Button4),
             4 => Ok(MouseButton::Button5),
-            v => Err(ProtocolError::InvalidData(format!("invalid mouse button: {}", v))),
+            v => Err(ProtocolError::InvalidData(format!(
+                "invalid mouse button: {}",
+                v
+            ))),
         }
     }
 }
@@ -964,8 +1331,14 @@ impl Decode for MouseButton {
 impl Encode for Key {
     fn encode(&self, buf: &mut BytesMut) {
         match self {
-            Key::Char(c) => { buf.put_u8(0); buf.put_u32_le(*c as u32); }
-            Key::Function(n) => { buf.put_u8(1); buf.put_u8(*n); }
+            Key::Char(c) => {
+                buf.put_u8(0);
+                buf.put_u32_le(*c as u32);
+            }
+            Key::Function(n) => {
+                buf.put_u8(1);
+                buf.put_u8(*n);
+            }
             Key::Escape => buf.put_u8(2),
             Key::Enter => buf.put_u8(3),
             Key::Tab => buf.put_u8(4),
@@ -986,13 +1359,33 @@ impl Encode for Key {
 
 impl Decode for Key {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
         match buf.get_u8() {
             0 => {
-                if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); }
-                char::from_u32(buf.get_u32_le()).map(Key::Char).ok_or_else(|| ProtocolError::InvalidData("invalid char".into()))
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
+                char::from_u32(buf.get_u32_le())
+                    .map(Key::Char)
+                    .ok_or_else(|| ProtocolError::InvalidData("invalid char".into()))
             }
-            1 => { if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); } Ok(Key::Function(buf.get_u8())) }
+            1 => {
+                if buf.remaining() < 1 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 1,
+                        have: buf.remaining(),
+                    });
+                }
+                Ok(Key::Function(buf.get_u8()))
+            }
             2 => Ok(Key::Escape),
             3 => Ok(Key::Enter),
             4 => Ok(Key::Tab),
@@ -1013,12 +1406,19 @@ impl Decode for Key {
 }
 
 impl Encode for Modifiers {
-    fn encode(&self, buf: &mut BytesMut) { buf.put_u8(self.bits); }
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.bits);
+    }
 }
 
 impl Decode for Modifiers {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
         Ok(Modifiers { bits: buf.get_u8() })
     }
 }
@@ -1026,32 +1426,81 @@ impl Decode for Modifiers {
 impl Encode for InputType {
     fn encode(&self, buf: &mut BytesMut) {
         match self {
-            InputType::MouseDown { button } => { buf.put_u8(0); button.encode(buf); }
-            InputType::MouseUp { button } => { buf.put_u8(1); button.encode(buf); }
+            InputType::MouseDown { button } => {
+                buf.put_u8(0);
+                button.encode(buf);
+            }
+            InputType::MouseUp { button } => {
+                buf.put_u8(1);
+                button.encode(buf);
+            }
             InputType::MouseMove => buf.put_u8(2),
-            InputType::MouseScroll { delta_x, delta_y } => { buf.put_u8(3); buf.put_f32_le(*delta_x); buf.put_f32_le(*delta_y); }
-            InputType::KeyDown { key, modifiers } => { buf.put_u8(4); key.encode(buf); modifiers.encode(buf); }
-            InputType::KeyUp { key, modifiers } => { buf.put_u8(5); key.encode(buf); modifiers.encode(buf); }
-            InputType::TextInput { text } => { buf.put_u8(6); encode_string(text, buf); }
+            InputType::MouseScroll { delta_x, delta_y } => {
+                buf.put_u8(3);
+                buf.put_f32_le(*delta_x);
+                buf.put_f32_le(*delta_y);
+            }
+            InputType::KeyDown { key, modifiers } => {
+                buf.put_u8(4);
+                key.encode(buf);
+                modifiers.encode(buf);
+            }
+            InputType::KeyUp { key, modifiers } => {
+                buf.put_u8(5);
+                key.encode(buf);
+                modifiers.encode(buf);
+            }
+            InputType::TextInput { text } => {
+                buf.put_u8(6);
+                encode_string(text, buf);
+            }
         }
     }
 }
 
 impl Decode for InputType {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
         match buf.get_u8() {
-            0 => Ok(InputType::MouseDown { button: MouseButton::decode(buf)? }),
-            1 => Ok(InputType::MouseUp { button: MouseButton::decode(buf)? }),
+            0 => Ok(InputType::MouseDown {
+                button: MouseButton::decode(buf)?,
+            }),
+            1 => Ok(InputType::MouseUp {
+                button: MouseButton::decode(buf)?,
+            }),
             2 => Ok(InputType::MouseMove),
             3 => {
-                if buf.remaining() < 8 { return Err(ProtocolError::UnexpectedEof { needed: 8, have: buf.remaining() }); }
-                Ok(InputType::MouseScroll { delta_x: buf.get_f32_le(), delta_y: buf.get_f32_le() })
+                if buf.remaining() < 8 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 8,
+                        have: buf.remaining(),
+                    });
+                }
+                Ok(InputType::MouseScroll {
+                    delta_x: buf.get_f32_le(),
+                    delta_y: buf.get_f32_le(),
+                })
             }
-            4 => Ok(InputType::KeyDown { key: Key::decode(buf)?, modifiers: Modifiers::decode(buf)? }),
-            5 => Ok(InputType::KeyUp { key: Key::decode(buf)?, modifiers: Modifiers::decode(buf)? }),
-            6 => Ok(InputType::TextInput { text: decode_string(buf)? }),
-            v => Err(ProtocolError::InvalidData(format!("invalid input type: {}", v))),
+            4 => Ok(InputType::KeyDown {
+                key: Key::decode(buf)?,
+                modifiers: Modifiers::decode(buf)?,
+            }),
+            5 => Ok(InputType::KeyUp {
+                key: Key::decode(buf)?,
+                modifiers: Modifiers::decode(buf)?,
+            }),
+            6 => Ok(InputType::TextInput {
+                text: decode_string(buf)?,
+            }),
+            v => Err(ProtocolError::InvalidData(format!(
+                "invalid input type: {}",
+                v
+            ))),
         }
     }
 }
@@ -1069,31 +1518,63 @@ impl Decode for InputEvent {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         let region_id = RegionId::decode(buf)?;
         let event_type = InputType::decode(buf)?;
-        if buf.remaining() < 8 { return Err(ProtocolError::UnexpectedEof { needed: 8, have: buf.remaining() }); }
-        Ok(InputEvent { region_id, event_type, x: buf.get_f32_le(), y: buf.get_f32_le() })
+        if buf.remaining() < 8 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 8,
+                have: buf.remaining(),
+            });
+        }
+        Ok(InputEvent {
+            region_id,
+            event_type,
+            x: buf.get_f32_le(),
+            y: buf.get_f32_le(),
+        })
     }
 }
 
 impl Encode for ResizeEvent {
-    fn encode(&self, buf: &mut BytesMut) { buf.put_u16_le(self.width); buf.put_u16_le(self.height); }
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u16_le(self.width);
+        buf.put_u16_le(self.height);
+    }
 }
 
 impl Decode for ResizeEvent {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); }
-        Ok(ResizeEvent { width: buf.get_u16_le(), height: buf.get_u16_le() })
+        if buf.remaining() < 4 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 4,
+                have: buf.remaining(),
+            });
+        }
+        Ok(ResizeEvent {
+            width: buf.get_u16_le(),
+            height: buf.get_u16_le(),
+        })
     }
 }
 
 impl Encode for FocusEvent {
-    fn encode(&self, buf: &mut BytesMut) { self.region_id.encode(buf); buf.put_u8(self.focused as u8); }
+    fn encode(&self, buf: &mut BytesMut) {
+        self.region_id.encode(buf);
+        buf.put_u8(self.focused as u8);
+    }
 }
 
 impl Decode for FocusEvent {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         let region_id = RegionId::decode(buf)?;
-        if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
-        Ok(FocusEvent { region_id, focused: buf.get_u8() != 0 })
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
+        Ok(FocusEvent {
+            region_id,
+            focused: buf.get_u8() != 0,
+        })
     }
 }
 
@@ -1108,24 +1589,43 @@ impl Encode for ScrollEvent {
 impl Decode for ScrollEvent {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         let region_id = RegionId::decode(buf)?;
-        if buf.remaining() < 8 { return Err(ProtocolError::UnexpectedEof { needed: 8, have: buf.remaining() }); }
-        Ok(ScrollEvent { region_id, scroll_x: buf.get_f32_le(), scroll_y: buf.get_f32_le() })
+        if buf.remaining() < 8 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 8,
+                have: buf.remaining(),
+            });
+        }
+        Ok(ScrollEvent {
+            region_id,
+            scroll_x: buf.get_f32_le(),
+            scroll_y: buf.get_f32_le(),
+        })
     }
 }
 
 impl Encode for LayoutTrigger {
-    fn encode(&self, buf: &mut BytesMut) { buf.put_u8(*self as u8); }
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u8(*self as u8);
+    }
 }
 
 impl Decode for LayoutTrigger {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
         match buf.get_u8() {
             0 => Ok(LayoutTrigger::Resize),
             1 => Ok(LayoutTrigger::ConstraintChange),
             2 => Ok(LayoutTrigger::ContentChange),
             3 => Ok(LayoutTrigger::TreeChange),
-            v => Err(ProtocolError::InvalidData(format!("invalid layout trigger: {}", v))),
+            v => Err(ProtocolError::InvalidData(format!(
+                "invalid layout trigger: {}",
+                v
+            ))),
         }
     }
 }
@@ -1148,7 +1648,12 @@ impl Encode for ComputedRegionLayout {
 impl Decode for ComputedRegionLayout {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         let id = RegionId::decode(buf)?;
-        if buf.remaining() < 33 { return Err(ProtocolError::UnexpectedEof { needed: 33, have: buf.remaining() }); }
+        if buf.remaining() < 33 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 33,
+                have: buf.remaining(),
+            });
+        }
         Ok(ComputedRegionLayout {
             id,
             x: buf.get_f32_le(),
@@ -1209,12 +1714,21 @@ impl Encode for AppMessage {
         let payload_start = buf.len();
 
         let type_code = match self {
-            AppMessage::ClientHello { version, requested_capabilities } => {
+            AppMessage::ClientHello {
+                version,
+                requested_capabilities,
+            } => {
                 buf.put_u16_le(*version);
                 buf.put_u32_le(*requested_capabilities);
                 msg_type::CLIENT_HELLO
             }
-            AppMessage::CreateRegion { id, parent, insert_index, constraints, style } => {
+            AppMessage::CreateRegion {
+                id,
+                parent,
+                insert_index,
+                constraints,
+                style,
+            } => {
                 id.encode(buf);
                 parent.encode(buf);
                 buf.put_i32_le(*insert_index);
@@ -1241,7 +1755,11 @@ impl Encode for AppMessage {
                 id.encode(buf);
                 msg_type::DELETE_REGION
             }
-            AppMessage::ReparentRegion { id, new_parent, insert_index } => {
+            AppMessage::ReparentRegion {
+                id,
+                new_parent,
+                insert_index,
+            } => {
                 id.encode(buf);
                 new_parent.encode(buf);
                 buf.put_i32_le(*insert_index);
@@ -1292,7 +1810,10 @@ impl Encode for AppMessage {
 impl Decode for AppMessage {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         if buf.remaining() < 8 {
-            return Err(ProtocolError::UnexpectedEof { needed: 8, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 8,
+                have: buf.remaining(),
+            });
         }
 
         let magic = buf.get_u16_le();
@@ -1301,11 +1822,27 @@ impl Decode for AppMessage {
         }
 
         let type_code = buf.get_u16_le();
-        let _payload_len = buf.get_u32_le();
+        let payload_len = buf.get_u32_le() as usize;
 
-        match type_code {
+        // Validate we have enough bytes for the declared payload
+        if buf.remaining() < payload_len {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: payload_len,
+                have: buf.remaining(),
+            });
+        }
+
+        // Track how many bytes we should consume
+        let expected_remaining = buf.remaining() - payload_len;
+
+        let result = match type_code {
             msg_type::CLIENT_HELLO => {
-                if buf.remaining() < 6 { return Err(ProtocolError::UnexpectedEof { needed: 6, have: buf.remaining() }); }
+                if buf.remaining() < 6 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 6,
+                        have: buf.remaining(),
+                    });
+                }
                 Ok(AppMessage::ClientHello {
                     version: buf.get_u16_le(),
                     requested_capabilities: buf.get_u32_le(),
@@ -1314,11 +1851,22 @@ impl Decode for AppMessage {
             msg_type::CREATE_REGION => {
                 let id = RegionId::decode(buf)?;
                 let parent = RegionId::decode(buf)?;
-                if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); }
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
                 let insert_index = buf.get_i32_le();
                 let constraints = Constraints::decode(buf)?;
                 let style = Style::decode(buf)?;
-                Ok(AppMessage::CreateRegion { id, parent, insert_index, constraints, style })
+                Ok(AppMessage::CreateRegion {
+                    id,
+                    parent,
+                    insert_index,
+                    constraints,
+                    style,
+                })
             }
             msg_type::SET_CONSTRAINTS => {
                 let id = RegionId::decode(buf)?;
@@ -1342,9 +1890,18 @@ impl Decode for AppMessage {
             msg_type::REPARENT_REGION => {
                 let id = RegionId::decode(buf)?;
                 let new_parent = RegionId::decode(buf)?;
-                if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); }
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
                 let insert_index = buf.get_i32_le();
-                Ok(AppMessage::ReparentRegion { id, new_parent, insert_index })
+                Ok(AppMessage::ReparentRegion {
+                    id,
+                    new_parent,
+                    insert_index,
+                })
             }
             msg_type::BEGIN_FRAME => {
                 let frame_id = FrameId::decode(buf)?;
@@ -1356,7 +1913,12 @@ impl Decode for AppMessage {
             }
             msg_type::SCROLL => {
                 let id = RegionId::decode(buf)?;
-                if buf.remaining() < 9 { return Err(ProtocolError::UnexpectedEof { needed: 9, have: buf.remaining() }); }
+                if buf.remaining() < 9 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 9,
+                        have: buf.remaining(),
+                    });
+                }
                 let x = buf.get_f32_le();
                 let y = buf.get_f32_le();
                 let animate = buf.get_u8() != 0;
@@ -1369,19 +1931,48 @@ impl Decode for AppMessage {
             msg_type::BLUR => Ok(AppMessage::Blur),
             msg_type::SUBSCRIBE => {
                 let id = RegionId::decode(buf)?;
-                if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); }
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
                 let events = buf.get_u32_le();
                 Ok(AppMessage::Subscribe { id, events })
             }
             msg_type::UNSUBSCRIBE => {
                 let id = RegionId::decode(buf)?;
-                if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); }
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
                 let events = buf.get_u32_le();
                 Ok(AppMessage::Unsubscribe { id, events })
             }
             msg_type::DISCONNECT => Ok(AppMessage::Disconnect),
             _ => Err(ProtocolError::UnknownMessageType(type_code)),
+        };
+
+        // Verify we consumed exactly the declared payload length
+        if result.is_ok() {
+            let actual_remaining = buf.remaining();
+            if actual_remaining < expected_remaining {
+                // Consumed more than declared - protocol violation
+                let over_read = expected_remaining - actual_remaining;
+                return Err(ProtocolError::InvalidData(format!(
+                    "payload overrun: consumed {} bytes beyond declared length {}",
+                    over_read, payload_len
+                )));
+            } else if actual_remaining > expected_remaining {
+                // Consumed less than declared - skip remaining bytes to stay in sync
+                let under_read = actual_remaining - expected_remaining;
+                buf.advance(under_read);
+            }
         }
+
+        result
     }
 }
 
@@ -1395,21 +1986,36 @@ impl Encode for TerminalMessage {
         let payload_start = buf.len();
 
         let type_code = match self {
-            TerminalMessage::ServerHello { version, capabilities } => {
+            TerminalMessage::ServerHello {
+                version,
+                capabilities,
+            } => {
                 buf.put_u16_le(*version);
                 buf.put_u32_le(*capabilities);
                 msg_type::SERVER_HELLO
             }
-            TerminalMessage::SessionReady { session_id, root_region, width, height } => {
+            TerminalMessage::SessionReady {
+                session_id,
+                root_region,
+                width,
+                height,
+            } => {
                 buf.put_u64_le(*session_id);
                 root_region.encode(buf);
                 buf.put_u16_le(*width);
                 buf.put_u16_le(*height);
                 msg_type::SESSION_READY
             }
-            TerminalMessage::LayoutComputed { frame_id, trigger, regions } => {
+            TerminalMessage::LayoutComputed {
+                frame_id,
+                trigger,
+                regions,
+            } => {
                 match frame_id {
-                    Some(id) => { buf.put_u8(1); id.encode(buf); }
+                    Some(id) => {
+                        buf.put_u8(1);
+                        id.encode(buf);
+                    }
                     None => buf.put_u8(0),
                 }
                 trigger.encode(buf);
@@ -1452,7 +2058,10 @@ impl Encode for TerminalMessage {
 impl Decode for TerminalMessage {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         if buf.remaining() < 8 {
-            return Err(ProtocolError::UnexpectedEof { needed: 8, have: buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 8,
+                have: buf.remaining(),
+            });
         }
 
         let magic = buf.get_u16_le();
@@ -1461,52 +2070,122 @@ impl Decode for TerminalMessage {
         }
 
         let type_code = buf.get_u16_le();
-        let _payload_len = buf.get_u32_le();
+        let payload_len = buf.get_u32_le() as usize;
 
-        match type_code {
+        // Validate we have enough bytes for the declared payload
+        if buf.remaining() < payload_len {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: payload_len,
+                have: buf.remaining(),
+            });
+        }
+
+        // Track how many bytes we should consume
+        let expected_remaining = buf.remaining() - payload_len;
+
+        let result = match type_code {
             msg_type::SERVER_HELLO => {
-                if buf.remaining() < 6 { return Err(ProtocolError::UnexpectedEof { needed: 6, have: buf.remaining() }); }
+                if buf.remaining() < 6 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 6,
+                        have: buf.remaining(),
+                    });
+                }
                 Ok(TerminalMessage::ServerHello {
                     version: buf.get_u16_le(),
                     capabilities: buf.get_u32_le(),
                 })
             }
             msg_type::SESSION_READY => {
-                if buf.remaining() < 16 { return Err(ProtocolError::UnexpectedEof { needed: 16, have: buf.remaining() }); }
+                if buf.remaining() < 16 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 16,
+                        have: buf.remaining(),
+                    });
+                }
                 let session_id = buf.get_u64_le();
                 let root_region = RegionId::decode(buf)?;
                 let width = buf.get_u16_le();
                 let height = buf.get_u16_le();
-                Ok(TerminalMessage::SessionReady { session_id, root_region, width, height })
+                Ok(TerminalMessage::SessionReady {
+                    session_id,
+                    root_region,
+                    width,
+                    height,
+                })
             }
             msg_type::LAYOUT_COMPUTED => {
-                if buf.remaining() < 1 { return Err(ProtocolError::UnexpectedEof { needed: 1, have: buf.remaining() }); }
+                if buf.remaining() < 1 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 1,
+                        have: buf.remaining(),
+                    });
+                }
                 let frame_id = match buf.get_u8() {
                     0 => None,
                     1 => Some(FrameId::decode(buf)?),
                     _ => return Err(ProtocolError::InvalidData("invalid option tag".into())),
                 };
                 let trigger = LayoutTrigger::decode(buf)?;
-                if buf.remaining() < 4 { return Err(ProtocolError::UnexpectedEof { needed: 4, have: buf.remaining() }); }
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
                 let count = buf.get_u32_le() as usize;
+                if count > MAX_REGION_COUNT {
+                    return Err(ProtocolError::InvalidData(format!(
+                        "region count {} exceeds maximum {}",
+                        count, MAX_REGION_COUNT
+                    )));
+                }
                 let mut regions = Vec::with_capacity(count);
                 for _ in 0..count {
                     regions.push(ComputedRegionLayout::decode(buf)?);
                 }
-                Ok(TerminalMessage::LayoutComputed { frame_id, trigger, regions })
+                Ok(TerminalMessage::LayoutComputed {
+                    frame_id,
+                    trigger,
+                    regions,
+                })
             }
             msg_type::INPUT => Ok(TerminalMessage::Input(InputEvent::decode(buf)?)),
             msg_type::RESIZE => Ok(TerminalMessage::Resize(ResizeEvent::decode(buf)?)),
             msg_type::FOCUS_EVENT => Ok(TerminalMessage::Focus(FocusEvent::decode(buf)?)),
             msg_type::SCROLL_EVENT => Ok(TerminalMessage::Scroll(ScrollEvent::decode(buf)?)),
             msg_type::ERROR => {
-                if buf.remaining() < 2 { return Err(ProtocolError::UnexpectedEof { needed: 2, have: buf.remaining() }); }
+                if buf.remaining() < 2 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 2,
+                        have: buf.remaining(),
+                    });
+                }
                 let code = buf.get_u16_le();
                 let message = decode_string(buf)?;
                 Ok(TerminalMessage::Error { code, message })
             }
             _ => Err(ProtocolError::UnknownMessageType(type_code)),
+        };
+
+        // Verify we consumed exactly the declared payload length
+        if result.is_ok() {
+            let actual_remaining = buf.remaining();
+            if actual_remaining < expected_remaining {
+                // Consumed more than declared - protocol violation
+                let over_read = expected_remaining - actual_remaining;
+                return Err(ProtocolError::InvalidData(format!(
+                    "payload overrun: consumed {} bytes beyond declared length {}",
+                    over_read, payload_len
+                )));
+            } else if actual_remaining > expected_remaining {
+                // Consumed less than declared - skip remaining bytes to stay in sync
+                let under_read = actual_remaining - expected_remaining;
+                buf.advance(under_read);
+            }
         }
+
+        result
     }
 }
 
@@ -1534,7 +2213,10 @@ mod tests {
 
     #[test]
     fn test_roundtrip_client_hello() {
-        let msg = AppMessage::ClientHello { version: 1, requested_capabilities: 0xDEADBEEF };
+        let msg = AppMessage::ClientHello {
+            version: 1,
+            requested_capabilities: 0xDEADBEEF,
+        };
         let bytes = msg.encode_to_bytes();
         let mut cursor = bytes.as_ref();
         let decoded = AppMessage::decode(&mut cursor).unwrap();

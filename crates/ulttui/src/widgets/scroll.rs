@@ -9,12 +9,11 @@ use ratatui::Frame;
 use super::View;
 use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
 use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimState};
-use ultty_protocol::{Constraints, OverflowAxis};
+use ultty_protocol::{AppMessage, Constraints, OverflowAxis, RegionId};
 
-/// Scrollable container with vim navigation support.
-#[derive(Debug)]
 pub struct ScrollView {
     constraints: Constraints,
+    child: Option<Box<dyn View>>,
     scroll_x: f32,
     scroll_y: f32,
     content_height: f32,
@@ -26,12 +25,22 @@ pub struct ScrollView {
     current_match: usize,
 }
 
+impl std::fmt::Debug for ScrollView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScrollView")
+            .field("scroll_y", &self.scroll_y)
+            .field("has_child", &self.child.is_some())
+            .finish()
+    }
+}
+
 impl Default for ScrollView {
     fn default() -> Self {
         let mut constraints = Constraints::default();
         constraints.overflow.y = OverflowAxis::Scroll;
         Self {
             constraints,
+            child: None,
             scroll_x: 0.0,
             scroll_y: 0.0,
             content_height: 0.0,
@@ -50,7 +59,8 @@ impl ScrollView {
         Self::default()
     }
 
-    pub fn child<V: View>(self, _child: V) -> Self {
+    pub fn child<V: View + 'static>(mut self, child: V) -> Self {
+        self.child = Some(Box::new(child));
         self
     }
 
@@ -155,39 +165,127 @@ impl View for ScrollView {
         self.constraints.clone()
     }
 
-    fn render_ansi(&self, frame: &mut Frame, area: Rect) {
-        let scroll_info = format!(
-            "Scroll: {:.0}/{:.0} | Mode: {:?}",
-            self.scroll_y,
-            self.content_height.max(1.0) - self.viewport_height,
-            self.vim_state.mode
-        );
+    fn style(&self) -> ultty_protocol::Style {
+        ultty_protocol::Style::new().border(ultty_protocol::BorderStyle::thin())
+    }
 
-        let search_info = if let Some(query) = &self.search_query {
-            format!(
-                " | Search: '{}' ({}/{})",
-                query,
-                if self.search_matches.is_empty() {
-                    0
-                } else {
-                    self.current_match + 1
-                },
-                self.search_matches.len()
-            )
+    fn content(&self) -> ultty_protocol::Content {
+        if self.child.is_some() {
+            ultty_protocol::Content::None
         } else {
-            String::new()
-        };
+            let scroll_info = format!(
+                "Scroll: {:.0}/{:.0}",
+                self.scroll_y,
+                self.content_height.max(1.0) - self.viewport_height
+            );
+            ultty_protocol::Content::Text(ultty_protocol::TextContent::new(scroll_info))
+        }
+    }
 
-        let status = format!("{}{}", scroll_info, search_info);
+    fn children_count(&self) -> usize {
+        if self.child.is_some() {
+            1
+        } else {
+            0
+        }
+    }
 
+    fn render_child_native(
+        &self,
+        index: usize,
+        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        parent: RegionId,
+        next_id: &mut u32,
+    ) -> anyhow::Result<Option<RegionId>> {
+        if index == 0 {
+            if let Some(child) = &self.child {
+                let region_id = RegionId::new(*next_id);
+                *next_id += 1;
+
+                send_message(&AppMessage::CreateRegion {
+                    id: region_id,
+                    parent,
+                    insert_index: -1,
+                    constraints: child.constraints(),
+                    style: child.style(),
+                })?;
+
+                let content = child.content();
+                if content != ultty_protocol::Content::None {
+                    send_message(&AppMessage::SetContent {
+                        id: region_id,
+                        content,
+                    })?;
+                }
+
+                for i in 0..child.children_count() {
+                    child.render_child_native(i, send_message, region_id, next_id)?;
+                }
+
+                return Ok(Some(region_id));
+            }
+        }
+        Ok(None)
+    }
+
+    fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
             .title("ScrollView")
             .border_style(Style::default().fg(Color::DarkGray));
 
-        let paragraph = Paragraph::new(Line::raw(status)).block(block);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
 
-        frame.render_widget(paragraph, area);
+        if let Some(child) = &self.child {
+            child.render_ansi(frame, inner);
+        } else {
+            let scroll_info = format!(
+                "Scroll: {:.0}/{:.0}",
+                self.scroll_y,
+                self.content_height.max(1.0) - self.viewport_height
+            );
+            let paragraph = Paragraph::new(Line::raw(scroll_info));
+            frame.render_widget(paragraph, inner);
+        }
+    }
+
+    fn is_focusable(&self) -> bool {
+        true
+    }
+
+    fn on_key(&mut self, key: &crate::event::KeyEvent) -> Option<super::FocusAction> {
+        use crate::event::Key;
+
+        match key.key {
+            Key::Char('j') | Key::Down => {
+                self.scroll_lines(1);
+                Some(super::FocusAction::Consumed)
+            }
+            Key::Char('k') | Key::Up => {
+                self.scroll_lines(-1);
+                Some(super::FocusAction::Consumed)
+            }
+            Key::Char('d') if key.modifiers.ctrl => {
+                self.scroll_by(self.half_page_size());
+                Some(super::FocusAction::Consumed)
+            }
+            Key::Char('u') if key.modifiers.ctrl => {
+                self.scroll_by(-self.half_page_size());
+                Some(super::FocusAction::Consumed)
+            }
+            Key::Char('g') => {
+                self.scroll_to_top();
+                Some(super::FocusAction::Consumed)
+            }
+            Key::Char('G') => {
+                self.scroll_to_bottom();
+                Some(super::FocusAction::Consumed)
+            }
+            Key::Tab if key.modifiers.shift => Some(super::FocusAction::Previous),
+            Key::Tab => Some(super::FocusAction::Next),
+            _ => None,
+        }
     }
 }
 

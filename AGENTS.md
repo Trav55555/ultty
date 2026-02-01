@@ -72,8 +72,10 @@ ultty/
 # Run terminal emulator
 cargo run -p ultty
 
-# Run example chat app
-cargo run -p example-chat
+# Run examples
+cargo run -p hello-native  # Raw protocol demo (run inside ultty)
+cargo run -p counter-app   # Framework counter app
+cargo run -p todo-app      # Framework todo list app
 
 # Run tests
 cargo test --workspace
@@ -99,13 +101,28 @@ cargo clippy --workspace --all-targets
 ## Current Status
 
 - [x] Protocol spec drafted
-- [ ] Protocol implementation
-- [ ] Terminal: VT100 parser
-- [ ] Terminal: GPU renderer
-- [ ] Terminal: Native protocol handler
-- [ ] Framework: Component system
-- [ ] Framework: ANSI fallback
-- [ ] Example: Chat app
+- [x] Protocol implementation (encode/decode)
+- [x] Terminal: VT100 parser
+- [x] Terminal: GPU renderer
+- [x] Terminal: Native protocol handler
+  - [x] NativeSession with scene tree + layout engine
+  - [x] ProtocolServer (Unix socket listener)
+  - [x] Event forwarding (keyboard, resize)
+  - [x] Content rendering (Text, RichText, Widgets)
+- [x] Framework: NativeBackend
+  - [x] Socket connection + handshake
+  - [x] View reconciliation
+  - [x] Event conversion
+- [x] Framework: Component system
+  - [x] View trait with native rendering support
+  - [x] Text, RichText, TextInput widgets
+  - [x] Button, List, ScrollView widgets
+  - [x] Column, Row, Stack containers
+- [x] Framework: ANSI fallback (via ratatui)
+- [x] Examples
+  - [x] hello-native (raw protocol demo)
+  - [x] counter-app (framework counter app)
+  - [x] todo-app (framework todo list app)
 
 ## Dependencies Policy
 

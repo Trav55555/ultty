@@ -47,6 +47,15 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.grid_mut().set_cursor_position(row, col);
             }
             Action::CursorPosition { row, col } => {
+                // When origin mode (DECOM) is enabled, cursor positions are relative
+                // to the scroll region, not the screen
+                let row = if self.terminal.modes().origin_mode {
+                    let region = self.terminal.grid().effective_scroll_region();
+                    // Add scroll region top offset (row is 1-based, region.top is 0-based)
+                    row.saturating_add(region.top)
+                } else {
+                    row
+                };
                 self.terminal.grid_mut().set_cursor_position(row, col);
             }
 
@@ -382,8 +391,12 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.grid_mut().cursor_mut().blinking = enabled;
             }
             Mode::ColumnMode132 => {
-                // 132 column mode - just log for now, actual resize requires window coordination
-                tracing::debug!("Column mode {} requested", if enabled { "132" } else { "80" });
+                // 132 column mode (DECCOLM) - request resize from app
+                let columns = if enabled { 132 } else { 80 };
+                self.terminal.request_column_resize(columns);
+                // Clear the screen when switching column modes (per DECCOLM spec)
+                self.terminal.grid_mut().clear();
+                self.terminal.grid_mut().cursor_mut().position = crate::grid::CursorPosition::origin();
             }
             Mode::AlternateScreen => {
                 if enabled {
@@ -409,6 +422,14 @@ impl<'a> TerminalHandler<'a> {
                     self.terminal.leave_alternate_screen();
                     self.terminal.grid_mut().cursor_mut().restore();
                 }
+            }
+            Mode::AlternateScrollMode => {
+                self.terminal.modes_mut().alternate_scroll = enabled;
+            }
+            Mode::SynchronizedUpdate => {
+                // Synchronized update mode - we acknowledge it but don't need special handling
+                // since we render on a consistent frame interval anyway
+                self.terminal.modes_mut().synchronized_update = enabled;
             }
         }
     }
@@ -640,7 +661,10 @@ mod tests {
 
     #[test]
     fn mouse_event_encoding_sgr() {
+        use crate::grid::MouseModifiers;
+
         let mut term = Terminal::new(Dimensions::new(80, 24));
+        let no_mods = MouseModifiers::default();
 
         // Enable SGR mouse mode
         process(&mut term, b"\x1b[?1000h"); // Normal tracking
@@ -648,27 +672,104 @@ mod tests {
 
         // Test left button press at column 10, row 5
         let event = term
-            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, false)
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, false, no_mods)
             .unwrap();
         assert_eq!(event, b"\x1b[<0;11;6M"); // 0-indexed to 1-indexed
 
         // Test left button release - SGR uses Left button with pressed=false
         let event = term
-            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, false, false)
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, false, false, no_mods)
             .unwrap();
         assert_eq!(event, b"\x1b[<0;11;6m"); // lowercase 'm' for release
 
         // Test scroll up
         let event = term
-            .encode_mouse_event(crate::grid::MouseButton::ScrollUp, 10, 5, true, false)
+            .encode_mouse_event(crate::grid::MouseButton::ScrollUp, 10, 5, true, false, no_mods)
             .unwrap();
         assert_eq!(event, b"\x1b[<64;11;6M"); // scroll up is button code 64
 
         // Test motion tracking
         process(&mut term, b"\x1b[?1003h"); // Any event mode
         let event = term
-            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, true)
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, true, no_mods)
             .unwrap();
         assert_eq!(event, b"\x1b[<32;11;6M"); // motion flag adds 32
+    }
+
+    #[test]
+    fn mouse_event_with_modifiers() {
+        use crate::grid::MouseModifiers;
+
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+
+        // Enable SGR mouse mode
+        process(&mut term, b"\x1b[?1000h"); // Normal tracking
+        process(&mut term, b"\x1b[?1006h"); // SGR encoding
+
+        // Test shift+click (adds 4 to button code)
+        let shift_mods = MouseModifiers::new(true, false, false, false);
+        let event = term
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, false, shift_mods)
+            .unwrap();
+        assert_eq!(event, b"\x1b[<4;11;6M"); // 0 + 4 = 4
+
+        // Test ctrl+click (adds 16 to button code)
+        let ctrl_mods = MouseModifiers::new(false, false, true, false);
+        let event = term
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, false, ctrl_mods)
+            .unwrap();
+        assert_eq!(event, b"\x1b[<16;11;6M"); // 0 + 16 = 16
+
+        // Test alt+click (adds 8 to button code)
+        let alt_mods = MouseModifiers::new(false, true, false, false);
+        let event = term
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, false, alt_mods)
+            .unwrap();
+        assert_eq!(event, b"\x1b[<8;11;6M"); // 0 + 8 = 8
+
+        // Test shift+ctrl+alt+click (adds 4 + 8 + 16 = 28)
+        let all_mods = MouseModifiers::new(true, true, true, false);
+        let event = term
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, false, all_mods)
+            .unwrap();
+        assert_eq!(event, b"\x1b[<28;11;6M"); // 0 + 4 + 8 + 16 = 28
+
+        // Test shift+middle click
+        let event = term
+            .encode_mouse_event(crate::grid::MouseButton::Middle, 10, 5, true, false, shift_mods)
+            .unwrap();
+        assert_eq!(event, b"\x1b[<5;11;6M"); // 1 + 4 = 5
+    }
+
+    #[test]
+    fn alternate_scroll_mode() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+
+        // Default: disabled
+        assert!(!term.modes().alternate_scroll);
+
+        // Enable alternate scroll mode
+        process(&mut term, b"\x1b[?1007h");
+        assert!(term.modes().alternate_scroll);
+
+        // Disable alternate scroll mode
+        process(&mut term, b"\x1b[?1007l");
+        assert!(!term.modes().alternate_scroll);
+    }
+
+    #[test]
+    fn synchronized_update_mode() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+
+        // Default: disabled
+        assert!(!term.modes().synchronized_update);
+
+        // Enable synchronized update mode
+        process(&mut term, b"\x1b[?2026h");
+        assert!(term.modes().synchronized_update);
+
+        // Disable synchronized update mode
+        process(&mut term, b"\x1b[?2026l");
+        assert!(!term.modes().synchronized_update);
     }
 }

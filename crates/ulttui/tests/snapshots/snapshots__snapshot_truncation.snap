@@ -1,0 +1,6 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+assertion_line: 164
+expression: output
+---
+This is a very long

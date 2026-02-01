@@ -6,6 +6,7 @@
 // Core modules (must be first as others depend on them)
 pub mod config;
 pub mod config_watcher;
+pub mod control;
 pub mod grid;
 pub mod protocol;
 pub mod pty;
@@ -17,6 +18,7 @@ pub mod scene;
 pub mod session;
 pub mod tabs;
 pub mod terminal_manager;
+pub mod testing;
 pub mod tmux;
 pub mod url;
 pub mod vim;

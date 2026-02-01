@@ -1,0 +1,6 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+assertion_line: 66
+expression: output
+---
+Hello 世 界  🌍  emoji

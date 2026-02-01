@@ -108,6 +108,10 @@ impl Modifiers {
             bits: self.bits | other.bits,
         }
     }
+
+    pub const fn contains(self, other: Modifiers) -> bool {
+        self.bits & other.bits == other.bits
+    }
 }
 
 /// Resize event.

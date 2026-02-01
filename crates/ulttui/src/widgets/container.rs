@@ -4,7 +4,39 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::Frame;
 
 use super::View;
-use ultty_protocol::{Constraints, Dimension, Display, FlexDirection};
+use ultty_protocol::{AppMessage, Constraints, Dimension, Display, FlexDirection, RegionId};
+
+fn render_child_to_native(
+    child: &dyn View,
+    send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+    parent: RegionId,
+    next_id: &mut u32,
+) -> anyhow::Result<RegionId> {
+    let region_id = RegionId::new(*next_id);
+    *next_id += 1;
+
+    send_message(&AppMessage::CreateRegion {
+        id: region_id,
+        parent,
+        insert_index: -1,
+        constraints: child.constraints(),
+        style: child.style(),
+    })?;
+
+    let content = child.content();
+    if content != ultty_protocol::Content::None {
+        send_message(&AppMessage::SetContent {
+            id: region_id,
+            content,
+        })?;
+    }
+
+    for i in 0..child.children_count() {
+        child.render_child_native(i, send_message, region_id, next_id)?;
+    }
+
+    Ok(region_id)
+}
 
 /// Vertical flex container.
 pub struct Column {
@@ -65,6 +97,29 @@ impl Column {
 impl View for Column {
     fn constraints(&self) -> Constraints {
         self.constraints.clone()
+    }
+
+    fn children_count(&self) -> usize {
+        self.children.len()
+    }
+
+    fn render_child_native(
+        &self,
+        index: usize,
+        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        parent: RegionId,
+        next_id: &mut u32,
+    ) -> anyhow::Result<Option<RegionId>> {
+        if let Some(child) = self.children.get(index) {
+            Ok(Some(render_child_to_native(
+                child.as_ref(),
+                send_message,
+                parent,
+                next_id,
+            )?))
+        } else {
+            Ok(None)
+        }
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
@@ -143,6 +198,29 @@ impl View for Row {
         self.constraints.clone()
     }
 
+    fn children_count(&self) -> usize {
+        self.children.len()
+    }
+
+    fn render_child_native(
+        &self,
+        index: usize,
+        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        parent: RegionId,
+        next_id: &mut u32,
+    ) -> anyhow::Result<Option<RegionId>> {
+        if let Some(child) = self.children.get(index) {
+            Ok(Some(render_child_to_native(
+                child.as_ref(),
+                send_message,
+                parent,
+                next_id,
+            )?))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         if self.children.is_empty() {
             return;
@@ -208,6 +286,29 @@ impl Stack {
 impl View for Stack {
     fn constraints(&self) -> Constraints {
         self.constraints.clone()
+    }
+
+    fn children_count(&self) -> usize {
+        self.children.len()
+    }
+
+    fn render_child_native(
+        &self,
+        index: usize,
+        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        parent: RegionId,
+        next_id: &mut u32,
+    ) -> anyhow::Result<Option<RegionId>> {
+        if let Some(child) = self.children.get(index) {
+            Ok(Some(render_child_to_native(
+                child.as_ref(),
+                send_message,
+                parent,
+                next_id,
+            )?))
+        } else {
+            Ok(None)
+        }
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {

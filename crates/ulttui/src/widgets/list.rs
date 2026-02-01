@@ -9,6 +9,9 @@ use ratatui::Frame;
 use super::View;
 use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
 use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimState};
+use ultty_protocol::{
+    BorderStyle, Color as ProtoColor, NamedColor, RichText, Span, Style as ProtoStyle,
+};
 
 /// A selectable list with vim navigation.
 #[derive(Debug)]
@@ -128,6 +131,39 @@ impl<T: AsRef<str>> List<T> {
 }
 
 impl<T: std::fmt::Display> View for List<T> {
+    fn style(&self) -> ProtoStyle {
+        ProtoStyle::new().border(BorderStyle::thin())
+    }
+
+    fn content(&self) -> ultty_protocol::Content {
+        let mut rich = RichText::new();
+
+        for (display_idx, &actual_idx) in self.filtered_indices.iter().enumerate() {
+            let item = &self.items[actual_idx];
+            let text = format!("{}", item);
+
+            let style = if display_idx == self.selected {
+                ProtoStyle::new()
+                    .fg(ProtoColor::Named(NamedColor::Black))
+                    .bg(ProtoColor::Named(NamedColor::White))
+                    .bold()
+            } else {
+                ProtoStyle::default()
+            };
+
+            rich.spans.push(Span { text, style });
+
+            if display_idx < self.filtered_indices.len() - 1 {
+                rich.spans.push(Span {
+                    text: "\n".to_string(),
+                    style: ProtoStyle::default(),
+                });
+            }
+        }
+
+        ultty_protocol::Content::RichText(rich)
+    }
+
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         let items: Vec<ListItem> = self
             .filtered_indices
@@ -169,6 +205,36 @@ impl<T: std::fmt::Display> View for List<T> {
             );
 
         frame.render_widget(list, area);
+    }
+
+    fn is_focusable(&self) -> bool {
+        true
+    }
+
+    fn on_key(&mut self, key: &crate::event::KeyEvent) -> Option<super::FocusAction> {
+        use crate::event::Key;
+
+        match key.key {
+            Key::Char('j') | Key::Down => {
+                self.move_selection(1);
+                Some(super::FocusAction::Consumed)
+            }
+            Key::Char('k') | Key::Up => {
+                self.move_selection(-1);
+                Some(super::FocusAction::Consumed)
+            }
+            Key::Char('g') => {
+                self.select_first();
+                Some(super::FocusAction::Consumed)
+            }
+            Key::Char('G') => {
+                self.select_last();
+                Some(super::FocusAction::Consumed)
+            }
+            Key::Tab if key.modifiers.shift => Some(super::FocusAction::Previous),
+            Key::Tab => Some(super::FocusAction::Next),
+            _ => None,
+        }
     }
 }
 

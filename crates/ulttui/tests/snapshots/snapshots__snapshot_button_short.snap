@@ -1,0 +1,6 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+assertion_line: 80
+expression: output
+---
+[ OK ]

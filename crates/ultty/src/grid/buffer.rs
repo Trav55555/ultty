@@ -92,6 +92,9 @@ impl Buffer {
 
     /// Push lines from grid top into history (called when grid scrolls up).
     pub fn push_to_history(&mut self, rows: Vec<Row>) {
+        if self.max_history == 0 {
+            return; // No history storage configured (e.g., alternate screen)
+        }
         for row in rows {
             if self.history.len() >= self.max_history {
                 self.history.remove(0);
@@ -156,10 +159,175 @@ impl Buffer {
         self.history.len()
     }
 
-    /// Resize the buffer.
+    /// Resize the buffer with proper reflow.
     pub fn resize(&mut self, new_dims: Dimensions) {
-        self.grid.resize(new_dims);
+        let old_dims = self.grid.dimensions();
+
+        if new_dims == old_dims {
+            return;
+        }
+
+        // If width changed, we need to reflow both history and grid together
+        if new_dims.cols != old_dims.cols {
+            self.reflow_all(new_dims);
+        } else {
+            // Only height changed - handle specially
+            self.resize_height(new_dims);
+        }
+
         self.scroll_offset = self.scroll_offset.min(self.history.len());
+    }
+
+    /// Handle resize when only height changes.
+    fn resize_height(&mut self, new_dims: Dimensions) {
+        let old_rows = self.grid.dimensions().rows as usize;
+        let new_rows = new_dims.rows as usize;
+
+        if new_rows < old_rows {
+            // Shrinking - move top rows to history, keep bottom rows in grid
+            let rows_to_move = old_rows - new_rows;
+            let grid_rows: Vec<Row> = self.grid.rows().take(rows_to_move).cloned().collect();
+            self.push_to_history(grid_rows);
+            // Remove those rows from the grid (shift everything up)
+            self.grid.remove_top_rows(rows_to_move);
+        }
+
+        self.grid.resize(new_dims);
+
+        if new_rows > old_rows {
+            // Growing - try to pull rows back from history
+            let rows_to_pull = (new_rows - old_rows).min(self.history.len());
+            if rows_to_pull > 0 {
+                // Pull from end of history (most recent)
+                let start = self.history.len() - rows_to_pull;
+                let pulled: Vec<Row> = self.history.drain(start..).collect();
+                // Insert at beginning of grid
+                self.grid.prepend_rows(pulled);
+            }
+        }
+    }
+
+    /// Reflow all content (history + visible grid) to new dimensions.
+    fn reflow_all(&mut self, new_dims: Dimensions) {
+        use crate::grid::cell::Cell;
+
+        let new_cols = new_dims.cols;
+        let new_rows = new_dims.rows as usize;
+
+        // Collect all logical lines from history and grid
+        let mut logical_lines: Vec<Vec<Cell>> = Vec::new();
+        let mut current_line: Vec<Cell> = Vec::new();
+
+        // Process history rows
+        for row in self.history.drain(..) {
+            for cell in row.cells() {
+                current_line.push(cell.clone());
+            }
+            if !row.is_wrapped() {
+                // Trim trailing blanks
+                while current_line.last().map_or(false, |c| c.is_blank()) {
+                    current_line.pop();
+                }
+                logical_lines.push(std::mem::take(&mut current_line));
+            }
+        }
+
+        // Process grid rows, but skip trailing blank rows
+        let grid_rows: Vec<_> = self.grid.rows().cloned().collect();
+
+        // Find the last non-blank row
+        let last_content_row = grid_rows.iter().rposition(|row| !row.is_blank()).unwrap_or(0);
+
+        for (idx, row) in grid_rows.iter().enumerate() {
+            // Skip trailing blank rows (but include blank rows that have content after them)
+            if idx > last_content_row && row.is_blank() {
+                continue;
+            }
+
+            for cell in row.cells() {
+                current_line.push(cell.clone());
+            }
+            if !row.is_wrapped() {
+                while current_line.last().map_or(false, |c| c.is_blank()) {
+                    current_line.pop();
+                }
+                logical_lines.push(std::mem::take(&mut current_line));
+            }
+        }
+
+        // Don't forget remaining cells from a wrapped line at the end
+        if !current_line.is_empty() {
+            while current_line.last().map_or(false, |c| c.is_blank()) {
+                current_line.pop();
+            }
+            logical_lines.push(current_line);
+        }
+
+        // Remove trailing empty logical lines (these are just viewport padding)
+        while logical_lines.last().map_or(false, |line| line.is_empty()) {
+            logical_lines.pop();
+        }
+
+        // Re-wrap all logical lines to new width
+        let mut all_rows: Vec<Row> = Vec::new();
+
+        for line in logical_lines {
+            if line.is_empty() {
+                // Preserve intentional blank lines (from hard line breaks)
+                all_rows.push(Row::new(new_cols));
+                continue;
+            }
+
+            let mut pos = 0;
+            while pos < line.len() {
+                let mut new_row = Row::new(new_cols);
+                let mut col = 0u16;
+
+                while (col as usize) < new_cols as usize && pos < line.len() {
+                    let cell = &line[pos];
+                    if let Some(dest) = new_row.get_mut(col) {
+                        *dest = cell.clone();
+                    }
+                    col += 1;
+                    pos += 1;
+                }
+
+                // Mark as wrapped if more content follows
+                if pos < line.len() {
+                    new_row.set_wrapped(true);
+                }
+
+                all_rows.push(new_row);
+            }
+        }
+
+        // Ensure we have at least new_rows rows (add empty rows at end if needed)
+        while all_rows.len() < new_rows {
+            all_rows.push(Row::new(new_cols));
+        }
+
+        // Split into history and visible grid
+        // Keep the last new_rows rows in the grid, rest goes to history
+        if all_rows.len() > new_rows {
+            let split_point = all_rows.len() - new_rows;
+            if self.max_history > 0 {
+                self.history = all_rows.drain(..split_point).collect();
+
+                // Trim history to max size (remove oldest)
+                while self.history.len() > self.max_history {
+                    self.history.remove(0);
+                }
+            } else {
+                // No history storage - discard overflow rows
+                all_rows.drain(..split_point);
+                self.history.clear();
+            }
+        } else {
+            self.history.clear();
+        }
+
+        // Update grid with remaining rows
+        self.grid.set_rows(all_rows, new_dims);
     }
 
     /// Write a character (delegates to grid, handles history on scroll).
@@ -293,5 +461,114 @@ mod tests {
 
         // Grid first row should be empty
         assert_eq!(buf.grid().cell(0, 0).unwrap().char(), ' ');
+    }
+
+    #[test]
+    fn resize_reflows_content_narrower() {
+        let mut buf = Buffer::new(Dimensions::new(20, 5));
+
+        // Write a long line that will wrap when narrowed
+        let text = "Hello World!!!!!";
+        for c in text.chars() {
+            buf.grid_mut().write_char(c);
+        }
+
+        // Verify initial state - should fit on one row
+        assert_eq!(buf.grid().row(0).unwrap().text_trimmed(), text);
+
+        // Narrow to 10 columns
+        buf.resize(Dimensions::new(10, 5));
+
+        // Content should now span two rows
+        assert_eq!(buf.grid().row(0).unwrap().text_trimmed(), "Hello Worl");
+        assert_eq!(buf.grid().row(1).unwrap().text_trimmed(), "d!!!!!");
+        assert!(buf.grid().row(0).unwrap().is_wrapped());
+    }
+
+    #[test]
+    fn resize_reflows_content_wider() {
+        let mut buf = Buffer::new(Dimensions::new(10, 5));
+
+        // Write a line that wraps at 10 columns
+        let text = "Hello World!!!!!";
+        for c in text.chars() {
+            buf.grid_mut().write_char(c);
+        }
+
+        // Should be wrapped across two rows
+        assert!(buf.grid().row(0).unwrap().is_wrapped());
+
+        // Widen to 20 columns
+        buf.resize(Dimensions::new(20, 5));
+
+        // Content should now fit on one row
+        assert_eq!(buf.grid().row(0).unwrap().text_trimmed(), text);
+        assert!(!buf.grid().row(0).unwrap().is_wrapped());
+    }
+
+    #[test]
+    fn resize_height_shrink_moves_to_history() {
+        let mut buf = Buffer::new(Dimensions::new(20, 5));
+
+        // Directly set cells in each row using a single borrow
+        {
+            let grid = buf.grid_mut();
+            grid.row_mut(0).unwrap()[0].set_char('A');
+            grid.row_mut(1).unwrap()[0].set_char('B');
+            grid.row_mut(2).unwrap()[0].set_char('C');
+            grid.row_mut(3).unwrap()[0].set_char('D');
+            grid.row_mut(4).unwrap()[0].set_char('E');
+        }
+
+        // Verify initial state - cell() takes (col, row)
+        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'A');
+        assert_eq!(buf.grid().cell(0, 4).unwrap().char(), 'E');
+
+        // Shrink height from 5 to 3 (width stays same)
+        buf.resize(Dimensions::new(20, 3));
+
+        // Top 2 rows (A, B) should move to history
+        assert_eq!(buf.history_len(), 2);
+        assert_eq!(buf.history[0][0].char(), 'A');
+        assert_eq!(buf.history[1][0].char(), 'B');
+
+        // Grid should have C, D, E - cell() takes (col, row)
+        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'C');
+        assert_eq!(buf.grid().cell(0, 1).unwrap().char(), 'D');
+        assert_eq!(buf.grid().cell(0, 2).unwrap().char(), 'E');
+    }
+
+    #[test]
+    fn resize_height_grow_pulls_from_history() {
+        let mut buf = Buffer::new(Dimensions::new(20, 3));
+
+        // Add history
+        let mut row_a = Row::new(20);
+        row_a[0].set_char('A');
+        let mut row_b = Row::new(20);
+        row_b[0].set_char('B');
+        buf.push_to_history(vec![row_a, row_b]);
+
+        // Directly set cells in grid
+        {
+            let grid = buf.grid_mut();
+            grid.row_mut(0).unwrap()[0].set_char('C');
+            grid.row_mut(1).unwrap()[0].set_char('D');
+        }
+
+        // Verify state: 2 in history (A, B), grid has C, D, empty - cell() takes (col, row)
+        assert_eq!(buf.history_len(), 2);
+        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'C');  // col 0, row 0
+
+        // Grow height from 3 to 5 (width stays same)
+        buf.resize(Dimensions::new(20, 5));
+
+        // History should be pulled into grid
+        // History rows A, B should now be at top of grid - cell() takes (col, row)
+        assert_eq!(buf.history_len(), 0);
+        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'A');  // col 0, row 0
+        assert_eq!(buf.grid().cell(0, 1).unwrap().char(), 'B');  // col 0, row 1
+        assert_eq!(buf.grid().cell(0, 2).unwrap().char(), 'C');  // col 0, row 2
+        assert_eq!(buf.grid().cell(0, 3).unwrap().char(), 'D');  // col 0, row 3
     }
 }

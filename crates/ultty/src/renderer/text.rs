@@ -48,7 +48,8 @@ impl TextRenderer {
 
         // Measure cell dimensions using a sample character
         let font_family = font_config.family.clone();
-        let (cell_width, cell_height) = Self::measure_cell_with_font(&mut font_system, metrics, &font_family);
+        let (cell_width, cell_height) =
+            Self::measure_cell_with_font(&mut font_system, metrics, &font_family);
 
         // Create glyph atlas
         let atlas = GlyphAtlas::new(device.clone(), queue);
@@ -90,7 +91,11 @@ impl TextRenderer {
     }
 
     /// Measure cell dimensions for a monospace font.
-    fn measure_cell_with_font(font_system: &mut FontSystem, metrics: Metrics, font_family: &str) -> (f32, f32) {
+    fn measure_cell_with_font(
+        font_system: &mut FontSystem,
+        metrics: Metrics,
+        font_family: &str,
+    ) -> (f32, f32) {
         let mut buffer = Buffer::new(font_system, metrics);
 
         // Use configured font or system monospace
@@ -137,6 +142,141 @@ impl TextRenderer {
         self.ligatures
     }
 
+    /// Get the current font size.
+    pub fn font_size(&self) -> f32 {
+        self.metrics.font_size
+    }
+
+    /// Set the font size and recalculate cell dimensions.
+    pub fn set_font_size(&mut self, size: f32) {
+        // Clamp to reasonable range
+        let size = size.clamp(6.0, 72.0);
+
+        // Calculate new metrics with same line height ratio
+        let line_height_ratio = self.metrics.line_height / self.metrics.font_size;
+        let new_line_height = (size * line_height_ratio).ceil();
+        self.metrics = Metrics::new(size, new_line_height);
+
+        // Recalculate cell dimensions
+        let (width, height) =
+            Self::measure_cell_with_font(&mut self.font_system, self.metrics, &self.font_family);
+        self.cell_width = width;
+        self.cell_height = height;
+
+        // Clear glyph atlas since metrics changed
+        self.atlas.clear();
+    }
+
+    pub fn build_simple_text_vertices(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        fg: Rgba,
+    ) -> (Vec<Vertex>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
+        buffer.set_size(&mut self.font_system, 10000.0, self.cell_height * 2.0);
+
+        let shaping = self.get_shaping();
+        let attrs = if self.font_family.is_empty() {
+            Attrs::new().family(Family::Monospace)
+        } else {
+            Attrs::new().family(Family::Name(&self.font_family))
+        };
+
+        buffer.set_text(&mut self.font_system, text, attrs, shaping);
+
+        let mut cursor_x = x;
+        for run in buffer.layout_runs() {
+            for glyph in run.glyphs.iter() {
+                let physical = glyph.physical((0.0, 0.0), 1.0);
+
+                if let Some(glyph_info) = self
+                    .atlas
+                    .get_glyph(&mut self.font_system, physical.cache_key)
+                {
+                    if glyph_info.width == 0.0 || glyph_info.height == 0.0 {
+                        continue;
+                    }
+
+                    let gx = cursor_x + glyph_info.left + physical.x as f32;
+                    let gy = y + (self.cell_height - glyph_info.top) + physical.y as f32;
+
+                    self.emit_glyph_quad(&mut vertices, &mut indices, gx, gy, &glyph_info, fg);
+                }
+
+                cursor_x += glyph.w;
+            }
+        }
+
+        (vertices, indices)
+    }
+
+    /// Build vertices for styled text (with bold/italic support).
+    /// Returns (vertices, indices, advance_x) where advance_x is the total width.
+    pub fn build_styled_text_vertices(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        fg: Rgba,
+        bold: bool,
+        italic: bool,
+    ) -> (Vec<Vertex>, Vec<u32>, f32) {
+        use cosmic_text::{Style as CosmicStyle, Weight};
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
+        buffer.set_size(&mut self.font_system, 10000.0, self.cell_height * 2.0);
+
+        let shaping = self.get_shaping();
+        let mut attrs = if self.font_family.is_empty() {
+            Attrs::new().family(Family::Monospace)
+        } else {
+            Attrs::new().family(Family::Name(&self.font_family))
+        };
+
+        if bold {
+            attrs = attrs.weight(Weight::BOLD);
+        }
+        if italic {
+            attrs = attrs.style(CosmicStyle::Italic);
+        }
+
+        buffer.set_text(&mut self.font_system, text, attrs, shaping);
+
+        let mut cursor_x = x;
+        let start_x = x;
+        for run in buffer.layout_runs() {
+            for glyph in run.glyphs.iter() {
+                let physical = glyph.physical((0.0, 0.0), 1.0);
+
+                if let Some(glyph_info) = self
+                    .atlas
+                    .get_glyph(&mut self.font_system, physical.cache_key)
+                {
+                    if glyph_info.width == 0.0 || glyph_info.height == 0.0 {
+                        continue;
+                    }
+
+                    let gx = cursor_x + glyph_info.left + physical.x as f32;
+                    let gy = y + (self.cell_height - glyph_info.top) + physical.y as f32;
+
+                    self.emit_glyph_quad(&mut vertices, &mut indices, gx, gy, &glyph_info, fg);
+                }
+
+                cursor_x += glyph.w;
+            }
+        }
+
+        (vertices, indices, cursor_x - start_x)
+    }
+
     /// Render text from terminal state.
     pub fn render(
         &mut self,
@@ -149,7 +289,17 @@ impl TextRenderer {
         y_offset: f32,
         uniform_bind_group: &wgpu::BindGroup,
     ) -> Result<(), wgpu::SurfaceError> {
-        self.render_with_offset(encoder, view, terminal, color_scheme, cell_width, cell_height, 0.0, y_offset, uniform_bind_group)
+        self.render_with_offset(
+            encoder,
+            view,
+            terminal,
+            color_scheme,
+            cell_width,
+            cell_height,
+            0.0,
+            y_offset,
+            uniform_bind_group,
+        )
     }
 
     /// Render text from terminal state with X and Y offset.
@@ -165,8 +315,14 @@ impl TextRenderer {
         y_offset: f32,
         uniform_bind_group: &wgpu::BindGroup,
     ) -> Result<(), wgpu::SurfaceError> {
-        let (vertices, indices) =
-            self.build_text_vertices_with_offset(terminal, color_scheme, cell_width, cell_height, x_offset, y_offset);
+        let (vertices, indices) = self.build_text_vertices_with_offset(
+            terminal,
+            color_scheme,
+            cell_width,
+            cell_height,
+            x_offset,
+            y_offset,
+        );
 
         if vertices.is_empty() {
             return Ok(());
@@ -235,6 +391,8 @@ impl TextRenderer {
 
         // Create a cosmic-text buffer for shaping
         let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
+        // Set buffer size to allow layout - use a large enough size for single characters
+        buffer.set_size(&mut self.font_system, cell_width * 4.0, cell_height * 2.0);
         let shaping = self.get_shaping();
 
         for row_idx in 0..dims.rows {
@@ -258,7 +416,8 @@ impl TextRenderer {
 
                 // Get the full grapheme (base char + combining chars)
                 let grapheme = if cell.has_flag(CellFlags::HAS_COMBINING) {
-                    grid.grapheme(row_idx, col_idx).unwrap_or_else(|| ch.to_string())
+                    grid.grapheme(row_idx, col_idx)
+                        .unwrap_or_else(|| ch.to_string())
                 } else {
                     ch.to_string()
                 };
@@ -272,7 +431,12 @@ impl TextRenderer {
 
                 // Handle dim
                 let fg_color = if cell.has_flag(CellFlags::DIM) {
-                    Rgba::new(fg_color.r * 0.5, fg_color.g * 0.5, fg_color.b * 0.5, fg_color.a)
+                    Rgba::new(
+                        fg_color.r * 0.5,
+                        fg_color.g * 0.5,
+                        fg_color.b * 0.5,
+                        fg_color.a,
+                    )
                 } else {
                     fg_color
                 };
@@ -297,8 +461,9 @@ impl TextRenderer {
                         let physical = glyph.physical((0.0, 0.0), 1.0);
 
                         // Get or cache the glyph
-                        if let Some(glyph_info) =
-                            self.atlas.get_glyph(&mut self.font_system, physical.cache_key)
+                        if let Some(glyph_info) = self
+                            .atlas
+                            .get_glyph(&mut self.font_system, physical.cache_key)
                         {
                             // Skip zero-size glyphs
                             if glyph_info.width == 0.0 || glyph_info.height == 0.0 {
@@ -306,8 +471,14 @@ impl TextRenderer {
                             }
 
                             // Calculate position (offset by pane position)
-                            let x = col_idx as f32 * cell_width + glyph_info.left + physical.x as f32 + x_offset;
-                            let y = row_idx as f32 * cell_height + (cell_height - glyph_info.top) + physical.y as f32 + y_offset;
+                            let x = col_idx as f32 * cell_width
+                                + glyph_info.left
+                                + physical.x as f32
+                                + x_offset;
+                            let y = row_idx as f32 * cell_height
+                                + (cell_height - glyph_info.top)
+                                + physical.y as f32
+                                + y_offset;
 
                             // Emit quad
                             self.emit_glyph_quad(
@@ -394,6 +565,8 @@ impl TextRenderer {
         }
 
         let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
+        // Set buffer size to allow layout
+        buffer.set_size(&mut self.font_system, max_width, self.cell_height * 2.0);
         let shaping = self.get_shaping();
 
         // Use configured font or system monospace
@@ -415,21 +588,17 @@ impl TextRenderer {
                 if current_x + glyph.w > max_x {
                     // Add ellipsis if there's room
                     if current_x + self.cell_width < max_x {
-                        self.render_char_at(
-                            &mut vertices,
-                            &mut indices,
-                            '…',
-                            current_x,
-                            y,
-                            color,
-                        );
+                        self.render_char_at(&mut vertices, &mut indices, '…', current_x, y, color);
                     }
                     break;
                 }
 
                 let physical = glyph.physical((0.0, 0.0), 1.0);
 
-                if let Some(glyph_info) = self.atlas.get_glyph(&mut self.font_system, physical.cache_key) {
+                if let Some(glyph_info) = self
+                    .atlas
+                    .get_glyph(&mut self.font_system, physical.cache_key)
+                {
                     if glyph_info.width > 0.0 && glyph_info.height > 0.0 {
                         let gx = current_x + glyph_info.left + physical.x as f32;
                         let gy = y + (self.cell_height - glyph_info.top) + physical.y as f32;
@@ -463,6 +632,12 @@ impl TextRenderer {
         color: Rgba,
     ) {
         let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
+        // Set buffer size to allow layout
+        buffer.set_size(
+            &mut self.font_system,
+            self.cell_width * 4.0,
+            self.cell_height * 2.0,
+        );
         let shaping = self.get_shaping();
 
         let attrs = if self.font_family.is_empty() {
@@ -477,7 +652,10 @@ impl TextRenderer {
             if let Some(glyph) = run.glyphs.first() {
                 let physical = glyph.physical((0.0, 0.0), 1.0);
 
-                if let Some(glyph_info) = self.atlas.get_glyph(&mut self.font_system, physical.cache_key) {
+                if let Some(glyph_info) = self
+                    .atlas
+                    .get_glyph(&mut self.font_system, physical.cache_key)
+                {
                     if glyph_info.width > 0.0 && glyph_info.height > 0.0 {
                         let gx = x + glyph_info.left + physical.x as f32;
                         let gy = y + (self.cell_height - glyph_info.top) + physical.y as f32;
@@ -519,5 +697,46 @@ mod tests {
         let metrics = Metrics::new(14.0, 18.0);
         assert_eq!(metrics.font_size, 14.0);
         assert_eq!(metrics.line_height, 18.0);
+    }
+
+    /// This test verifies that cosmic-text Buffer requires set_size before layout_runs
+    /// will return any runs. This was the root cause of the "grey screen" bug where
+    /// text wasn't rendering because layout_runs() returned an empty iterator.
+    #[test]
+    fn cosmic_text_buffer_requires_set_size_for_layout() {
+        let mut font_system = FontSystem::new();
+        let metrics = Metrics::new(14.0, 18.0);
+
+        // Create buffer WITHOUT set_size - this was the bug
+        let mut buffer_without_size = Buffer::new(&mut font_system, metrics);
+        let attrs = Attrs::new().family(Family::Monospace);
+        buffer_without_size.set_text(&mut font_system, "Hello", attrs, Shaping::Advanced);
+
+        // Without set_size, layout_runs() returns empty
+        let runs_without_size: Vec<_> = buffer_without_size.layout_runs().collect();
+        assert!(
+            runs_without_size.is_empty(),
+            "Expected no layout runs without set_size (this proves the bug existed)"
+        );
+
+        // Create buffer WITH set_size - this is the fix
+        let mut buffer_with_size = Buffer::new(&mut font_system, metrics);
+        buffer_with_size.set_size(&mut font_system, 200.0, 50.0);
+        buffer_with_size.set_text(&mut font_system, "Hello", attrs, Shaping::Advanced);
+
+        // With set_size, layout_runs() returns runs
+        let runs_with_size: Vec<_> = buffer_with_size.layout_runs().collect();
+        assert!(
+            !runs_with_size.is_empty(),
+            "Expected layout runs with set_size (the fix works)"
+        );
+
+        // Verify we got glyphs
+        let glyph_count: usize = runs_with_size.iter().map(|r| r.glyphs.len()).sum();
+        assert!(
+            glyph_count >= 5, // "Hello" should have at least 5 glyphs
+            "Expected at least 5 glyphs for 'Hello', got {}",
+            glyph_count
+        );
     }
 }

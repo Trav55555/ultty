@@ -70,6 +70,9 @@ impl EventLoop {
         let poller = Poller::new()?;
 
         // Register PTY fd for reading
+        // SAFETY: The PTY file descriptor is valid and owned by `child` for the
+        // lifetime of this EventLoop. The poller only uses it for edge-triggered
+        // notifications, not for reading/writing.
         unsafe {
             poller.add(child.pty().as_raw_fd(), Event::readable(0))?;
         }
@@ -96,6 +99,9 @@ impl EventLoop {
         let poller = Poller::new()?;
 
         // Register PTY fd for reading
+        // SAFETY: The PTY file descriptor is valid and owned by `child` for the
+        // lifetime of this EventLoop. The poller only uses it for edge-triggered
+        // notifications, not for reading/writing.
         unsafe {
             poller.add(child.pty().as_raw_fd(), Event::readable(0))?;
         }
@@ -127,6 +133,9 @@ impl EventLoop {
 
         let poller = Poller::new()?;
 
+        // SAFETY: The PTY file descriptor is valid and owned by `child` for the
+        // lifetime of this EventLoop. The poller only uses it for edge-triggered
+        // notifications, not for reading/writing.
         unsafe {
             poller.add(child.pty().as_raw_fd(), Event::readable(0))?;
         }
@@ -206,8 +215,10 @@ impl EventLoop {
             match self.child.read(&mut self.read_buf) {
                 Ok(0) => break, // No more data available
                 Ok(n) => {
-                    // Parse and process the data
-                    self.process_bytes(&self.read_buf[..n].to_vec());
+                    // Process data directly - temporarily swap buffer to avoid borrow conflict
+                    let buf = std::mem::take(&mut self.read_buf);
+                    self.process_bytes(&buf[..n]);
+                    self.read_buf = buf;
                     self.events.push(TerminalEvent::Redraw);
                 }
                 Err(crate::pty::PtyError::Closed) => {

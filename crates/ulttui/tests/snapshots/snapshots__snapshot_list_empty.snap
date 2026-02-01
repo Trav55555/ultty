@@ -1,0 +1,10 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+assertion_line: 128
+expression: output
+---
+┌List [0/0]──────────────────┐
+│                            │
+│                            │
+│                            │
+└────────────────────────────┘

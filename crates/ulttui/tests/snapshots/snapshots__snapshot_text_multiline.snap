@@ -1,0 +1,8 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+assertion_line: 59
+expression: output
+---
+Line 1
+Line 2
+Line 3

@@ -57,6 +57,11 @@ pub struct TerminalModes {
     /// Bits: 0=disambiguate, 1=report event types, 2=report alternate keys,
     ///       3=report all keys as escape, 4=report associated text
     pub kitty_keyboard_flags: u8,
+    /// Alternate scroll mode - when enabled, scroll events scroll the alternate screen
+    /// instead of being sent as arrow keys
+    pub alternate_scroll: bool,
+    /// Synchronized update mode - batches screen updates for flicker-free rendering
+    pub synchronized_update: bool,
 }
 
 /// Kitty keyboard protocol flag bits.
@@ -125,6 +130,8 @@ pub struct Terminal {
     current_hyperlink_id: u32,
     /// Stack of Kitty keyboard mode flags
     kitty_keyboard_stack: Vec<u8>,
+    /// Pending column mode resize request (132 or 80 columns, DECCOLM)
+    pending_column_resize: Option<u16>,
 }
 
 impl Terminal {
@@ -144,6 +151,7 @@ impl Terminal {
             next_hyperlink_id: 1, // 0 means no hyperlink
             current_hyperlink_id: 0,
             kitty_keyboard_stack: Vec::new(),
+            pending_column_resize: None,
         }
     }
 
@@ -548,6 +556,27 @@ impl Terminal {
         self.selection = None;
     }
 
+    /// Request a column mode resize (DECCOLM - 132 or 80 columns).
+    ///
+    /// This sets a pending resize request that should be consumed by the
+    /// application layer to resize the window/terminal accordingly.
+    pub fn request_column_resize(&mut self, columns: u16) {
+        self.pending_column_resize = Some(columns);
+        tracing::debug!("Requested column resize to {} columns", columns);
+    }
+
+    /// Take the pending column resize request, if any.
+    ///
+    /// Returns the requested column count (132 or 80) and clears the request.
+    pub fn take_column_resize_request(&mut self) -> Option<u16> {
+        self.pending_column_resize.take()
+    }
+
+    /// Check if there's a pending column resize request.
+    pub fn has_column_resize_request(&self) -> bool {
+        self.pending_column_resize.is_some()
+    }
+
     // === Damage tracking ===
 
     /// Check if the active buffer has any dirty content.
@@ -580,6 +609,10 @@ impl Terminal {
     /// Generate mouse event bytes for the terminal.
     ///
     /// Returns None if mouse tracking is disabled.
+    ///
+    /// The `modifiers` parameter allows including keyboard modifier state
+    /// (shift, alt, ctrl, meta) in the mouse report, which is used by
+    /// applications like neovim for shift+click functionality.
     pub fn encode_mouse_event(
         &self,
         button: MouseButton,
@@ -587,6 +620,7 @@ impl Terminal {
         y: u16,
         pressed: bool,
         motion: bool,
+        modifiers: MouseModifiers,
     ) -> Option<Vec<u8>> {
         if self.modes.mouse_mode == MouseMode::None {
             return None;
@@ -608,11 +642,11 @@ impl Terminal {
 
         // Encode based on format
         match self.modes.mouse_encoding {
-            MouseEncoding::Sgr => Some(self.encode_mouse_sgr(button, x, y, pressed, motion)),
+            MouseEncoding::Sgr => Some(self.encode_mouse_sgr(button, x, y, pressed, motion, modifiers)),
             MouseEncoding::X10 | MouseEncoding::Utf8 => {
-                Some(self.encode_mouse_x10(button, x, y, pressed, motion))
+                Some(self.encode_mouse_x10(button, x, y, pressed, motion, modifiers))
             }
-            MouseEncoding::Urxvt => Some(self.encode_mouse_urxvt(button, x, y, pressed, motion)),
+            MouseEncoding::Urxvt => Some(self.encode_mouse_urxvt(button, x, y, pressed, motion, modifiers)),
         }
     }
 
@@ -624,6 +658,7 @@ impl Terminal {
         y: u16,
         pressed: bool,
         motion: bool,
+        modifiers: MouseModifiers,
     ) -> Vec<u8> {
         let mut cb = match button {
             MouseButton::Left => 0,
@@ -633,6 +668,9 @@ impl Terminal {
             MouseButton::ScrollUp => 64,
             MouseButton::ScrollDown => 65,
         };
+
+        // Add modifier bits: Shift=4, Meta/Alt=8, Control=16
+        cb += modifiers.bits();
 
         if motion {
             cb += 32;
@@ -655,6 +693,7 @@ impl Terminal {
         y: u16,
         pressed: bool,
         motion: bool,
+        modifiers: MouseModifiers,
     ) -> Vec<u8> {
         let mut cb = match button {
             MouseButton::Left => 0,
@@ -665,11 +704,14 @@ impl Terminal {
             MouseButton::ScrollDown => 65,
         };
 
+        // Add modifier bits: Shift=4, Meta/Alt=8, Control=16
+        cb += modifiers.bits();
+
         if motion {
             cb += 32;
         }
         if !pressed && !matches!(button, MouseButton::ScrollUp | MouseButton::ScrollDown) {
-            cb = 3; // Release
+            cb = 3 + modifiers.bits(); // Release with modifiers
         }
 
         // Add 32 to make printable, clamp to 223
@@ -688,6 +730,7 @@ impl Terminal {
         y: u16,
         pressed: bool,
         motion: bool,
+        modifiers: MouseModifiers,
     ) -> Vec<u8> {
         let mut cb = match button {
             MouseButton::Left => 0,
@@ -698,11 +741,14 @@ impl Terminal {
             MouseButton::ScrollDown => 65,
         };
 
+        // Add modifier bits: Shift=4, Meta/Alt=8, Control=16
+        cb += modifiers.bits();
+
         if motion {
             cb += 32;
         }
         if !pressed && !matches!(button, MouseButton::ScrollUp | MouseButton::ScrollDown) {
-            cb = 3;
+            cb = 3 + modifiers.bits(); // Release with modifiers
         }
 
         format!("\x1b[{};{};{}M", cb + 32, x + 1, y + 1).into_bytes()
@@ -718,6 +764,43 @@ pub enum MouseButton {
     Release,
     ScrollUp,
     ScrollDown,
+}
+
+/// Mouse modifiers for event encoding.
+///
+/// These modifiers are included in mouse event reports when held during
+/// mouse actions. They add bits to the button code:
+/// - Shift: +4
+/// - Meta/Alt: +8
+/// - Control: +16
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MouseModifiers {
+    pub shift: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+    pub meta: bool,
+}
+
+impl MouseModifiers {
+    /// Create new mouse modifiers.
+    pub fn new(shift: bool, alt: bool, ctrl: bool, meta: bool) -> Self {
+        Self { shift, alt, ctrl, meta }
+    }
+
+    /// Get the modifier bits to add to the button code.
+    pub fn bits(&self) -> u8 {
+        let mut bits = 0u8;
+        if self.shift {
+            bits += 4;
+        }
+        if self.alt || self.meta {
+            bits += 8;
+        }
+        if self.ctrl {
+            bits += 16;
+        }
+        bits
+    }
 }
 
 /// Selection point (can be negative for scroll offset).

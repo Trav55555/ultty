@@ -4,6 +4,9 @@ members = [
     "crates/ultty",
     "crates/ulttui",
     "crates/ultty-protocol",
+    "examples/hello-native",
+    "examples/counter-app",
+    "examples/todo-app",
 ]
 
 [workspace.package]
