@@ -529,21 +529,35 @@ impl Terminal {
     pub fn add_image(&mut self, image: TerminalImage) {
         let cell_width = image.cell_width;
         let cell_height = image.cell_height;
+        let start_col = image.start_col;
 
         self.images.add(image);
 
-        // Move cursor past the image
-        // For now, just advance by the width on the same line
-        // TODO: Handle multi-line images properly
-        let new_col = self.grid().cursor().position.col.saturating_add(cell_width);
-        if new_col < self.dimensions().cols {
-            self.grid_mut().cursor_mut().position.col = new_col;
+        let dims = self.dimensions();
+        let cursor = self.grid_mut().cursor_mut();
+
+        if cell_height <= 1 {
+            let new_col = cursor.position.col.saturating_add(cell_width);
+            cursor.position.col = new_col.min(dims.cols.saturating_sub(1));
+        } else {
+            let new_row = cursor
+                .position
+                .row
+                .saturating_add(cell_height.saturating_sub(1));
+            if new_row >= dims.rows {
+                cursor.position.row = dims.rows.saturating_sub(1);
+            } else {
+                cursor.position.row = new_row;
+            }
+            cursor.position.col = start_col;
         }
 
         tracing::debug!(
-            "Added image: {}x{} cells at cursor",
+            "Added image: {}x{} cells, cursor now at ({}, {})",
             cell_width,
-            cell_height
+            cell_height,
+            cursor.position.col,
+            cursor.position.row
         );
     }
 
@@ -893,6 +907,7 @@ fn percent_decode(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grid::ImageId;
 
     #[test]
     fn new_terminal() {
@@ -1029,5 +1044,47 @@ mod tests {
 
         term.resize(Dimensions::new(100, 30));
         assert!(term.selection().is_none());
+    }
+
+    #[test]
+    fn add_image_single_line() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+        term.grid_mut().set_cursor_position(1, 5);
+
+        let image = TerminalImage {
+            id: ImageId(0),
+            width: 24,
+            height: 16,
+            data: vec![0; 24 * 16 * 4],
+            start_col: 4,
+            start_row: 0,
+            cell_width: 3,
+            cell_height: 1,
+        };
+        term.add_image(image);
+
+        assert_eq!(term.grid().cursor().position.col, 7);
+        assert_eq!(term.grid().cursor().position.row, 0);
+    }
+
+    #[test]
+    fn add_image_multi_line() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+        term.grid_mut().set_cursor_position(3, 10);
+
+        let image = TerminalImage {
+            id: ImageId(0),
+            width: 32,
+            height: 64,
+            data: vec![0; 32 * 64 * 4],
+            start_col: 9,
+            start_row: 2,
+            cell_width: 4,
+            cell_height: 4,
+        };
+        term.add_image(image);
+
+        assert_eq!(term.grid().cursor().position.col, 9);
+        assert_eq!(term.grid().cursor().position.row, 5);
     }
 }

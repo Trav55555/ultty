@@ -1,9 +1,37 @@
-//! Ultty - GPU-accelerated terminal emulator
+//! # Ultty - GPU-accelerated Terminal Emulator
 //!
-//! This library provides the core terminal emulation functionality
-//! including ANSI parsing, scene graph management, and rendering.
+//! Ultty is a modern terminal emulator with GPU rendering and support for
+//! a native binary protocol that enables high-performance TUI applications.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │                    Ultty Terminal                           │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │  [EventLoop] ──► [Terminal] ──► [Renderer]                  │
+//! │       │              │              │                       │
+//! │       ▼              ▼              ▼                       │
+//! │  PTY/Socket     Grid/Buffer    GPU (wgpu)                   │
+//! └─────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Key Components
+//!
+//! - **[`event_loop`]**: Main event loop handling PTY I/O and input
+//! - **[`grid`]**: Terminal grid, cells, and ANSI parsing
+//! - **[`renderer`]**: GPU-accelerated rendering via wgpu
+//! - **[`protocol`]**: Native binary protocol for TUI apps
+//! - **[`config`]**: Configuration and theming
+//!
+//! ## Crate Features
+//!
+//! This crate is primarily used as the ultty binary, but can also be used
+//! as a library for:
+//! - Embedding terminal emulation in other applications
+//! - Headless terminal testing
+//! - Custom terminal implementations
 
-// Core modules (must be first as others depend on them)
 pub mod config;
 pub mod config_watcher;
 pub mod control;
@@ -11,7 +39,6 @@ pub mod grid;
 pub mod protocol;
 pub mod pty;
 
-// Higher-level modules
 pub mod event_loop;
 pub mod renderer;
 pub mod scene;

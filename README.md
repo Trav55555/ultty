@@ -48,9 +48,10 @@ cargo run -p todo-app       # Framework todo list
 
 ## Documentation
 
-- [Protocol Specification](docs/PROTOCOL_SPEC.md)
-- [Project Review](docs/PROJECT_REVIEW_REPORT.md)
-- [Testing Strategy](docs/TESTING_STRATEGY.md)
+- [Getting Started](docs/GETTING_STARTED.md) - Installation and first app
+- [Architecture](docs/ARCHITECTURE.md) - System design and components
+- [Protocol Specification](docs/PROTOCOL_SPEC.md) - Native protocol details
+- [Testing Strategy](docs/TESTING_STRATEGY.md) - How to test
 
 ## Development
 
