@@ -341,13 +341,30 @@ impl Buffer {
 
         let cursor_col = self.grid.cursor().position.col;
         let cursor_row = self.grid.cursor().position.row;
+        let wrap_pending = self.grid.cursor().wrap_pending;
         let max_row = self.grid.dimensions().rows - 1;
         let max_col = self.grid.dimensions().cols;
         let char_width = c.width().unwrap_or(0) as u16;
 
-        // Check if this write will cause scrolling:
-        // cursor at last row AND writing will wrap to next line
-        let will_scroll = cursor_row >= max_row && cursor_col + char_width >= max_col;
+        // Determine if this write will cause scrolling.
+        // With pending wrap behavior:
+        // - If wrap_pending is true, the next non-zero-width char triggers deferred wrap
+        // - If wrap_pending is false and we're writing to the last column, that only sets
+        //   wrap_pending but doesn't actually scroll (scroll happens on NEXT char)
+        // - Wide chars that don't fit (width > 1 and col + width > cols) wrap before writing
+        let will_scroll = if char_width == 0 {
+            // Zero-width chars never cause scroll
+            false
+        } else if wrap_pending {
+            // Wrap is pending - this write will trigger it
+            cursor_row >= max_row
+        } else if char_width > 1 && cursor_col + char_width > max_col {
+            // Wide char that doesn't fit - will wrap before writing
+            cursor_row >= max_row
+        } else {
+            // Normal char - writing at last col just sets wrap_pending, no scroll yet
+            false
+        };
 
         if will_scroll {
             // Clone top row before grid scrolls

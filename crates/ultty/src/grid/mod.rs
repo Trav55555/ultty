@@ -91,6 +91,10 @@ pub struct Cursor {
     pub blinking: bool,
     /// Saved cursor for ESC 7 / ESC 8
     saved: Option<CursorPosition>,
+    /// Pending wrap flag - cursor is at end of line, next char will wrap
+    /// This implements standard terminal "autowrap pending" behavior where
+    /// the cursor stays at the last column until the next character is typed.
+    pub wrap_pending: bool,
 }
 
 impl Default for Cursor {
@@ -101,6 +105,7 @@ impl Default for Cursor {
             shape: CursorShape::Block,
             blinking: true, // Default is blinking
             saved: None,
+            wrap_pending: false,
         }
     }
 }
@@ -292,22 +297,22 @@ impl Grid {
     pub fn write_char(&mut self, c: char) {
         use unicode_width::UnicodeWidthChar;
 
-        let col = self.cursor.position.col;
-        let row = self.cursor.position.row;
-
-        if row >= self.dims.rows {
-            return;
-        }
-
         // Get character width (0 for control chars, 1 for normal, 2 for wide)
         let width = c.width().unwrap_or(0) as u16;
 
         if width == 0 {
             // Zero-width character - could be combining mark or control char
             // Try to attach combining characters to the previous cell
-            if col > 0 {
-                // Attach to previous cell
-                self.add_combining_char(row, col - 1, c);
+            let col = self.cursor.position.col;
+            let row = self.cursor.position.row;
+            if col > 0 || self.cursor.wrap_pending {
+                // Attach to previous cell (which is at col-1, or last col if wrap pending)
+                let attach_col = if self.cursor.wrap_pending {
+                    self.dims.cols - 1
+                } else {
+                    col - 1
+                };
+                self.add_combining_char(row, attach_col, c);
             } else if row > 0 {
                 // Previous row, last column
                 self.add_combining_char(row - 1, self.dims.cols - 1, c);
@@ -316,13 +321,37 @@ impl Grid {
             return;
         }
 
-        // Check if we need to wrap before writing
-        if col + width > self.dims.cols {
+        // If wrap is pending, perform the wrap now before writing
+        if self.cursor.wrap_pending {
+            // Mark current row as wrapped (soft wrap)
+            let row = self.cursor.position.row;
+            if let Some(r) = self.rows.get_mut(row as usize) {
+                r.set_wrapped(true);
+            }
+            // Move to next line
+            self.cursor.position.col = 0;
+            self.cursor.position.row += 1;
+            if self.cursor.position.row >= self.dims.rows {
+                self.scroll_up(1);
+                self.cursor.position.row = self.dims.rows - 1;
+            }
+            self.cursor.wrap_pending = false;
+        }
+
+        let col = self.cursor.position.col;
+        let row = self.cursor.position.row;
+
+        if row >= self.dims.rows {
+            return;
+        }
+
+        // Check if wide char would wrap (needs 2 columns but only 1 left)
+        if width > 1 && col + width > self.dims.cols {
             // Mark current row as wrapped (soft wrap)
             if let Some(r) = self.row_mut(row) {
                 r.set_wrapped(true);
             }
-            // Wrap to next line
+            // Wrap to next line before writing
             self.cursor.position.col = 0;
             self.cursor.position.row += 1;
             if self.cursor.position.row >= self.dims.rows {
@@ -368,43 +397,42 @@ impl Grid {
         // Advance cursor by character width
         self.cursor.position.col += width;
 
-        // Handle wrap after writing
+        // Check if we're now at or past the last column - set pending wrap
         if self.cursor.position.col >= self.dims.cols {
-            // Mark current row as wrapped (soft wrap) since we're continuing to next line
-            if let Some(r) = self.rows.get_mut(row as usize) {
-                r.set_wrapped(true);
-            }
-            self.cursor.position.col = 0;
-            self.cursor.position.row += 1;
-            if self.cursor.position.row >= self.dims.rows {
-                self.scroll_up(1);
-                self.cursor.position.row = self.dims.rows - 1;
-            }
+            // Don't move to next line yet, just set pending flag
+            // Keep cursor at last valid column
+            self.cursor.position.col = self.dims.cols - 1;
+            self.cursor.wrap_pending = true;
         }
     }
 
     /// Move cursor up, stopping at top edge.
     pub fn cursor_up(&mut self, n: u16) {
+        self.cursor.wrap_pending = false;
         self.cursor.position.row = self.cursor.position.row.saturating_sub(n);
     }
 
     /// Move cursor down, stopping at bottom edge.
     pub fn cursor_down(&mut self, n: u16) {
+        self.cursor.wrap_pending = false;
         self.cursor.position.row = (self.cursor.position.row + n).min(self.dims.rows - 1);
     }
 
     /// Move cursor left, stopping at left edge.
     pub fn cursor_left(&mut self, n: u16) {
+        self.cursor.wrap_pending = false;
         self.cursor.position.col = self.cursor.position.col.saturating_sub(n);
     }
 
     /// Move cursor right, stopping at right edge.
     pub fn cursor_right(&mut self, n: u16) {
+        self.cursor.wrap_pending = false;
         self.cursor.position.col = (self.cursor.position.col + n).min(self.dims.cols - 1);
     }
 
     /// Set absolute cursor position (1-based like ANSI).
     pub fn set_cursor_position(&mut self, row: u16, col: u16) {
+        self.cursor.wrap_pending = false;
         // ANSI positions are 1-based, convert to 0-based
         self.cursor.position.row = row.saturating_sub(1).min(self.dims.rows - 1);
         self.cursor.position.col = col.saturating_sub(1).min(self.dims.cols - 1);
@@ -412,22 +440,15 @@ impl Grid {
 
     /// Carriage return - move cursor to column 0.
     pub fn carriage_return(&mut self) {
-        // If we're at column 0 (just wrapped from previous line) and receive CR,
-        // it means the previous line's wrap was not a content continuation.
-        // Clear the wrapped flag to prevent incorrect merging during resize reflow.
-        // This handles shells like zsh that wrap to fill the line then CR back.
-        if self.cursor.position.col == 0 && self.cursor.position.row > 0 {
-            if let Some(prev_row) = self.rows.get_mut((self.cursor.position.row - 1) as usize) {
-                if prev_row.is_wrapped() {
-                    prev_row.set_wrapped(false);
-                }
-            }
-        }
+        // Clear pending wrap - CR should NOT cause a line break, it just
+        // moves to column 0 of the current line
+        self.cursor.wrap_pending = false;
         self.cursor.position.col = 0;
     }
 
     /// Newline - move cursor down, scrolling if needed.
     pub fn newline(&mut self) {
+        self.cursor.wrap_pending = false;
         let bottom = self
             .scroll_region
             .map(|r| r.bottom)
@@ -442,6 +463,7 @@ impl Grid {
 
     /// Backspace - move cursor left by one.
     pub fn backspace(&mut self) {
+        self.cursor.wrap_pending = false;
         if self.cursor.position.col > 0 {
             self.cursor.position.col -= 1;
         }
@@ -449,6 +471,7 @@ impl Grid {
 
     /// Tab - advance to next tab stop.
     pub fn tab(&mut self) {
+        self.cursor.wrap_pending = false;
         let current = self.cursor.position.col;
         if let Some(&next) = self.tab_stops.range((current + 1)..).next() {
             self.cursor.position.col = next.min(self.dims.cols - 1);
@@ -483,6 +506,7 @@ impl Grid {
     /// Set the scroll region (1-based top and bottom, inclusive).
     /// Pass (1, rows) to reset to full screen.
     pub fn set_scroll_region(&mut self, top: u16, bottom: u16) {
+        self.cursor.wrap_pending = false;
         // Convert from 1-based to 0-based
         let top = top.saturating_sub(1);
         let bottom = bottom.saturating_sub(1).min(self.dims.rows - 1);

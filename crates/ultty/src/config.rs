@@ -465,7 +465,7 @@ impl Default for FontConfig {
             // Unicode coverage and fallback for box-drawing characters.
             // Users can override this in config.toml with a specific font.
             family: String::new(),
-            size: 14.0,
+            size: 16.0,
             line_height: 1.2,
             ligatures: true,
         }
@@ -864,7 +864,7 @@ mod tests {
     #[test]
     fn default_config() {
         let config = Config::default();
-        assert_eq!(config.font.size, 14.0);
+        assert_eq!(config.font.size, 16.0);
         assert_eq!(config.behavior.scrollback_lines, 10_000);
     }
 
