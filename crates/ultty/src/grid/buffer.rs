@@ -333,9 +333,30 @@ impl Buffer {
         self.grid.set_rows(all_rows, new_dims);
     }
 
-    /// Write a character (delegates to grid, handles history on scroll).
+    /// Write a character, saving to history if scrolling occurs.
     pub fn write_char(&mut self, c: char) {
+        use unicode_width::UnicodeWidthChar;
+
         self.scroll_offset = 0;
+
+        let cursor_col = self.grid.cursor().position.col;
+        let cursor_row = self.grid.cursor().position.row;
+        let max_row = self.grid.dimensions().rows - 1;
+        let max_col = self.grid.dimensions().cols;
+        let char_width = c.width().unwrap_or(0) as u16;
+
+        // Check if this write will cause scrolling:
+        // cursor at last row AND writing will wrap to next line
+        let will_scroll = cursor_row >= max_row && cursor_col + char_width >= max_col;
+
+        if will_scroll {
+            // Clone top row before grid scrolls
+            let top_row = self.grid.row(0).cloned();
+            if let Some(row) = top_row {
+                self.push_to_history(vec![row]);
+            }
+        }
+
         self.grid.write_char(c);
     }
 
@@ -573,5 +594,58 @@ mod tests {
         assert_eq!(buf.grid().cell(0, 1).unwrap().char(), 'B'); // col 0, row 1
         assert_eq!(buf.grid().cell(0, 2).unwrap().char(), 'C'); // col 0, row 2
         assert_eq!(buf.grid().cell(0, 3).unwrap().char(), 'D'); // col 0, row 3
+    }
+
+    #[test]
+    fn write_char_saves_to_history_on_scroll() {
+        let mut buf = Buffer::new(Dimensions::new(10, 5));
+
+        for i in 0..5u16 {
+            buf.grid_mut().row_mut(i).unwrap()[0].set_char((b'0' + i as u8) as char);
+        }
+
+        assert_eq!(buf.grid().row(0).unwrap()[0].char(), '0');
+        assert_eq!(buf.grid().row(4).unwrap()[0].char(), '4');
+        assert_eq!(buf.history_len(), 0);
+
+        // Fill last row completely, then write one more char to trigger scroll
+        // set_cursor_position is 1-based, so row 5 = 0-based row 4
+        buf.grid_mut().set_cursor_position(5, 1);
+        for _ in 0..10 {
+            buf.write_char('X');
+        }
+        // Now cursor is at row 4, col 10 (past end) - next char triggers scroll
+        buf.write_char('Y');
+
+        assert_eq!(buf.history_len(), 1);
+        assert_eq!(buf.history[0][0].char(), '0');
+        assert_eq!(buf.grid().row(0).unwrap()[0].char(), '1');
+    }
+
+    #[test]
+    fn write_char_fills_screen_and_scrolls() {
+        // Simulate filling a small screen and scrolling multiple times
+        let mut buf = Buffer::new(Dimensions::new(5, 3)); // 5 cols, 3 rows
+
+        // Write enough to fill screen and scroll several times
+        // Each row holds 5 chars, we have 3 rows = 15 chars before scroll
+        // Then each additional 5 chars scrolls once
+        let text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 26 chars
+
+        for c in text.chars() {
+            buf.write_char(c);
+        }
+
+        // 26 chars / 5 cols = 5.2 rows needed
+        // 3 visible rows means 2-3 rows should be in history
+        // Let's verify history has content
+        assert!(
+            buf.history_len() >= 2,
+            "Expected at least 2 history rows, got {}",
+            buf.history_len()
+        );
+
+        // First history row should start with 'A'
+        assert_eq!(buf.history[0][0].char(), 'A');
     }
 }

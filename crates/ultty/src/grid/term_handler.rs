@@ -23,7 +23,13 @@ impl<'a> TerminalHandler<'a> {
     /// Handle a single parser action.
     pub fn handle(&mut self, action: Action) {
         match action {
-            Action::Print(c) => self.terminal.grid_mut().write_char(c),
+            Action::Print(c) => {
+                if !self.terminal.is_alternate_screen() {
+                    self.terminal.buffer_mut().write_char(c);
+                } else {
+                    self.terminal.grid_mut().write_char(c);
+                }
+            }
 
             Action::Execute(_code) => {
                 // C0 controls handled separately
