@@ -62,7 +62,8 @@ impl EventLoop {
     /// Create a new event loop with a shell.
     pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
         let size = PtySize::new(cols, rows);
-        let child = Child::spawn_shell(size).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let child =
+            Child::spawn_shell(size).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         let terminal = Terminal::new(Dimensions::new(cols, rows));
         let parser = AnsiParser::new();
@@ -117,12 +118,7 @@ impl EventLoop {
     }
 
     /// Create with a specific command.
-    pub fn with_command(
-        program: &str,
-        args: &[&str],
-        cols: u16,
-        rows: u16,
-    ) -> io::Result<Self> {
+    pub fn with_command(program: &str, args: &[&str], cols: u16, rows: u16) -> io::Result<Self> {
         let size = PtySize::new(cols, rows);
         let working_dir = crate::pty::current_dir();
         let child = Child::spawn(program, args, &working_dir, size)
@@ -198,31 +194,18 @@ impl EventLoop {
     pub fn process(&mut self) -> io::Result<Vec<TerminalEvent>> {
         self.events.clear();
 
-        // Check for child exit
-        if self
-            .child
-            .try_wait()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
-        {
-            if let Some(status) = self.child.exit_status() {
-                self.events.push(TerminalEvent::ChildExited { status });
-            }
-            return Ok(std::mem::take(&mut self.events));
-        }
-
-        // Read available data from PTY
+        // Read available data from PTY FIRST (before checking child exit)
+        // This ensures we don't miss output from fast-exiting processes like `echo`
         loop {
             match self.child.read(&mut self.read_buf) {
-                Ok(0) => break, // No more data available
+                Ok(0) => break,
                 Ok(n) => {
-                    // Process data directly - temporarily swap buffer to avoid borrow conflict
                     let buf = std::mem::take(&mut self.read_buf);
                     self.process_bytes(&buf[..n]);
                     self.read_buf = buf;
                     self.events.push(TerminalEvent::Redraw);
                 }
                 Err(crate::pty::PtyError::Closed) => {
-                    // PTY closed, child likely exited
                     self.child.try_wait().ok();
                     if let Some(status) = self.child.exit_status() {
                         self.events.push(TerminalEvent::ChildExited { status });
@@ -231,6 +214,23 @@ impl EventLoop {
                 }
                 Err(e) => {
                     return Err(io::Error::new(io::ErrorKind::Other, e));
+                }
+            }
+        }
+
+        // Check for child exit AFTER reading all available data
+        if self
+            .child
+            .try_wait()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+        {
+            if let Some(status) = self.child.exit_status() {
+                if !self
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, TerminalEvent::ChildExited { .. }))
+                {
+                    self.events.push(TerminalEvent::ChildExited { status });
                 }
             }
         }
@@ -380,8 +380,8 @@ mod tests {
 
     #[test]
     fn send_input_to_cat() {
-        let mut event_loop =
-            EventLoop::with_command("/bin/cat", &["/bin/cat"], 80, 24).expect("Failed to spawn cat");
+        let mut event_loop = EventLoop::with_command("/bin/cat", &["/bin/cat"], 80, 24)
+            .expect("Failed to spawn cat");
 
         // Send input
         event_loop.send_input(b"hello\n").expect("Failed to send");
