@@ -73,6 +73,12 @@ impl CopyMode {
         self.selection_anchor = None;
     }
 
+    pub fn enter_search(&mut self, total_rows: usize, viewport_rows: usize, viewport_cols: usize) {
+        self.enter(total_rows, viewport_rows, viewport_cols);
+        self.vim_state.mode = VimMode::Search;
+        self.search_query.clear();
+    }
+
     pub fn exit(&mut self) {
         self.active = false;
         self.selection_anchor = None;

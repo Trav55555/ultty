@@ -1091,6 +1091,13 @@ impl App {
             return;
         }
 
+        // Check for find/search (Ctrl+Shift+F)
+        if self.check_keybinding(&event, &self.config.keybindings.find.clone()) {
+            self.enter_search_mode();
+            self.needs_redraw = true;
+            return;
+        }
+
         // Tab keybindings
         if self.check_keybinding(&event, &self.config.keybindings.new_tab.clone()) {
             match self.terminal_manager.create_tab() {
@@ -1435,7 +1442,6 @@ impl App {
         }
     }
 
-    /// Enter vim-style copy mode.
     fn enter_copy_mode(&mut self) {
         let terminal = self.terminal();
         let buffer = terminal.buffer();
@@ -1450,7 +1456,20 @@ impl App {
         tracing::debug!("Entered copy mode");
     }
 
-    /// Handle key events in copy mode.
+    fn enter_search_mode(&mut self) {
+        let terminal = self.terminal();
+        let buffer = terminal.buffer();
+        let dims = terminal.dimensions();
+
+        let total_rows = buffer.total_lines();
+        let viewport_rows = dims.rows as usize;
+        let viewport_cols = dims.cols as usize;
+
+        self.copy_mode
+            .enter_search(total_rows, viewport_rows, viewport_cols);
+        tracing::debug!("Entered search mode");
+    }
+
     fn handle_copy_mode_key(&mut self, event: &KeyEvent) {
         let protocol_key = self.winit_key_to_protocol(&event.logical_key);
         let protocol_mods = self.winit_mods_to_protocol();

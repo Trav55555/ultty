@@ -123,6 +123,12 @@ cargo clippy --workspace --all-targets
   - [x] hello-native (raw protocol demo)
   - [x] counter-app (framework counter app)
   - [x] todo-app (framework todo list app)
+- [x] Terminal Features
+  - [x] Scrollback search (Ctrl+Shift+F)
+  - [x] Split panes (Ctrl+Shift+D/E)
+  - [x] Configurable keybindings (TOML config)
+  - [x] App compatibility tests (htop, nvim, vim, nano, top)
+  - [x] Property-based tests for parser robustness
 
 ## Dependencies Policy
 
