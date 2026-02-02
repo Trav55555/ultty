@@ -5,29 +5,24 @@ use super::pipeline::TextPipeline;
 use super::{ColorScheme, Rgba, Vertex};
 use crate::config::FontConfig;
 use crate::grid::{CellFlags, Terminal};
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
+use cosmic_text::{Attrs, Buffer, CacheKey, Family, FontSystem, Metrics, Shaping};
+use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
-/// Text renderer using cosmic-text for shaping and a glyph atlas for caching.
+type ShapingCacheKey = (char, u8);
+
 pub struct TextRenderer {
-    /// Font system for text shaping
     font_system: FontSystem,
-    /// Glyph atlas for caching
     atlas: GlyphAtlas,
-    /// Text render pipeline
     pipeline: TextPipeline,
-    /// Cell dimensions
     cell_width: f32,
     cell_height: f32,
-    /// Font metrics
     metrics: Metrics,
-    /// wgpu device
     device: Arc<wgpu::Device>,
-    /// Font family name (empty for system monospace)
     font_family: String,
-    /// Enable ligatures
     ligatures: bool,
+    shaping_cache: HashMap<ShapingCacheKey, CacheKey>,
 }
 
 impl TextRenderer {
@@ -72,6 +67,7 @@ impl TextRenderer {
             device,
             font_family,
             ligatures: font_config.ligatures,
+            shaping_cache: HashMap::with_capacity(256),
         })
     }
 
@@ -163,8 +159,9 @@ impl TextRenderer {
         self.cell_width = width;
         self.cell_height = height;
 
-        // Clear glyph atlas since metrics changed
+        // Clear caches since metrics changed
         self.atlas.clear();
+        self.shaping_cache.clear();
     }
 
     pub fn build_simple_text_vertices(
@@ -373,7 +370,6 @@ impl TextRenderer {
         Ok(())
     }
 
-    /// Build vertex data for text rendering with X and Y offset.
     fn build_text_vertices_with_offset(
         &mut self,
         terminal: &Terminal,
@@ -389,9 +385,7 @@ impl TextRenderer {
         let grid = terminal.grid();
         let dims = grid.dimensions();
 
-        // Create a cosmic-text buffer for shaping
         let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
-        // Set buffer size to allow layout - use a large enough size for single characters
         buffer.set_size(&mut self.font_system, cell_width * 4.0, cell_height * 2.0);
         let shaping = self.get_shaping();
 
@@ -409,27 +403,20 @@ impl TextRenderer {
 
                 let ch = cell.char();
 
-                // Skip spaces and wide char spacers
                 if ch == ' ' || cell.has_flag(CellFlags::WIDE_CHAR_SPACER) {
                     continue;
                 }
 
-                // Get the full grapheme (base char + combining chars)
-                let grapheme = if cell.has_flag(CellFlags::HAS_COMBINING) {
-                    grid.grapheme(row_idx, col_idx)
-                        .unwrap_or_else(|| ch.to_string())
-                } else {
-                    ch.to_string()
-                };
+                if cell.has_flag(CellFlags::HIDDEN) {
+                    continue;
+                }
 
-                // Determine foreground color
                 let fg_color = if cell.has_flag(CellFlags::REVERSE) {
                     color_scheme.resolve(cell.bg(), false)
                 } else {
                     color_scheme.resolve(cell.fg(), true)
                 };
 
-                // Handle dim
                 let fg_color = if cell.has_flag(CellFlags::DIM) {
                     Rgba::new(
                         fg_color.r * 0.5,
@@ -441,55 +428,72 @@ impl TextRenderer {
                     fg_color
                 };
 
-                // Skip hidden text
-                if cell.has_flag(CellFlags::HIDDEN) {
-                    continue;
-                }
+                let has_combining = cell.has_flag(CellFlags::HAS_COMBINING);
+                let style_key: u8 = if self.ligatures { 1 } else { 0 };
+                let cache_key_lookup = (ch, style_key);
 
-                // Shape the grapheme (base char + combining chars)
-                let attrs = if self.font_family.is_empty() {
-                    Attrs::new().family(Family::Monospace)
-                } else {
-                    Attrs::new().family(Family::Name(&self.font_family))
-                };
-                buffer.set_text(&mut self.font_system, &grapheme, attrs, shaping);
+                let cache_key = if !has_combining {
+                    if let Some(&cached) = self.shaping_cache.get(&cache_key_lookup) {
+                        Some(cached)
+                    } else {
+                        let attrs = if self.font_family.is_empty() {
+                            Attrs::new().family(Family::Monospace)
+                        } else {
+                            Attrs::new().family(Family::Name(&self.font_family))
+                        };
+                        let ch_str: String = ch.to_string();
+                        buffer.set_text(&mut self.font_system, &ch_str, attrs, shaping);
 
-                // Get the glyph from the layout
-                if let Some(run) = buffer.layout_runs().next() {
-                    for glyph in run.glyphs.iter() {
-                        // Get physical glyph with cache key
-                        let physical = glyph.physical((0.0, 0.0), 1.0);
-
-                        // Get or cache the glyph
-                        if let Some(glyph_info) = self
-                            .atlas
-                            .get_glyph(&mut self.font_system, physical.cache_key)
-                        {
-                            // Skip zero-size glyphs
-                            if glyph_info.width == 0.0 || glyph_info.height == 0.0 {
-                                continue;
+                        if let Some(run) = buffer.layout_runs().next() {
+                            if let Some(glyph) = run.glyphs.first() {
+                                let physical = glyph.physical((0.0, 0.0), 1.0);
+                                self.shaping_cache
+                                    .insert(cache_key_lookup, physical.cache_key);
+                                Some(physical.cache_key)
+                            } else {
+                                None
                             }
-
-                            // Calculate position (offset by pane position)
-                            let x = col_idx as f32 * cell_width
-                                + glyph_info.left
-                                + physical.x as f32
-                                + x_offset;
-                            let y = row_idx as f32 * cell_height
-                                + (cell_height - glyph_info.top)
-                                + physical.y as f32
-                                + y_offset;
-
-                            // Emit quad
-                            self.emit_glyph_quad(
-                                &mut vertices,
-                                &mut indices,
-                                x,
-                                y,
-                                &glyph_info,
-                                fg_color,
-                            );
+                        } else {
+                            None
                         }
+                    }
+                } else {
+                    let grapheme = grid
+                        .grapheme(row_idx, col_idx)
+                        .unwrap_or_else(|| ch.to_string());
+                    let attrs = if self.font_family.is_empty() {
+                        Attrs::new().family(Family::Monospace)
+                    } else {
+                        Attrs::new().family(Family::Name(&self.font_family))
+                    };
+                    buffer.set_text(&mut self.font_system, &grapheme, attrs, shaping);
+
+                    buffer.layout_runs().next().and_then(|run| {
+                        run.glyphs
+                            .first()
+                            .map(|g| g.physical((0.0, 0.0), 1.0).cache_key)
+                    })
+                };
+
+                if let Some(key) = cache_key {
+                    if let Some(glyph_info) = self.atlas.get_glyph(&mut self.font_system, key) {
+                        if glyph_info.width == 0.0 || glyph_info.height == 0.0 {
+                            continue;
+                        }
+
+                        let x = col_idx as f32 * cell_width + glyph_info.left + x_offset;
+                        let y = row_idx as f32 * cell_height
+                            + (cell_height - glyph_info.top)
+                            + y_offset;
+
+                        self.emit_glyph_quad(
+                            &mut vertices,
+                            &mut indices,
+                            x,
+                            y,
+                            &glyph_info,
+                            fg_color,
+                        );
                     }
                 }
             }
