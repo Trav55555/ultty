@@ -12,4 +12,9 @@ thiserror = { workspace = true }
 taffy = { workspace = true }  # For layout constraint types
 
 [dev-dependencies]
-proptest = "1.4"  # Property-based testing for serialization
+proptest = "1.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "codec"
+harness = false
