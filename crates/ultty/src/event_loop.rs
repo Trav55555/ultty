@@ -63,7 +63,7 @@ impl EventLoop {
     pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
         let size = PtySize::new(cols, rows);
         let child =
-            Child::spawn_shell(size).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            Child::spawn_shell(size).map_err(io::Error::other)?;
 
         let terminal = Terminal::new(Dimensions::new(cols, rows));
         let parser = AnsiParser::new();
@@ -92,7 +92,7 @@ impl EventLoop {
     pub fn new_with_dir(cols: u16, rows: u16, working_dir: &str) -> io::Result<Self> {
         let size = PtySize::new(cols, rows);
         let child = Child::spawn_shell_in_dir(size, working_dir)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         let terminal = Terminal::new(Dimensions::new(cols, rows));
         let parser = AnsiParser::new();
@@ -122,7 +122,7 @@ impl EventLoop {
         let size = PtySize::new(cols, rows);
         let working_dir = crate::pty::current_dir();
         let child = Child::spawn(program, args, &working_dir, size)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         let terminal = Terminal::new(Dimensions::new(cols, rows));
         let parser = AnsiParser::new();
@@ -171,7 +171,7 @@ impl EventLoop {
         let size = PtySize::new(cols, rows);
         self.child
             .resize(size)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         self.terminal.resize(Dimensions::new(cols, rows));
         Ok(())
     }
@@ -180,7 +180,7 @@ impl EventLoop {
     pub fn send_input(&mut self, data: &[u8]) -> io::Result<()> {
         self.child
             .write_all(data)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            .map_err(io::Error::other)
     }
 
     /// Send a key press to the shell.
@@ -213,7 +213,7 @@ impl EventLoop {
                     break;
                 }
                 Err(e) => {
-                    return Err(io::Error::new(io::ErrorKind::Other, e));
+                    return Err(io::Error::other(e));
                 }
             }
         }
@@ -222,7 +222,7 @@ impl EventLoop {
         if self
             .child
             .try_wait()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+            .map_err(io::Error::other)?
         {
             if let Some(status) = self.child.exit_status() {
                 if !self

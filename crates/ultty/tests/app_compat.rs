@@ -24,7 +24,9 @@ use ultty::grid::Terminal;
 /// Test harness for running terminal applications headlessly.
 pub struct AppTester {
     event_loop: EventLoop,
+    #[allow(dead_code)]
     cols: u16,
+    #[allow(dead_code)]
     rows: u16,
 }
 
@@ -83,10 +85,10 @@ impl AppTester {
             // Check for exit
             for event in &events {
                 if let TerminalEvent::ChildExited { status } = event {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Application exited with status {}", status),
-                    ));
+                    return Err(std::io::Error::other(format!(
+                        "Application exited with status {}",
+                        status
+                    )));
                 }
             }
         }

@@ -482,7 +482,7 @@ impl AnsiParser {
             0x07 => callback(Action::Bell),
             0x08 => callback(Action::Backspace),
             0x09 => callback(Action::Tab),
-            0x0A | 0x0B | 0x0C => callback(Action::Newline),
+            0x0A..=0x0C => callback(Action::Newline),
             0x0D => callback(Action::CarriageReturn),
             // SO (Shift Out) - switch to G1 charset
             0x0E => {

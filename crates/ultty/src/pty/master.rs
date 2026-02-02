@@ -38,7 +38,7 @@ impl PtySize {
         }
     }
 
-    fn to_winsize(&self) -> Winsize {
+    fn to_winsize(self) -> Winsize {
         Winsize {
             ws_row: self.rows,
             ws_col: self.cols,
@@ -132,7 +132,9 @@ impl Pty {
             Ok(n) => Ok(n),
             Err(nix::Error::EAGAIN) => Ok(0),
             Err(nix::Error::EIO) => Err(PtyError::Closed),
-            Err(e) => Err(PtyError::WriteFailed(io::Error::from_raw_os_error(e as i32))),
+            Err(e) => Err(PtyError::WriteFailed(io::Error::from_raw_os_error(
+                e as i32,
+            ))),
         }
     }
 
@@ -156,13 +158,13 @@ impl Pty {
 
 impl Read for Pty {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        Pty::read(self, buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        Pty::read(self, buf).map_err(io::Error::other)
     }
 }
 
 impl Write for Pty {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        Pty::write(self, buf).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        Pty::write(self, buf).map_err(io::Error::other)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -214,7 +216,10 @@ fn get_slave_name(master_fd: RawFd) -> Result<String> {
     }
 
     // Find null terminator
-    let len = name_buf.iter().position(|&c| c == 0).unwrap_or(name_buf.len());
+    let len = name_buf
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(name_buf.len());
     let name = String::from_utf8_lossy(&name_buf[..len]).to_string();
     Ok(name)
 }

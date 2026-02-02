@@ -151,9 +151,7 @@ impl TabBarState {
 
     /// Update drag position. Returns Some((from, to)) if tab should be moved.
     pub fn update_drag(&mut self, x: f32) -> Option<(usize, usize)> {
-        let Some(dragging_index) = self.dragging_tab else {
-            return None;
-        };
+        let dragging_index = self.dragging_tab?;
 
         self.drag_offset_x = x - self.drag_start_x;
 

@@ -1879,13 +1879,10 @@ impl Renderer {
                 let is_selected = terminal.is_selected(col_idx, row_idx);
                 let bg_color = if is_selected {
                     self.color_scheme.selection
+                } else if cell.has_flag(CellFlags::REVERSE) {
+                    self.color_scheme.resolve(cell.fg(), true)
                 } else {
-                    let color = if cell.has_flag(CellFlags::REVERSE) {
-                        self.color_scheme.resolve(cell.fg(), true)
-                    } else {
-                        self.color_scheme.resolve(cell.bg(), false)
-                    };
-                    color
+                    self.color_scheme.resolve(cell.bg(), false)
                 };
 
                 let should_flush = match run_color {
@@ -2257,6 +2254,7 @@ impl Renderer {
     }
 
     /// Emit quads for vim selection.
+    #[allow(clippy::too_many_arguments)]
     fn emit_vim_selection(
         &self,
         vertices: &mut Vec<Vertex>,
@@ -2723,6 +2721,7 @@ impl Renderer {
     }
 
     /// Emit a rectangle (helper for tab bar).
+    #[allow(clippy::too_many_arguments)]
     fn emit_rect(
         &self,
         vertices: &mut Vec<Vertex>,
@@ -2792,13 +2791,10 @@ impl Renderer {
                 let is_selected = terminal.is_selected(col_idx, row_idx);
                 let bg_color = if is_selected {
                     self.color_scheme.selection
+                } else if cell.has_flag(CellFlags::REVERSE) {
+                    self.color_scheme.resolve(cell.fg(), true)
                 } else {
-                    let color = if cell.has_flag(CellFlags::REVERSE) {
-                        self.color_scheme.resolve(cell.fg(), true)
-                    } else {
-                        self.color_scheme.resolve(cell.bg(), false)
-                    };
-                    color
+                    self.color_scheme.resolve(cell.bg(), false)
                 };
 
                 // Check if we should extend the run or start a new one
@@ -3439,7 +3435,7 @@ impl Renderer {
         let bytes_per_pixel = 4u32; // RGBA or BGRA
         let unpadded_bytes_per_row = width * bytes_per_pixel;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
         let buffer_size = (padded_bytes_per_row * height) as u64;
 
         // Create output buffer
@@ -3609,7 +3605,7 @@ impl Renderer {
         let bytes_per_pixel = 4u32;
         let unpadded_bytes_per_row = width * bytes_per_pixel;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
         let buffer_size = (padded_bytes_per_row * height) as u64;
 
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -4133,12 +4129,12 @@ impl Renderer {
         let line_height = self.cell_height;
 
         for line in source.lines() {
-            let (text, bold, color) = if line.starts_with("### ") {
-                (&line[4..], true, self.color_scheme.named[6])
-            } else if line.starts_with("## ") {
-                (&line[3..], true, self.color_scheme.named[5])
-            } else if line.starts_with("# ") {
-                (&line[2..], true, self.color_scheme.named[4])
+            let (text, bold, color) = if let Some(stripped) = line.strip_prefix("### ") {
+                (stripped, true, self.color_scheme.named[6])
+            } else if let Some(stripped) = line.strip_prefix("## ") {
+                (stripped, true, self.color_scheme.named[5])
+            } else if let Some(stripped) = line.strip_prefix("# ") {
+                (stripped, true, self.color_scheme.named[4])
             } else if line.starts_with("```") {
                 (line, false, self.color_scheme.named[8])
             } else if line.starts_with("- ") || line.starts_with("* ") {
@@ -4175,6 +4171,7 @@ impl Renderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_code_content(
         &mut self,
         source: &str,

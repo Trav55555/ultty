@@ -214,7 +214,7 @@ impl Grid {
         // Add to the combining map
         self.combining
             .entry((row, col))
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(c);
     }
 
@@ -689,13 +689,13 @@ impl Grid {
         for row in self.rows.drain(..) {
             // Append this row's non-blank cells to current logical line
             for cell in row.cells() {
-                current_line.push(cell.clone());
+                current_line.push(*cell);
             }
 
             // If this row wasn't wrapped, this logical line ends here
             if !row.is_wrapped() {
                 // Trim trailing empty cells
-                while current_line.last().map_or(false, |c| c.is_blank()) {
+                while current_line.last().is_some_and(|c| c.is_blank()) {
                     current_line.pop();
                 }
                 logical_lines.push(std::mem::take(&mut current_line));
@@ -704,7 +704,7 @@ impl Grid {
 
         // Don't forget any remaining cells
         if !current_line.is_empty() {
-            while current_line.last().map_or(false, |c| c.is_blank()) {
+            while current_line.last().is_some_and(|c| c.is_blank()) {
                 current_line.pop();
             }
             logical_lines.push(current_line);
@@ -726,7 +726,7 @@ impl Grid {
                 while col < new_cols && pos < line.len() {
                     let cell = &line[pos];
                     if let Some(dest) = new_row.get_mut(col) {
-                        *dest = cell.clone();
+                        *dest = *cell;
                     }
                     col += 1;
                     pos += 1;

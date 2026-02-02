@@ -275,6 +275,7 @@ impl TextRenderer {
     }
 
     /// Render text from terminal state.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -300,6 +301,7 @@ impl TextRenderer {
     }
 
     /// Render text from terminal state with X and Y offset.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_with_offset(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,

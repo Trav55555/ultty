@@ -10,6 +10,7 @@ use std::path::PathBuf;
 /// Main configuration structure.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     /// Color configuration
     pub colors: ColorConfig,
@@ -25,18 +26,6 @@ pub struct Config {
     pub tmux: TmuxConfig,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            colors: ColorConfig::default(),
-            font: FontConfig::default(),
-            keybindings: KeybindingConfig::default(),
-            behavior: BehaviorConfig::default(),
-            profiles: ProfilesConfig::default(),
-            tmux: TmuxConfig::default(),
-        }
-    }
-}
 
 impl Config {
     /// Load configuration from the default config file location.
@@ -696,6 +685,7 @@ pub struct ProfilesConfig {
 /// A launch profile defines a set of tools/tabs to open.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct LaunchProfile {
     /// Profile name (for display)
     pub name: String,
@@ -705,19 +695,11 @@ pub struct LaunchProfile {
     pub tabs: Vec<TabConfig>,
 }
 
-impl Default for LaunchProfile {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            working_dir: None,
-            tabs: Vec::new(),
-        }
-    }
-}
 
 /// Configuration for a single tab in a launch profile.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct TabConfig {
     /// Tab title
     pub title: Option<String>,
@@ -731,21 +713,11 @@ pub struct TabConfig {
     pub panes: Vec<PaneConfig>,
 }
 
-impl Default for TabConfig {
-    fn default() -> Self {
-        Self {
-            title: None,
-            command: None,
-            args: Vec::new(),
-            working_dir: None,
-            panes: Vec::new(),
-        }
-    }
-}
 
 /// Configuration for a pane in a tab.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct PaneConfig {
     /// Command to run
     pub command: Option<String>,
@@ -757,16 +729,6 @@ pub struct PaneConfig {
     pub split: Option<String>,
 }
 
-impl Default for PaneConfig {
-    fn default() -> Self {
-        Self {
-            command: None,
-            args: Vec::new(),
-            working_dir: None,
-            split: None,
-        }
-    }
-}
 
 /// RGB color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -124,11 +124,15 @@ impl Row {
 
         // Shift cells to the right
         for i in (at + count..self.cells.len()).rev() {
-            self.cells[i] = self.cells[i - count].clone();
+            self.cells[i] = self.cells[i - count];
         }
 
         // Clear the inserted cells
-        for i in at..at.min(self.cells.len()).saturating_add(count).min(self.cells.len()) {
+        for i in at..at
+            .min(self.cells.len())
+            .saturating_add(count)
+            .min(self.cells.len())
+        {
             self.cells[i].clear();
         }
 
@@ -142,7 +146,7 @@ impl Row {
 
         // Shift cells to the left
         for i in at..self.cells.len().saturating_sub(count) {
-            self.cells[i] = self.cells[i + count].clone();
+            self.cells[i] = self.cells[i + count];
         }
 
         // Clear the cells at the end
@@ -276,7 +280,7 @@ mod tests {
     fn erase_operations() {
         let mut row = Row::new(10);
         for i in 0..10 {
-            row[i].set_char(('A' as u8 + i as u8) as char);
+            row[i].set_char((b'A' + i as u8) as char);
         }
 
         row.erase_right(5);

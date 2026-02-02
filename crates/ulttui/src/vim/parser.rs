@@ -130,14 +130,14 @@ impl KeyParser {
         // Handle doubled operators (dd, yy, cc, >>, <<)
         if state.has_pending_operator() {
             let op = state.pending_operator.unwrap();
-            let doubled = match (op, key) {
-                (VimOperator::Delete, Key::Char('d')) => true,
-                (VimOperator::Yank, Key::Char('y')) => true,
-                (VimOperator::Change, Key::Char('c')) => true,
-                (VimOperator::IndentRight, Key::Char('>')) => true,
-                (VimOperator::IndentLeft, Key::Char('<')) => true,
-                _ => false,
-            };
+            let doubled = matches!(
+                (op, key),
+                (VimOperator::Delete, Key::Char('d'))
+                    | (VimOperator::Yank, Key::Char('y'))
+                    | (VimOperator::Change, Key::Char('c'))
+                    | (VimOperator::IndentRight, Key::Char('>'))
+                    | (VimOperator::IndentLeft, Key::Char('<'))
+            );
             if doubled {
                 state.take_operator();
                 let action = match op {

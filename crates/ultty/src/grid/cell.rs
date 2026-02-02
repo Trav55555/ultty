@@ -64,8 +64,10 @@ impl std::ops::BitOrAssign for CellFlags {
 
 /// Color representation for terminal cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum Color {
     /// Default terminal color
+    #[default]
     Default,
     /// Named color from the 16-color palette (0-15)
     Named(u8),
@@ -75,11 +77,6 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
-impl Default for Color {
-    fn default() -> Self {
-        Color::Default
-    }
-}
 
 impl Color {
     // Named color constants

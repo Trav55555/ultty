@@ -141,7 +141,7 @@ impl ProtocolServer {
                     } else {
                         Event::readable(key)
                     };
-                    self.poller.modify(&session.stream_fd(), interest)?;
+                    self.poller.modify(session.stream_fd(), interest)?;
                     false
                 }
                 Ok(false) => {
@@ -159,7 +159,7 @@ impl ProtocolServer {
 
         if should_remove {
             if let Some(session) = self.sessions.remove(&key) {
-                let _ = self.poller.delete(&session.stream_fd());
+                let _ = self.poller.delete(session.stream_fd());
             }
         }
 

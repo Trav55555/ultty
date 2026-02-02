@@ -299,7 +299,7 @@ impl TmuxController {
     fn parse_notification(&self, line: &str) -> Option<TmuxNotification> {
         if line.starts_with('%') {
             let parts: Vec<&str> = line.splitn(3, ' ').collect();
-            match parts.get(0).copied() {
+            match parts.first().copied() {
                 Some("%output") => {
                     let pane_id = parts.get(1)?.to_string();
                     let data = parts.get(2).unwrap_or(&"").as_bytes().to_vec();

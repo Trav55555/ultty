@@ -4,7 +4,7 @@
 //! requiring visual inspection.
 
 use std::time::Duration;
-use ultty::testing::{AppCheck, TerminalSnapshot, TestTerminal};
+use ultty::testing::{AppCheck, TestTerminal};
 
 const WAIT_SHORT: Duration = Duration::from_millis(300);
 const WAIT_LONG: Duration = Duration::from_secs(5);

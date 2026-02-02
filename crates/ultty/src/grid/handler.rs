@@ -174,7 +174,7 @@ impl<'a> Handler<'a> {
 
     /// Apply a text attribute to the current style.
     fn apply_attribute(&mut self, attr: Attribute) {
-        let attrs = self.grid.attrs().clone();
+        let attrs = *self.grid.attrs();
         let mut new_attrs = attrs;
 
         match attr {

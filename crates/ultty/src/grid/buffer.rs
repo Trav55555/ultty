@@ -221,11 +221,11 @@ impl Buffer {
         // Process history rows
         for row in self.history.drain(..) {
             for cell in row.cells() {
-                current_line.push(cell.clone());
+                current_line.push(*cell);
             }
             if !row.is_wrapped() {
                 // Trim trailing blanks
-                while current_line.last().map_or(false, |c| c.is_blank()) {
+                while current_line.last().is_some_and(|c| c.is_blank()) {
                     current_line.pop();
                 }
                 logical_lines.push(std::mem::take(&mut current_line));
@@ -236,7 +236,10 @@ impl Buffer {
         let grid_rows: Vec<_> = self.grid.rows().cloned().collect();
 
         // Find the last non-blank row
-        let last_content_row = grid_rows.iter().rposition(|row| !row.is_blank()).unwrap_or(0);
+        let last_content_row = grid_rows
+            .iter()
+            .rposition(|row| !row.is_blank())
+            .unwrap_or(0);
 
         for (idx, row) in grid_rows.iter().enumerate() {
             // Skip trailing blank rows (but include blank rows that have content after them)
@@ -245,10 +248,10 @@ impl Buffer {
             }
 
             for cell in row.cells() {
-                current_line.push(cell.clone());
+                current_line.push(*cell);
             }
             if !row.is_wrapped() {
-                while current_line.last().map_or(false, |c| c.is_blank()) {
+                while current_line.last().is_some_and(|c| c.is_blank()) {
                     current_line.pop();
                 }
                 logical_lines.push(std::mem::take(&mut current_line));
@@ -257,14 +260,14 @@ impl Buffer {
 
         // Don't forget remaining cells from a wrapped line at the end
         if !current_line.is_empty() {
-            while current_line.last().map_or(false, |c| c.is_blank()) {
+            while current_line.last().is_some_and(|c| c.is_blank()) {
                 current_line.pop();
             }
             logical_lines.push(current_line);
         }
 
         // Remove trailing empty logical lines (these are just viewport padding)
-        while logical_lines.last().map_or(false, |line| line.is_empty()) {
+        while logical_lines.last().is_some_and(|line| line.is_empty()) {
             logical_lines.pop();
         }
 
@@ -286,7 +289,7 @@ impl Buffer {
                 while (col as usize) < new_cols as usize && pos < line.len() {
                     let cell = &line[pos];
                     if let Some(dest) = new_row.get_mut(col) {
-                        *dest = cell.clone();
+                        *dest = *cell;
                     }
                     col += 1;
                     pos += 1;
@@ -389,7 +392,7 @@ mod tests {
         // Add some history
         for i in 0..50 {
             let mut row = Row::new(80);
-            row[0].set_char(('A' as u8 + (i % 26)) as char);
+            row[0].set_char((b'A' + (i % 26)) as char);
             buf.push_to_history(vec![row]);
         }
 
@@ -431,7 +434,7 @@ mod tests {
         // Add history
         for i in 0..10 {
             let mut row = Row::new(10);
-            row[0].set_char(('0' as u8 + i) as char);
+            row[0].set_char((b'0' + i) as char);
             buf.push_to_history(vec![row]);
         }
 
@@ -558,7 +561,7 @@ mod tests {
 
         // Verify state: 2 in history (A, B), grid has C, D, empty - cell() takes (col, row)
         assert_eq!(buf.history_len(), 2);
-        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'C');  // col 0, row 0
+        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'C'); // col 0, row 0
 
         // Grow height from 3 to 5 (width stays same)
         buf.resize(Dimensions::new(20, 5));
@@ -566,9 +569,9 @@ mod tests {
         // History should be pulled into grid
         // History rows A, B should now be at top of grid - cell() takes (col, row)
         assert_eq!(buf.history_len(), 0);
-        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'A');  // col 0, row 0
-        assert_eq!(buf.grid().cell(0, 1).unwrap().char(), 'B');  // col 0, row 1
-        assert_eq!(buf.grid().cell(0, 2).unwrap().char(), 'C');  // col 0, row 2
-        assert_eq!(buf.grid().cell(0, 3).unwrap().char(), 'D');  // col 0, row 3
+        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'A'); // col 0, row 0
+        assert_eq!(buf.grid().cell(0, 1).unwrap().char(), 'B'); // col 0, row 1
+        assert_eq!(buf.grid().cell(0, 2).unwrap().char(), 'C'); // col 0, row 2
+        assert_eq!(buf.grid().cell(0, 3).unwrap().char(), 'D'); // col 0, row 3
     }
 }

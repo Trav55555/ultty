@@ -392,12 +392,12 @@ impl Terminal {
     /// Set working directory (from OSC 7 file://host/path).
     pub fn set_working_directory(&mut self, uri: String) {
         // Parse file:// URI to extract path
-        let path = if uri.starts_with("file://") {
+        let path = if let Some(stripped) = uri.strip_prefix("file://") {
             // Skip file://hostname/ prefix
-            if let Some(path_start) = uri[7..].find('/') {
-                uri[7 + path_start..].to_string()
+            if let Some(path_start) = stripped.find('/') {
+                stripped[path_start..].to_string()
             } else {
-                uri[7..].to_string()
+                stripped.to_string()
             }
         } else {
             uri
@@ -718,7 +718,7 @@ impl Terminal {
         }
 
         // Add 32 to make printable, clamp to 223
-        let cb = (cb + 32).min(255) as u8;
+        let cb = cb + 32;
         let cx = ((x + 1).min(223) + 32) as u8;
         let cy = ((y + 1).min(223) + 32) as u8;
 

@@ -1296,7 +1296,7 @@ impl App {
                 // Handle Ctrl+key combinations
                 if self.modifiers.control_key() && !self.modifiers.shift_key() {
                     let ch = c.chars().next().unwrap_or('\0');
-                    if ch >= 'a' && ch <= 'z' {
+                    if ch.is_ascii_lowercase() {
                         let ctrl_char = (ch as u8 - b'a' + 1) as char;
                         if let Err(e) = self.send_input(&[ctrl_char as u8]) {
                             tracing::warn!("Failed to send input: {}", e);
@@ -1777,7 +1777,7 @@ impl App {
 
                 // Request window resize
                 let new_size = PhysicalSize::new(new_width, current_height);
-                if let Some(_) = self.window.request_inner_size(new_size) {
+                if self.window.request_inner_size(new_size).is_some() {
                     tracing::info!(
                         "Requested window resize to {} columns ({} pixels wide)",
                         columns,
@@ -1911,7 +1911,7 @@ impl App {
         let mut output = String::new();
 
         // Header
-        output.push_str(&format!("=== Ultty Terminal Debug Dump ===\n"));
+        output.push_str("=== Ultty Terminal Debug Dump ===\n");
         output.push_str(&format!("Timestamp: {}\n", timestamp));
         output.push_str(&format!(
             "Dimensions: {}x{} (cols x rows)\n",
@@ -1958,7 +1958,7 @@ impl App {
             output.push_str("|\n");
         }
 
-        output.push_str(&format!("\n=== End of Dump ===\n"));
+        output.push_str("\n=== End of Dump ===\n");
 
         // Write to file
         match std::fs::File::create(&filename) {
@@ -2031,7 +2031,7 @@ impl App {
 
         if let Some(ref mut server) = self.protocol_server {
             server.set_viewport(size.width as f32, size.height as f32);
-            server.broadcast_resize(cols as u16, rows as u16);
+            server.broadcast_resize(cols, rows);
         }
 
         self.needs_redraw = true;
@@ -2476,7 +2476,7 @@ impl App {
                             .position(|t| {
                                 self.terminal_manager
                                     .active_tab()
-                                    .map_or(false, |a| a.id == t.id)
+                                    .is_some_and(|a| a.id == t.id)
                             })
                             .unwrap_or(0);
                         ControlResponse::Data(ControlData::Info(TerminalInfo {
@@ -2622,7 +2622,7 @@ impl App {
                         .position(|t| {
                             self.terminal_manager
                                 .active_tab()
-                                .map_or(false, |a| a.id == t.id)
+                                .is_some_and(|a| a.id == t.id)
                         })
                         .unwrap_or(0);
                     let idx = index.unwrap_or(active_idx);

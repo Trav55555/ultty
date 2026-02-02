@@ -575,7 +575,7 @@ impl TerminalManager {
             &full_args,
             self.default_cols,
             self.default_rows,
-        ).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        ).map_err(io::Error::other)?;
 
         // Change working directory if specified
         if let Some(dir) = working_dir {

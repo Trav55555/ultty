@@ -124,7 +124,8 @@ impl Default for SixelPalette {
 impl SixelPalette {
     fn set_rgb(&mut self, index: u8, r: u8, g: u8, b: u8) {
         // RGBA format (little-endian becomes ABGR in memory)
-        self.colors[index as usize] = 0xFF000000 | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
+        self.colors[index as usize] =
+            0xFF000000 | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32);
     }
 
     fn set_hls(&mut self, index: u8, h: u16, l: u16, s: u16) {
@@ -183,7 +184,7 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
 
     // First pass: determine image dimensions
     let mut max_x: u32 = 0;
-    let max_y: u32;
+
     let mut x: u32 = 0;
     let mut y: u32 = 0;
 
@@ -240,7 +241,7 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
         i += 1;
     }
     max_x = max_x.max(x);
-    max_y = y + 6; // Add final row height
+    let max_y: u32 = y + 6; // Add final row height
 
     if max_x == 0 || max_y == 0 {
         return None;
@@ -306,7 +307,7 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
                                 // HLS
                                 palette.set_hls(index, params[2], params[3], params[4]);
                             }
-                            2 | _ => {
+                            _ => {
                                 // RGB (percentages 0-100)
                                 let r = ((params[2] as u32 * 255) / 100) as u8;
                                 let g = ((params[3] as u32 * 255) / 100) as u8;
@@ -325,7 +326,12 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
                 let mut j = i + 1;
                 while j < data.len() {
                     let next = data[j];
-                    if next == b'#' || next == b'-' || next == b'$' || next == b'!' || (next >= 63 && next <= 126) {
+                    if next == b'#'
+                        || next == b'-'
+                        || next == b'$'
+                        || next == b'!'
+                        || (63..=126).contains(&next)
+                    {
                         break;
                     }
                     j += 1;
@@ -356,8 +362,8 @@ fn draw_sixel(pixels: &mut [u8], width: u32, height: u32, x: u32, y: u32, sixel:
                 let offset = ((py * width + x) * 4) as usize;
                 if offset + 3 < pixels.len() {
                     // RGBA
-                    pixels[offset] = (color & 0xFF) as u8;         // R
-                    pixels[offset + 1] = ((color >> 8) & 0xFF) as u8;  // G
+                    pixels[offset] = (color & 0xFF) as u8; // R
+                    pixels[offset + 1] = ((color >> 8) & 0xFF) as u8; // G
                     pixels[offset + 2] = ((color >> 16) & 0xFF) as u8; // B
                     pixels[offset + 3] = ((color >> 24) & 0xFF) as u8; // A
                 }
@@ -483,9 +489,9 @@ mod tests {
         // Check that all 6 pixels are red
         for y in 0..6 {
             let offset = y * 4;
-            assert_eq!(pixels[offset], 255, "R at y={}", y);     // R
-            assert_eq!(pixels[offset + 1], 0, "G at y={}", y);   // G
-            assert_eq!(pixels[offset + 2], 0, "B at y={}", y);   // B
+            assert_eq!(pixels[offset], 255, "R at y={}", y); // R
+            assert_eq!(pixels[offset + 1], 0, "G at y={}", y); // G
+            assert_eq!(pixels[offset + 2], 0, "B at y={}", y); // B
             assert_eq!(pixels[offset + 3], 255, "A at y={}", y); // A
         }
     }

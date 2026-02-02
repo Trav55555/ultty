@@ -280,7 +280,7 @@ impl TextInput {
                 }
                 VimMotion::TillChar(c) => {
                     if let Some(pos) = chars[self.cursor + 1..].iter().position(|ch| ch == c) {
-                        self.cursor = self.cursor + pos;
+                        self.cursor += pos;
                     }
                 }
                 VimMotion::TillCharBack(c) => {
@@ -679,7 +679,7 @@ impl VimHandler for TextInput {
             return self.apply_operator(&command.operator, start_pos, self.cursor);
         }
 
-        if self.vim_state.mode.is_visual() {}
+        self.vim_state.mode.is_visual();
 
         VimResult::Handled
     }

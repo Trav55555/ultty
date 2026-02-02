@@ -99,8 +99,10 @@ pub enum AlignContent {
 
 /// Dimension value.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub enum Dimension {
     /// Automatic sizing.
+    #[default]
     Auto,
     /// Absolute size in terminal cells.
     Cells(f32),
@@ -118,11 +120,6 @@ pub enum Dimension {
     MaxContent,
 }
 
-impl Default for Dimension {
-    fn default() -> Self {
-        Dimension::Auto
-    }
-}
 
 impl Dimension {
     /// Create a cells dimension.

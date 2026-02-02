@@ -63,11 +63,12 @@ impl std::fmt::Debug for Column {
 
 impl Column {
     pub fn new() -> Self {
-        let mut constraints = Constraints::default();
-        constraints.display = Display::Flex;
-        constraints.flex_direction = FlexDirection::Column;
         Self {
-            constraints,
+            constraints: Constraints {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Column,
+                ..Default::default()
+            },
             children: Vec::new(),
             gap: 0,
         }
@@ -167,11 +168,12 @@ impl std::fmt::Debug for Row {
 
 impl Row {
     pub fn new() -> Self {
-        let mut constraints = Constraints::default();
-        constraints.display = Display::Flex;
-        constraints.flex_direction = FlexDirection::Row;
         Self {
-            constraints,
+            constraints: Constraints {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                ..Default::default()
+            },
             children: Vec::new(),
             gap: 0,
         }

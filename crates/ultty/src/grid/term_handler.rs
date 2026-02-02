@@ -280,7 +280,7 @@ impl<'a> TerminalHandler<'a> {
 
     /// Apply a text attribute to the current style.
     fn apply_attribute(&mut self, attr: Attribute) {
-        let attrs = self.terminal.grid().attrs().clone();
+        let attrs = *self.terminal.grid().attrs();
         let mut new_attrs = attrs;
 
         match attr {
@@ -453,8 +453,8 @@ impl<'a> TerminalHandler<'a> {
         let cell_pixel_width = 8u32;
         let cell_pixel_height = 16u32;
 
-        let cell_width = ((width + cell_pixel_width - 1) / cell_pixel_width) as u16;
-        let cell_height = ((height + cell_pixel_height - 1) / cell_pixel_height) as u16;
+        let cell_width = width.div_ceil(cell_pixel_width) as u16;
+        let cell_height = height.div_ceil(cell_pixel_height) as u16;
 
         // Allocate image ID and create the image
         let id = self.terminal.images_mut().allocate_id();
