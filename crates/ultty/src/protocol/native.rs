@@ -1,21 +1,19 @@
 //! Native binary protocol handler.
+//!
+//! This module is a placeholder for potential future refactoring.
+//! Currently, native protocol handling is implemented in `session.rs` and `server.rs`.
 
 use ultty_protocol::{AppMessage, TerminalMessage};
 
-/// Native protocol connection handler.
-pub struct NativeProtocol {
-    // TODO: Connection state
-}
+/// Native protocol connection handler (unused - see session.rs).
+pub struct NativeProtocol {}
 
 impl NativeProtocol {
-    /// Create a new native protocol handler.
     pub fn new() -> Self {
         Self {}
     }
 
-    /// Process an incoming message.
     pub fn handle_message(&mut self, _msg: AppMessage) -> Option<TerminalMessage> {
-        // TODO: Process message and update scene graph
         None
     }
 }

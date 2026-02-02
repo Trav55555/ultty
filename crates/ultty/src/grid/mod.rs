@@ -143,6 +143,9 @@ pub struct Grid {
     /// Combining characters storage: (row, col) -> additional chars
     /// Only cells with HAS_COMBINING flag have entries here
     combining: std::collections::HashMap<(u16, u16), Vec<char>>,
+    /// Custom tab stops (column numbers where tabs stop)
+    /// Initialized to default every-8-columns pattern
+    tab_stops: std::collections::BTreeSet<u16>,
 }
 
 impl Grid {
@@ -150,6 +153,8 @@ impl Grid {
     pub fn new(dims: Dimensions) -> Self {
         let rows = (0..dims.rows).map(|_| Row::new(dims.cols)).collect();
         let dirty = vec![true; dims.rows as usize];
+
+        let tab_stops: std::collections::BTreeSet<u16> = (0..dims.cols).step_by(8).collect();
 
         Self {
             rows,
@@ -159,6 +164,7 @@ impl Grid {
             dirty,
             scroll_region: None,
             combining: std::collections::HashMap::new(),
+            tab_stops,
         }
     }
 
@@ -212,10 +218,7 @@ impl Grid {
         }
 
         // Add to the combining map
-        self.combining
-            .entry((row, col))
-            .or_default()
-            .push(c);
+        self.combining.entry((row, col)).or_default().push(c);
     }
 
     /// Get combining characters for a cell.
@@ -407,7 +410,10 @@ impl Grid {
 
     /// Newline - move cursor down, scrolling if needed.
     pub fn newline(&mut self) {
-        let bottom = self.scroll_region.map(|r| r.bottom).unwrap_or(self.dims.rows - 1);
+        let bottom = self
+            .scroll_region
+            .map(|r| r.bottom)
+            .unwrap_or(self.dims.rows - 1);
 
         if self.cursor.position.row >= bottom {
             self.scroll_up(1);
@@ -423,10 +429,37 @@ impl Grid {
         }
     }
 
-    /// Tab - advance to next tab stop (every 8 columns).
+    /// Tab - advance to next tab stop.
     pub fn tab(&mut self) {
-        let next_tab = ((self.cursor.position.col / 8) + 1) * 8;
-        self.cursor.position.col = next_tab.min(self.dims.cols - 1);
+        let current = self.cursor.position.col;
+        if let Some(&next) = self.tab_stops.range((current + 1)..).next() {
+            self.cursor.position.col = next.min(self.dims.cols - 1);
+        } else {
+            self.cursor.position.col = self.dims.cols - 1;
+        }
+    }
+
+    /// Set a tab stop at the current cursor column.
+    pub fn set_tab_stop(&mut self) {
+        self.tab_stops.insert(self.cursor.position.col);
+    }
+
+    /// Clear tab stop(s).
+    pub fn clear_tab_stop(&mut self, mode: u8) {
+        match mode {
+            0 => {
+                self.tab_stops.remove(&self.cursor.position.col);
+            }
+            3 => {
+                self.tab_stops.clear();
+            }
+            _ => {}
+        }
+    }
+
+    /// Reset tab stops to default (every 8 columns).
+    pub fn reset_tab_stops(&mut self) {
+        self.tab_stops = (0..self.dims.cols).step_by(8).collect();
     }
 
     /// Set the scroll region (1-based top and bottom, inclusive).
@@ -459,7 +492,8 @@ impl Grid {
 
     /// Get the effective scroll region (returns full screen if none set).
     pub fn effective_scroll_region(&self) -> ScrollRegion {
-        self.scroll_region.unwrap_or(ScrollRegion::new(0, self.dims.rows - 1))
+        self.scroll_region
+            .unwrap_or(ScrollRegion::new(0, self.dims.rows - 1))
     }
 
     /// Scroll the grid up by n lines (within scroll region).
@@ -664,8 +698,16 @@ impl Grid {
         self.rows.truncate(new_dims.rows as usize);
 
         // Clamp cursor
-        self.cursor.position.col = self.cursor.position.col.min(new_dims.cols.saturating_sub(1));
-        self.cursor.position.row = self.cursor.position.row.min(new_dims.rows.saturating_sub(1));
+        self.cursor.position.col = self
+            .cursor
+            .position
+            .col
+            .min(new_dims.cols.saturating_sub(1));
+        self.cursor.position.row = self
+            .cursor
+            .position
+            .row
+            .min(new_dims.rows.saturating_sub(1));
 
         self.dims = new_dims;
         self.dirty = vec![true; new_dims.rows as usize];
@@ -754,8 +796,16 @@ impl Grid {
         self.rows.truncate(new_dims.rows as usize);
 
         // Clamp cursor position
-        self.cursor.position.col = self.cursor.position.col.min(new_dims.cols.saturating_sub(1));
-        self.cursor.position.row = self.cursor.position.row.min(new_dims.rows.saturating_sub(1));
+        self.cursor.position.col = self
+            .cursor
+            .position
+            .col
+            .min(new_dims.cols.saturating_sub(1));
+        self.cursor.position.row = self
+            .cursor
+            .position
+            .row
+            .min(new_dims.rows.saturating_sub(1));
 
         // Mark all dirty
         self.dirty = vec![true; new_dims.rows as usize];
@@ -775,8 +825,8 @@ impl Grid {
         self.rows.truncate(self.dims.rows as usize);
 
         // Adjust cursor position down by the number of inserted rows
-        self.cursor.position.row = (self.cursor.position.row + count as u16)
-            .min(self.dims.rows.saturating_sub(1));
+        self.cursor.position.row =
+            (self.cursor.position.row + count as u16).min(self.dims.rows.saturating_sub(1));
 
         // Mark all dirty
         self.mark_all_dirty();
@@ -977,6 +1027,35 @@ mod tests {
 
         grid.tab();
         assert_eq!(grid.cursor.position.col, 16);
+    }
+
+    #[test]
+    fn custom_tab_stops() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+
+        grid.clear_tab_stop(3);
+        grid.cursor.position.col = 5;
+        grid.set_tab_stop();
+        grid.cursor.position.col = 12;
+        grid.set_tab_stop();
+        grid.cursor.position.col = 20;
+        grid.set_tab_stop();
+
+        grid.cursor.position.col = 0;
+        grid.tab();
+        assert_eq!(grid.cursor.position.col, 5);
+
+        grid.tab();
+        assert_eq!(grid.cursor.position.col, 12);
+
+        grid.clear_tab_stop(0);
+        grid.tab();
+        assert_eq!(grid.cursor.position.col, 20);
+
+        grid.reset_tab_stops();
+        grid.cursor.position.col = 5;
+        grid.tab();
+        assert_eq!(grid.cursor.position.col, 8);
     }
 
     #[test]

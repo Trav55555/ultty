@@ -121,12 +121,8 @@ impl<'a> Handler<'a> {
 
             // Tabs
             Action::Tab => self.grid.tab(),
-            Action::SetTabStop => {
-                // TODO: Implement custom tab stops
-            }
-            Action::ClearTabStop(_) => {
-                // TODO: Implement tab stop clearing
-            }
+            Action::SetTabStop => self.grid.set_tab_stop(),
+            Action::ClearTabStop(mode) => self.grid.clear_tab_stop(mode),
 
             // Terminal queries
             Action::ReportCursorPosition => {
@@ -138,7 +134,7 @@ impl<'a> Handler<'a> {
 
             // Control characters
             Action::Bell => {
-                // TODO: Trigger bell (audio or visual)
+                // Bell is handled by event loop (TerminalEvent::Bell)
             }
             Action::Newline => self.grid.newline(),
             Action::CarriageReturn => self.grid.carriage_return(),

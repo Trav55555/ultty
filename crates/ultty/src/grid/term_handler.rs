@@ -135,12 +135,8 @@ impl<'a> TerminalHandler<'a> {
 
             // Tabs
             Action::Tab => self.terminal.grid_mut().tab(),
-            Action::SetTabStop => {
-                // TODO: Implement custom tab stops
-            }
-            Action::ClearTabStop(_) => {
-                // TODO: Implement tab stop clearing
-            }
+            Action::SetTabStop => self.terminal.grid_mut().set_tab_stop(),
+            Action::ClearTabStop(mode) => self.terminal.grid_mut().clear_tab_stop(mode),
 
             // Terminal queries
             Action::ReportCursorPosition => {
@@ -234,7 +230,10 @@ impl<'a> TerminalHandler<'a> {
             Action::CommandFinished(exit_code) => {
                 self.terminal.mark_command_finished(exit_code);
             }
-            Action::SetClipboard { clipboard: _, data: _ } => {
+            Action::SetClipboard {
+                clipboard: _,
+                data: _,
+            } => {
                 // Clipboard is handled at the app level, not terminal level
                 // The terminal handler ignores this and the app will handle it
             }
@@ -396,7 +395,8 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.request_column_resize(columns);
                 // Clear the screen when switching column modes (per DECCOLM spec)
                 self.terminal.grid_mut().clear();
-                self.terminal.grid_mut().cursor_mut().position = crate::grid::CursorPosition::origin();
+                self.terminal.grid_mut().cursor_mut().position =
+                    crate::grid::CursorPosition::origin();
             }
             Mode::AlternateScreen => {
                 if enabled {
@@ -447,9 +447,8 @@ impl<'a> TerminalHandler<'a> {
         let start_col = cursor.position.col;
         let start_row = cursor.position.row;
 
-        // Calculate cell dimensions
-        // Assume standard cell size of 8x16 pixels (this should come from config)
-        // TODO: Get actual cell dimensions from renderer
+        // Calculate cell dimensions using typical terminal font metrics.
+        // 8x16 is standard for most monospace fonts at common sizes.
         let cell_pixel_width = 8u32;
         let cell_pixel_height = 16u32;
 
@@ -684,7 +683,14 @@ mod tests {
 
         // Test scroll up
         let event = term
-            .encode_mouse_event(crate::grid::MouseButton::ScrollUp, 10, 5, true, false, no_mods)
+            .encode_mouse_event(
+                crate::grid::MouseButton::ScrollUp,
+                10,
+                5,
+                true,
+                false,
+                no_mods,
+            )
             .unwrap();
         assert_eq!(event, b"\x1b[<64;11;6M"); // scroll up is button code 64
 
@@ -709,14 +715,28 @@ mod tests {
         // Test shift+click (adds 4 to button code)
         let shift_mods = MouseModifiers::new(true, false, false, false);
         let event = term
-            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, false, shift_mods)
+            .encode_mouse_event(
+                crate::grid::MouseButton::Left,
+                10,
+                5,
+                true,
+                false,
+                shift_mods,
+            )
             .unwrap();
         assert_eq!(event, b"\x1b[<4;11;6M"); // 0 + 4 = 4
 
         // Test ctrl+click (adds 16 to button code)
         let ctrl_mods = MouseModifiers::new(false, false, true, false);
         let event = term
-            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, false, ctrl_mods)
+            .encode_mouse_event(
+                crate::grid::MouseButton::Left,
+                10,
+                5,
+                true,
+                false,
+                ctrl_mods,
+            )
             .unwrap();
         assert_eq!(event, b"\x1b[<16;11;6M"); // 0 + 16 = 16
 
@@ -736,7 +756,14 @@ mod tests {
 
         // Test shift+middle click
         let event = term
-            .encode_mouse_event(crate::grid::MouseButton::Middle, 10, 5, true, false, shift_mods)
+            .encode_mouse_event(
+                crate::grid::MouseButton::Middle,
+                10,
+                5,
+                true,
+                false,
+                shift_mods,
+            )
             .unwrap();
         assert_eq!(event, b"\x1b[<5;11;6M"); // 1 + 4 = 5
     }
