@@ -99,3 +99,7 @@ harness = false
 [[bench]]
 name = "render"
 harness = false
+
+[[bench]]
+name = "input_latency"
+harness = false
