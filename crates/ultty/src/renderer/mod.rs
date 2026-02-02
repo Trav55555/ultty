@@ -579,6 +579,272 @@ impl Renderer {
         })
     }
 
+    /// Create a new headless renderer for benchmarking (no window/surface required).
+    ///
+    /// This creates a renderer that can render to textures without a window.
+    /// Useful for benchmarking and testing.
+    pub async fn new_headless(width: u32, height: u32) -> anyhow::Result<Self> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+
+        // Request adapter without a surface (headless)
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Failed to find suitable GPU adapter for headless rendering"))?;
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("ultty_headless_device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                },
+                None,
+            )
+            .await?;
+
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+
+        // Use a common sRGB format for headless rendering
+        let surface_format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+        // Create a dummy surface configuration (not actually used for surface rendering)
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+
+        // Create uniform buffer
+        let uniforms = Uniforms::orthographic(width as f32, height as f32);
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("uniform_buffer"),
+            contents: bytemuck::cast_slice(&[uniforms]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Create uniform bind group layout
+        let uniform_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("uniform_bind_group_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("uniform_bind_group"),
+            layout: &uniform_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        // Create render pipeline
+        let bg_pipeline =
+            RenderPipeline::new(&device, surface_format, &uniform_bind_group_layout)?;
+
+        // Create text renderer with default font config
+        let font_config = crate::config::FontConfig::default();
+        let text_renderer = TextRenderer::with_config(
+            device.clone(),
+            queue.clone(),
+            surface_format,
+            &uniform_bind_group_layout,
+            &font_config,
+        )?;
+
+        // Get cell dimensions from text renderer
+        let (cell_width, cell_height) = text_renderer.cell_dimensions();
+
+        Ok(Self {
+            device,
+            queue,
+            config,
+            bg_pipeline,
+            image_pipeline: None,
+            text_renderer,
+            color_scheme: ColorScheme::default(),
+            cell_width,
+            cell_height,
+            uniform_buffer,
+            uniform_bind_group,
+            tab_bar_height: 0.0,
+            pane_offset_x: 0.0,
+            pane_offset_y: 0.0,
+            opacity: 1.0,
+            image_cache: std::collections::HashMap::new(),
+        })
+    }
+
+    /// Render to a texture (headless) and return timing information.
+    ///
+    /// This is useful for benchmarking the render pipeline without a window.
+    /// Returns the time taken to render in microseconds.
+    pub fn render_to_texture(
+        &mut self,
+        terminal: &Terminal,
+        overlay: &OverlayState,
+    ) -> anyhow::Result<()> {
+        let width = self.config.width;
+        let height = self.config.height;
+
+        // Create render target texture
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("bench_render_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bench_render_encoder"),
+            });
+
+        // Build vertex data for backgrounds
+        let (bg_vertices, bg_indices) = self.build_background_vertices(terminal, overlay);
+
+        // Create background vertex/index buffers
+        let bg_vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("bg_vertex_buffer"),
+                contents: bytemuck::cast_slice(&bg_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+        let bg_index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("bg_index_buffer"),
+                contents: bytemuck::cast_slice(&bg_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+        // Render pass for backgrounds
+        {
+            let linear_bg = self.color_scheme.background.to_linear();
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bench_bg_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: linear_bg.r as f64 * self.opacity as f64,
+                            g: linear_bg.g as f64 * self.opacity as f64,
+                            b: linear_bg.b as f64 * self.opacity as f64,
+                            a: self.opacity as f64,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(self.bg_pipeline.pipeline());
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, bg_vertex_buffer.slice(..));
+            render_pass.set_index_buffer(bg_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
+        }
+
+        // Render text
+        self.text_renderer.render(
+            &mut encoder,
+            &view,
+            terminal,
+            &self.color_scheme,
+            self.cell_width,
+            self.cell_height,
+            self.tab_bar_height,
+            &self.uniform_bind_group,
+        )?;
+
+        // Build and render overlays
+        let (overlay_vertices, overlay_indices) = self.build_overlay_vertices(terminal, overlay);
+        if !overlay_vertices.is_empty() {
+            let overlay_vertex_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("overlay_vertex_buffer"),
+                    contents: bytemuck::cast_slice(&overlay_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+            let overlay_index_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("overlay_index_buffer"),
+                    contents: bytemuck::cast_slice(&overlay_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bench_overlay_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(self.bg_pipeline.pipeline());
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, overlay_vertex_buffer.slice(..));
+            render_pass.set_index_buffer(overlay_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..overlay_indices.len() as u32, 0, 0..1);
+        }
+
+        // Submit and wait for completion
+        self.queue.submit(std::iter::once(encoder.finish()));
+        self.device.poll(wgpu::Maintain::Wait);
+
+        Ok(())
+    }
+
     /// Get cell dimensions in pixels.
     pub fn cell_dimensions(&self) -> (f32, f32) {
         (self.cell_width, self.cell_height)

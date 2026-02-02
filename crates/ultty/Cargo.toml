@@ -95,3 +95,7 @@ harness = false
 [[bench]]
 name = "layout"
 harness = false
+
+[[bench]]
+name = "render"
+harness = false

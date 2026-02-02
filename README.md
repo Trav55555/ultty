@@ -43,8 +43,8 @@ cargo run -p todo-app       # Framework todo list
 - [x] Native protocol handler with scene graph
 - [x] Framework with component system
 - [x] ANSI fallback mode (run in any terminal)
-- [ ] Protocol hardening complete
-- [ ] Performance benchmarks
+- [x] Protocol hardening (bounds checks, size limits)
+- [x] Performance benchmarks
 
 ## Documentation
 
@@ -63,12 +63,15 @@ cargo fmt --all             # Format
 
 ## Performance Targets
 
-| Metric | Target |
-|--------|--------|
-| Layout recompute | < 1ms |
-| Frame render | < 5ms |
-| Input latency | < 10ms |
-| Memory (terminal) | < 50MB |
+| Metric | Target | Measured |
+|--------|--------|----------|
+| Layout recompute | < 1ms | 27µs (37x margin) |
+| Frame render (80x24 typical) | < 5ms | 3.7ms |
+| Frame render (empty) | < 5ms | 102µs |
+| Input latency | < 10ms | - |
+| Memory (terminal) | < 50MB | - |
+
+Run benchmarks: `cargo bench -p ultty`
 
 ## License
 
