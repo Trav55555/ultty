@@ -1,4 +1,5 @@
 //! Terminal grid and buffer management.
+//! Terminal grid and cell management.
 //!
 //! This module provides the core data structures for terminal emulation:
 //! - [`Cell`] - A single character cell with styling
@@ -8,6 +9,23 @@
 //! - [`Terminal`] - Full terminal state with alternate screen and selection
 //! - [`Handler`] - Applies ANSI parser actions to the terminal
 //! - [`ImageStore`] - Storage for inline images (Sixel, etc.)
+//!
+//! # Example
+//!
+//! ```
+//! use ultty::grid::{Grid, Dimensions, Terminal};
+//!
+//! // Create a terminal
+//! let mut term = Terminal::new(Dimensions::new(80, 24));
+//!
+//! // Write some text
+//! for c in "Hello, World!".chars() {
+//!     term.grid_mut().write_char(c);
+//! }
+//!
+//! // Check the content
+//! assert_eq!(term.grid().row(0).unwrap().text_trimmed(), "Hello, World!");
+//! ```
 
 mod buffer;
 mod cell;

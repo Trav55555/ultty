@@ -124,29 +124,17 @@ impl<'a> Handler<'a> {
             Action::SetTabStop => self.grid.set_tab_stop(),
             Action::ClearTabStop(mode) => self.grid.clear_tab_stop(mode),
 
-            // Terminal queries
-            Action::ReportCursorPosition => {
-                // TODO: Send cursor position report
-            }
-            Action::DeviceAttributes => {
-                // TODO: Send device attributes
-            }
+            // Terminal queries (handled by TerminalHandler which has response queue)
+            Action::ReportCursorPosition | Action::DeviceAttributes => {}
 
             // Control characters
-            Action::Bell => {
-                // Bell is handled by event loop (TerminalEvent::Bell)
-            }
+            Action::Bell => {}
             Action::Newline => self.grid.newline(),
             Action::CarriageReturn => self.grid.carriage_return(),
             Action::Backspace => self.grid.backspace(),
 
-            // Screen modes
-            Action::EnterAlternateScreen => {
-                // TODO: Switch to alternate screen buffer
-            }
-            Action::LeaveAlternateScreen => {
-                // TODO: Switch back to main screen buffer
-            }
+            // Screen modes (handled by TerminalHandler which has alternate buffer)
+            Action::EnterAlternateScreen | Action::LeaveAlternateScreen => {}
 
             // OSC/DCS sequences are handled by TerminalHandler, not the simple grid handler
             Action::SetTitle(_)
@@ -208,40 +196,27 @@ impl<'a> Handler<'a> {
             Mode::CursorVisible => {
                 self.grid.cursor_mut().visible = enabled;
             }
-            Mode::ApplicationCursorKeys => {
-                // TODO: Track application cursor keys mode
-            }
-            Mode::BracketedPaste => {
-                // TODO: Track bracketed paste mode
-            }
-            Mode::FocusReporting => {
-                // TODO: Track focus reporting mode
-            }
-            Mode::MouseX10
+            // All other modes handled by TerminalHandler
+            Mode::ApplicationCursorKeys
+            | Mode::BracketedPaste
+            | Mode::FocusReporting
+            | Mode::MouseX10
             | Mode::MouseNormal
             | Mode::MouseButtonEvent
             | Mode::MouseAnyEvent
             | Mode::MouseUtf8
             | Mode::MouseSgr
-            | Mode::MouseUrxvt => {
-                // Mouse modes are handled by TerminalHandler, not the simple grid handler
-            }
-            Mode::OriginMode => {
-                // TODO: Track origin mode
-            }
-            Mode::AutoWrap => {
-                // TODO: Track auto-wrap mode
-            }
-            Mode::ReverseVideo
+            | Mode::MouseUrxvt
+            | Mode::OriginMode
+            | Mode::AutoWrap
+            | Mode::ReverseVideo
             | Mode::CursorBlink
             | Mode::ColumnMode132
             | Mode::AlternateScreen
             | Mode::AlternateScreenClear
             | Mode::AlternateScreenSaveCursor
             | Mode::AlternateScrollMode
-            | Mode::SynchronizedUpdate => {
-                // These modes are handled by TerminalHandler, not the simple grid handler
-            }
+            | Mode::SynchronizedUpdate => {}
         }
     }
 }

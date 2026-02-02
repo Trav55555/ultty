@@ -1,11 +1,28 @@
 //! Testing infrastructure for autonomous terminal testing.
+//! Headless terminal testing utilities.
 //!
 //! This module provides hooks for testing the terminal emulator without a GUI.
 //! It allows spawning a headless terminal, sending input, and capturing output.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use ultty::testing::TestTerminal;
+//! use std::time::Duration;
+//!
+//! let mut term = TestTerminal::new().unwrap();
+//!
+//! // Send a command and wait for output
+//! term.send("echo hello\n").unwrap();
+//! term.wait_for_output(Duration::from_millis(100)).unwrap();
+//!
+//! // Check output contains expected text
+//! assert!(term.capture_text().contains("hello"));
+//! ```
 
 pub mod snapshot;
 
-pub use snapshot::{TerminalSnapshot, TerminalVerifier, SnapshotDiff};
+pub use snapshot::{SnapshotDiff, TerminalSnapshot, TerminalVerifier};
 
 use crate::event_loop::EventLoop;
 use crate::grid::{MouseMode, Terminal};
@@ -27,13 +44,21 @@ impl TestTerminal {
     /// Create a new test terminal with specified dimensions.
     pub fn with_size(cols: u16, rows: u16) -> std::io::Result<Self> {
         let event_loop = EventLoop::new(cols, rows)?;
-        Ok(Self { event_loop, cols, rows })
+        Ok(Self {
+            event_loop,
+            cols,
+            rows,
+        })
     }
 
     /// Create a test terminal in a specific working directory.
     pub fn with_dir(cols: u16, rows: u16, working_dir: &str) -> std::io::Result<Self> {
         let event_loop = EventLoop::new_with_dir(cols, rows, working_dir)?;
-        Ok(Self { event_loop, cols, rows })
+        Ok(Self {
+            event_loop,
+            cols,
+            rows,
+        })
     }
 
     /// Send input to the terminal.
@@ -78,7 +103,9 @@ impl TestTerminal {
             // Ctrl+key
             s if s.starts_with("Ctrl+") => {
                 let ch = s.chars().last().unwrap_or('?');
-                let ctrl_char = (ch.to_ascii_lowercase() as u8).wrapping_sub(b'a').wrapping_add(1);
+                let ctrl_char = (ch.to_ascii_lowercase() as u8)
+                    .wrapping_sub(b'a')
+                    .wrapping_add(1);
                 self.send_bytes(&[ctrl_char])
             }
             // Regular character
@@ -103,7 +130,11 @@ impl TestTerminal {
     }
 
     /// Wait until terminal output stabilizes.
-    pub fn wait_until_stable(&mut self, stable_duration: Duration, max_wait: Duration) -> std::io::Result<()> {
+    pub fn wait_until_stable(
+        &mut self,
+        stable_duration: Duration,
+        max_wait: Duration,
+    ) -> std::io::Result<()> {
         let start = Instant::now();
         let mut last_content = self.capture_text();
         let mut stable_since = Instant::now();
@@ -268,7 +299,8 @@ impl TestTerminal {
         }
 
         // Wait for app to start
-        if let Err(e) = self.wait_until_stable(Duration::from_millis(500), Duration::from_secs(10)) {
+        if let Err(e) = self.wait_until_stable(Duration::from_millis(500), Duration::from_secs(10))
+        {
             result.failed.push(format!("App didn't stabilize: {}", e));
             return result;
         }
@@ -314,9 +346,13 @@ impl TestTerminal {
                 AppCheck::MinRows(min) => {
                     let actual = snapshot.non_empty_rows();
                     if actual >= *min {
-                        result.passed.push(format!("Has {} rows (min {})", actual, min));
+                        result
+                            .passed
+                            .push(format!("Has {} rows (min {})", actual, min));
                     } else {
-                        result.failed.push(format!("Only {} rows (need {})", actual, min));
+                        result
+                            .failed
+                            .push(format!("Only {} rows (need {})", actual, min));
                     }
                 }
             }
@@ -402,7 +438,10 @@ pub mod assertions {
             (actual_col, actual_row),
             (col, row),
             "Expected cursor at ({}, {}), but was at ({}, {})",
-            col, row, actual_col, actual_row
+            col,
+            row,
+            actual_col,
+            actual_row
         );
     }
 }
