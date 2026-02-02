@@ -95,9 +95,9 @@ highest leverage steps to prove the vision.
 
 ## Suggested Next Steps (Prioritized)
 
-1) Enforce payload length and add hard caps (strings, region counts).
-2) Add negative tests/fuzz seeds for malformed frames and size limits.
-3) Remove PTY hot-path allocations (`to_vec()`); feed slices directly.
-4) Add `// SAFETY:` comments for all unsafe blocks and document invariants.
-5) Build a minimal native-protocol demo app to validate layout + atomic frames.
+1) ~~Enforce payload length and add hard caps (strings, region counts).~~ **DONE** (2026-02-01)
+2) ~~Add negative tests/fuzz seeds for malformed frames and size limits.~~ **DONE** (2026-02-01)
+3) ~~Remove PTY hot-path allocations (`to_vec()`); feed slices directly.~~ **Already optimized** - uses buffer swapping
+4) ~~Add `// SAFETY:` comments for all unsafe blocks and document invariants.~~ **DONE** (2026-02-01)
+5) ~~Build a minimal native-protocol demo app to validate layout + atomic frames.~~ **Already exists** - see `examples/hello-native`
 

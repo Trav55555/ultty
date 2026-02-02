@@ -52,7 +52,7 @@ mod tests {
 
 **Location**: `crates/ultty-protocol/tests/roundtrip.rs`
 
-**Status**: Currently broken (proptest trait bound issues) - **FIX FIRST**
+**Status**: Working (40 tests pass, 1 ignored for stack size)
 
 **Pattern**:
 ```rust
