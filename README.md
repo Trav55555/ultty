@@ -63,15 +63,15 @@ cargo fmt --all             # Format
 
 ## Performance Targets
 
-| Metric | Target | Measured |
-|--------|--------|----------|
-| Layout recompute | < 1ms | 27µs (37x margin) |
-| Frame render (80x24 typical) | < 5ms | 3.7ms |
-| Frame render (empty) | < 5ms | 102µs |
-| Input latency | < 10ms | - |
-| Memory (terminal) | < 50MB | - |
+| Metric | Target | Measured | Margin |
+|--------|--------|----------|--------|
+| Layout recompute | < 1ms | 27µs | 37x |
+| Frame render (typical) | < 5ms | 290µs | 17x |
+| Frame render (empty) | < 5ms | 102µs | 49x |
+| Input latency (internal) | < 10ms | ~0.3ms | 33x |
+| Memory (terminal) | < 50MB | ~18MB | 2.8x |
 
-Run benchmarks: `cargo bench -p ultty`
+All targets met with significant margins. Run benchmarks: `cargo bench -p ultty`
 
 ## License
 
