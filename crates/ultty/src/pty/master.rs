@@ -119,10 +119,34 @@ impl Pty {
     /// Returns `Ok(0)` if no data is available, `Err(Closed)` if the PTY is closed.
     pub fn read(&self, buf: &mut [u8]) -> Result<usize> {
         match read(self.master.as_raw_fd(), buf) {
-            Ok(n) => Ok(n),
+            Ok(n) => {
+                if n > 0 {
+                    Self::debug_log_pty_data(&buf[..n]);
+                }
+                Ok(n)
+            }
             Err(nix::Error::EAGAIN) => Ok(0),
             Err(nix::Error::EIO) => Err(PtyError::Closed),
             Err(e) => Err(PtyError::ReadFailed(io::Error::from_raw_os_error(e as i32))),
+        }
+    }
+
+    fn debug_log_pty_data(data: &[u8]) {
+        use std::sync::OnceLock;
+        static LOG_FILE: OnceLock<Option<std::sync::Mutex<std::fs::File>>> = OnceLock::new();
+
+        let file = LOG_FILE.get_or_init(|| {
+            std::env::var("ULTTY_PTY_LOG")
+                .ok()
+                .and_then(|path| std::fs::File::create(&path).ok().map(std::sync::Mutex::new))
+        });
+
+        if let Some(mutex) = file {
+            if let Ok(mut f) = mutex.lock() {
+                use std::io::Write;
+                let _ = f.write_all(data);
+                let _ = f.flush();
+            }
         }
     }
 

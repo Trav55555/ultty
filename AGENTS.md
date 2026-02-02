@@ -204,6 +204,70 @@ ulttyctl --json tabs
 
 **Socket location**: `$XDG_RUNTIME_DIR/ultty-ctl.sock`
 
+## AI Agent Testing with ulttyctl
+
+When testing ultty from an AI agent (like Claude Code), use `ulttyctl` instead of tmux for reliable automation.
+
+### Setup
+
+1. Start ultty in a tmux session (for persistence):
+```bash
+tmux new-session -d -s ultty-test
+tmux send-keys -t ultty-test "ULTTY_PTY_LOG=/tmp/pty.bin ./target/release/ultty" Enter
+```
+
+2. Verify connection:
+```bash
+./target/release/ulttyctl ping  # Should return "PONG"
+```
+
+### Common Workflow
+
+```bash
+# Check terminal state
+./target/release/ulttyctl info
+# Output: 88x35 tab:1/1 cursor:(0,1) focused:true
+
+# Send a command
+./target/release/ulttyctl send-text "claude"
+./target/release/ulttyctl send-key enter
+
+# Wait for app to load
+sleep 5
+
+# Get visible text (for verification)
+./target/release/ulttyctl text
+
+# Take screenshot (for visual debugging)
+./target/release/ulttyctl screenshot /tmp/screenshot.png
+
+# Send keyboard shortcuts
+./target/release/ulttyctl send-key q          # Press 'q'
+./target/release/ulttyctl send-key c ctrl     # Ctrl+C
+./target/release/ulttyctl send-key escape     # Escape
+```
+
+### PTY Capture for Debugging
+
+Enable PTY logging to capture raw terminal data:
+```bash
+ULTTY_PTY_LOG=/tmp/pty.bin ./target/release/ultty
+```
+
+Analyze the capture:
+```bash
+xxd /tmp/pty.bin | head -50           # View hex dump
+strings /tmp/pty.bin | grep "error"   # Search for text
+```
+
+### Key Differences from tmux
+
+| tmux | ulttyctl |
+|------|----------|
+| `tmux send-keys` may not work with GPU terminal | `ulttyctl send-text/send-key` works reliably |
+| `tmux capture-pane` captures tmux's view | `ulttyctl text` captures ultty's actual buffer |
+| No screenshot support | `ulttyctl screenshot` captures GPU-rendered output |
+
 ## Testing Infrastructure
 
 ### Test Layers

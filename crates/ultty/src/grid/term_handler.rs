@@ -84,14 +84,10 @@ impl<'a> TerminalHandler<'a> {
 
             // Line operations
             Action::InsertLines(n) => {
-                for _ in 0..n {
-                    self.terminal.grid_mut().scroll_down(1);
-                }
+                self.terminal.grid_mut().insert_lines(n);
             }
             Action::DeleteLines(n) => {
-                for _ in 0..n {
-                    self.terminal.grid_mut().scroll_up(1);
-                }
+                self.terminal.grid_mut().delete_lines(n);
             }
             Action::DeleteCharacters(n) => {
                 let row_idx = self.terminal.grid().cursor().position.row;
@@ -147,12 +143,18 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.queue_response(response.into_bytes());
             }
             Action::DeviceAttributes => {
-                // Send primary device attributes
+                // Send primary device attributes (DA1)
                 // We identify as VT220 with various capabilities:
                 // 1 = 132 columns, 2 = printer port, 6 = selective erase,
                 // 22 = ANSI color, 29 = ANSI text locator
-                // Response: CSI ? 62 ; 1 ; 2 ; 6 ; 22 ; 29 c
                 let response = b"\x1b[?62;1;2;6;22;29c".to_vec();
+                self.terminal.queue_response(response);
+            }
+            Action::SecondaryDeviceAttributes => {
+                // Send secondary device attributes (DA2)
+                // Format: CSI > Pp ; Pv ; Pc c
+                // Pp=0 (VT100-compatible), Pv=1 (version), Pc=0 (no special options)
+                let response = b"\x1b[>0;1;0c".to_vec();
                 self.terminal.queue_response(response);
             }
 

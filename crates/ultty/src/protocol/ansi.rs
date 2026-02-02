@@ -127,8 +127,11 @@ pub enum Action {
     /// Report cursor position (CSI 6 n)
     ReportCursorPosition,
 
-    /// Device attributes request (CSI c)
+    /// Device attributes request (CSI c or CSI 0 c) - Primary DA
     DeviceAttributes,
+
+    /// Secondary device attributes request (CSI > c or CSI > 0 c) - DA2
+    SecondaryDeviceAttributes,
 
     // === Bell ===
     /// Bell character (0x07)
@@ -484,17 +487,14 @@ impl AnsiParser {
             0x09 => callback(Action::Tab),
             0x0A..=0x0C => callback(Action::Newline),
             0x0D => callback(Action::CarriageReturn),
-            // SO (Shift Out) - switch to G1 charset
             0x0E => {
                 self.using_g1 = true;
             }
-            // SI (Shift In) - switch to G0 charset
             0x0F => {
                 self.using_g1 = false;
             }
             // Other C0 controls
             0x00..=0x1F => callback(Action::Execute(byte)),
-            // Printable ASCII - with DEC Special Graphics translation if active
             0x20..=0x7E => {
                 let ch = if self.is_graphics_charset_active() {
                     Self::translate_dec_graphics(byte).unwrap_or(byte as char)
@@ -610,7 +610,6 @@ impl AnsiParser {
         // '<' - DEC Supplemental (treated as ASCII)
         match byte {
             b'0' => {
-                // DEC Special Graphics - enable line drawing translation
                 if is_g0 {
                     self.g0_charset_graphics = true;
                 } else {
@@ -805,7 +804,13 @@ impl AnsiParser {
             b'n' if p1 == 6 => callback(Action::ReportCursorPosition),
 
             // Device attributes
-            b'c' => callback(Action::DeviceAttributes),
+            b'c' => {
+                if self.intermediate == Some(b'>') {
+                    callback(Action::SecondaryDeviceAttributes);
+                } else {
+                    callback(Action::DeviceAttributes);
+                }
+            }
 
             // Cursor style (DECSCUSR) - CSI Ps SP q
             b'q' if self.intermediate == Some(b' ') => {
@@ -1339,7 +1344,10 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
         ALPHABET.iter().position(|&x| x == c).map(|p| p as u8)
     }
 
-    let input: Vec<u8> = input.bytes().filter(|&b| b != b'=' && b != b'\n' && b != b'\r').collect();
+    let input: Vec<u8> = input
+        .bytes()
+        .filter(|&b| b != b'=' && b != b'\n' && b != b'\r')
+        .collect();
     let mut output = Vec::with_capacity(input.len() * 3 / 4);
 
     for chunk in input.chunks(4) {
@@ -1462,10 +1470,7 @@ mod tests {
 
     #[test]
     fn print_chars() {
-        assert_eq!(
-            parse(b"Hi"),
-            vec![Action::Print('H'), Action::Print('i')]
-        );
+        assert_eq!(parse(b"Hi"), vec![Action::Print('H'), Action::Print('i')]);
     }
 
     #[test]
@@ -1584,10 +1589,7 @@ mod tests {
         );
 
         // End hyperlink (empty URI)
-        assert_eq!(
-            parse(b"\x1b]8;;\x07"),
-            vec![Action::EndHyperlink]
-        );
+        assert_eq!(parse(b"\x1b]8;;\x07"), vec![Action::EndHyperlink]);
     }
 
     #[test]
@@ -1623,42 +1625,24 @@ mod tests {
     #[test]
     fn kitty_keyboard_protocol() {
         // CSI > flags u - push keyboard mode
-        assert_eq!(
-            parse(b"\x1b[>1u"),
-            vec![Action::KittyKeyboardPush(1)]
-        );
+        assert_eq!(parse(b"\x1b[>1u"), vec![Action::KittyKeyboardPush(1)]);
 
         // Push with multiple flags (disambiguate + report events)
-        assert_eq!(
-            parse(b"\x1b[>3u"),
-            vec![Action::KittyKeyboardPush(3)]
-        );
+        assert_eq!(parse(b"\x1b[>3u"), vec![Action::KittyKeyboardPush(3)]);
 
         // CSI < u - pop keyboard mode
-        assert_eq!(
-            parse(b"\x1b[<u"),
-            vec![Action::KittyKeyboardPop]
-        );
+        assert_eq!(parse(b"\x1b[<u"), vec![Action::KittyKeyboardPop]);
 
         // CSI ? u - query keyboard mode
-        assert_eq!(
-            parse(b"\x1b[?u"),
-            vec![Action::KittyKeyboardQuery]
-        );
+        assert_eq!(parse(b"\x1b[?u"), vec![Action::KittyKeyboardQuery]);
     }
 
     #[test]
     fn utf8_two_byte_chars() {
         // 2-byte UTF-8: é (U+00E9) = 0xC3 0xA9
-        assert_eq!(
-            parse(b"\xC3\xA9"),
-            vec![Action::Print('é')]
-        );
+        assert_eq!(parse(b"\xC3\xA9"), vec![Action::Print('é')]);
         // â (U+00E2) = 0xC3 0xA2
-        assert_eq!(
-            parse(b"\xC3\xA2"),
-            vec![Action::Print('â')]
-        );
+        assert_eq!(parse(b"\xC3\xA2"), vec![Action::Print('â')]);
         // Mixed ASCII and UTF-8
         assert_eq!(
             parse(b"caf\xC3\xA9"),
@@ -1674,29 +1658,17 @@ mod tests {
     #[test]
     fn utf8_three_byte_chars() {
         // 3-byte UTF-8: 中 (U+4E2D) = 0xE4 0xB8 0xAD
-        assert_eq!(
-            parse(b"\xE4\xB8\xAD"),
-            vec![Action::Print('中')]
-        );
+        assert_eq!(parse(b"\xE4\xB8\xAD"), vec![Action::Print('中')]);
         // € (U+20AC) = 0xE2 0x82 0xAC
-        assert_eq!(
-            parse(b"\xE2\x82\xAC"),
-            vec![Action::Print('€')]
-        );
+        assert_eq!(parse(b"\xE2\x82\xAC"), vec![Action::Print('€')]);
     }
 
     #[test]
     fn utf8_four_byte_chars() {
         // 4-byte UTF-8: 😀 (U+1F600) = 0xF0 0x9F 0x98 0x80
-        assert_eq!(
-            parse(b"\xF0\x9F\x98\x80"),
-            vec![Action::Print('😀')]
-        );
+        assert_eq!(parse(b"\xF0\x9F\x98\x80"), vec![Action::Print('😀')]);
         // 🦀 (U+1F980) = 0xF0 0x9F 0xA6 0x80
-        assert_eq!(
-            parse(b"\xF0\x9F\xA6\x80"),
-            vec![Action::Print('🦀')]
-        );
+        assert_eq!(parse(b"\xF0\x9F\xA6\x80"), vec![Action::Print('🦀')]);
     }
 
     #[test]
@@ -1712,27 +1684,15 @@ mod tests {
     #[test]
     fn utf8_orphan_continuation() {
         // Continuation byte without lead - emit replacement char
-        assert_eq!(
-            parse(b"\x80"),
-            vec![Action::Print('\u{FFFD}')]
-        );
-        assert_eq!(
-            parse(b"\xBF"),
-            vec![Action::Print('\u{FFFD}')]
-        );
+        assert_eq!(parse(b"\x80"), vec![Action::Print('\u{FFFD}')]);
+        assert_eq!(parse(b"\xBF"), vec![Action::Print('\u{FFFD}')]);
     }
 
     #[test]
     fn utf8_invalid_lead_bytes() {
         // Invalid lead bytes 0xF8-0xFF - emit replacement char
-        assert_eq!(
-            parse(b"\xF8"),
-            vec![Action::Print('\u{FFFD}')]
-        );
-        assert_eq!(
-            parse(b"\xFF"),
-            vec![Action::Print('\u{FFFD}')]
-        );
+        assert_eq!(parse(b"\xF8"), vec![Action::Print('\u{FFFD}')]);
+        assert_eq!(parse(b"\xFF"), vec![Action::Print('\u{FFFD}')]);
     }
 
     #[test]
@@ -1754,9 +1714,9 @@ mod tests {
         assert_eq!(
             parse(b"\x1b(0lqx\x1b(B"),
             vec![
-                Action::Print('┌'),  // l = upper left corner
-                Action::Print('─'),  // q = horizontal line
-                Action::Print('│'),  // x = vertical line
+                Action::Print('┌'), // l = upper left corner
+                Action::Print('─'), // q = horizontal line
+                Action::Print('│'), // x = vertical line
             ]
         );
     }
@@ -1767,10 +1727,10 @@ mod tests {
         assert_eq!(
             parse(b"\x1b(0lkjm\x1b(B"),
             vec![
-                Action::Print('┌'),  // l = upper left
-                Action::Print('┐'),  // k = upper right
-                Action::Print('┘'),  // j = lower right
-                Action::Print('└'),  // m = lower left
+                Action::Print('┌'), // l = upper left
+                Action::Print('┐'), // k = upper right
+                Action::Print('┘'), // j = lower right
+                Action::Print('└'), // m = lower left
             ]
         );
     }
@@ -1781,11 +1741,11 @@ mod tests {
         assert_eq!(
             parse(b"\x1b(0tuvwn\x1b(B"),
             vec![
-                Action::Print('├'),  // t = left tee
-                Action::Print('┤'),  // u = right tee
-                Action::Print('┴'),  // v = bottom tee
-                Action::Print('┬'),  // w = top tee
-                Action::Print('┼'),  // n = crossing lines
+                Action::Print('├'), // t = left tee
+                Action::Print('┤'), // u = right tee
+                Action::Print('┴'), // v = bottom tee
+                Action::Print('┬'), // w = top tee
+                Action::Print('┼'), // n = crossing lines
             ]
         );
     }
@@ -1796,8 +1756,8 @@ mod tests {
         assert_eq!(
             parse(b"\x1b(0x\x1b(Bx"),
             vec![
-                Action::Print('│'),  // x in graphics mode = vertical line
-                Action::Print('x'),  // x in ASCII mode = x
+                Action::Print('│'), // x in graphics mode = vertical line
+                Action::Print('x'), // x in ASCII mode = x
             ]
         );
     }
@@ -1809,8 +1769,8 @@ mod tests {
         assert_eq!(
             parse(b"\x1b)0\x0Ex\x0Fx"),
             vec![
-                Action::Print('│'),  // x after SO with G1=graphics
-                Action::Print('x'),  // x after SI with G0=ASCII
+                Action::Print('│'), // x after SO with G1=graphics
+                Action::Print('x'), // x after SI with G0=ASCII
             ]
         );
     }
@@ -1821,10 +1781,22 @@ mod tests {
         assert_eq!(
             parse(b"\x1b(0ABC\x1b(B"),
             vec![
-                Action::Print('A'),  // Passthrough
-                Action::Print('B'),  // Passthrough
-                Action::Print('C'),  // Passthrough
+                Action::Print('A'), // Passthrough
+                Action::Print('B'), // Passthrough
+                Action::Print('C'), // Passthrough
             ]
         );
+    }
+
+    #[test]
+    fn primary_device_attributes() {
+        assert_eq!(parse(b"\x1b[c"), vec![Action::DeviceAttributes]);
+        assert_eq!(parse(b"\x1b[0c"), vec![Action::DeviceAttributes]);
+    }
+
+    #[test]
+    fn secondary_device_attributes() {
+        assert_eq!(parse(b"\x1b[>c"), vec![Action::SecondaryDeviceAttributes]);
+        assert_eq!(parse(b"\x1b[>0c"), vec![Action::SecondaryDeviceAttributes]);
     }
 }

@@ -608,6 +608,106 @@ impl Grid {
         }
     }
 
+    /// Insert n blank lines at the cursor position (IL).
+    /// Content from cursor row to bottom of scroll region shifts down.
+    pub fn insert_lines(&mut self, n: u16) {
+        let region = self.effective_scroll_region();
+        let cursor_row = self.cursor.position.row;
+
+        // Only operate if cursor is within scroll region
+        if cursor_row < region.top || cursor_row > region.bottom {
+            return;
+        }
+
+        let n = n as usize;
+        let region_height = (region.bottom - cursor_row + 1) as usize;
+
+        if n >= region_height {
+            // Clear from cursor to bottom of region
+            for row_idx in cursor_row..=region.bottom {
+                if let Some(row) = self.rows.get_mut(row_idx as usize) {
+                    row.clear();
+                }
+                self.mark_dirty(row_idx);
+            }
+            return;
+        }
+
+        // Move rows down (from bottom to top to avoid overwriting)
+        for i in (0..(region_height - n)).rev() {
+            let src_row = cursor_row as usize + i;
+            let dst_row = src_row + n;
+
+            if dst_row <= region.bottom as usize {
+                let src = self.rows[src_row].clone();
+                self.rows[dst_row] = src;
+            }
+        }
+
+        // Clear the n rows at cursor position
+        for i in 0..n {
+            let row_idx = cursor_row as usize + i;
+            if row_idx <= region.bottom as usize {
+                self.rows[row_idx] = Row::new(self.dims.cols);
+            }
+        }
+
+        // Mark affected rows dirty
+        for row_idx in cursor_row..=region.bottom {
+            self.mark_dirty(row_idx);
+        }
+    }
+
+    /// Delete n lines at the cursor position (DL).
+    /// Content below cursor shifts up, blank lines appear at bottom of scroll region.
+    pub fn delete_lines(&mut self, n: u16) {
+        let region = self.effective_scroll_region();
+        let cursor_row = self.cursor.position.row;
+
+        // Only operate if cursor is within scroll region
+        if cursor_row < region.top || cursor_row > region.bottom {
+            return;
+        }
+
+        let n = n as usize;
+        let region_height = (region.bottom - cursor_row + 1) as usize;
+
+        if n >= region_height {
+            // Clear from cursor to bottom of region
+            for row_idx in cursor_row..=region.bottom {
+                if let Some(row) = self.rows.get_mut(row_idx as usize) {
+                    row.clear();
+                }
+                self.mark_dirty(row_idx);
+            }
+            return;
+        }
+
+        // Move rows up
+        for i in 0..(region_height - n) {
+            let src_row = cursor_row as usize + n + i;
+            let dst_row = cursor_row as usize + i;
+
+            if src_row <= region.bottom as usize {
+                let src = self.rows[src_row].clone();
+                self.rows[dst_row] = src;
+            }
+        }
+
+        // Clear the bottom n rows of the region
+        for i in 0..n {
+            let row_idx = region.bottom as usize - i;
+            if row_idx >= cursor_row as usize {
+                self.rows[row_idx] = Row::new(self.dims.cols);
+            }
+        }
+
+        // Mark affected rows dirty
+        for row_idx in cursor_row..=region.bottom {
+            self.mark_dirty(row_idx);
+        }
+    }
+
     /// Erase from cursor to end of display.
     pub fn erase_below(&mut self) {
         // Erase from cursor to end of current line
@@ -1295,5 +1395,51 @@ mod tests {
 
         let dirty: Vec<u16> = grid.dirty_rows().collect();
         assert_eq!(dirty, vec![1, 3]);
+    }
+
+    #[test]
+    fn insert_lines_at_cursor() {
+        let mut grid = Grid::new(Dimensions::new(5, 6));
+
+        for row in 0..6 {
+            grid.cursor.position.row = row;
+            grid.cursor.position.col = 0;
+            grid.write_char((b'A' + row as u8) as char);
+        }
+
+        grid.cursor.position.row = 2;
+        grid.cursor.position.col = 0;
+
+        grid.insert_lines(2);
+
+        assert_eq!(grid.cell(0, 0).unwrap().char(), 'A');
+        assert_eq!(grid.cell(0, 1).unwrap().char(), 'B');
+        assert_eq!(grid.cell(0, 2).unwrap().char(), ' ');
+        assert_eq!(grid.cell(0, 3).unwrap().char(), ' ');
+        assert_eq!(grid.cell(0, 4).unwrap().char(), 'C');
+        assert_eq!(grid.cell(0, 5).unwrap().char(), 'D');
+    }
+
+    #[test]
+    fn delete_lines_at_cursor() {
+        let mut grid = Grid::new(Dimensions::new(5, 6));
+
+        for row in 0..6 {
+            grid.cursor.position.row = row;
+            grid.cursor.position.col = 0;
+            grid.write_char((b'A' + row as u8) as char);
+        }
+
+        grid.cursor.position.row = 2;
+        grid.cursor.position.col = 0;
+
+        grid.delete_lines(2);
+
+        assert_eq!(grid.cell(0, 0).unwrap().char(), 'A');
+        assert_eq!(grid.cell(0, 1).unwrap().char(), 'B');
+        assert_eq!(grid.cell(0, 2).unwrap().char(), 'E');
+        assert_eq!(grid.cell(0, 3).unwrap().char(), 'F');
+        assert_eq!(grid.cell(0, 4).unwrap().char(), ' ');
+        assert_eq!(grid.cell(0, 5).unwrap().char(), ' ');
     }
 }

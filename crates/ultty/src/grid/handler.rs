@@ -74,16 +74,10 @@ impl<'a> Handler<'a> {
 
             // Line operations
             Action::InsertLines(n) => {
-                // Insert n blank lines at cursor, pushing content down
-                for _ in 0..n {
-                    self.grid.scroll_down(1);
-                }
+                self.grid.insert_lines(n);
             }
             Action::DeleteLines(n) => {
-                // Delete n lines at cursor, pulling content up
-                for _ in 0..n {
-                    self.grid.scroll_up(1);
-                }
+                self.grid.delete_lines(n);
             }
             Action::DeleteCharacters(n) => {
                 let row_idx = self.grid.cursor().position.row;
@@ -125,7 +119,9 @@ impl<'a> Handler<'a> {
             Action::ClearTabStop(mode) => self.grid.clear_tab_stop(mode),
 
             // Terminal queries (handled by TerminalHandler which has response queue)
-            Action::ReportCursorPosition | Action::DeviceAttributes => {}
+            Action::ReportCursorPosition
+            | Action::DeviceAttributes
+            | Action::SecondaryDeviceAttributes => {}
 
             // Control characters
             Action::Bell => {}
