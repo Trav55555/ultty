@@ -127,8 +127,19 @@ cargo clippy --workspace --all-targets
   - [x] Scrollback search (Ctrl+Shift+F)
   - [x] Split panes (Ctrl+Shift+D/E)
   - [x] Configurable keybindings (TOML config)
-  - [x] App compatibility tests (htop, nvim, vim, nano, top)
+  - [x] App compatibility tests (htop, nvim, vim, nano, top, tmux, less, claude, opencode)
   - [x] Property-based tests for parser robustness
+- [x] CLI Automation (ulttyctl)
+  - [x] Unix socket control server
+  - [x] Input injection (send-text, send-key, send-raw)
+  - [x] Tab management (new-tab, switch-tab, close-tab, tabs)
+  - [x] State queries (info, text, selection)
+  - [x] Search with regex support
+  - [x] Wait-for pattern with regex and timeout
+  - [x] Screenshot capture (file or bytes)
+  - [x] Batch command execution
+  - [x] JSON output mode
+  - [x] Token-based authentication
 
 ## Dependencies Policy
 
@@ -139,10 +150,98 @@ cargo clippy --workspace --all-targets
 
 ## Performance Targets
 
-| Metric | Target |
-|--------|--------|
-| Layout recompute | < 1ms |
-| Frame render | < 5ms |
-| Input latency | < 10ms |
-| Memory (terminal) | < 50MB |
-| Memory (framework) | < 10MB |
+| Metric | Target | Measured | Margin |
+|--------|--------|----------|--------|
+| Layout recompute | < 1ms | 27µs | 37x |
+| Frame render | < 5ms | 290µs | 17x |
+| Input latency | < 10ms | ~0.3ms | 33x |
+| Memory (terminal) | < 50MB | ~18MB | 2.8x |
+| Memory (framework) | < 10MB | TBD | - |
+
+## CLI Automation (ulttyctl)
+
+Control ultty from the command line via Unix socket:
+
+```bash
+# Test connection
+ulttyctl ping
+
+# Send input
+ulttyctl send-text "ls -la"
+ulttyctl send-key enter
+ulttyctl send-key c ctrl  # Ctrl+C
+
+# Tab management
+ulttyctl new-tab htop
+ulttyctl tabs
+ulttyctl switch-tab 2
+ulttyctl close-tab
+
+# Query state
+ulttyctl info              # Terminal size, cursor, tab count
+ulttyctl text              # Visible text
+ulttyctl text --scrollback # Include scrollback
+
+# Search (supports regex)
+ulttyctl search "error"
+ulttyctl search --regex "error|warning"
+
+# Wait for pattern (useful for automation)
+ulttyctl wait-for "$ " --timeout 5000
+ulttyctl wait-for --regex "\\$\\s*$" --timeout 5000
+
+# Screenshot
+ulttyctl screenshot /tmp/screen.png
+ulttyctl screenshot  # Returns bytes to stdout
+
+# Batch commands (atomic execution)
+ulttyctl --json batch '[{"type":"send_text","text":"ls"},{"type":"send_key","key":"Enter"}]'
+
+# JSON output for scripting
+ulttyctl --json info
+ulttyctl --json tabs
+```
+
+**Socket location**: `$XDG_RUNTIME_DIR/ultty-ctl.sock`
+
+## Testing Infrastructure
+
+### Test Layers
+
+| Layer | Type | Framework |
+|-------|------|-----------|
+| Unit | Inline `#[cfg(test)]` | std |
+| Property | Parser robustness | proptest |
+| Reference | Data-driven ANSI tests | Custom |
+| Snapshot | Widget rendering | insta |
+| Integration | App compatibility | TestTerminal |
+| Widget | Ratatui rendering | TestBackend |
+
+### TestTerminal Helper
+
+```rust
+use ultty::testing::TestTerminal;
+
+let mut term = TestTerminal::with_size(80, 24)?;
+term.send("echo hello\r")?;
+term.wait_until_stable(Duration::from_millis(200), Duration::from_secs(5))?;
+
+// Fluent assertions
+term.verify()
+    .assert_contains("hello")
+    .assert_main_screen()
+    .assert_cursor_at(0, 1);
+
+// Snapshot comparison
+let snapshot = term.snapshot();
+assert!(snapshot.has_colors());
+```
+
+### Running Tests
+
+```bash
+cargo test --workspace           # All tests
+cargo test -p ultty              # Terminal tests only
+cargo test -p ulttui             # Framework tests only
+cargo insta review               # Review snapshot changes
+```
