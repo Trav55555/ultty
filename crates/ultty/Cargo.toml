@@ -103,3 +103,7 @@ harness = false
 [[bench]]
 name = "input_latency"
 harness = false
+
+[[bench]]
+name = "memory"
+harness = false
