@@ -2459,7 +2459,8 @@ impl App {
 
     fn handle_control_requests(&mut self) {
         use ultty_protocol::control::{
-            ControlData, ControlRequest, ControlResponse, TabInfo, TerminalInfo, VersionInfo,
+            ControlData, ControlRequest, ControlResponse, SearchMatch, TabInfo, TerminalInfo,
+            VersionInfo,
         };
 
         let requests = {
@@ -2741,6 +2742,143 @@ impl App {
                             code: 1,
                             message: "No active terminal".to_string(),
                         }
+                    }
+                }
+
+                ControlRequest::Search {
+                    pattern,
+                    regex: _,
+                    case_sensitive,
+                    include_scrollback,
+                } => {
+                    if let Some(terminal) = self.terminal_manager.focused_terminal() {
+                        let buffer = terminal.event_loop.terminal().buffer();
+                        let mut matches = Vec::new();
+                        let pattern_lower = if case_sensitive {
+                            pattern.clone()
+                        } else {
+                            pattern.to_lowercase()
+                        };
+
+                        let line_count = if include_scrollback {
+                            buffer.total_lines()
+                        } else {
+                            terminal.event_loop.terminal().dimensions().rows as usize
+                        };
+
+                        for row in 0..line_count {
+                            let row_opt = if include_scrollback {
+                                buffer.row_at(row)
+                            } else {
+                                buffer.visible_row(row as u16)
+                            };
+
+                            if let Some(grid_row) = row_opt {
+                                let text = grid_row.text_trimmed();
+                                let search_text = if case_sensitive {
+                                    text.clone()
+                                } else {
+                                    text.to_lowercase()
+                                };
+
+                                for (col, _) in search_text.match_indices(&pattern_lower) {
+                                    let context_start = col.saturating_sub(20);
+                                    let context_end = (col + pattern.len() + 20).min(text.len());
+                                    matches.push(SearchMatch {
+                                        line: row,
+                                        col,
+                                        text: text[col..col + pattern.len()].to_string(),
+                                        context_before: text[context_start..col].to_string(),
+                                        context_after: text[col + pattern.len()..context_end]
+                                            .to_string(),
+                                    });
+                                }
+                            }
+                        }
+
+                        ControlResponse::Data(ControlData::SearchResults(matches))
+                    } else {
+                        ControlResponse::Error {
+                            code: 1,
+                            message: "No active terminal".to_string(),
+                        }
+                    }
+                }
+
+                ControlRequest::WaitFor {
+                    pattern,
+                    regex: _,
+                    timeout_ms,
+                } => {
+                    if let Some(terminal) = self.terminal_manager.focused_terminal() {
+                        let start = std::time::Instant::now();
+                        let timeout = std::time::Duration::from_millis(timeout_ms);
+                        let pattern_lower = pattern.to_lowercase();
+
+                        let mut found: Option<(usize, usize)> = None;
+
+                        while start.elapsed() < timeout && found.is_none() {
+                            let buffer = terminal.event_loop.terminal().buffer();
+                            let total_lines = buffer.total_lines();
+
+                            for row in 0..total_lines {
+                                if let Some(grid_row) = buffer.row_at(row) {
+                                    let text = grid_row.text_trimmed().to_lowercase();
+                                    if let Some(col) = text.find(&pattern_lower) {
+                                        found = Some((row, col));
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if found.is_none() {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                            }
+                        }
+
+                        match found {
+                            Some((line, col)) => {
+                                ControlResponse::Data(ControlData::WaitMatched { line, col })
+                            }
+                            None => ControlResponse::Data(ControlData::WaitTimeout),
+                        }
+                    } else {
+                        ControlResponse::Error {
+                            code: 1,
+                            message: "No active terminal".to_string(),
+                        }
+                    }
+                }
+
+                ControlRequest::Batch { commands } => {
+                    let results: Vec<ControlResponse> = commands
+                        .iter()
+                        .map(|_| ControlResponse::Error {
+                            code: 99,
+                            message: "Batch execution not yet supported".to_string(),
+                        })
+                        .collect();
+                    ControlResponse::Data(ControlData::BatchResults(results))
+                }
+
+                ControlRequest::Authenticate { token } => {
+                    let expected =
+                        std::fs::read_to_string(ultty_protocol::control::auth_token_path()).ok();
+
+                    if let Some(expected_token) = expected {
+                        if token.trim() == expected_token.trim() {
+                            if let Some(ref mut server) = self.control_server {
+                                server.set_client_authenticated(client_key, true);
+                            }
+                            ControlResponse::Data(ControlData::Authenticated)
+                        } else {
+                            ControlResponse::Error {
+                                code: 403,
+                                message: "Invalid token".to_string(),
+                            }
+                        }
+                    } else {
+                        ControlResponse::Data(ControlData::Authenticated)
                     }
                 }
             };

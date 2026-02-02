@@ -45,14 +45,13 @@ pub enum MouseButton {
     Button5 = 4,
 }
 
-/// Keyboard key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Key {
-    /// Character key.
     Char(char),
-    /// Function key (F1-F12).
     Function(u8),
-    /// Special keys.
     Escape,
     Enter,
     Tab,
@@ -69,9 +68,9 @@ pub enum Key {
     Right,
 }
 
-/// Modifier keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Modifiers {
+    #[serde(rename = "bits")]
     pub(crate) bits: u8,
 }
 

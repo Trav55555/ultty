@@ -12,7 +12,14 @@ fn main() {
         std::process::exit(0);
     }
 
-    let command = args.join(" ");
+    let use_json = args.iter().any(|a| a == "--json");
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--json").collect();
+
+    let command = if use_json {
+        format!("{{\"type\":\"{}\"}}", args.join(" "))
+    } else {
+        args.join(" ")
+    };
 
     match send_command(&command) {
         Ok(response) => {
@@ -56,7 +63,10 @@ fn print_help() {
         r#"ulttyctl - control ultty from the command line
 
 USAGE:
-    ulttyctl <command> [args...]
+    ulttyctl [--json] <command> [args...]
+
+GLOBAL FLAGS:
+    --json                  Output in JSON format
 
 INPUT COMMANDS:
     send-text <text>        Send text as if typed
@@ -72,15 +82,24 @@ QUERY COMMANDS:
     info                    Get terminal info (size, cursor, etc.)
     text [--scrollback]     Get visible text (optionally with scrollback)
     selection               Get current selection
+    search <pattern>        Search for pattern in scrollback
+
+WAIT COMMANDS:
+    wait-for <pattern> [--timeout <ms>]
+                            Wait for pattern to appear (default 30s timeout)
 
 WINDOW COMMANDS:
     focus                   Focus the ultty window
     fullscreen              Toggle fullscreen
     opacity <0.0-1.0>       Set window opacity
 
+AUTHENTICATION:
+    auth <token>            Authenticate with token
+
 OTHER:
     ping                    Test connection
     version                 Show version info
+    screenshot [path]       Take screenshot
 
 EXAMPLES:
     ulttyctl send-text "ls -la"
@@ -89,6 +108,9 @@ EXAMPLES:
     ulttyctl new-tab htop
     ulttyctl switch-tab 2
     ulttyctl text --scrollback
+    ulttyctl search "error"
+    ulttyctl wait-for "$ " --timeout 5000
+    ulttyctl --json info
 "#
     );
 }

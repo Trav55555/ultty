@@ -4,29 +4,34 @@
 //! separate from the TUI app protocol.
 
 use crate::{Key, Modifiers};
+use serde::{Deserialize, Serialize};
 
-/// Control messages from ulttyctl to terminal.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    #[default]
+    Text,
+    Json,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlRequest {
     // === Input Injection ===
-    /// Send text as if typed.
     SendText {
         text: String,
     },
 
-    /// Send a key press.
     SendKey {
         key: Key,
         modifiers: Modifiers,
     },
 
-    /// Send raw bytes to PTY.
     SendRaw {
         data: Vec<u8>,
     },
 
     // === Command Execution ===
-    /// Create a new tab with optional command.
     NewTab {
         title: Option<String>,
         command: Option<String>,
@@ -34,54 +39,56 @@ pub enum ControlRequest {
         working_dir: Option<String>,
     },
 
-    /// Run command in current tab.
     RunCommand {
         command: String,
         args: Vec<String>,
     },
 
-    /// Close a tab by index (None = current).
     CloseTab {
         index: Option<usize>,
     },
 
     // === State Queries ===
-    /// Get visible text from terminal.
     GetText {
-        /// Include scrollback buffer.
         include_scrollback: bool,
-        /// Number of scrollback lines (None = all).
         scrollback_lines: Option<usize>,
     },
 
-    /// Get current selection.
     GetSelection,
 
-    /// List all tabs.
     ListTabs,
 
-    /// Get terminal info (size, cursor pos, etc.).
     GetInfo,
 
+    // === Search ===
+    Search {
+        pattern: String,
+        regex: bool,
+        case_sensitive: bool,
+        include_scrollback: bool,
+    },
+
+    // === Wait Operations ===
+    WaitFor {
+        pattern: String,
+        regex: bool,
+        timeout_ms: u64,
+    },
+
     // === Window Control ===
-    /// Focus the ultty window.
     FocusWindow,
 
-    /// Switch to tab by index.
     SwitchTab {
         index: usize,
     },
 
-    /// Toggle fullscreen.
     ToggleFullscreen,
 
-    /// Resize window.
     Resize {
         width: u32,
         height: u32,
     },
 
-    /// Set window opacity.
     SetOpacity {
         opacity: f32,
     },
@@ -91,29 +98,33 @@ pub enum ControlRequest {
         path: Option<String>,
     },
 
+    // === Batch Mode ===
+    Batch {
+        commands: Vec<ControlRequest>,
+    },
+
+    // === Auth ===
+    Authenticate {
+        token: String,
+    },
+
     // === Misc ===
     Ping,
 
     Version,
 }
 
-/// Control responses from terminal to ulttyctl.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum ControlResponse {
-    /// Success with no data.
     Ok,
-
-    /// Success with text data.
     Text(String),
-
-    /// Success with structured data.
     Data(ControlData),
-
-    /// Error response.
     Error { code: u16, message: String },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlData {
     Info(TerminalInfo),
     Tabs(Vec<TabInfo>),
@@ -122,63 +133,60 @@ pub enum ControlData {
     Pong,
     ScreenshotSaved(String),
     ScreenshotData(Vec<u8>),
+    SearchResults(Vec<SearchMatch>),
+    BatchResults(Vec<ControlResponse>),
+    Authenticated,
+    WaitMatched { line: usize, col: usize },
+    WaitTimeout,
 }
 
-/// Terminal information.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchMatch {
+    pub line: usize,
+    pub col: usize,
+    pub text: String,
+    pub context_before: String,
+    pub context_after: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TerminalInfo {
-    /// Terminal width in columns.
     pub cols: u16,
-    /// Terminal height in rows.
     pub rows: u16,
-    /// Cursor column.
     pub cursor_col: u16,
-    /// Cursor row.
     pub cursor_row: u16,
-    /// Current tab index.
     pub current_tab: usize,
-    /// Total number of tabs.
     pub tab_count: usize,
-    /// Window is focused.
     pub focused: bool,
-    /// Current working directory.
     pub cwd: Option<String>,
 }
 
-/// Tab information.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TabInfo {
-    /// Tab index.
     pub index: usize,
-    /// Tab title.
     pub title: String,
-    /// Tab is active.
     pub active: bool,
-    /// Process ID.
     pub pid: Option<u32>,
-    /// Current working directory.
     pub cwd: Option<String>,
 }
 
-/// Version information.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VersionInfo {
-    /// ultty version.
     pub version: String,
-    /// Protocol version.
     pub protocol_version: u16,
-    /// Git commit hash.
     pub git_hash: Option<String>,
 }
 
-/// Control socket path.
 pub fn control_socket_path() -> std::path::PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
     std::path::PathBuf::from(runtime_dir).join("ultty-ctl.sock")
 }
 
-/// Magic bytes for control protocol.
+pub fn auth_token_path() -> std::path::PathBuf {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::PathBuf::from(runtime_dir).join("ultty-auth.token")
+}
+
 pub const CONTROL_MAGIC: [u8; 2] = [0x55, 0x43]; // "UC"
 
-/// Control protocol version.
 pub const CONTROL_VERSION: u16 = 1;

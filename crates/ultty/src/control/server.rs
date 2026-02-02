@@ -8,7 +8,9 @@ use std::time::Duration;
 use polling::{Event, Events, Poller};
 use tracing::{debug, error, info, warn};
 
-use ultty_protocol::control::{control_socket_path, ControlData, ControlRequest, ControlResponse};
+use ultty_protocol::control::{
+    control_socket_path, ControlData, ControlRequest, ControlResponse, OutputFormat,
+};
 
 const LISTENER_KEY: usize = 0;
 const CLIENT_KEY_BASE: usize = 100;
@@ -17,9 +19,15 @@ pub struct ControlServer {
     listener: UnixListener,
     socket_path: PathBuf,
     poller: Poller,
-    clients: HashMap<usize, UnixStream>,
+    clients: HashMap<usize, ClientState>,
     next_key: usize,
     pending_requests: Vec<(usize, ControlRequest)>,
+}
+
+struct ClientState {
+    stream: UnixStream,
+    output_format: OutputFormat,
+    authenticated: bool,
 }
 
 impl ControlServer {
@@ -89,7 +97,14 @@ impl ControlServer {
                         self.poller.add(&stream, Event::readable(key))?;
                     }
 
-                    self.clients.insert(key, stream);
+                    self.clients.insert(
+                        key,
+                        ClientState {
+                            stream,
+                            output_format: OutputFormat::Text,
+                            authenticated: false,
+                        },
+                    );
                     debug!("Control client connected: {}", key);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -108,9 +123,9 @@ impl ControlServer {
         let mut request_data: Option<Vec<u8>> = None;
         let mut need_modify = false;
 
-        if let Some(stream) = self.clients.get_mut(&key) {
+        if let Some(client) = self.clients.get_mut(&key) {
             let mut buf = [0u8; 4096];
-            match stream.read(&mut buf) {
+            match client.stream.read(&mut buf) {
                 Ok(0) => {
                     debug!("Control client disconnected: {}", key);
                     should_remove = true;
@@ -136,14 +151,14 @@ impl ControlServer {
         }
 
         if need_modify {
-            if let Some(stream) = self.clients.get(&key) {
-                self.poller.modify(stream, Event::readable(key))?;
+            if let Some(client) = self.clients.get(&key) {
+                self.poller.modify(&client.stream, Event::readable(key))?;
             }
         }
 
         if should_remove {
-            if let Some(stream) = self.clients.remove(&key) {
-                let _ = self.poller.delete(&stream);
+            if let Some(client) = self.clients.remove(&key) {
+                let _ = self.poller.delete(&client.stream);
             }
         }
 
@@ -152,6 +167,11 @@ impl ControlServer {
 
     fn parse_request(&self, data: &[u8]) -> Option<ControlRequest> {
         let text = std::str::from_utf8(data).ok()?.trim();
+
+        if text.starts_with('{') {
+            return serde_json::from_str(text).ok();
+        }
+
         let mut parts = text.split_whitespace();
         let cmd = parts.next()?;
 
@@ -215,6 +235,49 @@ impl ControlServer {
                 let path = parts.next().map(String::from);
                 Some(ControlRequest::Screenshot { path })
             }
+            "search" => {
+                let pattern: String = parts.collect::<Vec<_>>().join(" ");
+                if pattern.is_empty() {
+                    None
+                } else {
+                    Some(ControlRequest::Search {
+                        pattern,
+                        regex: false,
+                        case_sensitive: false,
+                        include_scrollback: true,
+                    })
+                }
+            }
+            "wait-for" => {
+                let rest: Vec<&str> = parts.collect();
+                let mut timeout_ms = 30000u64;
+                let mut pattern_parts = Vec::new();
+
+                for (i, part) in rest.iter().enumerate() {
+                    if *part == "--timeout" {
+                        if let Some(t) = rest.get(i + 1) {
+                            timeout_ms = t.parse().unwrap_or(30000);
+                        }
+                        break;
+                    }
+                    pattern_parts.push(*part);
+                }
+
+                let pattern = pattern_parts.join(" ");
+                if pattern.is_empty() {
+                    None
+                } else {
+                    Some(ControlRequest::WaitFor {
+                        pattern,
+                        regex: false,
+                        timeout_ms,
+                    })
+                }
+            }
+            "auth" => {
+                let token = parts.next()?.to_string();
+                Some(ControlRequest::Authenticate { token })
+            }
             _ => None,
         }
     }
@@ -224,12 +287,31 @@ impl ControlServer {
     }
 
     pub fn send_response(&mut self, client_key: usize, response: &ControlResponse) {
-        if let Some(stream) = self.clients.get_mut(&client_key) {
-            let text = format_response(response);
-            if let Err(e) = stream.write_all(text.as_bytes()) {
+        if let Some(client) = self.clients.get_mut(&client_key) {
+            let text = format_response(response, client.output_format);
+            if let Err(e) = client.stream.write_all(text.as_bytes()) {
                 warn!("Failed to send response to client {}: {}", client_key, e);
             }
         }
+    }
+
+    pub fn set_client_format(&mut self, client_key: usize, format: OutputFormat) {
+        if let Some(client) = self.clients.get_mut(&client_key) {
+            client.output_format = format;
+        }
+    }
+
+    pub fn set_client_authenticated(&mut self, client_key: usize, authenticated: bool) {
+        if let Some(client) = self.clients.get_mut(&client_key) {
+            client.authenticated = authenticated;
+        }
+    }
+
+    pub fn is_client_authenticated(&self, client_key: usize) -> bool {
+        self.clients
+            .get(&client_key)
+            .map(|c| c.authenticated)
+            .unwrap_or(false)
     }
 }
 
@@ -288,7 +370,13 @@ fn parse_modifiers(s: &str) -> ultty_protocol::Modifiers {
     mods
 }
 
-fn format_response(response: &ControlResponse) -> String {
+fn format_response(response: &ControlResponse, format: OutputFormat) -> String {
+    if format == OutputFormat::Json {
+        return serde_json::to_string(response)
+            .unwrap_or_else(|_| r#"{"error":"serialize failed"}"#.to_string())
+            + "\n";
+    }
+
     match response {
         ControlResponse::Ok => "OK\n".to_string(),
         ControlResponse::Text(text) => format!("{}\n", text),
@@ -323,6 +411,33 @@ fn format_response(response: &ControlResponse) -> String {
             },
             ControlData::ScreenshotSaved(path) => format!("Screenshot saved: {}\n", path),
             ControlData::ScreenshotData(data) => format!("Screenshot data: {} bytes\n", data.len()),
+            ControlData::SearchResults(matches) => {
+                if matches.is_empty() {
+                    "(no matches)\n".to_string()
+                } else {
+                    let mut out = format!("{} match(es):\n", matches.len());
+                    for m in matches {
+                        out.push_str(&format!("  {}:{}: {}\n", m.line + 1, m.col + 1, m.text));
+                    }
+                    out
+                }
+            }
+            ControlData::BatchResults(results) => {
+                let mut out = format!("{} result(s):\n", results.len());
+                for (i, r) in results.iter().enumerate() {
+                    out.push_str(&format!(
+                        "[{}] {}",
+                        i + 1,
+                        format_response(r, OutputFormat::Text)
+                    ));
+                }
+                out
+            }
+            ControlData::Authenticated => "AUTHENTICATED\n".to_string(),
+            ControlData::WaitMatched { line, col } => {
+                format!("MATCHED at {}:{}\n", line + 1, col + 1)
+            }
+            ControlData::WaitTimeout => "TIMEOUT\n".to_string(),
         },
         ControlResponse::Error { code, message } => {
             format!("ERROR {}: {}\n", code, message)
