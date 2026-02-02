@@ -523,7 +523,7 @@ fn test_less_pager() {
         return;
     }
 
-    // Create some content to view
+    // Run through shell to give less a proper TTY (direct command execution exits immediately)
     let mut tester = AppTester::new_shell(80, 24).expect("Failed to spawn shell");
 
     tester
