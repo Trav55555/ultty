@@ -36,6 +36,15 @@ const MAX_STRING_LEN: usize = 1024 * 1024;
 /// Maximum allowed region count in a layout message to prevent OOM attacks.
 const MAX_REGION_COUNT: usize = 10_000;
 
+/// Maximum allowed payload length (16 MB) to prevent OOM attacks.
+const MAX_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
+
+/// Maximum allowed grid track count to prevent OOM attacks.
+const MAX_TRACK_COUNT: usize = 1_000;
+
+/// Maximum allowed RichText span count to prevent OOM attacks.
+const MAX_SPAN_COUNT: usize = 10_000;
+
 // ============================================================================
 // Traits
 // ============================================================================
@@ -745,6 +754,12 @@ impl Decode for TrackSizingFunction {
                 }
                 let count = buf.get_u16_le();
                 let len = buf.get_u32_le() as usize;
+                if len > MAX_TRACK_COUNT {
+                    return Err(ProtocolError::InvalidData(format!(
+                        "track count {} exceeds maximum {}",
+                        len, MAX_TRACK_COUNT
+                    )));
+                }
                 let mut dims = Vec::with_capacity(len);
                 for _ in 0..len {
                     dims.push(Dimension::decode(buf)?);
@@ -774,6 +789,12 @@ fn decode_vec_track(buf: &mut impl Buf) -> Result<Vec<TrackSizingFunction>> {
         });
     }
     let len = buf.get_u32_le() as usize;
+    if len > MAX_TRACK_COUNT {
+        return Err(ProtocolError::InvalidData(format!(
+            "track count {} exceeds maximum {}",
+            len, MAX_TRACK_COUNT
+        )));
+    }
     let mut vec = Vec::with_capacity(len);
     for _ in 0..len {
         vec.push(TrackSizingFunction::decode(buf)?);
@@ -1094,6 +1115,12 @@ impl Decode for RichText {
             });
         }
         let len = buf.get_u32_le() as usize;
+        if len > MAX_SPAN_COUNT {
+            return Err(ProtocolError::InvalidData(format!(
+                "span count {} exceeds maximum {}",
+                len, MAX_SPAN_COUNT
+            )));
+        }
         let mut spans = Vec::with_capacity(len);
         for _ in 0..len {
             spans.push(Span::decode(buf)?);
@@ -1824,7 +1851,13 @@ impl Decode for AppMessage {
         let type_code = buf.get_u16_le();
         let payload_len = buf.get_u32_le() as usize;
 
-        // Validate we have enough bytes for the declared payload
+        if payload_len > MAX_PAYLOAD_LEN {
+            return Err(ProtocolError::InvalidData(format!(
+                "payload length {} exceeds maximum {}",
+                payload_len, MAX_PAYLOAD_LEN
+            )));
+        }
+
         if buf.remaining() < payload_len {
             return Err(ProtocolError::UnexpectedEof {
                 needed: payload_len,
@@ -1832,7 +1865,6 @@ impl Decode for AppMessage {
             });
         }
 
-        // Track how many bytes we should consume
         let expected_remaining = buf.remaining() - payload_len;
 
         let result = match type_code {
@@ -2072,7 +2104,13 @@ impl Decode for TerminalMessage {
         let type_code = buf.get_u16_le();
         let payload_len = buf.get_u32_le() as usize;
 
-        // Validate we have enough bytes for the declared payload
+        if payload_len > MAX_PAYLOAD_LEN {
+            return Err(ProtocolError::InvalidData(format!(
+                "payload length {} exceeds maximum {}",
+                payload_len, MAX_PAYLOAD_LEN
+            )));
+        }
+
         if buf.remaining() < payload_len {
             return Err(ProtocolError::UnexpectedEof {
                 needed: payload_len,
@@ -2080,7 +2118,6 @@ impl Decode for TerminalMessage {
             });
         }
 
-        // Track how many bytes we should consume
         let expected_remaining = buf.remaining() - payload_len;
 
         let result = match type_code {
@@ -2258,5 +2295,74 @@ mod tests {
         let mut cursor = buf.freeze();
         let decoded = Constraints::decode(&mut cursor).unwrap();
         assert_eq!(decoded, constraints);
+    }
+
+    #[test]
+    fn test_reject_oversized_payload() {
+        let mut buf = BytesMut::new();
+        buf.put_slice(&FRAME_MAGIC);
+        buf.put_u16_le(msg_type::DISCONNECT);
+        buf.put_u32_le((MAX_PAYLOAD_LEN + 1) as u32);
+
+        let mut cursor = buf.freeze();
+        let result = AppMessage::decode(&mut cursor);
+        assert!(matches!(result, Err(ProtocolError::InvalidData(_))));
+    }
+
+    #[test]
+    fn test_reject_oversized_string() {
+        let mut buf = BytesMut::new();
+        buf.put_u32_le((MAX_STRING_LEN + 1) as u32);
+
+        let mut cursor = buf.freeze();
+        let result = decode_string(&mut cursor);
+        assert!(matches!(result, Err(ProtocolError::InvalidData(_))));
+    }
+
+    #[test]
+    fn test_reject_oversized_region_count() {
+        let mut buf = BytesMut::new();
+        buf.put_slice(&FRAME_MAGIC);
+        buf.put_u16_le(msg_type::LAYOUT_COMPUTED);
+        buf.put_u32_le(6);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u32_le((MAX_REGION_COUNT + 1) as u32);
+
+        let mut cursor = buf.freeze();
+        let result = TerminalMessage::decode(&mut cursor);
+        assert!(matches!(result, Err(ProtocolError::InvalidData(_))));
+    }
+
+    #[test]
+    fn test_reject_oversized_span_count() {
+        let mut buf = BytesMut::new();
+        buf.put_u32_le((MAX_SPAN_COUNT + 1) as u32);
+
+        let mut cursor = buf.freeze();
+        let result = RichText::decode(&mut cursor);
+        assert!(matches!(result, Err(ProtocolError::InvalidData(_))));
+    }
+
+    #[test]
+    fn test_reject_oversized_track_count() {
+        let mut buf = BytesMut::new();
+        buf.put_u32_le((MAX_TRACK_COUNT + 1) as u32);
+
+        let mut cursor = buf.freeze();
+        let result = decode_vec_track(&mut cursor);
+        assert!(matches!(result, Err(ProtocolError::InvalidData(_))));
+    }
+
+    #[test]
+    fn test_invalid_magic_rejected() {
+        let mut buf = BytesMut::new();
+        buf.put_slice(&[0xBA, 0xD0]);
+        buf.put_u16_le(msg_type::DISCONNECT);
+        buf.put_u32_le(0);
+
+        let mut cursor = buf.freeze();
+        let result = AppMessage::decode(&mut cursor);
+        assert!(matches!(result, Err(ProtocolError::InvalidMagic(_))));
     }
 }

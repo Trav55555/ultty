@@ -10,13 +10,20 @@ use crate::{Key, Modifiers};
 pub enum ControlRequest {
     // === Input Injection ===
     /// Send text as if typed.
-    SendText { text: String },
+    SendText {
+        text: String,
+    },
 
     /// Send a key press.
-    SendKey { key: Key, modifiers: Modifiers },
+    SendKey {
+        key: Key,
+        modifiers: Modifiers,
+    },
 
     /// Send raw bytes to PTY.
-    SendRaw { data: Vec<u8> },
+    SendRaw {
+        data: Vec<u8>,
+    },
 
     // === Command Execution ===
     /// Create a new tab with optional command.
@@ -28,10 +35,15 @@ pub enum ControlRequest {
     },
 
     /// Run command in current tab.
-    RunCommand { command: String, args: Vec<String> },
+    RunCommand {
+        command: String,
+        args: Vec<String>,
+    },
 
     /// Close a tab by index (None = current).
-    CloseTab { index: Option<usize> },
+    CloseTab {
+        index: Option<usize>,
+    },
 
     // === State Queries ===
     /// Get visible text from terminal.
@@ -56,22 +68,32 @@ pub enum ControlRequest {
     FocusWindow,
 
     /// Switch to tab by index.
-    SwitchTab { index: usize },
+    SwitchTab {
+        index: usize,
+    },
 
     /// Toggle fullscreen.
     ToggleFullscreen,
 
     /// Resize window.
-    Resize { width: u32, height: u32 },
+    Resize {
+        width: u32,
+        height: u32,
+    },
 
     /// Set window opacity.
-    SetOpacity { opacity: f32 },
+    SetOpacity {
+        opacity: f32,
+    },
+
+    // === Screenshot ===
+    Screenshot {
+        path: Option<String>,
+    },
 
     // === Misc ===
-    /// Ping (for connection testing).
     Ping,
 
-    /// Get version info.
     Version,
 }
 
@@ -91,23 +113,15 @@ pub enum ControlResponse {
     Error { code: u16, message: String },
 }
 
-/// Structured response data.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlData {
-    /// Terminal info.
     Info(TerminalInfo),
-
-    /// Tab list.
     Tabs(Vec<TabInfo>),
-
-    /// Selection text.
     Selection(Option<String>),
-
-    /// Version info.
     Version(VersionInfo),
-
-    /// Pong response.
     Pong,
+    ScreenshotSaved(String),
+    ScreenshotData(Vec<u8>),
 }
 
 /// Terminal information.

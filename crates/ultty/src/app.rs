@@ -2686,6 +2686,44 @@ impl App {
                     self.needs_redraw = true;
                     ControlResponse::Ok
                 }
+
+                ControlRequest::Screenshot { path } => {
+                    if let Some(terminal) = self.terminal_manager.focused_terminal() {
+                        let term = terminal.event_loop.terminal();
+                        let overlay = OverlayState::default();
+
+                        if let Some(path_str) = path {
+                            let path = std::path::PathBuf::from(&path_str);
+                            if let Some(parent) = path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            match self.renderer.capture_screenshot(term, &overlay, &path) {
+                                Ok(()) => ControlResponse::Data(ControlData::ScreenshotSaved(
+                                    path.display().to_string(),
+                                )),
+                                Err(e) => ControlResponse::Error {
+                                    code: 5,
+                                    message: format!("Screenshot failed: {}", e),
+                                },
+                            }
+                        } else {
+                            match self.renderer.capture_screenshot_bytes(term, &overlay) {
+                                Ok(data) => {
+                                    ControlResponse::Data(ControlData::ScreenshotData(data))
+                                }
+                                Err(e) => ControlResponse::Error {
+                                    code: 5,
+                                    message: format!("Screenshot failed: {}", e),
+                                },
+                            }
+                        }
+                    } else {
+                        ControlResponse::Error {
+                            code: 1,
+                            message: "No active terminal".to_string(),
+                        }
+                    }
+                }
             };
 
             responses.push((client_key, response));

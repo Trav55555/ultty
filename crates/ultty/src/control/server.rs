@@ -39,6 +39,8 @@ impl ControlServer {
 
         let poller = Poller::new()?;
 
+        // SAFETY: listener fd is valid and owned by this ControlServer for its lifetime.
+        // The poller uses it only for readability notifications.
         unsafe {
             poller.add(&listener, Event::readable(LISTENER_KEY))?;
         }
@@ -82,6 +84,7 @@ impl ControlServer {
                     let key = self.next_key;
                     self.next_key += 1;
 
+                    // SAFETY: stream fd is valid and stored in self.clients for its lifetime.
                     unsafe {
                         self.poller.add(&stream, Event::readable(key))?;
                     }
@@ -208,6 +211,10 @@ impl ControlServer {
                 let args: Vec<String> = parts.map(String::from).collect();
                 Some(ControlRequest::RunCommand { command, args })
             }
+            "screenshot" => {
+                let path = parts.next().map(String::from);
+                Some(ControlRequest::Screenshot { path })
+            }
             _ => None,
         }
     }
@@ -314,6 +321,8 @@ fn format_response(response: &ControlResponse) -> String {
                 Some(text) => format!("{}\n", text),
                 None => "(no selection)\n".to_string(),
             },
+            ControlData::ScreenshotSaved(path) => format!("Screenshot saved: {}\n", path),
+            ControlData::ScreenshotData(data) => format!("Screenshot data: {} bytes\n", data.len()),
         },
         ControlResponse::Error { code, message } => {
             format!("ERROR {}: {}\n", code, message)

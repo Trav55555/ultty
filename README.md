@@ -1,21 +1,75 @@
-# Ultimate TUI Terminal
+# Ultty
 
-A high-performance TUI framework experimentation sandbox, inspired by the Claude Code architecture analysis.
+A GPU-accelerated terminal emulator with a native TUI protocol, designed to make traditional ANSI-based architectures obsolete.
+
+## Vision
+
+Modern TUI applications are bottlenecked by the 1970s ANSI protocol: apps compute layout, serialize to escape sequences, terminals re-parse and re-render. Ultty eliminates this by:
+
+- **Terminal-side layout**: Apps declare constraints, terminal computes positions
+- **Retained scene graph**: Terminal owns the tree, apps send diffs
+- **Binary protocol**: No parsing overhead, direct structured messages
+- **Atomic frames**: `BeginFrame`/`EndFrame` prevents tearing
 
 ## Architecture
-- **Language:** Rust
-- **Layout:** Taffy (Flexbox)
-- **Rendering:** Ratatui (Diffing) + Crossterm (Backend)
-- **Loop:** Game-style loop (Update -> Layout -> Render -> Diff)
 
-## Roadmap
-- [x] Initial Scaffolding
-- [ ] Implement "Transient Alt Mode" (Buffer switching)
-- [ ] Connect Taffy layout tree to Ratatui widgets
-- [ ] Benchmark vs React/Ink
-
-## Usage
-Run the demo:
-```bash
-cargo run
 ```
+ultty/
+├── crates/
+│   ├── ultty/            # Terminal emulator (GPU-rendered via wgpu)
+│   ├── ulttui/           # TUI framework library (apps link this)
+│   └── ultty-protocol/   # Shared wire protocol definitions
+├── examples/             # Reference implementations
+└── docs/                 # Specs and architecture docs
+```
+
+## Quick Start
+
+```bash
+# Run the terminal emulator
+cargo run -p ultty
+
+# Run example apps (inside ultty terminal)
+cargo run -p hello-native   # Raw protocol demo
+cargo run -p counter-app    # Framework counter
+cargo run -p todo-app       # Framework todo list
+```
+
+## Current Status
+
+- [x] Protocol specification and implementation
+- [x] GPU renderer with wgpu
+- [x] VT100/ANSI parser (legacy compatibility)
+- [x] Native protocol handler with scene graph
+- [x] Framework with component system
+- [x] ANSI fallback mode (run in any terminal)
+- [ ] Protocol hardening complete
+- [ ] Performance benchmarks
+
+## Documentation
+
+- [Protocol Specification](docs/PROTOCOL_SPEC.md)
+- [Project Review](docs/PROJECT_REVIEW_REPORT.md)
+- [Testing Strategy](docs/TESTING_STRATEGY.md)
+
+## Development
+
+```bash
+cargo test --workspace      # Run all tests
+cargo check --workspace     # Type check
+cargo clippy --workspace    # Lint
+cargo fmt --all             # Format
+```
+
+## Performance Targets
+
+| Metric | Target |
+|--------|--------|
+| Layout recompute | < 1ms |
+| Frame render | < 5ms |
+| Input latency | < 10ms |
+| Memory (terminal) | < 50MB |
+
+## License
+
+MIT
