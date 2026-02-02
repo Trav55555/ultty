@@ -33,7 +33,7 @@ pub enum MouseEncoding {
 }
 
 /// Terminal modes that affect behavior.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct TerminalModes {
     /// Application cursor keys (DECCKM)
     pub application_cursor_keys: bool,
@@ -62,6 +62,26 @@ pub struct TerminalModes {
     pub alternate_scroll: bool,
     /// Synchronized update mode - batches screen updates for flicker-free rendering
     pub synchronized_update: bool,
+}
+
+impl Default for TerminalModes {
+    fn default() -> Self {
+        Self {
+            application_cursor_keys: false,
+            bracketed_paste: false,
+            focus_reporting: false,
+            auto_wrap: false,
+            origin_mode: false,
+            insert_mode: false,
+            mouse_mode: MouseMode::None,
+            mouse_encoding: MouseEncoding::X10,
+            reverse_video: false,
+            kitty_keyboard_flags: 0,
+            // Enable by default so mouse wheel works in less, vim, etc.
+            alternate_scroll: true,
+            synchronized_update: false,
+        }
+    }
 }
 
 #[allow(dead_code)]

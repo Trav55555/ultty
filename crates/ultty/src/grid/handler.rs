@@ -97,6 +97,37 @@ impl<'a> Handler<'a> {
             // Scrolling
             Action::ScrollUp(n) => self.grid.scroll_up(n),
             Action::ScrollDown(n) => self.grid.scroll_down(n),
+            Action::ReverseIndex => {
+                // Move cursor up, scroll down if at top of scroll region
+                let region = self.grid.effective_scroll_region();
+                let cursor_row = self.grid.cursor().position.row;
+                if cursor_row <= region.top {
+                    self.grid.scroll_down(1);
+                } else {
+                    self.grid.cursor_up(1);
+                }
+            }
+            Action::Index => {
+                // Move cursor down, scroll up if at bottom of scroll region
+                let region = self.grid.effective_scroll_region();
+                let cursor_row = self.grid.cursor().position.row;
+                if cursor_row >= region.bottom {
+                    self.grid.scroll_up(1);
+                } else {
+                    self.grid.cursor_down(1);
+                }
+            }
+            Action::NextLine => {
+                // Move to beginning of next line (CR + Index)
+                self.grid.carriage_return();
+                let region = self.grid.effective_scroll_region();
+                let cursor_row = self.grid.cursor().position.row;
+                if cursor_row >= region.bottom {
+                    self.grid.scroll_up(1);
+                } else {
+                    self.grid.cursor_down(1);
+                }
+            }
             Action::SetScrollingRegion { top, bottom } => {
                 self.grid.set_scroll_region(top, bottom);
             }

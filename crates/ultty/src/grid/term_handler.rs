@@ -119,6 +119,48 @@ impl<'a> TerminalHandler<'a> {
                 }
             }
             Action::ScrollDown(n) => self.terminal.grid_mut().scroll_down(n),
+            Action::ReverseIndex => {
+                // Move cursor up, scroll down if at top of scroll region
+                let grid = self.terminal.grid_mut();
+                let region = grid.effective_scroll_region();
+                let cursor_row = grid.cursor().position.row;
+                if cursor_row <= region.top {
+                    grid.scroll_down(1);
+                } else {
+                    grid.cursor_up(1);
+                }
+            }
+            Action::Index => {
+                // Move cursor down, scroll up if at bottom of scroll region
+                let grid = self.terminal.grid_mut();
+                let region = grid.effective_scroll_region();
+                let cursor_row = grid.cursor().position.row;
+                if cursor_row >= region.bottom {
+                    if !self.terminal.is_alternate_screen() {
+                        self.terminal.buffer_mut().scroll_grid_up(1);
+                    } else {
+                        self.terminal.grid_mut().scroll_up(1);
+                    }
+                } else {
+                    self.terminal.grid_mut().cursor_down(1);
+                }
+            }
+            Action::NextLine => {
+                // Move to beginning of next line (CR + Index)
+                self.terminal.grid_mut().carriage_return();
+                let grid = self.terminal.grid_mut();
+                let region = grid.effective_scroll_region();
+                let cursor_row = grid.cursor().position.row;
+                if cursor_row >= region.bottom {
+                    if !self.terminal.is_alternate_screen() {
+                        self.terminal.buffer_mut().scroll_grid_up(1);
+                    } else {
+                        self.terminal.grid_mut().scroll_up(1);
+                    }
+                } else {
+                    self.terminal.grid_mut().cursor_down(1);
+                }
+            }
             Action::SetScrollingRegion { top, bottom } => {
                 self.terminal.grid_mut().set_scroll_region(top, bottom);
             }
@@ -780,16 +822,16 @@ mod tests {
     fn alternate_scroll_mode() {
         let mut term = Terminal::new(Dimensions::new(80, 24));
 
-        // Default: disabled
-        assert!(!term.modes().alternate_scroll);
-
-        // Enable alternate scroll mode
-        process(&mut term, b"\x1b[?1007h");
+        // Default: enabled (so mouse wheel works in less, vim, etc.)
         assert!(term.modes().alternate_scroll);
 
         // Disable alternate scroll mode
         process(&mut term, b"\x1b[?1007l");
         assert!(!term.modes().alternate_scroll);
+
+        // Enable alternate scroll mode
+        process(&mut term, b"\x1b[?1007h");
+        assert!(term.modes().alternate_scroll);
     }
 
     #[test]

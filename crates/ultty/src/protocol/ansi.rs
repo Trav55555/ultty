@@ -92,6 +92,15 @@ pub enum Action {
     /// Set scrolling region (CSI r)
     SetScrollingRegion { top: u16, bottom: u16 },
 
+    /// Reverse Index (ESC M) - move cursor up, scroll down if at top
+    ReverseIndex,
+
+    /// Index (ESC D) - move cursor down, scroll up if at bottom
+    Index,
+
+    /// Next Line (ESC E) - CR + LF
+    NextLine,
+
     // === Cursor Save/Restore ===
     /// Save cursor position (ESC 7 or CSI s)
     SaveCursorPosition,
@@ -571,6 +580,21 @@ impl AnsiParser {
             // Set tab stop (ESC H)
             b'H' => {
                 callback(Action::SetTabStop);
+                self.reset();
+            }
+            // Reverse Index (ESC M) - move cursor up, scroll down if at top of scroll region
+            b'M' => {
+                callback(Action::ReverseIndex);
+                self.reset();
+            }
+            // Index (ESC D) - move cursor down, scroll up if at bottom of scroll region
+            b'D' => {
+                callback(Action::Index);
+                self.reset();
+            }
+            // Next Line (ESC E) - move to beginning of next line, scroll if needed
+            b'E' => {
+                callback(Action::NextLine);
                 self.reset();
             }
             // Another ESC - restart escape

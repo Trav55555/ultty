@@ -1008,8 +1008,14 @@ impl App {
 
         if in_alternate && alternate_scroll {
             // Send arrow keys for scrolling in alternate screen
+            // Check DECCKM mode to send correct escape sequence
+            let app_cursor = self.terminal().modes().application_cursor_keys;
             let count = lines.unsigned_abs() as usize;
-            let arrow = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" }; // Up : Down
+            let arrow: &[u8] = if lines > 0 {
+                if app_cursor { b"\x1bOA" } else { b"\x1b[A" } // Up
+            } else {
+                if app_cursor { b"\x1bOB" } else { b"\x1b[B" } // Down
+            };
             for _ in 0..count {
                 let _ = self.send_input(arrow);
             }
@@ -2972,6 +2978,7 @@ impl App {
 
         let ctrl = modifiers.contains(ultty_protocol::Modifiers::CTRL);
         let alt = modifiers.contains(ultty_protocol::Modifiers::ALT);
+        let app_cursor = terminal.event_loop.terminal().modes().application_cursor_keys;
 
         let bytes: Vec<u8> = match key {
             ultty_protocol::Key::Char(c) => {
@@ -2993,14 +3000,26 @@ impl App {
             ultty_protocol::Key::Backspace => vec![0x7f],
             ultty_protocol::Key::Delete => b"\x1b[3~".to_vec(),
             ultty_protocol::Key::Insert => b"\x1b[2~".to_vec(),
-            ultty_protocol::Key::Home => b"\x1b[H".to_vec(),
-            ultty_protocol::Key::End => b"\x1b[F".to_vec(),
+            ultty_protocol::Key::Home => {
+                if app_cursor { b"\x1bOH".to_vec() } else { b"\x1b[H".to_vec() }
+            }
+            ultty_protocol::Key::End => {
+                if app_cursor { b"\x1bOF".to_vec() } else { b"\x1b[F".to_vec() }
+            }
             ultty_protocol::Key::PageUp => b"\x1b[5~".to_vec(),
             ultty_protocol::Key::PageDown => b"\x1b[6~".to_vec(),
-            ultty_protocol::Key::Up => b"\x1b[A".to_vec(),
-            ultty_protocol::Key::Down => b"\x1b[B".to_vec(),
-            ultty_protocol::Key::Right => b"\x1b[C".to_vec(),
-            ultty_protocol::Key::Left => b"\x1b[D".to_vec(),
+            ultty_protocol::Key::Up => {
+                if app_cursor { b"\x1bOA".to_vec() } else { b"\x1b[A".to_vec() }
+            }
+            ultty_protocol::Key::Down => {
+                if app_cursor { b"\x1bOB".to_vec() } else { b"\x1b[B".to_vec() }
+            }
+            ultty_protocol::Key::Right => {
+                if app_cursor { b"\x1bOC".to_vec() } else { b"\x1b[C".to_vec() }
+            }
+            ultty_protocol::Key::Left => {
+                if app_cursor { b"\x1bOD".to_vec() } else { b"\x1b[D".to_vec() }
+            }
             ultty_protocol::Key::Function(n) => match n {
                 1 => b"\x1bOP".to_vec(),
                 2 => b"\x1bOQ".to_vec(),
