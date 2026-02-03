@@ -16,10 +16,12 @@ impl Rgba {
         Self { r, g, b, a }
     }
 
+    /// Create a new opaque RGB color (alpha = 1.0).
     pub const fn rgb(r: f32, g: f32, b: f32) -> Self {
         Self { r, g, b, a: 1.0 }
     }
 
+    /// Create a color from 8-bit RGB components (0-255).
     pub fn from_u8(r: u8, g: u8, b: u8) -> Self {
         Self {
             r: r as f32 / 255.0,
@@ -29,6 +31,7 @@ impl Rgba {
         }
     }
 
+    /// Convert to an `[r, g, b, a]` array for GPU upload.
     pub fn to_array(&self) -> [f32; 4] {
         [self.r, self.g, self.b, self.a]
     }
@@ -176,6 +179,7 @@ impl ColorScheme {
         }
     }
 
+    /// Resolve a native protocol color to an RGBA value.
     pub fn resolve_protocol_color(&self, color: &ultty_protocol::Color) -> Rgba {
         match color {
             ultty_protocol::Color::Named(named) => {
@@ -204,5 +208,169 @@ impl ColorScheme {
             ultty_protocol::Color::Rgb(r, g, b) => Rgba::from_u8(*r, *g, *b),
             ultty_protocol::Color::Indexed(idx) => self.indexed_color(*idx),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grid::Color;
+
+    const EPS: f32 = 0.001;
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < EPS
+    }
+
+    #[test]
+    fn rgba_from_u8() {
+        let c = Rgba::from_u8(255, 128, 0);
+        assert!(approx(c.r, 1.0));
+        assert!(approx(c.g, 128.0 / 255.0));
+        assert!(approx(c.b, 0.0));
+        assert!(approx(c.a, 1.0));
+    }
+
+    #[test]
+    fn rgba_default_is_black() {
+        let c = Rgba::default();
+        assert!(approx(c.r, 0.0));
+        assert!(approx(c.g, 0.0));
+        assert!(approx(c.b, 0.0));
+        assert!(approx(c.a, 1.0));
+    }
+
+    #[test]
+    fn rgba_to_array() {
+        let c = Rgba::new(0.1, 0.2, 0.3, 0.4);
+        let arr = c.to_array();
+        assert!(approx(arr[0], 0.1));
+        assert!(approx(arr[1], 0.2));
+        assert!(approx(arr[2], 0.3));
+        assert!(approx(arr[3], 0.4));
+    }
+
+    #[test]
+    fn srgb_to_linear_black() {
+        let c = Rgba::rgb(0.0, 0.0, 0.0).to_linear();
+        assert!(approx(c.r, 0.0));
+        assert!(approx(c.g, 0.0));
+        assert!(approx(c.b, 0.0));
+    }
+
+    #[test]
+    fn srgb_to_linear_white() {
+        let c = Rgba::rgb(1.0, 1.0, 1.0).to_linear();
+        assert!(approx(c.r, 1.0));
+        assert!(approx(c.g, 1.0));
+        assert!(approx(c.b, 1.0));
+    }
+
+    #[test]
+    fn srgb_to_linear_mid_gray() {
+        let c = Rgba::rgb(0.5, 0.5, 0.5).to_linear();
+        assert!(approx(c.r, 0.214));
+        assert!(approx(c.g, 0.214));
+        assert!(approx(c.b, 0.214));
+    }
+
+    #[test]
+    fn srgb_to_linear_preserves_alpha() {
+        let c = Rgba::new(0.5, 0.5, 0.5, 0.75).to_linear();
+        assert!(approx(c.a, 0.75));
+    }
+
+    #[test]
+    fn srgb_to_linear_low_value() {
+        let v = 0.03;
+        let c = Rgba::rgb(v, v, v).to_linear();
+        let expected = v / 12.92;
+        assert!(approx(c.r, expected));
+        assert!(approx(c.g, expected));
+        assert!(approx(c.b, expected));
+    }
+
+    #[test]
+    fn dark_scheme_defaults() {
+        let scheme = ColorScheme::dark();
+        assert_eq!(scheme.foreground, Rgba::from_u8(0xE5, 0xE5, 0xE5));
+        assert_eq!(scheme.background, Rgba::from_u8(0x1E, 0x1E, 0x1E));
+    }
+
+    #[test]
+    fn resolve_default_fg() {
+        let scheme = ColorScheme::dark();
+        let c = scheme.resolve(Color::Default, true);
+        assert_eq!(c, scheme.foreground);
+    }
+
+    #[test]
+    fn resolve_default_bg() {
+        let scheme = ColorScheme::dark();
+        let c = scheme.resolve(Color::Default, false);
+        assert_eq!(c, scheme.background);
+    }
+
+    #[test]
+    fn resolve_named_color() {
+        let scheme = ColorScheme::dark();
+        let c = scheme.resolve(Color::Named(1), true);
+        assert_eq!(c, scheme.named[1]);
+    }
+
+    #[test]
+    fn resolve_rgb_color() {
+        let scheme = ColorScheme::dark();
+        let c = scheme.resolve(Color::Rgb(255, 0, 0), true);
+        assert_eq!(c, Rgba::from_u8(255, 0, 0));
+    }
+
+    #[test]
+    fn indexed_color_standard() {
+        let scheme = ColorScheme::dark();
+        for i in 0..16u8 {
+            assert_eq!(scheme.indexed_color(i), scheme.named[i as usize]);
+        }
+    }
+
+    #[test]
+    fn indexed_color_cube() {
+        let scheme = ColorScheme::dark();
+        let black = scheme.indexed_color(16);
+        assert_eq!(black, Rgba::from_u8(0, 0, 0));
+        let white = scheme.indexed_color(231);
+        assert_eq!(white, Rgba::from_u8(255, 255, 255));
+    }
+
+    #[test]
+    fn indexed_color_grayscale() {
+        let scheme = ColorScheme::dark();
+        let darkest = scheme.indexed_color(232);
+        assert_eq!(darkest, Rgba::from_u8(8, 8, 8));
+        let lightest = scheme.indexed_color(255);
+        assert_eq!(lightest, Rgba::from_u8(238, 238, 238));
+    }
+
+    #[test]
+    fn resolve_protocol_named() {
+        let scheme = ColorScheme::dark();
+        let c = scheme.resolve_protocol_color(&ultty_protocol::Color::Named(
+            ultty_protocol::NamedColor::Red,
+        ));
+        assert_eq!(c, scheme.named[1]);
+    }
+
+    #[test]
+    fn resolve_protocol_rgb() {
+        let scheme = ColorScheme::dark();
+        let c = scheme.resolve_protocol_color(&ultty_protocol::Color::Rgb(10, 20, 30));
+        assert_eq!(c, Rgba::from_u8(10, 20, 30));
+    }
+
+    #[test]
+    fn resolve_protocol_indexed() {
+        let scheme = ColorScheme::dark();
+        let c = scheme.resolve_protocol_color(&ultty_protocol::Color::Indexed(200));
+        assert_eq!(c, scheme.indexed_color(200));
     }
 }

@@ -164,6 +164,7 @@ impl TextRenderer {
         self.shaping_cache.clear();
     }
 
+    /// Build vertices for a simple text string at a given position.
     pub fn build_simple_text_vertices(
         &mut self,
         text: &str,
@@ -381,11 +382,12 @@ impl TextRenderer {
         x_offset: f32,
         y_offset: f32,
     ) -> (Vec<Vertex>, Vec<u32>) {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-
         let grid = terminal.grid();
         let dims = grid.dimensions();
+        // Estimate ~half of cells have visible glyphs
+        let est_glyphs = (dims.rows as usize * dims.cols as usize) / 2;
+        let mut vertices = Vec::with_capacity(est_glyphs * 4);
+        let mut indices = Vec::with_capacity(est_glyphs * 6);
 
         let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
         buffer.set_size(&mut self.font_system, cell_width * 4.0, cell_height * 2.0);

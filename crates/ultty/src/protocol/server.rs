@@ -29,6 +29,7 @@ pub struct ProtocolServer {
 }
 
 impl ProtocolServer {
+    /// Create a new protocol server listening on the given Unix socket path.
     pub fn new(socket_path: impl AsRef<Path>) -> io::Result<Self> {
         let socket_path = socket_path.as_ref().to_path_buf();
 
@@ -63,10 +64,12 @@ impl ProtocolServer {
         })
     }
 
+    /// Returns the path to the Unix socket this server is listening on.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
 
+    /// Update the viewport dimensions and propagate to all connected sessions.
     pub fn set_viewport(&mut self, width: f32, height: f32) {
         self.viewport_width = width;
         self.viewport_height = height;
@@ -75,6 +78,7 @@ impl ProtocolServer {
         }
     }
 
+    /// Poll for new connections and session events, with an optional timeout.
     pub fn poll(&mut self, timeout: Option<Duration>) -> io::Result<()> {
         let mut events = Events::new();
 
@@ -166,18 +170,22 @@ impl ProtocolServer {
         Ok(())
     }
 
+    /// Returns the number of currently connected native sessions.
     pub fn session_count(&self) -> usize {
         self.sessions.len()
     }
 
+    /// Iterate over all connected sessions (immutable).
     pub fn sessions(&self) -> impl Iterator<Item = &NativeSession> {
         self.sessions.values()
     }
 
+    /// Iterate over all connected sessions (mutable).
     pub fn sessions_mut(&mut self) -> impl Iterator<Item = &mut NativeSession> {
         self.sessions.values_mut()
     }
 
+    /// Send a key event to all connected native sessions.
     pub fn broadcast_key(
         &mut self,
         key: ultty_protocol::Key,
@@ -241,6 +249,7 @@ impl ProtocolServer {
         any_active
     }
 
+    /// Send a resize event to all connected native sessions.
     pub fn broadcast_resize(&mut self, width: u16, height: u16) {
         for session in self.sessions.values_mut() {
             session.set_viewport(width as f32, height as f32);
@@ -259,5 +268,323 @@ impl Drop for ProtocolServer {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.socket_path);
         info!("Protocol server shut down");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    fn temp_socket_path() -> PathBuf {
+        use std::sync::atomic::AtomicU64;
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        PathBuf::from(format!("/tmp/ultty-test-{}-{}", pid, id))
+    }
+
+    /// Helper: ensure the socket file is removed even if the test panics.
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // 1. Lifecycle: new() creates socket, drop removes it
+    // ---------------------------------------------------------------
+    #[test]
+    fn new_creates_socket_file() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let server = ProtocolServer::new(&path).expect("failed to create server");
+        assert!(path.exists(), "socket file should exist after new()");
+        drop(server);
+        assert!(!path.exists(), "socket file should be removed after drop");
+    }
+
+    // ---------------------------------------------------------------
+    // 2. set_viewport updates dimensions
+    // ---------------------------------------------------------------
+    #[test]
+    fn set_viewport_updates_dimensions() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+        server.set_viewport(120.0, 40.0);
+        // The internal fields should now reflect the new viewport.
+        // We can verify indirectly by checking that a newly accepted
+        // session would inherit these values, but at minimum the call
+        // must not panic.
+        assert_eq!(server.viewport_width, 120.0);
+        assert_eq!(server.viewport_height, 40.0);
+    }
+
+    // ---------------------------------------------------------------
+    // 3. session_count starts at 0
+    // ---------------------------------------------------------------
+    #[test]
+    fn session_count_starts_at_zero() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let server = ProtocolServer::new(&path).unwrap();
+        assert_eq!(server.session_count(), 0);
+    }
+
+    // ---------------------------------------------------------------
+    // 4. poll with no connections returns Ok
+    // ---------------------------------------------------------------
+    #[test]
+    fn poll_no_connections_returns_ok() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+        // Use a zero-duration timeout so poll returns immediately.
+        let result = server.poll(Some(Duration::ZERO));
+        assert!(result.is_ok(), "poll with no connections should succeed");
+    }
+
+    // ---------------------------------------------------------------
+    // 5. broadcast_key with no sessions doesn't panic
+    // ---------------------------------------------------------------
+    #[test]
+    fn broadcast_key_no_sessions() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+        // Should not panic when there are no sessions.
+        server.broadcast_key(
+            ultty_protocol::Key::Char('a'),
+            ultty_protocol::Modifiers::NONE,
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // 6. broadcast_mouse with no sessions doesn't panic
+    // ---------------------------------------------------------------
+    #[test]
+    fn broadcast_mouse_no_sessions() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+        server.broadcast_mouse(
+            ultty_protocol::InputType::MouseDown {
+                button: ultty_protocol::MouseButton::Left,
+            },
+            10.0,
+            5.0,
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // 7. broadcast_resize with no sessions doesn't panic
+    // ---------------------------------------------------------------
+    #[test]
+    fn broadcast_resize_no_sessions() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+        server.broadcast_resize(120, 40);
+    }
+
+    // ---------------------------------------------------------------
+    // 8. update_animations with no sessions returns false
+    // ---------------------------------------------------------------
+    #[test]
+    fn update_animations_no_sessions() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+        assert!(!server.update_animations());
+    }
+
+    // ---------------------------------------------------------------
+    // 9. socket_path returns correct path
+    // ---------------------------------------------------------------
+    #[test]
+    fn socket_path_returns_correct_path() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let server = ProtocolServer::new(&path).unwrap();
+        assert_eq!(server.socket_path(), path.as_path());
+    }
+
+    // ---------------------------------------------------------------
+    // 10. Accepting a connection increments session_count
+    // ---------------------------------------------------------------
+    #[test]
+    fn accept_connection_increments_session_count() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+        assert_eq!(server.session_count(), 0);
+
+        // Connect a client to the server socket.
+        let _client = UnixStream::connect(&path).expect("failed to connect");
+
+        // poll() should accept the pending connection.
+        server
+            .poll(Some(Duration::from_millis(100)))
+            .expect("poll failed");
+
+        assert_eq!(server.session_count(), 1);
+    }
+
+    // ---------------------------------------------------------------
+    // 11. Multiple connections are tracked independently
+    // ---------------------------------------------------------------
+    #[test]
+    fn multiple_connections_tracked() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+
+        let _c1 = UnixStream::connect(&path).unwrap();
+        let _c2 = UnixStream::connect(&path).unwrap();
+
+        server
+            .poll(Some(Duration::from_millis(100)))
+            .expect("poll failed");
+
+        assert_eq!(server.session_count(), 2);
+    }
+
+    // ---------------------------------------------------------------
+    // 12. broadcast_key with a connected session doesn't panic
+    // ---------------------------------------------------------------
+    #[test]
+    fn broadcast_key_with_session() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+        let _client = UnixStream::connect(&path).unwrap();
+        server
+            .poll(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        assert_eq!(server.session_count(), 1);
+        server.broadcast_key(
+            ultty_protocol::Key::Enter,
+            ultty_protocol::Modifiers::CTRL,
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // 13. broadcast_mouse with a connected session doesn't panic
+    // ---------------------------------------------------------------
+    #[test]
+    fn broadcast_mouse_with_session() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+        let _client = UnixStream::connect(&path).unwrap();
+        server
+            .poll(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        server.broadcast_mouse(
+            ultty_protocol::InputType::MouseScroll {
+                delta_x: 0.0,
+                delta_y: -3.0,
+            },
+            20.0,
+            10.0,
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // 14. broadcast_resize with a connected session doesn't panic
+    // ---------------------------------------------------------------
+    #[test]
+    fn broadcast_resize_with_session() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+        let _client = UnixStream::connect(&path).unwrap();
+        server
+            .poll(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        server.broadcast_resize(200, 60);
+    }
+
+    // ---------------------------------------------------------------
+    // 15. new() removes stale socket file before binding
+    // ---------------------------------------------------------------
+    #[test]
+    fn new_removes_stale_socket() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        // Create a first server (creates the socket file).
+        let server1 = ProtocolServer::new(&path).unwrap();
+        // Intentionally leak (don't drop) so socket file persists by
+        // just forgetting the Drop.
+        std::mem::forget(server1);
+
+        // A second server on the same path should succeed because
+        // new() removes the stale file.
+        let _server2 = ProtocolServer::new(&path).expect(
+            "should be able to create server on path with stale socket",
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // 16. set_viewport propagates to existing sessions
+    // ---------------------------------------------------------------
+    #[test]
+    fn set_viewport_propagates_to_sessions() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+        let _client = UnixStream::connect(&path).unwrap();
+        server
+            .poll(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        server.set_viewport(200.0, 50.0);
+
+        // Verify each session received the viewport update.
+        for session in server.sessions() {
+            let (w, h) = session.viewport();
+            assert_eq!(w, 200.0);
+            assert_eq!(h, 50.0);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // 17. sessions() iterator works
+    // ---------------------------------------------------------------
+    #[test]
+    fn sessions_iterator() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+        assert_eq!(server.sessions().count(), 0);
+
+        let _c1 = UnixStream::connect(&path).unwrap();
+        server
+            .poll(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        assert_eq!(server.sessions().count(), 1);
     }
 }

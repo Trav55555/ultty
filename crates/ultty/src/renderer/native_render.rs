@@ -7,6 +7,7 @@ use super::{DeferredImageRender, Renderer, Vertex};
 use wgpu::util::DeviceExt;
 
 impl Renderer {
+    /// Render a native protocol session's scene tree (backgrounds, text, widgets, images).
     pub fn render_native_session(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -18,10 +19,12 @@ impl Renderer {
         use ultty_protocol::Content;
 
         let scene = session.scene();
-        let mut bg_vertices = Vec::new();
-        let mut bg_indices = Vec::new();
-        let mut text_vertices = Vec::new();
-        let mut text_indices = Vec::new();
+        let region_count = scene.iter_depth_first().count();
+        let est = region_count * 4;
+        let mut bg_vertices = Vec::with_capacity(est * 4);
+        let mut bg_indices = Vec::with_capacity(est * 6);
+        let mut text_vertices = Vec::with_capacity(est * 4);
+        let mut text_indices = Vec::with_capacity(est * 6);
         let mut deferred_images: Vec<DeferredImageRender> = Vec::new();
 
         // Build a set of matched region IDs for quick lookup

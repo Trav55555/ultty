@@ -736,7 +736,9 @@ impl TerminalManager {
             let tab = Tab {
                 id: tab_id,
                 terminals: terminal_ids,
-                focused_terminal: focused_terminal_id.unwrap(),
+                focused_terminal: focused_terminal_id.ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "no focused terminal in restored tab")
+                })?,
                 title: tab_data.title.clone(),
                 split_direction,
             };

@@ -8,6 +8,7 @@ const UR: (f32, f32, f32, f32) = (0.5, 0.0, 0.5, 0.5);
 const LL: (f32, f32, f32, f32) = (0.0, 0.5, 0.5, 0.5);
 const LR: (f32, f32, f32, f32) = (0.5, 0.5, 0.5, 0.5);
 
+/// A fractional rectangle within a cell: `(x, y, width, height)` in 0.0..1.0.
 pub type Rect4 = (f32, f32, f32, f32);
 
 /// Returns fractional (x, y, w, h) rects within the cell. Up to 3 rects for multi-quadrant chars.

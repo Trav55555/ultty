@@ -1185,3 +1185,76 @@ impl App {
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-' || c == '.'
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn is_word_char_alphanumeric() {
+        // ASCII letters
+        assert!(is_word_char('a'));
+        assert!(is_word_char('z'));
+        assert!(is_word_char('A'));
+        assert!(is_word_char('Z'));
+        assert!(is_word_char('m'));
+        // Digits
+        assert!(is_word_char('0'));
+        assert!(is_word_char('5'));
+        assert!(is_word_char('9'));
+    }
+
+    #[test]
+    fn is_word_char_special() {
+        assert!(is_word_char('_'));
+        assert!(is_word_char('-'));
+        assert!(is_word_char('.'));
+    }
+
+    #[test]
+    fn is_word_char_space() {
+        assert!(!is_word_char(' '));
+        assert!(!is_word_char('\t'));
+        assert!(!is_word_char('\n'));
+    }
+
+    #[test]
+    fn is_word_char_punctuation() {
+        assert!(!is_word_char(','));
+        assert!(!is_word_char(';'));
+        assert!(!is_word_char('('));
+        assert!(!is_word_char(')'));
+        assert!(!is_word_char(':'));
+        assert!(!is_word_char('!'));
+        assert!(!is_word_char('@'));
+        assert!(!is_word_char('#'));
+    }
+
+    #[test]
+    fn is_word_char_unicode() {
+        // Accented Latin characters
+        assert!(is_word_char('é'));
+        assert!(is_word_char('ñ'));
+        assert!(is_word_char('ü'));
+        // CJK characters
+        assert!(is_word_char('中'));
+        assert!(is_word_char('文'));
+        // Cyrillic
+        assert!(is_word_char('Д'));
+    }
+
+    #[test]
+    fn click_threshold_is_reasonable() {
+        assert!(
+            CLICK_THRESHOLD >= Duration::from_millis(100),
+            "CLICK_THRESHOLD ({:?}) should be at least 100ms",
+            CLICK_THRESHOLD
+        );
+        assert!(
+            CLICK_THRESHOLD <= Duration::from_millis(1000),
+            "CLICK_THRESHOLD ({:?}) should be at most 1000ms",
+            CLICK_THRESHOLD
+        );
+    }
+}
