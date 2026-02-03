@@ -199,17 +199,16 @@ impl Default for ColorConfig {
         themes.insert("dark".to_string(), ThemeConfig::dark());
         themes.insert("light".to_string(), ThemeConfig::light());
 
-        // Use Catppuccin Mocha as default - good contrast, modern look
-        let default_theme = ThemeConfig::catppuccin_mocha();
+        let default_theme = ThemeConfig::everforest_dark();
 
         Self {
             foreground: default_theme.foreground,
             background: default_theme.background,
             cursor: default_theme.cursor,
             selection: default_theme.selection,
-            palette: PaletteConfig::catppuccin_mocha(),
+            palette: PaletteConfig::everforest_dark(),
             themes,
-            theme: Some("catppuccin-mocha".to_string()),
+            theme: Some("everforest-dark".to_string()),
         }
     }
 }
