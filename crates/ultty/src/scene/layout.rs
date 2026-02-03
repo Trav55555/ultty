@@ -356,4 +356,251 @@ mod tests {
         let right_layout = engine.get_layout(RegionId::new(2)).unwrap();
         assert_eq!(right_layout.size.width, 70.0); // 100 - 30
     }
+
+    // ── constraints_to_style tests ──────────────────────────────────
+
+    use ultty_protocol::{
+        AlignContent as ProtoAlignContent, AlignItems as ProtoAlignItems,
+        AlignSelf as ProtoAlignSelf, Edges, FlexWrap as ProtoFlexWrap,
+        JustifyContent as ProtoJustifyContent, Overflow as ProtoOverflow,
+        OverflowAxis as ProtoOverflowAxis, Size as ProtoSize,
+    };
+
+    fn default_constraints() -> Constraints {
+        Constraints::default()
+    }
+
+    #[test]
+    fn constraints_display_variants() {
+        for (proto, expected) in [
+            (ProtoDisplay::Block, taffy::Display::Block),
+            (ProtoDisplay::Flex, taffy::Display::Flex),
+            (ProtoDisplay::Grid, taffy::Display::Grid),
+            (ProtoDisplay::None, taffy::Display::None),
+        ] {
+            let c = Constraints { display: proto, ..default_constraints() };
+            let style = constraints_to_style(&c);
+            assert_eq!(style.display, expected, "Display::{proto:?}");
+        }
+    }
+
+    #[test]
+    fn constraints_flex_direction_variants() {
+        for (proto, expected) in [
+            (ProtoFlexDirection::Row, taffy::FlexDirection::Row),
+            (ProtoFlexDirection::RowReverse, taffy::FlexDirection::RowReverse),
+            (ProtoFlexDirection::Column, taffy::FlexDirection::Column),
+            (ProtoFlexDirection::ColumnReverse, taffy::FlexDirection::ColumnReverse),
+        ] {
+            let c = Constraints { flex_direction: proto, ..default_constraints() };
+            let style = constraints_to_style(&c);
+            assert_eq!(style.flex_direction, expected, "FlexDirection::{proto:?}");
+        }
+    }
+
+    #[test]
+    fn constraints_flex_wrap_variants() {
+        for (proto, expected) in [
+            (ProtoFlexWrap::NoWrap, taffy::FlexWrap::NoWrap),
+            (ProtoFlexWrap::Wrap, taffy::FlexWrap::Wrap),
+            (ProtoFlexWrap::WrapReverse, taffy::FlexWrap::WrapReverse),
+        ] {
+            let c = Constraints { flex_wrap: proto, ..default_constraints() };
+            let style = constraints_to_style(&c);
+            assert_eq!(style.flex_wrap, expected, "FlexWrap::{proto:?}");
+        }
+    }
+
+    #[test]
+    fn constraints_justify_content_variants() {
+        for (proto, expected) in [
+            (ProtoJustifyContent::Start, taffy::JustifyContent::Start),
+            (ProtoJustifyContent::End, taffy::JustifyContent::End),
+            (ProtoJustifyContent::Center, taffy::JustifyContent::Center),
+            (ProtoJustifyContent::SpaceBetween, taffy::JustifyContent::SpaceBetween),
+            (ProtoJustifyContent::SpaceAround, taffy::JustifyContent::SpaceAround),
+            (ProtoJustifyContent::SpaceEvenly, taffy::JustifyContent::SpaceEvenly),
+        ] {
+            let c = Constraints { justify_content: proto, ..default_constraints() };
+            let style = constraints_to_style(&c);
+            assert_eq!(style.justify_content, Some(expected), "JustifyContent::{proto:?}");
+        }
+    }
+
+    #[test]
+    fn constraints_align_items_variants() {
+        for (proto, expected) in [
+            (ProtoAlignItems::Start, taffy::AlignItems::Start),
+            (ProtoAlignItems::End, taffy::AlignItems::End),
+            (ProtoAlignItems::Center, taffy::AlignItems::Center),
+            (ProtoAlignItems::Baseline, taffy::AlignItems::Baseline),
+            (ProtoAlignItems::Stretch, taffy::AlignItems::Stretch),
+        ] {
+            let c = Constraints { align_items: proto, ..default_constraints() };
+            let style = constraints_to_style(&c);
+            assert_eq!(style.align_items, Some(expected), "AlignItems::{proto:?}");
+        }
+    }
+
+    #[test]
+    fn constraints_align_self_auto_maps_to_none() {
+        let c = Constraints { align_self: ProtoAlignSelf::Auto, ..default_constraints() };
+        let style = constraints_to_style(&c);
+        assert_eq!(style.align_self, None);
+    }
+
+    #[test]
+    fn constraints_align_self_non_auto_maps_to_some() {
+        for (proto, expected) in [
+            (ProtoAlignSelf::Start, taffy::AlignSelf::Start),
+            (ProtoAlignSelf::End, taffy::AlignSelf::End),
+            (ProtoAlignSelf::Center, taffy::AlignSelf::Center),
+            (ProtoAlignSelf::Baseline, taffy::AlignSelf::Baseline),
+            (ProtoAlignSelf::Stretch, taffy::AlignSelf::Stretch),
+        ] {
+            let c = Constraints { align_self: proto, ..default_constraints() };
+            let style = constraints_to_style(&c);
+            assert_eq!(style.align_self, Some(expected), "AlignSelf::{proto:?}");
+        }
+    }
+
+    #[test]
+    fn constraints_align_content_variants() {
+        for (proto, expected) in [
+            (ProtoAlignContent::Start, taffy::AlignContent::Start),
+            (ProtoAlignContent::End, taffy::AlignContent::End),
+            (ProtoAlignContent::Center, taffy::AlignContent::Center),
+            (ProtoAlignContent::SpaceBetween, taffy::AlignContent::SpaceBetween),
+            (ProtoAlignContent::SpaceAround, taffy::AlignContent::SpaceAround),
+            (ProtoAlignContent::SpaceEvenly, taffy::AlignContent::SpaceEvenly),
+            (ProtoAlignContent::Stretch, taffy::AlignContent::Stretch),
+        ] {
+            let c = Constraints { align_content: proto, ..default_constraints() };
+            let style = constraints_to_style(&c);
+            assert_eq!(style.align_content, Some(expected), "AlignContent::{proto:?}");
+        }
+    }
+
+    #[test]
+    fn constraints_overflow_axis_mapping() {
+        for (proto, expected) in [
+            (ProtoOverflowAxis::Visible, taffy::Overflow::Visible),
+            (ProtoOverflowAxis::Hidden, taffy::Overflow::Hidden),
+            (ProtoOverflowAxis::Scroll, taffy::Overflow::Scroll),
+            (ProtoOverflowAxis::Auto, taffy::Overflow::Scroll),
+        ] {
+            let c = Constraints {
+                overflow: ProtoOverflow { x: proto, y: proto },
+                ..default_constraints()
+            };
+            let style = constraints_to_style(&c);
+            assert_eq!(style.overflow.x, expected, "Overflow x for {proto:?}");
+            assert_eq!(style.overflow.y, expected, "Overflow y for {proto:?}");
+        }
+    }
+
+    #[test]
+    fn constraints_flex_grow_shrink_aspect_passthrough() {
+        let c = Constraints {
+            flex_grow: 2.5,
+            flex_shrink: 0.5,
+            aspect_ratio: Some(1.5),
+            ..default_constraints()
+        };
+        let style = constraints_to_style(&c);
+        assert_eq!(style.flex_grow, 2.5);
+        assert_eq!(style.flex_shrink, 0.5);
+        assert_eq!(style.aspect_ratio, Some(1.5));
+    }
+
+    #[test]
+    fn constraints_margin_padding_gap_use_dimension_helpers() {
+        let c = Constraints {
+            margin: Edges::new(
+                ProtoDimension::Cells(1.0),
+                ProtoDimension::Cells(2.0),
+                ProtoDimension::Cells(3.0),
+                ProtoDimension::Auto,
+            ),
+            padding: Edges::all(ProtoDimension::Percent(10.0)),
+            gap: ProtoSize {
+                width: ProtoDimension::Cells(5.0),
+                height: ProtoDimension::Percent(20.0),
+            },
+            ..default_constraints()
+        };
+        let style = constraints_to_style(&c);
+
+        assert_eq!(style.margin.top, LengthPercentageAuto::Length(1.0));
+        assert_eq!(style.margin.right, LengthPercentageAuto::Length(2.0));
+        assert_eq!(style.margin.bottom, LengthPercentageAuto::Length(3.0));
+        assert_eq!(style.margin.left, LengthPercentageAuto::Auto);
+
+        assert_eq!(style.padding.left, LengthPercentage::Percent(0.1));
+        assert_eq!(style.padding.right, LengthPercentage::Percent(0.1));
+
+        assert_eq!(style.gap.width, LengthPercentage::Length(5.0));
+        assert_eq!(style.gap.height, LengthPercentage::Percent(0.2));
+    }
+
+    // ── dimension_to_taffy tests ────────────────────────────────────
+
+    #[test]
+    fn dimension_to_taffy_auto_and_cells() {
+        assert_eq!(dimension_to_taffy(&ProtoDimension::Auto), Dimension::Auto);
+        assert_eq!(dimension_to_taffy(&ProtoDimension::Cells(10.0)), Dimension::Length(10.0));
+    }
+
+    #[test]
+    fn dimension_to_taffy_percent_divides_by_100() {
+        assert_eq!(dimension_to_taffy(&ProtoDimension::Percent(50.0)), Dimension::Percent(0.5));
+        assert_eq!(dimension_to_taffy(&ProtoDimension::Percent(100.0)), Dimension::Percent(1.0));
+    }
+
+    #[test]
+    fn dimension_to_taffy_fr_mincontent_maxcontent_fallback_to_auto() {
+        assert_eq!(dimension_to_taffy(&ProtoDimension::Fr(1.0)), Dimension::Auto);
+        assert_eq!(dimension_to_taffy(&ProtoDimension::MinContent), Dimension::Auto);
+        assert_eq!(dimension_to_taffy(&ProtoDimension::MaxContent), Dimension::Auto);
+    }
+
+    #[test]
+    fn dimension_to_taffy_viewport_units() {
+        assert_eq!(dimension_to_taffy(&ProtoDimension::Vw(50.0)), Dimension::Percent(0.5));
+        assert_eq!(dimension_to_taffy(&ProtoDimension::Vh(50.0)), Dimension::Percent(0.5));
+    }
+
+    // ── dimension_to_length_auto tests ──────────────────────────────
+
+    #[test]
+    fn length_auto_basic_variants() {
+        assert_eq!(dimension_to_length_auto(&ProtoDimension::Auto), LengthPercentageAuto::Auto);
+        assert_eq!(dimension_to_length_auto(&ProtoDimension::Cells(5.0)), LengthPercentageAuto::Length(5.0));
+        assert_eq!(dimension_to_length_auto(&ProtoDimension::Percent(25.0)), LengthPercentageAuto::Percent(0.25));
+    }
+
+    #[test]
+    fn length_auto_catch_all_returns_auto() {
+        assert_eq!(dimension_to_length_auto(&ProtoDimension::Fr(1.0)), LengthPercentageAuto::Auto);
+        assert_eq!(dimension_to_length_auto(&ProtoDimension::Vw(50.0)), LengthPercentageAuto::Auto);
+        assert_eq!(dimension_to_length_auto(&ProtoDimension::Vh(50.0)), LengthPercentageAuto::Auto);
+        assert_eq!(dimension_to_length_auto(&ProtoDimension::MinContent), LengthPercentageAuto::Auto);
+        assert_eq!(dimension_to_length_auto(&ProtoDimension::MaxContent), LengthPercentageAuto::Auto);
+    }
+
+    // ── dimension_to_length_pct tests ───────────────────────────────
+
+    #[test]
+    fn length_pct_cells_and_percent() {
+        assert_eq!(dimension_to_length_pct(&ProtoDimension::Cells(5.0)), LengthPercentage::Length(5.0));
+        assert_eq!(dimension_to_length_pct(&ProtoDimension::Percent(50.0)), LengthPercentage::Percent(0.5));
+    }
+
+    #[test]
+    fn length_pct_catch_all_returns_zero_length() {
+        assert_eq!(dimension_to_length_pct(&ProtoDimension::Auto), LengthPercentage::Length(0.0));
+        assert_eq!(dimension_to_length_pct(&ProtoDimension::Fr(1.0)), LengthPercentage::Length(0.0));
+        assert_eq!(dimension_to_length_pct(&ProtoDimension::Vw(50.0)), LengthPercentage::Length(0.0));
+        assert_eq!(dimension_to_length_pct(&ProtoDimension::Vh(50.0)), LengthPercentage::Length(0.0));
+    }
 }

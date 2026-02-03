@@ -184,6 +184,32 @@ impl SceneTree {
                                 });
                             }
                         }
+                        WidgetContent::Progress(progress) => {
+                            if let Some(label) = &progress.label {
+                                let text_lower = label.to_lowercase();
+                                for (offset, _) in text_lower.match_indices(&query_lower) {
+                                    matches.push(SearchMatch {
+                                        region_id: region.id,
+                                        span_index: None,
+                                        byte_offset: offset,
+                                        length: query.len(),
+                                    });
+                                }
+                            }
+                        }
+                        WidgetContent::Spinner(spinner) => {
+                            if let Some(label) = &spinner.label {
+                                let text_lower = label.to_lowercase();
+                                for (offset, _) in text_lower.match_indices(&query_lower) {
+                                    matches.push(SearchMatch {
+                                        region_id: region.id,
+                                        span_index: None,
+                                        byte_offset: offset,
+                                        length: query.len(),
+                                    });
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -553,5 +579,287 @@ mod tests {
         assert_eq!(m.span_index, Some(2));
         assert_eq!(m.byte_offset, 10);
         assert_eq!(m.length, 3);
+    }
+
+    // ── Widget search tests ─────────────────────────────────────────
+
+    use ultty_protocol::{
+        CodeWidget, ImageScale, ImageWidget, InputWidget, MarkdownWidget, ProgressWidget,
+        SpinnerWidget,
+    };
+
+    #[test]
+    fn search_finds_match_in_input_value() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        r.content = Content::Widget(WidgetContent::Input(InputWidget {
+            value: "hello world".into(),
+            placeholder: String::new(),
+            multiline: false,
+            password: false,
+        }));
+        tree.insert(r);
+
+        let matches = tree.search("hello");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].region_id, RegionId::new(1));
+        assert_eq!(matches[0].byte_offset, 0);
+        assert_eq!(matches[0].length, 5);
+    }
+
+    #[test]
+    fn search_finds_match_in_markdown_source() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        r.content = Content::Widget(WidgetContent::Markdown(MarkdownWidget {
+            source: "# Title\nSome markdown content".into(),
+        }));
+        tree.insert(r);
+
+        let matches = tree.search("markdown");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].region_id, RegionId::new(1));
+    }
+
+    #[test]
+    fn search_finds_match_in_code_source() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        r.content = Content::Widget(WidgetContent::Code(CodeWidget {
+            source: "fn main() { println!(\"hello\"); }".into(),
+            language: "rust".into(),
+            line_numbers: true,
+        }));
+        tree.insert(r);
+
+        let matches = tree.search("main");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].region_id, RegionId::new(1));
+        assert_eq!(matches[0].byte_offset, 3);
+    }
+
+    #[test]
+    fn search_is_case_insensitive_across_widget_types() {
+        let mut tree = SceneTree::new();
+
+        let mut r1 = Region::new(RegionId::new(1));
+        r1.parent = Some(RegionId::ROOT);
+        r1.content = Content::Widget(WidgetContent::Input(InputWidget {
+            value: "HELLO".into(),
+            placeholder: String::new(),
+            multiline: false,
+            password: false,
+        }));
+        tree.insert(r1);
+
+        let mut r2 = Region::new(RegionId::new(2));
+        r2.parent = Some(RegionId::ROOT);
+        r2.content = Content::Widget(WidgetContent::Markdown(MarkdownWidget {
+            source: "Hello World".into(),
+        }));
+        tree.insert(r2);
+
+        let mut r3 = Region::new(RegionId::new(3));
+        r3.parent = Some(RegionId::ROOT);
+        r3.content = Content::Widget(WidgetContent::Code(CodeWidget {
+            source: "hello()".into(),
+            language: String::new(),
+            line_numbers: false,
+        }));
+        tree.insert(r3);
+
+        let matches = tree.search("hello");
+        assert_eq!(matches.len(), 3);
+    }
+
+    #[test]
+    fn search_returns_correct_region_id_and_offset_for_widgets() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(42));
+        r.parent = Some(RegionId::ROOT);
+        r.content = Content::Widget(WidgetContent::Code(CodeWidget {
+            source: "abc def ghi".into(),
+            language: String::new(),
+            line_numbers: false,
+        }));
+        tree.insert(r);
+
+        let matches = tree.search("def");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].region_id, RegionId::new(42));
+        assert_eq!(matches[0].byte_offset, 4);
+        assert_eq!(matches[0].length, 3);
+    }
+
+    #[test]
+    fn search_finds_multiple_matches_in_same_widget() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        r.content = Content::Widget(WidgetContent::Markdown(MarkdownWidget {
+            source: "foo bar foo baz foo".into(),
+        }));
+        tree.insert(r);
+
+        let matches = tree.search("foo");
+        assert_eq!(matches.len(), 3);
+        assert_eq!(matches[0].byte_offset, 0);
+        assert_eq!(matches[1].byte_offset, 8);
+        assert_eq!(matches[2].byte_offset, 16);
+    }
+
+    #[test]
+    fn search_non_text_widgets_return_no_matches() {
+        let mut tree = SceneTree::new();
+
+        let mut r1 = Region::new(RegionId::new(1));
+        r1.parent = Some(RegionId::ROOT);
+        r1.content = Content::Widget(WidgetContent::Progress(ProgressWidget {
+            value: 0.5,
+            label: None,
+            animated: false,
+            indeterminate: false,
+        }));
+        tree.insert(r1);
+
+        let mut r2 = Region::new(RegionId::new(2));
+        r2.parent = Some(RegionId::ROOT);
+        r2.content = Content::Widget(WidgetContent::Spinner(SpinnerWidget {
+            label: None,
+            style: Default::default(),
+        }));
+        tree.insert(r2);
+
+        let mut r3 = Region::new(RegionId::new(3));
+        r3.parent = Some(RegionId::ROOT);
+        r3.content = Content::Widget(WidgetContent::Image(ImageWidget {
+            data: vec![0u8; 16],
+            width: 2,
+            height: 2,
+            scale: ImageScale::Fit,
+        }));
+        tree.insert(r3);
+
+        let matches = tree.search("test");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn search_finds_match_in_progress_label() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        r.content = Content::Widget(WidgetContent::Progress(ProgressWidget {
+            value: 0.75,
+            label: Some("Loading data...".into()),
+            animated: false,
+            indeterminate: false,
+        }));
+        tree.insert(r);
+
+        let matches = tree.search("loading");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].region_id, RegionId::new(1));
+        assert_eq!(matches[0].byte_offset, 0);
+        assert_eq!(matches[0].length, 7);
+    }
+
+    #[test]
+    fn search_finds_match_in_spinner_label() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        r.content = Content::Widget(WidgetContent::Spinner(SpinnerWidget {
+            label: Some("Processing request".into()),
+            style: Default::default(),
+        }));
+        tree.insert(r);
+
+        let matches = tree.search("processing");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].region_id, RegionId::new(1));
+        assert_eq!(matches[0].byte_offset, 0);
+    }
+
+    #[test]
+    fn search_skips_progress_spinner_with_no_label() {
+        let mut tree = SceneTree::new();
+
+        let mut r1 = Region::new(RegionId::new(1));
+        r1.parent = Some(RegionId::ROOT);
+        r1.content = Content::Widget(WidgetContent::Progress(ProgressWidget {
+            value: 0.5,
+            label: None,
+            animated: false,
+            indeterminate: false,
+        }));
+        tree.insert(r1);
+
+        let mut r2 = Region::new(RegionId::new(2));
+        r2.parent = Some(RegionId::ROOT);
+        r2.content = Content::Widget(WidgetContent::Spinner(SpinnerWidget {
+            label: None,
+            style: Default::default(),
+        }));
+        tree.insert(r2);
+
+        // With labels
+        let mut r3 = Region::new(RegionId::new(3));
+        r3.parent = Some(RegionId::ROOT);
+        r3.content = Content::Widget(WidgetContent::Progress(ProgressWidget {
+            value: 0.5,
+            label: Some("target".into()),
+            animated: false,
+            indeterminate: false,
+        }));
+        tree.insert(r3);
+
+        let matches = tree.search("target");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].region_id, RegionId::new(3));
+    }
+
+    #[test]
+    fn search_mixed_text_and_widget_regions() {
+        let mut tree = SceneTree::new();
+
+        let mut r1 = Region::new(RegionId::new(1));
+        r1.parent = Some(RegionId::ROOT);
+        r1.content = Content::Text(TextContent::new("find me here"));
+        tree.insert(r1);
+
+        let mut r2 = Region::new(RegionId::new(2));
+        r2.parent = Some(RegionId::ROOT);
+        r2.content = Content::Widget(WidgetContent::Input(InputWidget {
+            value: "find me too".into(),
+            placeholder: String::new(),
+            multiline: false,
+            password: false,
+        }));
+        tree.insert(r2);
+
+        let mut r3 = Region::new(RegionId::new(3));
+        r3.parent = Some(RegionId::ROOT);
+        r3.content = Content::Widget(WidgetContent::Code(CodeWidget {
+            source: "// find me in code".into(),
+            language: String::new(),
+            line_numbers: false,
+        }));
+        tree.insert(r3);
+
+        let mut r4 = Region::new(RegionId::new(4));
+        r4.parent = Some(RegionId::ROOT);
+        r4.content = Content::None;
+        tree.insert(r4);
+
+        let matches = tree.search("find me");
+        assert_eq!(matches.len(), 3);
+        let region_ids: Vec<u32> = matches.iter().map(|m| m.region_id.0).collect();
+        assert!(region_ids.contains(&1));
+        assert!(region_ids.contains(&2));
+        assert!(region_ids.contains(&3));
     }
 }
