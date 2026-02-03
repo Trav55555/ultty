@@ -5,4 +5,4 @@ pub mod region;
 pub mod tree;
 
 pub use region::Region;
-pub use tree::SceneTree;
+pub use tree::{SceneTree, SearchMatch};

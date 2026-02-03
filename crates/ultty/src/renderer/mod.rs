@@ -437,6 +437,10 @@ pub struct Renderer {
     opacity: f32,
     /// Cached image textures
     image_cache: std::collections::HashMap<ImageId, CachedImageTexture>,
+    /// Animated progress: region_id -> current displayed value (lerped toward target)
+    animated_progress: std::collections::HashMap<ultty_protocol::RegionId, f32>,
+    /// Whether active animations exist (spinners, animated progress)
+    has_animations: bool,
 }
 
 /// Pipeline for rendering images.
@@ -576,6 +580,8 @@ impl Renderer {
             pane_offset_y: 0.0,
             opacity: 1.0,
             image_cache: std::collections::HashMap::new(),
+            animated_progress: std::collections::HashMap::new(),
+            has_animations: false,
         })
     }
 
@@ -695,6 +701,8 @@ impl Renderer {
             pane_offset_y: 0.0,
             opacity: 1.0,
             image_cache: std::collections::HashMap::new(),
+            animated_progress: std::collections::HashMap::new(),
+            has_animations: false,
         })
     }
 
@@ -1276,6 +1284,7 @@ impl Renderer {
         terminal: &Terminal,
         overlay: &OverlayState,
         sessions: impl Iterator<Item = &'a crate::protocol::NativeSession>,
+        native_search_matches: Option<&[crate::scene::SearchMatch]>,
     ) -> Result<(), wgpu::SurfaceError> {
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
 
@@ -1395,7 +1404,7 @@ impl Renderer {
         )?;
 
         for session in sessions {
-            self.render_native_session(&mut encoder, &view, session);
+            self.render_native_session(&mut encoder, &view, session, native_search_matches);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -3774,11 +3783,22 @@ impl Renderer {
         Ok(png_data)
     }
 
+    /// Check if there are active animations that require continuous redraw.
+    pub fn has_active_animations(&self) -> bool {
+        self.has_animations
+    }
+
+    /// Reset animation flags for this frame. Call at the start of each render.
+    pub fn reset_animation_flags(&mut self) {
+        self.has_animations = false;
+    }
+
     pub fn render_native_session(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         session: &crate::protocol::NativeSession,
+        search_matches: Option<&[crate::scene::SearchMatch]>,
     ) {
         use ultty_protocol::Content;
         use wgpu::util::DeviceExt;
@@ -3788,6 +3808,11 @@ impl Renderer {
         let mut bg_indices = Vec::new();
         let mut text_vertices = Vec::new();
         let mut text_indices = Vec::new();
+
+        // Build a set of matched region IDs for quick lookup
+        let matched_regions: std::collections::HashSet<ultty_protocol::RegionId> = search_matches
+            .map(|matches| matches.iter().map(|m| m.region_id).collect())
+            .unwrap_or_default();
 
         for region in scene.iter_depth_first() {
             if region.id == ultty_protocol::RegionId::ROOT {
@@ -3896,6 +3921,7 @@ impl Renderer {
                 Content::Widget(widget) => {
                     self.render_widget_content(
                         widget,
+                        region.id,
                         x,
                         y,
                         w,
@@ -3908,6 +3934,50 @@ impl Renderer {
                     );
                 }
                 Content::None => {}
+            }
+
+            // Draw search highlight rectangles for matched regions
+            if matched_regions.contains(&region.id) {
+                if let Some(matches) = search_matches {
+                    for m in matches.iter().filter(|m| m.region_id == region.id) {
+                        // Approximate character position: byte_offset * char_width
+                        let char_w = self.cell_width;
+                        let highlight_x = x + m.byte_offset as f32 * char_w;
+                        let highlight_w = m.length as f32 * char_w;
+                        // Use search highlight color (yellow with alpha)
+                        let highlight_color = [1.0_f32, 0.8, 0.0, 0.35];
+
+                        let base_idx = bg_vertices.len() as u32;
+                        bg_vertices.push(Vertex {
+                            position: [highlight_x, y],
+                            tex_coord: [0.0, 0.0],
+                            color: highlight_color,
+                        });
+                        bg_vertices.push(Vertex {
+                            position: [highlight_x + highlight_w, y],
+                            tex_coord: [1.0, 0.0],
+                            color: highlight_color,
+                        });
+                        bg_vertices.push(Vertex {
+                            position: [highlight_x + highlight_w, y + h],
+                            tex_coord: [1.0, 1.0],
+                            color: highlight_color,
+                        });
+                        bg_vertices.push(Vertex {
+                            position: [highlight_x, y + h],
+                            tex_coord: [0.0, 1.0],
+                            color: highlight_color,
+                        });
+                        bg_indices.extend_from_slice(&[
+                            base_idx,
+                            base_idx + 1,
+                            base_idx + 2,
+                            base_idx,
+                            base_idx + 2,
+                            base_idx + 3,
+                        ]);
+                    }
+                }
             }
         }
 
@@ -3993,6 +4063,7 @@ impl Renderer {
     fn render_widget_content(
         &mut self,
         widget: &ultty_protocol::WidgetContent,
+        region_id: ultty_protocol::RegionId,
         x: f32,
         y: f32,
         w: f32,
@@ -4009,7 +4080,49 @@ impl Renderer {
             WidgetContent::Progress(progress) => {
                 let bar_height = h.min(self.cell_height);
                 let bar_y = y + (h - bar_height) / 2.0;
-                let filled_width = w * progress.value.clamp(0.0, 1.0);
+
+                // Compute the effective fill width
+                let target_value = progress.value.clamp(0.0, 1.0);
+                let display_value = if progress.indeterminate {
+                    self.has_animations = true;
+                    // Bouncing bar: time-based position
+                    let t = (std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as f32)
+                        / 1000.0;
+                    // Ping-pong between 0 and 1
+                    let phase = (t * 1.5) % 2.0;
+                    if phase < 1.0 { phase } else { 2.0 - phase }
+                } else if progress.animated {
+                    self.has_animations = true;
+                    // Lerp stored value toward target
+                    let current = self
+                        .animated_progress
+                        .get(&region_id)
+                        .copied()
+                        .unwrap_or(target_value);
+                    let lerped = current + (target_value - current) * 0.1;
+                    let lerped = if (lerped - target_value).abs() < 0.001 {
+                        target_value
+                    } else {
+                        lerped
+                    };
+                    self.animated_progress.insert(region_id, lerped);
+                    lerped
+                } else {
+                    target_value
+                };
+
+                let filled_width = if progress.indeterminate {
+                    // For indeterminate, show a small bouncing highlight
+                    let highlight_w = w * 0.25;
+                    let _offset_x = display_value * (w - highlight_w);
+                    // We'll handle this below
+                    0.0 // Don't use the normal fill path
+                } else {
+                    w * display_value
+                };
 
                 let bg_color = self.color_scheme.named[8];
                 let fg_color = region_style
@@ -4048,7 +4161,41 @@ impl Renderer {
                     base_idx + 3,
                 ]);
 
-                if filled_width > 0.0 {
+                if progress.indeterminate {
+                    // Bouncing highlight bar
+                    let highlight_w = w * 0.25;
+                    let offset_x = display_value * (w - highlight_w);
+                    let hx = x + offset_x;
+                    let base_idx = bg_vertices.len() as u32;
+                    bg_vertices.push(Vertex {
+                        position: [hx, bar_y],
+                        tex_coord: [0.0, 0.0],
+                        color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                    });
+                    bg_vertices.push(Vertex {
+                        position: [hx + highlight_w, bar_y],
+                        tex_coord: [1.0, 0.0],
+                        color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                    });
+                    bg_vertices.push(Vertex {
+                        position: [hx + highlight_w, bar_y + bar_height],
+                        tex_coord: [1.0, 1.0],
+                        color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                    });
+                    bg_vertices.push(Vertex {
+                        position: [hx, bar_y + bar_height],
+                        tex_coord: [0.0, 1.0],
+                        color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                    });
+                    bg_indices.extend_from_slice(&[
+                        base_idx,
+                        base_idx + 1,
+                        base_idx + 2,
+                        base_idx,
+                        base_idx + 2,
+                        base_idx + 3,
+                    ]);
+                } else if filled_width > 0.0 {
                     let base_idx = bg_vertices.len() as u32;
                     bg_vertices.push(Vertex {
                         position: [x, bar_y],
@@ -4095,14 +4242,24 @@ impl Renderer {
                 }
             }
             WidgetContent::Spinner(spinner) => {
-                static SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                static BRAILLE_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                static DOTS_FRAMES: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
+                static LINE_FRAMES: &[char] = &['|', '/', '-', '\\'];
+                static BOUNCE_FRAMES: &[char] = &['⠁', '⠂', '⠄', '⠂'];
+                let frames: &[char] = match spinner.style {
+                    ultty_protocol::SpinnerStyle::Braille => BRAILLE_FRAMES,
+                    ultty_protocol::SpinnerStyle::Dots => DOTS_FRAMES,
+                    ultty_protocol::SpinnerStyle::Line => LINE_FRAMES,
+                    ultty_protocol::SpinnerStyle::Bounce => BOUNCE_FRAMES,
+                };
                 let frame_idx = (std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis()
                     / 80) as usize
-                    % SPINNER_FRAMES.len();
-                let spinner_char = SPINNER_FRAMES[frame_idx];
+                    % frames.len();
+                let spinner_char = frames[frame_idx];
+                self.has_animations = true;
 
                 let fg_color = region_style
                     .fg
@@ -4206,6 +4363,27 @@ impl Renderer {
                     text_vertices,
                     text_indices,
                 );
+            }
+            WidgetContent::Image(img) => {
+                // Render image placeholder text showing dimensions
+                // Full GPU texture upload uses the existing ImagePipeline infrastructure
+                let placeholder = format!("[Image: {}x{}]", img.width, img.height);
+                let fg_color = region_style
+                    .fg
+                    .as_ref()
+                    .map(|c| self.color_scheme.resolve_protocol_color(c))
+                    .unwrap_or(self.color_scheme.named[8]);
+                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                    &placeholder,
+                    x,
+                    y,
+                    fg_color,
+                    false,
+                    true, // italic for placeholder
+                );
+                let base_idx = text_vertices.len() as u32;
+                text_vertices.extend(verts);
+                text_indices.extend(idxs.iter().map(|i| i + base_idx));
             }
         }
     }

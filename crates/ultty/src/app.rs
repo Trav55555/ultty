@@ -93,6 +93,14 @@ pub struct App {
     protocol_server: Option<ProtocolServer>,
     /// Control server for CLI automation (ulttyctl)
     control_server: Option<ControlServer>,
+    /// Search matches for native protocol regions
+    native_search_matches: Vec<ultty::scene::SearchMatch>,
+    /// Whether native search overlay is active
+    native_search_active: bool,
+    /// Current search query for native sessions
+    native_search_query: String,
+    /// Current highlighted match index
+    native_search_index: usize,
 }
 
 impl App {
@@ -213,6 +221,10 @@ impl App {
                 .unwrap_or(0),
             protocol_server,
             control_server,
+            native_search_matches: Vec::new(),
+            native_search_active: false,
+            native_search_query: String::new(),
+            native_search_index: 0,
         })
     }
 
@@ -581,6 +593,35 @@ impl App {
         )
     }
 
+    /// Forward a mouse event to native protocol sessions.
+    /// Returns true if any session consumed the event.
+    fn forward_mouse_to_native_sessions(
+        &mut self,
+        event_type: ultty_protocol::InputType,
+        cell_x: f32,
+        cell_y: f32,
+    ) -> bool {
+        if let Some(ref mut server) = self.protocol_server {
+            if server.session_count() > 0 {
+                server.broadcast_mouse(event_type, cell_x, cell_y);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Convert winit MouseButton to protocol MouseButton.
+    fn winit_to_protocol_mouse_button(
+        button: MouseButton,
+    ) -> Option<ultty_protocol::MouseButton> {
+        match button {
+            MouseButton::Left => Some(ultty_protocol::MouseButton::Left),
+            MouseButton::Middle => Some(ultty_protocol::MouseButton::Middle),
+            MouseButton::Right => Some(ultty_protocol::MouseButton::Right),
+            _ => None,
+        }
+    }
+
     /// Handle mouse button press/release.
     fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
         if button != MouseButton::Left
@@ -693,6 +734,18 @@ impl App {
                     self.mouse_pos.y - self.tab_bar.height() as f64,
                 );
 
+                // Forward to native protocol sessions
+                if let Some(proto_button) = Self::winit_to_protocol_mouse_button(button) {
+                    let event_type = ultty_protocol::InputType::MouseDown {
+                        button: proto_button,
+                    };
+                    self.forward_mouse_to_native_sessions(
+                        event_type,
+                        col as f32,
+                        row as f32,
+                    );
+                }
+
                 // Check for Ctrl+Click on URL
                 if self.modifiers.control_key() && self.url_detector.is_enabled() {
                     if let Some(url) = self.url_detector.url_at(col, row) {
@@ -750,6 +803,20 @@ impl App {
                 self.mouse_pressed = false;
                 self.scrollbar_dragging = false;
 
+                // Forward MouseUp to native protocol sessions
+                if let Some(proto_button) = Self::winit_to_protocol_mouse_button(button) {
+                    let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
+                    let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y.max(0.0));
+                    let event_type = ultty_protocol::InputType::MouseUp {
+                        button: proto_button,
+                    };
+                    self.forward_mouse_to_native_sessions(
+                        event_type,
+                        col as f32,
+                        row as f32,
+                    );
+                }
+
                 // End tab drag if active
                 if self.tab_bar.is_dragging() {
                     self.tab_bar.end_drag();
@@ -794,6 +861,16 @@ impl App {
         let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
         if adjusted_y < 0.0 {
             return; // Dragging in tab bar area
+        }
+
+        // Forward mouse move to native protocol sessions
+        {
+            let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
+            self.forward_mouse_to_native_sessions(
+                ultty_protocol::InputType::MouseMove,
+                col as f32,
+                row as f32,
+            );
         }
 
         // Check if motion tracking is enabled
@@ -1001,6 +1078,24 @@ impl App {
             return;
         }
 
+        // Forward scroll to native protocol sessions
+        {
+            let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
+            let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y.max(0.0));
+            let delta_y = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y,
+                MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+            };
+            self.forward_mouse_to_native_sessions(
+                ultty_protocol::InputType::MouseScroll {
+                    delta_x: 0.0,
+                    delta_y,
+                },
+                col as f32,
+                row as f32,
+            );
+        }
+
         // Check if in alternate screen with alternate scroll mode
         // In this case, send arrow keys instead of scrolling
         let in_alternate = self.terminal().is_alternate_screen();
@@ -1099,6 +1194,13 @@ impl App {
 
         // Check for find/search (Ctrl+Shift+F)
         if self.check_keybinding(&event, &self.config.keybindings.find.clone()) {
+            // If native sessions are active, also search their scene trees
+            if self.has_native_sessions() {
+                self.native_search_active = true;
+                self.native_search_query.clear();
+                self.native_search_matches.clear();
+                self.native_search_index = 0;
+            }
             self.enter_search_mode();
             self.needs_redraw = true;
             return;
@@ -1485,10 +1587,22 @@ impl App {
 
         match self.copy_mode.handle_key(&protocol_key, protocol_mods) {
             CopyModeResult::Handled => {
+                // If native search is active, mirror n/N navigation
+                if self.native_search_active && !self.native_search_matches.is_empty() {
+                    // Check if the key was n or N by looking at the key
+                    match &protocol_key {
+                        ProtocolKey::Char('n') => self.native_search_next(),
+                        ProtocolKey::Char('N') => self.native_search_prev(),
+                        _ => {}
+                    }
+                }
                 self.needs_redraw = true;
             }
             CopyModeResult::Exit => {
                 tracing::debug!("Exited copy mode");
+                if self.native_search_active {
+                    self.dismiss_native_search();
+                }
                 self.needs_redraw = true;
             }
             CopyModeResult::Copy(selection) => {
@@ -1504,6 +1618,9 @@ impl App {
                     self.copy_to_clipboard(&text);
                 }
                 tracing::debug!("Copied and exited copy mode");
+                if self.native_search_active {
+                    self.dismiss_native_search();
+                }
                 self.needs_redraw = true;
             }
             CopyModeResult::Search(query) => {
@@ -1671,6 +1788,71 @@ impl App {
             // Move cursor to first match
             // The copy_mode's goto_next_match will handle positioning
         }
+
+        // Also search native sessions if active
+        if self.native_search_active {
+            self.perform_native_search(query);
+        }
+    }
+
+    /// Check if any native protocol sessions are active.
+    fn has_native_sessions(&self) -> bool {
+        self.protocol_server
+            .as_ref()
+            .map(|s| s.session_count() > 0)
+            .unwrap_or(false)
+    }
+
+    /// Perform search across all native protocol sessions.
+    fn perform_native_search(&mut self, query: &str) {
+        self.native_search_query = query.to_string();
+        self.native_search_matches.clear();
+        self.native_search_index = 0;
+
+        if let Some(ref server) = self.protocol_server {
+            for session in server.sessions() {
+                let matches = session.scene().search(query);
+                self.native_search_matches.extend(matches);
+            }
+        }
+
+        tracing::debug!(
+            "Native search '{}': found {} matches",
+            query,
+            self.native_search_matches.len()
+        );
+    }
+
+    /// Navigate to the next native search match.
+    fn native_search_next(&mut self) {
+        if self.native_search_matches.is_empty() {
+            return;
+        }
+        self.native_search_index =
+            (self.native_search_index + 1) % self.native_search_matches.len();
+        self.needs_redraw = true;
+    }
+
+    /// Navigate to the previous native search match.
+    fn native_search_prev(&mut self) {
+        if self.native_search_matches.is_empty() {
+            return;
+        }
+        if self.native_search_index == 0 {
+            self.native_search_index = self.native_search_matches.len() - 1;
+        } else {
+            self.native_search_index -= 1;
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Dismiss native search.
+    fn dismiss_native_search(&mut self) {
+        self.native_search_active = false;
+        self.native_search_matches.clear();
+        self.native_search_query.clear();
+        self.native_search_index = 0;
+        self.needs_redraw = true;
     }
 
     /// Update tab bar hover state.
@@ -2335,11 +2517,17 @@ impl App {
 
         if let Some(ref server) = self.protocol_server {
             if server.session_count() > 0 {
+                let search_matches = if self.native_search_active && !self.native_search_matches.is_empty() {
+                    Some(self.native_search_matches.as_slice())
+                } else {
+                    None
+                };
                 return self.renderer.render_with_native_sessions(
                     &self.surface,
                     terminal,
                     &overlay,
                     server.sessions(),
+                    search_matches,
                 );
             }
         }
