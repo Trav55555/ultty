@@ -16,7 +16,7 @@ use wgpu::util::DeviceExt;
 /// wgpu requires that `bytes_per_row` is a multiple of
 /// `COPY_BYTES_PER_ROW_ALIGNMENT` (256).  This function performs the
 /// ceiling-division rounding.
-fn padded_bytes_per_row(width: u32, bytes_per_pixel: u32, alignment: u32) -> u32 {
+pub(crate) fn padded_bytes_per_row(width: u32, bytes_per_pixel: u32, alignment: u32) -> u32 {
     let unpadded = width * bytes_per_pixel;
     unpadded.div_ceil(alignment) * alignment
 }
@@ -25,7 +25,7 @@ fn padded_bytes_per_row(width: u32, bytes_per_pixel: u32, alignment: u32) -> u32
 ///
 /// `data` is the raw GPU read-back buffer (with padding).  The function
 /// returns a tightly-packed RGBA pixel buffer suitable for PNG encoding.
-fn unpad_and_convert_pixels(
+pub(crate) fn unpad_and_convert_pixels(
     data: &[u8],
     width: u32,
     height: u32,
@@ -54,7 +54,7 @@ fn unpad_and_convert_pixels(
 }
 
 /// Encode a tightly-packed RGBA pixel buffer as a PNG into an in-memory `Vec<u8>`.
-fn encode_rgba_png(pixels: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn encode_rgba_png(pixels: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
     let mut png_data = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut png_data, width, height);
@@ -171,10 +171,8 @@ impl Renderer {
 
         // Calculate buffer size with proper alignment
         let bytes_per_pixel = 4u32; // RGBA or BGRA
-        let unpadded_bytes_per_row = width * bytes_per_pixel;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
-        let buffer_size = (padded_bytes_per_row * height) as u64;
+        let padded_row = padded_bytes_per_row(width, bytes_per_pixel, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer_size = (padded_row * height) as u64;
 
         // Create output buffer
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -196,7 +194,7 @@ impl Renderer {
                 buffer: &output_buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
+                    bytes_per_row: Some(padded_row),
                     rows_per_image: Some(height),
                 },
             },
@@ -219,43 +217,17 @@ impl Renderer {
         self.device.poll(wgpu::Maintain::Wait);
         rx.recv()??;
 
-        // Get the data
         let data = buffer_slice.get_mapped_range();
-
-        // Convert from padded to unpadded and handle BGRA -> RGBA if needed
-        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-        for y in 0..height {
-            let row_start = (y * padded_bytes_per_row) as usize;
-            let row_end = row_start + (width * bytes_per_pixel) as usize;
-            let row = &data[row_start..row_end];
-
-            // wgpu typically uses BGRA, convert to RGBA for PNG
-            for chunk in row.chunks(4) {
-                if self.config.format == wgpu::TextureFormat::Bgra8UnormSrgb
-                    || self.config.format == wgpu::TextureFormat::Bgra8Unorm
-                {
-                    // BGRA -> RGBA
-                    pixels.push(chunk[2]); // R
-                    pixels.push(chunk[1]); // G
-                    pixels.push(chunk[0]); // B
-                    pixels.push(chunk[3]); // A
-                } else {
-                    // Already RGBA
-                    pixels.extend_from_slice(chunk);
-                }
-            }
-        }
-
+        let is_bgra = matches!(
+            self.config.format,
+            wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
+        );
+        let pixels = unpad_and_convert_pixels(&data, width, height, padded_row, bytes_per_pixel, is_bgra);
         drop(data);
         output_buffer.unmap();
 
-        let file = std::fs::File::create(path)?;
-        let writer = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(writer, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header()?;
-        writer.write_image_data(&pixels)?;
+        let png_data = encode_rgba_png(&pixels, width, height)?;
+        std::fs::write(path, &png_data)?;
 
         tracing::info!("Screenshot saved to {}", path.display());
         Ok(())
@@ -339,10 +311,8 @@ impl Renderer {
         );
 
         let bytes_per_pixel = 4u32;
-        let unpadded_bytes_per_row = width * bytes_per_pixel;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
-        let buffer_size = (padded_bytes_per_row * height) as u64;
+        let padded_row = padded_bytes_per_row(width, bytes_per_pixel, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer_size = (padded_row * height) as u64;
 
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("screenshot_buffer"),
@@ -362,7 +332,7 @@ impl Renderer {
                 buffer: &output_buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
+                    bytes_per_row: Some(padded_row),
                     rows_per_image: Some(height),
                 },
             },
@@ -380,40 +350,15 @@ impl Renderer {
         rx.recv()??;
 
         let data = buffer_slice.get_mapped_range();
-
-        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-        for y in 0..height {
-            let row_start = (y * padded_bytes_per_row) as usize;
-            let row_end = row_start + (width * bytes_per_pixel) as usize;
-            let row = &data[row_start..row_end];
-
-            for chunk in row.chunks(4) {
-                if self.config.format == wgpu::TextureFormat::Bgra8UnormSrgb
-                    || self.config.format == wgpu::TextureFormat::Bgra8Unorm
-                {
-                    pixels.push(chunk[2]);
-                    pixels.push(chunk[1]);
-                    pixels.push(chunk[0]);
-                    pixels.push(chunk[3]);
-                } else {
-                    pixels.extend_from_slice(chunk);
-                }
-            }
-        }
-
+        let is_bgra = matches!(
+            self.config.format,
+            wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
+        );
+        let pixels = unpad_and_convert_pixels(&data, width, height, padded_row, bytes_per_pixel, is_bgra);
         drop(data);
         output_buffer.unmap();
 
-        let mut png_data = Vec::new();
-        {
-            let mut encoder = png::Encoder::new(&mut png_data, width, height);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            let mut writer = encoder.write_header()?;
-            writer.write_image_data(&pixels)?;
-        }
-
-        Ok(png_data)
+        encode_rgba_png(&pixels, width, height)
     }
 }
 

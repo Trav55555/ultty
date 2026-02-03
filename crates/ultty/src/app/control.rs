@@ -599,6 +599,7 @@ fn key_to_bytes(
 
 /// Format a command and its arguments into a newline-terminated string
 /// suitable for sending to a PTY (as used by RunCommand).
+#[cfg(test)]
 fn build_command_line(command: &str, args: &[String]) -> String {
     if args.is_empty() {
         format!("{}\n", command)
