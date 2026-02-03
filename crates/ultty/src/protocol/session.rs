@@ -46,6 +46,10 @@ pub struct NativeSession {
     capabilities: u32,
     /// Event subscriptions: region_id -> event mask.
     subscriptions: HashMap<RegionId, u32>,
+    /// Currently focused region (if any).
+    focused_region: Option<RegionId>,
+    /// Per-region scroll offsets: region_id -> (scroll_x, scroll_y).
+    scroll_offsets: HashMap<RegionId, (f32, f32)>,
 }
 
 impl NativeSession {
@@ -67,6 +71,8 @@ impl NativeSession {
             scene_dirty: false,
             capabilities: 0,
             subscriptions: HashMap::new(),
+            focused_region: None,
+            scroll_offsets: HashMap::new(),
         })
     }
 
@@ -250,18 +256,53 @@ impl NativeSession {
                 y,
                 animate: _,
             } => {
-                // TODO: Handle programmatic scroll
-                debug!("Scroll request for {:?}: ({}, {})", id, x, y);
+                self.scroll_offsets.insert(id, (x, y));
+                self.scene_dirty = true;
+                debug!("Scroll set for {:?}: ({}, {})", id, x, y);
             }
 
             AppMessage::Focus { id } => {
-                // TODO: Handle focus
-                debug!("Focus request for {:?}", id);
+                let old = self.focused_region.take();
+                self.focused_region = Some(id);
+                debug!("Focus set to {:?} (was {:?})", id, old);
+
+                // Send focus lost event to old region if subscribed
+                if let Some(old_id) = old {
+                    if old_id != id && self.is_subscribed(old_id, ultty_protocol::EVENT_FOCUS) {
+                        let _ = self.send_message(&TerminalMessage::Focus(
+                            ultty_protocol::FocusEvent {
+                                region_id: old_id,
+                                focused: false,
+                            },
+                        ));
+                    }
+                }
+
+                // Send focus gained event to new region if subscribed
+                if self.is_subscribed(id, ultty_protocol::EVENT_FOCUS) {
+                    let _ = self.send_message(&TerminalMessage::Focus(
+                        ultty_protocol::FocusEvent {
+                            region_id: id,
+                            focused: true,
+                        },
+                    ));
+                }
             }
 
             AppMessage::Blur => {
-                // TODO: Handle blur
-                debug!("Blur request");
+                if let Some(old_id) = self.focused_region.take() {
+                    debug!("Blur from {:?}", old_id);
+                    if self.is_subscribed(old_id, ultty_protocol::EVENT_FOCUS) {
+                        let _ = self.send_message(&TerminalMessage::Focus(
+                            ultty_protocol::FocusEvent {
+                                region_id: old_id,
+                                focused: false,
+                            },
+                        ));
+                    }
+                } else {
+                    debug!("Blur (no focus)");
+                }
             }
 
             AppMessage::Disconnect => {
@@ -318,8 +359,7 @@ impl NativeSession {
 
         // Insert into tree (handles parent's children list)
         if insert_index >= 0 {
-            // TODO: Support insert_index properly
-            self.scene.insert(region);
+            self.scene.insert_at(region, insert_index as usize);
         } else {
             self.scene.insert(region);
         }
@@ -526,6 +566,16 @@ impl NativeSession {
 
     pub fn scene(&self) -> &SceneTree {
         &self.scene
+    }
+
+    /// Get the currently focused region.
+    pub fn focused_region(&self) -> Option<RegionId> {
+        self.focused_region
+    }
+
+    /// Get scroll offset for a region.
+    pub fn scroll_offset(&self, id: RegionId) -> (f32, f32) {
+        self.scroll_offsets.get(&id).copied().unwrap_or((0.0, 0.0))
     }
 
     pub fn has_pending_writes(&self) -> bool {

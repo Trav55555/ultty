@@ -51,12 +51,28 @@ impl SceneTree {
         self.regions.get_mut(&id)
     }
 
-    /// Insert a new region.
+    /// Insert a new region (appends to parent's children).
     pub fn insert(&mut self, region: Region) {
         let id = region.id;
         if let Some(parent_id) = region.parent {
             if let Some(parent) = self.regions.get_mut(&parent_id) {
                 parent.children.push(id);
+            }
+        }
+        self.regions.insert(id, region);
+    }
+
+    /// Insert a new region at a specific index in the parent's children list.
+    /// If index is out of bounds, appends to the end.
+    pub fn insert_at(&mut self, region: Region, index: usize) {
+        let id = region.id;
+        if let Some(parent_id) = region.parent {
+            if let Some(parent) = self.regions.get_mut(&parent_id) {
+                if index <= parent.children.len() {
+                    parent.children.insert(index, id);
+                } else {
+                    parent.children.push(id);
+                }
             }
         }
         self.regions.insert(id, region);
