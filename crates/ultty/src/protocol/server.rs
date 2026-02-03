@@ -185,21 +185,44 @@ impl ProtocolServer {
         self.sessions.values_mut()
     }
 
-    /// Send a key event to all connected native sessions.
+    /// Send a key event to all connected native sessions that have subscribed to key events.
     pub fn broadcast_key(
         &mut self,
         key: ultty_protocol::Key,
         modifiers: ultty_protocol::Modifiers,
     ) {
         for session in self.sessions.values_mut() {
-            if let Err(e) = session.send_key(key.clone(), modifiers) {
-                tracing::warn!(
-                    "Failed to send key to session {}: {}",
-                    session.session_id(),
-                    e
-                );
+            if session.is_subscribed(ultty_protocol::RegionId::ROOT, ultty_protocol::EVENT_KEY) {
+                if let Err(e) = session.send_key(key.clone(), modifiers) {
+                    tracing::warn!(
+                        "Failed to send key to session {}: {}",
+                        session.session_id(),
+                        e
+                    );
+                }
             }
         }
+        self.flush();
+    }
+
+    /// Send a key-up event to all connected native sessions that have subscribed to key events.
+    pub fn broadcast_key_up(
+        &mut self,
+        key: ultty_protocol::Key,
+        modifiers: ultty_protocol::Modifiers,
+    ) {
+        for session in self.sessions.values_mut() {
+            if session.is_subscribed(ultty_protocol::RegionId::ROOT, ultty_protocol::EVENT_KEY) {
+                if let Err(e) = session.send_key_up(key.clone(), modifiers) {
+                    tracing::warn!(
+                        "Failed to send key_up to session {}: {}",
+                        session.session_id(),
+                        e
+                    );
+                }
+            }
+        }
+        self.flush();
     }
 
     /// Forward a mouse event to all native sessions.
@@ -235,6 +258,7 @@ impl ProtocolServer {
                 }
             }
         }
+        self.flush();
     }
 
     /// Advance scroll animations across all sessions.
@@ -249,6 +273,21 @@ impl ProtocolServer {
         any_active
     }
 
+    /// Flush pending writes for all sessions.
+    pub fn flush(&mut self) {
+        for session in self.sessions.values_mut() {
+            if session.has_pending_writes() {
+                if let Err(e) = session.flush() {
+                    tracing::warn!(
+                        "Failed to flush session {}: {}",
+                        session.session_id(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
     /// Send a resize event to all connected native sessions.
     pub fn broadcast_resize(&mut self, width: u16, height: u16) {
         for session in self.sessions.values_mut() {
@@ -261,6 +300,7 @@ impl ProtocolServer {
                 );
             }
         }
+        self.flush();
     }
 }
 

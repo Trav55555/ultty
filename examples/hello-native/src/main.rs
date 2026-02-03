@@ -4,9 +4,10 @@ use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use ultty_protocol::{
-    AppMessage, Color, Constraints, Content, Decode, Dimension, Display, Encode, FlexDirection,
-    FrameId, NamedColor, RegionId, Style, TerminalMessage, TextAlign, TextContent, TextOverflow,
-    TextWrap, FRAME_MAGIC, PROTOCOL_VERSION,
+    AppMessage, CodeWidget, Color, Constraints, Content, Decode, Dimension, Display, Encode,
+    FlexDirection, FrameId, MarkdownWidget, NamedColor, ProgressWidget, RegionId, SpinnerWidget,
+    Style, TerminalMessage, TextAlign, TextContent, TextOverflow, TextWrap, WidgetContent,
+    FRAME_MAGIC, PROTOCOL_VERSION,
 };
 
 struct NativeClient {
@@ -251,7 +252,7 @@ fn main() -> anyhow::Result<()> {
         container,
         Constraints {
             display: Display::Flex,
-            flex_direction: FlexDirection::Row,
+            flex_direction: FlexDirection::Column,
             width: Dimension::Percent(100.0),
             flex_grow: 1.0,
             ..Default::default()
@@ -259,52 +260,93 @@ fn main() -> anyhow::Result<()> {
         Style::default(),
     )?;
 
-    let left = client.create_region(
+    // --- Progress bar ---
+    let progress_region = client.create_region(
         body,
         Constraints {
-            width: Dimension::Percent(50.0),
-            height: Dimension::Percent(100.0),
+            width: Dimension::Percent(100.0),
+            height: Dimension::Cells(2.0),
+            flex_shrink: 0.0,
             ..Default::default()
         },
         Style {
             bg: Some(Color::Named(NamedColor::Red)),
-            opacity: 0.5,
+            opacity: 0.3,
             ..Default::default()
         },
     )?;
 
     client.set_content(
-        left,
-        Content::Text(TextContent {
-            text: "Left Panel".to_string(),
-            wrap: TextWrap::Word,
-            align: TextAlign::Center,
-            overflow: TextOverflow::Clip,
-        }),
+        progress_region,
+        Content::Widget(WidgetContent::Progress(ProgressWidget {
+            value: 0.65,
+            label: Some("Downloading... 65%".to_string()),
+            animated: true,
+            indeterminate: false,
+        })),
     )?;
 
-    let right = client.create_region(
+    // --- Spinner ---
+    let spinner_region = client.create_region(
         body,
         Constraints {
-            width: Dimension::Percent(50.0),
-            height: Dimension::Percent(100.0),
+            width: Dimension::Percent(100.0),
+            height: Dimension::Cells(2.0),
+            flex_shrink: 0.0,
             ..Default::default()
         },
         Style {
             bg: Some(Color::Named(NamedColor::Cyan)),
-            opacity: 0.5,
+            opacity: 0.3,
             ..Default::default()
         },
     )?;
 
     client.set_content(
-        right,
-        Content::Text(TextContent {
-            text: "Right Panel".to_string(),
-            wrap: TextWrap::Word,
-            align: TextAlign::Center,
-            overflow: TextOverflow::Clip,
-        }),
+        spinner_region,
+        Content::Widget(WidgetContent::Spinner(SpinnerWidget {
+            label: Some("Loading resources...".to_string()),
+            ..Default::default()
+        })),
+    )?;
+
+    // --- Markdown ---
+    let markdown_region = client.create_region(
+        body,
+        Constraints {
+            width: Dimension::Percent(100.0),
+            height: Dimension::Cells(6.0),
+            flex_shrink: 0.0,
+            ..Default::default()
+        },
+        Style::default(),
+    )?;
+
+    client.set_content(
+        markdown_region,
+        Content::Widget(WidgetContent::Markdown(MarkdownWidget {
+            source: "# Hello Markdown\n\nThis is **bold** and *italic* text rendered via the native protocol.\n\n- Item one\n- Item two".to_string(),
+        })),
+    )?;
+
+    // --- Code block ---
+    let code_region = client.create_region(
+        body,
+        Constraints {
+            width: Dimension::Percent(100.0),
+            flex_grow: 1.0,
+            ..Default::default()
+        },
+        Style::default(),
+    )?;
+
+    client.set_content(
+        code_region,
+        Content::Widget(WidgetContent::Code(CodeWidget {
+            source: "fn main() {\n    println!(\"Hello from native protocol!\");\n}".to_string(),
+            language: "rust".to_string(),
+            line_numbers: true,
+        })),
     )?;
 
     let footer = client.create_region(

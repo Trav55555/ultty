@@ -386,6 +386,10 @@ impl NativeSession {
             self.scene_dirty = true;
         } else {
             warn!("SetConstraints for unknown region {:?}", id);
+            let _ = self.send_message(&TerminalMessage::Error {
+                code: 404,
+                message: format!("region {} not found", id.0),
+            });
         }
     }
 
@@ -397,6 +401,10 @@ impl NativeSession {
             self.scene_dirty = true;
         } else {
             warn!("SetStyle for unknown region {:?}", id);
+            let _ = self.send_message(&TerminalMessage::Error {
+                code: 404,
+                message: format!("region {} not found", id.0),
+            });
         }
     }
 
@@ -408,6 +416,10 @@ impl NativeSession {
             self.scene_dirty = true;
         } else {
             warn!("SetContent for unknown region {:?}", id);
+            let _ = self.send_message(&TerminalMessage::Error {
+                code: 404,
+                message: format!("region {} not found", id.0),
+            });
         }
     }
 
@@ -419,6 +431,10 @@ impl NativeSession {
             debug!("Deleted region {:?}", id);
         } else {
             warn!("DeleteRegion for unknown region {:?}", id);
+            let _ = self.send_message(&TerminalMessage::Error {
+                code: 404,
+                message: format!("region {} not found", id.0),
+            });
         }
     }
 
@@ -449,6 +465,10 @@ impl NativeSession {
             debug!("Reparented region {:?} to {:?}", id, new_parent);
         } else {
             warn!("ReparentRegion for unknown region {:?}", id);
+            let _ = self.send_message(&TerminalMessage::Error {
+                code: 404,
+                message: format!("region {} not found", id.0),
+            });
         }
     }
 
@@ -556,6 +576,11 @@ impl NativeSession {
     }
 
     /// Flush pending writes to socket.
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.flush_writes()
+    }
+
+    /// Flush pending writes to socket (internal).
     fn flush_writes(&mut self) -> io::Result<()> {
         while !self.write_buf.is_empty() {
             match self.stream.write(&self.write_buf) {
@@ -681,6 +706,19 @@ impl NativeSession {
         self.send_input(ultty_protocol::InputEvent {
             region_id: RegionId::ROOT,
             event_type: ultty_protocol::InputType::KeyDown { key, modifiers },
+            x: 0.0,
+            y: 0.0,
+        })
+    }
+
+    pub fn send_key_up(
+        &mut self,
+        key: ultty_protocol::Key,
+        modifiers: ultty_protocol::Modifiers,
+    ) -> io::Result<()> {
+        self.send_input(ultty_protocol::InputEvent {
+            region_id: RegionId::ROOT,
+            event_type: ultty_protocol::InputType::KeyUp { key, modifiers },
             x: 0.0,
             y: 0.0,
         })

@@ -663,7 +663,8 @@ impl App {
 
     /// Handle keyboard input.
     fn handle_key(&mut self, event: KeyEvent) {
-        if event.state != ElementState::Pressed {
+        if event.state == ElementState::Released {
+            self.forward_key_up_to_native_sessions(&event);
             return;
         }
 
@@ -931,15 +932,8 @@ impl App {
         self.forward_key_to_native_sessions(&event);
     }
 
-    fn forward_key_to_native_sessions(&mut self, event: &KeyEvent) {
-        let Some(ref mut server) = self.protocol_server else {
-            return;
-        };
-
-        if server.session_count() == 0 {
-            return;
-        }
-
+    /// Convert a winit key event into protocol key + modifiers.
+    fn convert_key_event(&self, event: &KeyEvent) -> Option<(ProtocolKey, ProtocolModifiers)> {
         let protocol_key = match &event.logical_key {
             Key::Named(named) => match named {
                 NamedKey::Escape => Some(ProtocolKey::Escape),
@@ -973,11 +967,7 @@ impl App {
             },
             Key::Character(c) => c.chars().next().map(ProtocolKey::Char),
             _ => None,
-        };
-
-        let Some(key) = protocol_key else {
-            return;
-        };
+        }?;
 
         let mut modifiers = ProtocolModifiers::NONE;
         if self.modifiers.shift_key() {
@@ -993,7 +983,31 @@ impl App {
             modifiers = modifiers.union(ProtocolModifiers::META);
         }
 
-        server.broadcast_key(key, modifiers);
+        Some((protocol_key, modifiers))
+    }
+
+    fn forward_key_to_native_sessions(&mut self, event: &KeyEvent) {
+        let Some((key, modifiers)) = self.convert_key_event(event) else {
+            return;
+        };
+        let Some(ref mut server) = self.protocol_server else {
+            return;
+        };
+        if server.session_count() > 0 {
+            server.broadcast_key(key, modifiers);
+        }
+    }
+
+    fn forward_key_up_to_native_sessions(&mut self, event: &KeyEvent) {
+        let Some((key, modifiers)) = self.convert_key_event(event) else {
+            return;
+        };
+        let Some(ref mut server) = self.protocol_server else {
+            return;
+        };
+        if server.session_count() > 0 {
+            server.broadcast_key_up(key, modifiers);
+        }
     }
 
     /// Check if a key event matches a configured keybinding.
