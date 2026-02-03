@@ -47,11 +47,11 @@ jobs:
 
       - name: Build (native)
         if: '!matrix.cross'
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release -p ultty --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release -p ultty --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
@@ -97,12 +97,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
+      - name: Download x86_64 Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ultty-x86_64-unknown-linux-gnu
+          path: artifacts
+      - run: |
+          mkdir -p target/x86_64-unknown-linux-gnu/release
+          tar xzf artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
+            -C target/x86_64-unknown-linux-gnu/release
       - run: cargo install cargo-deb
-      - run: cargo deb -p ultty --no-build
-        continue-on-error: true
+      - run: cargo deb -p ultty --no-build --target x86_64-unknown-linux-gnu
       - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:
           name: ultty-deb
-          path: target/debian/*.deb
-        if: success()
+          path: target/x86_64-unknown-linux-gnu/debian/*.deb
+      - name: Upload .deb to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/x86_64-unknown-linux-gnu/debian/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

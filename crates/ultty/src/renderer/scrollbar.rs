@@ -60,6 +60,88 @@ impl ScrollbarState {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_visible_when_content_fits() {
+        let sb = ScrollbarState::new(24, 24, 0);
+        assert!(!sb.is_visible());
+    }
+
+    #[test]
+    fn not_visible_when_fewer_lines() {
+        let sb = ScrollbarState::new(10, 24, 0);
+        assert!(!sb.is_visible());
+    }
+
+    #[test]
+    fn visible_when_content_exceeds_viewport() {
+        let sb = ScrollbarState::new(100, 24, 0);
+        assert!(sb.is_visible());
+    }
+
+    #[test]
+    fn thumb_full_when_content_fits() {
+        let sb = ScrollbarState::new(20, 24, 0);
+        let (pos, size) = sb.thumb_geometry();
+        assert_eq!(pos, 0.0);
+        assert_eq!(size, 1.0);
+    }
+
+    #[test]
+    fn thumb_at_bottom_when_offset_zero() {
+        let sb = ScrollbarState::new(100, 24, 0);
+        let (pos, size) = sb.thumb_geometry();
+        // Thumb should be at bottom: pos + size ~= 1.0
+        assert!((pos + size - 1.0).abs() < 0.001, "pos={pos}, size={size}");
+    }
+
+    #[test]
+    fn thumb_at_top_when_offset_max() {
+        let sb = ScrollbarState::new(100, 24, 76); // max offset = 100-24 = 76
+        let (pos, size) = sb.thumb_geometry();
+        // Thumb should be at top: pos ~= 0.0
+        assert!(pos.abs() < 0.001, "pos={pos}, size={size}");
+    }
+
+    #[test]
+    fn thumb_size_proportional_to_viewport() {
+        let sb = ScrollbarState::new(100, 50, 0);
+        let (_, size) = sb.thumb_geometry();
+        // viewport/total = 0.5
+        assert!((size - 0.5).abs() < 0.001, "size={size}");
+    }
+
+    #[test]
+    fn thumb_size_minimum_clamp() {
+        // Very large scrollback, tiny viewport
+        let sb = ScrollbarState::new(100_000, 24, 0);
+        let (_, size) = sb.thumb_geometry();
+        // Should be clamped to min 0.05
+        assert!((size - 0.05).abs() < 0.001, "size={size}");
+    }
+
+    #[test]
+    fn thumb_midpoint_at_half_scroll() {
+        let sb = ScrollbarState::new(100, 24, 38); // half of 76
+        let (pos, size) = sb.thumb_geometry();
+        // Thumb center should be near the middle
+        let center = pos + size / 2.0;
+        assert!((center - 0.5).abs() < 0.05, "center={center}, pos={pos}, size={size}");
+    }
+
+    #[test]
+    fn default_scrollbar_state() {
+        let sb = ScrollbarState::default();
+        assert_eq!(sb.total_lines, 0);
+        assert_eq!(sb.viewport_lines, 0);
+        assert_eq!(sb.scroll_offset, 0);
+        assert!(!sb.is_visible());
+    }
+}
+
 impl Renderer {
     /// Emit scrollbar vertices.
     pub(super) fn emit_scrollbar(

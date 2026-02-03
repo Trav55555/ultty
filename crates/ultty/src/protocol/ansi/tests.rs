@@ -505,3 +505,554 @@ fn secondary_device_attributes() {
     assert_eq!(parse(b"\x1b[>c"), vec![Action::SecondaryDeviceAttributes]);
     assert_eq!(parse(b"\x1b[>0c"), vec![Action::SecondaryDeviceAttributes]);
 }
+
+// ---------------------------------------------------------------
+// CSI: cursor movement (remaining variants)
+// ---------------------------------------------------------------
+
+#[test]
+fn cursor_forward() {
+    assert_eq!(parse(b"\x1b[4C"), vec![Action::CursorForward(4)]);
+    assert_eq!(parse(b"\x1b[C"), vec![Action::CursorForward(1)]);
+}
+
+#[test]
+fn cursor_back() {
+    assert_eq!(parse(b"\x1b[2D"), vec![Action::CursorBack(2)]);
+    assert_eq!(parse(b"\x1b[D"), vec![Action::CursorBack(1)]);
+}
+
+#[test]
+fn cursor_next_line() {
+    assert_eq!(parse(b"\x1b[3E"), vec![Action::CursorNextLine(3)]);
+    assert_eq!(parse(b"\x1b[E"), vec![Action::CursorNextLine(1)]);
+}
+
+#[test]
+fn cursor_previous_line() {
+    assert_eq!(parse(b"\x1b[2F"), vec![Action::CursorPreviousLine(2)]);
+    assert_eq!(parse(b"\x1b[F"), vec![Action::CursorPreviousLine(1)]);
+}
+
+#[test]
+fn cursor_horizontal_absolute() {
+    assert_eq!(
+        parse(b"\x1b[15G"),
+        vec![Action::CursorHorizontalAbsolute(15)]
+    );
+    assert_eq!(
+        parse(b"\x1b[G"),
+        vec![Action::CursorHorizontalAbsolute(1)]
+    );
+}
+
+#[test]
+fn cursor_position_f_variant() {
+    // CSI f is the same as CSI H
+    assert_eq!(
+        parse(b"\x1b[5;10f"),
+        vec![Action::CursorPosition { row: 5, col: 10 }]
+    );
+}
+
+// ---------------------------------------------------------------
+// CSI: erase operations
+// ---------------------------------------------------------------
+
+#[test]
+fn erase_in_line() {
+    assert_eq!(parse(b"\x1b[K"), vec![Action::EraseInLine(0)]);
+    assert_eq!(parse(b"\x1b[0K"), vec![Action::EraseInLine(0)]);
+    assert_eq!(parse(b"\x1b[1K"), vec![Action::EraseInLine(1)]);
+    assert_eq!(parse(b"\x1b[2K"), vec![Action::EraseInLine(2)]);
+}
+
+#[test]
+fn erase_characters() {
+    assert_eq!(parse(b"\x1b[5X"), vec![Action::EraseCharacters(5)]);
+    assert_eq!(parse(b"\x1b[X"), vec![Action::EraseCharacters(1)]);
+}
+
+#[test]
+fn erase_display_all_modes() {
+    assert_eq!(parse(b"\x1b[0J"), vec![Action::EraseInDisplay(0)]);
+    assert_eq!(parse(b"\x1b[1J"), vec![Action::EraseInDisplay(1)]);
+    assert_eq!(parse(b"\x1b[3J"), vec![Action::EraseInDisplay(3)]);
+}
+
+// ---------------------------------------------------------------
+// CSI: line/character insert/delete
+// ---------------------------------------------------------------
+
+#[test]
+fn insert_lines() {
+    assert_eq!(parse(b"\x1b[3L"), vec![Action::InsertLines(3)]);
+    assert_eq!(parse(b"\x1b[L"), vec![Action::InsertLines(1)]);
+}
+
+#[test]
+fn delete_lines() {
+    assert_eq!(parse(b"\x1b[2M"), vec![Action::DeleteLines(2)]);
+    assert_eq!(parse(b"\x1b[M"), vec![Action::DeleteLines(1)]);
+}
+
+#[test]
+fn insert_characters() {
+    assert_eq!(parse(b"\x1b[4@"), vec![Action::InsertCharacters(4)]);
+    assert_eq!(parse(b"\x1b[@"), vec![Action::InsertCharacters(1)]);
+}
+
+#[test]
+fn delete_characters() {
+    assert_eq!(parse(b"\x1b[3P"), vec![Action::DeleteCharacters(3)]);
+    assert_eq!(parse(b"\x1b[P"), vec![Action::DeleteCharacters(1)]);
+}
+
+// ---------------------------------------------------------------
+// CSI: scrolling region
+// ---------------------------------------------------------------
+
+#[test]
+fn set_scrolling_region() {
+    assert_eq!(
+        parse(b"\x1b[5;20r"),
+        vec![Action::SetScrollingRegion { top: 5, bottom: 20 }]
+    );
+}
+
+// ---------------------------------------------------------------
+// CSI: cursor style
+// ---------------------------------------------------------------
+
+#[test]
+fn set_cursor_style() {
+    // Blinking block
+    assert_eq!(parse(b"\x1b[1 q"), vec![Action::SetCursorStyle(1)]);
+    // Steady block
+    assert_eq!(parse(b"\x1b[2 q"), vec![Action::SetCursorStyle(2)]);
+    // Blinking underline
+    assert_eq!(parse(b"\x1b[3 q"), vec![Action::SetCursorStyle(3)]);
+    // Steady bar
+    assert_eq!(parse(b"\x1b[6 q"), vec![Action::SetCursorStyle(6)]);
+}
+
+// ---------------------------------------------------------------
+// CSI: report cursor position
+// ---------------------------------------------------------------
+
+#[test]
+fn report_cursor_position() {
+    assert_eq!(parse(b"\x1b[6n"), vec![Action::ReportCursorPosition]);
+}
+
+// ---------------------------------------------------------------
+// CSI: modes (additional)
+// ---------------------------------------------------------------
+
+#[test]
+fn bracketed_paste_mode() {
+    assert_eq!(
+        parse(b"\x1b[?2004h"),
+        vec![Action::SetMode(Mode::BracketedPaste)]
+    );
+    assert_eq!(
+        parse(b"\x1b[?2004l"),
+        vec![Action::ResetMode(Mode::BracketedPaste)]
+    );
+}
+
+#[test]
+fn focus_reporting_mode() {
+    assert_eq!(
+        parse(b"\x1b[?1004h"),
+        vec![Action::SetMode(Mode::FocusReporting)]
+    );
+    assert_eq!(
+        parse(b"\x1b[?1004l"),
+        vec![Action::ResetMode(Mode::FocusReporting)]
+    );
+}
+
+#[test]
+fn application_cursor_keys_mode() {
+    assert_eq!(
+        parse(b"\x1b[?1h"),
+        vec![Action::SetMode(Mode::ApplicationCursorKeys)]
+    );
+    assert_eq!(
+        parse(b"\x1b[?1l"),
+        vec![Action::ResetMode(Mode::ApplicationCursorKeys)]
+    );
+}
+
+#[test]
+fn mouse_tracking_modes() {
+    assert_eq!(
+        parse(b"\x1b[?9h"),
+        vec![Action::SetMode(Mode::MouseX10)]
+    );
+    assert_eq!(
+        parse(b"\x1b[?1000h"),
+        vec![Action::SetMode(Mode::MouseNormal)]
+    );
+    assert_eq!(
+        parse(b"\x1b[?1002h"),
+        vec![Action::SetMode(Mode::MouseButtonEvent)]
+    );
+    assert_eq!(
+        parse(b"\x1b[?1003h"),
+        vec![Action::SetMode(Mode::MouseAnyEvent)]
+    );
+    assert_eq!(
+        parse(b"\x1b[?1006h"),
+        vec![Action::SetMode(Mode::MouseSgr)]
+    );
+}
+
+// ---------------------------------------------------------------
+// SGR: all attribute types
+// ---------------------------------------------------------------
+
+#[test]
+fn sgr_dim() {
+    assert_eq!(
+        parse(b"\x1b[2m"),
+        vec![Action::SetAttribute(Attribute::Dim)]
+    );
+}
+
+#[test]
+fn sgr_italic() {
+    assert_eq!(
+        parse(b"\x1b[3m"),
+        vec![Action::SetAttribute(Attribute::Italic)]
+    );
+}
+
+#[test]
+fn sgr_underline() {
+    assert_eq!(
+        parse(b"\x1b[4m"),
+        vec![Action::SetAttribute(Attribute::Underline)]
+    );
+}
+
+#[test]
+fn sgr_blink() {
+    assert_eq!(
+        parse(b"\x1b[5m"),
+        vec![Action::SetAttribute(Attribute::Blink)]
+    );
+}
+
+#[test]
+fn sgr_reverse() {
+    assert_eq!(
+        parse(b"\x1b[7m"),
+        vec![Action::SetAttribute(Attribute::Reverse)]
+    );
+}
+
+#[test]
+fn sgr_hidden() {
+    assert_eq!(
+        parse(b"\x1b[8m"),
+        vec![Action::SetAttribute(Attribute::Hidden)]
+    );
+}
+
+#[test]
+fn sgr_strikethrough() {
+    assert_eq!(
+        parse(b"\x1b[9m"),
+        vec![Action::SetAttribute(Attribute::Strikethrough)]
+    );
+}
+
+#[test]
+fn sgr_disable_attributes() {
+    assert_eq!(
+        parse(b"\x1b[22m"),
+        vec![Action::SetAttribute(Attribute::NoBold)]
+    );
+    assert_eq!(
+        parse(b"\x1b[23m"),
+        vec![Action::SetAttribute(Attribute::NoItalic)]
+    );
+    assert_eq!(
+        parse(b"\x1b[24m"),
+        vec![Action::SetAttribute(Attribute::NoUnderline)]
+    );
+    assert_eq!(
+        parse(b"\x1b[25m"),
+        vec![Action::SetAttribute(Attribute::NoBlink)]
+    );
+    assert_eq!(
+        parse(b"\x1b[27m"),
+        vec![Action::SetAttribute(Attribute::NoReverse)]
+    );
+    assert_eq!(
+        parse(b"\x1b[28m"),
+        vec![Action::SetAttribute(Attribute::NoHidden)]
+    );
+    assert_eq!(
+        parse(b"\x1b[29m"),
+        vec![Action::SetAttribute(Attribute::NoStrikethrough)]
+    );
+}
+
+// ---------------------------------------------------------------
+// SGR: background colors
+// ---------------------------------------------------------------
+
+#[test]
+fn sgr_background_color() {
+    assert_eq!(
+        parse(b"\x1b[41m"),
+        vec![Action::SetAttribute(Attribute::BackgroundColor(
+            Color::Named(NamedColor::Red)
+        ))]
+    );
+    assert_eq!(
+        parse(b"\x1b[44m"),
+        vec![Action::SetAttribute(Attribute::BackgroundColor(
+            Color::Named(NamedColor::Blue)
+        ))]
+    );
+}
+
+#[test]
+fn sgr_background_256_color() {
+    assert_eq!(
+        parse(b"\x1b[48;5;100m"),
+        vec![Action::SetAttribute(Attribute::BackgroundColor(
+            Color::Indexed(100)
+        ))]
+    );
+}
+
+#[test]
+fn sgr_background_true_color() {
+    assert_eq!(
+        parse(b"\x1b[48;2;10;20;30m"),
+        vec![Action::SetAttribute(Attribute::BackgroundColor(
+            Color::Rgb { r: 10, g: 20, b: 30 }
+        ))]
+    );
+}
+
+// ---------------------------------------------------------------
+// SGR: default colors
+// ---------------------------------------------------------------
+
+#[test]
+fn sgr_default_foreground() {
+    assert_eq!(
+        parse(b"\x1b[39m"),
+        vec![Action::SetAttribute(Attribute::ForegroundColor(Color::Default))]
+    );
+}
+
+#[test]
+fn sgr_default_background() {
+    assert_eq!(
+        parse(b"\x1b[49m"),
+        vec![Action::SetAttribute(Attribute::BackgroundColor(Color::Default))]
+    );
+}
+
+// ---------------------------------------------------------------
+// SGR: bright colors
+// ---------------------------------------------------------------
+
+#[test]
+fn sgr_bright_foreground() {
+    assert_eq!(
+        parse(b"\x1b[90m"),
+        vec![Action::SetAttribute(Attribute::ForegroundColor(
+            Color::Named(NamedColor::BrightBlack)
+        ))]
+    );
+    assert_eq!(
+        parse(b"\x1b[91m"),
+        vec![Action::SetAttribute(Attribute::ForegroundColor(
+            Color::Named(NamedColor::BrightRed)
+        ))]
+    );
+    assert_eq!(
+        parse(b"\x1b[97m"),
+        vec![Action::SetAttribute(Attribute::ForegroundColor(
+            Color::Named(NamedColor::BrightWhite)
+        ))]
+    );
+}
+
+#[test]
+fn sgr_bright_background() {
+    assert_eq!(
+        parse(b"\x1b[100m"),
+        vec![Action::SetAttribute(Attribute::BackgroundColor(
+            Color::Named(NamedColor::BrightBlack)
+        ))]
+    );
+    assert_eq!(
+        parse(b"\x1b[107m"),
+        vec![Action::SetAttribute(Attribute::BackgroundColor(
+            Color::Named(NamedColor::BrightWhite)
+        ))]
+    );
+}
+
+// ---------------------------------------------------------------
+// SGR: multiple params in one sequence
+// ---------------------------------------------------------------
+
+#[test]
+fn sgr_multiple_params() {
+    assert_eq!(
+        parse(b"\x1b[1;31m"),
+        vec![
+            Action::SetAttribute(Attribute::Bold),
+            Action::SetAttribute(Attribute::ForegroundColor(
+                Color::Named(NamedColor::Red)
+            )),
+        ]
+    );
+}
+
+#[test]
+fn sgr_reset_with_bold_and_color() {
+    assert_eq!(
+        parse(b"\x1b[0;1;32m"),
+        vec![
+            Action::ResetAttributes,
+            Action::SetAttribute(Attribute::Bold),
+            Action::SetAttribute(Attribute::ForegroundColor(
+                Color::Named(NamedColor::Green)
+            )),
+        ]
+    );
+}
+
+// ---------------------------------------------------------------
+// SGR: all 8 named foreground colors
+// ---------------------------------------------------------------
+
+#[test]
+fn sgr_all_named_foreground_colors() {
+    let expected = [
+        (30, NamedColor::Black),
+        (31, NamedColor::Red),
+        (32, NamedColor::Green),
+        (33, NamedColor::Yellow),
+        (34, NamedColor::Blue),
+        (35, NamedColor::Magenta),
+        (36, NamedColor::Cyan),
+        (37, NamedColor::White),
+    ];
+    for (code, color) in expected {
+        let input = format!("\x1b[{}m", code);
+        assert_eq!(
+            parse(input.as_bytes()),
+            vec![Action::SetAttribute(Attribute::ForegroundColor(
+                Color::Named(color)
+            ))],
+            "SGR {} should map to {:?}",
+            code,
+            color,
+        );
+    }
+}
+
+// ---------------------------------------------------------------
+// OSC: clipboard (OSC 52)
+// ---------------------------------------------------------------
+
+#[test]
+fn osc_clipboard() {
+    // OSC 52 ; c ; base64data BEL
+    assert_eq!(
+        parse(b"\x1b]52;c;SGVsbG8=\x07"),
+        vec![Action::SetClipboard {
+            clipboard: 'c',
+            data: "Hello".to_string(),
+        }]
+    );
+}
+
+// ---------------------------------------------------------------
+// OSC: color queries
+// ---------------------------------------------------------------
+
+#[test]
+fn osc_query_colors() {
+    assert_eq!(
+        parse(b"\x1b]10;?\x07"),
+        vec![Action::QueryForegroundColor]
+    );
+    assert_eq!(
+        parse(b"\x1b]11;?\x07"),
+        vec![Action::QueryBackgroundColor]
+    );
+    assert_eq!(
+        parse(b"\x1b]12;?\x07"),
+        vec![Action::QueryCursorColor]
+    );
+}
+
+// ---------------------------------------------------------------
+// ESC sequences: index, reverse index, next line
+// ---------------------------------------------------------------
+
+#[test]
+fn esc_reverse_index() {
+    assert_eq!(parse(b"\x1bM"), vec![Action::ReverseIndex]);
+}
+
+#[test]
+fn esc_index() {
+    assert_eq!(parse(b"\x1bD"), vec![Action::Index]);
+}
+
+#[test]
+fn esc_next_line() {
+    assert_eq!(parse(b"\x1bE"), vec![Action::NextLine]);
+}
+
+// ---------------------------------------------------------------
+// Tab operations
+// ---------------------------------------------------------------
+
+#[test]
+fn tab_clear() {
+    assert_eq!(parse(b"\x1b[0g"), vec![Action::ClearTabStop(0)]);
+    assert_eq!(parse(b"\x1b[3g"), vec![Action::ClearTabStop(3)]);
+}
+
+// ---------------------------------------------------------------
+// Synchronized update
+// ---------------------------------------------------------------
+
+#[test]
+fn synchronized_update_mode() {
+    assert_eq!(
+        parse(b"\x1b[?2026h"),
+        vec![Action::SetMode(Mode::SynchronizedUpdate)]
+    );
+    assert_eq!(
+        parse(b"\x1b[?2026l"),
+        vec![Action::ResetMode(Mode::SynchronizedUpdate)]
+    );
+}
+
+// ---------------------------------------------------------------
+// DECRQM: request private mode
+// ---------------------------------------------------------------
+
+#[test]
+fn request_private_mode() {
+    assert_eq!(
+        parse(b"\x1b[?2026$p"),
+        vec![Action::RequestPrivateMode(2026)]
+    );
+}
