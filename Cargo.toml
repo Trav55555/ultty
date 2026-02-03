@@ -8,6 +8,7 @@ members = [
     "examples/counter-app",
     "examples/todo-app",
     "examples/dashboard",
+    "examples/chat",
 ]
 
 [workspace.package]
