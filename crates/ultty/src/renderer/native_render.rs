@@ -781,10 +781,8 @@ impl Renderer {
             }
 
             // Unordered list items
-            let (prefix, content) = if line.starts_with("- ") {
-                ("• ", &line[2..])
-            } else if line.starts_with("* ") {
-                ("• ", &line[2..])
+            let (prefix, content) = if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+                ("• ", rest)
             } else if let Some(rest) = line.strip_prefix("> ") {
                 // Block quotes
                 ("│ ", rest)
@@ -1115,7 +1113,7 @@ fn code_keywords(language: &str) -> Vec<&'static str> {
 }
 
 /// Tokenize a line of code into styled segments.
-fn tokenize_code_line<'a>(line: &str, keywords: &[&str]) -> Vec<CodeToken> {
+fn tokenize_code_line(line: &str, keywords: &[&str]) -> Vec<CodeToken> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = line.chars().collect();
     let len = chars.len();
