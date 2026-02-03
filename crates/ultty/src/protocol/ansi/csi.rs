@@ -264,3 +264,598 @@ impl AnsiParser {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Action, Attribute, Mode, AnsiParser};
+
+    /// Feed raw bytes through the parser and collect emitted actions.
+    fn parse(input: &[u8]) -> Vec<Action> {
+        let mut parser = AnsiParser::new();
+        let mut actions = Vec::new();
+        parser.feed(input, |a| actions.push(a));
+        actions
+    }
+
+    // ------------------------------------------------------------------
+    // Cursor movement: CUU (A), CUD (B), CUF (C), CUB (D)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cuu_with_param() {
+        assert_eq!(parse(b"\x1b[5A"), vec![Action::CursorUp(5)]);
+    }
+
+    #[test]
+    fn cuu_default_is_one() {
+        assert_eq!(parse(b"\x1b[A"), vec![Action::CursorUp(1)]);
+    }
+
+    #[test]
+    fn cuu_zero_treated_as_one() {
+        // CSI 0 A - param 0 should be clamped to 1
+        assert_eq!(parse(b"\x1b[0A"), vec![Action::CursorUp(1)]);
+    }
+
+    #[test]
+    fn cud_with_param() {
+        assert_eq!(parse(b"\x1b[3B"), vec![Action::CursorDown(3)]);
+    }
+
+    #[test]
+    fn cud_default() {
+        assert_eq!(parse(b"\x1b[B"), vec![Action::CursorDown(1)]);
+    }
+
+    #[test]
+    fn cuf_with_param() {
+        assert_eq!(parse(b"\x1b[10C"), vec![Action::CursorForward(10)]);
+    }
+
+    #[test]
+    fn cuf_default() {
+        assert_eq!(parse(b"\x1b[C"), vec![Action::CursorForward(1)]);
+    }
+
+    #[test]
+    fn cub_with_param() {
+        assert_eq!(parse(b"\x1b[7D"), vec![Action::CursorBack(7)]);
+    }
+
+    #[test]
+    fn cub_default() {
+        assert_eq!(parse(b"\x1b[D"), vec![Action::CursorBack(1)]);
+    }
+
+    // ------------------------------------------------------------------
+    // Cursor movement: CNL (E), CPL (F), CHA (G), CUP (H/f)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cnl_with_param() {
+        assert_eq!(parse(b"\x1b[4E"), vec![Action::CursorNextLine(4)]);
+    }
+
+    #[test]
+    fn cpl_with_param() {
+        assert_eq!(parse(b"\x1b[2F"), vec![Action::CursorPreviousLine(2)]);
+    }
+
+    #[test]
+    fn cha_with_param() {
+        assert_eq!(
+            parse(b"\x1b[15G"),
+            vec![Action::CursorHorizontalAbsolute(15)]
+        );
+    }
+
+    #[test]
+    fn cha_default() {
+        assert_eq!(
+            parse(b"\x1b[G"),
+            vec![Action::CursorHorizontalAbsolute(1)]
+        );
+    }
+
+    #[test]
+    fn cup_with_params() {
+        assert_eq!(
+            parse(b"\x1b[10;20H"),
+            vec![Action::CursorPosition { row: 10, col: 20 }]
+        );
+    }
+
+    #[test]
+    fn cup_default() {
+        assert_eq!(
+            parse(b"\x1b[H"),
+            vec![Action::CursorPosition { row: 1, col: 1 }]
+        );
+    }
+
+    #[test]
+    fn cup_f_variant() {
+        assert_eq!(
+            parse(b"\x1b[5;10f"),
+            vec![Action::CursorPosition { row: 5, col: 10 }]
+        );
+    }
+
+    #[test]
+    fn cup_row_only() {
+        // CSI 5 H - only row specified, col defaults to 1
+        assert_eq!(
+            parse(b"\x1b[5H"),
+            vec![Action::CursorPosition { row: 5, col: 1 }]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Erase sequences: ED (J), EL (K), ECH (X)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn ed_default_zero() {
+        assert_eq!(parse(b"\x1b[J"), vec![Action::EraseInDisplay(0)]);
+    }
+
+    #[test]
+    fn ed_explicit_values() {
+        assert_eq!(parse(b"\x1b[0J"), vec![Action::EraseInDisplay(0)]);
+        assert_eq!(parse(b"\x1b[1J"), vec![Action::EraseInDisplay(1)]);
+        assert_eq!(parse(b"\x1b[2J"), vec![Action::EraseInDisplay(2)]);
+        assert_eq!(parse(b"\x1b[3J"), vec![Action::EraseInDisplay(3)]);
+    }
+
+    #[test]
+    fn ed_clamped_to_3() {
+        // Values > 3 should be clamped
+        assert_eq!(parse(b"\x1b[9J"), vec![Action::EraseInDisplay(3)]);
+    }
+
+    #[test]
+    fn el_default_zero() {
+        assert_eq!(parse(b"\x1b[K"), vec![Action::EraseInLine(0)]);
+    }
+
+    #[test]
+    fn el_explicit_values() {
+        assert_eq!(parse(b"\x1b[0K"), vec![Action::EraseInLine(0)]);
+        assert_eq!(parse(b"\x1b[1K"), vec![Action::EraseInLine(1)]);
+        assert_eq!(parse(b"\x1b[2K"), vec![Action::EraseInLine(2)]);
+    }
+
+    #[test]
+    fn el_clamped_to_2() {
+        assert_eq!(parse(b"\x1b[9K"), vec![Action::EraseInLine(2)]);
+    }
+
+    #[test]
+    fn ech_with_param() {
+        assert_eq!(parse(b"\x1b[5X"), vec![Action::EraseCharacters(5)]);
+    }
+
+    #[test]
+    fn ech_default() {
+        assert_eq!(parse(b"\x1b[X"), vec![Action::EraseCharacters(1)]);
+    }
+
+    // ------------------------------------------------------------------
+    // Mode set/reset: DECSET (CSI ? ... h) / DECRST (CSI ? ... l)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn decset_cursor_visible() {
+        assert_eq!(
+            parse(b"\x1b[?25h"),
+            vec![Action::SetMode(Mode::CursorVisible)]
+        );
+    }
+
+    #[test]
+    fn decrst_cursor_visible() {
+        assert_eq!(
+            parse(b"\x1b[?25l"),
+            vec![Action::ResetMode(Mode::CursorVisible)]
+        );
+    }
+
+    #[test]
+    fn decset_application_cursor_keys() {
+        assert_eq!(
+            parse(b"\x1b[?1h"),
+            vec![Action::SetMode(Mode::ApplicationCursorKeys)]
+        );
+    }
+
+    #[test]
+    fn decset_alternate_screen_1049() {
+        assert_eq!(
+            parse(b"\x1b[?1049h"),
+            vec![Action::SetMode(Mode::AlternateScreenSaveCursor)]
+        );
+    }
+
+    #[test]
+    fn decrst_alternate_screen_1049() {
+        assert_eq!(
+            parse(b"\x1b[?1049l"),
+            vec![Action::ResetMode(Mode::AlternateScreenSaveCursor)]
+        );
+    }
+
+    #[test]
+    fn decset_bracketed_paste() {
+        assert_eq!(
+            parse(b"\x1b[?2004h"),
+            vec![Action::SetMode(Mode::BracketedPaste)]
+        );
+    }
+
+    #[test]
+    fn decrst_bracketed_paste() {
+        assert_eq!(
+            parse(b"\x1b[?2004l"),
+            vec![Action::ResetMode(Mode::BracketedPaste)]
+        );
+    }
+
+    #[test]
+    fn decset_mouse_sgr() {
+        assert_eq!(
+            parse(b"\x1b[?1006h"),
+            vec![Action::SetMode(Mode::MouseSgr)]
+        );
+    }
+
+    #[test]
+    fn decset_focus_reporting() {
+        assert_eq!(
+            parse(b"\x1b[?1004h"),
+            vec![Action::SetMode(Mode::FocusReporting)]
+        );
+    }
+
+    #[test]
+    fn decset_synchronized_update() {
+        assert_eq!(
+            parse(b"\x1b[?2026h"),
+            vec![Action::SetMode(Mode::SynchronizedUpdate)]
+        );
+    }
+
+    #[test]
+    fn decset_auto_wrap() {
+        assert_eq!(
+            parse(b"\x1b[?7h"),
+            vec![Action::SetMode(Mode::AutoWrap)]
+        );
+    }
+
+    #[test]
+    fn decset_origin_mode() {
+        assert_eq!(
+            parse(b"\x1b[?6h"),
+            vec![Action::SetMode(Mode::OriginMode)]
+        );
+    }
+
+    #[test]
+    fn decset_reverse_video() {
+        assert_eq!(
+            parse(b"\x1b[?5h"),
+            vec![Action::SetMode(Mode::ReverseVideo)]
+        );
+    }
+
+    #[test]
+    fn decset_column_mode() {
+        assert_eq!(
+            parse(b"\x1b[?3h"),
+            vec![Action::SetMode(Mode::ColumnMode132)]
+        );
+    }
+
+    #[test]
+    fn decset_cursor_blink() {
+        assert_eq!(
+            parse(b"\x1b[?12h"),
+            vec![Action::SetMode(Mode::CursorBlink)]
+        );
+    }
+
+    #[test]
+    fn decset_alternate_screen_47() {
+        assert_eq!(
+            parse(b"\x1b[?47h"),
+            vec![Action::SetMode(Mode::AlternateScreen)]
+        );
+    }
+
+    #[test]
+    fn decset_alternate_screen_clear_1047() {
+        assert_eq!(
+            parse(b"\x1b[?1047h"),
+            vec![Action::SetMode(Mode::AlternateScreenClear)]
+        );
+    }
+
+    #[test]
+    fn decset_mouse_x10() {
+        assert_eq!(
+            parse(b"\x1b[?9h"),
+            vec![Action::SetMode(Mode::MouseX10)]
+        );
+    }
+
+    #[test]
+    fn decset_mouse_normal() {
+        assert_eq!(
+            parse(b"\x1b[?1000h"),
+            vec![Action::SetMode(Mode::MouseNormal)]
+        );
+    }
+
+    #[test]
+    fn decset_mouse_button_event() {
+        assert_eq!(
+            parse(b"\x1b[?1002h"),
+            vec![Action::SetMode(Mode::MouseButtonEvent)]
+        );
+    }
+
+    #[test]
+    fn decset_mouse_any_event() {
+        assert_eq!(
+            parse(b"\x1b[?1003h"),
+            vec![Action::SetMode(Mode::MouseAnyEvent)]
+        );
+    }
+
+    #[test]
+    fn decset_mouse_utf8() {
+        assert_eq!(
+            parse(b"\x1b[?1005h"),
+            vec![Action::SetMode(Mode::MouseUtf8)]
+        );
+    }
+
+    #[test]
+    fn decset_mouse_urxvt() {
+        assert_eq!(
+            parse(b"\x1b[?1015h"),
+            vec![Action::SetMode(Mode::MouseUrxvt)]
+        );
+    }
+
+    #[test]
+    fn decset_alternate_scroll_mode() {
+        assert_eq!(
+            parse(b"\x1b[?1007h"),
+            vec![Action::SetMode(Mode::AlternateScrollMode)]
+        );
+    }
+
+    #[test]
+    fn decset_unknown_mode_no_action() {
+        // Unknown private mode should produce no action
+        let actions = parse(b"\x1b[?9999h");
+        assert!(actions.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // CSI with parameters and defaults
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn csi_large_param() {
+        assert_eq!(parse(b"\x1b[999A"), vec![Action::CursorUp(999)]);
+    }
+
+    #[test]
+    fn csi_multiple_semicolons_default() {
+        // CSI ; H means row=0, col=0 (both default) -> clamped to 1,1
+        assert_eq!(
+            parse(b"\x1b[;H"),
+            vec![Action::CursorPosition { row: 1, col: 1 }]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Line operations
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn insert_lines() {
+        assert_eq!(parse(b"\x1b[3L"), vec![Action::InsertLines(3)]);
+    }
+
+    #[test]
+    fn delete_lines() {
+        assert_eq!(parse(b"\x1b[2M"), vec![Action::DeleteLines(2)]);
+    }
+
+    #[test]
+    fn insert_characters() {
+        assert_eq!(parse(b"\x1b[4@"), vec![Action::InsertCharacters(4)]);
+    }
+
+    #[test]
+    fn delete_characters() {
+        assert_eq!(parse(b"\x1b[3P"), vec![Action::DeleteCharacters(3)]);
+    }
+
+    // ------------------------------------------------------------------
+    // Scrolling
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn scroll_up() {
+        assert_eq!(parse(b"\x1b[5S"), vec![Action::ScrollUp(5)]);
+    }
+
+    #[test]
+    fn scroll_down() {
+        assert_eq!(parse(b"\x1b[3T"), vec![Action::ScrollDown(3)]);
+    }
+
+    #[test]
+    fn set_scrolling_region() {
+        assert_eq!(
+            parse(b"\x1b[5;20r"),
+            vec![Action::SetScrollingRegion { top: 5, bottom: 20 }]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Cursor save/restore
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn save_cursor_via_csi() {
+        assert_eq!(parse(b"\x1b[s"), vec![Action::SaveCursorPosition]);
+    }
+
+    #[test]
+    fn restore_cursor_via_csi() {
+        assert_eq!(parse(b"\x1b[u"), vec![Action::RestoreCursorPosition]);
+    }
+
+    // ------------------------------------------------------------------
+    // Cursor style (DECSCUSR)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn set_cursor_style_blinking_block() {
+        assert_eq!(parse(b"\x1b[1 q"), vec![Action::SetCursorStyle(1)]);
+    }
+
+    #[test]
+    fn set_cursor_style_steady_bar() {
+        assert_eq!(parse(b"\x1b[6 q"), vec![Action::SetCursorStyle(6)]);
+    }
+
+    // ------------------------------------------------------------------
+    // Report cursor position
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn report_cursor_position() {
+        assert_eq!(parse(b"\x1b[6n"), vec![Action::ReportCursorPosition]);
+    }
+
+    // ------------------------------------------------------------------
+    // Device attributes
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn primary_device_attributes() {
+        assert_eq!(parse(b"\x1b[c"), vec![Action::DeviceAttributes]);
+    }
+
+    #[test]
+    fn secondary_device_attributes() {
+        assert_eq!(parse(b"\x1b[>c"), vec![Action::SecondaryDeviceAttributes]);
+    }
+
+    // ------------------------------------------------------------------
+    // Tab clear
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn tab_clear_current() {
+        assert_eq!(parse(b"\x1b[0g"), vec![Action::ClearTabStop(0)]);
+    }
+
+    #[test]
+    fn tab_clear_all() {
+        assert_eq!(parse(b"\x1b[3g"), vec![Action::ClearTabStop(3)]);
+    }
+
+    // ------------------------------------------------------------------
+    // DECRQM - Request Private Mode
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn request_private_mode() {
+        assert_eq!(
+            parse(b"\x1b[?2026$p"),
+            vec![Action::RequestPrivateMode(2026)]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Kitty keyboard protocol
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn kitty_keyboard_push() {
+        assert_eq!(parse(b"\x1b[>1u"), vec![Action::KittyKeyboardPush(1)]);
+    }
+
+    #[test]
+    fn kitty_keyboard_pop() {
+        assert_eq!(parse(b"\x1b[<u"), vec![Action::KittyKeyboardPop]);
+    }
+
+    #[test]
+    fn kitty_keyboard_query() {
+        assert_eq!(parse(b"\x1b[?u"), vec![Action::KittyKeyboardQuery]);
+    }
+
+    // ------------------------------------------------------------------
+    // Malformed CSI sequences
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn csi_aborted_by_esc() {
+        // ESC during CSI should abort and restart in escape state
+        // ESC [ 5 ESC [ 3 B -> only CursorDown(3) from the second sequence
+        assert_eq!(parse(b"\x1b[5\x1b[3B"), vec![Action::CursorDown(3)]);
+    }
+
+    #[test]
+    fn csi_invalid_byte_resets() {
+        // Invalid byte in CSI entry resets to ground
+        // 0x01 is a control character that triggers reset
+        let actions = parse(b"\x1b[\x01");
+        // The invalid byte causes a reset; should not crash
+        // 0x01 in CSI entry hits the default arm -> reset
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn csi_sgr_dispatches_via_m() {
+        // Verify CSI m dispatches SGR
+        assert_eq!(
+            parse(b"\x1b[1m"),
+            vec![Action::SetAttribute(Attribute::Bold)]
+        );
+    }
+
+    #[test]
+    fn csi_unknown_final_byte_ignored() {
+        // Unknown CSI final byte (e.g., '|') should produce no action
+        let actions = parse(b"\x1b[5|");
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn csi_followed_by_normal_text() {
+        // After CSI completion, parser should return to ground
+        assert_eq!(
+            parse(b"\x1b[1AX"),
+            vec![Action::CursorUp(1), Action::Print('X')]
+        );
+    }
+
+    #[test]
+    fn csi_private_semicolon_no_preceding_digit() {
+        // CSI ? ; 25 h - first param defaults to 0
+        // With empty first param, p1 = 0, which is unknown mode -> no action
+        // Then second param 25 isn't processed for mode set (only p1 is checked)
+        let actions = parse(b"\x1b[?;25h");
+        // p1 = 0, which doesn't match any mode
+        assert!(actions.is_empty());
+    }
+}

@@ -23,7 +23,7 @@ use crate::{
         TrackSizingFunction,
     },
     messages::{ComputedRegionLayout, FrameId, LayoutTrigger},
-    style::{BorderEdges, BorderStyle, BorderType, Color, NamedColor, Style},
+    style::{BorderEdges, BorderStyle, BorderType, Color, Easing, NamedColor, Style, Transition},
     AppMessage, ProtocolError, RegionId, Result, TerminalMessage, FRAME_MAGIC,
 };
 
@@ -431,9 +431,13 @@ impl Encode for Style {
         let flags = (self.bold as u8)
             | ((self.italic as u8) << 1)
             | ((self.underline as u8) << 2)
-            | ((self.dim as u8) << 3);
+            | ((self.dim as u8) << 3)
+            | ((self.transition.is_some() as u8) << 4);
         buf.put_u8(flags);
         buf.put_f32_le(self.opacity);
+        if let Some(ref transition) = self.transition {
+            transition.encode(buf);
+        }
     }
 }
 
@@ -451,6 +455,11 @@ impl Decode for Style {
         }
         let flags = buf.get_u8();
         let opacity = buf.get_f32_le();
+        let transition = if flags & 16 != 0 {
+            Some(Transition::decode(buf)?)
+        } else {
+            None
+        };
         Ok(Style {
             fg,
             bg,
@@ -461,6 +470,41 @@ impl Decode for Style {
             underline: flags & 4 != 0,
             dim: flags & 8 != 0,
             opacity,
+            transition,
+        })
+    }
+}
+
+impl Encode for Transition {
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u32_le(self.duration_ms);
+        buf.put_u8(self.easing as u8);
+        buf.put_u32_le(self.properties);
+    }
+}
+
+impl Decode for Transition {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        if buf.remaining() < 9 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 9,
+                have: buf.remaining(),
+            });
+        }
+        let duration_ms = buf.get_u32_le();
+        let easing_byte = buf.get_u8();
+        let easing = match easing_byte {
+            0 => Easing::Linear,
+            1 => Easing::EaseIn,
+            2 => Easing::EaseOut,
+            3 => Easing::EaseInOut,
+            _ => Easing::Linear,
+        };
+        let properties = buf.get_u32_le();
+        Ok(Transition {
+            duration_ms,
+            easing,
+            properties,
         })
     }
 }
@@ -2393,12 +2437,57 @@ mod tests {
             underline: true,
             dim: false,
             opacity: 0.9,
+            transition: None,
         };
         let mut buf = BytesMut::new();
         style.encode(&mut buf);
         let mut cursor = buf.freeze();
         let decoded = Style::decode(&mut cursor).unwrap();
         assert_eq!(decoded, style);
+    }
+
+    #[test]
+    fn test_roundtrip_style_with_transition() {
+        let style = Style {
+            fg: Some(Color::Rgb(100, 200, 50)),
+            bg: None,
+            border: BorderStyle::NONE,
+            border_color: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            opacity: 0.7,
+            transition: Some(Transition {
+                duration_ms: 500,
+                easing: Easing::EaseOut,
+                properties: 0x03, // OPACITY | BG
+            }),
+        };
+        let mut buf = BytesMut::new();
+        style.encode(&mut buf);
+        let mut cursor = buf.freeze();
+        let decoded = Style::decode(&mut cursor).unwrap();
+        assert_eq!(decoded, style);
+        assert!(decoded.transition.is_some());
+        let t = decoded.transition.unwrap();
+        assert_eq!(t.duration_ms, 500);
+        assert_eq!(t.easing, Easing::EaseOut);
+        assert_eq!(t.properties, 0x03);
+    }
+
+    #[test]
+    fn test_roundtrip_transition() {
+        let transition = Transition {
+            duration_ms: 1000,
+            easing: Easing::EaseInOut,
+            properties: 0x0F,
+        };
+        let mut buf = BytesMut::new();
+        transition.encode(&mut buf);
+        let mut cursor = buf.freeze();
+        let decoded = Transition::decode(&mut cursor).unwrap();
+        assert_eq!(decoded, transition);
     }
 
     #[test]

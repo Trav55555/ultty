@@ -56,6 +56,28 @@ pub struct NativeSession {
     pending_clipboard_get: bool,
     /// Pending clipboard set request.
     pending_clipboard_set: Option<String>,
+    /// Active style transitions: region_id -> (start_time, start_opacity, target_style).
+    style_animations: HashMap<RegionId, StyleAnimation>,
+}
+
+/// Tracks an in-progress style transition for a region.
+struct StyleAnimation {
+    /// When the animation started.
+    start: std::time::Instant,
+    /// Duration of the transition.
+    duration: std::time::Duration,
+    /// Easing function.
+    easing: ultty_protocol::Easing,
+    /// Property mask.
+    properties: u32,
+    /// Starting opacity value.
+    start_opacity: f32,
+    /// Starting background color (as RGB, if available).
+    start_bg: Option<(u8, u8, u8)>,
+    /// Starting foreground color (as RGB, if available).
+    start_fg: Option<(u8, u8, u8)>,
+    /// Target style (the final state).
+    target_style: ultty_protocol::Style,
 }
 
 impl NativeSession {
@@ -82,6 +104,7 @@ impl NativeSession {
             scroll_targets: HashMap::new(),
             pending_clipboard_get: false,
             pending_clipboard_set: None,
+            style_animations: HashMap::new(),
         })
     }
 
@@ -416,7 +439,30 @@ impl NativeSession {
     /// Handle SetStyle.
     fn handle_set_style(&mut self, id: RegionId, style: Style) {
         if let Some(region) = self.scene.get_mut(id) {
-            region.style = style;
+            // Check if the new style has a transition
+            if let Some(transition) = &style.transition {
+                let old_style = &region.style;
+                let start_opacity = old_style.opacity;
+                let start_bg = Self::style_color_to_rgb(&old_style.bg);
+                let start_fg = Self::style_color_to_rgb(&old_style.fg);
+
+                let anim = StyleAnimation {
+                    start: std::time::Instant::now(),
+                    duration: std::time::Duration::from_millis(transition.duration_ms as u64),
+                    easing: transition.easing,
+                    properties: transition.properties,
+                    start_opacity,
+                    start_bg,
+                    start_fg,
+                    target_style: style,
+                };
+                self.style_animations.insert(id, anim);
+                // Don't snap to target — the animation will interpolate
+            } else {
+                // No transition: snap immediately
+                self.style_animations.remove(&id);
+                region.style = style;
+            }
             region.mark_dirty();
             self.scene_dirty = true;
         } else {
@@ -425,6 +471,14 @@ impl NativeSession {
                 code: 404,
                 message: format!("region {} not found", id.0),
             });
+        }
+    }
+
+    /// Extract RGB values from an optional Color, if it's an RGB color.
+    fn style_color_to_rgb(color: &Option<ultty_protocol::Color>) -> Option<(u8, u8, u8)> {
+        match color {
+            Some(ultty_protocol::Color::Rgb(r, g, b)) => Some((*r, *g, *b)),
+            _ => None,
         }
     }
 
@@ -669,6 +723,92 @@ impl NativeSession {
             self.scene_dirty = true;
         }
         !self.scroll_targets.is_empty()
+    }
+
+    /// Advance style animations toward their targets.
+    /// Returns `true` if any animations are still active.
+    pub fn update_style_animations(&mut self) -> bool {
+        if self.style_animations.is_empty() {
+            return false;
+        }
+
+        let now = std::time::Instant::now();
+        let mut done = Vec::new();
+
+        for (&id, anim) in &self.style_animations {
+            let elapsed = now.duration_since(anim.start);
+            let t_linear = (elapsed.as_secs_f32() / anim.duration.as_secs_f32()).min(1.0);
+            let t = anim.easing.apply(t_linear);
+            let finished = t_linear >= 1.0;
+
+            if let Some(region) = self.scene.get_mut(id) {
+                // Interpolate opacity
+                if anim.properties & ultty_protocol::TRANSITION_OPACITY != 0 {
+                    let target_opacity = anim.target_style.opacity;
+                    region.style.opacity =
+                        anim.start_opacity + (target_opacity - anim.start_opacity) * t;
+                }
+
+                // Interpolate background color
+                if anim.properties & ultty_protocol::TRANSITION_BG != 0 {
+                    if let (Some((sr, sg, sb)), Some(ultty_protocol::Color::Rgb(tr, tg, tb))) =
+                        (anim.start_bg, &anim.target_style.bg)
+                    {
+                        let r = Self::lerp_u8(sr, *tr, t);
+                        let g = Self::lerp_u8(sg, *tg, t);
+                        let b = Self::lerp_u8(sb, *tb, t);
+                        region.style.bg = Some(ultty_protocol::Color::Rgb(r, g, b));
+                    }
+                }
+
+                // Interpolate foreground color
+                if anim.properties & ultty_protocol::TRANSITION_FG != 0 {
+                    if let (Some((sr, sg, sb)), Some(ultty_protocol::Color::Rgb(tr, tg, tb))) =
+                        (anim.start_fg, &anim.target_style.fg)
+                    {
+                        let r = Self::lerp_u8(sr, *tr, t);
+                        let g = Self::lerp_u8(sg, *tg, t);
+                        let b = Self::lerp_u8(sb, *tb, t);
+                        region.style.fg = Some(ultty_protocol::Color::Rgb(r, g, b));
+                    }
+                }
+
+                // Copy non-animatable properties immediately
+                region.style.bold = anim.target_style.bold;
+                region.style.italic = anim.target_style.italic;
+                region.style.underline = anim.target_style.underline;
+                region.style.dim = anim.target_style.dim;
+                region.style.border = anim.target_style.border;
+                region.style.border_color = anim.target_style.border_color;
+                region.style.transition = anim.target_style.transition;
+
+                if finished {
+                    // Snap to final state
+                    region.style = anim.target_style.clone();
+                    done.push(id);
+                }
+
+                region.mark_dirty();
+            } else {
+                done.push(id);
+            }
+        }
+
+        for id in done {
+            self.style_animations.remove(&id);
+        }
+
+        let active = !self.style_animations.is_empty();
+        if active {
+            self.scene_dirty = true;
+        }
+        active
+    }
+
+    /// Linearly interpolate between two u8 values.
+    fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+        let result = a as f32 + (b as f32 - a as f32) * t;
+        result.round().clamp(0.0, 255.0) as u8
     }
 
     pub fn has_pending_writes(&self) -> bool {

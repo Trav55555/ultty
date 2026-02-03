@@ -70,9 +70,12 @@ pub enum TextWrap {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum TextAlign {
+    /// Align text to the left edge.
     #[default]
     Left = 0,
+    /// Center text horizontally.
     Center = 1,
+    /// Align text to the right edge.
     Right = 2,
 }
 
@@ -205,10 +208,14 @@ pub struct SpinnerWidget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum SpinnerStyle {
+    /// Braille dot rotation pattern.
     #[default]
     Braille = 0,
+    /// Cycling dots pattern.
     Dots = 1,
+    /// Rotating line pattern.
     Line = 2,
+    /// Bouncing bar pattern.
     Bounce = 3,
 }
 

@@ -85,6 +85,17 @@ insta = { workspace = true }
 tempfile = "3.10"
 toml = "0.8"
 
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/x86_64-unknown-linux-gnu/release/ultty", dest = "/usr/bin/ultty", mode = "755" },
+    { source = "target/x86_64-unknown-linux-gnu/release/ulttyctl", dest = "/usr/bin/ulttyctl", mode = "755" },
+    { source = "../../dist/ultty.desktop", dest = "/usr/share/applications/ultty.desktop", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+wayland = "*"
+libxkbcommon = "*"
+
 [[bench]]
 name = "parser"
 harness = false

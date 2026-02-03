@@ -323,12 +323,15 @@ impl ProtocolServer {
         self.flush();
     }
 
-    /// Advance scroll animations across all sessions.
+    /// Advance all animations (scroll and style transitions) across all sessions.
     /// Returns true if any session still has active animations.
     pub fn update_animations(&mut self) -> bool {
         let mut any_active = false;
         for session in self.sessions.values_mut() {
             if session.update_scroll_animations() {
+                any_active = true;
+            }
+            if session.update_style_animations() {
                 any_active = true;
             }
         }

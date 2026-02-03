@@ -328,7 +328,7 @@ impl AnsiParser {
 }
 
 /// Simple base64 decoder for OSC 52 clipboard data.
-fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
+pub(super) fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     fn char_to_val(c: u8) -> Option<u8> {
@@ -355,4 +355,445 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
     }
 
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Action, AnsiParser};
+
+    /// Feed raw bytes through the parser and collect emitted actions.
+    fn parse(input: &[u8]) -> Vec<Action> {
+        let mut parser = AnsiParser::new();
+        let mut actions = Vec::new();
+        parser.feed(input, |a| actions.push(a));
+        actions
+    }
+
+    // ------------------------------------------------------------------
+    // OSC title changes (OSC 0, 1, 2)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_set_title_code_0_bel() {
+        assert_eq!(
+            parse(b"\x1b]0;Hello World\x07"),
+            vec![Action::SetTitle("Hello World".to_string())]
+        );
+    }
+
+    #[test]
+    fn osc_set_title_code_1_bel() {
+        assert_eq!(
+            parse(b"\x1b]1;Icon Title\x07"),
+            vec![Action::SetTitle("Icon Title".to_string())]
+        );
+    }
+
+    #[test]
+    fn osc_set_title_code_2_bel() {
+        assert_eq!(
+            parse(b"\x1b]2;Window Title\x07"),
+            vec![Action::SetTitle("Window Title".to_string())]
+        );
+    }
+
+    #[test]
+    fn osc_set_title_st_terminator() {
+        // ST terminator = ESC backslash
+        assert_eq!(
+            parse(b"\x1b]0;Title via ST\x1b\\"),
+            vec![Action::SetTitle("Title via ST".to_string())]
+        );
+    }
+
+    #[test]
+    fn osc_set_title_empty() {
+        assert_eq!(
+            parse(b"\x1b]0;\x07"),
+            vec![Action::SetTitle(String::new())]
+        );
+    }
+
+    #[test]
+    fn osc_title_with_special_chars() {
+        assert_eq!(
+            parse(b"\x1b]0;user@host: ~/dir\x07"),
+            vec![Action::SetTitle("user@host: ~/dir".to_string())]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // OSC clipboard (OSC 52)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_clipboard_basic() {
+        // "Hello" in base64 is "SGVsbG8="
+        assert_eq!(
+            parse(b"\x1b]52;c;SGVsbG8=\x07"),
+            vec![Action::SetClipboard {
+                clipboard: 'c',
+                data: "Hello".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn osc_clipboard_primary_selection() {
+        // "test" in base64 is "dGVzdA=="
+        assert_eq!(
+            parse(b"\x1b]52;p;dGVzdA==\x07"),
+            vec![Action::SetClipboard {
+                clipboard: 'p',
+                data: "test".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn osc_clipboard_with_st_terminator() {
+        assert_eq!(
+            parse(b"\x1b]52;c;SGVsbG8=\x1b\\"),
+            vec![Action::SetClipboard {
+                clipboard: 'c',
+                data: "Hello".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn osc_clipboard_invalid_base64_no_crash() {
+        // Invalid base64 should not crash; it just won't produce an action
+        let actions = parse(b"\x1b]52;c;!!!invalid!!!\x07");
+        // The base64 decoder is lenient - it skips invalid chars
+        // so this may or may not produce an action, but must not panic
+        let _ = actions;
+    }
+
+    // ------------------------------------------------------------------
+    // OSC color queries (OSC 10, 11, 12)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_query_foreground_color() {
+        assert_eq!(
+            parse(b"\x1b]10;?\x07"),
+            vec![Action::QueryForegroundColor]
+        );
+    }
+
+    #[test]
+    fn osc_query_background_color() {
+        assert_eq!(
+            parse(b"\x1b]11;?\x07"),
+            vec![Action::QueryBackgroundColor]
+        );
+    }
+
+    #[test]
+    fn osc_query_cursor_color() {
+        assert_eq!(
+            parse(b"\x1b]12;?\x07"),
+            vec![Action::QueryCursorColor]
+        );
+    }
+
+    #[test]
+    fn osc_color_set_ignored() {
+        // Setting colors (non-query) should not emit any action
+        let actions = parse(b"\x1b]10;rgb:ff/ff/ff\x07");
+        assert!(actions.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // OSC hyperlinks (OSC 8)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_hyperlink_start() {
+        assert_eq!(
+            parse(b"\x1b]8;;https://example.com\x07"),
+            vec![Action::StartHyperlink("https://example.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn osc_hyperlink_start_with_id_param() {
+        assert_eq!(
+            parse(b"\x1b]8;id=link1;https://github.com\x07"),
+            vec![Action::StartHyperlink("https://github.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn osc_hyperlink_end() {
+        assert_eq!(parse(b"\x1b]8;;\x07"), vec![Action::EndHyperlink]);
+    }
+
+    #[test]
+    fn osc_hyperlink_with_st_terminator() {
+        assert_eq!(
+            parse(b"\x1b]8;;https://rust-lang.org\x1b\\"),
+            vec![Action::StartHyperlink("https://rust-lang.org".to_string())]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // OSC with different terminators (BEL vs ST)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_bel_terminator() {
+        assert_eq!(
+            parse(b"\x1b]0;BEL terminated\x07"),
+            vec![Action::SetTitle("BEL terminated".to_string())]
+        );
+    }
+
+    #[test]
+    fn osc_st_terminator() {
+        assert_eq!(
+            parse(b"\x1b]0;ST terminated\x1b\\"),
+            vec![Action::SetTitle("ST terminated".to_string())]
+        );
+    }
+
+    #[test]
+    fn osc_st_followed_by_text() {
+        // After ST, the parser should return to ground state and handle normal text
+        assert_eq!(
+            parse(b"\x1b]0;Title\x1b\\A"),
+            vec![
+                Action::SetTitle("Title".to_string()),
+                Action::Print('A'),
+            ]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Malformed/truncated OSC sequences
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_no_semicolon_unknown_code() {
+        // OSC with no semicolon and unrecognized code - should not crash
+        let actions = parse(b"\x1b]999\x07");
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn osc_empty_buffer() {
+        // OSC immediately terminated - empty buffer
+        let actions = parse(b"\x1b]\x07");
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn osc_bare_133() {
+        // Bare OSC 133 without data = prompt start
+        assert_eq!(parse(b"\x1b]133\x07"), vec![Action::PromptStart]);
+    }
+
+    #[test]
+    fn osc_unknown_code_with_data() {
+        // Unknown OSC code should be silently ignored
+        let actions = parse(b"\x1b]999;some data\x07");
+        assert!(actions.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // OSC shell integration (OSC 133)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_shell_integration_prompt_start() {
+        assert_eq!(parse(b"\x1b]133;A\x07"), vec![Action::PromptStart]);
+    }
+
+    #[test]
+    fn osc_shell_integration_command_start() {
+        assert_eq!(parse(b"\x1b]133;B\x07"), vec![Action::CommandStart]);
+    }
+
+    #[test]
+    fn osc_shell_integration_command_executed() {
+        assert_eq!(parse(b"\x1b]133;C\x07"), vec![Action::CommandExecuted]);
+    }
+
+    #[test]
+    fn osc_shell_integration_command_finished_zero() {
+        assert_eq!(
+            parse(b"\x1b]133;D;0\x07"),
+            vec![Action::CommandFinished(Some(0))]
+        );
+    }
+
+    #[test]
+    fn osc_shell_integration_command_finished_nonzero() {
+        assert_eq!(
+            parse(b"\x1b]133;D;127\x07"),
+            vec![Action::CommandFinished(Some(127))]
+        );
+    }
+
+    #[test]
+    fn osc_shell_integration_command_finished_no_exit_code() {
+        // "D" with no args - exit code should be None (empty string doesn't parse)
+        assert_eq!(
+            parse(b"\x1b]133;D\x07"),
+            vec![Action::CommandFinished(None)]
+        );
+    }
+
+    #[test]
+    fn osc_shell_integration_unknown_type() {
+        // Unknown shell integration type - should not emit any action
+        let actions = parse(b"\x1b]133;Z\x07");
+        assert!(actions.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // OSC notifications (OSC 9, OSC 777)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_iterm2_notification() {
+        assert_eq!(
+            parse(b"\x1b]9;Build complete!\x07"),
+            vec![Action::Notification {
+                title: String::new(),
+                body: "Build complete!".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn osc_rxvt_notification_with_title_and_body() {
+        assert_eq!(
+            parse(b"\x1b]777;notify;Build;Done\x07"),
+            vec![Action::Notification {
+                title: "Build".to_string(),
+                body: "Done".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn osc_rxvt_notification_non_notify_ignored() {
+        // OSC 777 with something other than "notify" - should be ignored
+        let actions = parse(b"\x1b]777;other;stuff\x07");
+        assert!(actions.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // OSC working directory (OSC 7)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn osc_working_directory() {
+        assert_eq!(
+            parse(b"\x1b]7;file://localhost/home/user\x07"),
+            vec![Action::SetWorkingDirectory(
+                "file://localhost/home/user".to_string()
+            )]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // base64_decode unit tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn base64_decode_hello() {
+        let decoded = super::base64_decode("SGVsbG8=").unwrap();
+        assert_eq!(decoded, b"Hello");
+    }
+
+    #[test]
+    fn base64_decode_empty() {
+        let decoded = super::base64_decode("").unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn base64_decode_padding_stripped() {
+        // base64 with padding
+        let decoded = super::base64_decode("YQ==").unwrap();
+        assert_eq!(decoded, b"a");
+    }
+
+    #[test]
+    fn base64_decode_no_padding() {
+        // base64 without padding should also work
+        let decoded = super::base64_decode("YQ").unwrap();
+        assert_eq!(decoded, b"a");
+    }
+
+    #[test]
+    fn base64_decode_ignores_newlines() {
+        let decoded = super::base64_decode("SGVs\nbG8=").unwrap();
+        assert_eq!(decoded, b"Hello");
+    }
+
+    // ------------------------------------------------------------------
+    // DCS / Sixel
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn dcs_sixel_basic() {
+        // DCS q <sixel_data> ST
+        // Minimal sixel: ESC P q <data> ESC backslash
+        let actions = parse(b"\x1bPq#0!4~\x1b\\");
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::SixelImage { data, .. } => {
+                assert_eq!(data, b"#0!4~");
+            }
+            other => panic!("Expected SixelImage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dcs_sixel_with_params() {
+        // DCS 0;1;0 q <data> ST
+        let actions = parse(b"\x1bP0;1;0q~\x1b\\");
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::SixelImage {
+                aspect_ratio,
+                background,
+                horizontal_grid,
+                data,
+            } => {
+                assert_eq!(*aspect_ratio, 0);
+                assert_eq!(*background, 1);
+                assert_eq!(*horizontal_grid, 0);
+                assert_eq!(data, b"~");
+            }
+            other => panic!("Expected SixelImage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dcs_empty_no_action() {
+        // Empty DCS should produce no action
+        let actions = parse(b"\x1bP\x1b\\");
+        assert!(actions.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // APC sequences (consumed silently)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apc_consumed_silently() {
+        let actions = parse(b"\x1b_Gi=31337,s=1,v=1,a=q\x1b\\");
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn apc_followed_by_text() {
+        let actions = parse(b"\x1b_payload\x1b\\X");
+        assert_eq!(actions, vec![Action::Print('X')]);
+    }
 }

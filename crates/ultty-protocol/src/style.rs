@@ -21,7 +21,80 @@ pub struct Style {
     pub dim: bool,
     /// Opacity (0.0 - 1.0).
     pub opacity: f32,
+    /// Transition for animated property changes.
+    /// When set, style changes will animate over the specified duration.
+    pub transition: Option<Transition>,
 }
+
+/// Transition configuration for animated style changes.
+///
+/// When a region's style is updated and the style has a transition,
+/// the terminal will smoothly interpolate animatable properties
+/// (opacity, colors) from old values to new values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Transition {
+    /// Animation duration in milliseconds.
+    pub duration_ms: u32,
+    /// Easing function.
+    pub easing: Easing,
+    /// Which properties to animate (bitmask of `TRANSITION_*` constants).
+    pub properties: u32,
+}
+
+impl Default for Transition {
+    fn default() -> Self {
+        Self {
+            duration_ms: 200,
+            easing: Easing::EaseInOut,
+            properties: TRANSITION_ALL,
+        }
+    }
+}
+
+/// Easing function for transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum Easing {
+    /// Constant speed.
+    Linear = 0,
+    /// Start slow, accelerate.
+    EaseIn = 1,
+    /// Start fast, decelerate.
+    EaseOut = 2,
+    /// Start slow, accelerate, then decelerate.
+    #[default]
+    EaseInOut = 3,
+}
+
+impl Easing {
+    /// Apply easing function to a linear progress value (0.0 - 1.0).
+    pub fn apply(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Easing::Linear => t,
+            Easing::EaseIn => t * t,
+            Easing::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
+            Easing::EaseInOut => {
+                if t < 0.5 {
+                    2.0 * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
+                }
+            }
+        }
+    }
+}
+
+/// Transition property: animate opacity changes.
+pub const TRANSITION_OPACITY: u32 = 0x01;
+/// Transition property: animate background color changes.
+pub const TRANSITION_BG: u32 = 0x02;
+/// Transition property: animate foreground color changes.
+pub const TRANSITION_FG: u32 = 0x04;
+/// Transition property: animate border color changes.
+pub const TRANSITION_BORDER_COLOR: u32 = 0x08;
+/// Transition property: animate all supported properties.
+pub const TRANSITION_ALL: u32 = 0x0F;
 
 impl Style {
     /// Create a new style with defaults.
@@ -96,21 +169,37 @@ impl Color {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum NamedColor {
+    /// Standard black (color 0).
     Black = 0,
+    /// Standard red (color 1).
     Red = 1,
+    /// Standard green (color 2).
     Green = 2,
+    /// Standard yellow (color 3).
     Yellow = 3,
+    /// Standard blue (color 4).
     Blue = 4,
+    /// Standard magenta (color 5).
     Magenta = 5,
+    /// Standard cyan (color 6).
     Cyan = 6,
+    /// Standard white (color 7).
     White = 7,
+    /// Bright black / dark gray (color 8).
     BrightBlack = 8,
+    /// Bright red (color 9).
     BrightRed = 9,
+    /// Bright green (color 10).
     BrightGreen = 10,
+    /// Bright yellow (color 11).
     BrightYellow = 11,
+    /// Bright blue (color 12).
     BrightBlue = 12,
+    /// Bright magenta (color 13).
     BrightMagenta = 13,
+    /// Bright cyan (color 14).
     BrightCyan = 14,
+    /// Bright white (color 15).
     BrightWhite = 15,
     /// Terminal's default foreground.
     Foreground = 16,
@@ -169,6 +258,7 @@ impl BorderStyle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum BorderType {
+    /// No border.
     #[default]
     None = 0,
     /// Thin lines: ─ │ ┌ ┐ └ ┘
@@ -188,9 +278,13 @@ pub enum BorderType {
 /// Which edges have borders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BorderEdges {
+    /// Top edge has a border.
     pub top: bool,
+    /// Right edge has a border.
     pub right: bool,
+    /// Bottom edge has a border.
     pub bottom: bool,
+    /// Left edge has a border.
     pub left: bool,
 }
 
@@ -226,4 +320,75 @@ impl BorderEdges {
         bottom: false,
         left: true,
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn easing_linear() {
+        assert_eq!(Easing::Linear.apply(0.0), 0.0);
+        assert_eq!(Easing::Linear.apply(0.5), 0.5);
+        assert_eq!(Easing::Linear.apply(1.0), 1.0);
+    }
+
+    #[test]
+    fn easing_ease_in() {
+        assert_eq!(Easing::EaseIn.apply(0.0), 0.0);
+        assert_eq!(Easing::EaseIn.apply(1.0), 1.0);
+        // EaseIn should be slower at the start
+        assert!(Easing::EaseIn.apply(0.5) < 0.5);
+    }
+
+    #[test]
+    fn easing_ease_out() {
+        assert_eq!(Easing::EaseOut.apply(0.0), 0.0);
+        assert_eq!(Easing::EaseOut.apply(1.0), 1.0);
+        // EaseOut should be faster at the start
+        assert!(Easing::EaseOut.apply(0.5) > 0.5);
+    }
+
+    #[test]
+    fn easing_ease_in_out() {
+        assert_eq!(Easing::EaseInOut.apply(0.0), 0.0);
+        assert_eq!(Easing::EaseInOut.apply(1.0), 1.0);
+        assert_eq!(Easing::EaseInOut.apply(0.5), 0.5);
+        // First half is slow (ease in)
+        assert!(Easing::EaseInOut.apply(0.25) < 0.25);
+        // Second half is fast then slow (ease out)
+        assert!(Easing::EaseInOut.apply(0.75) > 0.75);
+    }
+
+    #[test]
+    fn easing_clamps_input() {
+        assert_eq!(Easing::Linear.apply(-0.5), 0.0);
+        assert_eq!(Easing::Linear.apply(1.5), 1.0);
+    }
+
+    #[test]
+    fn transition_default() {
+        let t = Transition::default();
+        assert_eq!(t.duration_ms, 200);
+        assert_eq!(t.easing, Easing::EaseInOut);
+        assert_eq!(t.properties, TRANSITION_ALL);
+    }
+
+    #[test]
+    fn style_with_transition() {
+        let style = Style {
+            opacity: 0.5,
+            transition: Some(Transition {
+                duration_ms: 300,
+                easing: Easing::EaseOut,
+                properties: TRANSITION_OPACITY,
+            }),
+            ..Default::default()
+        };
+        assert!(style.transition.is_some());
+        let t = style.transition.unwrap();
+        assert_eq!(t.duration_ms, 300);
+        assert_eq!(t.easing, Easing::EaseOut);
+        assert_eq!(t.properties, TRANSITION_OPACITY);
+    }
 }

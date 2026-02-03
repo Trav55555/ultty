@@ -49,12 +49,18 @@ pub enum FlexWrap {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum JustifyContent {
+    /// Pack items at the start.
     #[default]
     Start = 0,
+    /// Pack items at the end.
     End = 1,
+    /// Center items.
     Center = 2,
+    /// Distribute items with equal space between them.
     SpaceBetween = 3,
+    /// Distribute items with equal space around them.
     SpaceAround = 4,
+    /// Distribute items with equal space between and around them.
     SpaceEvenly = 5,
 }
 
@@ -62,10 +68,15 @@ pub enum JustifyContent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum AlignItems {
+    /// Align items to the start of the cross axis.
     Start = 0,
+    /// Align items to the end of the cross axis.
     End = 1,
+    /// Center items on the cross axis.
     Center = 2,
+    /// Align items along their text baseline.
     Baseline = 3,
+    /// Stretch items to fill the cross axis.
     #[default]
     Stretch = 4,
 }
@@ -74,12 +85,18 @@ pub enum AlignItems {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum AlignSelf {
+    /// Inherit from parent's `align_items`.
     #[default]
     Auto = 0,
+    /// Align self to the start of the cross axis.
     Start = 1,
+    /// Align self to the end of the cross axis.
     End = 2,
+    /// Center self on the cross axis.
     Center = 3,
+    /// Align self along the text baseline.
     Baseline = 4,
+    /// Stretch self to fill the cross axis.
     Stretch = 5,
 }
 
@@ -87,12 +104,19 @@ pub enum AlignSelf {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum AlignContent {
+    /// Pack lines at the start of the cross axis.
     Start = 0,
+    /// Pack lines at the end of the cross axis.
     End = 1,
+    /// Center lines on the cross axis.
     Center = 2,
+    /// Distribute lines with equal space between them.
     SpaceBetween = 3,
+    /// Distribute lines with equal space around them.
     SpaceAround = 4,
+    /// Distribute lines with equal space between and around them.
     SpaceEvenly = 5,
+    /// Stretch lines to fill the cross axis.
     #[default]
     Stretch = 6,
 }
@@ -141,7 +165,9 @@ impl Dimension {
 /// Overflow behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Overflow {
+    /// Horizontal overflow behavior.
     pub x: OverflowAxis,
+    /// Vertical overflow behavior.
     pub y: OverflowAxis,
 }
 
@@ -149,82 +175,115 @@ pub struct Overflow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum OverflowAxis {
+    /// Content is not clipped and may render outside the region.
     #[default]
     Visible = 0,
+    /// Content is clipped at the region boundary.
     Hidden = 1,
+    /// Always show a scrollbar.
     Scroll = 2,
+    /// Show a scrollbar only when content overflows.
     Auto = 3,
 }
 
 /// Grid line specification.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum GridLine {
+    /// Automatic grid line placement.
     #[default]
     Auto,
+    /// Explicit grid line number (1-indexed, negative counts from end).
     Line(i16),
+    /// Span across the given number of tracks.
     Span(u16),
 }
 
 /// Grid placement (start and end lines).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GridPlacement {
+    /// Start grid line.
     pub start: GridLine,
+    /// End grid line.
     pub end: GridLine,
 }
 
 /// Track sizing function for grid.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrackSizingFunction {
+    /// A single fixed track size.
     Single(Dimension),
+    /// A track with minimum and maximum size bounds.
     MinMax(Dimension, Dimension),
+    /// Repeat a pattern of track sizes a given number of times.
     Repeat(u16, Vec<Dimension>),
 }
 
 /// Size with width and height.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Size<T> {
+    /// Width component.
     pub width: T,
+    /// Height component.
     pub height: T,
 }
 
 /// Complete layout constraints for a region.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Constraints {
-    // Display
+    /// Display mode (block, flex, grid, or none).
     pub display: Display,
 
-    // Flexbox
+    /// Flex layout direction.
     pub flex_direction: FlexDirection,
+    /// Flex wrapping behavior.
     pub flex_wrap: FlexWrap,
+    /// Main axis alignment.
     pub justify_content: JustifyContent,
+    /// Cross axis alignment for children.
     pub align_items: AlignItems,
+    /// Cross axis alignment override for this item.
     pub align_self: AlignSelf,
+    /// Cross axis alignment for wrapped lines.
     pub align_content: AlignContent,
+    /// Flex grow factor.
     pub flex_grow: f32,
+    /// Flex shrink factor.
     pub flex_shrink: f32,
+    /// Initial main axis size before growing/shrinking.
     pub flex_basis: Dimension,
 
-    // Size
+    /// Preferred width.
     pub width: Dimension,
+    /// Preferred height.
     pub height: Dimension,
+    /// Minimum width constraint.
     pub min_width: Dimension,
+    /// Minimum height constraint.
     pub min_height: Dimension,
+    /// Maximum width constraint.
     pub max_width: Dimension,
+    /// Maximum height constraint.
     pub max_height: Dimension,
+    /// Width-to-height aspect ratio.
     pub aspect_ratio: Option<f32>,
 
-    // Spacing
+    /// Outer margin on each edge.
     pub margin: Edges<Dimension>,
+    /// Inner padding on each edge.
     pub padding: Edges<Dimension>,
+    /// Gap between children (column gap, row gap).
     pub gap: Size<Dimension>,
 
-    // Overflow
+    /// Overflow behavior for content that exceeds bounds.
     pub overflow: Overflow,
 
-    // Grid (only used when display = Grid)
+    /// Grid column track definitions (only used when display is `Grid`).
     pub grid_template_columns: Vec<TrackSizingFunction>,
+    /// Grid row track definitions (only used when display is `Grid`).
     pub grid_template_rows: Vec<TrackSizingFunction>,
+    /// Grid column placement for this item.
     pub grid_column: GridPlacement,
+    /// Grid row placement for this item.
     pub grid_row: GridPlacement,
 }
 
@@ -286,9 +345,13 @@ impl Constraints {
 /// Edge values (top, right, bottom, left).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Edges<T> {
+    /// Top edge value.
     pub top: T,
+    /// Right edge value.
     pub right: T,
+    /// Bottom edge value.
     pub bottom: T,
+    /// Left edge value.
     pub left: T,
 }
 

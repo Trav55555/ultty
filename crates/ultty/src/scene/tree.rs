@@ -428,4 +428,130 @@ mod tests {
         let mut tree = SceneTree::new();
         assert!(tree.remove(RegionId::new(999)).is_none());
     }
+
+    #[test]
+    fn reparent_region() {
+        let mut tree = SceneTree::new();
+
+        // Create two parent regions under root
+        let mut p1 = Region::new(RegionId::new(1));
+        p1.parent = Some(RegionId::ROOT);
+        tree.insert(p1);
+
+        let mut p2 = Region::new(RegionId::new(2));
+        p2.parent = Some(RegionId::ROOT);
+        tree.insert(p2);
+
+        // Create a child under p1
+        let mut child = Region::new(RegionId::new(3));
+        child.parent = Some(RegionId::new(1));
+        tree.insert(child);
+
+        // Verify initial state
+        assert_eq!(tree.get(RegionId::new(1)).unwrap().children, vec![RegionId::new(3)]);
+        assert!(tree.get(RegionId::new(2)).unwrap().children.is_empty());
+
+        // Reparent: remove child then re-insert under p2
+        let mut removed = tree.remove(RegionId::new(3)).unwrap();
+        assert!(tree.get(RegionId::new(1)).unwrap().children.is_empty());
+
+        removed.parent = Some(RegionId::new(2));
+        tree.insert(removed);
+
+        assert!(tree.get(RegionId::new(1)).unwrap().children.is_empty());
+        assert_eq!(tree.get(RegionId::new(2)).unwrap().children, vec![RegionId::new(3)]);
+        assert_eq!(tree.get(RegionId::new(3)).unwrap().parent, Some(RegionId::new(2)));
+    }
+
+    #[test]
+    fn get_mut_modifies_region() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        tree.insert(r);
+
+        tree.get_mut(RegionId::new(1)).unwrap().content =
+            Content::Text(TextContent::new("modified"));
+
+        match &tree.get(RegionId::new(1)).unwrap().content {
+            Content::Text(tc) => assert_eq!(tc.text, "modified"),
+            _ => panic!("expected Text content"),
+        }
+    }
+
+    #[test]
+    fn default_tree_matches_new() {
+        let tree1 = SceneTree::new();
+        let tree2 = SceneTree::default();
+        assert_eq!(tree1.root(), tree2.root());
+        assert!(tree1.get(RegionId::ROOT).is_some());
+        assert!(tree2.get(RegionId::ROOT).is_some());
+    }
+
+    #[test]
+    fn depth_first_single_node() {
+        let tree = SceneTree::new();
+        let ids: Vec<u32> = tree.iter_depth_first().map(|r| r.id.0).collect();
+        assert_eq!(ids, vec![0]); // Just root
+    }
+
+    #[test]
+    fn depth_first_deep_chain() {
+        let mut tree = SceneTree::new();
+
+        let mut r1 = Region::new(RegionId::new(1));
+        r1.parent = Some(RegionId::ROOT);
+        tree.insert(r1);
+
+        let mut r2 = Region::new(RegionId::new(2));
+        r2.parent = Some(RegionId::new(1));
+        tree.insert(r2);
+
+        let mut r3 = Region::new(RegionId::new(3));
+        r3.parent = Some(RegionId::new(2));
+        tree.insert(r3);
+
+        let ids: Vec<u32> = tree.iter_depth_first().map(|r| r.id.0).collect();
+        // Root(0) -> 1 -> 2 -> 3
+        assert_eq!(ids, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn insert_without_parent_in_tree() {
+        // Region with a parent ID that doesn't exist in the tree
+        let mut tree = SceneTree::new();
+        let mut orphan = Region::new(RegionId::new(99));
+        orphan.parent = Some(RegionId::new(999)); // non-existent parent
+        tree.insert(orphan);
+
+        // The region is inserted but not linked to any parent's children
+        assert!(tree.get(RegionId::new(99)).is_some());
+        assert!(tree.get(RegionId::ROOT).unwrap().children.is_empty());
+    }
+
+    #[test]
+    fn insert_no_parent_field() {
+        // Region with parent = None (like an additional root)
+        let mut tree = SceneTree::new();
+        let free = Region::new(RegionId::new(50));
+        tree.insert(free);
+
+        assert!(tree.get(RegionId::new(50)).is_some());
+        // Root should not have it as a child
+        assert!(tree.get(RegionId::ROOT).unwrap().children.is_empty());
+    }
+
+    #[test]
+    fn search_match_fields() {
+        let m = SearchMatch {
+            region_id: RegionId::new(5),
+            span_index: Some(2),
+            byte_offset: 10,
+            length: 3,
+        };
+        assert_eq!(m.region_id, RegionId::new(5));
+        assert_eq!(m.span_index, Some(2));
+        assert_eq!(m.byte_offset, 10);
+        assert_eq!(m.length, 3);
+    }
 }

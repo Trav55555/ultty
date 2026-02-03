@@ -1,6 +1,5 @@
 ---
 source: crates/ultty/tests/native_protocol.rs
-assertion_line: 1407
 expression: "&region.content"
 ---
 RichText(
@@ -27,6 +26,7 @@ RichText(
                     underline: false,
                     dim: false,
                     opacity: 0.0,
+                    transition: None,
                 },
             },
             Span {
@@ -50,6 +50,7 @@ RichText(
                     underline: false,
                     dim: false,
                     opacity: 0.0,
+                    transition: None,
                 },
             },
             Span {
@@ -73,6 +74,7 @@ RichText(
                     underline: false,
                     dim: false,
                     opacity: 0.0,
+                    transition: None,
                 },
             },
         ],

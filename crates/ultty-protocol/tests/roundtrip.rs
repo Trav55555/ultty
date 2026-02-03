@@ -169,6 +169,7 @@ fn arb_style() -> impl Strategy<Value = Style> {
                 underline,
                 dim,
                 opacity,
+                transition: None,
             },
         )
 }
@@ -1016,6 +1017,7 @@ fn all_style_options_roundtrip() {
             underline: true,
             dim: true,
             opacity: 0.75,
+            transition: None,
         },
     };
     let encoded = msg.encode_to_bytes();

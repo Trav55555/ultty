@@ -55,7 +55,10 @@ pub use layout::{
     TrackSizingFunction,
 };
 pub use messages::{AppMessage, ComputedRegionLayout, FrameId, LayoutTrigger, TerminalMessage};
-pub use style::{BorderEdges, BorderStyle, BorderType, Color, NamedColor, Style};
+pub use style::{
+    BorderEdges, BorderStyle, BorderType, Color, Easing, NamedColor, Style, Transition,
+    TRANSITION_ALL, TRANSITION_BG, TRANSITION_BORDER_COLOR, TRANSITION_FG, TRANSITION_OPACITY,
+};
 pub use vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimRegister, VimState};
 
 /// Region identifier, unique within a session.

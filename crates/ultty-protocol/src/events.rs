@@ -2,10 +2,13 @@
 
 use crate::RegionId;
 
-/// Event subscription masks.
+/// Subscription bitmask for mouse events.
 pub const EVENT_MOUSE: u32 = 0x01;
+/// Subscription bitmask for keyboard events.
 pub const EVENT_KEY: u32 = 0x02;
+/// Subscription bitmask for focus/blur events.
 pub const EVENT_FOCUS: u32 = 0x04;
+/// Subscription bitmask for scroll events.
 pub const EVENT_SCROLL: u32 = 0x08;
 
 /// Input event.
@@ -44,36 +47,59 @@ pub enum InputType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MouseButton {
+    /// Primary (left) mouse button.
     Left = 0,
+    /// Middle mouse button (scroll wheel click).
     Middle = 1,
+    /// Secondary (right) mouse button.
     Right = 2,
+    /// Extra mouse button 4 (back).
     Button4 = 3,
+    /// Extra mouse button 5 (forward).
     Button5 = 4,
 }
 
 use serde::{Deserialize, Serialize};
 
+/// Keyboard key identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Key {
+    /// A Unicode character key.
     Char(char),
+    /// A function key (F1-F24).
     Function(u8),
+    /// Escape key.
     Escape,
+    /// Enter / Return key.
     Enter,
+    /// Tab key.
     Tab,
+    /// Backspace key.
     Backspace,
+    /// Delete key.
     Delete,
+    /// Insert key.
     Insert,
+    /// Home key.
     Home,
+    /// End key.
     End,
+    /// Page Up key.
     PageUp,
+    /// Page Down key.
     PageDown,
+    /// Up arrow key.
     Up,
+    /// Down arrow key.
     Down,
+    /// Left arrow key.
     Left,
+    /// Right arrow key.
     Right,
 }
 
+/// Keyboard modifier flags (shift, ctrl, alt, meta).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Modifiers {
     #[serde(rename = "bits")]
@@ -81,10 +107,15 @@ pub struct Modifiers {
 }
 
 impl Modifiers {
+    /// No modifiers held.
     pub const NONE: Modifiers = Modifiers { bits: 0 };
+    /// Shift key modifier.
     pub const SHIFT: Modifiers = Modifiers { bits: 0x01 };
+    /// Control key modifier.
     pub const CTRL: Modifiers = Modifiers { bits: 0x02 };
+    /// Alt / Option key modifier.
     pub const ALT: Modifiers = Modifiers { bits: 0x04 };
+    /// Meta / Command / Windows key modifier.
     pub const META: Modifiers = Modifiers { bits: 0x08 };
 
     /// Check if shift is pressed.
@@ -114,6 +145,7 @@ impl Modifiers {
         }
     }
 
+    /// Check if all bits in `other` are set in this modifier set.
     pub const fn contains(self, other: Modifiers) -> bool {
         self.bits & other.bits == other.bits
     }
