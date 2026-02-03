@@ -26,6 +26,8 @@ impl App {
             if server.update_animations() {
                 self.needs_redraw = true;
             }
+            // Check keepalive timeouts
+            server.check_keepalives();
 
             // Handle clipboard operations from native sessions
             let gets = server.pending_clipboard_gets();

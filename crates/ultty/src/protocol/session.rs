@@ -42,6 +42,10 @@ pub struct NativeSession {
     current_frame: Option<FrameId>,
     /// Whether scene changed during current frame.
     scene_dirty: bool,
+    /// Whether layout constraints changed (requires Taffy recomputation).
+    constraints_dirty: bool,
+    /// Whether visual state changed (requires vertex buffer rebuild).
+    render_dirty: bool,
     /// Negotiated capabilities.
     capabilities: u32,
     /// Event subscriptions: region_id -> event mask.
@@ -58,6 +62,12 @@ pub struct NativeSession {
     pending_clipboard_set: Option<String>,
     /// Active style transitions: region_id -> (start_time, start_opacity, target_style).
     style_animations: HashMap<RegionId, StyleAnimation>,
+    /// Time of last data received from client.
+    last_activity: std::time::Instant,
+    /// Time of last ping sent (if any).
+    last_ping_sent: Option<std::time::Instant>,
+    /// Whether we're waiting for a pong reply.
+    awaiting_pong: bool,
 }
 
 /// Tracks an in-progress style transition for a region.
@@ -97,6 +107,8 @@ impl NativeSession {
             viewport_height: 24.0,
             current_frame: None,
             scene_dirty: false,
+            constraints_dirty: false,
+            render_dirty: true,
             capabilities: 0,
             subscriptions: HashMap::new(),
             focused_region: None,
@@ -105,6 +117,9 @@ impl NativeSession {
             pending_clipboard_get: false,
             pending_clipboard_set: None,
             style_animations: HashMap::new(),
+            last_activity: std::time::Instant::now(),
+            last_ping_sent: None,
+            awaiting_pong: false,
         })
     }
 
@@ -115,6 +130,8 @@ impl NativeSession {
             self.viewport_width = width;
             self.viewport_height = height;
             self.scene_dirty = true;
+            self.constraints_dirty = true;
+            self.render_dirty = true;
         }
     }
 
@@ -167,6 +184,7 @@ impl NativeSession {
         let n = self.stream.read(&mut temp)?;
         if n > 0 {
             self.read_buf.extend_from_slice(&temp[..n]);
+            self.last_activity = std::time::Instant::now();
         }
         Ok(n)
     }
@@ -181,11 +199,38 @@ impl NativeSession {
         // Peek at header to get length
         let magic = u16::from_le_bytes([self.read_buf[0], self.read_buf[1]]);
         if magic != u16::from_le_bytes(FRAME_MAGIC) {
-            error!("Session {} invalid magic: 0x{:04x}", self.session_id, magic);
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid frame magic",
-            ));
+            // Stream resync: scan forward for next valid magic bytes
+            warn!(
+                "Session {} invalid magic 0x{:04x}, attempting resync",
+                self.session_id, magic
+            );
+            let magic_bytes = FRAME_MAGIC;
+            let mut found = false;
+            for i in 1..self.read_buf.len().saturating_sub(1) {
+                if self.read_buf[i] == magic_bytes[0]
+                    && i + 1 < self.read_buf.len()
+                    && self.read_buf[i + 1] == magic_bytes[1]
+                {
+                    warn!(
+                        "Session {} resync: skipped {} bytes to next magic",
+                        self.session_id, i
+                    );
+                    self.read_buf.advance(i);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                // No magic found, discard all but last byte (it might be first byte of magic)
+                let keep = if self.read_buf.last() == Some(&magic_bytes[0]) {
+                    1
+                } else {
+                    0
+                };
+                let discard = self.read_buf.len() - keep;
+                self.read_buf.advance(discard);
+            }
+            return Ok(None);
         }
 
         let payload_len = u32::from_le_bytes([
@@ -358,6 +403,11 @@ impl NativeSession {
                 self.pending_clipboard_set = Some(text);
             }
 
+            AppMessage::Pong => {
+                debug!("Session {} received pong", self.session_id);
+                self.awaiting_pong = false;
+            }
+
             AppMessage::Disconnect => {
                 info!("Session {} disconnected (explicit)", self.session_id);
                 return Ok(false);
@@ -418,6 +468,8 @@ impl NativeSession {
         }
 
         self.scene_dirty = true;
+        self.constraints_dirty = true;
+        self.render_dirty = true;
         debug!("Created region {:?} under {:?}", id, parent);
     }
 
@@ -427,6 +479,8 @@ impl NativeSession {
             region.constraints = constraints;
             region.mark_dirty();
             self.scene_dirty = true;
+            self.constraints_dirty = true;
+            self.render_dirty = true;
         } else {
             warn!("SetConstraints for unknown region {:?}", id);
             let _ = self.send_message(&TerminalMessage::Error {
@@ -465,6 +519,7 @@ impl NativeSession {
             }
             region.mark_dirty();
             self.scene_dirty = true;
+            self.render_dirty = true;
         } else {
             warn!("SetStyle for unknown region {:?}", id);
             let _ = self.send_message(&TerminalMessage::Error {
@@ -488,6 +543,7 @@ impl NativeSession {
             region.content = content;
             region.mark_dirty();
             self.scene_dirty = true;
+            self.render_dirty = true;
         } else {
             warn!("SetContent for unknown region {:?}", id);
             let _ = self.send_message(&TerminalMessage::Error {
@@ -501,6 +557,8 @@ impl NativeSession {
     fn handle_delete_region(&mut self, id: RegionId) {
         if self.scene.remove(id).is_some() {
             self.scene_dirty = true;
+            self.constraints_dirty = true;
+            self.render_dirty = true;
             self.subscriptions.remove(&id);
             debug!("Deleted region {:?}", id);
         } else {
@@ -536,6 +594,8 @@ impl NativeSession {
             }
 
             self.scene_dirty = true;
+            self.constraints_dirty = true;
+            self.render_dirty = true;
             debug!("Reparented region {:?} to {:?}", id, new_parent);
         } else {
             warn!("ReparentRegion for unknown region {:?}", id);
@@ -567,7 +627,10 @@ impl NativeSession {
 
         // Compute layout if scene changed
         if self.scene_dirty {
-            self.compute_and_send_layout(Some(frame_id), LayoutTrigger::ConstraintChange)?;
+            if self.constraints_dirty {
+                self.compute_and_send_layout(Some(frame_id), LayoutTrigger::ConstraintChange)?;
+                self.constraints_dirty = false;
+            }
             self.scene_dirty = false;
         }
 
@@ -677,6 +740,67 @@ impl NativeSession {
         Ok(())
     }
 
+    /// Check keepalive state for this session.
+    ///
+    /// Returns `Ok(true)` if the session is alive, `Ok(false)` if it should be
+    /// disconnected due to timeout.
+    ///
+    /// - Idle timeout: 120s with no data → close
+    /// - Ping interval: 30s since last activity → send Ping
+    /// - Pong timeout: 10s after ping with no pong → close
+    pub fn check_keepalive(&mut self) -> io::Result<bool> {
+        let now = std::time::Instant::now();
+        let idle = now.duration_since(self.last_activity);
+
+        // Hard idle timeout: 120 seconds
+        if idle > std::time::Duration::from_secs(120) {
+            info!(
+                "Session {} idle timeout ({}s)",
+                self.session_id,
+                idle.as_secs()
+            );
+            return Ok(false);
+        }
+
+        // Pong timeout: if we sent a ping and haven't received pong in 10s
+        if self.awaiting_pong {
+            if let Some(ping_time) = self.last_ping_sent {
+                if now.duration_since(ping_time) > std::time::Duration::from_secs(10) {
+                    info!(
+                        "Session {} pong timeout",
+                        self.session_id,
+                    );
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Ping interval: 30s since last activity, send ping if not already awaiting
+        if idle > std::time::Duration::from_secs(30) && !self.awaiting_pong {
+            debug!("Session {} sending ping", self.session_id);
+            self.send_message(&TerminalMessage::Ping)?;
+            self.last_ping_sent = Some(now);
+            self.awaiting_pong = true;
+        }
+
+        Ok(true)
+    }
+
+    /// Returns true if there are active style animations in progress.
+    pub fn has_active_style_animations(&self) -> bool {
+        !self.style_animations.is_empty()
+    }
+
+    /// Returns true if the session's visual state has changed since last render.
+    pub fn is_render_dirty(&self) -> bool {
+        self.render_dirty
+    }
+
+    /// Clear the render dirty flag (call after rebuilding vertex buffers).
+    pub fn clear_render_dirty(&mut self) {
+        self.render_dirty = false;
+    }
+
     pub fn scene(&self) -> &SceneTree {
         &self.scene
     }
@@ -721,6 +845,7 @@ impl NativeSession {
         }
         if !self.scroll_targets.is_empty() {
             self.scene_dirty = true;
+            self.render_dirty = true;
         }
         !self.scroll_targets.is_empty()
     }
@@ -801,6 +926,7 @@ impl NativeSession {
         let active = !self.style_animations.is_empty();
         if active {
             self.scene_dirty = true;
+            self.render_dirty = true;
         }
         active
     }

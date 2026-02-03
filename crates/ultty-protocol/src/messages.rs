@@ -93,6 +93,10 @@ pub enum AppMessage {
     // Session
     /// Disconnect cleanly.
     Disconnect,
+
+    // Keepalive
+    /// Pong response to a Ping from the terminal.
+    Pong,
 }
 
 /// Messages from terminal to app.
@@ -134,6 +138,10 @@ pub enum TerminalMessage {
     // Clipboard
     /// Clipboard content response.
     ClipboardContent { text: Option<String> },
+
+    // Keepalive
+    /// Ping request to the app (expects a Pong reply).
+    Ping,
 
     // Errors
     /// Error response.

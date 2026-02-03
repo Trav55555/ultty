@@ -1,24 +1,30 @@
 //! Built-in widgets.
 
 mod button;
+mod checkbox;
 mod container;
 mod image;
 mod list;
 mod modal;
 mod scroll;
+mod select;
 mod table;
 mod tabs;
 mod text;
+mod toggle;
 
 pub use button::Button;
+pub use checkbox::Checkbox;
 pub use container::{Column, Row, Stack};
 pub use image::Image;
 pub use list::List;
 pub use modal::Modal;
 pub use scroll::ScrollView;
+pub use select::Select;
 pub use table::Table;
 pub use tabs::Tabs;
 pub use text::{RichText, Text, TextInput};
+pub use toggle::Toggle;
 
 use crate::event::{Event, KeyEvent};
 use ratatui::layout::Rect;

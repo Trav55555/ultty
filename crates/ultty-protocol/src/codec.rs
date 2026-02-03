@@ -1863,6 +1863,7 @@ mod msg_type {
     pub const UNSUBSCRIBE: u16 = 0x0051;
     pub const CLIPBOARD_GET: u16 = 0x0060;
     pub const CLIPBOARD_SET: u16 = 0x0061;
+    pub const PONG: u16 = 0x0070;
     pub const DISCONNECT: u16 = 0x00FF;
 
     // Terminal -> App
@@ -1874,6 +1875,7 @@ mod msg_type {
     pub const FOCUS_EVENT: u16 = 0x0023;
     pub const SCROLL_EVENT: u16 = 0x0024;
     pub const CLIPBOARD_CONTENT: u16 = 0x0025;
+    pub const PING: u16 = 0x0070;
     pub const ERROR: u16 = 0x00FF;
 }
 
@@ -1975,6 +1977,7 @@ impl Encode for AppMessage {
                 msg_type::CLIPBOARD_SET
             }
             AppMessage::Disconnect => msg_type::DISCONNECT,
+            AppMessage::Pong => msg_type::PONG,
         };
 
         let payload_len = (buf.len() - payload_start) as u32;
@@ -2141,6 +2144,7 @@ impl Decode for AppMessage {
                 Ok(AppMessage::ClipboardSet { text })
             }
             msg_type::DISCONNECT => Ok(AppMessage::Disconnect),
+            msg_type::PONG => Ok(AppMessage::Pong),
             _ => Err(ProtocolError::UnknownMessageType(type_code)),
         };
 
@@ -2234,6 +2238,7 @@ impl Encode for TerminalMessage {
                 encode_option_string(text, buf);
                 msg_type::CLIPBOARD_CONTENT
             }
+            TerminalMessage::Ping => msg_type::PING,
             TerminalMessage::Error { code, message } => {
                 buf.put_u16_le(*code);
                 encode_string(message, buf);
@@ -2352,6 +2357,7 @@ impl Decode for TerminalMessage {
             msg_type::RESIZE => Ok(TerminalMessage::Resize(ResizeEvent::decode(buf)?)),
             msg_type::FOCUS_EVENT => Ok(TerminalMessage::Focus(FocusEvent::decode(buf)?)),
             msg_type::SCROLL_EVENT => Ok(TerminalMessage::Scroll(ScrollEvent::decode(buf)?)),
+            msg_type::PING => Ok(TerminalMessage::Ping),
             msg_type::CLIPBOARD_CONTENT => {
                 let text = decode_option_string(buf)?;
                 Ok(TerminalMessage::ClipboardContent { text })
@@ -2562,6 +2568,24 @@ mod tests {
         let mut cursor = buf.freeze();
         let result = decode_vec_track(&mut cursor);
         assert!(matches!(result, Err(ProtocolError::InvalidData(_))));
+    }
+
+    #[test]
+    fn test_roundtrip_pong() {
+        let msg = AppMessage::Pong;
+        let bytes = msg.encode_to_bytes();
+        let mut cursor = bytes.as_ref();
+        let decoded = AppMessage::decode(&mut cursor).unwrap();
+        assert_eq!(decoded, AppMessage::Pong);
+    }
+
+    #[test]
+    fn test_roundtrip_ping() {
+        let msg = TerminalMessage::Ping;
+        let bytes = msg.encode_to_bytes();
+        let mut cursor = bytes.as_ref();
+        let decoded = TerminalMessage::decode(&mut cursor).unwrap();
+        assert_eq!(decoded, TerminalMessage::Ping);
     }
 
     #[test]

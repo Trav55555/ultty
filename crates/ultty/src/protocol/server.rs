@@ -338,6 +338,29 @@ impl ProtocolServer {
         any_active
     }
 
+    /// Check keepalive state for all sessions. Removes timed-out sessions.
+    pub fn check_keepalives(&mut self) {
+        let mut to_remove = Vec::new();
+        for (&key, session) in &mut self.sessions {
+            match session.check_keepalive() {
+                Ok(true) => {}
+                Ok(false) => {
+                    info!("Session {} timed out", session.session_id());
+                    to_remove.push(key);
+                }
+                Err(e) => {
+                    error!("Session {} keepalive error: {}", session.session_id(), e);
+                    to_remove.push(key);
+                }
+            }
+        }
+        for key in to_remove {
+            if let Some(session) = self.sessions.remove(&key) {
+                let _ = self.poller.delete(session.stream_fd());
+            }
+        }
+    }
+
     /// Flush pending writes for all sessions.
     pub fn flush(&mut self) {
         for session in self.sessions.values_mut() {
