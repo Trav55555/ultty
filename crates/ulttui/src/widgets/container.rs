@@ -4,7 +4,21 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::Frame;
 
 use super::View;
-use ultty_protocol::{AppMessage, Constraints, Dimension, Display, FlexDirection, RegionId};
+use ultty_protocol::{AppMessage, Constraints, Dimension, Display, Edges, FlexDirection, RegionId};
+
+/// Extract padding values as (top, right, bottom, left) in cell units.
+fn extract_cells(edges: &Edges<Dimension>) -> (u16, u16, u16, u16) {
+    let to_u16 = |d: &Dimension| match d {
+        Dimension::Cells(n) => *n as u16,
+        _ => 0,
+    };
+    (
+        to_u16(&edges.top),
+        to_u16(&edges.right),
+        to_u16(&edges.bottom),
+        to_u16(&edges.left),
+    )
+}
 
 fn render_child_to_native(
     child: &dyn View,
@@ -128,17 +142,40 @@ impl View for Column {
             return;
         }
 
-        let constraints: Vec<Constraint> =
-            self.children.iter().map(|_| Constraint::Min(1)).collect();
+        // Apply padding
+        let pad = extract_cells(&self.constraints.padding);
+        let inner = Rect::new(
+            area.x + pad.3,
+            area.y + pad.0,
+            area.width.saturating_sub(pad.1 + pad.3),
+            area.height.saturating_sub(pad.0 + pad.2),
+        );
 
+        // Reserve space for gaps between children
+        let total_gap = self.gap * (self.children.len().saturating_sub(1)) as u16;
+        let available = inner.height.saturating_sub(total_gap);
+
+        let constraints: Vec<Constraint> = self
+            .children
+            .iter()
+            .map(|_| Constraint::Min(1))
+            .collect();
+
+        let no_gap_area = Rect::new(inner.x, inner.y, inner.width, available);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(0)
             .constraints(constraints)
-            .split(area);
+            .split(no_gap_area);
 
-        for (child, chunk) in self.children.iter().zip(chunks.iter()) {
-            child.render_ansi(frame, *chunk);
+        let mut y_offset = 0u16;
+        for (i, (child, chunk)) in self.children.iter().zip(chunks.iter()).enumerate() {
+            let shifted = Rect::new(inner.x, inner.y + y_offset, chunk.width, chunk.height);
+            child.render_ansi(frame, shifted);
+            y_offset += chunk.height;
+            if i < self.children.len() - 1 {
+                y_offset += self.gap;
+            }
         }
     }
 }
@@ -228,20 +265,30 @@ impl View for Row {
             return;
         }
 
+        let total_gap = self.gap * (self.children.len().saturating_sub(1)) as u16;
+        let available = area.width.saturating_sub(total_gap);
+
         let constraints: Vec<Constraint> = self
             .children
             .iter()
             .map(|_| Constraint::Ratio(1, self.children.len() as u32))
             .collect();
 
+        let no_gap_area = Rect::new(area.x, area.y, available, area.height);
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .margin(0)
             .constraints(constraints)
-            .split(area);
+            .split(no_gap_area);
 
-        for (child, chunk) in self.children.iter().zip(chunks.iter()) {
-            child.render_ansi(frame, *chunk);
+        let mut x_offset = 0u16;
+        for (i, (child, chunk)) in self.children.iter().zip(chunks.iter()).enumerate() {
+            let shifted = Rect::new(area.x + x_offset, area.y, chunk.width, chunk.height);
+            child.render_ansi(frame, shifted);
+            x_offset += chunk.width;
+            if i < self.children.len() - 1 {
+                x_offset += self.gap;
+            }
         }
     }
 }
@@ -317,5 +364,71 @@ impl View for Stack {
         for child in &self.children {
             child.render_ansi(frame, area);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::widgets::Text;
+
+    #[test]
+    fn column_children_count() {
+        let col = Column::new()
+            .child(Text::new("a"))
+            .child(Text::new("b"))
+            .child(Text::new("c"));
+        assert_eq!(<Column as View>::children_count(&col), 3);
+    }
+
+    #[test]
+    fn column_constraints() {
+        let col = Column::new().gap(2.0).padding(1.0);
+        let c = <Column as View>::constraints(&col);
+        assert_eq!(c.display, Display::Flex);
+        assert_eq!(c.flex_direction, FlexDirection::Column);
+        assert_eq!(c.gap.height, Dimension::Cells(2.0));
+        assert_eq!(c.padding.top, Dimension::Cells(1.0));
+    }
+
+    #[test]
+    fn row_children_count() {
+        let row = Row::new().child(Text::new("x")).child(Text::new("y"));
+        assert_eq!(<Row as View>::children_count(&row), 2);
+    }
+
+    #[test]
+    fn row_constraints() {
+        let row = Row::new().gap(3.0);
+        let c = <Row as View>::constraints(&row);
+        assert_eq!(c.display, Display::Flex);
+        assert_eq!(c.flex_direction, FlexDirection::Row);
+        assert_eq!(c.gap.width, Dimension::Cells(3.0));
+    }
+
+    #[test]
+    fn stack_children_count() {
+        let stack = Stack::new().child(Text::new("a"));
+        assert_eq!(<Stack as View>::children_count(&stack), 1);
+    }
+
+    #[test]
+    fn column_empty() {
+        let col = Column::new();
+        assert_eq!(<Column as View>::children_count(&col), 0);
+    }
+
+    #[test]
+    fn extract_cells_works() {
+        let edges = Edges::all(Dimension::Cells(2.0));
+        let (t, r, b, l) = extract_cells(&edges);
+        assert_eq!((t, r, b, l), (2, 2, 2, 2));
+    }
+
+    #[test]
+    fn extract_cells_auto() {
+        let edges = Edges::all(Dimension::Auto);
+        let (t, r, b, l) = extract_cells(&edges);
+        assert_eq!((t, r, b, l), (0, 0, 0, 0));
     }
 }

@@ -74,3 +74,70 @@ impl View for Button {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ultty_protocol::{Color, Content, NamedColor};
+
+    #[test]
+    fn button_label() {
+        let btn = Button::new("Click me");
+        assert_eq!(btn.label(), "Click me");
+    }
+
+    #[test]
+    fn button_content() {
+        let btn = Button::new("OK");
+        let content = <Button as View>::content(&btn);
+        match content {
+            Content::Text(tc) => assert_eq!(tc.text, "[ OK ]"),
+            _ => panic!("Expected Text content"),
+        }
+    }
+
+    #[test]
+    fn button_style() {
+        let btn = Button::new("X");
+        let style = <Button as View>::style(&btn);
+        assert!(style.bold);
+        assert_eq!(style.fg, Some(Color::Named(NamedColor::White)));
+        assert_eq!(style.bg, Some(Color::Named(NamedColor::BrightBlack)));
+    }
+
+    #[test]
+    fn button_is_focusable() {
+        let btn = Button::new("X");
+        assert!(btn.is_focusable());
+    }
+
+    #[test]
+    fn button_on_key_enter() {
+        let mut btn = Button::new("X");
+        let key = KeyEvent {
+            key: Key::Enter,
+            modifiers: Default::default(),
+        };
+        assert!(matches!(btn.on_key(&key), Some(FocusAction::Consumed)));
+    }
+
+    #[test]
+    fn button_on_key_tab() {
+        let mut btn = Button::new("X");
+        let key = KeyEvent {
+            key: Key::Tab,
+            modifiers: Default::default(),
+        };
+        assert!(matches!(btn.on_key(&key), Some(FocusAction::Next)));
+    }
+
+    #[test]
+    fn button_on_key_unhandled() {
+        let mut btn = Button::new("X");
+        let key = KeyEvent {
+            key: Key::Char('a'),
+            modifiers: Default::default(),
+        };
+        assert!(btn.on_key(&key).is_none());
+    }
+}

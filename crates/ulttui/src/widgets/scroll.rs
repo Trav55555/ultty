@@ -229,9 +229,21 @@ impl View for ScrollView {
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
+        let max_scroll = (self.content_height - self.viewport_height).max(0.0);
+        let pct = if max_scroll > 0.0 {
+            (self.scroll_y / max_scroll * 100.0) as u32
+        } else {
+            0
+        };
+        let title = if self.content_height > 0.0 {
+            format!("ScrollView [{}%]", pct)
+        } else {
+            "ScrollView".to_string()
+        };
+
         let block = Block::default()
             .borders(Borders::ALL)
-            .title("ScrollView")
+            .title(title)
             .border_style(Style::default().fg(Color::DarkGray));
 
         let inner = block.inner(area);
@@ -243,7 +255,7 @@ impl View for ScrollView {
             let scroll_info = format!(
                 "Scroll: {:.0}/{:.0}",
                 self.scroll_y,
-                self.content_height.max(1.0) - self.viewport_height
+                max_scroll
             );
             let paragraph = Paragraph::new(Line::raw(scroll_info));
             frame.render_widget(paragraph, inner);
