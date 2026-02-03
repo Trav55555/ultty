@@ -35,7 +35,6 @@ pub mod app;
 pub mod backend;
 pub mod event;
 pub mod layout;
-pub mod state;
 pub mod vim;
 pub mod widgets;
 

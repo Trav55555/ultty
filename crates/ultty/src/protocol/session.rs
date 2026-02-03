@@ -50,6 +50,8 @@ pub struct NativeSession {
     focused_region: Option<RegionId>,
     /// Per-region scroll offsets: region_id -> (scroll_x, scroll_y).
     scroll_offsets: HashMap<RegionId, (f32, f32)>,
+    /// Animated scroll targets: region_id -> (target_x, target_y).
+    scroll_targets: HashMap<RegionId, (f32, f32)>,
 }
 
 impl NativeSession {
@@ -73,6 +75,7 @@ impl NativeSession {
             subscriptions: HashMap::new(),
             focused_region: None,
             scroll_offsets: HashMap::new(),
+            scroll_targets: HashMap::new(),
         })
     }
 
@@ -254,11 +257,18 @@ impl NativeSession {
                 id,
                 x,
                 y,
-                animate: _,
+                animate,
             } => {
-                self.scroll_offsets.insert(id, (x, y));
+                if animate {
+                    self.scroll_targets.insert(id, (x, y));
+                    // Initialize current position if not yet set
+                    self.scroll_offsets.entry(id).or_insert((0.0, 0.0));
+                } else {
+                    self.scroll_offsets.insert(id, (x, y));
+                    self.scroll_targets.remove(&id);
+                }
                 self.scene_dirty = true;
-                debug!("Scroll set for {:?}: ({}, {})", id, x, y);
+                debug!("Scroll set for {:?}: ({}, {}), animate={}", id, x, y, animate);
             }
 
             AppMessage::Focus { id } => {
@@ -580,6 +590,33 @@ impl NativeSession {
     /// Get scroll offset for a region.
     pub fn scroll_offset(&self, id: RegionId) -> (f32, f32) {
         self.scroll_offsets.get(&id).copied().unwrap_or((0.0, 0.0))
+    }
+
+    /// Advance animated scroll positions toward their targets.
+    /// Returns `true` if any animations are still active (needs another frame).
+    pub fn update_scroll_animations(&mut self) -> bool {
+        const LERP_FACTOR: f32 = 0.15;
+        const EPSILON: f32 = 0.5;
+
+        let mut done = Vec::new();
+        for (&id, &(tx, ty)) in &self.scroll_targets {
+            let (cx, cy) = self.scroll_offsets.get(&id).copied().unwrap_or((0.0, 0.0));
+            let nx = cx + (tx - cx) * LERP_FACTOR;
+            let ny = cy + (ty - cy) * LERP_FACTOR;
+            let nx = if (nx - tx).abs() < EPSILON { tx } else { nx };
+            let ny = if (ny - ty).abs() < EPSILON { ty } else { ny };
+            self.scroll_offsets.insert(id, (nx, ny));
+            if nx == tx && ny == ty {
+                done.push(id);
+            }
+        }
+        for id in done {
+            self.scroll_targets.remove(&id);
+        }
+        if !self.scroll_targets.is_empty() {
+            self.scene_dirty = true;
+        }
+        !self.scroll_targets.is_empty()
     }
 
     pub fn has_pending_writes(&self) -> bool {

@@ -475,19 +475,17 @@ impl App {
     }
 
     /// Get the terminal state of the focused terminal.
-    fn terminal(&self) -> &ultty::grid::Terminal {
+    fn terminal(&self) -> Option<&ultty::grid::Terminal> {
         self.terminal_manager
             .focused_terminal()
             .map(|t| t.event_loop.terminal())
-            .expect("No focused terminal")
     }
 
     /// Get mutable terminal state of the focused terminal.
-    fn terminal_mut(&mut self) -> &mut ultty::grid::Terminal {
+    fn terminal_mut(&mut self) -> Option<&mut ultty::grid::Terminal> {
         self.terminal_manager
             .focused_terminal_mut()
             .map(|t| t.event_loop.terminal_mut())
-            .expect("No focused terminal")
     }
 
     /// Send input to the focused terminal.
@@ -547,7 +545,7 @@ impl App {
                 self.mouse_pos = position;
                 if self.mouse_pressed {
                     self.handle_mouse_drag();
-                } else if self.terminal().track_mouse_motion() {
+                } else if self.terminal().is_some_and(|t| t.track_mouse_motion()) {
                     // AnyEvent mode reports motion even without button pressed
                     self.handle_mouse_motion();
                 }
@@ -564,7 +562,7 @@ impl App {
                 self.needs_redraw = true;
             }
             WindowEvent::Focused(focused) => {
-                if self.terminal().modes().focus_reporting {
+                if self.terminal().is_some_and(|t| t.modes().focus_reporting) {
                     // Send focus in/out escape sequence
                     let seq = if focused { b"\x1b[I" } else { b"\x1b[O" };
                     let _ = self.send_input(seq);
@@ -635,7 +633,7 @@ impl App {
         let y = self.mouse_pos.y as f32;
 
         // Check if mouse tracking is enabled and send event to PTY
-        if self.terminal().mouse_tracking_enabled() {
+        if self.terminal().is_some_and(|t| t.mouse_tracking_enabled()) {
             // Don't intercept UI elements when mouse tracking is on
             if self.tab_bar.visible && y < self.tab_bar.height() {
                 // Still allow tab bar interaction
@@ -661,8 +659,7 @@ impl App {
                 };
                 let mods = self.mouse_modifiers();
                 if let Some(bytes) =
-                    self.terminal()
-                        .encode_mouse_event(term_button, col, row, pressed, false, mods)
+                    self.terminal().and_then(|t| t.encode_mouse_event(term_button, col, row, pressed, false, mods))
                 {
                     let _ = self.send_input(&bytes);
                 }
@@ -793,8 +790,8 @@ impl App {
                 if self.click_count == 2 && !self.modifiers.alt_key() {
                     // Word selection - find word boundaries (not in block mode)
                     self.select_word(col, row);
-                } else {
-                    self.terminal_mut().start_selection(point, mode);
+                } else if let Some(t) = self.terminal_mut() {
+                    t.start_selection(point, mode);
                 }
 
                 self.needs_redraw = true;
@@ -825,7 +822,7 @@ impl App {
 
                 // Copy selection to clipboard on release (if copy_on_select enabled)
                 if self.config.behavior.copy_on_select {
-                    if let Some(text) = self.terminal().selected_text() {
+                    if let Some(text) = self.terminal().and_then(|t| t.selected_text()) {
                         if !text.is_empty() {
                             self.copy_to_clipboard(&text);
                         }
@@ -874,18 +871,18 @@ impl App {
         }
 
         // Check if motion tracking is enabled
-        if self.terminal().track_mouse_motion() && self.mouse_pressed {
+        if self.terminal().is_some_and(|t| t.track_mouse_motion()) && self.mouse_pressed {
             let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
             // When button is held, report as Left button for drag
             let mods = self.mouse_modifiers();
-            if let Some(bytes) = self.terminal().encode_mouse_event(
+            if let Some(bytes) = self.terminal().and_then(|t| t.encode_mouse_event(
                 TerminalMouseButton::Left,
                 col,
                 row,
                 true,
                 true,
                 mods,
-            ) {
+            )) {
                 let _ = self.send_input(&bytes);
             }
             return;
@@ -894,7 +891,7 @@ impl App {
         let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
         let point = SelectionPoint::new(col as i32, row as i32);
 
-        self.terminal_mut().update_selection(point);
+        if let Some(t) = self.terminal_mut() { t.update_selection(point); }
         self.needs_redraw = true;
     }
 
@@ -908,14 +905,14 @@ impl App {
         let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
         // Motion without button uses Release (3) + motion flag (32) = 35
         let mods = self.mouse_modifiers();
-        if let Some(bytes) = self.terminal().encode_mouse_event(
+        if let Some(bytes) = self.terminal().and_then(|t| t.encode_mouse_event(
             TerminalMouseButton::Release,
             col,
             row,
             true,
             true,
             mods,
-        ) {
+        )) {
             let _ = self.send_input(&bytes);
         }
     }
@@ -945,7 +942,7 @@ impl App {
         let fraction = ((y - scrollbar_top) / scrollbar_height).clamp(0.0, 1.0);
 
         // Get buffer info
-        let terminal = self.terminal();
+        let Some(terminal) = self.terminal() else { return; };
         let buffer = terminal.buffer();
         let total_lines = buffer.total_lines();
         let viewport_rows = terminal.dimensions().rows as usize;
@@ -959,7 +956,8 @@ impl App {
         let target_offset = ((1.0 - fraction) * max_offset as f32).round() as usize;
 
         // Apply scroll
-        let buffer = self.terminal_mut().buffer_mut();
+        let Some(t) = self.terminal_mut() else { return; };
+        let buffer = t.buffer_mut();
         let current = buffer.scroll_offset();
         if target_offset > current {
             buffer.scroll_up(target_offset - current);
@@ -974,7 +972,8 @@ impl App {
     fn select_word(&mut self, col: u16, row: u16) {
         // First, find word boundaries (immutable borrow)
         let word_bounds = {
-            let grid = self.terminal().grid();
+            let Some(terminal) = self.terminal() else { return; };
+            let grid = terminal.grid();
 
             if let Some(grid_row) = grid.row(row) {
                 let mut start_col = col;
@@ -1017,9 +1016,8 @@ impl App {
         if let Some((start_col, end_col)) = word_bounds {
             let start = SelectionPoint::new(start_col as i32, row as i32);
             let end = SelectionPoint::new(end_col as i32, row as i32);
-            self.terminal_mut()
-                .start_selection(start, SelectionMode::Normal);
-            self.terminal_mut().update_selection(end);
+            if let Some(t) = self.terminal_mut() { t.start_selection(start, SelectionMode::Normal); }
+            if let Some(t) = self.terminal_mut() { t.update_selection(end); }
         }
     }
 
@@ -1040,7 +1038,7 @@ impl App {
         }
 
         // Check if mouse tracking is enabled - send scroll events to PTY
-        if self.terminal().mouse_tracking_enabled() {
+        if self.terminal().is_some_and(|t| t.mouse_tracking_enabled()) {
             let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
             let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y.max(0.0));
             // Terminal scroll: positive lines = scroll up (button 64)
@@ -1054,19 +1052,20 @@ impl App {
             let mods = self.mouse_modifiers();
 
             // Debug: log scroll events
+            let mouse_mode = self.terminal().map(|t| t.modes().mouse_mode);
             tracing::debug!(
                 "Mouse scroll: lines={}, button={:?}, pos=({},{}), mode={:?}",
                 lines,
                 button,
                 col,
                 row,
-                self.terminal().modes().mouse_mode
+                mouse_mode
             );
 
             for _ in 0..count {
                 if let Some(bytes) = self
                     .terminal()
-                    .encode_mouse_event(button, col, row, true, false, mods)
+                    .and_then(|t| t.encode_mouse_event(button, col, row, true, false, mods))
                 {
                     tracing::debug!(
                         "Sending scroll bytes: {:?}",
@@ -1098,13 +1097,13 @@ impl App {
 
         // Check if in alternate screen with alternate scroll mode
         // In this case, send arrow keys instead of scrolling
-        let in_alternate = self.terminal().is_alternate_screen();
-        let alternate_scroll = self.terminal().modes().alternate_scroll;
+        let in_alternate = self.terminal().is_some_and(|t| t.is_alternate_screen());
+        let alternate_scroll = self.terminal().is_some_and(|t| t.modes().alternate_scroll);
 
         if in_alternate && alternate_scroll {
             // Send arrow keys for scrolling in alternate screen
             // Check DECCKM mode to send correct escape sequence
-            let app_cursor = self.terminal().modes().application_cursor_keys;
+            let app_cursor = self.terminal().is_some_and(|t| t.modes().application_cursor_keys);
             let count = lines.unsigned_abs() as usize;
             let arrow: &[u8] = if lines > 0 {
                 if app_cursor { b"\x1bOA" } else { b"\x1b[A" } // Up
@@ -1125,7 +1124,8 @@ impl App {
         }
 
         // Normal mode: scroll the scrollback buffer
-        let buffer = self.terminal_mut().buffer_mut();
+        let Some(t) = self.terminal_mut() else { return; };
+        let buffer = t.buffer_mut();
 
         if lines > 0 {
             buffer.scroll_up(lines as usize);
@@ -1153,7 +1153,7 @@ impl App {
             match clipboard.get_text() {
                 Ok(text) => {
                     // Check for bracketed paste mode
-                    let bracketed = self.terminal().modes().bracketed_paste;
+                    let bracketed = self.terminal().is_some_and(|t| t.modes().bracketed_paste);
                     if bracketed {
                         let _ = self.send_input(b"\x1b[200~");
                     }
@@ -1354,7 +1354,7 @@ impl App {
             event.logical_key,
             Key::Named(NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super)
         ) {
-            self.terminal_mut().clear_selection();
+            if let Some(t) = self.terminal_mut() { t.clear_selection(); }
         }
 
         // Handle paste shortcut (Ctrl+Shift+V or Shift+Insert)
@@ -1371,14 +1371,14 @@ impl App {
 
         // Handle copy shortcut (Ctrl+Shift+C)
         if self.check_keybinding(&event, &self.config.keybindings.copy.clone()) {
-            if let Some(text) = self.terminal().selected_text() {
+            if let Some(text) = self.terminal().and_then(|t| t.selected_text()) {
                 self.copy_to_clipboard(&text);
             }
             return;
         }
 
         // Check if application cursor keys mode is enabled (DECCKM)
-        let app_cursor = self.terminal().modes().application_cursor_keys;
+        let app_cursor = self.terminal().is_some_and(|t| t.modes().application_cursor_keys);
 
         // Convert key to terminal input
         let input: Option<&[u8]> = match &event.logical_key {
@@ -1556,7 +1556,7 @@ impl App {
     }
 
     fn enter_copy_mode(&mut self) {
-        let terminal = self.terminal();
+        let Some(terminal) = self.terminal() else { return; };
         let buffer = terminal.buffer();
         let dims = terminal.dimensions();
 
@@ -1570,7 +1570,7 @@ impl App {
     }
 
     fn enter_search_mode(&mut self) {
-        let terminal = self.terminal();
+        let Some(terminal) = self.terminal() else { return; };
         let buffer = terminal.buffer();
         let dims = terminal.dimensions();
 
@@ -1695,7 +1695,8 @@ impl App {
 
     /// Extract text from a vim selection.
     fn extract_selection_text(&self, selection: &VimSelection) -> String {
-        let buffer = self.terminal().buffer();
+        let Some(terminal) = self.terminal() else { return String::new(); };
+        let buffer = terminal.buffer();
         let mut text = String::new();
 
         match selection {
@@ -1765,7 +1766,8 @@ impl App {
             return;
         }
 
-        let buffer = self.terminal().buffer();
+        let Some(terminal) = self.terminal() else { return; };
+        let buffer = terminal.buffer();
         let mut matches = Vec::new();
 
         let total_lines = buffer.total_lines();
@@ -1911,7 +1913,7 @@ impl App {
             Vec<Vec<u32>>,
             std::collections::HashMap<u32, String>,
         ) = {
-            let terminal = self.terminal();
+            let Some(terminal) = self.terminal() else { return; };
             let dims = terminal.dimensions();
             let rows: Vec<String> = (0..dims.rows)
                 .map(|row| {
@@ -2080,11 +2082,14 @@ impl App {
         }
 
         // Get terminal reference
-        let terminal = self
+        let Some(terminal) = self
             .terminal_manager
             .focused_terminal()
             .map(|t| t.event_loop.terminal())
-            .expect("No focused terminal");
+        else {
+            tracing::warn!("Cannot take screenshot: no focused terminal");
+            return;
+        };
 
         // Use default overlay state for clean screenshot
         let overlay = OverlayState::default();
@@ -2115,7 +2120,7 @@ impl App {
         let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
         let filename = format!("/tmp/ultty-debug-{}.txt", timestamp);
 
-        let terminal = self.terminal();
+        let Some(terminal) = self.terminal() else { return; };
         let grid = terminal.grid();
         let dims = grid.dimensions();
         let cursor = grid.cursor();
@@ -2263,6 +2268,10 @@ impl App {
         if let Some(ref mut server) = self.protocol_server {
             if let Err(e) = server.poll(Some(Duration::ZERO)) {
                 tracing::warn!("Protocol server poll error: {}", e);
+            }
+            // Tick scroll animations
+            if server.update_animations() {
+                self.needs_redraw = true;
             }
         }
 
@@ -2469,11 +2478,13 @@ impl App {
 
     /// Render a single terminal pane.
     fn render_single_pane(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let terminal = self
+        let Some(terminal) = self
             .terminal_manager
             .focused_terminal()
             .map(|t| t.event_loop.terminal())
-            .expect("No focused terminal");
+        else {
+            return Ok(());
+        };
 
         // Calculate scrollbar state
         let buffer = terminal.buffer();

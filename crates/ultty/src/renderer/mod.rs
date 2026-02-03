@@ -905,6 +905,16 @@ impl Renderer {
             .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }
 
+    /// Clear cached image textures for terminal images (e.g., on tab close).
+    pub fn clear_image_cache(&mut self) {
+        self.image_cache.clear();
+    }
+
+    /// Clear cached native image textures, retaining only the given region IDs.
+    pub fn retain_native_images(&mut self, live_regions: &std::collections::HashSet<ultty_protocol::RegionId>) {
+        self.native_image_cache.retain(|id, _| live_regions.contains(id));
+    }
+
     /// Set the color scheme.
     pub fn set_color_scheme(&mut self, scheme: ColorScheme) {
         self.color_scheme = scheme;
@@ -3117,56 +3127,6 @@ impl Renderer {
         indices.push(base_idx + 3);
     }
 
-    #[allow(dead_code)]
-    fn build_image_vertices(&self, terminal: &Terminal) -> (Vec<Vertex>, Vec<u32>) {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-
-        // For each image in the terminal's image store
-        for image in terminal.images().images() {
-            // Calculate screen position based on cell coordinates
-            let x0 = image.start_col as f32 * self.cell_width + self.pane_offset_x;
-            let y0 = image.start_row as f32 * self.cell_height + self.tab_bar_height + self.pane_offset_y;
-            let x1 = x0 + image.cell_width as f32 * self.cell_width;
-            let y1 = y0 + image.cell_height as f32 * self.cell_height;
-
-            let base_idx = vertices.len() as u32;
-
-            // White color (the texture provides the actual color)
-            let color = [1.0f32, 1.0, 1.0, 1.0];
-
-            vertices.push(Vertex {
-                position: [x0, y0],
-                tex_coord: [0.0, 0.0],
-                color,
-            });
-            vertices.push(Vertex {
-                position: [x1, y0],
-                tex_coord: [1.0, 0.0],
-                color,
-            });
-            vertices.push(Vertex {
-                position: [x1, y1],
-                tex_coord: [1.0, 1.0],
-                color,
-            });
-            vertices.push(Vertex {
-                position: [x0, y1],
-                tex_coord: [0.0, 1.0],
-                color,
-            });
-
-            indices.push(base_idx);
-            indices.push(base_idx + 1);
-            indices.push(base_idx + 2);
-            indices.push(base_idx);
-            indices.push(base_idx + 2);
-            indices.push(base_idx + 3);
-        }
-
-        (vertices, indices)
-    }
-
     /// Upload a native protocol ImageWidget to the GPU, caching by region ID.
     /// Returns true if the texture is ready for rendering.
     fn upload_native_image(
@@ -3523,13 +3483,14 @@ impl Renderer {
                     occlusion_query_set: None,
                 });
 
-                let pipeline = &self.image_pipeline.as_ref().unwrap().pipeline;
-                render_pass.set_pipeline(pipeline);
-                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                render_pass.set_bind_group(1, &cached.bind_group, &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+                if let Some(img_pipeline) = self.image_pipeline.as_ref() {
+                    render_pass.set_pipeline(&img_pipeline.pipeline);
+                    render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    render_pass.set_bind_group(1, &cached.bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                    render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+                }
             }
         }
 
@@ -3685,7 +3646,7 @@ impl Renderer {
         let buffer_slice = output_buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            tx.send(result).unwrap();
+            let _ = tx.send(result);
         });
         self.device.poll(wgpu::Maintain::Wait);
         rx.recv()??;
@@ -3847,7 +3808,7 @@ impl Renderer {
         let buffer_slice = output_buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            tx.send(result).unwrap();
+            let _ = tx.send(result);
         });
         self.device.poll(wgpu::Maintain::Wait);
         rx.recv()??;
@@ -4213,13 +4174,14 @@ impl Renderer {
                     occlusion_query_set: None,
                 });
 
-                let pipeline = &self.image_pipeline.as_ref().unwrap().pipeline;
-                rp.set_pipeline(pipeline);
-                rp.set_bind_group(0, &self.uniform_bind_group, &[]);
-                rp.set_bind_group(1, &cached.bind_group, &[]);
-                rp.set_vertex_buffer(0, vb.slice(..));
-                rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..indices.len() as u32, 0, 0..1);
+                if let Some(img_pipeline) = self.image_pipeline.as_ref() {
+                    rp.set_pipeline(&img_pipeline.pipeline);
+                    rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    rp.set_bind_group(1, &cached.bind_group, &[]);
+                    rp.set_vertex_buffer(0, vb.slice(..));
+                    rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                    rp.draw_indexed(0..indices.len() as u32, 0, 0..1);
+                }
             }
         }
     }

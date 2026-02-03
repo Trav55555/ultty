@@ -229,6 +229,18 @@ impl ProtocolServer {
         }
     }
 
+    /// Advance scroll animations across all sessions.
+    /// Returns true if any session still has active animations.
+    pub fn update_animations(&mut self) -> bool {
+        let mut any_active = false;
+        for session in self.sessions.values_mut() {
+            if session.update_scroll_animations() {
+                any_active = true;
+            }
+        }
+        any_active
+    }
+
     pub fn broadcast_resize(&mut self, width: u16, height: u16) {
         for session in self.sessions.values_mut() {
             session.set_viewport(width as f32, height as f32);
