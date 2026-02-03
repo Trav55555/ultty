@@ -224,3 +224,136 @@ fn dimension_to_length_pct(d: &ProtoDimension) -> LengthPercentage {
         _ => LengthPercentage::Length(0.0),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::region::Region;
+    use ultty_protocol::{
+        Constraints, Dimension as ProtoDimension, Display as ProtoDisplay,
+        FlexDirection as ProtoFlexDirection,
+    };
+
+    fn build_scene() -> SceneTree {
+        let mut tree = SceneTree::new();
+
+        // Root with two children: a fixed-size and a flex-grow
+        let root = tree.get_mut(RegionId::ROOT).unwrap();
+        root.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Cells(80.0),
+            height: ProtoDimension::Cells(24.0),
+            ..Default::default()
+        };
+
+        let mut header = Region::new(RegionId::new(1));
+        header.parent = Some(RegionId::ROOT);
+        header.constraints = Constraints {
+            height: ProtoDimension::Cells(3.0),
+            width: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(header);
+
+        let mut body = Region::new(RegionId::new(2));
+        body.parent = Some(RegionId::ROOT);
+        body.constraints = Constraints {
+            flex_grow: 1.0,
+            width: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(body);
+
+        tree
+    }
+
+    #[test]
+    fn layout_sync_and_compute() {
+        let scene = build_scene();
+        let mut engine = LayoutEngine::new();
+        engine.sync(&scene);
+        engine.compute(80.0, 24.0);
+
+        let root_layout = engine.get_layout(RegionId::ROOT).unwrap();
+        assert_eq!(root_layout.size.width, 80.0);
+        assert_eq!(root_layout.size.height, 24.0);
+
+        let header = engine.get_layout(RegionId::new(1)).unwrap();
+        assert_eq!(header.size.height, 3.0);
+        assert_eq!(header.size.width, 80.0);
+
+        let body = engine.get_layout(RegionId::new(2)).unwrap();
+        assert_eq!(body.size.width, 80.0);
+        assert_eq!(body.size.height, 21.0); // 24 - 3
+    }
+
+    #[test]
+    fn layout_removes_stale_nodes() {
+        let mut scene = build_scene();
+        let mut engine = LayoutEngine::new();
+        engine.sync(&scene);
+
+        assert!(engine.get_layout(RegionId::new(1)).is_some());
+
+        // Remove a region from the scene
+        scene.remove(RegionId::new(1));
+        engine.sync(&scene);
+
+        assert!(engine.get_layout(RegionId::new(1)).is_none());
+    }
+
+    #[test]
+    fn layout_empty_tree() {
+        let scene = SceneTree::new();
+        let mut engine = LayoutEngine::new();
+        engine.sync(&scene);
+        engine.compute(80.0, 24.0);
+
+        // Root with default constraints gets no explicit size
+        let root = engine.get_layout(RegionId::ROOT).unwrap();
+        assert!(root.size.width >= 0.0);
+        assert!(root.size.height >= 0.0);
+    }
+
+    #[test]
+    fn layout_row_direction() {
+        let mut tree = SceneTree::new();
+        let root = tree.get_mut(RegionId::ROOT).unwrap();
+        root.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Row,
+            width: ProtoDimension::Cells(100.0),
+            height: ProtoDimension::Cells(10.0),
+            ..Default::default()
+        };
+
+        let mut left = Region::new(RegionId::new(1));
+        left.parent = Some(RegionId::ROOT);
+        left.constraints = Constraints {
+            width: ProtoDimension::Cells(30.0),
+            height: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(left);
+
+        let mut right = Region::new(RegionId::new(2));
+        right.parent = Some(RegionId::ROOT);
+        right.constraints = Constraints {
+            flex_grow: 1.0,
+            height: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(right);
+
+        let mut engine = LayoutEngine::new();
+        engine.sync(&tree);
+        engine.compute(100.0, 10.0);
+
+        let left_layout = engine.get_layout(RegionId::new(1)).unwrap();
+        assert_eq!(left_layout.size.width, 30.0);
+
+        let right_layout = engine.get_layout(RegionId::new(2)).unwrap();
+        assert_eq!(right_layout.size.width, 70.0); // 100 - 30
+    }
+}

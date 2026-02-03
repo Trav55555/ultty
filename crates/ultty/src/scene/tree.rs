@@ -311,4 +311,121 @@ mod tests {
         assert_eq!(matches[1].byte_offset, 4);
         assert_eq!(matches[2].byte_offset, 8);
     }
+
+    #[test]
+    fn new_tree_has_root() {
+        let tree = SceneTree::new();
+        assert!(tree.get(RegionId::ROOT).is_some());
+        assert_eq!(tree.root(), RegionId::ROOT);
+    }
+
+    #[test]
+    fn insert_and_get() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(10));
+        r.parent = Some(RegionId::ROOT);
+        tree.insert(r);
+
+        assert!(tree.get(RegionId::new(10)).is_some());
+        let root = tree.get(RegionId::ROOT).unwrap();
+        assert_eq!(root.children, vec![RegionId::new(10)]);
+    }
+
+    #[test]
+    fn insert_at_specific_index() {
+        let mut tree = SceneTree::new();
+        for i in 1..=3 {
+            let mut r = Region::new(RegionId::new(i));
+            r.parent = Some(RegionId::ROOT);
+            tree.insert(r);
+        }
+
+        // Insert at index 1 (between first and second)
+        let mut r4 = Region::new(RegionId::new(4));
+        r4.parent = Some(RegionId::ROOT);
+        tree.insert_at(r4, 1);
+
+        let root = tree.get(RegionId::ROOT).unwrap();
+        assert_eq!(
+            root.children,
+            vec![RegionId::new(1), RegionId::new(4), RegionId::new(2), RegionId::new(3)]
+        );
+    }
+
+    #[test]
+    fn insert_at_out_of_bounds_appends() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        tree.insert_at(r, 999);
+
+        let root = tree.get(RegionId::ROOT).unwrap();
+        assert_eq!(root.children, vec![RegionId::new(1)]);
+    }
+
+    #[test]
+    fn remove_region() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        tree.insert(r);
+
+        assert!(tree.get(RegionId::new(1)).is_some());
+        let removed = tree.remove(RegionId::new(1));
+        assert!(removed.is_some());
+        assert!(tree.get(RegionId::new(1)).is_none());
+
+        let root = tree.get(RegionId::ROOT).unwrap();
+        assert!(root.children.is_empty());
+    }
+
+    #[test]
+    fn remove_cascades_to_children() {
+        let mut tree = SceneTree::new();
+        let mut r1 = Region::new(RegionId::new(1));
+        r1.parent = Some(RegionId::ROOT);
+        tree.insert(r1);
+
+        let mut r2 = Region::new(RegionId::new(2));
+        r2.parent = Some(RegionId::new(1));
+        tree.insert(r2);
+
+        tree.remove(RegionId::new(1));
+        assert!(tree.get(RegionId::new(1)).is_none());
+        assert!(tree.get(RegionId::new(2)).is_none());
+    }
+
+    #[test]
+    fn cannot_remove_root() {
+        let mut tree = SceneTree::new();
+        assert!(tree.remove(RegionId::ROOT).is_none());
+        assert!(tree.get(RegionId::ROOT).is_some());
+    }
+
+    #[test]
+    fn depth_first_iteration_order() {
+        let mut tree = SceneTree::new();
+
+        let mut a = Region::new(RegionId::new(1));
+        a.parent = Some(RegionId::ROOT);
+        tree.insert(a);
+
+        let mut b = Region::new(RegionId::new(2));
+        b.parent = Some(RegionId::ROOT);
+        tree.insert(b);
+
+        let mut a1 = Region::new(RegionId::new(3));
+        a1.parent = Some(RegionId::new(1));
+        tree.insert(a1);
+
+        let ids: Vec<u32> = tree.iter_depth_first().map(|r| r.id.0).collect();
+        // Root(0) -> A(1) -> A1(3) -> B(2)
+        assert_eq!(ids, vec![0, 1, 3, 2]);
+    }
+
+    #[test]
+    fn remove_nonexistent_returns_none() {
+        let mut tree = SceneTree::new();
+        assert!(tree.remove(RegionId::new(999)).is_none());
+    }
 }

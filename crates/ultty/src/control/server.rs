@@ -166,120 +166,7 @@ impl ControlServer {
     }
 
     fn parse_request(&self, data: &[u8]) -> Option<ControlRequest> {
-        let text = std::str::from_utf8(data).ok()?.trim();
-
-        if text.starts_with('{') {
-            return serde_json::from_str(text).ok();
-        }
-
-        let mut parts = text.split_whitespace();
-        let cmd = parts.next()?;
-
-        match cmd {
-            "ping" => Some(ControlRequest::Ping),
-            "version" => Some(ControlRequest::Version),
-            "info" => Some(ControlRequest::GetInfo),
-            "tabs" => Some(ControlRequest::ListTabs),
-            "text" => {
-                let include_scrollback = parts.next() == Some("--scrollback");
-                Some(ControlRequest::GetText {
-                    include_scrollback,
-                    scrollback_lines: None,
-                })
-            }
-            "selection" => Some(ControlRequest::GetSelection),
-            "send-text" => {
-                let text: String = parts.collect::<Vec<_>>().join(" ");
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(ControlRequest::SendText { text })
-                }
-            }
-            "send-key" => {
-                let key_str = parts.next()?;
-                let key = parse_key(key_str)?;
-                let modifiers = parse_modifiers(parts.next().unwrap_or(""));
-                Some(ControlRequest::SendKey { key, modifiers })
-            }
-            "new-tab" => {
-                let command = parts.next().map(String::from);
-                let args: Vec<String> = parts.map(String::from).collect();
-                Some(ControlRequest::NewTab {
-                    title: None,
-                    command,
-                    args,
-                    working_dir: None,
-                })
-            }
-            "switch-tab" => {
-                let index = parts.next()?.parse().ok()?;
-                Some(ControlRequest::SwitchTab { index })
-            }
-            "close-tab" => {
-                let index = parts.next().and_then(|s| s.parse().ok());
-                Some(ControlRequest::CloseTab { index })
-            }
-            "focus" => Some(ControlRequest::FocusWindow),
-            "fullscreen" => Some(ControlRequest::ToggleFullscreen),
-            "opacity" => {
-                let opacity = parts.next()?.parse().ok()?;
-                Some(ControlRequest::SetOpacity { opacity })
-            }
-            "run" => {
-                let command = parts.next()?.to_string();
-                let args: Vec<String> = parts.map(String::from).collect();
-                Some(ControlRequest::RunCommand { command, args })
-            }
-            "screenshot" => {
-                let path = parts.next().map(String::from);
-                Some(ControlRequest::Screenshot { path })
-            }
-            "search" => {
-                let pattern: String = parts.collect::<Vec<_>>().join(" ");
-                if pattern.is_empty() {
-                    None
-                } else {
-                    Some(ControlRequest::Search {
-                        pattern,
-                        regex: false,
-                        case_sensitive: false,
-                        include_scrollback: true,
-                    })
-                }
-            }
-            "wait-for" => {
-                let rest: Vec<&str> = parts.collect();
-                let mut timeout_ms = 30000u64;
-                let mut pattern_parts = Vec::new();
-
-                for (i, part) in rest.iter().enumerate() {
-                    if *part == "--timeout" {
-                        if let Some(t) = rest.get(i + 1) {
-                            timeout_ms = t.parse().unwrap_or(30000);
-                        }
-                        break;
-                    }
-                    pattern_parts.push(*part);
-                }
-
-                let pattern = pattern_parts.join(" ");
-                if pattern.is_empty() {
-                    None
-                } else {
-                    Some(ControlRequest::WaitFor {
-                        pattern,
-                        regex: false,
-                        timeout_ms,
-                    })
-                }
-            }
-            "auth" => {
-                let token = parts.next()?.to_string();
-                Some(ControlRequest::Authenticate { token })
-            }
-            _ => None,
-        }
+        parse_request(data)
     }
 
     pub fn take_pending_requests(&mut self) -> Vec<(usize, ControlRequest)> {
@@ -319,6 +206,133 @@ impl Drop for ControlServer {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.socket_path);
         info!("Control server shut down");
+    }
+}
+
+fn parse_request(data: &[u8]) -> Option<ControlRequest> {
+    let text = std::str::from_utf8(data).ok()?.trim();
+
+    if text.starts_with('{') {
+        return serde_json::from_str(text).ok();
+    }
+
+    let mut parts = text.split_whitespace();
+    let cmd = parts.next()?;
+
+    match cmd {
+        "ping" => Some(ControlRequest::Ping),
+        "version" => Some(ControlRequest::Version),
+        "info" => Some(ControlRequest::GetInfo),
+        "tabs" => Some(ControlRequest::ListTabs),
+        "text" => {
+            let include_scrollback = parts.next() == Some("--scrollback");
+            Some(ControlRequest::GetText {
+                include_scrollback,
+                scrollback_lines: None,
+            })
+        }
+        "selection" => Some(ControlRequest::GetSelection),
+        "send-text" => {
+            let text: String = parts.collect::<Vec<_>>().join(" ");
+            if text.is_empty() {
+                None
+            } else {
+                Some(ControlRequest::SendText { text })
+            }
+        }
+        "send-key" => {
+            let key_str = parts.next()?;
+            let key = parse_key(key_str)?;
+            let modifiers = parse_modifiers(parts.next().unwrap_or(""));
+            Some(ControlRequest::SendKey { key, modifiers })
+        }
+        "new-tab" => {
+            let command = parts.next().map(String::from);
+            let args: Vec<String> = parts.map(String::from).collect();
+            Some(ControlRequest::NewTab {
+                title: None,
+                command,
+                args,
+                working_dir: None,
+            })
+        }
+        "switch-tab" => {
+            let index = parts.next()?.parse().ok()?;
+            Some(ControlRequest::SwitchTab { index })
+        }
+        "close-tab" => {
+            let index = parts.next().and_then(|s| s.parse().ok());
+            Some(ControlRequest::CloseTab { index })
+        }
+        "focus" => Some(ControlRequest::FocusWindow),
+        "fullscreen" => Some(ControlRequest::ToggleFullscreen),
+        "opacity" => {
+            let opacity = parts.next()?.parse().ok()?;
+            Some(ControlRequest::SetOpacity { opacity })
+        }
+        "send-raw" => {
+            let hex_str: String = parts.collect::<Vec<_>>().join("");
+            let data = hex_decode(&hex_str)?;
+            Some(ControlRequest::SendRaw { data })
+        }
+        "run" => {
+            let command = parts.next()?.to_string();
+            let args: Vec<String> = parts.map(String::from).collect();
+            Some(ControlRequest::RunCommand { command, args })
+        }
+        "resize" => {
+            let width: u32 = parts.next()?.parse().ok()?;
+            let height: u32 = parts.next()?.parse().ok()?;
+            Some(ControlRequest::Resize { width, height })
+        }
+        "screenshot" => {
+            let path = parts.next().map(String::from);
+            Some(ControlRequest::Screenshot { path })
+        }
+        "search" => {
+            let pattern: String = parts.collect::<Vec<_>>().join(" ");
+            if pattern.is_empty() {
+                None
+            } else {
+                Some(ControlRequest::Search {
+                    pattern,
+                    regex: false,
+                    case_sensitive: false,
+                    include_scrollback: true,
+                })
+            }
+        }
+        "wait-for" => {
+            let rest: Vec<&str> = parts.collect();
+            let mut timeout_ms = 30000u64;
+            let mut pattern_parts = Vec::new();
+
+            for (i, part) in rest.iter().enumerate() {
+                if *part == "--timeout" {
+                    if let Some(t) = rest.get(i + 1) {
+                        timeout_ms = t.parse().unwrap_or(30000);
+                    }
+                    break;
+                }
+                pattern_parts.push(*part);
+            }
+
+            let pattern = pattern_parts.join(" ");
+            if pattern.is_empty() {
+                None
+            } else {
+                Some(ControlRequest::WaitFor {
+                    pattern,
+                    regex: false,
+                    timeout_ms,
+                })
+            }
+        }
+        "auth" => {
+            let token = parts.next()?.to_string();
+            Some(ControlRequest::Authenticate { token })
+        }
+        _ => None,
     }
 }
 
@@ -368,6 +382,17 @@ fn parse_modifiers(s: &str) -> ultty_protocol::Modifiers {
         mods = mods.union(ultty_protocol::Modifiers::META);
     }
     mods
+}
+
+fn hex_decode(hex: &str) -> Option<Vec<u8>> {
+    let hex = hex.trim();
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect()
 }
 
 fn format_response(response: &ControlResponse, format: OutputFormat) -> String {
@@ -442,5 +467,128 @@ fn format_response(response: &ControlResponse, format: OutputFormat) -> String {
         ControlResponse::Error { code, message } => {
             format!("ERROR {}: {}\n", code, message)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_decode_valid() {
+        assert_eq!(hex_decode("1b5b41"), Some(vec![0x1b, 0x5b, 0x41]));
+        assert_eq!(hex_decode("00ff"), Some(vec![0x00, 0xff]));
+        assert_eq!(hex_decode(""), Some(vec![]));
+    }
+
+    #[test]
+    fn hex_decode_invalid() {
+        assert_eq!(hex_decode("1b5"), None); // odd length
+        assert_eq!(hex_decode("zz"), None); // invalid hex
+    }
+
+    #[test]
+    fn parse_ping() {
+        assert_eq!(parse_request(b"ping"), Some(ControlRequest::Ping));
+    }
+
+    #[test]
+    fn parse_version() {
+        assert_eq!(parse_request(b"version"), Some(ControlRequest::Version));
+    }
+
+    #[test]
+    fn parse_send_text() {
+        assert_eq!(
+            parse_request(b"send-text hello world"),
+            Some(ControlRequest::SendText {
+                text: "hello world".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_send_raw() {
+        assert_eq!(
+            parse_request(b"send-raw 1b5b41"),
+            Some(ControlRequest::SendRaw {
+                data: vec![0x1b, 0x5b, 0x41]
+            })
+        );
+    }
+
+    #[test]
+    fn parse_resize() {
+        assert_eq!(
+            parse_request(b"resize 1920 1080"),
+            Some(ControlRequest::Resize {
+                width: 1920,
+                height: 1080
+            })
+        );
+    }
+
+    #[test]
+    fn parse_unknown_returns_none() {
+        assert_eq!(parse_request(b"nonexistent-command"), None);
+    }
+
+    #[test]
+    fn parse_wait_for_with_timeout() {
+        assert_eq!(
+            parse_request(b"wait-for $ --timeout 5000"),
+            Some(ControlRequest::WaitFor {
+                pattern: "$".to_string(),
+                regex: false,
+                timeout_ms: 5000,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_search() {
+        assert_eq!(
+            parse_request(b"search error log"),
+            Some(ControlRequest::Search {
+                pattern: "error log".to_string(),
+                regex: false,
+                case_sensitive: false,
+                include_scrollback: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_send_key() {
+        let req = parse_request(b"send-key enter");
+        assert!(req.is_some());
+        if let Some(ControlRequest::SendKey { key, .. }) = req {
+            assert_eq!(key, ultty_protocol::Key::Enter);
+        }
+    }
+
+    #[test]
+    fn format_pong_text() {
+        let response = ControlResponse::Data(ControlData::Pong);
+        assert_eq!(format_response(&response, OutputFormat::Text), "PONG\n");
+    }
+
+    #[test]
+    fn format_error_text() {
+        let response = ControlResponse::Error {
+            code: 404,
+            message: "not found".to_string(),
+        };
+        assert_eq!(
+            format_response(&response, OutputFormat::Text),
+            "ERROR 404: not found\n"
+        );
+    }
+
+    #[test]
+    fn format_json_output() {
+        let response = ControlResponse::Data(ControlData::Pong);
+        let json = format_response(&response, OutputFormat::Json);
+        assert!(json.contains("Pong") || json.contains("pong"));
     }
 }

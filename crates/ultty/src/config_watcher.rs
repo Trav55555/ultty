@@ -124,10 +124,86 @@ pub fn config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io::Write;
 
     #[test]
     fn config_watcher_creation() {
         // This may or may not succeed depending on whether config exists
         let _watcher = ConfigWatcher::new();
+    }
+
+    #[test]
+    fn config_path_returns_some() {
+        // config_path should return a valid path (even if file doesn't exist)
+        let path = config_path();
+        assert!(path.is_some());
+        let p = path.unwrap();
+        assert!(p.to_string_lossy().contains("ultty"));
+        assert!(p.to_string_lossy().ends_with("config.toml"));
+    }
+
+    #[test]
+    fn debounce_prevents_rapid_reloads() {
+        // Create a temp directory with a config file to get a working watcher
+        let tmpdir = tempfile::tempdir().unwrap();
+        let config_file = tmpdir.path().join("config.toml");
+        fs::write(&config_file, "[font]\nsize = 14.0\n").unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // Simulate a watcher with manual event injection
+        let mut watcher_state = ConfigWatcher {
+            _watcher: notify::recommended_watcher(|_: Result<Event, notify::Error>| {})
+                .unwrap(),
+            receiver: rx,
+            last_reload: Instant::now(),
+            debounce: Duration::from_millis(500),
+        };
+
+        // Send a reload event — should be debounced (just set last_reload to now)
+        tx.send(ConfigEvent::Reload).unwrap();
+        assert!(!watcher_state.poll(), "should be debounced");
+
+        // Advance past debounce by setting last_reload to the past
+        watcher_state.last_reload = Instant::now() - Duration::from_secs(1);
+        tx.send(ConfigEvent::Reload).unwrap();
+        assert!(watcher_state.poll(), "should allow reload after debounce");
+    }
+
+    #[test]
+    fn poll_drains_errors_without_reload() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher_state = ConfigWatcher {
+            _watcher: notify::recommended_watcher(|_: Result<Event, notify::Error>| {})
+                .unwrap(),
+            receiver: rx,
+            last_reload: Instant::now() - Duration::from_secs(10),
+            debounce: Duration::from_millis(500),
+        };
+
+        tx.send(ConfigEvent::Error("test error".to_string())).unwrap();
+        assert!(!watcher_state.poll(), "errors should not trigger reload");
+    }
+
+    #[test]
+    fn config_reload_roundtrip() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let config_file = tmpdir.path().join("config.toml");
+
+        // Write a config and load it
+        let mut f = fs::File::create(&config_file).unwrap();
+        writeln!(f, "[font]\nsize = 20.0\nfamily = \"Test Font\"").unwrap();
+        drop(f);
+
+        let config = Config::load_from_path(&config_file.to_path_buf()).unwrap();
+        assert_eq!(config.font.size, 20.0);
+        assert_eq!(config.font.family, "Test Font");
+
+        // Overwrite with different values
+        fs::write(&config_file, "[font]\nsize = 12.0\nfamily = \"Other\"").unwrap();
+        let config2 = Config::load_from_path(&config_file.to_path_buf()).unwrap();
+        assert_eq!(config2.font.size, 12.0);
+        assert_eq!(config2.font.family, "Other");
     }
 }

@@ -8,6 +8,8 @@ Cargo.lock
 .vscode/
 *.swp
 *.swo
+*.sw[a-z]
+.NONE.sw*
 *~
 
 # OS
@@ -18,6 +20,10 @@ Thumbs.db
 *.profraw
 *.profdata
 coverage/
+tests/visual/__pycache__/
+
+# Screenshots (ad-hoc test captures)
+*.png
 
 # Benchmarks
 criterion/

@@ -686,3 +686,148 @@ impl NativeSession {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::region::ComputedLayout;
+    use std::os::unix::net::UnixStream;
+
+    fn make_session() -> NativeSession {
+        let (s1, _s2) = UnixStream::pair().unwrap();
+        NativeSession::new(s1, 1).unwrap()
+    }
+
+    #[test]
+    fn hit_test_returns_root_when_empty() {
+        let session = make_session();
+        let (id, x, y) = session.hit_test(5.0, 5.0);
+        assert_eq!(id, RegionId::ROOT);
+        assert_eq!(x, 5.0);
+        assert_eq!(y, 5.0);
+    }
+
+    #[test]
+    fn hit_test_finds_child_region() {
+        let mut session = make_session();
+
+        // Set root computed layout
+        if let Some(root) = session.scene.get_mut(RegionId::ROOT) {
+            root.computed = ComputedLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 24.0,
+            };
+        }
+
+        // Add a child with known bounds
+        let mut child = Region::new(RegionId::new(1));
+        child.parent = Some(RegionId::ROOT);
+        child.computed = ComputedLayout {
+            x: 10.0,
+            y: 5.0,
+            width: 20.0,
+            height: 10.0,
+        };
+        session.scene.insert(child);
+
+        let (id, lx, ly) = session.hit_test(15.0, 8.0);
+        assert_eq!(id, RegionId::new(1));
+        assert_eq!(lx, 5.0); // 15 - 10
+        assert_eq!(ly, 3.0); // 8 - 5
+    }
+
+    #[test]
+    fn hit_test_misses_child_returns_root() {
+        let mut session = make_session();
+        if let Some(root) = session.scene.get_mut(RegionId::ROOT) {
+            root.computed = ComputedLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 24.0,
+            };
+        }
+
+        let mut child = Region::new(RegionId::new(1));
+        child.parent = Some(RegionId::ROOT);
+        child.computed = ComputedLayout {
+            x: 50.0,
+            y: 50.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        session.scene.insert(child);
+
+        let (id, _, _) = session.hit_test(5.0, 5.0);
+        assert_eq!(id, RegionId::ROOT);
+    }
+
+    #[test]
+    fn scroll_offset_default_zero() {
+        let session = make_session();
+        assert_eq!(session.scroll_offset(RegionId::new(99)), (0.0, 0.0));
+    }
+
+    #[test]
+    fn scroll_animation_converges() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        // Set a target
+        session.scroll_offsets.insert(id, (0.0, 0.0));
+        session.scroll_targets.insert(id, (100.0, 200.0));
+
+        // Run animation until convergence
+        let mut iterations = 0;
+        while session.update_scroll_animations() {
+            iterations += 1;
+            if iterations > 200 {
+                panic!("Scroll animation did not converge");
+            }
+        }
+
+        let (x, y) = session.scroll_offset(id);
+        assert_eq!(x, 100.0);
+        assert_eq!(y, 200.0);
+        assert!(iterations > 1, "Should take multiple iterations");
+    }
+
+    #[test]
+    fn scroll_no_animation_when_no_targets() {
+        let mut session = make_session();
+        assert!(!session.update_scroll_animations());
+    }
+
+    #[test]
+    fn subscription_check() {
+        let mut session = make_session();
+        let id = RegionId::new(5);
+
+        assert!(!session.is_subscribed(id, ultty_protocol::EVENT_MOUSE));
+
+        session.subscriptions.insert(id, ultty_protocol::EVENT_MOUSE);
+        assert!(session.is_subscribed(id, ultty_protocol::EVENT_MOUSE));
+        assert!(!session.is_subscribed(id, ultty_protocol::EVENT_KEY));
+    }
+
+    #[test]
+    fn focused_region_default_none() {
+        let session = make_session();
+        assert_eq!(session.focused_region(), None);
+    }
+
+    #[test]
+    fn session_id_accessor() {
+        let session = make_session();
+        assert_eq!(session.session_id(), 1);
+    }
+
+    #[test]
+    fn viewport_set() {
+        let mut session = make_session();
+        session.set_viewport(120.0, 40.0);
+        // No direct accessor, but shouldn't panic
+    }
+}
