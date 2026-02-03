@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use ultty_protocol::{
-    AppMessage, CodeWidget, Constraints, Content, Decode, Dimension, Display, Encode, FrameId,
-    FlexDirection, InputType, InputWidget, Key, MarkdownWidget, Modifiers, MouseButton,
-    ProgressWidget, RegionId, RichText, Span, SpinnerWidget, Style, TerminalMessage, TextAlign,
-    TextContent, TextOverflow, TextWrap, WidgetContent, EVENT_FOCUS, EVENT_KEY, EVENT_MOUSE,
-    EVENT_SCROLL, PROTOCOL_VERSION,
+    AppMessage, BorderStyle, BorderType, CodeWidget, Constraints, Content, Decode, Dimension,
+    Display, Encode, FrameId, FlexDirection, InputType, InputWidget, Key, MarkdownWidget,
+    Modifiers, MouseButton, ProgressWidget, RegionId, RichText, Span, SpinnerWidget, Style,
+    TerminalMessage, TextAlign, TextContent, TextOverflow, TextWrap, WidgetContent, EVENT_FOCUS,
+    EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL, PROTOCOL_VERSION,
 };
 
 fn temp_socket_path() -> PathBuf {
@@ -1637,4 +1637,87 @@ fn test_clipboard_set_and_get() {
         }
     }
     assert!(found_clipboard, "Expected ClipboardContent message");
+}
+
+// ========================================================================
+// Border rendering integration test
+// ========================================================================
+
+#[test]
+fn test_border_style_rendered() {
+    let socket_path = temp_socket_path();
+    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    server.set_viewport(80.0, 24.0);
+
+    let (mut client, root) = handshake(&mut server, &socket_path);
+
+    let region_id = RegionId::new(1);
+    send_frame(
+        &mut client,
+        &mut server,
+        1,
+        vec![AppMessage::CreateRegion {
+            id: region_id,
+            parent: root,
+            insert_index: -1,
+            constraints: Constraints {
+                display: Display::Flex,
+                width: Dimension::Percent(100.0),
+                height: Dimension::Cells(5.0),
+                ..Default::default()
+            },
+            style: Style {
+                border: BorderStyle::thin(),
+                ..Default::default()
+            },
+        }],
+    );
+
+    // Drain LayoutComputed
+    let mut response = vec![0u8; 4096];
+    let _ = client.read(&mut response);
+
+    // Verify the region has a border style set in the scene
+    let session = server.sessions().next().unwrap();
+    let region = session.scene().get(region_id).unwrap();
+    assert_eq!(region.style.border.style, BorderType::Thin);
+    assert!(region.style.border.edges.top);
+    assert!(region.style.border.edges.bottom);
+    assert!(region.style.border.edges.left);
+    assert!(region.style.border.edges.right);
+}
+
+// ========================================================================
+// Protocol resilience: Ping/Pong keepalive integration test
+// ========================================================================
+
+#[test]
+fn test_keepalive_ping_pong() {
+    let socket_path = temp_socket_path();
+    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    server.set_viewport(80.0, 24.0);
+
+    let (mut client, _root) = handshake(&mut server, &socket_path);
+
+    // Server sends a Ping to the client via check_keepalives
+    // (which normally triggers after 30s idle, but we can test the Pong path)
+
+    // Manually send a Pong from the client (simulating a response to a Ping)
+    let mut buf = BytesMut::new();
+    AppMessage::Pong.encode(&mut buf);
+    client.write_all(&buf).unwrap();
+
+    // Server should process the Pong without error and session should remain active
+    server.poll(Some(Duration::from_millis(10))).unwrap();
+    assert_eq!(server.session_count(), 1, "Session should remain active after Pong");
+
+    // Verify Ping can be encoded and decoded (roundtrip via the server sending Ping)
+    // We test this by encoding a Ping and verifying the client can decode it
+    let mut ping_buf = BytesMut::new();
+    TerminalMessage::Ping.encode(&mut ping_buf);
+
+    // Simulate writing ping to client and decoding
+    let mut cursor = &ping_buf[..];
+    let decoded = TerminalMessage::decode(&mut cursor).unwrap();
+    assert!(matches!(decoded, TerminalMessage::Ping), "Expected Ping message");
 }

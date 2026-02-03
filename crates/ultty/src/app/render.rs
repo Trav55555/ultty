@@ -20,6 +20,13 @@ impl App {
             Ok(()) => {
                 // Clear dirty flags after successful render
                 self.terminal_manager.clear_dirty();
+                // Clear native session render dirty flags so renderer can
+                // reuse cached GPU buffers on subsequent frames.
+                if let Some(ref mut server) = self.protocol_server {
+                    for session in server.sessions_mut() {
+                        session.clear_render_dirty();
+                    }
+                }
             }
             Err(wgpu::SurfaceError::Lost) => {
                 let size = self.window.inner_size();

@@ -197,6 +197,10 @@ pub struct Renderer {
     animated_progress: std::collections::HashMap<ultty_protocol::RegionId, f32>,
     /// Whether active animations exist (spinners, animated progress)
     has_animations: bool,
+    /// Cached native session background GPU buffers (vertex, index, index_count)
+    cached_native_bg: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+    /// Cached native session text GPU buffers (vertex, index, index_count)
+    cached_native_text: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
 }
 
 /// Deferred native image render request (collected during widget content rendering).
@@ -348,6 +352,8 @@ impl Renderer {
             native_image_cache: std::collections::HashMap::new(),
             animated_progress: std::collections::HashMap::new(),
             has_animations: false,
+            cached_native_bg: None,
+            cached_native_text: None,
         })
     }
 
@@ -470,6 +476,8 @@ impl Renderer {
             native_image_cache: std::collections::HashMap::new(),
             animated_progress: std::collections::HashMap::new(),
             has_animations: false,
+            cached_native_bg: None,
+            cached_native_text: None,
         })
     }
 
@@ -1181,8 +1189,16 @@ impl Renderer {
             &self.uniform_bind_group,
         )?;
 
-        for session in sessions {
-            self.render_native_session(&mut encoder, &view, session, native_search_matches, native_search_index);
+        let sessions: Vec<_> = sessions.collect();
+        let any_dirty = sessions.iter().any(|s| s.is_render_dirty());
+
+        if !any_dirty && self.cached_native_bg.is_some() {
+            // Reuse cached GPU buffers — skip expensive vertex rebuild
+            self.draw_cached_native_buffers(&mut encoder, &view);
+        } else {
+            for session in &sessions {
+                self.render_native_session(&mut encoder, &view, session, native_search_matches, native_search_index);
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

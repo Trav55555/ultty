@@ -350,6 +350,7 @@ impl Renderer {
         }
 
         if !bg_vertices.is_empty() {
+            let bg_count = bg_indices.len() as u32;
             let bg_vb = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -365,29 +366,37 @@ impl Renderer {
                     usage: wgpu::BufferUsages::INDEX,
                 });
 
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("native_bg_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+            {
+                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("native_bg_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
 
-            rp.set_pipeline(self.bg_pipeline.pipeline());
-            rp.set_bind_group(0, &self.uniform_bind_group, &[]);
-            rp.set_vertex_buffer(0, bg_vb.slice(..));
-            rp.set_index_buffer(bg_ib.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
+                rp.set_pipeline(self.bg_pipeline.pipeline());
+                rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+                rp.set_vertex_buffer(0, bg_vb.slice(..));
+                rp.set_index_buffer(bg_ib.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..bg_count, 0, 0..1);
+            }
+
+            // Cache bg buffers for reuse when sessions are clean
+            self.cached_native_bg = Some((bg_vb, bg_ib, bg_count));
+        } else {
+            self.cached_native_bg = None;
         }
 
         if !text_vertices.is_empty() {
+            let text_count = text_indices.len() as u32;
             let text_vb = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -403,27 +412,34 @@ impl Renderer {
                     usage: wgpu::BufferUsages::INDEX,
                 });
 
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("native_text_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+            {
+                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("native_text_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
 
-            rp.set_pipeline(self.text_renderer.pipeline());
-            rp.set_bind_group(0, &self.uniform_bind_group, &[]);
-            rp.set_bind_group(1, self.text_renderer.atlas_bind_group(), &[]);
-            rp.set_vertex_buffer(0, text_vb.slice(..));
-            rp.set_index_buffer(text_ib.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..text_indices.len() as u32, 0, 0..1);
+                rp.set_pipeline(self.text_renderer.pipeline());
+                rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+                rp.set_bind_group(1, self.text_renderer.atlas_bind_group(), &[]);
+                rp.set_vertex_buffer(0, text_vb.slice(..));
+                rp.set_index_buffer(text_ib.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..text_count, 0, 0..1);
+            }
+
+            // Cache text buffers for reuse when sessions are clean
+            self.cached_native_text = Some((text_vb, text_ib, text_count));
+        } else {
+            self.cached_native_text = None;
         }
 
         // Render deferred native images using the image pipeline
@@ -477,6 +493,60 @@ impl Renderer {
                     rp.draw_indexed(0..indices.len() as u32, 0, 0..1);
                 }
             }
+        }
+    }
+
+    /// Draw native session content from cached GPU buffers (skip vertex rebuild).
+    pub fn draw_cached_native_buffers(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+    ) {
+        if let Some((ref bg_vb, ref bg_ib, bg_count)) = self.cached_native_bg {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("native_bg_pass_cached"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            rp.set_pipeline(self.bg_pipeline.pipeline());
+            rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+            rp.set_vertex_buffer(0, bg_vb.slice(..));
+            rp.set_index_buffer(bg_ib.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..bg_count, 0, 0..1);
+        }
+
+        if let Some((ref text_vb, ref text_ib, text_count)) = self.cached_native_text {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("native_text_pass_cached"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            rp.set_pipeline(self.text_renderer.pipeline());
+            rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+            rp.set_bind_group(1, self.text_renderer.atlas_bind_group(), &[]);
+            rp.set_vertex_buffer(0, text_vb.slice(..));
+            rp.set_index_buffer(text_ib.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..text_count, 0, 0..1);
         }
     }
 
