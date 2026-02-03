@@ -1366,6 +1366,14 @@ impl App {
                 } else {
                     None
                 };
+
+                // Collect live region IDs for image cache eviction
+                let live_regions: std::collections::HashSet<ultty_protocol::RegionId> = server
+                    .sessions()
+                    .flat_map(|s| s.scene().iter_depth_first().map(|r| r.id))
+                    .collect();
+                self.renderer.retain_native_images(&live_regions);
+
                 return self.renderer.render_with_native_sessions(
                     &self.surface,
                     terminal,

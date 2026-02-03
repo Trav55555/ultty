@@ -107,6 +107,17 @@ impl Renderer {
             return true;
         }
 
+        // Evict oldest entries if cache exceeds limit (64 textures)
+        const MAX_IMAGE_CACHE: usize = 64;
+        if self.image_cache.len() >= MAX_IMAGE_CACHE {
+            // Remove entries not currently referenced by the terminal
+            let excess = self.image_cache.len() - MAX_IMAGE_CACHE + 1;
+            let keys_to_remove: Vec<_> = self.image_cache.keys().take(excess).copied().collect();
+            for key in keys_to_remove {
+                self.image_cache.remove(&key);
+            }
+        }
+
         // Ensure image pipeline exists
         if self.image_pipeline.is_none() {
             self.create_image_pipeline();

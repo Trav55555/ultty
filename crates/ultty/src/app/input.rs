@@ -713,6 +713,7 @@ impl App {
                 if let Some(tab) = self.terminal_manager.active_tab() {
                     let tab_id = tab.id;
                     self.terminal_manager.close_tab(tab_id);
+                    self.renderer.clear_image_cache();
                     tracing::info!("Closed tab {:?}", tab_id);
                     self.update_tab_bar();
                     self.needs_redraw = true;
