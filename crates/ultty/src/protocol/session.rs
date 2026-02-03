@@ -548,6 +548,40 @@ impl NativeSession {
         }))
     }
 
+    /// Hit-test: find the deepest region containing the point (in cell coords).
+    /// Returns (region_id, region-local x, region-local y).
+    pub fn hit_test(&self, x: f32, y: f32) -> (RegionId, f32, f32) {
+        let mut best = (RegionId::ROOT, x, y);
+        self.hit_test_recursive(self.scene.root(), x, y, &mut best);
+        best
+    }
+
+    fn hit_test_recursive(
+        &self,
+        region_id: RegionId,
+        x: f32,
+        y: f32,
+        best: &mut (RegionId, f32, f32),
+    ) {
+        if let Some(region) = self.scene.get(region_id) {
+            let c = &region.computed;
+            if x >= c.x && x < c.x + c.width && y >= c.y && y < c.y + c.height {
+                *best = (region_id, x - c.x, y - c.y);
+                // Check children (later children are rendered on top, so iterate forward)
+                for &child_id in &region.children {
+                    self.hit_test_recursive(child_id, x, y, best);
+                }
+            }
+        }
+    }
+
+    /// Check if a region is subscribed to the given event mask.
+    pub fn is_subscribed(&self, region_id: RegionId, event_mask: u32) -> bool {
+        self.subscriptions
+            .get(&region_id)
+            .map_or(false, |mask| mask & event_mask != 0)
+    }
+
     pub fn send_key(
         &mut self,
         key: ultty_protocol::Key,

@@ -2,6 +2,12 @@
 
 use crate::RegionId;
 
+/// Event subscription masks.
+pub const EVENT_MOUSE: u32 = 0x01;
+pub const EVENT_KEY: u32 = 0x02;
+pub const EVENT_FOCUS: u32 = 0x04;
+pub const EVENT_SCROLL: u32 = 0x08;
+
 /// Input event.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputEvent {

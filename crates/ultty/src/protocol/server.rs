@@ -194,6 +194,41 @@ impl ProtocolServer {
         }
     }
 
+    /// Forward a mouse event to all native sessions.
+    /// Hit-tests each session's scene tree to find the target region,
+    /// checks subscriptions, and sends the event with region-local coords.
+    pub fn broadcast_mouse(
+        &mut self,
+        event_type: ultty_protocol::InputType,
+        cell_x: f32,
+        cell_y: f32,
+    ) {
+        let event_mask = match &event_type {
+            ultty_protocol::InputType::MouseScroll { .. } => ultty_protocol::EVENT_SCROLL,
+            _ => ultty_protocol::EVENT_MOUSE,
+        };
+        for session in self.sessions.values_mut() {
+            let (region_id, local_x, local_y) = session.hit_test(cell_x, cell_y);
+            if session.is_subscribed(region_id, event_mask)
+                || session.is_subscribed(ultty_protocol::RegionId::ROOT, event_mask)
+            {
+                let input = ultty_protocol::InputEvent {
+                    region_id,
+                    event_type: event_type.clone(),
+                    x: local_x,
+                    y: local_y,
+                };
+                if let Err(e) = session.send_input(input) {
+                    tracing::warn!(
+                        "Failed to send mouse to session {}: {}",
+                        session.session_id(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
     pub fn broadcast_resize(&mut self, width: u16, height: u16) {
         for session in self.sessions.values_mut() {
             session.set_viewport(width as f32, height as f32);

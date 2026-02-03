@@ -302,7 +302,47 @@ impl NativeBackend {
                 key: self.convert_key(key),
                 modifiers: self.convert_modifiers(modifiers),
             })),
+            InputType::MouseDown { button } => Some(Event::Mouse(crate::event::MouseEvent {
+                kind: crate::event::MouseEventKind::Down(Self::convert_mouse_button(button)),
+                x: input.x as u16,
+                y: input.y as u16,
+                modifiers: crate::event::Modifiers::default(),
+            })),
+            InputType::MouseUp { button } => Some(Event::Mouse(crate::event::MouseEvent {
+                kind: crate::event::MouseEventKind::Up(Self::convert_mouse_button(button)),
+                x: input.x as u16,
+                y: input.y as u16,
+                modifiers: crate::event::Modifiers::default(),
+            })),
+            InputType::MouseMove => Some(Event::Mouse(crate::event::MouseEvent {
+                kind: crate::event::MouseEventKind::Moved,
+                x: input.x as u16,
+                y: input.y as u16,
+                modifiers: crate::event::Modifiers::default(),
+            })),
+            InputType::MouseScroll { delta_y, .. } => {
+                let kind = if delta_y > 0.0 {
+                    crate::event::MouseEventKind::ScrollUp
+                } else {
+                    crate::event::MouseEventKind::ScrollDown
+                };
+                Some(Event::Mouse(crate::event::MouseEvent {
+                    kind,
+                    x: input.x as u16,
+                    y: input.y as u16,
+                    modifiers: crate::event::Modifiers::default(),
+                }))
+            }
             _ => None,
+        }
+    }
+
+    fn convert_mouse_button(button: ultty_protocol::MouseButton) -> crate::event::MouseButton {
+        match button {
+            ultty_protocol::MouseButton::Left => crate::event::MouseButton::Left,
+            ultty_protocol::MouseButton::Middle => crate::event::MouseButton::Middle,
+            ultty_protocol::MouseButton::Right => crate::event::MouseButton::Right,
+            _ => crate::event::MouseButton::Left,
         }
     }
 
