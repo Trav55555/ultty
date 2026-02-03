@@ -15,7 +15,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourusername/ultty"
+repository = "https://github.com/Trav55555/ultty"
 rust-version = "1.75"
 
 [workspace.dependencies]

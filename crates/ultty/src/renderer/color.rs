@@ -1,0 +1,208 @@
+//! Color types and terminal color scheme.
+
+use crate::config::ColorConfig;
+
+/// RGBA color for rendering.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rgba {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+impl Rgba {
+    pub const fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+
+    pub const fn rgb(r: f32, g: f32, b: f32) -> Self {
+        Self { r, g, b, a: 1.0 }
+    }
+
+    pub fn from_u8(r: u8, g: u8, b: u8) -> Self {
+        Self {
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
+            a: 1.0,
+        }
+    }
+
+    pub fn to_array(&self) -> [f32; 4] {
+        [self.r, self.g, self.b, self.a]
+    }
+
+    /// Convert from sRGB to linear color space.
+    ///
+    /// Colors from hex values (like #1D2021) are in sRGB space.
+    /// When rendering to an sRGB framebuffer, wgpu expects the clear color
+    /// to be in linear space - it will apply gamma encoding automatically.
+    /// Without this conversion, colors appear washed out (dark grays look light gray).
+    pub fn to_linear(&self) -> Self {
+        fn srgb_to_linear(c: f32) -> f32 {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        Self {
+            r: srgb_to_linear(self.r),
+            g: srgb_to_linear(self.g),
+            b: srgb_to_linear(self.b),
+            a: self.a, // Alpha is not gamma-encoded
+        }
+    }
+}
+
+impl Default for Rgba {
+    fn default() -> Self {
+        Self::rgb(0.0, 0.0, 0.0)
+    }
+}
+
+/// Terminal color scheme.
+///
+/// Maps terminal colors to RGB values for rendering.
+#[derive(Debug, Clone)]
+pub struct ColorScheme {
+    /// 16 named colors (0-15)
+    pub named: [Rgba; 16],
+    /// Default foreground
+    pub foreground: Rgba,
+    /// Default background
+    pub background: Rgba,
+    /// Cursor color
+    pub cursor: Rgba,
+    /// Selection background
+    pub selection: Rgba,
+}
+
+impl Default for ColorScheme {
+    fn default() -> Self {
+        Self::dark()
+    }
+}
+
+impl ColorScheme {
+    /// Dark color scheme (similar to many terminal defaults).
+    pub fn dark() -> Self {
+        Self {
+            named: [
+                // Normal colors
+                Rgba::from_u8(0x00, 0x00, 0x00), // Black
+                Rgba::from_u8(0xCD, 0x00, 0x00), // Red
+                Rgba::from_u8(0x00, 0xCD, 0x00), // Green
+                Rgba::from_u8(0xCD, 0xCD, 0x00), // Yellow
+                Rgba::from_u8(0x00, 0x00, 0xEE), // Blue
+                Rgba::from_u8(0xCD, 0x00, 0xCD), // Magenta
+                Rgba::from_u8(0x00, 0xCD, 0xCD), // Cyan
+                Rgba::from_u8(0xE5, 0xE5, 0xE5), // White
+                // Bright colors
+                Rgba::from_u8(0x7F, 0x7F, 0x7F), // Bright Black
+                Rgba::from_u8(0xFF, 0x00, 0x00), // Bright Red
+                Rgba::from_u8(0x00, 0xFF, 0x00), // Bright Green
+                Rgba::from_u8(0xFF, 0xFF, 0x00), // Bright Yellow
+                Rgba::from_u8(0x5C, 0x5C, 0xFF), // Bright Blue
+                Rgba::from_u8(0xFF, 0x00, 0xFF), // Bright Magenta
+                Rgba::from_u8(0x00, 0xFF, 0xFF), // Bright Cyan
+                Rgba::from_u8(0xFF, 0xFF, 0xFF), // Bright White
+            ],
+            foreground: Rgba::from_u8(0xE5, 0xE5, 0xE5),
+            background: Rgba::from_u8(0x1E, 0x1E, 0x1E),
+            cursor: Rgba::from_u8(0xFF, 0xFF, 0xFF),
+            selection: Rgba::new(0.3, 0.4, 0.6, 0.5),
+        }
+    }
+
+    /// Create a color scheme from configuration.
+    pub fn from_config(config: &ColorConfig) -> Self {
+        let palette = config.palette.to_array();
+        let named: [Rgba; 16] = std::array::from_fn(|i| {
+            let c = palette[i];
+            Rgba::from_u8(c.r, c.g, c.b)
+        });
+
+        let (sr, sg, sb, sa) = config.selection.to_f32();
+
+        Self {
+            named,
+            foreground: Rgba::from_u8(config.foreground.r, config.foreground.g, config.foreground.b),
+            background: Rgba::from_u8(config.background.r, config.background.g, config.background.b),
+            cursor: Rgba::from_u8(config.cursor.r, config.cursor.g, config.cursor.b),
+            selection: Rgba::new(sr, sg, sb, sa),
+        }
+    }
+
+    /// Resolve a terminal color to RGBA.
+    pub fn resolve(&self, color: crate::grid::Color, is_fg: bool) -> Rgba {
+        match color {
+            crate::grid::Color::Default => {
+                if is_fg {
+                    self.foreground
+                } else {
+                    self.background
+                }
+            }
+            crate::grid::Color::Named(idx) => self.named[idx as usize % 16],
+            crate::grid::Color::Indexed(idx) => self.indexed_color(idx),
+            crate::grid::Color::Rgb(r, g, b) => Rgba::from_u8(r, g, b),
+        }
+    }
+
+    /// Get a color from the 256-color palette.
+    pub fn indexed_color(&self, idx: u8) -> Rgba {
+        match idx {
+            // Standard 16 colors
+            0..=15 => self.named[idx as usize],
+            // 216-color cube (6x6x6)
+            16..=231 => {
+                let idx = idx - 16;
+                let r = (idx / 36) % 6;
+                let g = (idx / 6) % 6;
+                let b = idx % 6;
+                Rgba::from_u8(
+                    if r == 0 { 0 } else { r * 40 + 55 },
+                    if g == 0 { 0 } else { g * 40 + 55 },
+                    if b == 0 { 0 } else { b * 40 + 55 },
+                )
+            }
+            // Grayscale (24 shades)
+            232..=255 => {
+                let gray = (idx - 232) * 10 + 8;
+                Rgba::from_u8(gray, gray, gray)
+            }
+        }
+    }
+
+    pub fn resolve_protocol_color(&self, color: &ultty_protocol::Color) -> Rgba {
+        match color {
+            ultty_protocol::Color::Named(named) => {
+                use ultty_protocol::NamedColor;
+                match named {
+                    NamedColor::Black => self.named[0],
+                    NamedColor::Red => self.named[1],
+                    NamedColor::Green => self.named[2],
+                    NamedColor::Yellow => self.named[3],
+                    NamedColor::Blue => self.named[4],
+                    NamedColor::Magenta => self.named[5],
+                    NamedColor::Cyan => self.named[6],
+                    NamedColor::White => self.named[7],
+                    NamedColor::BrightBlack => self.named[8],
+                    NamedColor::BrightRed => self.named[9],
+                    NamedColor::BrightGreen => self.named[10],
+                    NamedColor::BrightYellow => self.named[11],
+                    NamedColor::BrightBlue => self.named[12],
+                    NamedColor::BrightMagenta => self.named[13],
+                    NamedColor::BrightCyan => self.named[14],
+                    NamedColor::BrightWhite => self.named[15],
+                    NamedColor::Foreground => self.foreground,
+                    NamedColor::Background => self.background,
+                }
+            }
+            ultty_protocol::Color::Rgb(r, g, b) => Rgba::from_u8(*r, *g, *b),
+            ultty_protocol::Color::Indexed(idx) => self.indexed_color(*idx),
+        }
+    }
+}
