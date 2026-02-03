@@ -179,7 +179,11 @@ impl<'a> Handler<'a> {
             | Action::KittyKeyboardPush(_)
             | Action::KittyKeyboardPop
             | Action::KittyKeyboardQuery
-            | Action::UnknownOsc(_) => {}
+            | Action::UnknownOsc(_)
+            | Action::QueryForegroundColor
+            | Action::QueryBackgroundColor
+            | Action::QueryCursorColor
+            | Action::RequestPrivateMode(_) => {}
         }
     }
 
@@ -398,5 +402,34 @@ mod tests {
 
         let cell = grid.cell(0, 0).unwrap();
         assert_eq!(cell.fg(), Color::Rgb(100, 150, 200));
+    }
+
+    #[test]
+    fn osc_66_preserves_colors() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        // Set fg and bg colors, then print a block char via OSC 66
+        // ESC[38;2;122;132;120m - fg gray
+        // ESC[48;2;64;73;74m - bg darker gray
+        // OSC 66;w=1;▀ ST - print upper half block
+        process(
+            &mut grid,
+            b"\x1b[38;2;122;132;120m\x1b[48;2;64;73;74m\x1b]66;w=1;\xe2\x96\x80\x1b\\",
+        );
+
+        let cell = grid.cell(0, 0).unwrap();
+        assert_eq!(cell.char(), '▀');
+        assert_eq!(cell.fg(), Color::Rgb(122, 132, 120));
+        assert_eq!(cell.bg(), Color::Rgb(64, 73, 74));
+    }
+
+    #[test]
+    fn space_with_background() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        // Set bg color and print a space
+        process(&mut grid, b"\x1b[48;2;64;73;74m ");
+
+        let cell = grid.cell(0, 0).unwrap();
+        assert_eq!(cell.char(), ' ');
+        assert_eq!(cell.bg(), Color::Rgb(64, 73, 74));
     }
 }

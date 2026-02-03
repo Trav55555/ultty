@@ -321,6 +321,53 @@ impl<'a> TerminalHandler<'a> {
                 let response = format!("\x1b[?{}u", flags);
                 self.terminal.queue_response(response.into_bytes());
             }
+            Action::QueryForegroundColor => {
+                // Respond with foreground color in XParseColor format
+                // Format: OSC 10 ; rgb:RRRR/GGGG/BBBB ST
+                // Using a typical light foreground for dark themes
+                let response = b"\x1b]10;rgb:d4d4/d4d4/d4d4\x1b\\".to_vec();
+                self.terminal.queue_response(response);
+            }
+            Action::QueryBackgroundColor => {
+                // Respond with background color in XParseColor format
+                // Format: OSC 11 ; rgb:RRRR/GGGG/BBBB ST
+                // Using a typical dark background
+                let response = b"\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\".to_vec();
+                self.terminal.queue_response(response);
+            }
+            Action::QueryCursorColor => {
+                // Respond with cursor color in XParseColor format
+                // Format: OSC 12 ; rgb:RRRR/GGGG/BBBB ST
+                let response = b"\x1b]12;rgb:d4d4/d4d4/d4d4\x1b\\".to_vec();
+                self.terminal.queue_response(response);
+            }
+            Action::RequestPrivateMode(mode) => {
+                // DECRQM response format: CSI ? Ps ; Pm $ y
+                // Pm: 1=set, 2=reset, 3=permanently set, 4=permanently reset, 0=not recognized
+                let modes = self.terminal.modes();
+                let status = match mode {
+                    1 => if modes.application_cursor_keys { 1 } else { 2 },
+                    7 => if modes.auto_wrap { 1 } else { 2 },
+                    25 => if self.terminal.grid().cursor().visible { 1 } else { 2 },
+                    1000 | 1002 | 1003 => {
+                        let active = matches!(modes.mouse_mode,
+                            crate::grid::terminal::MouseMode::Normal |
+                            crate::grid::terminal::MouseMode::ButtonEvent |
+                            crate::grid::terminal::MouseMode::AnyEvent
+                        );
+                        if active { 1 } else { 2 }
+                    }
+                    1004 => if modes.focus_reporting { 1 } else { 2 },
+                    1006 => if matches!(modes.mouse_encoding, crate::grid::terminal::MouseEncoding::Sgr) { 1 } else { 2 },
+                    2004 => if modes.bracketed_paste { 1 } else { 2 },
+                    2026 => if modes.synchronized_update { 1 } else { 2 },
+                    2027 => 2, // Unicode core spec - not implemented
+                    // Mode not recognized
+                    _ => 0,
+                };
+                let response = format!("\x1b[?{};{}$y", mode, status);
+                self.terminal.queue_response(response.into_bytes());
+            }
             Action::UnknownOsc(_) => {
                 // Ignore unknown OSC sequences
             }
@@ -568,7 +615,7 @@ fn convert_named_color(named: NamedColor) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::Dimensions;
+    use crate::grid::{cell::Color, Dimensions};
     use crate::protocol::ansi::AnsiParser;
 
     fn process(terminal: &mut Terminal, input: &[u8]) {
@@ -848,5 +895,53 @@ mod tests {
         // Disable synchronized update mode
         process(&mut term, b"\x1b[?2026l");
         assert!(!term.modes().synchronized_update);
+    }
+
+    #[test]
+    fn background_colors_in_alternate_screen() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+
+        // Enter alternate screen (mode 1049 saves cursor and enters alt screen)
+        process(&mut term, b"\x1b[?1049h");
+        assert!(term.is_alternate_screen());
+
+        // Set RGB background color (48;2;R;G;B) and print a space
+        // This simulates what OpenCode does to draw filled backgrounds
+        process(&mut term, b"\x1b[48;2;64;73;74m ");
+
+        // Verify the cell has the correct background color
+        let cell = term.grid().cell(0, 0).unwrap();
+        assert_eq!(cell.char(), ' ');
+        assert_eq!(cell.bg(), Color::Rgb(64, 73, 74));
+
+        // Print more characters with the same background
+        process(&mut term, b"ABC");
+
+        // All cells should have the background
+        assert_eq!(term.grid().cell(1, 0).unwrap().bg(), Color::Rgb(64, 73, 74));
+        assert_eq!(term.grid().cell(2, 0).unwrap().bg(), Color::Rgb(64, 73, 74));
+        assert_eq!(term.grid().cell(3, 0).unwrap().bg(), Color::Rgb(64, 73, 74));
+    }
+
+    #[test]
+    fn osc_66_in_alternate_screen() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+
+        // Enter alternate screen
+        process(&mut term, b"\x1b[?1049h");
+
+        // Set colors and print via OSC 66
+        // ESC[38;2;122;132;120m - fg gray
+        // ESC[48;2;64;73;74m - bg darker gray
+        // OSC 66;w=1;▀ ST - print upper half block
+        process(
+            &mut term,
+            b"\x1b[38;2;122;132;120m\x1b[48;2;64;73;74m\x1b]66;w=1;\xe2\x96\x80\x1b\\",
+        );
+
+        let cell = term.grid().cell(0, 0).unwrap();
+        assert_eq!(cell.char(), '▀');
+        assert_eq!(cell.fg(), Color::Rgb(122, 132, 120));
+        assert_eq!(cell.bg(), Color::Rgb(64, 73, 74));
     }
 }

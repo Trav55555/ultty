@@ -223,6 +223,18 @@ pub enum Action {
 
     /// Unknown OSC sequence (for debugging)
     UnknownOsc(String),
+
+    /// Query foreground color (OSC 10 ; ?)
+    QueryForegroundColor,
+
+    /// Query background color (OSC 11 ; ?)
+    QueryBackgroundColor,
+
+    /// Query cursor color (OSC 12 ; ?)
+    QueryCursorColor,
+
+    /// Request DEC private mode status (DECRQM - CSI ? Ps $ p)
+    RequestPrivateMode(u16),
 }
 
 /// Text attributes settable via SGR sequences.
@@ -351,8 +363,24 @@ enum State {
     CsiParam,
     /// In OSC sequence (ESC ])
     OscString,
+    /// Saw ESC while in OSC, expecting \ for ST (String Terminator)
+    OscStringEsc,
     /// In DCS sequence (ESC P)
     DcsString,
+    /// Saw ESC while in DCS, expecting \ for ST
+    DcsStringEsc,
+    /// In APC sequence (ESC _) - used by Kitty graphics protocol
+    ApcString,
+    /// Saw ESC while in APC, expecting \ for ST
+    ApcStringEsc,
+    /// In PM sequence (ESC ^) - Privacy Message, rarely used
+    PmString,
+    /// Saw ESC while in PM, expecting \ for ST
+    PmStringEsc,
+    /// In SOS sequence (ESC X) - Start of String, rarely used
+    SosString,
+    /// Saw ESC while in SOS, expecting \ for ST
+    SosStringEsc,
     /// Character set designation for G0 (ESC ()
     CharsetDesignateG0,
     /// Character set designation for G1 (ESC ))
@@ -430,7 +458,15 @@ impl AnsiParser {
             State::CsiEntry => self.csi_entry(byte, callback),
             State::CsiPrivate | State::CsiParam => self.csi_param(byte, callback),
             State::OscString => self.osc_string(byte, callback),
+            State::OscStringEsc => self.osc_string_esc(byte, callback),
             State::DcsString => self.dcs_string(byte, callback),
+            State::DcsStringEsc => self.dcs_string_esc(byte, callback),
+            State::ApcString => self.apc_string(byte),
+            State::ApcStringEsc => self.apc_string_esc(byte),
+            State::PmString => self.ignored_string(byte, State::PmStringEsc),
+            State::PmStringEsc => self.ignored_string_esc(byte, State::PmString),
+            State::SosString => self.ignored_string(byte, State::SosStringEsc),
+            State::SosStringEsc => self.ignored_string_esc(byte, State::SosString),
             State::CharsetDesignateG0 | State::CharsetDesignateG1 => {
                 self.charset_designate(byte, callback)
             }
@@ -608,6 +644,19 @@ impl AnsiParser {
             // G1 character set designation (ESC ))
             b')' => {
                 self.state = State::CharsetDesignateG1;
+            }
+            // APC - Application Program Command (ESC _)
+            // Used by Kitty graphics protocol
+            b'_' => {
+                self.state = State::ApcString;
+            }
+            // PM - Privacy Message (ESC ^)
+            b'^' => {
+                self.state = State::PmString;
+            }
+            // SOS - Start of String (ESC X)
+            b'X' => {
+                self.state = State::SosString;
             }
             // Anything else - abort and return to ground
             _ => {
@@ -854,6 +903,11 @@ impl AnsiParser {
                 }
             }
 
+            // DECRQM - Request DEC Private Mode (CSI ? Ps $ p)
+            b'p' if self.is_private && self.intermediate == Some(b'$') => {
+                callback(Action::RequestPrivateMode(p1));
+            }
+
             _ => {
                 // Unknown CSI sequence - ignore
             }
@@ -1065,12 +1119,9 @@ impl AnsiParser {
         F: FnMut(Action),
     {
         match byte {
-            // ST (String Terminator) - ESC \
+            // ESC - might be start of ST (String Terminator = ESC \)
             0x1B => {
-                // Might be start of ST, need to check next byte
-                // For now, just reset
-                self.dispatch_osc(callback);
-                self.reset();
+                self.state = State::OscStringEsc;
             }
             // BEL also terminates OSC
             0x07 => {
@@ -1079,6 +1130,27 @@ impl AnsiParser {
             }
             _ => {
                 self.osc_buffer.push(byte);
+            }
+        }
+    }
+
+    /// OSC string ESC state - waiting for backslash to complete ST.
+    fn osc_string_esc<F>(&mut self, byte: u8, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        match byte {
+            // Backslash completes ST (String Terminator)
+            b'\\' => {
+                self.dispatch_osc(callback);
+                self.reset();
+            }
+            // Any other byte - was not a valid ST, dispatch and reprocess
+            _ => {
+                self.dispatch_osc(callback);
+                self.reset();
+                // Reprocess this byte from ground state
+                self.process_byte(byte, callback);
             }
         }
     }
@@ -1157,6 +1229,41 @@ impl AnsiParser {
                         let title = parts.get(1).unwrap_or(&"").to_string();
                         let body = parts.get(2).unwrap_or(&"").to_string();
                         callback(Action::Notification { title, body });
+                    }
+                }
+                // Foreground color query/set (OSC 10)
+                "10" => {
+                    if data == "?" {
+                        callback(Action::QueryForegroundColor);
+                    }
+                    // Setting colors not implemented - ignore
+                }
+                // Background color query/set (OSC 11)
+                "11" => {
+                    if data == "?" {
+                        callback(Action::QueryBackgroundColor);
+                    }
+                    // Setting colors not implemented - ignore
+                }
+                // Cursor color query/set (OSC 12)
+                "12" => {
+                    if data == "?" {
+                        callback(Action::QueryCursorColor);
+                    }
+                    // Setting colors not implemented - ignore
+                }
+                // Kitty character width protocol (OSC 66)
+                // Format: 66;w=N;CHAR or 66;s=N;CHAR
+                // We print the character and ignore the width hint (monospace terminal)
+                "66" => {
+                    // data format: w=N;CHAR or s=N;CHAR
+                    // Find the second semicolon to get the character(s)
+                    if let Some(semi_pos) = data.find(';') {
+                        let chars = &data[semi_pos + 1..];
+                        // Print each character
+                        for c in chars.chars() {
+                            callback(Action::Print(c));
+                        }
                     }
                 }
                 _ => {
@@ -1282,16 +1389,14 @@ impl AnsiParser {
     }
 
     /// DCS string state.
-    fn dcs_string<F>(&mut self, byte: u8, callback: &mut F)
+    fn dcs_string<F>(&mut self, byte: u8, _callback: &mut F)
     where
         F: FnMut(Action),
     {
         match byte {
-            // ST (String Terminator) - ESC \
+            // ESC - might be start of ST (String Terminator = ESC \)
             0x1B => {
-                // Might be start of ST, dispatch and reset
-                self.dispatch_dcs(callback);
-                self.reset();
+                self.state = State::DcsStringEsc;
             }
             // CAN/SUB abort the sequence
             0x18 | 0x1A => {
@@ -1301,6 +1406,70 @@ impl AnsiParser {
                 // Accumulate DCS content
                 self.dcs_buffer.push(byte);
             }
+        }
+    }
+
+    /// DCS string ESC state - waiting for backslash to complete ST.
+    fn dcs_string_esc<F>(&mut self, byte: u8, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        match byte {
+            // Backslash completes ST (String Terminator)
+            b'\\' => {
+                self.dispatch_dcs(callback);
+                self.reset();
+            }
+            // Any other byte - was not a valid ST, dispatch and reprocess
+            _ => {
+                self.dispatch_dcs(callback);
+                self.reset();
+                // Reprocess this byte from ground state
+                self.process_byte(byte, callback);
+            }
+        }
+    }
+
+    /// APC string state - accumulating APC content (Kitty graphics, etc.).
+    /// We currently just ignore APC content but need to consume it properly.
+    fn apc_string(&mut self, byte: u8) {
+        match byte {
+            // ESC - might be start of ST (String Terminator = ESC \)
+            0x1B => {
+                self.state = State::ApcStringEsc;
+            }
+            // Just consume the byte - we don't process APC content yet
+            _ => {}
+        }
+    }
+
+    /// APC string ESC state - waiting for backslash to complete ST.
+    fn apc_string_esc(&mut self, byte: u8) {
+        match byte {
+            // Backslash completes ST (String Terminator)
+            b'\\' => {
+                self.reset();
+            }
+            // Any other byte - not a valid ST, continue in APC mode
+            _ => {
+                self.state = State::ApcString;
+            }
+        }
+    }
+
+    /// Generic handler for ignored string sequences (PM, SOS, etc.)
+    fn ignored_string(&mut self, byte: u8, esc_state: State) {
+        if byte == 0x1B {
+            self.state = esc_state;
+        }
+        // Otherwise just consume the byte
+    }
+
+    /// Generic handler for ESC in ignored string sequences.
+    fn ignored_string_esc(&mut self, byte: u8, string_state: State) {
+        match byte {
+            b'\\' => self.reset(),
+            _ => self.state = string_state,
         }
     }
 
@@ -1659,6 +1828,82 @@ mod tests {
 
         // CSI ? u - query keyboard mode
         assert_eq!(parse(b"\x1b[?u"), vec![Action::KittyKeyboardQuery]);
+    }
+
+    #[test]
+    fn osc_66_character_width() {
+        // OSC 66 - Kitty character width protocol
+        // Format: OSC 66 ; w=N ; CHAR ST
+        // Should print the character(s) after the width specification
+
+        // Single block character with ST terminator
+        assert_eq!(
+            parse(b"\x1b]66;w=1;\xE2\x96\x80\x1b\\"),
+            vec![Action::Print('▀')]
+        );
+
+        // Block character with BEL terminator
+        assert_eq!(
+            parse(b"\x1b]66;w=1;\xE2\x96\x88\x07"),
+            vec![Action::Print('█')]
+        );
+
+        // Multiple characters
+        assert_eq!(
+            parse(b"\x1b]66;w=1;\xE2\x96\x80\xE2\x96\x84\x1b\\"),
+            vec![Action::Print('▀'), Action::Print('▄')]
+        );
+
+        // Screen width (s=N) format
+        assert_eq!(
+            parse(b"\x1b]66;s=2;\xE2\x96\x84\x1b\\"),
+            vec![Action::Print('▄')]
+        );
+    }
+
+    #[test]
+    fn osc_st_terminator() {
+        // Test that ST (ESC \) properly terminates OSC and doesn't print backslash
+        assert_eq!(
+            parse(b"\x1b]0;My Title\x1b\\"),
+            vec![Action::SetTitle("My Title".to_string())]
+        );
+
+        // Verify no extra backslash is printed
+        assert_eq!(
+            parse(b"\x1b]0;Title\x1b\\X"),
+            vec![
+                Action::SetTitle("Title".to_string()),
+                Action::Print('X')
+            ]
+        );
+    }
+
+    #[test]
+    fn apc_sequences() {
+        // APC sequences (ESC _) should be consumed without printing anything
+        // Used by Kitty graphics protocol
+
+        // Simple APC with ST terminator
+        assert_eq!(parse(b"\x1b_G\x1b\\"), vec![]);
+
+        // APC followed by text - text should print
+        assert_eq!(
+            parse(b"\x1b_Gi=31337,s=1,v=1,a=q\x1b\\Hello"),
+            vec![
+                Action::Print('H'),
+                Action::Print('e'),
+                Action::Print('l'),
+                Action::Print('l'),
+                Action::Print('o'),
+            ]
+        );
+
+        // Multiple APC sequences
+        assert_eq!(
+            parse(b"\x1b_G1\x1b\\\x1b_G2\x1b\\X"),
+            vec![Action::Print('X')]
+        );
     }
 
     #[test]
