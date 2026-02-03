@@ -496,12 +496,41 @@ fn arb_code_widget() -> impl Strategy<Value = CodeWidget> {
 }
 
 fn arb_progress_widget() -> impl Strategy<Value = ProgressWidget> {
-    (0.0f32..=1.0, proptest::option::of(".*"))
-        .prop_map(|(value, label)| ProgressWidget { value, label })
+    (0.0f32..=1.0, proptest::option::of(".*"), proptest::bool::ANY, proptest::bool::ANY)
+        .prop_map(|(value, label, animated, indeterminate)| ProgressWidget {
+            value,
+            label,
+            animated,
+            indeterminate,
+        })
 }
 
 fn arb_spinner_widget() -> impl Strategy<Value = SpinnerWidget> {
-    proptest::option::of(".*").prop_map(|label| SpinnerWidget { label })
+    (proptest::option::of(".*"), 0u8..=3).prop_map(|(label, style_val)| SpinnerWidget {
+        label,
+        style: match style_val {
+            0 => ultty_protocol::SpinnerStyle::Braille,
+            1 => ultty_protocol::SpinnerStyle::Dots,
+            2 => ultty_protocol::SpinnerStyle::Line,
+            _ => ultty_protocol::SpinnerStyle::Bounce,
+        },
+    })
+}
+
+fn arb_image_widget() -> impl Strategy<Value = ultty_protocol::ImageWidget> {
+    (1u32..=64, 1u32..=64, 0u8..=3).prop_map(|(w, h, scale_val)| {
+        ultty_protocol::ImageWidget {
+            data: vec![0u8; (w * h * 4) as usize],
+            width: w,
+            height: h,
+            scale: match scale_val {
+                0 => ultty_protocol::ImageScale::Fit,
+                1 => ultty_protocol::ImageScale::Fill,
+                2 => ultty_protocol::ImageScale::Stretch,
+                _ => ultty_protocol::ImageScale::None,
+            },
+        }
+    })
 }
 
 fn arb_widget_content() -> impl Strategy<Value = WidgetContent> {
@@ -511,6 +540,7 @@ fn arb_widget_content() -> impl Strategy<Value = WidgetContent> {
         arb_code_widget().prop_map(WidgetContent::Code),
         arb_progress_widget().prop_map(WidgetContent::Progress),
         arb_spinner_widget().prop_map(WidgetContent::Spinner),
+        arb_image_widget().prop_map(WidgetContent::Image),
     ]
 }
 
@@ -1168,9 +1198,12 @@ fn all_widget_types_roundtrip() {
         WidgetContent::Progress(ProgressWidget {
             value: 0.75,
             label: Some("Loading...".into()),
+            animated: false,
+            indeterminate: false,
         }),
         WidgetContent::Spinner(SpinnerWidget {
             label: Some("Processing".into()),
+            style: ultty_protocol::SpinnerStyle::Braille,
         }),
     ];
 

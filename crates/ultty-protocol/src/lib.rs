@@ -40,12 +40,14 @@ pub mod vim;
 
 pub use codec::{Decode, Encode};
 pub use content::{
-    CodeWidget, Content, InputWidget, MarkdownWidget, ProgressWidget, RichText, Span,
-    SpinnerWidget, TextAlign, TextContent, TextOverflow, TextWrap, WidgetContent,
+    CodeWidget, Content, ImageScale, ImageWidget, InputWidget, MarkdownWidget, ProgressWidget,
+    RichText, Span, SpinnerStyle, SpinnerWidget, TextAlign, TextContent, TextOverflow, TextWrap,
+    WidgetContent,
 };
 pub use error::{ProtocolError, Result};
 pub use events::{
     FocusEvent, InputEvent, InputType, Key, Modifiers, MouseButton, ResizeEvent, ScrollEvent,
+    EVENT_FOCUS, EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL,
 };
 pub use layout::{
     AlignContent, AlignItems, AlignSelf, Constraints, Dimension, Display, Edges, FlexDirection,

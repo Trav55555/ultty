@@ -144,6 +144,8 @@ pub enum WidgetContent {
     Progress(ProgressWidget),
     /// Loading spinner.
     Spinner(SpinnerWidget),
+    /// Inline image.
+    Image(ImageWidget),
 }
 
 /// Text input widget.
@@ -184,11 +186,65 @@ pub struct ProgressWidget {
     pub value: f32,
     /// Optional label.
     pub label: Option<String>,
+    /// Smooth animated fill toward target value.
+    pub animated: bool,
+    /// Indeterminate mode (bouncing highlight bar).
+    pub indeterminate: bool,
 }
 
 /// Spinner widget.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpinnerWidget {
     /// Optional label.
     pub label: Option<String>,
+    /// Spinner animation style.
+    pub style: SpinnerStyle,
+}
+
+impl Default for SpinnerWidget {
+    fn default() -> Self {
+        Self {
+            label: None,
+            style: SpinnerStyle::default(),
+        }
+    }
+}
+
+/// Spinner animation style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum SpinnerStyle {
+    #[default]
+    Braille = 0,
+    Dots = 1,
+    Line = 2,
+    Bounce = 3,
+}
+
+/// Image widget for displaying inline images.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageWidget {
+    /// Inline RGBA pixel data.
+    pub data: Vec<u8>,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Image scaling mode.
+    pub scale: ImageScale,
+}
+
+/// Image scaling mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum ImageScale {
+    /// Scale to fit within bounds, preserving aspect ratio.
+    #[default]
+    Fit = 0,
+    /// Scale to fill bounds, preserving aspect ratio (may crop).
+    Fill = 1,
+    /// Stretch to fill bounds exactly.
+    Stretch = 2,
+    /// No scaling (original size).
+    None = 3,
 }

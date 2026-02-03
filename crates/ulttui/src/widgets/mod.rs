@@ -2,12 +2,14 @@
 
 mod button;
 mod container;
+mod image;
 mod list;
 mod scroll;
 mod text;
 
 pub use button::Button;
 pub use container::{Column, Row, Stack};
+pub use image::Image;
 pub use list::List;
 pub use scroll::ScrollView;
 pub use text::{RichText, Text, TextInput};

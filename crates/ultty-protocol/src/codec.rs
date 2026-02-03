@@ -10,8 +10,9 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{
     content::{
-        CodeWidget, Content, InputWidget, MarkdownWidget, ProgressWidget, RichText, Span,
-        SpinnerWidget, TextAlign, TextContent, TextOverflow, TextWrap, WidgetContent,
+        CodeWidget, Content, ImageScale, ImageWidget, InputWidget, MarkdownWidget, ProgressWidget,
+        RichText, Span, SpinnerStyle, SpinnerWidget, TextAlign, TextContent, TextOverflow,
+        TextWrap, WidgetContent,
     },
     events::{
         FocusEvent, InputEvent, InputType, Key, Modifiers, MouseButton, ResizeEvent, ScrollEvent,
@@ -41,6 +42,9 @@ const MAX_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
 
 /// Maximum allowed grid track count to prevent OOM attacks.
 const MAX_TRACK_COUNT: usize = 1_000;
+
+/// Maximum allowed image data size (64 MB) to prevent OOM attacks.
+const MAX_IMAGE_DATA_LEN: usize = 64 * 1024 * 1024;
 
 /// Maximum allowed RichText span count to prevent OOM attacks.
 const MAX_SPAN_COUNT: usize = 10_000;
@@ -1201,6 +1205,8 @@ impl Encode for ProgressWidget {
     fn encode(&self, buf: &mut BytesMut) {
         buf.put_f32_le(self.value);
         encode_option_string(&self.label, buf);
+        buf.put_u8(self.animated as u8);
+        buf.put_u8(self.indeterminate as u8);
     }
 }
 
@@ -1212,9 +1218,24 @@ impl Decode for ProgressWidget {
                 have: buf.remaining(),
             });
         }
+        let value = buf.get_f32_le();
+        let label = decode_option_string(buf)?;
+        // Read optional trailing bytes for backward compatibility
+        let animated = if buf.remaining() >= 1 {
+            buf.get_u8() != 0
+        } else {
+            false
+        };
+        let indeterminate = if buf.remaining() >= 1 {
+            buf.get_u8() != 0
+        } else {
+            false
+        };
         Ok(ProgressWidget {
-            value: buf.get_f32_le(),
-            label: decode_option_string(buf)?,
+            value,
+            label,
+            animated,
+            indeterminate,
         })
     }
 }
@@ -1222,13 +1243,87 @@ impl Decode for ProgressWidget {
 impl Encode for SpinnerWidget {
     fn encode(&self, buf: &mut BytesMut) {
         encode_option_string(&self.label, buf);
+        buf.put_u8(self.style as u8);
     }
 }
 
 impl Decode for SpinnerWidget {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        Ok(SpinnerWidget {
-            label: decode_option_string(buf)?,
+        let label = decode_option_string(buf)?;
+        // Read optional trailing style byte for backward compatibility
+        let style = if buf.remaining() >= 1 {
+            match buf.get_u8() {
+                0 => SpinnerStyle::Braille,
+                1 => SpinnerStyle::Dots,
+                2 => SpinnerStyle::Line,
+                3 => SpinnerStyle::Bounce,
+                _ => SpinnerStyle::Braille,
+            }
+        } else {
+            SpinnerStyle::default()
+        };
+        Ok(SpinnerWidget { label, style })
+    }
+}
+
+impl Encode for ImageWidget {
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u32_le(self.width);
+        buf.put_u32_le(self.height);
+        buf.put_u8(self.scale as u8);
+        buf.put_u32_le(self.data.len() as u32);
+        buf.put_slice(&self.data);
+    }
+}
+
+impl Decode for ImageWidget {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        if buf.remaining() < 9 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 9,
+                have: buf.remaining(),
+            });
+        }
+        let width = buf.get_u32_le();
+        let height = buf.get_u32_le();
+        let scale = match buf.get_u8() {
+            0 => ImageScale::Fit,
+            1 => ImageScale::Fill,
+            2 => ImageScale::Stretch,
+            3 => ImageScale::None,
+            v => {
+                return Err(ProtocolError::InvalidData(format!(
+                    "invalid image scale: {}",
+                    v
+                )))
+            }
+        };
+        if buf.remaining() < 4 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 4,
+                have: buf.remaining(),
+            });
+        }
+        let data_len = buf.get_u32_le() as usize;
+        if data_len > MAX_IMAGE_DATA_LEN {
+            return Err(ProtocolError::InvalidData(format!(
+                "image data length {} exceeds maximum {}",
+                data_len, MAX_IMAGE_DATA_LEN
+            )));
+        }
+        if buf.remaining() < data_len {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: data_len,
+                have: buf.remaining(),
+            });
+        }
+        let mut data = vec![0u8; data_len];
+        buf.copy_to_slice(&mut data);
+        Ok(ImageWidget {
+            data,
+            width,
+            height,
+            scale,
         })
     }
 }
@@ -1256,6 +1351,10 @@ impl Encode for WidgetContent {
                 buf.put_u8(4);
                 w.encode(buf);
             }
+            WidgetContent::Image(w) => {
+                buf.put_u8(5);
+                w.encode(buf);
+            }
         }
     }
 }
@@ -1274,6 +1373,7 @@ impl Decode for WidgetContent {
             2 => Ok(WidgetContent::Code(CodeWidget::decode(buf)?)),
             3 => Ok(WidgetContent::Progress(ProgressWidget::decode(buf)?)),
             4 => Ok(WidgetContent::Spinner(SpinnerWidget::decode(buf)?)),
+            5 => Ok(WidgetContent::Image(ImageWidget::decode(buf)?)),
             v => Err(ProtocolError::InvalidData(format!(
                 "invalid widget type: {}",
                 v
