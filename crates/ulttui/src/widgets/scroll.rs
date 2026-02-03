@@ -454,6 +454,10 @@ impl VimExt for ScrollView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{
+        Event, Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind,
+    };
+    use crate::widgets::FocusAction;
 
     #[test]
     fn test_scroll_navigation() {
@@ -498,5 +502,598 @@ mod tests {
 
         scroll.handle_vim_command(&VimCommand::motion(VimMotion::SearchNext));
         assert!(scroll.scroll_y > 0.0);
+    }
+
+    // --- New tests below ---
+
+    #[test]
+    fn scroll_default_values() {
+        let scroll = ScrollView::default();
+        assert_eq!(scroll.scroll_position(), (0.0, 0.0));
+        assert_eq!(scroll.content_height, 0.0);
+        assert_eq!(scroll.viewport_height, 0.0);
+    }
+
+    #[test]
+    fn scroll_new_is_default() {
+        let scroll = ScrollView::new();
+        assert_eq!(scroll.scroll_position(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn scroll_set_content_height() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(500.0);
+        assert_eq!(scroll.content_height, 500.0);
+    }
+
+    #[test]
+    fn scroll_set_viewport_height() {
+        let mut scroll = ScrollView::new();
+        scroll.set_viewport_height(200.0);
+        assert_eq!(scroll.viewport_height, 200.0);
+    }
+
+    #[test]
+    fn scroll_to_clamps_to_max() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(500.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.scroll_to(1000.0);
+        assert_eq!(scroll.scroll_y, 400.0); // max is content - viewport = 400
+    }
+
+    #[test]
+    fn scroll_to_clamps_to_zero() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(500.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.scroll_to(-50.0);
+        assert_eq!(scroll.scroll_y, 0.0);
+    }
+
+    #[test]
+    fn scroll_to_when_content_smaller_than_viewport() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(50.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.scroll_to(100.0);
+        assert_eq!(scroll.scroll_y, 0.0); // max is 0 since content < viewport
+    }
+
+    #[test]
+    fn scroll_by_positive() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(500.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.scroll_by(50.0);
+        assert_eq!(scroll.scroll_y, 50.0);
+        scroll.scroll_by(25.0);
+        assert_eq!(scroll.scroll_y, 75.0);
+    }
+
+    #[test]
+    fn scroll_by_negative() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(500.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.scroll_to(200.0);
+        scroll.scroll_by(-50.0);
+        assert_eq!(scroll.scroll_y, 150.0);
+    }
+
+    #[test]
+    fn scroll_by_clamps() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(500.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.scroll_by(-100.0);
+        assert_eq!(scroll.scroll_y, 0.0);
+
+        scroll.scroll_by(10000.0);
+        assert_eq!(scroll.scroll_y, 400.0);
+    }
+
+    #[test]
+    fn scroll_position_returns_xy() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(500.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.scroll_to(123.0);
+        let (x, y) = scroll.scroll_position();
+        assert_eq!(x, 0.0);
+        assert_eq!(y, 123.0);
+    }
+
+    #[test]
+    fn scroll_to_top() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(500.0);
+        scroll.set_viewport_height(100.0);
+        scroll.scroll_to(200.0);
+
+        scroll.scroll_to_top();
+        assert_eq!(scroll.scroll_y, 0.0);
+    }
+
+    #[test]
+    fn scroll_to_bottom() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(500.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.scroll_to_bottom();
+        assert_eq!(scroll.scroll_y, 400.0);
+    }
+
+    #[test]
+    fn scroll_to_bottom_when_content_fits() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(50.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.scroll_to_bottom();
+        assert_eq!(scroll.scroll_y, 0.0);
+    }
+
+    #[test]
+    fn scroll_lines_down() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.scroll_lines(2);
+        assert_eq!(scroll.scroll_y, 32.0); // 2 * 16.0
+    }
+
+    #[test]
+    fn scroll_lines_up() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.scroll_to(100.0);
+        scroll.scroll_lines(-3);
+        assert_eq!(scroll.scroll_y, 52.0); // 100 - 3*16 = 52
+    }
+
+    #[test]
+    fn scroll_to_line() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.scroll_to_line(5);
+        assert_eq!(scroll.scroll_y, 80.0); // 5 * 16.0
+    }
+
+    #[test]
+    fn scroll_center_on_line() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.center_on_line(10);
+        // 10 * 16.0 - 100.0/2 = 160 - 50 = 110
+        assert_eq!(scroll.scroll_y, 110.0);
+    }
+
+    #[test]
+    fn scroll_center_on_line_clamps_to_zero() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.center_on_line(0);
+        // 0 - 50 = -50, clamped to 0
+        assert_eq!(scroll.scroll_y, 0.0);
+    }
+
+    #[test]
+    fn scroll_search_clears_previous() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.search("first");
+        scroll.add_search_match(10);
+        assert_eq!(scroll.search_matches.len(), 1);
+
+        scroll.search("second");
+        assert_eq!(scroll.search_matches.len(), 0);
+        assert_eq!(scroll.current_match, 0);
+    }
+
+    #[test]
+    fn scroll_search_next_wraps() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.search("test");
+        scroll.add_search_match(5);
+        scroll.add_search_match(20);
+
+        scroll.goto_next_match();
+        assert_eq!(scroll.current_match, 1);
+
+        scroll.goto_next_match();
+        assert_eq!(scroll.current_match, 0); // wraps
+    }
+
+    #[test]
+    fn scroll_search_prev_wraps() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.search("test");
+        scroll.add_search_match(5);
+        scroll.add_search_match(20);
+
+        assert_eq!(scroll.current_match, 0);
+        scroll.goto_prev_match();
+        assert_eq!(scroll.current_match, 1); // wraps back
+
+        scroll.goto_prev_match();
+        assert_eq!(scroll.current_match, 0);
+    }
+
+    #[test]
+    fn scroll_search_next_empty_noop() {
+        let mut scroll = ScrollView::new();
+        scroll.search("nothing");
+        scroll.goto_next_match(); // should not panic
+        assert_eq!(scroll.current_match, 0);
+    }
+
+    #[test]
+    fn scroll_search_prev_empty_noop() {
+        let mut scroll = ScrollView::new();
+        scroll.search("nothing");
+        scroll.goto_prev_match(); // should not panic
+        assert_eq!(scroll.current_match, 0);
+    }
+
+    #[test]
+    fn scroll_search_next_centers_on_match() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(2000.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.search("test");
+        scroll.add_search_match(50);
+
+        scroll.goto_next_match();
+        // centers on line 50: 50*16 - 50 = 750
+        assert_eq!(scroll.scroll_y, 750.0);
+    }
+
+    #[test]
+    fn scroll_horizontal_sets_overflow() {
+        let scroll = ScrollView::new().horizontal();
+        let c = scroll.constraints();
+        assert_eq!(c.overflow.x, OverflowAxis::Scroll);
+    }
+
+    #[test]
+    fn scroll_is_focusable() {
+        let scroll = ScrollView::new();
+        assert!(scroll.is_focusable());
+    }
+
+    #[test]
+    fn scroll_children_count_no_child() {
+        let scroll = ScrollView::new();
+        assert_eq!(<ScrollView as View>::children_count(&scroll), 0);
+    }
+
+    #[test]
+    fn scroll_children_count_with_child() {
+        let scroll = ScrollView::new().child(crate::widgets::Text::new("hello"));
+        assert_eq!(<ScrollView as View>::children_count(&scroll), 1);
+    }
+
+    #[test]
+    fn scroll_content_without_child() {
+        let scroll = ScrollView::new();
+        let content = <ScrollView as View>::content(&scroll);
+        match content {
+            ultty_protocol::Content::Text(_) => {} // expected
+            _ => panic!("Expected Text content when no child"),
+        }
+    }
+
+    #[test]
+    fn scroll_content_with_child() {
+        let scroll = ScrollView::new().child(crate::widgets::Text::new("hello"));
+        let content = <ScrollView as View>::content(&scroll);
+        assert_eq!(content, ultty_protocol::Content::None);
+    }
+
+    #[test]
+    fn scroll_debug_format() {
+        let scroll = ScrollView::new();
+        let debug = format!("{:?}", scroll);
+        assert!(debug.contains("ScrollView"));
+        assert!(debug.contains("scroll_y"));
+    }
+
+    #[test]
+    fn scroll_style_has_border() {
+        let scroll = ScrollView::new();
+        let style = <ScrollView as View>::style(&scroll);
+        assert_ne!(style.border.style, ultty_protocol::BorderType::None);
+    }
+
+    fn key(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    fn key_with_ctrl(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn key_with_shift(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            modifiers: Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn scroll_on_key_j_scrolls_down() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        let result = scroll.on_key(&key(Key::Char('j')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert!(scroll.scroll_y > 0.0);
+    }
+
+    #[test]
+    fn scroll_on_key_down_scrolls_down() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        let result = scroll.on_key(&key(Key::Down));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert!(scroll.scroll_y > 0.0);
+    }
+
+    #[test]
+    fn scroll_on_key_k_scrolls_up() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+        scroll.scroll_to(200.0);
+
+        let result = scroll.on_key(&key(Key::Char('k')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert!(scroll.scroll_y < 200.0);
+    }
+
+    #[test]
+    fn scroll_on_key_up_scrolls_up() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+        scroll.scroll_to(200.0);
+
+        let result = scroll.on_key(&key(Key::Up));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert!(scroll.scroll_y < 200.0);
+    }
+
+    #[test]
+    fn scroll_on_key_ctrl_d_half_page_down() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        let result = scroll.on_key(&key_with_ctrl(Key::Char('d')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(scroll.scroll_y, 50.0); // half of viewport
+    }
+
+    #[test]
+    fn scroll_on_key_ctrl_u_half_page_up() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+        scroll.scroll_to(200.0);
+
+        let result = scroll.on_key(&key_with_ctrl(Key::Char('u')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(scroll.scroll_y, 150.0);
+    }
+
+    #[test]
+    fn scroll_on_key_g_goes_to_top() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+        scroll.scroll_to(500.0);
+
+        let result = scroll.on_key(&key(Key::Char('g')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(scroll.scroll_y, 0.0);
+    }
+
+    #[test]
+    fn scroll_on_key_shift_g_goes_to_bottom() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        let result = scroll.on_key(&key(Key::Char('G')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(scroll.scroll_y, 900.0);
+    }
+
+    #[test]
+    fn scroll_on_key_tab_focus_next() {
+        let mut scroll = ScrollView::new();
+        let result = scroll.on_key(&key(Key::Tab));
+        assert!(matches!(result, Some(FocusAction::Next)));
+    }
+
+    #[test]
+    fn scroll_on_key_shift_tab_focus_previous() {
+        let mut scroll = ScrollView::new();
+        let result = scroll.on_key(&key_with_shift(Key::Tab));
+        assert!(matches!(result, Some(FocusAction::Previous)));
+    }
+
+    #[test]
+    fn scroll_on_key_unhandled_returns_none() {
+        let mut scroll = ScrollView::new();
+        let result = scroll.on_key(&key(Key::Char('z')));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn scroll_on_event_scroll_up() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+        scroll.scroll_to(200.0);
+
+        let event = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            x: 0,
+            y: 0,
+            modifiers: Modifiers::default(),
+        });
+        let handled = scroll.on_event(&event);
+        assert!(handled);
+        assert!(scroll.scroll_y < 200.0); // scrolled up by 3 lines
+    }
+
+    #[test]
+    fn scroll_on_event_scroll_down() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        let event = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            x: 0,
+            y: 0,
+            modifiers: Modifiers::default(),
+        });
+        let handled = scroll.on_event(&event);
+        assert!(handled);
+        assert!(scroll.scroll_y > 0.0);
+    }
+
+    #[test]
+    fn scroll_on_event_non_scroll_ignored() {
+        let mut scroll = ScrollView::new();
+        let event = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            x: 0,
+            y: 0,
+            modifiers: Modifiers::default(),
+        });
+        let handled = scroll.on_event(&event);
+        assert!(!handled);
+    }
+
+    #[test]
+    fn scroll_on_event_non_mouse_ignored() {
+        let mut scroll = ScrollView::new();
+        let handled = scroll.on_event(&Event::FocusGained);
+        assert!(!handled);
+    }
+
+    #[test]
+    fn scroll_vim_page_up() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+        scroll.scroll_to(500.0);
+
+        scroll.handle_vim_command(&VimCommand::motion(VimMotion::PageUp));
+        assert_eq!(scroll.scroll_y, 400.0);
+    }
+
+    #[test]
+    fn scroll_vim_half_page_up() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+        scroll.scroll_to(500.0);
+
+        scroll.handle_vim_command(&VimCommand::motion(VimMotion::HalfPageUp));
+        assert_eq!(scroll.scroll_y, 450.0);
+    }
+
+    #[test]
+    fn scroll_vim_up_count() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+        scroll.scroll_to(200.0);
+
+        scroll.handle_vim_command(&VimCommand::motion_with_count(3, VimMotion::Up));
+        // 3 lines up: 200 - 3*16 = 152
+        assert_eq!(scroll.scroll_y, 152.0);
+    }
+
+    #[test]
+    fn scroll_vim_line_motion() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        scroll.handle_vim_command(&VimCommand::motion(VimMotion::Line(10)));
+        // scroll_to_line(10): 10 * 16 = 160, clamped to max 900
+        assert_eq!(scroll.scroll_y, 160.0);
+    }
+
+    #[test]
+    fn scroll_vim_search_prev() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(2000.0);
+        scroll.set_viewport_height(100.0);
+        scroll.vim_state.search_forward = true;
+
+        scroll.search("test");
+        scroll.add_search_match(10);
+        scroll.add_search_match(50);
+
+        // SearchPrev with forward=true calls goto_prev_match
+        scroll.handle_vim_command(&VimCommand::motion(VimMotion::SearchPrev));
+        // goes to last match (wraps): line 50
+        assert_eq!(scroll.current_match, 1);
+    }
+
+    #[test]
+    fn scroll_vim_unhandled_returns_ignored() {
+        let mut scroll = ScrollView::new();
+        let result = scroll.handle_vim_command(&VimCommand::motion(VimMotion::Word));
+        assert!(matches!(result, VimResult::Ignored));
     }
 }

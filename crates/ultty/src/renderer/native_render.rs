@@ -720,23 +720,21 @@ impl Renderer {
     ) {
         let mut cursor_y = y;
         let line_height = self.cell_height;
+        let mut in_code_block = false;
 
         for line in source.lines() {
-            let (text, bold, color) = if let Some(stripped) = line.strip_prefix("### ") {
-                (stripped, true, self.color_scheme.named[6])
-            } else if let Some(stripped) = line.strip_prefix("## ") {
-                (stripped, true, self.color_scheme.named[5])
-            } else if let Some(stripped) = line.strip_prefix("# ") {
-                (stripped, true, self.color_scheme.named[4])
-            } else if line.starts_with("```") {
-                (line, false, self.color_scheme.named[8])
-            } else if line.starts_with("- ") || line.starts_with("* ") {
-                let bullet_text = format!("• {}", &line[2..]);
+            // Fenced code blocks
+            if line.starts_with("```") {
+                in_code_block = !in_code_block;
+                cursor_y += line_height;
+                continue;
+            }
+            if in_code_block {
                 let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                    &bullet_text,
-                    x,
+                    line,
+                    x + self.cell_width,
                     cursor_y,
-                    self.color_scheme.foreground,
+                    self.color_scheme.named[7],
                     false,
                     false,
                 );
@@ -745,30 +743,234 @@ impl Renderer {
                 text_indices.extend(idxs.iter().map(|i| i + base_idx));
                 cursor_y += line_height;
                 continue;
+            }
+
+            // Horizontal rules
+            if line == "---" || line == "***" || line == "___" {
+                let rule = "─".repeat(40);
+                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                    &rule,
+                    x,
+                    cursor_y,
+                    self.color_scheme.named[8],
+                    false,
+                    false,
+                );
+                let base_idx = text_vertices.len() as u32;
+                text_vertices.extend(verts);
+                text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                cursor_y += line_height;
+                continue;
+            }
+
+            // Headers
+            if let Some(stripped) = line.strip_prefix("### ") {
+                self.render_markdown_inline(stripped, x, cursor_y, true, self.color_scheme.named[6], text_vertices, text_indices);
+                cursor_y += line_height;
+                continue;
+            }
+            if let Some(stripped) = line.strip_prefix("## ") {
+                self.render_markdown_inline(stripped, x, cursor_y, true, self.color_scheme.named[5], text_vertices, text_indices);
+                cursor_y += line_height;
+                continue;
+            }
+            if let Some(stripped) = line.strip_prefix("# ") {
+                self.render_markdown_inline(stripped, x, cursor_y, true, self.color_scheme.named[4], text_vertices, text_indices);
+                cursor_y += line_height;
+                continue;
+            }
+
+            // Unordered list items
+            let (prefix, content) = if line.starts_with("- ") {
+                ("• ", &line[2..])
+            } else if line.starts_with("* ") {
+                ("• ", &line[2..])
+            } else if let Some(rest) = line.strip_prefix("> ") {
+                // Block quotes
+                ("│ ", rest)
             } else {
-                (line, false, self.color_scheme.foreground)
+                ("", line)
             };
 
-            let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                text,
-                x,
-                cursor_y,
-                color,
-                bold,
-                false,
-            );
-            let base_idx = text_vertices.len() as u32;
-            text_vertices.extend(verts);
-            text_indices.extend(idxs.iter().map(|i| i + base_idx));
+            // Numbered list items (1. 2. etc.)
+            let (prefix, content) = if prefix.is_empty() {
+                if let Some(dot_pos) = content.find(". ") {
+                    if dot_pos <= 3 && content[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
+                        let num_prefix = format!("{}. ", &content[..dot_pos]);
+                        // Render number prefix then inline content
+                        let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
+                            &num_prefix,
+                            x,
+                            cursor_y,
+                            self.color_scheme.named[8],
+                            false,
+                            false,
+                        );
+                        let base_idx = text_vertices.len() as u32;
+                        text_vertices.extend(verts);
+                        text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                        self.render_markdown_inline(&content[dot_pos + 2..], x + advance, cursor_y, false, self.color_scheme.foreground, text_vertices, text_indices);
+                        cursor_y += line_height;
+                        continue;
+                    }
+                }
+                ("", content)
+            } else {
+                (prefix, content)
+            };
+
+            let mut cursor_x = x;
+            if !prefix.is_empty() {
+                let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
+                    prefix,
+                    cursor_x,
+                    cursor_y,
+                    self.color_scheme.named[8],
+                    false,
+                    false,
+                );
+                let base_idx = text_vertices.len() as u32;
+                text_vertices.extend(verts);
+                text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                cursor_x += advance;
+            }
+
+            self.render_markdown_inline(content, cursor_x, cursor_y, false, self.color_scheme.foreground, text_vertices, text_indices);
             cursor_y += line_height;
         }
+    }
+
+    /// Render a line of markdown with inline formatting (**bold**, *italic*, `code`, [links](url)).
+    #[allow(clippy::too_many_arguments)]
+    fn render_markdown_inline(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        line_bold: bool,
+        line_color: super::color::Rgba,
+        text_vertices: &mut Vec<Vertex>,
+        text_indices: &mut Vec<u32>,
+    ) {
+        let mut cursor_x = x;
+        let chars: Vec<char> = text.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+        let mut segment = String::new();
+
+        while i < len {
+            // **bold**
+            if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+                if !segment.is_empty() {
+                    cursor_x += self.emit_md_segment(&segment, cursor_x, y, line_bold, false, line_color, text_vertices, text_indices);
+                    segment.clear();
+                }
+                i += 2;
+                let mut bold_text = String::new();
+                while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '*') {
+                    bold_text.push(chars[i]);
+                    i += 1;
+                }
+                if i + 1 < len { i += 2; } // skip closing **
+                cursor_x += self.emit_md_segment(&bold_text, cursor_x, y, true, false, line_color, text_vertices, text_indices);
+                continue;
+            }
+
+            // *italic*
+            if chars[i] == '*' && (i + 1 >= len || chars[i + 1] != '*') {
+                if !segment.is_empty() {
+                    cursor_x += self.emit_md_segment(&segment, cursor_x, y, line_bold, false, line_color, text_vertices, text_indices);
+                    segment.clear();
+                }
+                i += 1;
+                let mut italic_text = String::new();
+                while i < len && chars[i] != '*' {
+                    italic_text.push(chars[i]);
+                    i += 1;
+                }
+                if i < len { i += 1; } // skip closing *
+                cursor_x += self.emit_md_segment(&italic_text, cursor_x, y, line_bold, true, line_color, text_vertices, text_indices);
+                continue;
+            }
+
+            // `inline code`
+            if chars[i] == '`' {
+                if !segment.is_empty() {
+                    cursor_x += self.emit_md_segment(&segment, cursor_x, y, line_bold, false, line_color, text_vertices, text_indices);
+                    segment.clear();
+                }
+                i += 1;
+                let mut code_text = String::new();
+                while i < len && chars[i] != '`' {
+                    code_text.push(chars[i]);
+                    i += 1;
+                }
+                if i < len { i += 1; } // skip closing `
+                cursor_x += self.emit_md_segment(&code_text, cursor_x, y, false, false, self.color_scheme.named[7], text_vertices, text_indices);
+                continue;
+            }
+
+            // [link text](url) — render text as underlined
+            if chars[i] == '[' {
+                let mut link_text = String::new();
+                let mut j = i + 1;
+                while j < len && chars[j] != ']' {
+                    link_text.push(chars[j]);
+                    j += 1;
+                }
+                if j + 1 < len && chars[j] == ']' && chars[j + 1] == '(' {
+                    // Skip past (url)
+                    j += 2;
+                    while j < len && chars[j] != ')' { j += 1; }
+                    if j < len { j += 1; }
+
+                    if !segment.is_empty() {
+                        cursor_x += self.emit_md_segment(&segment, cursor_x, y, line_bold, false, line_color, text_vertices, text_indices);
+                        segment.clear();
+                    }
+                    // Render link text in blue/cyan
+                    cursor_x += self.emit_md_segment(&link_text, cursor_x, y, false, false, self.color_scheme.named[6], text_vertices, text_indices);
+                    i = j;
+                    continue;
+                }
+            }
+
+            segment.push(chars[i]);
+            i += 1;
+        }
+
+        if !segment.is_empty() {
+            self.emit_md_segment(&segment, cursor_x, y, line_bold, false, line_color, text_vertices, text_indices);
+        }
+    }
+
+    /// Emit a styled text segment and return the x advance.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_md_segment(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        bold: bool,
+        italic: bool,
+        color: super::color::Rgba,
+        text_vertices: &mut Vec<Vertex>,
+        text_indices: &mut Vec<u32>,
+    ) -> f32 {
+        let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
+            text, x, y, color, bold, italic,
+        );
+        let base_idx = text_vertices.len() as u32;
+        text_vertices.extend(verts);
+        text_indices.extend(idxs.iter().map(|i| i + base_idx));
+        advance
     }
 
     #[allow(clippy::too_many_arguments)]
     fn render_code_content(
         &mut self,
         source: &str,
-        _language: &str,
+        language: &str,
         line_numbers: bool,
         x: f32,
         y: f32,
@@ -777,8 +979,8 @@ impl Renderer {
     ) {
         let mut cursor_y = y;
         let line_height = self.cell_height;
-        let code_color = self.color_scheme.named[7];
         let line_num_color = self.color_scheme.named[8];
+        let keywords = code_keywords(language);
 
         for (idx, line) in source.lines().enumerate() {
             let mut cursor_x = x;
@@ -799,18 +1001,198 @@ impl Renderer {
                 cursor_x += advance;
             }
 
+            self.render_code_line(line, &keywords, cursor_x, cursor_y, text_vertices, text_indices);
+            cursor_y += line_height;
+        }
+    }
+
+    /// Render a single line of code with basic syntax highlighting.
+    fn render_code_line(
+        &mut self,
+        line: &str,
+        keywords: &[&str],
+        x: f32,
+        y: f32,
+        text_vertices: &mut Vec<Vertex>,
+        text_indices: &mut Vec<u32>,
+    ) {
+        let keyword_color = self.color_scheme.named[5];   // magenta
+        let string_color = self.color_scheme.named[2];    // green
+        let comment_color = self.color_scheme.named[8];   // bright black (dim)
+        let number_color = self.color_scheme.named[3];    // yellow
+        let code_color = self.color_scheme.named[7];      // white/default code
+
+        let trimmed = line.trim_start();
+
+        // Full-line comment detection
+        if trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with("--") {
             let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                line,
-                cursor_x,
-                cursor_y,
-                code_color,
-                false,
-                false,
+                line, x, y, comment_color, false, true,
             );
             let base_idx = text_vertices.len() as u32;
             text_vertices.extend(verts);
             text_indices.extend(idxs.iter().map(|i| i + base_idx));
-            cursor_y += line_height;
+            return;
+        }
+
+        // Tokenize the line into segments
+        let tokens = tokenize_code_line(line, keywords);
+        let mut cursor_x = x;
+
+        for token in &tokens {
+            let (color, bold) = match token.kind {
+                TokenKind::Keyword => (keyword_color, true),
+                TokenKind::String => (string_color, false),
+                TokenKind::Comment => (comment_color, false),
+                TokenKind::Number => (number_color, false),
+                TokenKind::Plain => (code_color, false),
+            };
+            let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
+                &token.text, cursor_x, y, color, bold, false,
+            );
+            let base_idx = text_vertices.len() as u32;
+            text_vertices.extend(verts);
+            text_indices.extend(idxs.iter().map(|i| i + base_idx));
+            cursor_x += advance;
         }
     }
+}
+
+// ── Code syntax highlighting helpers ────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenKind {
+    Keyword,
+    String,
+    Comment,
+    Number,
+    Plain,
+}
+
+struct CodeToken {
+    text: String,
+    kind: TokenKind,
+}
+
+/// Returns keyword list for a given language identifier.
+fn code_keywords(language: &str) -> Vec<&'static str> {
+    match language.to_lowercase().as_str() {
+        "rust" | "rs" => vec![
+            "fn", "let", "mut", "const", "static", "struct", "enum", "impl", "trait",
+            "pub", "use", "mod", "crate", "self", "super", "return", "if", "else",
+            "match", "for", "while", "loop", "break", "continue", "where", "type",
+            "async", "await", "move", "ref", "as", "in", "true", "false",
+        ],
+        "python" | "py" => vec![
+            "def", "class", "import", "from", "return", "if", "elif", "else",
+            "for", "while", "break", "continue", "pass", "with", "as", "try",
+            "except", "finally", "raise", "yield", "lambda", "and", "or", "not",
+            "in", "is", "True", "False", "None", "self", "async", "await",
+        ],
+        "javascript" | "js" | "typescript" | "ts" => vec![
+            "function", "const", "let", "var", "return", "if", "else", "for",
+            "while", "do", "switch", "case", "break", "continue", "class",
+            "extends", "import", "export", "from", "default", "new", "this",
+            "typeof", "instanceof", "async", "await", "try", "catch", "finally",
+            "throw", "true", "false", "null", "undefined",
+        ],
+        "go" => vec![
+            "func", "package", "import", "return", "if", "else", "for", "range",
+            "switch", "case", "break", "continue", "type", "struct", "interface",
+            "map", "chan", "go", "defer", "select", "var", "const", "true", "false", "nil",
+        ],
+        "c" | "cpp" | "c++" | "h" => vec![
+            "int", "char", "float", "double", "void", "return", "if", "else",
+            "for", "while", "do", "switch", "case", "break", "continue",
+            "struct", "enum", "typedef", "const", "static", "extern",
+            "include", "define", "true", "false", "NULL", "nullptr",
+        ],
+        _ => vec![
+            "fn", "function", "def", "class", "return", "if", "else", "for",
+            "while", "import", "from", "let", "const", "var", "true", "false",
+        ],
+    }
+}
+
+/// Tokenize a line of code into styled segments.
+fn tokenize_code_line<'a>(line: &str, keywords: &[&str]) -> Vec<CodeToken> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = line.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // Inline comment: //
+        if i + 1 < len && chars[i] == '/' && chars[i + 1] == '/' {
+            tokens.push(CodeToken {
+                text: chars[i..].iter().collect(),
+                kind: TokenKind::Comment,
+            });
+            break;
+        }
+
+        // String literals: "..." or '...'
+        if chars[i] == '"' || chars[i] == '\'' {
+            let quote = chars[i];
+            let mut s = String::new();
+            s.push(chars[i]);
+            i += 1;
+            while i < len && chars[i] != quote {
+                if chars[i] == '\\' && i + 1 < len {
+                    s.push(chars[i]);
+                    i += 1;
+                }
+                s.push(chars[i]);
+                i += 1;
+            }
+            if i < len {
+                s.push(chars[i]);
+                i += 1;
+            }
+            tokens.push(CodeToken { text: s, kind: TokenKind::String });
+            continue;
+        }
+
+        // Numbers
+        if chars[i].is_ascii_digit() || (chars[i] == '.' && i + 1 < len && chars[i + 1].is_ascii_digit()) {
+            let mut s = String::new();
+            while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '_') {
+                s.push(chars[i]);
+                i += 1;
+            }
+            tokens.push(CodeToken { text: s, kind: TokenKind::Number });
+            continue;
+        }
+
+        // Identifiers / keywords
+        if chars[i].is_alphanumeric() || chars[i] == '_' {
+            let mut word = String::new();
+            while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                word.push(chars[i]);
+                i += 1;
+            }
+            let kind = if keywords.contains(&word.as_str()) {
+                TokenKind::Keyword
+            } else {
+                TokenKind::Plain
+            };
+            tokens.push(CodeToken { text: word, kind });
+            continue;
+        }
+
+        // Whitespace and operators — accumulate as plain
+        let mut plain = String::new();
+        while i < len && !chars[i].is_alphanumeric() && chars[i] != '_'
+            && chars[i] != '"' && chars[i] != '\''
+            && !(i + 1 < len && chars[i] == '/' && chars[i + 1] == '/')
+        {
+            plain.push(chars[i]);
+            i += 1;
+        }
+        if !plain.is_empty() {
+            tokens.push(CodeToken { text: plain, kind: TokenKind::Plain });
+        }
+    }
+
+    tokens
 }

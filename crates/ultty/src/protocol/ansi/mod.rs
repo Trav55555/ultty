@@ -1,0 +1,809 @@
+//! ANSI/VT100 escape sequence parser for legacy applications.
+//!
+//! This parser converts raw terminal escape sequences into structured
+//! [`Action`] values that can be processed by the terminal emulator.
+//!
+//! # Example
+//!
+//! ```rust
+//! use ultty::protocol::ansi::{AnsiParser, Action};
+//!
+//! let mut parser = AnsiParser::new();
+//! let mut actions = Vec::new();
+//!
+//! parser.feed(b"\x1b[1;1H", |action| actions.push(action));
+//!
+//! assert_eq!(actions.len(), 1);
+//! ```
+
+mod csi;
+mod osc;
+mod sgr;
+
+use serde::{Deserialize, Serialize};
+
+/// Actions the ANSI parser can emit.
+///
+/// This enum represents all terminal control operations that
+/// escape sequences can trigger. The parser converts raw bytes
+/// into a sequence of these actions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", content = "params")]
+pub enum Action {
+    /// Print a character to the current cursor position
+    Print(char),
+
+    /// Execute a C0 control code (0x00-0x1F)
+    Execute(u8),
+
+    // === Cursor Movement ===
+    /// Move cursor up N lines (CSI A)
+    CursorUp(u16),
+
+    /// Move cursor down N lines (CSI B)
+    CursorDown(u16),
+
+    /// Move cursor right N columns (CSI C)
+    CursorForward(u16),
+
+    /// Move cursor left N columns (CSI D)
+    CursorBack(u16),
+
+    /// Move cursor to next line, N lines down (CSI E)
+    CursorNextLine(u16),
+
+    /// Move cursor to previous line, N lines up (CSI F)
+    CursorPreviousLine(u16),
+
+    /// Move cursor to column N (CSI G)
+    CursorHorizontalAbsolute(u16),
+
+    /// Move cursor to row;column (CSI H or CSI f)
+    CursorPosition { row: u16, col: u16 },
+
+    // === Erase Operations ===
+    /// Erase in display (CSI J)
+    /// 0 = cursor to end, 1 = start to cursor, 2 = entire, 3 = entire + scrollback
+    EraseInDisplay(u8),
+
+    /// Erase in line (CSI K)
+    /// 0 = cursor to end, 1 = start to cursor, 2 = entire line
+    EraseInLine(u8),
+
+    /// Erase N characters from cursor (CSI X)
+    EraseCharacters(u16),
+
+    // === Line Operations ===
+    /// Insert N blank lines (CSI L)
+    InsertLines(u16),
+
+    /// Delete N lines (CSI M)
+    DeleteLines(u16),
+
+    /// Delete N characters (CSI P)
+    DeleteCharacters(u16),
+
+    /// Insert N blank characters (CSI @)
+    InsertCharacters(u16),
+
+    // === Scrolling ===
+    /// Scroll up N lines (CSI S)
+    ScrollUp(u16),
+
+    /// Scroll down N lines (CSI T)
+    ScrollDown(u16),
+
+    /// Set scrolling region (CSI r)
+    SetScrollingRegion { top: u16, bottom: u16 },
+
+    /// Reverse Index (ESC M) - move cursor up, scroll down if at top
+    ReverseIndex,
+
+    /// Index (ESC D) - move cursor down, scroll up if at bottom
+    Index,
+
+    /// Next Line (ESC E) - CR + LF
+    NextLine,
+
+    // === Cursor Save/Restore ===
+    /// Save cursor position (ESC 7 or CSI s)
+    SaveCursorPosition,
+
+    /// Restore cursor position (ESC 8 or CSI u)
+    RestoreCursorPosition,
+
+    // === Text Attributes (SGR) ===
+    /// Set graphic rendition (CSI m)
+    SetAttribute(Attribute),
+
+    /// Reset all attributes to default (CSI 0 m)
+    ResetAttributes,
+
+    // === Modes ===
+    /// Set mode (CSI h)
+    SetMode(Mode),
+
+    /// Reset mode (CSI l)
+    ResetMode(Mode),
+
+    // === Tabs ===
+    /// Horizontal tab (0x09)
+    Tab,
+
+    /// Set tab stop at current column (ESC H)
+    SetTabStop,
+
+    /// Clear tab stop (CSI g)
+    ClearTabStop(u8),
+
+    // === Terminal Queries ===
+    /// Report cursor position (CSI 6 n)
+    ReportCursorPosition,
+
+    /// Device attributes request (CSI c or CSI 0 c) - Primary DA
+    DeviceAttributes,
+
+    /// Secondary device attributes request (CSI > c or CSI > 0 c) - DA2
+    SecondaryDeviceAttributes,
+
+    // === Bell ===
+    /// Bell character (0x07)
+    Bell,
+
+    // === Newline/Carriage Return ===
+    /// Newline (0x0A, 0x0B, 0x0C)
+    Newline,
+
+    /// Carriage return (0x0D)
+    CarriageReturn,
+
+    /// Backspace (0x08)
+    Backspace,
+
+    // === Screen Modes ===
+    /// Switch to alternate screen buffer (CSI ?1049h)
+    EnterAlternateScreen,
+
+    /// Switch back to main screen buffer (CSI ?1049l)
+    LeaveAlternateScreen,
+
+    /// Set cursor style (DECSCUSR - CSI Ps SP q)
+    /// 0/1 = blinking block, 2 = steady block, 3 = blinking underline,
+    /// 4 = steady underline, 5 = blinking bar, 6 = steady bar
+    SetCursorStyle(u8),
+
+    // === OSC Sequences ===
+    /// Set window/icon title (OSC 0, 1, 2)
+    SetTitle(String),
+
+    /// Set working directory (OSC 7)
+    SetWorkingDirectory(String),
+
+    /// Shell integration: prompt start (OSC 133;A)
+    PromptStart,
+
+    /// Shell integration: command start (OSC 133;B)
+    CommandStart,
+
+    /// Shell integration: command executed (OSC 133;C)
+    CommandExecuted,
+
+    /// Shell integration: command finished with exit code (OSC 133;D;exitcode)
+    CommandFinished(Option<i32>),
+
+    /// Set clipboard content (OSC 52)
+    SetClipboard { clipboard: char, data: String },
+
+    /// Start hyperlink (OSC 8 with URI)
+    StartHyperlink(String),
+
+    /// End hyperlink (OSC 8 with empty URI)
+    EndHyperlink,
+
+    /// Desktop notification (OSC 9 or OSC 777)
+    Notification { title: String, body: String },
+
+    /// Kitty keyboard protocol: push mode with flags (CSI > flags u)
+    KittyKeyboardPush(u8),
+
+    /// Kitty keyboard protocol: pop mode (CSI < u)
+    KittyKeyboardPop,
+
+    /// Kitty keyboard protocol: query mode (CSI ? u)
+    KittyKeyboardQuery,
+
+    /// Sixel image data (DCS q ... ST)
+    /// Contains: aspect ratio params and raw sixel data
+    SixelImage {
+        /// Pixel aspect ratio parameter
+        aspect_ratio: u16,
+        /// Background color mode (0=device default, 1=no change, 2=set to 0)
+        background: u16,
+        /// Horizontal grid size
+        horizontal_grid: u16,
+        /// Raw sixel data bytes
+        data: Vec<u8>,
+    },
+
+    /// Unknown OSC sequence (for debugging)
+    UnknownOsc(String),
+
+    /// Query foreground color (OSC 10 ; ?)
+    QueryForegroundColor,
+
+    /// Query background color (OSC 11 ; ?)
+    QueryBackgroundColor,
+
+    /// Query cursor color (OSC 12 ; ?)
+    QueryCursorColor,
+
+    /// Request DEC private mode status (DECRQM - CSI ? Ps $ p)
+    RequestPrivateMode(u16),
+}
+
+/// Text attributes settable via SGR sequences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "attr", content = "value")]
+pub enum Attribute {
+    Bold,
+    Dim,
+    Italic,
+    Underline,
+    Blink,
+    Reverse,
+    Hidden,
+    Strikethrough,
+
+    // Foreground colors
+    ForegroundColor(Color),
+
+    // Background colors
+    BackgroundColor(Color),
+
+    // Disable specific attributes
+    NoBold,
+    NoItalic,
+    NoUnderline,
+    NoBlink,
+    NoReverse,
+    NoHidden,
+    NoStrikethrough,
+}
+
+/// Color values for text attributes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
+pub enum Color {
+    /// Standard 8 colors (0-7)
+    Named(NamedColor),
+    /// 256-color palette index
+    Indexed(u8),
+    /// True color RGB
+    Rgb { r: u8, g: u8, b: u8 },
+    /// Default terminal color
+    Default,
+}
+
+/// Named terminal colors (the standard 8/16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NamedColor {
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    BrightBlack,
+    BrightRed,
+    BrightGreen,
+    BrightYellow,
+    BrightBlue,
+    BrightMagenta,
+    BrightCyan,
+    BrightWhite,
+}
+
+/// Terminal modes that can be set/reset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Mode {
+    /// Cursor visibility (CSI ?25h/l)
+    CursorVisible,
+    /// Application cursor keys (CSI ?1h/l)
+    ApplicationCursorKeys,
+    /// Bracketed paste (CSI ?2004h/l)
+    BracketedPaste,
+    /// Focus reporting (CSI ?1004h/l)
+    FocusReporting,
+    /// X10 mouse tracking - button press only (CSI ?9h/l)
+    MouseX10,
+    /// Normal mouse tracking - press and release (CSI ?1000h/l)
+    MouseNormal,
+    /// Button event mouse tracking - with motion (CSI ?1002h/l)
+    MouseButtonEvent,
+    /// Any event mouse tracking - all motion (CSI ?1003h/l)
+    MouseAnyEvent,
+    /// UTF-8 mouse encoding (CSI ?1005h/l)
+    MouseUtf8,
+    /// SGR extended mouse encoding (CSI ?1006h/l)
+    MouseSgr,
+    /// URXVT mouse encoding (CSI ?1015h/l)
+    MouseUrxvt,
+    /// Origin mode (CSI ?6h/l)
+    OriginMode,
+    /// Auto-wrap mode (CSI ?7h/l)
+    AutoWrap,
+    /// Reverse video mode (CSI ?5h/l) - swap fg/bg
+    ReverseVideo,
+    /// Alternate screen buffer (CSI ?47h/l)
+    AlternateScreen,
+    /// Alternate screen buffer with clear (CSI ?1047h/l)
+    AlternateScreenClear,
+    /// Save cursor and switch to alternate screen (CSI ?1049h/l)
+    AlternateScreenSaveCursor,
+    /// Cursor blink (CSI ?12h/l)
+    CursorBlink,
+    /// Column mode - 132 vs 80 columns (CSI ?3h/l)
+    ColumnMode132,
+    /// Alternate scroll mode (CSI ?1007h/l) - scroll alternate screen instead of sending keys
+    AlternateScrollMode,
+    /// Synchronized update mode (CSI ?2026h/l) - batch updates for flicker-free rendering
+    SynchronizedUpdate,
+}
+
+/// Parser state machine states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum State {
+    /// Normal state, processing printable characters
+    Ground,
+    /// Saw ESC, waiting for next byte
+    Escape,
+    /// In CSI sequence (ESC [), collecting parameters
+    CsiEntry,
+    /// In CSI sequence with private marker (ESC [ ?)
+    CsiPrivate,
+    /// Collecting CSI parameters (digits and semicolons)
+    CsiParam,
+    /// In OSC sequence (ESC ])
+    OscString,
+    /// Saw ESC while in OSC, expecting \ for ST (String Terminator)
+    OscStringEsc,
+    /// In DCS sequence (ESC P)
+    DcsString,
+    /// Saw ESC while in DCS, expecting \ for ST
+    DcsStringEsc,
+    /// In APC sequence (ESC _) - used by Kitty graphics protocol
+    ApcString,
+    /// Saw ESC while in APC, expecting \ for ST
+    ApcStringEsc,
+    /// In PM sequence (ESC ^) - Privacy Message, rarely used
+    PmString,
+    /// Saw ESC while in PM, expecting \ for ST
+    PmStringEsc,
+    /// In SOS sequence (ESC X) - Start of String, rarely used
+    SosString,
+    /// Saw ESC while in SOS, expecting \ for ST
+    SosStringEsc,
+    /// Character set designation for G0 (ESC ()
+    CharsetDesignateG0,
+    /// Character set designation for G1 (ESC ))
+    CharsetDesignateG1,
+}
+
+/// ANSI parser state machine.
+///
+/// The parser processes bytes incrementally and emits [`Action`] values
+/// through a callback. It maintains internal state to handle multi-byte
+/// escape sequences.
+pub struct AnsiParser {
+    pub(super) state: State,
+    pub(super) params: Vec<u16>,
+    pub(super) current_param: Option<u16>,
+    pub(super) is_private: bool,
+    /// Intermediate byte for CSI sequences (e.g., space in `CSI Ps SP q`)
+    pub(super) intermediate: Option<u8>,
+    pub(super) osc_buffer: Vec<u8>,
+    pub(super) dcs_buffer: Vec<u8>,
+    pub(super) dcs_params: Vec<u16>,
+    /// Buffer for accumulating UTF-8 multi-byte sequences
+    utf8_buffer: Vec<u8>,
+    /// Number of remaining bytes expected in current UTF-8 sequence
+    utf8_remaining: u8,
+    /// Active character set for G0 (false = ASCII, true = DEC Special Graphics)
+    g0_charset_graphics: bool,
+    /// Active character set for G1
+    g1_charset_graphics: bool,
+    /// Which charset is currently active (false = G0, true = G1)
+    using_g1: bool,
+}
+
+impl AnsiParser {
+    /// Create a new ANSI parser.
+    pub fn new() -> Self {
+        Self {
+            state: State::Ground,
+            params: Vec::with_capacity(16),
+            current_param: None,
+            is_private: false,
+            intermediate: None,
+            osc_buffer: Vec::new(),
+            dcs_buffer: Vec::new(),
+            dcs_params: Vec::new(),
+            utf8_buffer: Vec::with_capacity(4),
+            utf8_remaining: 0,
+            g0_charset_graphics: false,
+            g1_charset_graphics: false,
+            using_g1: false,
+        }
+    }
+
+    /// Feed bytes into the parser.
+    ///
+    /// The parser will call the provided callback for each complete action
+    /// it recognizes. Incomplete sequences are buffered internally.
+    pub fn feed<F>(&mut self, data: &[u8], mut callback: F)
+    where
+        F: FnMut(Action),
+    {
+        for &byte in data {
+            self.process_byte(byte, &mut callback);
+        }
+    }
+
+    /// Process a single byte.
+    pub(super) fn process_byte<F>(&mut self, byte: u8, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        match self.state {
+            State::Ground => self.ground(byte, callback),
+            State::Escape => self.escape(byte, callback),
+            State::CsiEntry => self.csi_entry(byte, callback),
+            State::CsiPrivate | State::CsiParam => self.csi_param(byte, callback),
+            State::OscString => self.osc_string(byte, callback),
+            State::OscStringEsc => self.osc_string_esc(byte, callback),
+            State::DcsString => self.dcs_string(byte, callback),
+            State::DcsStringEsc => self.dcs_string_esc(byte, callback),
+            State::ApcString => self.apc_string(byte),
+            State::ApcStringEsc => self.apc_string_esc(byte),
+            State::PmString => self.ignored_string(byte, State::PmStringEsc),
+            State::PmStringEsc => self.ignored_string_esc(byte, State::PmString),
+            State::SosString => self.ignored_string(byte, State::SosStringEsc),
+            State::SosStringEsc => self.ignored_string_esc(byte, State::SosString),
+            State::CharsetDesignateG0 | State::CharsetDesignateG1 => {
+                self.charset_designate(byte, callback)
+            }
+        }
+    }
+
+    /// Reset parser to ground state.
+    /// Note: charset state is preserved across resets (only cleared on hard reset).
+    pub(super) fn reset(&mut self) {
+        self.state = State::Ground;
+        self.params.clear();
+        self.current_param = None;
+        self.is_private = false;
+        self.intermediate = None;
+        self.osc_buffer.clear();
+        self.dcs_buffer.clear();
+        self.dcs_params.clear();
+        self.utf8_buffer.clear();
+        self.utf8_remaining = 0;
+        // Note: g0/g1 charset state is intentionally NOT reset here
+        // as it persists across escape sequences
+    }
+
+    /// Ground state - normal character processing.
+    fn ground<F>(&mut self, byte: u8, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        // If we're in the middle of a UTF-8 sequence, handle continuation
+        if self.utf8_remaining > 0 {
+            if byte & 0xC0 == 0x80 {
+                // Valid continuation byte
+                self.utf8_buffer.push(byte);
+                self.utf8_remaining -= 1;
+
+                if self.utf8_remaining == 0 {
+                    // Complete sequence - decode and emit
+                    if let Ok(s) = std::str::from_utf8(&self.utf8_buffer) {
+                        for c in s.chars() {
+                            callback(Action::Print(c));
+                        }
+                    }
+                    self.utf8_buffer.clear();
+                }
+                return;
+            } else {
+                // Invalid continuation - emit replacement char and process this byte normally
+                callback(Action::Print('\u{FFFD}'));
+                self.utf8_buffer.clear();
+                self.utf8_remaining = 0;
+                // Fall through to process current byte
+            }
+        }
+
+        match byte {
+            // ESC - start escape sequence
+            0x1B => {
+                self.state = State::Escape;
+            }
+            // C0 control codes
+            0x07 => callback(Action::Bell),
+            0x08 => callback(Action::Backspace),
+            0x09 => callback(Action::Tab),
+            0x0A..=0x0C => callback(Action::Newline),
+            0x0D => callback(Action::CarriageReturn),
+            0x0E => {
+                self.using_g1 = true;
+            }
+            0x0F => {
+                self.using_g1 = false;
+            }
+            // Other C0 controls
+            0x00..=0x1F => callback(Action::Execute(byte)),
+            0x20..=0x7E => {
+                let ch = if self.is_graphics_charset_active() {
+                    Self::translate_dec_graphics(byte).unwrap_or(byte as char)
+                } else {
+                    byte as char
+                };
+                callback(Action::Print(ch));
+            }
+            // DEL - ignore
+            0x7F => {}
+            // UTF-8 continuation byte without lead - invalid, emit replacement
+            0x80..=0xBF => {
+                callback(Action::Print('\u{FFFD}'));
+            }
+            // UTF-8 2-byte sequence lead (0xC0-0xDF)
+            0xC0..=0xDF => {
+                self.utf8_buffer.clear();
+                self.utf8_buffer.push(byte);
+                self.utf8_remaining = 1;
+            }
+            // UTF-8 3-byte sequence lead (0xE0-0xEF)
+            0xE0..=0xEF => {
+                self.utf8_buffer.clear();
+                self.utf8_buffer.push(byte);
+                self.utf8_remaining = 2;
+            }
+            // UTF-8 4-byte sequence lead (0xF0-0xF7)
+            0xF0..=0xF7 => {
+                self.utf8_buffer.clear();
+                self.utf8_buffer.push(byte);
+                self.utf8_remaining = 3;
+            }
+            // Invalid UTF-8 lead bytes (0xF8-0xFF) - emit replacement
+            0xF8..=0xFF => {
+                callback(Action::Print('\u{FFFD}'));
+            }
+        }
+    }
+
+    /// Escape state - just saw ESC.
+    fn escape<F>(&mut self, byte: u8, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        match byte {
+            // CSI - Control Sequence Introducer
+            b'[' => {
+                self.state = State::CsiEntry;
+                self.params.clear();
+                self.current_param = None;
+                self.is_private = false;
+            }
+            // OSC - Operating System Command
+            b']' => {
+                self.state = State::OscString;
+                self.osc_buffer.clear();
+            }
+            // DCS - Device Control String
+            b'P' => {
+                self.state = State::DcsString;
+                self.dcs_buffer.clear();
+                self.dcs_params.clear();
+            }
+            // Save cursor (ESC 7)
+            b'7' => {
+                callback(Action::SaveCursorPosition);
+                self.reset();
+            }
+            // Restore cursor (ESC 8)
+            b'8' => {
+                callback(Action::RestoreCursorPosition);
+                self.reset();
+            }
+            // Set tab stop (ESC H)
+            b'H' => {
+                callback(Action::SetTabStop);
+                self.reset();
+            }
+            // Reverse Index (ESC M) - move cursor up, scroll down if at top of scroll region
+            b'M' => {
+                callback(Action::ReverseIndex);
+                self.reset();
+            }
+            // Index (ESC D) - move cursor down, scroll up if at bottom of scroll region
+            b'D' => {
+                callback(Action::Index);
+                self.reset();
+            }
+            // Next Line (ESC E) - move to beginning of next line, scroll if needed
+            b'E' => {
+                callback(Action::NextLine);
+                self.reset();
+            }
+            // Another ESC - restart escape
+            0x1B => {
+                // Stay in escape state
+            }
+            // G0 character set designation (ESC ()
+            b'(' => {
+                self.state = State::CharsetDesignateG0;
+            }
+            // G1 character set designation (ESC ))
+            b')' => {
+                self.state = State::CharsetDesignateG1;
+            }
+            // APC - Application Program Command (ESC _)
+            // Used by Kitty graphics protocol
+            b'_' => {
+                self.state = State::ApcString;
+            }
+            // PM - Privacy Message (ESC ^)
+            b'^' => {
+                self.state = State::PmString;
+            }
+            // SOS - Start of String (ESC X)
+            b'X' => {
+                self.state = State::SosString;
+            }
+            // Anything else - abort and return to ground
+            _ => {
+                self.reset();
+            }
+        }
+    }
+
+    /// Character set designation (ESC ( X or ESC ) X)
+    /// Handles G0/G1 character set selection used by ncurses applications.
+    fn charset_designate<F>(&mut self, byte: u8, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        let _ = callback; // May be used in future for charset change notifications
+
+        // Determine if this is G0 or G1 based on the state we entered from
+        let is_g0 = self.state == State::CharsetDesignateG0;
+
+        // Common character set designators:
+        // 'B' - ASCII (USASCII)
+        // '0' - DEC Special Graphics (line drawing)
+        // 'A' - UK National (treated as ASCII)
+        // '<' - DEC Supplemental (treated as ASCII)
+        match byte {
+            b'0' => {
+                if is_g0 {
+                    self.g0_charset_graphics = true;
+                } else {
+                    self.g1_charset_graphics = true;
+                }
+            }
+            b'B' | b'A' | b'<' | b'>' | b'1' | b'2' => {
+                // ASCII or other charset - disable line drawing
+                if is_g0 {
+                    self.g0_charset_graphics = false;
+                } else {
+                    self.g1_charset_graphics = false;
+                }
+            }
+            _ => {
+                // Unknown charset designator - treat as ASCII
+                tracing::debug!("Unknown charset designator: {}", byte as char);
+                if is_g0 {
+                    self.g0_charset_graphics = false;
+                } else {
+                    self.g1_charset_graphics = false;
+                }
+            }
+        }
+        self.reset();
+    }
+
+    /// Check if the currently active charset is DEC Special Graphics.
+    fn is_graphics_charset_active(&self) -> bool {
+        if self.using_g1 {
+            self.g1_charset_graphics
+        } else {
+            self.g0_charset_graphics
+        }
+    }
+
+    /// Translate a byte to DEC Special Graphics character.
+    /// Returns None if the byte doesn't map to a special character (passthrough).
+    fn translate_dec_graphics(byte: u8) -> Option<char> {
+        // DEC Special Graphics character set mapping
+        // Characters 0x5F-0x7E map to line-drawing and other symbols
+        match byte {
+            // Blank (space)
+            0x5F => Some(' '),
+            // Diamond
+            0x60 => Some('\u{25C6}'),
+            // Checkerboard
+            0x61 => Some('\u{2592}'),
+            // Horizontal tab symbol
+            0x62 => Some('\u{2409}'),
+            // Form feed symbol
+            0x63 => Some('\u{240C}'),
+            // Carriage return symbol
+            0x64 => Some('\u{240D}'),
+            // Line feed symbol
+            0x65 => Some('\u{240A}'),
+            // Degree symbol
+            0x66 => Some('\u{00B0}'),
+            // Plus/minus
+            0x67 => Some('\u{00B1}'),
+            // Newline symbol
+            0x68 => Some('\u{2424}'),
+            // Vertical tab symbol
+            0x69 => Some('\u{240B}'),
+            // Lower right corner
+            0x6A => Some('\u{2518}'),
+            // Upper right corner
+            0x6B => Some('\u{2510}'),
+            // Upper left corner
+            0x6C => Some('\u{250C}'),
+            // Lower left corner
+            0x6D => Some('\u{2514}'),
+            // Crossing lines (plus)
+            0x6E => Some('\u{253C}'),
+            // Scan line 1 (top)
+            0x6F => Some('\u{23BA}'),
+            // Scan line 3
+            0x70 => Some('\u{23BB}'),
+            // Horizontal line (middle)
+            0x71 => Some('\u{2500}'),
+            // Scan line 7
+            0x72 => Some('\u{23BC}'),
+            // Scan line 9 (bottom)
+            0x73 => Some('\u{23BD}'),
+            // Left tee
+            0x74 => Some('\u{251C}'),
+            // Right tee
+            0x75 => Some('\u{2524}'),
+            // Bottom tee
+            0x76 => Some('\u{2534}'),
+            // Top tee
+            0x77 => Some('\u{252C}'),
+            // Vertical line
+            0x78 => Some('\u{2502}'),
+            // Less than or equal
+            0x79 => Some('\u{2264}'),
+            // Greater than or equal
+            0x7A => Some('\u{2265}'),
+            // Pi
+            0x7B => Some('\u{03C0}'),
+            // Not equal
+            0x7C => Some('\u{2260}'),
+            // UK pound
+            0x7D => Some('\u{00A3}'),
+            // Bullet/centered dot
+            0x7E => Some('\u{00B7}'),
+            // Characters before 0x5F are passed through unchanged
+            _ => None,
+        }
+    }
+}
+
+impl Default for AnsiParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -313,6 +313,10 @@ impl View for Table {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{
+        Event, Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind,
+    };
+    use crate::widgets::FocusAction;
 
     #[test]
     fn table_navigation() {
@@ -363,5 +367,301 @@ mod tests {
         table.move_selection(1); // should not panic
         assert_eq!(table.selected_index(), 0);
         assert_eq!(table.selected_row(), None);
+    }
+
+    // --- New tests below ---
+
+    #[test]
+    fn table_default_values() {
+        let table = Table::default();
+        assert_eq!(table.selected_index(), 0);
+        assert_eq!(table.selected_row(), None);
+    }
+
+    #[test]
+    fn table_new_is_default() {
+        let table = Table::new();
+        assert_eq!(table.selected_index(), 0);
+        assert_eq!(table.selected_row(), None);
+    }
+
+    #[test]
+    fn table_column_widths_builder() {
+        let table = Table::new()
+            .headers(vec!["A", "B"])
+            .column_widths(vec![10.0, 20.0]);
+        // Verify it doesn't panic and the table is constructed
+        assert_eq!(table.selected_index(), 0);
+    }
+
+    #[test]
+    fn table_selected_row_after_move() {
+        let mut table = Table::new()
+            .headers(vec!["Name"])
+            .rows(vec![vec!["Alice"], vec!["Bob"], vec!["Carol"]]);
+
+        table.move_selection(2);
+        assert_eq!(
+            table.selected_row(),
+            Some(&vec!["Carol".to_string()])
+        );
+    }
+
+    #[test]
+    fn table_select_first_after_move() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"], vec!["b"], vec!["c"]]);
+        table.move_selection(2);
+        assert_eq!(table.selected_index(), 2);
+        table.select_first();
+        assert_eq!(table.selected_index(), 0);
+    }
+
+    #[test]
+    fn table_select_last_on_empty() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(Vec::<Vec<String>>::new());
+        table.select_last(); // should not panic
+        assert_eq!(table.selected_index(), 0);
+    }
+
+    #[test]
+    fn table_move_selection_negative_from_zero() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"], vec!["b"]]);
+        table.move_selection(-1);
+        assert_eq!(table.selected_index(), 0);
+    }
+
+    #[test]
+    fn table_move_selection_clamps_to_last() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"], vec!["b"], vec!["c"]]);
+        table.move_selection(10);
+        assert_eq!(table.selected_index(), 2);
+    }
+
+    #[test]
+    fn table_debug_format() {
+        let table = Table::new()
+            .headers(vec!["Name", "Age"])
+            .rows(vec![vec!["Alice", "30"]]);
+        let debug = format!("{:?}", table);
+        assert!(debug.contains("Table"));
+        assert!(debug.contains("rows_count"));
+        assert!(debug.contains("selected"));
+    }
+
+    #[test]
+    fn table_constraints() {
+        let table = Table::new();
+        let c = <Table as View>::constraints(&table);
+        assert_eq!(c.display, Display::Flex);
+        assert_eq!(c.flex_direction, FlexDirection::Column);
+        assert_eq!(c.width, Dimension::Percent(100.0));
+    }
+
+    #[test]
+    fn table_children_count_header_plus_rows() {
+        let table = Table::new()
+            .headers(vec!["A"])
+            .rows(vec![vec!["1"], vec!["2"], vec!["3"]]);
+        // 1 header + 3 data rows = 4
+        assert_eq!(<Table as View>::children_count(&table), 4);
+    }
+
+    #[test]
+    fn table_children_count_no_rows() {
+        let table = Table::new()
+            .headers(vec!["A"])
+            .rows(Vec::<Vec<String>>::new());
+        // 1 header + 0 data rows = 1
+        assert_eq!(<Table as View>::children_count(&table), 1);
+    }
+
+    #[test]
+    fn table_is_focusable() {
+        let table = Table::new();
+        assert!(table.is_focusable());
+    }
+
+    #[test]
+    fn table_style_has_border() {
+        let table = Table::new();
+        let style = <Table as View>::style(&table);
+        assert_ne!(style.border.style, ultty_protocol::BorderType::None);
+    }
+
+    fn key(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    fn key_with_shift(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            modifiers: Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn table_on_key_j_moves_down() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"], vec!["b"]]);
+        let result = table.on_key(&key(Key::Char('j')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(table.selected_index(), 1);
+    }
+
+    #[test]
+    fn table_on_key_down_moves_down() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"], vec!["b"]]);
+        let result = table.on_key(&key(Key::Down));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(table.selected_index(), 1);
+    }
+
+    #[test]
+    fn table_on_key_k_moves_up() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"], vec!["b"]]);
+        table.move_selection(1);
+        let result = table.on_key(&key(Key::Char('k')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(table.selected_index(), 0);
+    }
+
+    #[test]
+    fn table_on_key_up_moves_up() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"], vec!["b"]]);
+        table.move_selection(1);
+        let result = table.on_key(&key(Key::Up));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(table.selected_index(), 0);
+    }
+
+    #[test]
+    fn table_on_key_g_selects_first() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"], vec!["b"], vec!["c"]]);
+        table.move_selection(2);
+        let result = table.on_key(&key(Key::Char('g')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(table.selected_index(), 0);
+    }
+
+    #[test]
+    fn table_on_key_shift_g_selects_last() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"], vec!["b"], vec!["c"]]);
+        let result = table.on_key(&key(Key::Char('G')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(table.selected_index(), 2);
+    }
+
+    #[test]
+    fn table_on_key_tab_focus_next() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"]]);
+        let result = table.on_key(&key(Key::Tab));
+        assert!(matches!(result, Some(FocusAction::Next)));
+    }
+
+    #[test]
+    fn table_on_key_shift_tab_focus_previous() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"]]);
+        let result = table.on_key(&key_with_shift(Key::Tab));
+        assert!(matches!(result, Some(FocusAction::Previous)));
+    }
+
+    #[test]
+    fn table_on_key_unhandled_returns_none() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"]]);
+        let result = table.on_key(&key(Key::Char('z')));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn table_on_event_scroll_up() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"], vec!["b"], vec!["c"], vec!["d"], vec!["e"]]);
+        table.move_selection(4);
+        assert_eq!(table.selected_index(), 4);
+
+        let event = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            x: 0,
+            y: 0,
+            modifiers: Modifiers::default(),
+        });
+        let handled = table.on_event(&event);
+        assert!(handled);
+        assert_eq!(table.selected_index(), 1); // moved up by 3
+    }
+
+    #[test]
+    fn table_on_event_scroll_down() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"], vec!["b"], vec!["c"], vec!["d"], vec!["e"]]);
+
+        let event = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            x: 0,
+            y: 0,
+            modifiers: Modifiers::default(),
+        });
+        let handled = table.on_event(&event);
+        assert!(handled);
+        assert_eq!(table.selected_index(), 3); // moved down by 3
+    }
+
+    #[test]
+    fn table_on_event_non_scroll_ignored() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"]]);
+
+        let event = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            x: 0,
+            y: 0,
+            modifiers: Modifiers::default(),
+        });
+        let handled = table.on_event(&event);
+        assert!(!handled);
+    }
+
+    #[test]
+    fn table_on_event_non_mouse_ignored() {
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(vec![vec!["a"]]);
+
+        let handled = table.on_event(&Event::FocusGained);
+        assert!(!handled);
     }
 }

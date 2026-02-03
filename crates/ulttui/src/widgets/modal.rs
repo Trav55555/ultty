@@ -310,6 +310,8 @@ impl View for Modal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{Key, KeyEvent, Modifiers};
+    use crate::widgets::FocusAction;
 
     #[test]
     fn modal_button_navigation() {
@@ -344,5 +346,211 @@ mod tests {
     fn modal_selected_label() {
         let modal = Modal::new().buttons(vec!["Yes", "No"]);
         assert_eq!(modal.selected_button_label(), Some("Yes"));
+    }
+
+    // --- New tests below ---
+
+    #[test]
+    fn modal_default_values() {
+        let modal = Modal::default();
+        assert!(modal.is_visible());
+        assert_eq!(modal.selected_button_index(), 0);
+        assert_eq!(modal.selected_button_label(), Some("OK"));
+    }
+
+    #[test]
+    fn modal_builder_chain() {
+        let modal = Modal::new()
+            .title("Confirm")
+            .body("Are you sure?")
+            .buttons(vec!["Yes", "No", "Cancel"])
+            .visible(false);
+
+        assert!(!modal.is_visible());
+        assert_eq!(modal.selected_button_label(), Some("Yes"));
+    }
+
+    #[test]
+    fn modal_visible_builder() {
+        let modal = Modal::new().visible(false);
+        assert!(!modal.is_visible());
+
+        let modal = Modal::new().visible(true);
+        assert!(modal.is_visible());
+    }
+
+    #[test]
+    fn modal_empty_buttons_navigation() {
+        let mut modal = Modal::new().buttons(Vec::<String>::new());
+        // Should not panic on empty buttons
+        modal.select_next_button();
+        assert_eq!(modal.selected_button_index(), 0);
+        modal.select_prev_button();
+        assert_eq!(modal.selected_button_index(), 0);
+        assert_eq!(modal.selected_button_label(), None);
+    }
+
+    #[test]
+    fn modal_single_button_wraps() {
+        let mut modal = Modal::new().buttons(vec!["Only"]);
+        assert_eq!(modal.selected_button_index(), 0);
+        modal.select_next_button();
+        assert_eq!(modal.selected_button_index(), 0);
+        modal.select_prev_button();
+        assert_eq!(modal.selected_button_index(), 0);
+    }
+
+    #[test]
+    fn modal_prev_button_wraps_from_zero() {
+        let mut modal = Modal::new().buttons(vec!["A", "B", "C"]);
+        assert_eq!(modal.selected_button_index(), 0);
+        modal.select_prev_button();
+        assert_eq!(modal.selected_button_index(), 2);
+    }
+
+    #[test]
+    fn modal_debug_format() {
+        let modal = Modal::new().title("Test").visible(true);
+        let debug = format!("{:?}", modal);
+        assert!(debug.contains("Modal"));
+        assert!(debug.contains("Test"));
+        assert!(debug.contains("visible"));
+    }
+
+    #[test]
+    fn modal_constraints_when_visible() {
+        let modal = Modal::new();
+        let c = <Modal as View>::constraints(&modal);
+        assert_eq!(c.display, Display::Flex);
+        assert_eq!(c.flex_direction, FlexDirection::Column);
+    }
+
+    #[test]
+    fn modal_constraints_when_hidden() {
+        let modal = Modal::new().visible(false);
+        let c = <Modal as View>::constraints(&modal);
+        assert_eq!(c.display, Display::None);
+    }
+
+    #[test]
+    fn modal_children_count_visible() {
+        let modal = Modal::new();
+        assert_eq!(<Modal as View>::children_count(&modal), 2);
+    }
+
+    #[test]
+    fn modal_children_count_hidden() {
+        let modal = Modal::new().visible(false);
+        assert_eq!(<Modal as View>::children_count(&modal), 0);
+    }
+
+    #[test]
+    fn modal_is_focusable_when_visible() {
+        let modal = Modal::new();
+        assert!(modal.is_focusable());
+    }
+
+    #[test]
+    fn modal_not_focusable_when_hidden() {
+        let modal = Modal::new().visible(false);
+        assert!(!modal.is_focusable());
+    }
+
+    fn key(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    #[test]
+    fn modal_on_key_right_selects_next() {
+        let mut modal = Modal::new().buttons(vec!["A", "B", "C"]);
+        assert_eq!(modal.selected_button_index(), 0);
+
+        let result = modal.on_key(&key(Key::Right));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(modal.selected_button_index(), 1);
+    }
+
+    #[test]
+    fn modal_on_key_left_selects_prev() {
+        let mut modal = Modal::new().buttons(vec!["A", "B", "C"]);
+        modal.select_next_button(); // go to 1
+        let result = modal.on_key(&key(Key::Left));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(modal.selected_button_index(), 0);
+    }
+
+    #[test]
+    fn modal_on_key_h_selects_prev() {
+        let mut modal = Modal::new().buttons(vec!["A", "B"]);
+        modal.select_next_button(); // go to 1
+        let result = modal.on_key(&key(Key::Char('h')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(modal.selected_button_index(), 0);
+    }
+
+    #[test]
+    fn modal_on_key_l_selects_next() {
+        let mut modal = Modal::new().buttons(vec!["A", "B"]);
+        let result = modal.on_key(&key(Key::Char('l')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(modal.selected_button_index(), 1);
+    }
+
+    #[test]
+    fn modal_on_key_tab_selects_next() {
+        let mut modal = Modal::new().buttons(vec!["A", "B"]);
+        let result = modal.on_key(&key(Key::Tab));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(modal.selected_button_index(), 1);
+    }
+
+    #[test]
+    fn modal_on_key_enter_consumed() {
+        let mut modal = Modal::new();
+        let result = modal.on_key(&key(Key::Enter));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+    }
+
+    #[test]
+    fn modal_on_key_escape_hides() {
+        let mut modal = Modal::new();
+        assert!(modal.is_visible());
+        let result = modal.on_key(&key(Key::Escape));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert!(!modal.is_visible());
+    }
+
+    #[test]
+    fn modal_on_key_unhandled_returns_none() {
+        let mut modal = Modal::new();
+        let result = modal.on_key(&key(Key::Char('x')));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn modal_on_key_when_hidden_returns_none() {
+        let mut modal = Modal::new().visible(false);
+        let result = modal.on_key(&key(Key::Right));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn modal_style_has_border() {
+        let modal = Modal::new();
+        let style = <Modal as View>::style(&modal);
+        assert_ne!(style.border.style, ultty_protocol::BorderType::None);
+    }
+
+    #[test]
+    fn modal_selected_button_label_after_navigation() {
+        let mut modal = Modal::new().buttons(vec!["Save", "Discard", "Cancel"]);
+        assert_eq!(modal.selected_button_label(), Some("Save"));
+        modal.select_next_button();
+        assert_eq!(modal.selected_button_label(), Some("Discard"));
+        modal.select_next_button();
+        assert_eq!(modal.selected_button_label(), Some("Cancel"));
     }
 }

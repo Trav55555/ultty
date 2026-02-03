@@ -521,65 +521,400 @@ impl App {
         let alt = modifiers.contains(ultty_protocol::Modifiers::ALT);
         let app_cursor = terminal.event_loop.terminal().modes().application_cursor_keys;
 
-        let bytes: Vec<u8> = match key {
-            ultty_protocol::Key::Char(c) => {
-                if ctrl && c.is_ascii_alphabetic() {
-                    vec![(c.to_ascii_lowercase() as u8) - b'a' + 1]
-                } else if alt {
-                    let mut v = vec![0x1b];
-                    let mut buf = [0u8; 4];
-                    v.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-                    v
-                } else {
-                    let mut buf = [0u8; 4];
-                    c.encode_utf8(&mut buf).as_bytes().to_vec()
-                }
-            }
-            ultty_protocol::Key::Enter => vec![b'\r'],
-            ultty_protocol::Key::Tab => vec![b'\t'],
-            ultty_protocol::Key::Escape => vec![0x1b],
-            ultty_protocol::Key::Backspace => vec![0x7f],
-            ultty_protocol::Key::Delete => b"\x1b[3~".to_vec(),
-            ultty_protocol::Key::Insert => b"\x1b[2~".to_vec(),
-            ultty_protocol::Key::Home => {
-                if app_cursor { b"\x1bOH".to_vec() } else { b"\x1b[H".to_vec() }
-            }
-            ultty_protocol::Key::End => {
-                if app_cursor { b"\x1bOF".to_vec() } else { b"\x1b[F".to_vec() }
-            }
-            ultty_protocol::Key::PageUp => b"\x1b[5~".to_vec(),
-            ultty_protocol::Key::PageDown => b"\x1b[6~".to_vec(),
-            ultty_protocol::Key::Up => {
-                if app_cursor { b"\x1bOA".to_vec() } else { b"\x1b[A".to_vec() }
-            }
-            ultty_protocol::Key::Down => {
-                if app_cursor { b"\x1bOB".to_vec() } else { b"\x1b[B".to_vec() }
-            }
-            ultty_protocol::Key::Right => {
-                if app_cursor { b"\x1bOC".to_vec() } else { b"\x1b[C".to_vec() }
-            }
-            ultty_protocol::Key::Left => {
-                if app_cursor { b"\x1bOD".to_vec() } else { b"\x1b[D".to_vec() }
-            }
-            ultty_protocol::Key::Function(n) => match n {
-                1 => b"\x1bOP".to_vec(),
-                2 => b"\x1bOQ".to_vec(),
-                3 => b"\x1bOR".to_vec(),
-                4 => b"\x1bOS".to_vec(),
-                5 => b"\x1b[15~".to_vec(),
-                6 => b"\x1b[17~".to_vec(),
-                7 => b"\x1b[18~".to_vec(),
-                8 => b"\x1b[19~".to_vec(),
-                9 => b"\x1b[20~".to_vec(),
-                10 => b"\x1b[21~".to_vec(),
-                11 => b"\x1b[23~".to_vec(),
-                12 => b"\x1b[24~".to_vec(),
-                _ => vec![],
-            },
-        };
+        let bytes = key_to_bytes(key, ctrl, alt, app_cursor);
 
         if !bytes.is_empty() {
             let _ = terminal.event_loop.send_input(&bytes);
         }
+    }
+}
+
+/// Convert a protocol key (with modifier flags) to the byte sequence expected by a PTY.
+///
+/// `app_cursor` controls whether application cursor key mode (DECCKM) sequences
+/// are emitted for arrow/Home/End keys.
+fn key_to_bytes(
+    key: &ultty_protocol::Key,
+    ctrl: bool,
+    alt: bool,
+    app_cursor: bool,
+) -> Vec<u8> {
+    match key {
+        ultty_protocol::Key::Char(c) => {
+            if ctrl && c.is_ascii_alphabetic() {
+                vec![(c.to_ascii_lowercase() as u8) - b'a' + 1]
+            } else if alt {
+                let mut v = vec![0x1b];
+                let mut buf = [0u8; 4];
+                v.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                v
+            } else {
+                let mut buf = [0u8; 4];
+                c.encode_utf8(&mut buf).as_bytes().to_vec()
+            }
+        }
+        ultty_protocol::Key::Enter => vec![b'\r'],
+        ultty_protocol::Key::Tab => vec![b'\t'],
+        ultty_protocol::Key::Escape => vec![0x1b],
+        ultty_protocol::Key::Backspace => vec![0x7f],
+        ultty_protocol::Key::Delete => b"\x1b[3~".to_vec(),
+        ultty_protocol::Key::Insert => b"\x1b[2~".to_vec(),
+        ultty_protocol::Key::Home => {
+            if app_cursor { b"\x1bOH".to_vec() } else { b"\x1b[H".to_vec() }
+        }
+        ultty_protocol::Key::End => {
+            if app_cursor { b"\x1bOF".to_vec() } else { b"\x1b[F".to_vec() }
+        }
+        ultty_protocol::Key::PageUp => b"\x1b[5~".to_vec(),
+        ultty_protocol::Key::PageDown => b"\x1b[6~".to_vec(),
+        ultty_protocol::Key::Up => {
+            if app_cursor { b"\x1bOA".to_vec() } else { b"\x1b[A".to_vec() }
+        }
+        ultty_protocol::Key::Down => {
+            if app_cursor { b"\x1bOB".to_vec() } else { b"\x1b[B".to_vec() }
+        }
+        ultty_protocol::Key::Right => {
+            if app_cursor { b"\x1bOC".to_vec() } else { b"\x1b[C".to_vec() }
+        }
+        ultty_protocol::Key::Left => {
+            if app_cursor { b"\x1bOD".to_vec() } else { b"\x1b[D".to_vec() }
+        }
+        ultty_protocol::Key::Function(n) => match n {
+            1 => b"\x1bOP".to_vec(),
+            2 => b"\x1bOQ".to_vec(),
+            3 => b"\x1bOR".to_vec(),
+            4 => b"\x1bOS".to_vec(),
+            5 => b"\x1b[15~".to_vec(),
+            6 => b"\x1b[17~".to_vec(),
+            7 => b"\x1b[18~".to_vec(),
+            8 => b"\x1b[19~".to_vec(),
+            9 => b"\x1b[20~".to_vec(),
+            10 => b"\x1b[21~".to_vec(),
+            11 => b"\x1b[23~".to_vec(),
+            12 => b"\x1b[24~".to_vec(),
+            _ => vec![],
+        },
+    }
+}
+
+/// Format a command and its arguments into a newline-terminated string
+/// suitable for sending to a PTY (as used by RunCommand).
+fn build_command_line(command: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        format!("{}\n", command)
+    } else {
+        format!("{} {}\n", command, args.join(" "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ultty_protocol::Key;
+
+    // ---------------------------------------------------------------
+    // key_to_bytes: simple keys (no modifiers, no app-cursor)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn key_char_plain_ascii() {
+        assert_eq!(key_to_bytes(&Key::Char('a'), false, false, false), b"a");
+        assert_eq!(key_to_bytes(&Key::Char('Z'), false, false, false), b"Z");
+        assert_eq!(key_to_bytes(&Key::Char('5'), false, false, false), b"5");
+    }
+
+    #[test]
+    fn key_char_multibyte_utf8() {
+        // A non-ASCII character should encode as its UTF-8 bytes.
+        let bytes = key_to_bytes(&Key::Char('\u{00e9}'), false, false, false); // 'e' with accent
+        assert_eq!(bytes, "\u{00e9}".as_bytes());
+
+        let bytes = key_to_bytes(&Key::Char('\u{4e2d}'), false, false, false); // CJK character
+        assert_eq!(bytes, "\u{4e2d}".as_bytes());
+    }
+
+    #[test]
+    fn key_enter() {
+        assert_eq!(key_to_bytes(&Key::Enter, false, false, false), b"\r");
+    }
+
+    #[test]
+    fn key_tab() {
+        assert_eq!(key_to_bytes(&Key::Tab, false, false, false), b"\t");
+    }
+
+    #[test]
+    fn key_escape() {
+        assert_eq!(key_to_bytes(&Key::Escape, false, false, false), b"\x1b");
+    }
+
+    #[test]
+    fn key_backspace() {
+        assert_eq!(key_to_bytes(&Key::Backspace, false, false, false), b"\x7f");
+    }
+
+    #[test]
+    fn key_delete() {
+        assert_eq!(
+            key_to_bytes(&Key::Delete, false, false, false),
+            b"\x1b[3~"
+        );
+    }
+
+    #[test]
+    fn key_insert() {
+        assert_eq!(
+            key_to_bytes(&Key::Insert, false, false, false),
+            b"\x1b[2~"
+        );
+    }
+
+    #[test]
+    fn key_page_up_down() {
+        assert_eq!(
+            key_to_bytes(&Key::PageUp, false, false, false),
+            b"\x1b[5~"
+        );
+        assert_eq!(
+            key_to_bytes(&Key::PageDown, false, false, false),
+            b"\x1b[6~"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // key_to_bytes: ctrl modifier
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn key_ctrl_a_through_z() {
+        // Ctrl-A = 0x01, Ctrl-Z = 0x1A
+        assert_eq!(key_to_bytes(&Key::Char('a'), true, false, false), vec![1]);
+        assert_eq!(key_to_bytes(&Key::Char('c'), true, false, false), vec![3]);
+        assert_eq!(key_to_bytes(&Key::Char('z'), true, false, false), vec![26]);
+    }
+
+    #[test]
+    fn key_ctrl_uppercase_is_same_as_lowercase() {
+        // Ctrl-A and Ctrl-a should produce the same byte.
+        assert_eq!(
+            key_to_bytes(&Key::Char('A'), true, false, false),
+            key_to_bytes(&Key::Char('a'), true, false, false)
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Char('C'), true, false, false),
+            key_to_bytes(&Key::Char('c'), true, false, false)
+        );
+    }
+
+    #[test]
+    fn key_ctrl_non_alpha_passes_through() {
+        // Ctrl + non-alpha char should not produce a control character;
+        // it falls through to the alt/plain branch.
+        assert_eq!(
+            key_to_bytes(&Key::Char('5'), true, false, false),
+            b"5"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // key_to_bytes: alt modifier
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn key_alt_char() {
+        // Alt-a should be ESC followed by 'a'
+        assert_eq!(
+            key_to_bytes(&Key::Char('a'), false, true, false),
+            vec![0x1b, b'a']
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Char('x'), false, true, false),
+            vec![0x1b, b'x']
+        );
+    }
+
+    #[test]
+    fn key_alt_multibyte_char() {
+        // Alt + non-ASCII should be ESC + UTF-8 bytes
+        let bytes = key_to_bytes(&Key::Char('\u{00e9}'), false, true, false);
+        let mut expected = vec![0x1b];
+        expected.extend_from_slice("\u{00e9}".as_bytes());
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn key_ctrl_takes_precedence_over_alt_for_alpha() {
+        // When both ctrl and alt are set for an alpha char, ctrl wins.
+        assert_eq!(
+            key_to_bytes(&Key::Char('c'), true, true, false),
+            vec![3]
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // key_to_bytes: arrow keys with and without app-cursor mode
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn arrow_keys_normal_mode() {
+        assert_eq!(key_to_bytes(&Key::Up, false, false, false), b"\x1b[A");
+        assert_eq!(key_to_bytes(&Key::Down, false, false, false), b"\x1b[B");
+        assert_eq!(key_to_bytes(&Key::Right, false, false, false), b"\x1b[C");
+        assert_eq!(key_to_bytes(&Key::Left, false, false, false), b"\x1b[D");
+    }
+
+    #[test]
+    fn arrow_keys_app_cursor_mode() {
+        assert_eq!(key_to_bytes(&Key::Up, false, false, true), b"\x1bOA");
+        assert_eq!(key_to_bytes(&Key::Down, false, false, true), b"\x1bOB");
+        assert_eq!(key_to_bytes(&Key::Right, false, false, true), b"\x1bOC");
+        assert_eq!(key_to_bytes(&Key::Left, false, false, true), b"\x1bOD");
+    }
+
+    #[test]
+    fn home_end_normal_mode() {
+        assert_eq!(key_to_bytes(&Key::Home, false, false, false), b"\x1b[H");
+        assert_eq!(key_to_bytes(&Key::End, false, false, false), b"\x1b[F");
+    }
+
+    #[test]
+    fn home_end_app_cursor_mode() {
+        assert_eq!(key_to_bytes(&Key::Home, false, false, true), b"\x1bOH");
+        assert_eq!(key_to_bytes(&Key::End, false, false, true), b"\x1bOF");
+    }
+
+    // ---------------------------------------------------------------
+    // key_to_bytes: function keys
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn function_keys_f1_through_f4() {
+        assert_eq!(key_to_bytes(&Key::Function(1), false, false, false), b"\x1bOP");
+        assert_eq!(key_to_bytes(&Key::Function(2), false, false, false), b"\x1bOQ");
+        assert_eq!(key_to_bytes(&Key::Function(3), false, false, false), b"\x1bOR");
+        assert_eq!(key_to_bytes(&Key::Function(4), false, false, false), b"\x1bOS");
+    }
+
+    #[test]
+    fn function_keys_f5_through_f12() {
+        assert_eq!(key_to_bytes(&Key::Function(5), false, false, false), b"\x1b[15~");
+        assert_eq!(key_to_bytes(&Key::Function(6), false, false, false), b"\x1b[17~");
+        assert_eq!(key_to_bytes(&Key::Function(7), false, false, false), b"\x1b[18~");
+        assert_eq!(key_to_bytes(&Key::Function(8), false, false, false), b"\x1b[19~");
+        assert_eq!(key_to_bytes(&Key::Function(9), false, false, false), b"\x1b[20~");
+        assert_eq!(key_to_bytes(&Key::Function(10), false, false, false), b"\x1b[21~");
+        assert_eq!(key_to_bytes(&Key::Function(11), false, false, false), b"\x1b[23~");
+        assert_eq!(key_to_bytes(&Key::Function(12), false, false, false), b"\x1b[24~");
+    }
+
+    #[test]
+    fn function_key_out_of_range_returns_empty() {
+        assert_eq!(key_to_bytes(&Key::Function(0), false, false, false), Vec::<u8>::new());
+        assert_eq!(key_to_bytes(&Key::Function(13), false, false, false), Vec::<u8>::new());
+        assert_eq!(key_to_bytes(&Key::Function(255), false, false, false), Vec::<u8>::new());
+    }
+
+    // ---------------------------------------------------------------
+    // build_command_line
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn command_line_no_args() {
+        assert_eq!(build_command_line("ls", &[]), "ls\n");
+    }
+
+    #[test]
+    fn command_line_with_args() {
+        let args = vec!["--all".to_string(), "-l".to_string()];
+        assert_eq!(build_command_line("ls", &args), "ls --all -l\n");
+    }
+
+    #[test]
+    fn command_line_single_arg() {
+        let args = vec!["/tmp".to_string()];
+        assert_eq!(build_command_line("cd", &args), "cd /tmp\n");
+    }
+
+    #[test]
+    fn command_line_always_ends_with_newline() {
+        assert!(build_command_line("echo", &[]).ends_with('\n'));
+        let args = vec!["hello".to_string()];
+        assert!(build_command_line("echo", &args).ends_with('\n'));
+    }
+
+    // ---------------------------------------------------------------
+    // Protocol type round-trip / construction tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn control_request_ping_serialization_roundtrip() {
+        use ultty_protocol::control::ControlRequest;
+        let req = ControlRequest::Ping;
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: ControlRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+    }
+
+    #[test]
+    fn control_response_error_has_correct_fields() {
+        use ultty_protocol::control::ControlResponse;
+        let resp = ControlResponse::Error {
+            code: 1,
+            message: "No active terminal".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"code\":1"));
+        assert!(json.contains("No active terminal"));
+    }
+
+    #[test]
+    fn control_response_pong_roundtrip() {
+        use ultty_protocol::control::{ControlData, ControlResponse};
+        let resp = ControlResponse::Data(ControlData::Pong);
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: ControlResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, resp);
+    }
+
+    #[test]
+    fn version_info_construction() {
+        use ultty_protocol::control::VersionInfo;
+        let info = VersionInfo {
+            version: "0.1.0".to_string(),
+            protocol_version: 1,
+            git_hash: Some("abc123".to_string()),
+        };
+        assert_eq!(info.version, "0.1.0");
+        assert_eq!(info.protocol_version, 1);
+        assert_eq!(info.git_hash, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn batch_request_serialization_roundtrip() {
+        use ultty_protocol::control::ControlRequest;
+        let batch = ControlRequest::Batch {
+            commands: vec![
+                ControlRequest::Ping,
+                ControlRequest::Version,
+                ControlRequest::GetSelection,
+            ],
+        };
+        let json = serde_json::to_string(&batch).unwrap();
+        let parsed: ControlRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, batch);
+    }
+
+    #[test]
+    fn search_request_serialization_roundtrip() {
+        use ultty_protocol::control::ControlRequest;
+        let req = ControlRequest::Search {
+            pattern: "hello.*world".to_string(),
+            regex: true,
+            case_sensitive: false,
+            include_scrollback: true,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: ControlRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
     }
 }

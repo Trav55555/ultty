@@ -386,7 +386,7 @@ fn parse_modifiers(s: &str) -> ultty_protocol::Modifiers {
 
 fn hex_decode(hex: &str) -> Option<Vec<u8>> {
     let hex = hex.trim();
-    if hex.len() % 2 != 0 {
+    if hex.len() & 1 != 0 {
         return None;
     }
     (0..hex.len())

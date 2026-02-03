@@ -1,10 +1,70 @@
 //! Screenshot capture functionality.
 //!
 //! Renders the terminal to an offscreen texture and saves as PNG.
+//!
+//! The GPU-dependent capture methods live on [`Renderer`]. The pure helper
+//! functions ([`padded_bytes_per_row`], [`unpad_and_convert_pixels`],
+//! [`encode_rgba_png`]) are free functions so they can be unit-tested
+//! without a GPU context.
 
 use super::{OverlayState, Renderer};
 use crate::grid::Terminal;
 use wgpu::util::DeviceExt;
+
+/// Compute the row stride (in bytes) after aligning to `alignment`.
+///
+/// wgpu requires that `bytes_per_row` is a multiple of
+/// `COPY_BYTES_PER_ROW_ALIGNMENT` (256).  This function performs the
+/// ceiling-division rounding.
+fn padded_bytes_per_row(width: u32, bytes_per_pixel: u32, alignment: u32) -> u32 {
+    let unpadded = width * bytes_per_pixel;
+    unpadded.div_ceil(alignment) * alignment
+}
+
+/// Strip row padding and optionally swizzle BGRA -> RGBA.
+///
+/// `data` is the raw GPU read-back buffer (with padding).  The function
+/// returns a tightly-packed RGBA pixel buffer suitable for PNG encoding.
+fn unpad_and_convert_pixels(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    padded_row_bytes: u32,
+    bytes_per_pixel: u32,
+    is_bgra: bool,
+) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        let row_start = (y * padded_row_bytes) as usize;
+        let row_end = row_start + (width * bytes_per_pixel) as usize;
+        let row = &data[row_start..row_end];
+
+        for chunk in row.chunks(4) {
+            if is_bgra {
+                pixels.push(chunk[2]); // R
+                pixels.push(chunk[1]); // G
+                pixels.push(chunk[0]); // B
+                pixels.push(chunk[3]); // A
+            } else {
+                pixels.extend_from_slice(chunk);
+            }
+        }
+    }
+    pixels
+}
+
+/// Encode a tightly-packed RGBA pixel buffer as a PNG into an in-memory `Vec<u8>`.
+fn encode_rgba_png(pixels: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
+    let mut png_data = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_data, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(pixels)?;
+    }
+    Ok(png_data)
+}
 
 impl Renderer {
     /// Capture a screenshot of the terminal to a PNG file.
@@ -354,5 +414,253 @@ impl Renderer {
         }
 
         Ok(png_data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The wgpu alignment constant is 256 bytes.
+    const WGPU_ALIGNMENT: u32 = 256;
+
+    // ---------------------------------------------------------------
+    // padded_bytes_per_row
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn padded_row_exact_multiple_of_alignment() {
+        // 64 pixels * 4 bpp = 256 bytes, already aligned.
+        assert_eq!(padded_bytes_per_row(64, 4, WGPU_ALIGNMENT), 256);
+    }
+
+    #[test]
+    fn padded_row_rounds_up_to_alignment() {
+        // 80 pixels * 4 bpp = 320 bytes -> next multiple of 256 = 512.
+        assert_eq!(padded_bytes_per_row(80, 4, WGPU_ALIGNMENT), 512);
+    }
+
+    #[test]
+    fn padded_row_small_width() {
+        // 1 pixel * 4 bpp = 4 bytes -> rounds up to 256.
+        assert_eq!(padded_bytes_per_row(1, 4, WGPU_ALIGNMENT), 256);
+    }
+
+    #[test]
+    fn padded_row_large_width() {
+        // 1920 pixels * 4 = 7680 bytes.  7680 / 256 = 30, exact.
+        assert_eq!(padded_bytes_per_row(1920, 4, WGPU_ALIGNMENT), 7680);
+    }
+
+    #[test]
+    fn padded_row_not_exact_large() {
+        // 1921 pixels * 4 = 7684 bytes.  ceil(7684/256)*256 = 7936.
+        assert_eq!(padded_bytes_per_row(1921, 4, WGPU_ALIGNMENT), 7936);
+    }
+
+    #[test]
+    fn padded_row_alignment_of_1() {
+        // With alignment=1, no padding needed.
+        assert_eq!(padded_bytes_per_row(123, 4, 1), 492);
+    }
+
+    // ---------------------------------------------------------------
+    // unpad_and_convert_pixels: RGBA pass-through (no swizzle)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn unpad_rgba_no_padding_needed() {
+        // 1x1 pixel, padded row = 256 bytes (but only first 4 bytes used).
+        let padded = padded_bytes_per_row(1, 4, WGPU_ALIGNMENT);
+        let mut data = vec![0u8; padded as usize];
+        data[0] = 10; // R
+        data[1] = 20; // G
+        data[2] = 30; // B
+        data[3] = 255; // A
+
+        let pixels = unpad_and_convert_pixels(&data, 1, 1, padded, 4, false);
+        assert_eq!(pixels, vec![10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn unpad_rgba_multiple_rows() {
+        // 2x2 image, each row padded to 256 bytes.
+        let padded = padded_bytes_per_row(2, 4, WGPU_ALIGNMENT);
+        assert_eq!(padded, 256); // 2*4=8 < 256
+        let mut data = vec![0u8; (padded * 2) as usize];
+        // Row 0: pixels (R0,G0,B0,A0) and (R1,G1,B1,A1)
+        data[0..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        // Row 1: pixels at offset 256
+        data[256..264].copy_from_slice(&[9, 10, 11, 12, 13, 14, 15, 16]);
+
+        let pixels = unpad_and_convert_pixels(&data, 2, 2, padded, 4, false);
+        assert_eq!(pixels, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    }
+
+    // ---------------------------------------------------------------
+    // unpad_and_convert_pixels: BGRA -> RGBA swizzle
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn bgra_to_rgba_single_pixel() {
+        let padded = padded_bytes_per_row(1, 4, WGPU_ALIGNMENT);
+        let mut data = vec![0u8; padded as usize];
+        // BGRA: B=30, G=20, R=10, A=255
+        data[0] = 30; // B
+        data[1] = 20; // G
+        data[2] = 10; // R
+        data[3] = 255; // A
+
+        let pixels = unpad_and_convert_pixels(&data, 1, 1, padded, 4, true);
+        // Should be converted to RGBA: R=10, G=20, B=30, A=255
+        assert_eq!(pixels, vec![10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn bgra_to_rgba_preserves_alpha() {
+        let padded = padded_bytes_per_row(1, 4, WGPU_ALIGNMENT);
+        let mut data = vec![0u8; padded as usize];
+        data[0] = 100; // B
+        data[1] = 150; // G
+        data[2] = 200; // R
+        data[3] = 128; // A (semi-transparent)
+
+        let pixels = unpad_and_convert_pixels(&data, 1, 1, padded, 4, true);
+        assert_eq!(pixels, vec![200, 150, 100, 128]);
+    }
+
+    #[test]
+    fn bgra_to_rgba_multiple_pixels_per_row() {
+        // 3 pixels wide, 1 row
+        let padded = padded_bytes_per_row(3, 4, WGPU_ALIGNMENT);
+        let mut data = vec![0u8; padded as usize];
+        // Pixel 0: BGRA(0, 0, 255, 255) -> RGBA(255, 0, 0, 255) (pure red)
+        data[0..4].copy_from_slice(&[0, 0, 255, 255]);
+        // Pixel 1: BGRA(0, 255, 0, 255) -> RGBA(0, 255, 0, 255) (pure green)
+        data[4..8].copy_from_slice(&[0, 255, 0, 255]);
+        // Pixel 2: BGRA(255, 0, 0, 255) -> RGBA(0, 0, 255, 255) (pure blue)
+        data[8..12].copy_from_slice(&[255, 0, 0, 255]);
+
+        let pixels = unpad_and_convert_pixels(&data, 3, 1, padded, 4, true);
+        assert_eq!(
+            pixels,
+            vec![
+                255, 0, 0, 255,   // red
+                0, 255, 0, 255,   // green
+                0, 0, 255, 255,   // blue
+            ]
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // unpad_and_convert_pixels: output size
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn output_pixel_count_matches_dimensions() {
+        let width = 10u32;
+        let height = 5u32;
+        let padded = padded_bytes_per_row(width, 4, WGPU_ALIGNMENT);
+        let data = vec![0u8; (padded * height) as usize];
+
+        let pixels = unpad_and_convert_pixels(&data, width, height, padded, 4, false);
+        assert_eq!(pixels.len(), (width * height * 4) as usize);
+    }
+
+    // ---------------------------------------------------------------
+    // encode_rgba_png
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn encode_png_produces_valid_png_header() {
+        // A 1x1 red pixel
+        let pixels = vec![255u8, 0, 0, 255];
+        let png_data = encode_rgba_png(&pixels, 1, 1).unwrap();
+
+        // PNG magic bytes: 137 80 78 71 13 10 26 10
+        assert!(png_data.len() > 8);
+        assert_eq!(&png_data[0..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    }
+
+    #[test]
+    fn encode_png_roundtrip_1x1() {
+        let original_pixels = vec![42u8, 100, 200, 255];
+        let png_data = encode_rgba_png(&original_pixels, 1, 1).unwrap();
+
+        // Decode the PNG and verify pixel values
+        let decoder = png::Decoder::new(std::io::Cursor::new(&png_data));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        let decoded = &buf[..info.buffer_size()];
+
+        assert_eq!(decoded, &original_pixels[..]);
+    }
+
+    #[test]
+    fn encode_png_roundtrip_2x2() {
+        // 2x2 image: red, green, blue, white
+        let original_pixels = vec![
+            255, 0, 0, 255,     // red
+            0, 255, 0, 255,     // green
+            0, 0, 255, 255,     // blue
+            255, 255, 255, 255, // white
+        ];
+        let png_data = encode_rgba_png(&original_pixels, 2, 2).unwrap();
+
+        let decoder = png::Decoder::new(std::io::Cursor::new(&png_data));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        let decoded = &buf[..info.buffer_size()];
+
+        assert_eq!(info.width, 2);
+        assert_eq!(info.height, 2);
+        assert_eq!(decoded, &original_pixels[..]);
+    }
+
+    #[test]
+    fn encode_png_reports_rgba_color_type() {
+        let pixels = vec![0u8; 4]; // 1x1 transparent black
+        let png_data = encode_rgba_png(&pixels, 1, 1).unwrap();
+
+        let decoder = png::Decoder::new(std::io::Cursor::new(&png_data));
+        let reader = decoder.read_info().unwrap();
+        assert_eq!(reader.info().color_type, png::ColorType::Rgba);
+        assert_eq!(reader.info().bit_depth, png::BitDepth::Eight);
+    }
+
+    // ---------------------------------------------------------------
+    // Integration: unpad + encode pipeline
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn full_pipeline_bgra_padded_to_png() {
+        // Simulate a 2x1 BGRA buffer with wgpu alignment.
+        let width = 2u32;
+        let height = 1u32;
+        let padded = padded_bytes_per_row(width, 4, WGPU_ALIGNMENT);
+        let mut data = vec![0u8; padded as usize];
+        // Pixel 0: BGRA(255, 0, 0, 255) = pure blue in BGRA
+        data[0..4].copy_from_slice(&[255, 0, 0, 255]);
+        // Pixel 1: BGRA(0, 255, 0, 128) = pure green in BGRA (semi-transparent)
+        data[4..8].copy_from_slice(&[0, 255, 0, 128]);
+
+        let pixels = unpad_and_convert_pixels(&data, width, height, padded, 4, true);
+        let png_data = encode_rgba_png(&pixels, width, height).unwrap();
+
+        // Decode and verify
+        let decoder = png::Decoder::new(std::io::Cursor::new(&png_data));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        let decoded = &buf[..info.buffer_size()];
+
+        // BGRA(255,0,0,255) -> RGBA(0,0,255,255)
+        // BGRA(0,255,0,128) -> RGBA(0,255,0,128)
+        assert_eq!(
+            decoded,
+            &[0, 0, 255, 255, 0, 255, 0, 128]
+        );
     }
 }

@@ -201,6 +201,8 @@ impl View for Tabs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{Key, KeyEvent, Modifiers};
+    use crate::widgets::FocusAction;
 
     #[test]
     fn tabs_navigation() {
@@ -238,5 +240,225 @@ mod tests {
         tabs.select_prev();
         assert_eq!(tabs.active_index(), 0);
         assert_eq!(tabs.active_label(), None);
+    }
+
+    // --- New tests below ---
+
+    #[test]
+    fn tabs_default_values() {
+        let tabs = Tabs::default();
+        assert_eq!(tabs.active_index(), 0);
+        assert_eq!(tabs.tab_count(), 0);
+        assert_eq!(tabs.active_label(), None);
+    }
+
+    #[test]
+    fn tabs_new_is_default() {
+        let tabs = Tabs::new();
+        assert_eq!(tabs.active_index(), 0);
+        assert_eq!(tabs.tab_count(), 0);
+    }
+
+    #[test]
+    fn tabs_builder_active() {
+        let tabs = Tabs::new()
+            .labels(vec!["A", "B", "C"])
+            .active(2);
+        assert_eq!(tabs.active_index(), 2);
+        assert_eq!(tabs.active_label(), Some("C"));
+    }
+
+    #[test]
+    fn tabs_tab_count() {
+        let tabs = Tabs::new().labels(vec!["X", "Y", "Z"]);
+        assert_eq!(tabs.tab_count(), 3);
+    }
+
+    #[test]
+    fn tabs_tab_count_empty() {
+        let tabs = Tabs::new();
+        assert_eq!(tabs.tab_count(), 0);
+    }
+
+    #[test]
+    fn tabs_single_label_wrap() {
+        let mut tabs = Tabs::new().labels(vec!["Only"]);
+        tabs.select_next();
+        assert_eq!(tabs.active_index(), 0);
+        tabs.select_prev();
+        assert_eq!(tabs.active_index(), 0);
+    }
+
+    #[test]
+    fn tabs_select_zero() {
+        let mut tabs = Tabs::new().labels(vec!["A", "B", "C"]);
+        tabs.select(2);
+        tabs.select(0);
+        assert_eq!(tabs.active_index(), 0);
+        assert_eq!(tabs.active_label(), Some("A"));
+    }
+
+    #[test]
+    fn tabs_select_boundary() {
+        let mut tabs = Tabs::new().labels(vec!["A", "B"]);
+        tabs.select(1);
+        assert_eq!(tabs.active_index(), 1);
+        tabs.select(2); // out of bounds, no change
+        assert_eq!(tabs.active_index(), 1);
+    }
+
+    #[test]
+    fn tabs_prev_wraps_from_zero() {
+        let mut tabs = Tabs::new().labels(vec!["A", "B", "C"]);
+        assert_eq!(tabs.active_index(), 0);
+        tabs.select_prev();
+        assert_eq!(tabs.active_index(), 2);
+    }
+
+    #[test]
+    fn tabs_debug_format() {
+        let tabs = Tabs::new().labels(vec!["Home", "Settings"]);
+        let debug = format!("{:?}", tabs);
+        assert!(debug.contains("Tabs"));
+        assert!(debug.contains("Home"));
+        assert!(debug.contains("active"));
+    }
+
+    #[test]
+    fn tabs_constraints() {
+        let tabs = Tabs::new().labels(vec!["A"]);
+        let c = <Tabs as View>::constraints(&tabs);
+        assert_eq!(c.display, Display::Flex);
+        assert_eq!(c.flex_direction, FlexDirection::Row);
+        assert_eq!(c.width, Dimension::Percent(100.0));
+        assert_eq!(c.height, Dimension::Cells(1.0));
+    }
+
+    #[test]
+    fn tabs_children_count_matches_labels() {
+        let tabs = Tabs::new().labels(vec!["A", "B", "C"]);
+        assert_eq!(<Tabs as View>::children_count(&tabs), 3);
+    }
+
+    #[test]
+    fn tabs_children_count_empty() {
+        let tabs = Tabs::new();
+        assert_eq!(<Tabs as View>::children_count(&tabs), 0);
+    }
+
+    #[test]
+    fn tabs_is_focusable() {
+        let tabs = Tabs::new();
+        assert!(tabs.is_focusable());
+    }
+
+    fn key(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    fn key_with_shift(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            modifiers: Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn tabs_on_key_right_selects_next() {
+        let mut tabs = Tabs::new().labels(vec!["A", "B"]);
+        let result = tabs.on_key(&key(Key::Right));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(tabs.active_index(), 1);
+    }
+
+    #[test]
+    fn tabs_on_key_left_selects_prev() {
+        let mut tabs = Tabs::new().labels(vec!["A", "B"]).active(1);
+        let result = tabs.on_key(&key(Key::Left));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(tabs.active_index(), 0);
+    }
+
+    #[test]
+    fn tabs_on_key_h_selects_prev() {
+        let mut tabs = Tabs::new().labels(vec!["A", "B"]).active(1);
+        let result = tabs.on_key(&key(Key::Char('h')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(tabs.active_index(), 0);
+    }
+
+    #[test]
+    fn tabs_on_key_l_selects_next() {
+        let mut tabs = Tabs::new().labels(vec!["A", "B"]);
+        let result = tabs.on_key(&key(Key::Char('l')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(tabs.active_index(), 1);
+    }
+
+    #[test]
+    fn tabs_on_key_digit_selects_tab() {
+        let mut tabs = Tabs::new().labels(vec!["A", "B", "C"]);
+        let result = tabs.on_key(&key(Key::Char('2')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(tabs.active_index(), 1); // digit '2' -> index 1
+    }
+
+    #[test]
+    fn tabs_on_key_digit_1_selects_first() {
+        let mut tabs = Tabs::new().labels(vec!["A", "B", "C"]).active(2);
+        let result = tabs.on_key(&key(Key::Char('1')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(tabs.active_index(), 0);
+    }
+
+    #[test]
+    fn tabs_on_key_digit_0_no_change() {
+        let mut tabs = Tabs::new().labels(vec!["A", "B"]).active(1);
+        let result = tabs.on_key(&key(Key::Char('0')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        // '0' maps to index -1 which fails the > 0 check, so no change
+        assert_eq!(tabs.active_index(), 1);
+    }
+
+    #[test]
+    fn tabs_on_key_digit_out_of_range() {
+        let mut tabs = Tabs::new().labels(vec!["A", "B"]);
+        let result = tabs.on_key(&key(Key::Char('5')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        // digit 5 -> index 4 but only 2 labels, so no change
+        assert_eq!(tabs.active_index(), 0);
+    }
+
+    #[test]
+    fn tabs_on_key_tab_focus_next() {
+        let mut tabs = Tabs::new().labels(vec!["A"]);
+        let result = tabs.on_key(&key(Key::Tab));
+        assert!(matches!(result, Some(FocusAction::Next)));
+    }
+
+    #[test]
+    fn tabs_on_key_shift_tab_focus_previous() {
+        let mut tabs = Tabs::new().labels(vec!["A"]);
+        let result = tabs.on_key(&key_with_shift(Key::Tab));
+        assert!(matches!(result, Some(FocusAction::Previous)));
+    }
+
+    #[test]
+    fn tabs_on_key_unhandled_returns_none() {
+        let mut tabs = Tabs::new().labels(vec!["A"]);
+        let result = tabs.on_key(&key(Key::Char('z')));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tabs_active_label_returns_correct_label() {
+        let tabs = Tabs::new().labels(vec!["Home", "About", "Contact"]).active(1);
+        assert_eq!(tabs.active_label(), Some("About"));
     }
 }
