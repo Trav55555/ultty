@@ -45,7 +45,7 @@ pub mod prelude {
     pub use crate::event::Event;
     pub use crate::layout::{Column, Row};
     pub use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
-    pub use crate::widgets::{Button, List, ScrollView, Text, TextInput, View};
+    pub use crate::widgets::{Button, List, Modal, ScrollView, Table, Tabs, Text, TextInput, View};
 
     // Re-export protocol types
     pub use ultty_protocol::{Color, Constraints, Dimension, Style};

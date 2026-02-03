@@ -4,14 +4,20 @@ mod button;
 mod container;
 mod image;
 mod list;
+mod modal;
 mod scroll;
+mod table;
+mod tabs;
 mod text;
 
 pub use button::Button;
 pub use container::{Column, Row, Stack};
 pub use image::Image;
 pub use list::List;
+pub use modal::Modal;
 pub use scroll::ScrollView;
+pub use table::Table;
+pub use tabs::Tabs;
 pub use text::{RichText, Text, TextInput};
 
 use crate::event::{Event, KeyEvent};
