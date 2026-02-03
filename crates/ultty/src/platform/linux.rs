@@ -1,6 +1,7 @@
 //! Linux-specific platform code.
 
 use super::Platform;
+use crate::pty::{Child, PtySize};
 use std::path::PathBuf;
 
 pub struct LinuxPlatform;
@@ -13,7 +14,8 @@ impl Platform for LinuxPlatform {
         runtime_dir.join("ultimate-terminal.sock")
     }
 
-    fn spawn_shell() -> std::io::Result<()> {
-        unimplemented!("PTY spawning not yet implemented")
+    fn spawn_shell() -> std::io::Result<Child> {
+        let size = PtySize::default();
+        Child::spawn_shell(size).map_err(std::io::Error::other)
     }
 }

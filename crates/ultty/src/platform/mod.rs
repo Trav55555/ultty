@@ -9,11 +9,13 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+use crate::pty::Child;
+
 // Common platform trait
 pub trait Platform {
     /// Get the socket path for native protocol.
     fn socket_path() -> std::path::PathBuf;
 
-    /// Spawn a shell process with PTY.
-    fn spawn_shell() -> std::io::Result<()>;
+    /// Spawn a shell process with PTY using default size.
+    fn spawn_shell() -> std::io::Result<Child>;
 }
