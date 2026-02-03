@@ -174,7 +174,7 @@ impl ThemeConfig {
         Self {
             name: "Everforest Dark".to_string(),
             foreground: RgbColor::new(0xD3, 0xC6, 0xAA), // fg
-            background: RgbColor::new(0x27, 0x2E, 0x33), // bg0
+            background: RgbColor::new(0x2D, 0x35, 0x3B), // bg0 (medium)
             cursor: RgbColor::new(0xA7, 0xC0, 0x80),     // green cursor
             selection: RgbaColor::new(0x3D, 0x48, 0x4D, 0xC0), // bg3
             palette: Some(PaletteConfig::everforest_dark()),

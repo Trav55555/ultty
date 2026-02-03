@@ -1921,7 +1921,7 @@ impl Renderer {
                     None => continue,
                 };
                 let ch = cell.char();
-                if let Some((rx, ry, rw, rh)) = block_char_rect(ch) {
+                if let Some((rects, count)) = block_char_rects(ch) {
                     let fg = if cell.has_flag(CellFlags::REVERSE) {
                         self.color_scheme.resolve(cell.bg(), false)
                     } else {
@@ -1932,22 +1932,26 @@ impl Renderer {
                     } else {
                         fg
                     };
-                    let x0 = col_idx as f32 * self.cell_width + self.pane_offset_x + rx * self.cell_width;
-                    let y0 = row_idx as f32 * self.cell_height + self.pane_offset_y + ry * self.cell_height;
-                    let w = rw * self.cell_width;
-                    let h = rh * self.cell_height;
-                    let base = vertices.len() as u32;
                     let c = fg.to_array();
-                    vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: c });
-                    vertices.push(Vertex { position: [x0 + w, y0], tex_coord: [0.0, 0.0], color: c });
-                    vertices.push(Vertex { position: [x0 + w, y0 + h], tex_coord: [0.0, 0.0], color: c });
-                    vertices.push(Vertex { position: [x0, y0 + h], tex_coord: [0.0, 0.0], color: c });
-                    indices.push(base);
-                    indices.push(base + 1);
-                    indices.push(base + 2);
-                    indices.push(base);
-                    indices.push(base + 2);
-                    indices.push(base + 3);
+                    let cx = col_idx as f32 * self.cell_width + self.pane_offset_x;
+                    let cy = row_idx as f32 * self.cell_height + self.pane_offset_y;
+                    for &(rx, ry, rw, rh) in &rects[..count] {
+                        let x0 = cx + rx * self.cell_width;
+                        let y0 = cy + ry * self.cell_height;
+                        let w = rw * self.cell_width;
+                        let h = rh * self.cell_height;
+                        let base = vertices.len() as u32;
+                        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: c });
+                        vertices.push(Vertex { position: [x0 + w, y0], tex_coord: [0.0, 0.0], color: c });
+                        vertices.push(Vertex { position: [x0 + w, y0 + h], tex_coord: [0.0, 0.0], color: c });
+                        vertices.push(Vertex { position: [x0, y0 + h], tex_coord: [0.0, 0.0], color: c });
+                        indices.push(base);
+                        indices.push(base + 1);
+                        indices.push(base + 2);
+                        indices.push(base);
+                        indices.push(base + 2);
+                        indices.push(base + 3);
+                    }
                 }
             }
         }
@@ -2896,7 +2900,7 @@ impl Renderer {
                     None => continue,
                 };
                 let ch = cell.char();
-                if let Some((rx, ry, rw, rh)) = block_char_rect(ch) {
+                if let Some((rects, count)) = block_char_rects(ch) {
                     let fg = if cell.has_flag(CellFlags::REVERSE) {
                         self.color_scheme.resolve(cell.bg(), false)
                     } else {
@@ -2907,22 +2911,26 @@ impl Renderer {
                     } else {
                         fg
                     };
-                    let x0 = col_idx as f32 * self.cell_width + rx * self.cell_width;
-                    let y0 = row_idx as f32 * self.cell_height + self.tab_bar_height + ry * self.cell_height;
-                    let w = rw * self.cell_width;
-                    let h = rh * self.cell_height;
-                    let base = vertices.len() as u32;
                     let c = fg.to_array();
-                    vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: c });
-                    vertices.push(Vertex { position: [x0 + w, y0], tex_coord: [0.0, 0.0], color: c });
-                    vertices.push(Vertex { position: [x0 + w, y0 + h], tex_coord: [0.0, 0.0], color: c });
-                    vertices.push(Vertex { position: [x0, y0 + h], tex_coord: [0.0, 0.0], color: c });
-                    indices.push(base);
-                    indices.push(base + 1);
-                    indices.push(base + 2);
-                    indices.push(base);
-                    indices.push(base + 2);
-                    indices.push(base + 3);
+                    let cx = col_idx as f32 * self.cell_width;
+                    let cy = row_idx as f32 * self.cell_height + self.tab_bar_height;
+                    for &(rx, ry, rw, rh) in &rects[..count] {
+                        let x0 = cx + rx * self.cell_width;
+                        let y0 = cy + ry * self.cell_height;
+                        let w = rw * self.cell_width;
+                        let h = rh * self.cell_height;
+                        let base = vertices.len() as u32;
+                        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: c });
+                        vertices.push(Vertex { position: [x0 + w, y0], tex_coord: [0.0, 0.0], color: c });
+                        vertices.push(Vertex { position: [x0 + w, y0 + h], tex_coord: [0.0, 0.0], color: c });
+                        vertices.push(Vertex { position: [x0, y0 + h], tex_coord: [0.0, 0.0], color: c });
+                        indices.push(base);
+                        indices.push(base + 1);
+                        indices.push(base + 2);
+                        indices.push(base);
+                        indices.push(base + 2);
+                        indices.push(base + 3);
+                    }
                 }
             }
         }
@@ -4454,32 +4462,54 @@ mod tests {
     }
 }
 
-/// Returns (x, y, w, h) as fractions of cell dimensions, or None if not a block char.
-fn block_char_rect(ch: char) -> Option<(f32, f32, f32, f32)> {
+const UL: (f32, f32, f32, f32) = (0.0, 0.0, 0.5, 0.5);
+const UR: (f32, f32, f32, f32) = (0.5, 0.0, 0.5, 0.5);
+const LL: (f32, f32, f32, f32) = (0.0, 0.5, 0.5, 0.5);
+const LR: (f32, f32, f32, f32) = (0.5, 0.5, 0.5, 0.5);
+
+type Rect4 = (f32, f32, f32, f32);
+
+/// Returns fractional (x, y, w, h) rects within the cell. Up to 3 rects for multi-quadrant chars.
+fn block_char_rects(ch: char) -> Option<([Rect4; 3], usize)> {
+    let zero: Rect4 = (0.0, 0.0, 0.0, 0.0);
+    let mut v = [zero; 3];
+    let mut n = 0usize;
+    macro_rules! push { ($r:expr) => { v[n] = $r; n += 1; } }
     match ch {
-        '\u{2588}' => Some((0.0, 0.0, 1.0, 1.0)),      // █ full
-        '\u{2580}' => Some((0.0, 0.0, 1.0, 0.5)),      // ▀ upper half
-        '\u{2584}' => Some((0.0, 0.5, 1.0, 0.5)),      // ▄ lower half
-        '\u{258C}' => Some((0.0, 0.0, 0.5, 1.0)),      // ▌ left half
-        '\u{2590}' => Some((0.5, 0.0, 0.5, 1.0)),      // ▐ right half
-        '\u{2581}' => Some((0.0, 7.0/8.0, 1.0, 1.0/8.0)),
-        '\u{2582}' => Some((0.0, 6.0/8.0, 1.0, 2.0/8.0)),
-        '\u{2583}' => Some((0.0, 5.0/8.0, 1.0, 3.0/8.0)),
-        '\u{2585}' => Some((0.0, 3.0/8.0, 1.0, 5.0/8.0)),
-        '\u{2586}' => Some((0.0, 2.0/8.0, 1.0, 6.0/8.0)),
-        '\u{2587}' => Some((0.0, 1.0/8.0, 1.0, 7.0/8.0)),
-        '\u{2589}' => Some((0.0, 0.0, 7.0/8.0, 1.0)),
-        '\u{258A}' => Some((0.0, 0.0, 6.0/8.0, 1.0)),
-        '\u{258B}' => Some((0.0, 0.0, 5.0/8.0, 1.0)),
-        '\u{258D}' => Some((0.0, 0.0, 3.0/8.0, 1.0)),
-        '\u{258E}' => Some((0.0, 0.0, 2.0/8.0, 1.0)),
-        '\u{258F}' => Some((0.0, 0.0, 1.0/8.0, 1.0)),
-        '\u{2594}' => Some((0.0, 0.0, 1.0, 1.0/8.0)),
-        '\u{2595}' => Some((7.0/8.0, 0.0, 1.0/8.0, 1.0)),
-        '\u{2596}' => Some((0.0, 0.5, 0.5, 0.5)),
-        '\u{2597}' => Some((0.5, 0.5, 0.5, 0.5)),
-        '\u{2598}' => Some((0.0, 0.0, 0.5, 0.5)),
-        '\u{259D}' => Some((0.5, 0.0, 0.5, 0.5)),
-        _ => None,
+        '\u{2588}' => { push!((0.0, 0.0, 1.0, 1.0)); }      // █ full
+        '\u{2580}' => { push!((0.0, 0.0, 1.0, 0.5)); }      // ▀ upper half
+        '\u{2584}' => { push!((0.0, 0.5, 1.0, 0.5)); }      // ▄ lower half
+        '\u{258C}' => { push!((0.0, 0.0, 0.5, 1.0)); }      // ▌ left half
+        '\u{2590}' => { push!((0.5, 0.0, 0.5, 1.0)); }      // ▐ right half
+        '\u{2581}' => { push!((0.0, 7.0/8.0, 1.0, 1.0/8.0)); }
+        '\u{2582}' => { push!((0.0, 6.0/8.0, 1.0, 2.0/8.0)); }
+        '\u{2583}' => { push!((0.0, 5.0/8.0, 1.0, 3.0/8.0)); }
+        '\u{2585}' => { push!((0.0, 3.0/8.0, 1.0, 5.0/8.0)); }
+        '\u{2586}' => { push!((0.0, 2.0/8.0, 1.0, 6.0/8.0)); }
+        '\u{2587}' => { push!((0.0, 1.0/8.0, 1.0, 7.0/8.0)); }
+        '\u{2589}' => { push!((0.0, 0.0, 7.0/8.0, 1.0)); }
+        '\u{258A}' => { push!((0.0, 0.0, 6.0/8.0, 1.0)); }
+        '\u{258B}' => { push!((0.0, 0.0, 5.0/8.0, 1.0)); }
+        '\u{258D}' => { push!((0.0, 0.0, 3.0/8.0, 1.0)); }
+        '\u{258E}' => { push!((0.0, 0.0, 2.0/8.0, 1.0)); }
+        '\u{258F}' => { push!((0.0, 0.0, 1.0/8.0, 1.0)); }
+        '\u{2594}' => { push!((0.0, 0.0, 1.0, 1.0/8.0)); }
+        '\u{2595}' => { push!((7.0/8.0, 0.0, 1.0/8.0, 1.0)); }
+        // Single quadrants
+        '\u{2596}' => { push!(LL); }                          // ▖
+        '\u{2597}' => { push!(LR); }                          // ▗
+        '\u{2598}' => { push!(UL); }                          // ▘
+        '\u{259D}' => { push!(UR); }                          // ▝
+        // Multi-quadrant composites
+        '\u{2599}' => { push!(UL); push!(LL); push!(LR); }   // ▙
+        '\u{259A}' => { push!(UL); push!(LR); }              // ▚
+        '\u{259B}' => { push!(UL); push!(UR); push!(LL); }   // ▛
+        '\u{259C}' => { push!(UL); push!(UR); push!(LR); }   // ▜
+        '\u{259E}' => { push!(UR); push!(LL); }              // ▞
+        '\u{259F}' => { push!(UR); push!(LL); push!(LR); }   // ▟
+        // Shade characters — fall through to font rendering
+        '\u{2591}'..='\u{2593}' => { return None; }
+        _ => { return None; }
     }
+    Some((v, n))
 }
