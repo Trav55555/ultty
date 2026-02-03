@@ -1,0 +1,17 @@
+---
+source: crates/ultty/tests/native_protocol.rs
+assertion_line: 988
+expression: "&region.content"
+---
+Widget(
+    Progress(
+        ProgressWidget {
+            value: 0.5,
+            label: Some(
+                "Halfway there",
+            ),
+            animated: false,
+            indeterminate: false,
+        },
+    ),
+)

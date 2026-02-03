@@ -1,0 +1,12 @@
+---
+source: crates/ultty/tests/native_protocol.rs
+assertion_line: 1077
+expression: "&region.content"
+---
+Widget(
+    Markdown(
+        MarkdownWidget {
+            source: "# Title\n\n**Bold** and *italic*\n\n- item 1\n- item 2",
+        },
+    ),
+)

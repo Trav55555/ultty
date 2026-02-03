@@ -4,6 +4,7 @@ members = [
     "crates/ultty",
     "crates/ulttui",
     "crates/ultty-protocol",
+    "crates/ultty-client",
     "examples/hello-native",
     "examples/counter-app",
     "examples/todo-app",
@@ -57,6 +58,7 @@ rstest = "0.18"
 
 # Internal crates
 ultty-protocol = { path = "crates/ultty-protocol" }
+ultty-client = { path = "crates/ultty-client" }
 ulttui = { path = "crates/ulttui" }
 ultty = { path = "crates/ultty" }
 

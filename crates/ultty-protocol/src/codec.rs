@@ -1817,6 +1817,8 @@ mod msg_type {
     pub const BLUR: u16 = 0x0042;
     pub const SUBSCRIBE: u16 = 0x0050;
     pub const UNSUBSCRIBE: u16 = 0x0051;
+    pub const CLIPBOARD_GET: u16 = 0x0060;
+    pub const CLIPBOARD_SET: u16 = 0x0061;
     pub const DISCONNECT: u16 = 0x00FF;
 
     // Terminal -> App
@@ -1827,6 +1829,7 @@ mod msg_type {
     pub const RESIZE: u16 = 0x0022;
     pub const FOCUS_EVENT: u16 = 0x0023;
     pub const SCROLL_EVENT: u16 = 0x0024;
+    pub const CLIPBOARD_CONTENT: u16 = 0x0025;
     pub const ERROR: u16 = 0x00FF;
 }
 
@@ -1921,6 +1924,11 @@ impl Encode for AppMessage {
                 id.encode(buf);
                 buf.put_u32_le(*events);
                 msg_type::UNSUBSCRIBE
+            }
+            AppMessage::ClipboardGet => msg_type::CLIPBOARD_GET,
+            AppMessage::ClipboardSet { text } => {
+                encode_string(text, buf);
+                msg_type::CLIPBOARD_SET
             }
             AppMessage::Disconnect => msg_type::DISCONNECT,
         };
@@ -2083,6 +2091,11 @@ impl Decode for AppMessage {
                 let events = buf.get_u32_le();
                 Ok(AppMessage::Unsubscribe { id, events })
             }
+            msg_type::CLIPBOARD_GET => Ok(AppMessage::ClipboardGet),
+            msg_type::CLIPBOARD_SET => {
+                let text = decode_string(buf)?;
+                Ok(AppMessage::ClipboardSet { text })
+            }
             msg_type::DISCONNECT => Ok(AppMessage::Disconnect),
             _ => Err(ProtocolError::UnknownMessageType(type_code)),
         };
@@ -2172,6 +2185,10 @@ impl Encode for TerminalMessage {
             TerminalMessage::Scroll(event) => {
                 event.encode(buf);
                 msg_type::SCROLL_EVENT
+            }
+            TerminalMessage::ClipboardContent { text } => {
+                encode_option_string(text, buf);
+                msg_type::CLIPBOARD_CONTENT
             }
             TerminalMessage::Error { code, message } => {
                 buf.put_u16_le(*code);
@@ -2291,6 +2308,10 @@ impl Decode for TerminalMessage {
             msg_type::RESIZE => Ok(TerminalMessage::Resize(ResizeEvent::decode(buf)?)),
             msg_type::FOCUS_EVENT => Ok(TerminalMessage::Focus(FocusEvent::decode(buf)?)),
             msg_type::SCROLL_EVENT => Ok(TerminalMessage::Scroll(ScrollEvent::decode(buf)?)),
+            msg_type::CLIPBOARD_CONTENT => {
+                let text = decode_option_string(buf)?;
+                Ok(TerminalMessage::ClipboardContent { text })
+            }
             msg_type::ERROR => {
                 if buf.remaining() < 2 {
                     return Err(ProtocolError::UnexpectedEof {

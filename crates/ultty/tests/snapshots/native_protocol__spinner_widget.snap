@@ -1,0 +1,15 @@
+---
+source: crates/ultty/tests/native_protocol.rs
+assertion_line: 1033
+expression: "&region.content"
+---
+Widget(
+    Spinner(
+        SpinnerWidget {
+            label: Some(
+                "Loading...",
+            ),
+            style: Braille,
+        },
+    ),
+)

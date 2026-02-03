@@ -52,6 +52,10 @@ pub struct NativeSession {
     scroll_offsets: HashMap<RegionId, (f32, f32)>,
     /// Animated scroll targets: region_id -> (target_x, target_y).
     scroll_targets: HashMap<RegionId, (f32, f32)>,
+    /// Pending clipboard get request.
+    pending_clipboard_get: bool,
+    /// Pending clipboard set request.
+    pending_clipboard_set: Option<String>,
 }
 
 impl NativeSession {
@@ -76,6 +80,8 @@ impl NativeSession {
             focused_region: None,
             scroll_offsets: HashMap::new(),
             scroll_targets: HashMap::new(),
+            pending_clipboard_get: false,
+            pending_clipboard_set: None,
         })
     }
 
@@ -266,6 +272,10 @@ impl NativeSession {
                 } else {
                     self.scroll_offsets.insert(id, (x, y));
                     self.scroll_targets.remove(&id);
+                    // Notify subscriber of immediate scroll
+                    if self.is_subscribed(id, ultty_protocol::EVENT_SCROLL) {
+                        let _ = self.send_scroll_event(id, x, y);
+                    }
                 }
                 self.scene_dirty = true;
                 debug!("Scroll set for {:?}: ({}, {}), animate={}", id, x, y, animate);
@@ -313,6 +323,16 @@ impl NativeSession {
                 } else {
                     debug!("Blur (no focus)");
                 }
+            }
+
+            AppMessage::ClipboardGet => {
+                debug!("Session {} clipboard get request", self.session_id);
+                self.pending_clipboard_get = true;
+            }
+
+            AppMessage::ClipboardSet { text } => {
+                debug!("Session {} clipboard set: {} chars", self.session_id, text.len());
+                self.pending_clipboard_set = Some(text);
             }
 
             AppMessage::Disconnect => {
@@ -624,6 +644,7 @@ impl NativeSession {
         const EPSILON: f32 = 0.5;
 
         let mut done = Vec::new();
+        let mut notify = Vec::new();
         for (&id, &(tx, ty)) in &self.scroll_targets {
             let (cx, cy) = self.scroll_offsets.get(&id).copied().unwrap_or((0.0, 0.0));
             let nx = cx + (tx - cx) * LERP_FACTOR;
@@ -634,9 +655,15 @@ impl NativeSession {
             if nx == tx && ny == ty {
                 done.push(id);
             }
+            if self.is_subscribed(id, ultty_protocol::EVENT_SCROLL) {
+                notify.push((id, nx, ny));
+            }
         }
         for id in done {
             self.scroll_targets.remove(&id);
+        }
+        for (id, sx, sy) in notify {
+            let _ = self.send_scroll_event(id, sx, sy);
         }
         if !self.scroll_targets.is_empty() {
             self.scene_dirty = true;
@@ -698,13 +725,25 @@ impl NativeSession {
             .is_some_and(|mask| mask & event_mask != 0)
     }
 
+    /// Target region for key events: the focused region if it has an EVENT_KEY subscription,
+    /// otherwise ROOT.
+    fn key_target(&self) -> RegionId {
+        if let Some(focused) = self.focused_region {
+            if self.is_subscribed(focused, ultty_protocol::EVENT_KEY) {
+                return focused;
+            }
+        }
+        RegionId::ROOT
+    }
+
     pub fn send_key(
         &mut self,
         key: ultty_protocol::Key,
         modifiers: ultty_protocol::Modifiers,
     ) -> io::Result<()> {
+        let target = self.key_target();
         self.send_input(ultty_protocol::InputEvent {
-            region_id: RegionId::ROOT,
+            region_id: target,
             event_type: ultty_protocol::InputType::KeyDown { key, modifiers },
             x: 0.0,
             y: 0.0,
@@ -716,12 +755,47 @@ impl NativeSession {
         key: ultty_protocol::Key,
         modifiers: ultty_protocol::Modifiers,
     ) -> io::Result<()> {
+        let target = self.key_target();
         self.send_input(ultty_protocol::InputEvent {
-            region_id: RegionId::ROOT,
+            region_id: target,
             event_type: ultty_protocol::InputType::KeyUp { key, modifiers },
             x: 0.0,
             y: 0.0,
         })
+    }
+
+    pub fn send_text_input(&mut self, text: String) -> io::Result<()> {
+        let target = self.key_target();
+        self.send_input(ultty_protocol::InputEvent {
+            region_id: target,
+            event_type: ultty_protocol::InputType::TextInput { text },
+            x: 0.0,
+            y: 0.0,
+        })
+    }
+
+    /// Take the pending clipboard get flag (returns true if a get was requested, then clears it).
+    pub fn take_clipboard_get(&mut self) -> bool {
+        std::mem::take(&mut self.pending_clipboard_get)
+    }
+
+    /// Take the pending clipboard set text (returns the text if a set was requested, then clears it).
+    pub fn take_clipboard_set(&mut self) -> Option<String> {
+        self.pending_clipboard_set.take()
+    }
+
+    /// Send clipboard content to the client.
+    pub fn send_clipboard_content(&mut self, text: Option<String>) -> io::Result<()> {
+        self.send_message(&TerminalMessage::ClipboardContent { text })
+    }
+
+    /// Send a scroll event notification to the client for a specific region.
+    pub fn send_scroll_event(&mut self, id: RegionId, scroll_x: f32, scroll_y: f32) -> io::Result<()> {
+        self.send_message(&TerminalMessage::Scroll(ultty_protocol::ScrollEvent {
+            region_id: id,
+            scroll_x,
+            scroll_y,
+        }))
     }
 }
 

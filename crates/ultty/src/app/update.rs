@@ -26,6 +26,24 @@ impl App {
             if server.update_animations() {
                 self.needs_redraw = true;
             }
+
+            // Handle clipboard operations from native sessions
+            let gets = server.pending_clipboard_gets();
+            for key in gets {
+                let text = self
+                    .clipboard
+                    .as_mut()
+                    .and_then(|cb| cb.get_text().ok());
+                server.send_clipboard_content(key, text);
+            }
+            let sets = server.pending_clipboard_sets();
+            for (_key, text) in sets {
+                if let Some(ref mut cb) = self.clipboard {
+                    if let Err(e) = cb.set_text(text) {
+                        tracing::warn!("Failed to set clipboard from native session: {}", e);
+                    }
+                }
+            }
         }
 
         if let Some(ref mut server) = self.control_server {

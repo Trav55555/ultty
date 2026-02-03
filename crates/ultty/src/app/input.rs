@@ -46,6 +46,18 @@ impl App {
             WindowEvent::MouseWheel { delta, .. } => {
                 self.handle_scroll(delta);
             }
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                // Forward IME committed text to native protocol sessions as TextInput
+                if let Some(ref mut server) = self.protocol_server {
+                    if server.session_count() > 0 {
+                        server.broadcast_text_input(text.clone());
+                    }
+                }
+                // Also send the text to the terminal PTY
+                if let Err(e) = self.send_input(text.as_bytes()) {
+                    tracing::warn!("Failed to send IME input: {}", e);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 self.needs_redraw = true;
             }

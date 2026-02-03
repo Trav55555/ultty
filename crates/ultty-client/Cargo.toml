@@ -1,0 +1,14 @@
+[package]
+name = "ultty-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Client SDK for building native TUI applications on the ultty terminal"
+
+[dependencies]
+ultty-protocol = { path = "../ultty-protocol" }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

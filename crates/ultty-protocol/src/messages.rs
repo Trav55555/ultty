@@ -83,6 +83,13 @@ pub enum AppMessage {
     /// Unsubscribe from events.
     Unsubscribe { id: RegionId, events: u32 },
 
+    // Clipboard
+    /// Request clipboard contents.
+    ClipboardGet,
+
+    /// Set clipboard contents.
+    ClipboardSet { text: String },
+
     // Session
     /// Disconnect cleanly.
     Disconnect,
@@ -123,6 +130,10 @@ pub enum TerminalMessage {
 
     /// Scroll position changed.
     Scroll(ScrollEvent),
+
+    // Clipboard
+    /// Clipboard content response.
+    ClipboardContent { text: Option<String> },
 
     // Errors
     /// Error response.

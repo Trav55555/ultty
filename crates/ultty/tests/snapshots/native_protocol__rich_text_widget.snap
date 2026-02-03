@@ -1,0 +1,80 @@
+---
+source: crates/ultty/tests/native_protocol.rs
+assertion_line: 1407
+expression: "&region.content"
+---
+RichText(
+    RichText {
+        spans: [
+            Span {
+                text: "Normal ",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    border: BorderStyle {
+                        style: None,
+                        edges: BorderEdges {
+                            top: false,
+                            right: false,
+                            bottom: false,
+                            left: false,
+                        },
+                        radius: 0,
+                    },
+                    border_color: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    dim: false,
+                    opacity: 0.0,
+                },
+            },
+            Span {
+                text: "bold",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    border: BorderStyle {
+                        style: None,
+                        edges: BorderEdges {
+                            top: false,
+                            right: false,
+                            bottom: false,
+                            left: false,
+                        },
+                        radius: 0,
+                    },
+                    border_color: None,
+                    bold: true,
+                    italic: false,
+                    underline: false,
+                    dim: false,
+                    opacity: 0.0,
+                },
+            },
+            Span {
+                text: " italic",
+                style: Style {
+                    fg: None,
+                    bg: None,
+                    border: BorderStyle {
+                        style: None,
+                        edges: BorderEdges {
+                            top: false,
+                            right: false,
+                            bottom: false,
+                            left: false,
+                        },
+                        radius: 0,
+                    },
+                    border_color: None,
+                    bold: false,
+                    italic: true,
+                    underline: false,
+                    dim: false,
+                    opacity: 0.0,
+                },
+            },
+        ],
+    },
+)

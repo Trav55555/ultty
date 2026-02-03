@@ -1,0 +1,14 @@
+---
+source: crates/ultty/tests/native_protocol.rs
+assertion_line: 1123
+expression: "&region.content"
+---
+Widget(
+    Code(
+        CodeWidget {
+            source: "fn main() {\n    println!(\"hello\");\n}",
+            language: "rust",
+            line_numbers: true,
+        },
+    ),
+)

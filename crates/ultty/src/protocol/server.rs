@@ -185,6 +185,14 @@ impl ProtocolServer {
         self.sessions.values_mut()
     }
 
+    /// Check if a session has any key event subscription (on ROOT or focused region).
+    fn session_wants_keys(session: &NativeSession) -> bool {
+        session.is_subscribed(ultty_protocol::RegionId::ROOT, ultty_protocol::EVENT_KEY)
+            || session
+                .focused_region()
+                .is_some_and(|id| session.is_subscribed(id, ultty_protocol::EVENT_KEY))
+    }
+
     /// Send a key event to all connected native sessions that have subscribed to key events.
     pub fn broadcast_key(
         &mut self,
@@ -192,7 +200,7 @@ impl ProtocolServer {
         modifiers: ultty_protocol::Modifiers,
     ) {
         for session in self.sessions.values_mut() {
-            if session.is_subscribed(ultty_protocol::RegionId::ROOT, ultty_protocol::EVENT_KEY) {
+            if Self::session_wants_keys(session) {
                 if let Err(e) = session.send_key(key.clone(), modifiers) {
                     tracing::warn!(
                         "Failed to send key to session {}: {}",
@@ -212,10 +220,26 @@ impl ProtocolServer {
         modifiers: ultty_protocol::Modifiers,
     ) {
         for session in self.sessions.values_mut() {
-            if session.is_subscribed(ultty_protocol::RegionId::ROOT, ultty_protocol::EVENT_KEY) {
+            if Self::session_wants_keys(session) {
                 if let Err(e) = session.send_key_up(key.clone(), modifiers) {
                     tracing::warn!(
                         "Failed to send key_up to session {}: {}",
+                        session.session_id(),
+                        e
+                    );
+                }
+            }
+        }
+        self.flush();
+    }
+
+    /// Send a text input event to all connected native sessions that have subscribed to key events.
+    pub fn broadcast_text_input(&mut self, text: String) {
+        for session in self.sessions.values_mut() {
+            if Self::session_wants_keys(session) {
+                if let Err(e) = session.send_text_input(text.clone()) {
+                    tracing::warn!(
+                        "Failed to send text_input to session {}: {}",
                         session.session_id(),
                         e
                     );
@@ -256,6 +280,44 @@ impl ProtocolServer {
                         e
                     );
                 }
+            }
+        }
+        self.flush();
+    }
+
+    /// Collect pending clipboard get requests from all sessions.
+    /// Returns a list of session keys that requested clipboard content.
+    pub fn pending_clipboard_gets(&mut self) -> Vec<usize> {
+        let mut gets = Vec::new();
+        for (&key, session) in &mut self.sessions {
+            if session.take_clipboard_get() {
+                gets.push(key);
+            }
+        }
+        gets
+    }
+
+    /// Collect pending clipboard set requests from all sessions.
+    /// Returns a list of (session_key, text) pairs.
+    pub fn pending_clipboard_sets(&mut self) -> Vec<(usize, String)> {
+        let mut sets = Vec::new();
+        for (&key, session) in &mut self.sessions {
+            if let Some(text) = session.take_clipboard_set() {
+                sets.push((key, text));
+            }
+        }
+        sets
+    }
+
+    /// Send clipboard content to a specific session (identified by key).
+    pub fn send_clipboard_content(&mut self, session_key: usize, text: Option<String>) {
+        if let Some(session) = self.sessions.get_mut(&session_key) {
+            if let Err(e) = session.send_clipboard_content(text) {
+                tracing::warn!(
+                    "Failed to send clipboard content to session {}: {}",
+                    session.session_id(),
+                    e
+                );
             }
         }
         self.flush();
