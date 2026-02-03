@@ -430,6 +430,11 @@ impl TextRenderer {
                     fg_color
                 };
 
+                // Skip block characters - they're rendered procedurally in the background pass
+                if is_block_char(ch) {
+                    continue;
+                }
+
                 let has_combining = cell.has_flag(CellFlags::HAS_COMBINING);
                 let style_key: u8 = if self.ligatures { 1 } else { 0 };
                 let cache_key_lookup = (ch, style_key);
@@ -692,6 +697,10 @@ impl TextRenderer {
     pub fn cache_stats(&self) -> super::atlas::AtlasStats {
         self.atlas.stats()
     }
+}
+
+fn is_block_char(ch: char) -> bool {
+    matches!(ch, '\u{2580}'..='\u{259F}')
 }
 
 #[cfg(test)]

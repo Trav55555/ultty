@@ -1909,6 +1909,49 @@ impl Renderer {
             }
         }
 
+        // Block characters (U+2580..U+259F) rendered as solid quads for pixel-perfect cell fill
+        for row_idx in 0..dims.rows {
+            let row = match grid.row(row_idx) {
+                Some(r) => r,
+                None => continue,
+            };
+            for col_idx in 0..dims.cols {
+                let cell = match row.get(col_idx) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let ch = cell.char();
+                if let Some((rx, ry, rw, rh)) = block_char_rect(ch) {
+                    let fg = if cell.has_flag(CellFlags::REVERSE) {
+                        self.color_scheme.resolve(cell.bg(), false)
+                    } else {
+                        self.color_scheme.resolve(cell.fg(), true)
+                    };
+                    let fg = if cell.has_flag(CellFlags::DIM) {
+                        Rgba::new(fg.r * 0.5, fg.g * 0.5, fg.b * 0.5, fg.a)
+                    } else {
+                        fg
+                    };
+                    let x0 = col_idx as f32 * self.cell_width + self.pane_offset_x + rx * self.cell_width;
+                    let y0 = row_idx as f32 * self.cell_height + self.pane_offset_y + ry * self.cell_height;
+                    let w = rw * self.cell_width;
+                    let h = rh * self.cell_height;
+                    let base = vertices.len() as u32;
+                    let c = fg.to_array();
+                    vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: c });
+                    vertices.push(Vertex { position: [x0 + w, y0], tex_coord: [0.0, 0.0], color: c });
+                    vertices.push(Vertex { position: [x0 + w, y0 + h], tex_coord: [0.0, 0.0], color: c });
+                    vertices.push(Vertex { position: [x0, y0 + h], tex_coord: [0.0, 0.0], color: c });
+                    indices.push(base);
+                    indices.push(base + 1);
+                    indices.push(base + 2);
+                    indices.push(base);
+                    indices.push(base + 2);
+                    indices.push(base + 3);
+                }
+            }
+        }
+
         // Draw cursor
         let cursor = terminal.buffer().grid().cursor();
         let should_show_cursor = cursor.visible
@@ -2837,6 +2880,49 @@ impl Renderer {
                         row_idx,
                         color,
                     );
+                }
+            }
+        }
+
+        // Block characters (U+2580..U+259F) rendered as solid quads for pixel-perfect cell fill
+        for row_idx in 0..dims.rows {
+            let row = match grid.row(row_idx) {
+                Some(r) => r,
+                None => continue,
+            };
+            for col_idx in 0..dims.cols {
+                let cell = match row.get(col_idx) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let ch = cell.char();
+                if let Some((rx, ry, rw, rh)) = block_char_rect(ch) {
+                    let fg = if cell.has_flag(CellFlags::REVERSE) {
+                        self.color_scheme.resolve(cell.bg(), false)
+                    } else {
+                        self.color_scheme.resolve(cell.fg(), true)
+                    };
+                    let fg = if cell.has_flag(CellFlags::DIM) {
+                        Rgba::new(fg.r * 0.5, fg.g * 0.5, fg.b * 0.5, fg.a)
+                    } else {
+                        fg
+                    };
+                    let x0 = col_idx as f32 * self.cell_width + rx * self.cell_width;
+                    let y0 = row_idx as f32 * self.cell_height + self.tab_bar_height + ry * self.cell_height;
+                    let w = rw * self.cell_width;
+                    let h = rh * self.cell_height;
+                    let base = vertices.len() as u32;
+                    let c = fg.to_array();
+                    vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: c });
+                    vertices.push(Vertex { position: [x0 + w, y0], tex_coord: [0.0, 0.0], color: c });
+                    vertices.push(Vertex { position: [x0 + w, y0 + h], tex_coord: [0.0, 0.0], color: c });
+                    vertices.push(Vertex { position: [x0, y0 + h], tex_coord: [0.0, 0.0], color: c });
+                    indices.push(base);
+                    indices.push(base + 1);
+                    indices.push(base + 2);
+                    indices.push(base);
+                    indices.push(base + 2);
+                    indices.push(base + 3);
                 }
             }
         }
@@ -4365,5 +4451,35 @@ mod tests {
         // Position should be roughly in middle
         let expected_middle = (1.0 - size) / 2.0;
         assert!((pos - expected_middle).abs() < 0.1);
+    }
+}
+
+/// Returns (x, y, w, h) as fractions of cell dimensions, or None if not a block char.
+fn block_char_rect(ch: char) -> Option<(f32, f32, f32, f32)> {
+    match ch {
+        '\u{2588}' => Some((0.0, 0.0, 1.0, 1.0)),      // █ full
+        '\u{2580}' => Some((0.0, 0.0, 1.0, 0.5)),      // ▀ upper half
+        '\u{2584}' => Some((0.0, 0.5, 1.0, 0.5)),      // ▄ lower half
+        '\u{258C}' => Some((0.0, 0.0, 0.5, 1.0)),      // ▌ left half
+        '\u{2590}' => Some((0.5, 0.0, 0.5, 1.0)),      // ▐ right half
+        '\u{2581}' => Some((0.0, 7.0/8.0, 1.0, 1.0/8.0)),
+        '\u{2582}' => Some((0.0, 6.0/8.0, 1.0, 2.0/8.0)),
+        '\u{2583}' => Some((0.0, 5.0/8.0, 1.0, 3.0/8.0)),
+        '\u{2585}' => Some((0.0, 3.0/8.0, 1.0, 5.0/8.0)),
+        '\u{2586}' => Some((0.0, 2.0/8.0, 1.0, 6.0/8.0)),
+        '\u{2587}' => Some((0.0, 1.0/8.0, 1.0, 7.0/8.0)),
+        '\u{2589}' => Some((0.0, 0.0, 7.0/8.0, 1.0)),
+        '\u{258A}' => Some((0.0, 0.0, 6.0/8.0, 1.0)),
+        '\u{258B}' => Some((0.0, 0.0, 5.0/8.0, 1.0)),
+        '\u{258D}' => Some((0.0, 0.0, 3.0/8.0, 1.0)),
+        '\u{258E}' => Some((0.0, 0.0, 2.0/8.0, 1.0)),
+        '\u{258F}' => Some((0.0, 0.0, 1.0/8.0, 1.0)),
+        '\u{2594}' => Some((0.0, 0.0, 1.0, 1.0/8.0)),
+        '\u{2595}' => Some((7.0/8.0, 0.0, 1.0/8.0, 1.0)),
+        '\u{2596}' => Some((0.0, 0.5, 0.5, 0.5)),
+        '\u{2597}' => Some((0.5, 0.5, 0.5, 0.5)),
+        '\u{2598}' => Some((0.0, 0.0, 0.5, 0.5)),
+        '\u{259D}' => Some((0.5, 0.0, 0.5, 0.5)),
+        _ => None,
     }
 }

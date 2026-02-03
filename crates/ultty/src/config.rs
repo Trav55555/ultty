@@ -466,7 +466,10 @@ impl Default for FontConfig {
             // Users can override this in config.toml with a specific font.
             family: String::new(),
             size: 16.0,
-            line_height: 1.2,
+            // 1.0 = no extra spacing between lines, required for block characters
+            // to touch (e.g., OpenCode logo). Users can increase if they prefer
+            // more line spacing for regular text.
+            line_height: 1.0,
             ligatures: true,
         }
     }
