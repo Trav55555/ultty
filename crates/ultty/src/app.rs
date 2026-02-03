@@ -1108,8 +1108,10 @@ impl App {
             let count = lines.unsigned_abs() as usize;
             let arrow: &[u8] = if lines > 0 {
                 if app_cursor { b"\x1bOA" } else { b"\x1b[A" } // Up
+            } else if app_cursor {
+                b"\x1bOB" // Down (application mode)
             } else {
-                if app_cursor { b"\x1bOB" } else { b"\x1b[B" } // Down
+                b"\x1b[B" // Down (normal mode)
             };
             for _ in 0..count {
                 let _ = self.send_input(arrow);
@@ -2416,12 +2418,13 @@ impl App {
             .unwrap_or(false);
         let frame_elapsed = now.duration_since(self.last_render);
 
-        if self.needs_redraw && frame_elapsed >= Duration::from_millis(16) {
-            if !sync_active || frame_elapsed >= Duration::from_millis(200) {
-                self.render();
-                self.last_render = now;
-                self.needs_redraw = false;
-            }
+        if self.needs_redraw
+            && frame_elapsed >= Duration::from_millis(16)
+            && (!sync_active || frame_elapsed >= Duration::from_millis(200))
+        {
+            self.render();
+            self.last_render = now;
+            self.needs_redraw = false;
         }
 
         false

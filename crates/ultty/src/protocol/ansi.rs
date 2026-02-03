@@ -1433,14 +1433,11 @@ impl AnsiParser {
     /// APC string state - accumulating APC content (Kitty graphics, etc.).
     /// We currently just ignore APC content but need to consume it properly.
     fn apc_string(&mut self, byte: u8) {
-        match byte {
+        if byte == 0x1B {
             // ESC - might be start of ST (String Terminator = ESC \)
-            0x1B => {
-                self.state = State::ApcStringEsc;
-            }
-            // Just consume the byte - we don't process APC content yet
-            _ => {}
+            self.state = State::ApcStringEsc;
         }
+        // Otherwise just consume the byte - we don't process APC content yet
     }
 
     /// APC string ESC state - waiting for backslash to complete ST.

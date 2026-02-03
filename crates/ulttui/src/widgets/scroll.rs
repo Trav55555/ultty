@@ -266,6 +266,23 @@ impl View for ScrollView {
         true
     }
 
+    fn on_event(&mut self, event: &crate::event::Event) -> bool {
+        if let crate::event::Event::Mouse(mouse) = event {
+            match mouse.kind {
+                crate::event::MouseEventKind::ScrollUp => {
+                    self.scroll_lines(-3);
+                    return true;
+                }
+                crate::event::MouseEventKind::ScrollDown => {
+                    self.scroll_lines(3);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn on_key(&mut self, key: &crate::event::KeyEvent) -> Option<super::FocusAction> {
         use crate::event::Key;
 

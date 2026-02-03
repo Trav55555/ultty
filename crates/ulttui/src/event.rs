@@ -11,6 +11,10 @@ pub enum Event {
     Mouse(MouseEvent),
     /// Terminal resized.
     Resize { width: u16, height: u16 },
+    /// Focus gained.
+    FocusGained,
+    /// Focus lost.
+    FocusLost,
 }
 
 /// Key event.

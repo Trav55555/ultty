@@ -413,7 +413,7 @@ impl NativeSession {
     }
 
     /// Handle ReparentRegion.
-    fn handle_reparent_region(&mut self, id: RegionId, new_parent: RegionId, _insert_index: i32) {
+    fn handle_reparent_region(&mut self, id: RegionId, new_parent: RegionId, insert_index: i32) {
         // Remove from old parent, add to new parent
         if let Some(region) = self.scene.get_mut(id) {
             let old_parent = region.parent;
@@ -426,9 +426,13 @@ impl NativeSession {
                 }
             }
 
-            // Add to new parent's children
+            // Add to new parent's children at specified index
             if let Some(new) = self.scene.get_mut(new_parent) {
-                new.children.push(id);
+                if insert_index >= 0 && (insert_index as usize) <= new.children.len() {
+                    new.children.insert(insert_index as usize, id);
+                } else {
+                    new.children.push(id);
+                }
             }
 
             self.scene_dirty = true;

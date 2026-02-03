@@ -289,6 +289,17 @@ impl NativeBackend {
                         self.pending_events.push(event);
                     }
                 }
+                TerminalMessage::Focus(focus) => {
+                    if focus.focused {
+                        self.pending_events.push(Event::FocusGained);
+                    } else {
+                        self.pending_events.push(Event::FocusLost);
+                    }
+                }
+                TerminalMessage::Scroll(_scroll) => {
+                    // Scroll position updates from the terminal are informational;
+                    // the app already knows its own scroll state.
+                }
                 _ => {}
             }
         }
