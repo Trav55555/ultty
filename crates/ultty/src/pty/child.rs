@@ -214,7 +214,12 @@ impl Drop for Child {
 
             // Force kill
             self.kill().ok();
-            self.wait().ok();
+
+            // Reap zombie in a background thread to avoid blocking the UI
+            let pid = self.pid;
+            std::thread::spawn(move || {
+                let _ = waitpid(pid, None);
+            });
         }
     }
 }

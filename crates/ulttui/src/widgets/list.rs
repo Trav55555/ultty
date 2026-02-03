@@ -10,7 +10,8 @@ use super::View;
 use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
 use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimState};
 use ultty_protocol::{
-    BorderStyle, Color as ProtoColor, NamedColor, RichText, Span, Style as ProtoStyle,
+    AppMessage, BorderStyle, Color as ProtoColor, Constraints, Dimension, Display, FlexDirection,
+    NamedColor, RegionId, Style as ProtoStyle, TextContent,
 };
 
 /// A selectable list with vim navigation.
@@ -131,37 +132,74 @@ impl<T: AsRef<str>> List<T> {
 }
 
 impl<T: std::fmt::Display> View for List<T> {
+    fn constraints(&self) -> Constraints {
+        Constraints {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            width: Dimension::Percent(100.0),
+            ..Default::default()
+        }
+    }
+
     fn style(&self) -> ProtoStyle {
         ProtoStyle::new().border(BorderStyle::thin())
     }
 
     fn content(&self) -> ultty_protocol::Content {
-        let mut rich = RichText::new();
+        // Content::None - children provide content
+        ultty_protocol::Content::None
+    }
 
-        for (display_idx, &actual_idx) in self.filtered_indices.iter().enumerate() {
-            let item = &self.items[actual_idx];
-            let text = format!("{}", item);
+    fn children_count(&self) -> usize {
+        self.filtered_indices.len()
+    }
 
-            let style = if display_idx == self.selected {
-                ProtoStyle::new()
-                    .fg(ProtoColor::Named(NamedColor::Black))
-                    .bg(ProtoColor::Named(NamedColor::White))
-                    .bold()
-            } else {
-                ProtoStyle::default()
-            };
+    fn render_child_native(
+        &self,
+        index: usize,
+        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        parent: RegionId,
+        next_id: &mut u32,
+    ) -> anyhow::Result<Option<RegionId>> {
+        let actual_idx = match self.filtered_indices.get(index) {
+            Some(&idx) => idx,
+            None => return Ok(None),
+        };
 
-            rich.spans.push(Span { text, style });
+        let item = &self.items[actual_idx];
+        let text = format!("{}", item);
 
-            if display_idx < self.filtered_indices.len() - 1 {
-                rich.spans.push(Span {
-                    text: "\n".to_string(),
-                    style: ProtoStyle::default(),
-                });
-            }
-        }
+        let style = if index == self.selected {
+            ProtoStyle::new()
+                .fg(ProtoColor::Named(NamedColor::Black))
+                .bg(ProtoColor::Named(NamedColor::White))
+                .bold()
+        } else {
+            ProtoStyle::default()
+        };
 
-        ultty_protocol::Content::RichText(rich)
+        let constraints = Constraints {
+            width: Dimension::Percent(100.0),
+            ..Default::default()
+        };
+
+        let region_id = RegionId::new(*next_id);
+        *next_id += 1;
+
+        send_message(&AppMessage::CreateRegion {
+            id: region_id,
+            parent,
+            insert_index: -1,
+            constraints,
+            style,
+        })?;
+
+        send_message(&AppMessage::SetContent {
+            id: region_id,
+            content: ultty_protocol::Content::Text(TextContent::new(text)),
+        })?;
+
+        Ok(Some(region_id))
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {

@@ -2223,11 +2223,23 @@ impl App {
         }
 
         // Render if needed (limit to ~60fps)
+        // Suppress rendering during synchronized update (mode 2026) to prevent
+        // partial frames, but enforce a 200ms safety timeout to avoid indefinite
+        // suppression if the app never sends ESU.
         let now = Instant::now();
-        if self.needs_redraw && now.duration_since(self.last_render) >= Duration::from_millis(16) {
-            self.render();
-            self.last_render = now;
-            self.needs_redraw = false;
+        let sync_active = self
+            .terminal_manager
+            .focused_terminal()
+            .map(|t| t.event_loop.terminal().modes().synchronized_update)
+            .unwrap_or(false);
+        let frame_elapsed = now.duration_since(self.last_render);
+
+        if self.needs_redraw && frame_elapsed >= Duration::from_millis(16) {
+            if !sync_active || frame_elapsed >= Duration::from_millis(200) {
+                self.render();
+                self.last_render = now;
+                self.needs_redraw = false;
+            }
         }
 
         false

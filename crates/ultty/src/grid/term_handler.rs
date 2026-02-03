@@ -524,8 +524,9 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.modes_mut().alternate_scroll = enabled;
             }
             Mode::SynchronizedUpdate => {
-                // Synchronized update mode - we acknowledge it but don't need special handling
-                // since we render on a consistent frame interval anyway
+                // Synchronized update mode - rendering is suppressed while active
+                // to prevent partial frames. The event loop checks this flag and
+                // defers rendering until the mode is disabled (ESU received).
                 self.terminal.modes_mut().synchronized_update = enabled;
             }
         }
