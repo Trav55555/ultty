@@ -579,7 +579,7 @@ impl NativeSession {
     pub fn is_subscribed(&self, region_id: RegionId, event_mask: u32) -> bool {
         self.subscriptions
             .get(&region_id)
-            .map_or(false, |mask| mask & event_mask != 0)
+            .is_some_and(|mask| mask & event_mask != 0)
     }
 
     pub fn send_key(

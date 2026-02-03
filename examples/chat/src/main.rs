@@ -59,7 +59,7 @@ impl ChatApp {
 }
 
 enum Message {
-    SendMessage,
+    Send,
     AppendChar(char),
     DeleteChar,
 }
@@ -69,7 +69,7 @@ impl Application for ChatApp {
 
     fn update(&mut self, msg: Message) {
         match msg {
-            Message::SendMessage => self.send_message(),
+            Message::Send => self.send_message(),
             Message::AppendChar(c) => self.input.push(c),
             Message::DeleteChar => {
                 self.input.pop();
@@ -80,7 +80,7 @@ impl Application for ChatApp {
     fn on_event(&mut self, event: &Event) -> Option<Message> {
         match event {
             Event::Key(key_event) => match key_event.key {
-                Key::Enter => Some(Message::SendMessage),
+                Key::Enter => Some(Message::Send),
                 Key::Backspace => Some(Message::DeleteChar),
                 Key::Char(c) => Some(Message::AppendChar(c)),
                 _ => None,

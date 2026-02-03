@@ -193,21 +193,12 @@ pub struct ProgressWidget {
 }
 
 /// Spinner widget.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct SpinnerWidget {
     /// Optional label.
     pub label: Option<String>,
     /// Spinner animation style.
     pub style: SpinnerStyle,
-}
-
-impl Default for SpinnerWidget {
-    fn default() -> Self {
-        Self {
-            label: None,
-            style: SpinnerStyle::default(),
-        }
-    }
 }
 
 /// Spinner animation style.
