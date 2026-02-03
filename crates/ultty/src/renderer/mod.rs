@@ -435,12 +435,23 @@ pub struct Renderer {
     pane_offset_y: f32,
     /// Window opacity (0.0-1.0)
     opacity: f32,
-    /// Cached image textures
+    /// Cached image textures (terminal sixel images)
     image_cache: std::collections::HashMap<ImageId, CachedImageTexture>,
+    /// Cached image textures for native protocol ImageWidget, keyed by RegionId
+    native_image_cache: std::collections::HashMap<ultty_protocol::RegionId, CachedImageTexture>,
     /// Animated progress: region_id -> current displayed value (lerped toward target)
     animated_progress: std::collections::HashMap<ultty_protocol::RegionId, f32>,
     /// Whether active animations exist (spinners, animated progress)
     has_animations: bool,
+}
+
+/// Deferred native image render request (collected during widget content rendering).
+struct DeferredImageRender {
+    region_id: ultty_protocol::RegionId,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
 }
 
 /// Pipeline for rendering images.
@@ -580,6 +591,7 @@ impl Renderer {
             pane_offset_y: 0.0,
             opacity: 1.0,
             image_cache: std::collections::HashMap::new(),
+            native_image_cache: std::collections::HashMap::new(),
             animated_progress: std::collections::HashMap::new(),
             has_animations: false,
         })
@@ -701,6 +713,7 @@ impl Renderer {
             pane_offset_y: 0.0,
             opacity: 1.0,
             image_cache: std::collections::HashMap::new(),
+            native_image_cache: std::collections::HashMap::new(),
             animated_progress: std::collections::HashMap::new(),
             has_animations: false,
         })
@@ -1285,6 +1298,7 @@ impl Renderer {
         overlay: &OverlayState,
         sessions: impl Iterator<Item = &'a crate::protocol::NativeSession>,
         native_search_matches: Option<&[crate::scene::SearchMatch]>,
+        native_search_index: usize,
     ) -> Result<(), wgpu::SurfaceError> {
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
 
@@ -1404,7 +1418,7 @@ impl Renderer {
         )?;
 
         for session in sessions {
-            self.render_native_session(&mut encoder, &view, session, native_search_matches);
+            self.render_native_session(&mut encoder, &view, session, native_search_matches, native_search_index);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -3153,6 +3167,98 @@ impl Renderer {
         (vertices, indices)
     }
 
+    /// Upload a native protocol ImageWidget to the GPU, caching by region ID.
+    /// Returns true if the texture is ready for rendering.
+    fn upload_native_image(
+        &mut self,
+        region_id: ultty_protocol::RegionId,
+        img: &ultty_protocol::ImageWidget,
+    ) -> bool {
+        // Check cache — re-upload if dimensions changed
+        if let Some(cached) = self.native_image_cache.get(&region_id) {
+            if cached.width == img.width && cached.height == img.height {
+                return true;
+            }
+            // Dimensions changed, remove old entry
+            self.native_image_cache.remove(&region_id);
+        }
+
+        if img.width == 0 || img.height == 0 || img.data.len() < (img.width * img.height * 4) as usize {
+            return false;
+        }
+
+        if self.image_pipeline.is_none() {
+            self.create_image_pipeline();
+        }
+
+        let Some(pipeline) = &self.image_pipeline else {
+            return false;
+        };
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("native_image_texture"),
+            size: wgpu::Extent3d {
+                width: img.width,
+                height: img.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &img.data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(img.width * 4),
+                rows_per_image: Some(img.height),
+            },
+            wgpu::Extent3d {
+                width: img.width,
+                height: img.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("native_image_bind_group"),
+            layout: &pipeline.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
+                },
+            ],
+        });
+
+        self.native_image_cache.insert(
+            region_id,
+            CachedImageTexture {
+                texture,
+                bind_group,
+                width: img.width,
+                height: img.height,
+            },
+        );
+
+        true
+    }
+
     /// Upload an image to the GPU and cache it.
     fn upload_image(&mut self, image: &TerminalImage) -> bool {
         if self.image_cache.contains_key(&image.id) {
@@ -3799,6 +3905,7 @@ impl Renderer {
         view: &wgpu::TextureView,
         session: &crate::protocol::NativeSession,
         search_matches: Option<&[crate::scene::SearchMatch]>,
+        current_match_index: usize,
     ) {
         use ultty_protocol::Content;
         use wgpu::util::DeviceExt;
@@ -3808,6 +3915,7 @@ impl Renderer {
         let mut bg_indices = Vec::new();
         let mut text_vertices = Vec::new();
         let mut text_indices = Vec::new();
+        let mut deferred_images: Vec<DeferredImageRender> = Vec::new();
 
         // Build a set of matched region IDs for quick lookup
         let matched_regions: std::collections::HashSet<ultty_protocol::RegionId> = search_matches
@@ -3931,6 +4039,7 @@ impl Renderer {
                         &mut bg_indices,
                         &mut text_vertices,
                         &mut text_indices,
+                        &mut deferred_images,
                     );
                 }
                 Content::None => {}
@@ -3939,13 +4048,17 @@ impl Renderer {
             // Draw search highlight rectangles for matched regions
             if matched_regions.contains(&region.id) {
                 if let Some(matches) = search_matches {
-                    for m in matches.iter().filter(|m| m.region_id == region.id) {
+                    for (match_idx, m) in matches.iter().enumerate().filter(|(_, m)| m.region_id == region.id) {
                         // Approximate character position: byte_offset * char_width
                         let char_w = self.cell_width;
                         let highlight_x = x + m.byte_offset as f32 * char_w;
                         let highlight_w = m.length as f32 * char_w;
-                        // Use search highlight color (yellow with alpha)
-                        let highlight_color = [1.0_f32, 0.8, 0.0, 0.35];
+                        // Active match: brighter orange; others: dim yellow
+                        let highlight_color = if match_idx == current_match_index {
+                            [1.0_f32, 0.6, 0.0, 0.6]
+                        } else {
+                            [1.0_f32, 0.8, 0.0, 0.35]
+                        };
 
                         let base_idx = bg_vertices.len() as u32;
                         bg_vertices.push(Vertex {
@@ -4057,6 +4170,58 @@ impl Renderer {
             rp.set_index_buffer(text_ib.slice(..), wgpu::IndexFormat::Uint32);
             rp.draw_indexed(0..text_indices.len() as u32, 0, 0..1);
         }
+
+        // Render deferred native images using the image pipeline
+        for img_render in &deferred_images {
+            let Some(cached) = self.native_image_cache.get(&img_render.region_id) else {
+                continue;
+            };
+
+            let color = [1.0f32, 1.0, 1.0, 1.0];
+            let vertices = vec![
+                Vertex { position: [img_render.x, img_render.y], tex_coord: [0.0, 0.0], color },
+                Vertex { position: [img_render.x + img_render.w, img_render.y], tex_coord: [1.0, 0.0], color },
+                Vertex { position: [img_render.x + img_render.w, img_render.y + img_render.h], tex_coord: [1.0, 1.0], color },
+                Vertex { position: [img_render.x, img_render.y + img_render.h], tex_coord: [0.0, 1.0], color },
+            ];
+            let indices: Vec<u32> = vec![0, 1, 2, 0, 2, 3];
+
+            let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("native_image_vb"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("native_image_ib"),
+                contents: bytemuck::cast_slice(&indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+            {
+                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("native_image_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                let pipeline = &self.image_pipeline.as_ref().unwrap().pipeline;
+                rp.set_pipeline(pipeline);
+                rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+                rp.set_bind_group(1, &cached.bind_group, &[]);
+                rp.set_vertex_buffer(0, vb.slice(..));
+                rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..indices.len() as u32, 0, 0..1);
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4073,6 +4238,7 @@ impl Renderer {
         bg_indices: &mut Vec<u32>,
         text_vertices: &mut Vec<Vertex>,
         text_indices: &mut Vec<u32>,
+        deferred_images: &mut Vec<DeferredImageRender>,
     ) {
         use ultty_protocol::WidgetContent;
 
@@ -4365,25 +4531,69 @@ impl Renderer {
                 );
             }
             WidgetContent::Image(img) => {
-                // Render image placeholder text showing dimensions
-                // Full GPU texture upload uses the existing ImagePipeline infrastructure
-                let placeholder = format!("[Image: {}x{}]", img.width, img.height);
-                let fg_color = region_style
-                    .fg
-                    .as_ref()
-                    .map(|c| self.color_scheme.resolve_protocol_color(c))
-                    .unwrap_or(self.color_scheme.named[8]);
-                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                    &placeholder,
-                    x,
-                    y,
-                    fg_color,
-                    false,
-                    true, // italic for placeholder
-                );
-                let base_idx = text_vertices.len() as u32;
-                text_vertices.extend(verts);
-                text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                // Upload image to GPU and defer rendering to image pipeline pass
+                if self.upload_native_image(region_id, img) {
+                    // Compute quad dimensions based on ImageScale
+                    let (img_x, img_y, img_w, img_h) = match img.scale {
+                        ultty_protocol::ImageScale::Stretch => (x, y, w, h),
+                        ultty_protocol::ImageScale::None => {
+                            // Original size in pixels, convert to screen coords
+                            let orig_w = img.width as f32;
+                            let orig_h = img.height as f32;
+                            (x, y, orig_w.min(w), orig_h.min(h))
+                        }
+                        ultty_protocol::ImageScale::Fit => {
+                            let aspect = img.width as f32 / img.height.max(1) as f32;
+                            let region_aspect = w / h.max(0.001);
+                            let (fw, fh) = if aspect > region_aspect {
+                                (w, w / aspect)
+                            } else {
+                                (h * aspect, h)
+                            };
+                            let fx = x + (w - fw) / 2.0;
+                            let fy = y + (h - fh) / 2.0;
+                            (fx, fy, fw, fh)
+                        }
+                        ultty_protocol::ImageScale::Fill => {
+                            let aspect = img.width as f32 / img.height.max(1) as f32;
+                            let region_aspect = w / h.max(0.001);
+                            let (fw, fh) = if aspect < region_aspect {
+                                (w, w / aspect)
+                            } else {
+                                (h * aspect, h)
+                            };
+                            let fx = x + (w - fw) / 2.0;
+                            let fy = y + (h - fh) / 2.0;
+                            (fx, fy, fw, fh)
+                        }
+                    };
+                    deferred_images.push(DeferredImageRender {
+                        region_id,
+                        x: img_x,
+                        y: img_y,
+                        w: img_w,
+                        h: img_h,
+                    });
+                } else {
+                    // Fallback: show placeholder if upload failed
+                    let placeholder = format!("[Image: {}x{}]", img.width, img.height);
+                    let fg_color = region_style
+                        .fg
+                        .as_ref()
+                        .map(|c| self.color_scheme.resolve_protocol_color(c))
+                        .unwrap_or(self.color_scheme.named[8]);
+                    let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                        &placeholder,
+                        x,
+                        y,
+                        fg_color,
+                        false,
+                        true,
+                    );
+                    let base_idx = text_vertices.len() as u32;
+                    text_vertices.extend(verts);
+                    text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                }
             }
         }
     }

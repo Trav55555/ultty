@@ -2528,6 +2528,7 @@ impl App {
                     &overlay,
                     server.sessions(),
                     search_matches,
+                    self.native_search_index,
                 );
             }
         }
