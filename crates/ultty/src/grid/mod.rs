@@ -169,6 +169,9 @@ pub struct Grid {
     /// Custom tab stops (column numbers where tabs stop)
     /// Initialized to default every-8-columns pattern
     tab_stops: std::collections::BTreeSet<u16>,
+    /// Auto-wrap mode (DECAWM) — when false, characters at the right margin
+    /// overwrite the last column instead of wrapping to the next line.
+    auto_wrap: bool,
 }
 
 impl Grid {
@@ -188,6 +191,7 @@ impl Grid {
             scroll_region: None,
             combining: std::collections::HashMap::new(),
             tab_stops,
+            auto_wrap: true,
         }
     }
 
@@ -204,6 +208,11 @@ impl Grid {
     /// Get mutable cursor state.
     pub fn cursor_mut(&mut self) -> &mut Cursor {
         &mut self.cursor
+    }
+
+    /// Set auto-wrap mode (DECAWM).
+    pub fn set_auto_wrap(&mut self, enabled: bool) {
+        self.auto_wrap = enabled;
     }
 
     /// Get current text attributes.
@@ -271,6 +280,12 @@ impl Grid {
         self.combining.remove(&(row, col));
     }
 
+    /// Clear all combining characters for a range of rows.
+    fn clear_combining_rows(&mut self, start_row: u16, end_row: u16) {
+        self.combining
+            .retain(|&(row, _), _| row < start_row || row > end_row);
+    }
+
     /// Get a row by index.
     pub fn row(&self, index: u16) -> Option<&Row> {
         self.rows.get(index as usize)
@@ -328,12 +343,16 @@ impl Grid {
             if let Some(r) = self.rows.get_mut(row as usize) {
                 r.set_wrapped(true);
             }
-            // Move to next line
+            // Move to next line, respecting scroll region
+            let bottom = self
+                .scroll_region
+                .map(|r| r.bottom)
+                .unwrap_or(self.dims.rows - 1);
             self.cursor.position.col = 0;
             self.cursor.position.row += 1;
-            if self.cursor.position.row >= self.dims.rows {
+            if self.cursor.position.row > bottom {
                 self.scroll_up(1);
-                self.cursor.position.row = self.dims.rows - 1;
+                self.cursor.position.row = bottom;
             }
             self.cursor.wrap_pending = false;
         }
@@ -365,12 +384,16 @@ impl Grid {
             if let Some(r) = self.row_mut(row) {
                 r.set_wrapped(true);
             }
-            // Wrap to next line before writing
+            // Wrap to next line before writing, respecting scroll region
+            let bottom = self
+                .scroll_region
+                .map(|r| r.bottom)
+                .unwrap_or(self.dims.rows - 1);
             self.cursor.position.col = 0;
             self.cursor.position.row += 1;
-            if self.cursor.position.row >= self.dims.rows {
+            if self.cursor.position.row > bottom {
                 self.scroll_up(1);
-                self.cursor.position.row = self.dims.rows - 1;
+                self.cursor.position.row = bottom;
             }
         }
 
@@ -411,12 +434,15 @@ impl Grid {
         // Advance cursor by character width
         self.cursor.position.col += width;
 
-        // Check if we're now at or past the last column - set pending wrap
+        // Check if we're now at or past the last column
         if self.cursor.position.col >= self.dims.cols {
-            // Don't move to next line yet, just set pending flag
             // Keep cursor at last valid column
             self.cursor.position.col = self.dims.cols - 1;
-            self.cursor.wrap_pending = true;
+            // Only set pending wrap if auto-wrap (DECAWM) is enabled;
+            // when off, subsequent chars overwrite the last column
+            if self.auto_wrap {
+                self.cursor.wrap_pending = true;
+            }
         }
     }
 
@@ -558,6 +584,9 @@ impl Grid {
         let n = n as usize;
         let region_height = (region.bottom - region.top + 1) as usize;
 
+        // Clear combining chars for the entire scroll region
+        self.clear_combining_rows(region.top, region.bottom);
+
         if n >= region_height {
             // Clear the entire scroll region
             for row_idx in region.top..=region.bottom {
@@ -569,33 +598,16 @@ impl Grid {
             return;
         }
 
-        // Move rows up within the region
-        for i in 0..n {
-            let src_row = region.top as usize + n + i;
-            let dst_row = region.top as usize + i;
-
-            if src_row <= region.bottom as usize {
-                // Can't use swap here easily, so clone
-                let src = self.rows[src_row].clone();
-                self.rows[dst_row] = src;
-            }
-        }
-
-        // Shift remaining rows
-        for row_idx in (region.top as usize + n)..=(region.bottom as usize - n) {
+        // Shift rows up within the region
+        for row_idx in (region.top as usize)..=(region.bottom as usize - n) {
             let src_row = row_idx + n;
-            if src_row <= region.bottom as usize {
-                let src = self.rows[src_row].clone();
-                self.rows[row_idx] = src;
-            }
+            self.rows[row_idx] = self.rows[src_row].clone();
         }
 
         // Clear the bottom n rows of the region
         for i in 0..n {
             let row_idx = region.bottom as usize - i;
-            if row_idx >= region.top as usize {
-                self.rows[row_idx] = Row::new(self.dims.cols);
-            }
+            self.rows[row_idx] = Row::new(self.dims.cols);
         }
 
         // Mark affected rows dirty
@@ -610,6 +622,9 @@ impl Grid {
         let n = n as usize;
         let region_height = (region.bottom - region.top + 1) as usize;
 
+        // Clear combining chars for the entire scroll region
+        self.clear_combining_rows(region.top, region.bottom);
+
         if n >= region_height {
             // Clear the entire scroll region
             for row_idx in region.top..=region.bottom {
@@ -621,23 +636,16 @@ impl Grid {
             return;
         }
 
-        // Move rows down within the region (from bottom to top to avoid overwriting)
-        for i in (0..(region_height - n)).rev() {
-            let src_row = region.top as usize + i;
-            let dst_row = src_row + n;
-
-            if dst_row <= region.bottom as usize {
-                let src = self.rows[src_row].clone();
-                self.rows[dst_row] = src;
-            }
+        // Shift rows down within the region (reverse to avoid overwriting)
+        for row_idx in ((region.top as usize + n)..=region.bottom as usize).rev() {
+            let src_row = row_idx - n;
+            self.rows[row_idx] = self.rows[src_row].clone();
         }
 
         // Clear the top n rows of the region
         for i in 0..n {
             let row_idx = region.top as usize + i;
-            if row_idx <= region.bottom as usize {
-                self.rows[row_idx] = Row::new(self.dims.cols);
-            }
+            self.rows[row_idx] = Row::new(self.dims.cols);
         }
 
         // Mark affected rows dirty
@@ -656,6 +664,9 @@ impl Grid {
         if cursor_row < region.top || cursor_row > region.bottom {
             return;
         }
+
+        // Clear combining chars for affected rows
+        self.clear_combining_rows(cursor_row, region.bottom);
 
         let n = n as usize;
         let region_height = (region.bottom - cursor_row + 1) as usize;
@@ -707,6 +718,9 @@ impl Grid {
             return;
         }
 
+        // Clear combining chars for affected rows
+        self.clear_combining_rows(cursor_row, region.bottom);
+
         let n = n as usize;
         let region_height = (region.bottom - cursor_row + 1) as usize;
 
@@ -748,6 +762,9 @@ impl Grid {
 
     /// Erase from cursor to end of display.
     pub fn erase_below(&mut self) {
+        // Clear combining chars for affected rows
+        self.clear_combining_rows(self.cursor.position.row, self.dims.rows.saturating_sub(1));
+
         // Erase from cursor to end of current line
         if let Some(row) = self.rows.get_mut(self.cursor.position.row as usize) {
             for i in self.cursor.position.col..self.dims.cols {
@@ -769,6 +786,9 @@ impl Grid {
 
     /// Erase from start of display to cursor.
     pub fn erase_above(&mut self) {
+        // Clear combining chars for affected rows
+        self.clear_combining_rows(0, self.cursor.position.row);
+
         // Erase all lines above cursor
         for row_idx in 0..self.cursor.position.row {
             if let Some(row) = self.rows.get_mut(row_idx as usize) {
@@ -790,6 +810,7 @@ impl Grid {
 
     /// Erase entire display.
     pub fn clear(&mut self) {
+        self.combining.clear();
         for row in &mut self.rows {
             row.clear();
         }
@@ -798,7 +819,12 @@ impl Grid {
 
     /// Erase from cursor to end of line.
     pub fn erase_line_right(&mut self) {
-        if let Some(row) = self.rows.get_mut(self.cursor.position.row as usize) {
+        let r = self.cursor.position.row;
+        // Clear combining chars for erased cells on this row
+        for col in self.cursor.position.col..self.dims.cols {
+            self.combining.remove(&(r, col));
+        }
+        if let Some(row) = self.rows.get_mut(r as usize) {
             for i in self.cursor.position.col..self.dims.cols {
                 if let Some(cell) = row.get_mut(i) {
                     cell.clear();
@@ -810,27 +836,34 @@ impl Grid {
             // considered a continuation of this line.
             row.set_wrapped(false);
         }
-        self.mark_dirty(self.cursor.position.row);
+        self.mark_dirty(r);
     }
 
     /// Erase from start of line to cursor.
     pub fn erase_line_left(&mut self) {
-        if let Some(row) = self.rows.get_mut(self.cursor.position.row as usize) {
+        let r = self.cursor.position.row;
+        // Clear combining chars for erased cells on this row
+        for col in 0..=self.cursor.position.col {
+            self.combining.remove(&(r, col));
+        }
+        if let Some(row) = self.rows.get_mut(r as usize) {
             for i in 0..=self.cursor.position.col {
                 if let Some(cell) = row.get_mut(i) {
                     cell.clear();
                 }
             }
         }
-        self.mark_dirty(self.cursor.position.row);
+        self.mark_dirty(r);
     }
 
     /// Erase entire current line.
     pub fn erase_line(&mut self) {
-        if let Some(row) = self.rows.get_mut(self.cursor.position.row as usize) {
+        let r = self.cursor.position.row;
+        self.clear_combining_rows(r, r);
+        if let Some(row) = self.rows.get_mut(r as usize) {
             row.clear();
         }
-        self.mark_dirty(self.cursor.position.row);
+        self.mark_dirty(r);
     }
 
     /// Resize the grid with reflow.
@@ -865,6 +898,17 @@ impl Grid {
             .row
             .min(new_dims.rows.saturating_sub(1));
 
+        // Reset scroll region — apps that need one will re-set it after resize
+        self.scroll_region = None;
+
+        // Extend tab stops to cover any new columns
+        let old_cols = self.dims.cols;
+        if new_dims.cols > old_cols {
+            for col in (old_cols..new_dims.cols).filter(|c| c % 8 == 0) {
+                self.tab_stops.insert(col);
+            }
+        }
+
         self.dims = new_dims;
         self.dirty = vec![true; new_dims.rows as usize];
     }
@@ -879,6 +923,9 @@ impl Grid {
         if self.rows.is_empty() {
             return;
         }
+
+        // Combining chars are keyed by (row, col) which become invalid after reflow
+        self.combining.clear();
 
         // Collect all logical lines (sequences of wrapped rows form one logical line)
         let mut logical_lines: Vec<Vec<Cell>> = Vec::new();
@@ -1487,5 +1534,141 @@ mod tests {
         assert_eq!(grid.cell(0, 3).unwrap().char(), 'F');
         assert_eq!(grid.cell(0, 4).unwrap().char(), ' ');
         assert_eq!(grid.cell(0, 5).unwrap().char(), ' ');
+    }
+
+    #[test]
+    fn wrap_respects_scroll_region() {
+        let mut grid = Grid::new(Dimensions::new(5, 10));
+
+        // Write content on each row
+        for row in 0..10 {
+            grid.cursor.position.row = row;
+            grid.cursor.position.col = 0;
+            grid.write_char((b'A' + row as u8) as char);
+        }
+
+        // Set scroll region to rows 3-7 (1-indexed)
+        grid.set_scroll_region(3, 7);
+
+        // Write chars to fill past the right margin inside the region
+        // Cursor is at row 2 (top of region) after set_scroll_region
+        grid.cursor.position.row = 6; // bottom of 0-indexed region
+        grid.cursor.position.col = 0;
+
+        // Fill to trigger wrap at end of row
+        for _ in 0..5 {
+            grid.write_char('X');
+        }
+        // Now wrap_pending is true. Writing another char should scroll
+        // within the region, NOT escape to row 7.
+        grid.write_char('Z');
+
+        // Cursor should still be at the bottom of the scroll region
+        assert_eq!(grid.cursor().position.row, 6);
+        // Row below region should be unchanged
+        assert_eq!(grid.cell(0, 7).unwrap().char(), 'H');
+    }
+
+    #[test]
+    fn resize_resets_scroll_region() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        grid.set_scroll_region(5, 20);
+        assert!(grid.scroll_region().is_some());
+
+        grid.resize(Dimensions::new(80, 10));
+        assert!(grid.scroll_region().is_none());
+    }
+
+    #[test]
+    fn resize_extends_tab_stops() {
+        let mut grid = Grid::new(Dimensions::new(40, 5));
+        // Default: tabs at 0, 8, 16, 24, 32
+        assert!(grid.tab_stops.contains(&32));
+        assert!(!grid.tab_stops.contains(&40));
+
+        // Widen to 80 columns
+        grid.resize(Dimensions::new(80, 5));
+        // Should now have tabs at 40, 48, 56, 64, 72
+        assert!(grid.tab_stops.contains(&40));
+        assert!(grid.tab_stops.contains(&48));
+        assert!(grid.tab_stops.contains(&72));
+    }
+
+    #[test]
+    fn combining_chars_cleared_on_scroll_up() {
+        let mut grid = Grid::new(Dimensions::new(10, 5));
+
+        // Write 'e' with combining accent on row 2
+        grid.cursor.position.row = 2;
+        grid.cursor.position.col = 0;
+        grid.write_char('e');
+        grid.write_char('\u{0301}');
+        assert!(grid.combining_chars(2, 0).is_some());
+
+        // Scroll up - combining chars should be cleaned
+        grid.scroll_up(1);
+        // Old combining entry at (2, 0) should be gone
+        assert!(grid.combining_chars(2, 0).is_none());
+    }
+
+    #[test]
+    fn combining_chars_cleared_on_erase() {
+        let mut grid = Grid::new(Dimensions::new(10, 5));
+
+        // Write 'e' with combining accent on row 0
+        grid.write_char('e');
+        grid.write_char('\u{0301}');
+        assert!(grid.combining_chars(0, 0).is_some());
+
+        // Erase line right should clear combining
+        grid.cursor.position.col = 0;
+        grid.erase_line_right();
+        assert!(grid.combining_chars(0, 0).is_none());
+    }
+
+    #[test]
+    fn combining_chars_cleared_on_clear() {
+        let mut grid = Grid::new(Dimensions::new(10, 5));
+
+        grid.write_char('e');
+        grid.write_char('\u{0301}');
+        assert!(grid.combining_chars(0, 0).is_some());
+
+        grid.clear();
+        assert!(grid.combining.is_empty());
+    }
+
+    #[test]
+    fn auto_wrap_off_prevents_wrap() {
+        let mut grid = Grid::new(Dimensions::new(5, 3));
+        grid.set_auto_wrap(false);
+
+        // Write 6 chars in 5-column grid
+        for c in "ABCDEF".chars() {
+            grid.write_char(c);
+        }
+
+        // Should NOT have wrapped — last column overwritten
+        assert_eq!(grid.cursor().position.row, 0);
+        assert_eq!(grid.cursor().position.col, 4);
+        // Last column should have 'F' (overwritten 'E')
+        assert_eq!(grid.cell(4, 0).unwrap().char(), 'F');
+        // Row 1 should be empty
+        assert_eq!(grid.cell(0, 1).unwrap().char(), ' ');
+    }
+
+    #[test]
+    fn auto_wrap_on_wraps_normally() {
+        let mut grid = Grid::new(Dimensions::new(5, 3));
+        // auto_wrap defaults to true
+
+        // Write 6 chars in 5-column grid
+        for c in "ABCDEF".chars() {
+            grid.write_char(c);
+        }
+
+        // Should have wrapped to row 1
+        assert_eq!(grid.cursor().position.row, 1);
+        assert_eq!(grid.cell(0, 1).unwrap().char(), 'F');
     }
 }

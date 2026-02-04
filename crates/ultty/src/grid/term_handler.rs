@@ -479,6 +479,7 @@ impl<'a> TerminalHandler<'a> {
             }
             Mode::AutoWrap => {
                 self.terminal.modes_mut().auto_wrap = enabled;
+                self.terminal.grid_mut().set_auto_wrap(enabled);
             }
             Mode::ReverseVideo => {
                 self.terminal.modes_mut().reverse_video = enabled;

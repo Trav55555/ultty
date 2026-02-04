@@ -70,7 +70,7 @@ impl Default for TerminalModes {
             application_cursor_keys: false,
             bracketed_paste: false,
             focus_reporting: false,
-            auto_wrap: false,
+            auto_wrap: true,
             origin_mode: false,
             insert_mode: false,
             mouse_mode: MouseMode::None,
