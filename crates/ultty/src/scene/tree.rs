@@ -13,9 +13,9 @@ pub struct SearchMatch {
     pub region_id: RegionId,
     /// Index of the span within RichText (None for plain text).
     pub span_index: Option<usize>,
-    /// Byte offset of the match within the text.
-    pub byte_offset: usize,
-    /// Length of the match in bytes.
+    /// Character offset of the match within the text.
+    pub char_offset: usize,
+    /// Length of the match in characters.
     pub length: usize,
 }
 
@@ -126,24 +126,28 @@ impl SceneTree {
             match &region.content {
                 Content::Text(text_content) => {
                     let text_lower = text_content.text.to_lowercase();
-                    for (offset, _) in text_lower.match_indices(&query_lower) {
+                    for (byte_off, _) in text_lower.match_indices(&query_lower) {
+                        let char_offset = text_lower[..byte_off].chars().count();
+                        let char_length = query_lower.chars().count();
                         matches.push(SearchMatch {
                             region_id: region.id,
                             span_index: None,
-                            byte_offset: offset,
-                            length: query.len(),
+                            char_offset,
+                            length: char_length,
                         });
                     }
                 }
                 Content::RichText(rich_text) => {
                     for (span_idx, span) in rich_text.spans.iter().enumerate() {
                         let text_lower = span.text.to_lowercase();
-                        for (offset, _) in text_lower.match_indices(&query_lower) {
+                        for (byte_off, _) in text_lower.match_indices(&query_lower) {
+                            let char_offset = text_lower[..byte_off].chars().count();
+                            let char_length = query_lower.chars().count();
                             matches.push(SearchMatch {
                                 region_id: region.id,
                                 span_index: Some(span_idx),
-                                byte_offset: offset,
-                                length: query.len(),
+                                char_offset,
+                                length: char_length,
                             });
                         }
                     }
@@ -152,47 +156,60 @@ impl SceneTree {
                     // Search text-bearing widgets
                     match widget {
                         WidgetContent::Input(input) => {
-                            let text_lower = input.value.to_lowercase();
-                            for (offset, _) in text_lower.match_indices(&query_lower) {
+                            let search_text = if input.value.is_empty() {
+                                &input.placeholder
+                            } else {
+                                &input.value
+                            };
+                            let text_lower = search_text.to_lowercase();
+                            for (byte_off, _) in text_lower.match_indices(&query_lower) {
+                                let char_offset = text_lower[..byte_off].chars().count();
+                                let char_length = query_lower.chars().count();
                                 matches.push(SearchMatch {
                                     region_id: region.id,
                                     span_index: None,
-                                    byte_offset: offset,
-                                    length: query.len(),
+                                    char_offset,
+                                    length: char_length,
                                 });
                             }
                         }
                         WidgetContent::Markdown(md) => {
                             let text_lower = md.source.to_lowercase();
-                            for (offset, _) in text_lower.match_indices(&query_lower) {
+                            for (byte_off, _) in text_lower.match_indices(&query_lower) {
+                                let char_offset = text_lower[..byte_off].chars().count();
+                                let char_length = query_lower.chars().count();
                                 matches.push(SearchMatch {
                                     region_id: region.id,
                                     span_index: None,
-                                    byte_offset: offset,
-                                    length: query.len(),
+                                    char_offset,
+                                    length: char_length,
                                 });
                             }
                         }
                         WidgetContent::Code(code) => {
                             let text_lower = code.source.to_lowercase();
-                            for (offset, _) in text_lower.match_indices(&query_lower) {
+                            for (byte_off, _) in text_lower.match_indices(&query_lower) {
+                                let char_offset = text_lower[..byte_off].chars().count();
+                                let char_length = query_lower.chars().count();
                                 matches.push(SearchMatch {
                                     region_id: region.id,
                                     span_index: None,
-                                    byte_offset: offset,
-                                    length: query.len(),
+                                    char_offset,
+                                    length: char_length,
                                 });
                             }
                         }
                         WidgetContent::Progress(progress) => {
                             if let Some(label) = &progress.label {
                                 let text_lower = label.to_lowercase();
-                                for (offset, _) in text_lower.match_indices(&query_lower) {
+                                for (byte_off, _) in text_lower.match_indices(&query_lower) {
+                                    let char_offset = text_lower[..byte_off].chars().count();
+                                    let char_length = query_lower.chars().count();
                                     matches.push(SearchMatch {
                                         region_id: region.id,
                                         span_index: None,
-                                        byte_offset: offset,
-                                        length: query.len(),
+                                        char_offset,
+                                        length: char_length,
                                     });
                                 }
                             }
@@ -200,12 +217,14 @@ impl SceneTree {
                         WidgetContent::Spinner(spinner) => {
                             if let Some(label) = &spinner.label {
                                 let text_lower = label.to_lowercase();
-                                for (offset, _) in text_lower.match_indices(&query_lower) {
+                                for (byte_off, _) in text_lower.match_indices(&query_lower) {
+                                    let char_offset = text_lower[..byte_off].chars().count();
+                                    let char_length = query_lower.chars().count();
                                     matches.push(SearchMatch {
                                         region_id: region.id,
                                         span_index: None,
-                                        byte_offset: offset,
-                                        length: query.len(),
+                                        char_offset,
+                                        length: char_length,
                                     });
                                 }
                             }
@@ -296,10 +315,10 @@ mod tests {
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].region_id, RegionId::new(1));
         assert_eq!(matches[0].span_index, None);
-        assert_eq!(matches[0].byte_offset, 0);
+        assert_eq!(matches[0].char_offset, 0);
         assert_eq!(matches[1].region_id, RegionId::new(2));
         assert_eq!(matches[1].span_index, Some(1));
-        assert_eq!(matches[1].byte_offset, 0);
+        assert_eq!(matches[1].char_offset, 0);
     }
 
     #[test]
@@ -333,9 +352,9 @@ mod tests {
 
         let matches = tree.search("aba");
         assert_eq!(matches.len(), 3);
-        assert_eq!(matches[0].byte_offset, 0);
-        assert_eq!(matches[1].byte_offset, 4);
-        assert_eq!(matches[2].byte_offset, 8);
+        assert_eq!(matches[0].char_offset, 0);
+        assert_eq!(matches[1].char_offset, 4);
+        assert_eq!(matches[2].char_offset, 8);
     }
 
     #[test]
@@ -572,12 +591,12 @@ mod tests {
         let m = SearchMatch {
             region_id: RegionId::new(5),
             span_index: Some(2),
-            byte_offset: 10,
+            char_offset: 10,
             length: 3,
         };
         assert_eq!(m.region_id, RegionId::new(5));
         assert_eq!(m.span_index, Some(2));
-        assert_eq!(m.byte_offset, 10);
+        assert_eq!(m.char_offset, 10);
         assert_eq!(m.length, 3);
     }
 
@@ -604,7 +623,7 @@ mod tests {
         let matches = tree.search("hello");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].region_id, RegionId::new(1));
-        assert_eq!(matches[0].byte_offset, 0);
+        assert_eq!(matches[0].char_offset, 0);
         assert_eq!(matches[0].length, 5);
     }
 
@@ -638,7 +657,7 @@ mod tests {
         let matches = tree.search("main");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].region_id, RegionId::new(1));
-        assert_eq!(matches[0].byte_offset, 3);
+        assert_eq!(matches[0].char_offset, 3);
     }
 
     #[test]
@@ -690,7 +709,7 @@ mod tests {
         let matches = tree.search("def");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].region_id, RegionId::new(42));
-        assert_eq!(matches[0].byte_offset, 4);
+        assert_eq!(matches[0].char_offset, 4);
         assert_eq!(matches[0].length, 3);
     }
 
@@ -706,9 +725,9 @@ mod tests {
 
         let matches = tree.search("foo");
         assert_eq!(matches.len(), 3);
-        assert_eq!(matches[0].byte_offset, 0);
-        assert_eq!(matches[1].byte_offset, 8);
-        assert_eq!(matches[2].byte_offset, 16);
+        assert_eq!(matches[0].char_offset, 0);
+        assert_eq!(matches[1].char_offset, 8);
+        assert_eq!(matches[2].char_offset, 16);
     }
 
     #[test]
@@ -763,7 +782,7 @@ mod tests {
         let matches = tree.search("loading");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].region_id, RegionId::new(1));
-        assert_eq!(matches[0].byte_offset, 0);
+        assert_eq!(matches[0].char_offset, 0);
         assert_eq!(matches[0].length, 7);
     }
 
@@ -781,7 +800,7 @@ mod tests {
         let matches = tree.search("processing");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].region_id, RegionId::new(1));
-        assert_eq!(matches[0].byte_offset, 0);
+        assert_eq!(matches[0].char_offset, 0);
     }
 
     #[test]
@@ -861,5 +880,110 @@ mod tests {
         assert!(region_ids.contains(&1));
         assert!(region_ids.contains(&2));
         assert!(region_ids.contains(&3));
+    }
+
+    // ── UTF-8 char offset tests ─────────────────────────────────────
+
+    #[test]
+    fn search_emoji_text_returns_char_offset() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        // "🎉 hello" — emoji is 4 bytes but 1 char, space is 1 byte/char
+        r.content = Content::Text(TextContent::new("🎉 hello"));
+        tree.insert(r);
+
+        let matches = tree.search("hello");
+        assert_eq!(matches.len(), 1);
+        // char_offset should be 2 (emoji + space), not 5 (4 bytes + 1 byte)
+        assert_eq!(matches[0].char_offset, 2);
+        assert_eq!(matches[0].length, 5);
+    }
+
+    #[test]
+    fn search_cjk_text_returns_char_offset() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        // "你好world" — each CJK char is 3 bytes but 1 char
+        r.content = Content::Text(TextContent::new("你好world"));
+        tree.insert(r);
+
+        let matches = tree.search("world");
+        assert_eq!(matches.len(), 1);
+        // char_offset should be 2, not 6
+        assert_eq!(matches[0].char_offset, 2);
+        assert_eq!(matches[0].length, 5);
+    }
+
+    #[test]
+    fn search_mixed_ascii_multibyte_offset() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        // "abc🎉def" — search for "def" should be at char_offset 4 (a,b,c,🎉)
+        r.content = Content::Text(TextContent::new("abc🎉def"));
+        tree.insert(r);
+
+        let matches = tree.search("def");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].char_offset, 4);
+        assert_eq!(matches[0].length, 3);
+    }
+
+    // ── Input placeholder search tests ──────────────────────────────
+
+    #[test]
+    fn search_finds_placeholder_when_value_empty() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        r.content = Content::Widget(WidgetContent::Input(InputWidget {
+            value: String::new(),
+            placeholder: "type here".into(),
+            multiline: false,
+            password: false,
+        }));
+        tree.insert(r);
+
+        let matches = tree.search("type");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].char_offset, 0);
+        assert_eq!(matches[0].length, 4);
+    }
+
+    #[test]
+    fn search_finds_value_when_non_empty() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        r.content = Content::Widget(WidgetContent::Input(InputWidget {
+            value: "actual text".into(),
+            placeholder: "placeholder".into(),
+            multiline: false,
+            password: false,
+        }));
+        tree.insert(r);
+
+        let matches = tree.search("actual");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].char_offset, 0);
+    }
+
+    #[test]
+    fn search_does_not_find_placeholder_when_value_non_empty() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        r.content = Content::Widget(WidgetContent::Input(InputWidget {
+            value: "something".into(),
+            placeholder: "hidden placeholder".into(),
+            multiline: false,
+            password: false,
+        }));
+        tree.insert(r);
+
+        let matches = tree.search("hidden");
+        assert!(matches.is_empty());
     }
 }

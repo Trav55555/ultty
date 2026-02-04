@@ -304,9 +304,9 @@ impl Renderer {
             if matched_regions.contains(&region.id) {
                 if let Some(matches) = search_matches {
                     for (match_idx, m) in matches.iter().enumerate().filter(|(_, m)| m.region_id == region.id) {
-                        // Approximate character position: byte_offset * char_width
+                        // Character position: char_offset * char_width
                         let char_w = self.cell_width;
-                        let highlight_x = x + m.byte_offset as f32 * char_w;
+                        let highlight_x = x + m.char_offset as f32 * char_w;
                         let highlight_w = m.length as f32 * char_w;
                         // Active match: brighter orange; others: dim yellow
                         let highlight_color = if match_idx == current_match_index {
@@ -936,6 +936,8 @@ impl Renderer {
         let mut cursor_y = y;
         let line_height = self.cell_height;
         let mut in_code_block = false;
+        let mut fence_language = "";
+        let mut fence_start_idx = 0usize;
         let lines: Vec<&str> = source.lines().collect();
         let mut line_idx = 0;
 
@@ -944,24 +946,36 @@ impl Renderer {
 
             // Fenced code blocks
             if line.starts_with("```") {
-                in_code_block = !in_code_block;
-                cursor_y += line_height;
-                line_idx += 1;
-                continue;
+                if !in_code_block {
+                    // Opening fence: extract language
+                    fence_language = line.trim_start_matches('`').trim();
+                    fence_start_idx = line_idx;
+                    in_code_block = true;
+                    line_idx += 1;
+                    continue;
+                } else {
+                    // Closing fence: render accumulated code lines
+                    let code_lines = &lines[fence_start_idx + 1..line_idx];
+                    if !code_lines.is_empty() {
+                        let code_source = code_lines.join("\n");
+                        self.render_code_content(
+                            &code_source,
+                            fence_language,
+                            false,
+                            x + self.cell_width,
+                            cursor_y,
+                            text_vertices,
+                            text_indices,
+                        );
+                        cursor_y += code_lines.len() as f32 * line_height;
+                    }
+                    in_code_block = false;
+                    line_idx += 1;
+                    continue;
+                }
             }
             if in_code_block {
-                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                    line,
-                    x + self.cell_width,
-                    cursor_y,
-                    self.color_scheme.named[7],
-                    false,
-                    false,
-                );
-                let base_idx = text_vertices.len() as u32;
-                text_vertices.extend(verts);
-                text_indices.extend(idxs.iter().map(|i| i + base_idx));
-                cursor_y += line_height;
+                // Lines inside a fenced code block are handled on close
                 line_idx += 1;
                 continue;
             }
@@ -1403,7 +1417,7 @@ impl Renderer {
                 cursor_x += advance;
             }
 
-            self.render_code_line(line, &keywords, &mut in_block_comment, cursor_x, cursor_y, text_vertices, text_indices);
+            self.render_code_line(line, language, &keywords, &mut in_block_comment, cursor_x, cursor_y, text_vertices, text_indices);
             cursor_y += line_height;
         }
     }
@@ -1413,6 +1427,7 @@ impl Renderer {
     fn render_code_line(
         &mut self,
         line: &str,
+        language: &str,
         keywords: &[&str],
         in_block_comment: &mut bool,
         x: f32,
@@ -1443,7 +1458,7 @@ impl Renderer {
                 text_indices.extend(idxs.iter().map(|i| i + base_idx));
                 *in_block_comment = false;
                 if !rest.is_empty() {
-                    self.render_code_line(rest, keywords, in_block_comment, x + advance, y, text_vertices, text_indices);
+                    self.render_code_line(rest, language, keywords, in_block_comment, x + advance, y, text_vertices, text_indices);
                 }
             } else {
                 let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
@@ -1458,8 +1473,8 @@ impl Renderer {
 
         let trimmed = line.trim_start();
 
-        // Full-line comment detection
-        if trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with("--") {
+        // Full-line comment detection (language-aware)
+        if is_line_comment(trimmed, language) {
             let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
                 line, x, y, comment_color, false, true,
             );
@@ -1575,6 +1590,31 @@ const OPERATORS: &[&str] = &[
     "==", "!=", "<=", ">=", "<<", ">>", "..", "?.",
 ];
 
+/// Check if a trimmed line starts with a line-comment prefix for the given language.
+fn is_line_comment(trimmed: &str, language: &str) -> bool {
+    // // is a comment in all languages
+    if trimmed.starts_with("//") {
+        return true;
+    }
+    // # is a comment in scripting languages; also for unknown/empty (backward compat)
+    if trimmed.starts_with('#') {
+        let lang = language.to_lowercase();
+        let known_no_hash = matches!(
+            lang.as_str(),
+            "rust" | "rs" | "c" | "cpp" | "c++" | "h"
+            | "javascript" | "js" | "typescript" | "ts"
+            | "java" | "go" | "sql" | "lua" | "haskell" | "hs"
+        );
+        return !known_no_hash;
+    }
+    // -- is a comment only in SQL, Lua, Haskell
+    if trimmed.starts_with("--") {
+        let lang = language.to_lowercase();
+        return matches!(lang.as_str(), "sql" | "lua" | "haskell" | "hs");
+    }
+    false
+}
+
 /// Check if a word looks like a type name (starts with uppercase letter).
 fn is_type_like(word: &str) -> bool {
     let first = match word.chars().next() {
@@ -1624,6 +1664,100 @@ fn tokenize_code_line(line: &str, keywords: &[&str], in_block_comment: &mut bool
                 kind: TokenKind::Comment,
             });
             break;
+        }
+
+        // Python triple-quoted strings: """...""" or '''...'''
+        if i + 2 < len
+            && (chars[i] == '"' || chars[i] == '\'')
+            && chars[i + 1] == chars[i]
+            && chars[i + 2] == chars[i]
+        {
+            let quote = chars[i];
+            let mut s: String = chars[i..i + 3].iter().collect();
+            i += 3;
+            loop {
+                if i + 2 < len && chars[i] == quote && chars[i + 1] == quote && chars[i + 2] == quote {
+                    s.push(quote);
+                    s.push(quote);
+                    s.push(quote);
+                    i += 3;
+                    break;
+                }
+                if i >= len {
+                    break;
+                }
+                s.push(chars[i]);
+                i += 1;
+            }
+            tokens.push(CodeToken { text: s, kind: TokenKind::String });
+            continue;
+        }
+
+        // Rust raw strings: r"..." or r#"..."#
+        if chars[i] == 'r' && i + 1 < len && (chars[i + 1] == '"' || chars[i + 1] == '#') {
+            let mut s = String::from('r');
+            let mut j = i + 1;
+            let mut hash_count = 0usize;
+            while j < len && chars[j] == '#' {
+                s.push('#');
+                hash_count += 1;
+                j += 1;
+            }
+            if j < len && chars[j] == '"' {
+                s.push('"');
+                j += 1;
+                // Consume until closing " followed by hash_count #'s
+                'raw_outer: loop {
+                    if j >= len {
+                        break;
+                    }
+                    if chars[j] == '"' {
+                        // Check for matching closing hashes
+                        let mut ok = true;
+                        for k in 1..=hash_count {
+                            if j + k >= len || chars[j + k] != '#' {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if ok {
+                            s.push('"');
+                            j += 1;
+                            for _ in 0..hash_count {
+                                s.push('#');
+                                j += 1;
+                            }
+                            break 'raw_outer;
+                        }
+                    }
+                    s.push(chars[j]);
+                    j += 1;
+                }
+                i = j;
+                tokens.push(CodeToken { text: s, kind: TokenKind::String });
+                continue;
+            }
+            // Not a raw string (e.g. just identifier starting with 'r'), fall through
+        }
+
+        // Backtick template literals (JS/TS): `...`
+        if chars[i] == '`' {
+            let mut s = String::from('`');
+            i += 1;
+            while i < len && chars[i] != '`' {
+                if chars[i] == '\\' && i + 1 < len {
+                    s.push(chars[i]);
+                    i += 1;
+                }
+                s.push(chars[i]);
+                i += 1;
+            }
+            if i < len {
+                s.push('`');
+                i += 1;
+            }
+            tokens.push(CodeToken { text: s, kind: TokenKind::String });
+            continue;
         }
 
         // String literals: "..." or '...'
@@ -1695,7 +1829,7 @@ fn tokenize_code_line(line: &str, keywords: &[&str], in_block_comment: &mut bool
         // Whitespace and single-char operators — accumulate as plain
         let mut plain = String::new();
         while i < len && !chars[i].is_alphanumeric() && chars[i] != '_'
-            && chars[i] != '"' && chars[i] != '\''
+            && chars[i] != '"' && chars[i] != '\'' && chars[i] != '`'
             && !(i + 1 < len && chars[i] == '/' && chars[i + 1] == '/')
             && !(i + 1 < len && chars[i] == '/' && chars[i + 1] == '*')
         {
@@ -1938,5 +2072,102 @@ mod tests {
         let tokens = tokenize_code_line("a && b", &rust_keywords(), &mut bc);
         let op = tokens.iter().find(|t| t.kind == TokenKind::Operator).unwrap();
         assert_eq!(op.text, "&&");
+    }
+
+    // ── is_line_comment tests ───────────────────────────────────────
+
+    #[test]
+    fn rust_attribute_not_comment() {
+        assert!(!is_line_comment("#[derive(Debug)]", "rust"));
+        assert!(!is_line_comment("#[cfg(test)]", "rs"));
+    }
+
+    #[test]
+    fn c_include_not_comment() {
+        assert!(!is_line_comment("#include <stdio.h>", "c"));
+        assert!(!is_line_comment("#define FOO", "cpp"));
+    }
+
+    #[test]
+    fn python_hash_is_comment() {
+        assert!(is_line_comment("# this is a comment", "python"));
+        assert!(is_line_comment("# comment", "py"));
+    }
+
+    #[test]
+    fn sql_double_dash_is_comment() {
+        assert!(is_line_comment("-- select all", "sql"));
+        assert!(is_line_comment("-- comment", "lua"));
+    }
+
+    #[test]
+    fn unknown_language_hash_is_comment() {
+        assert!(is_line_comment("# comment", ""));
+        assert!(is_line_comment("# comment", "unknown_lang"));
+        // But -- is not a comment for unknown languages
+        assert!(!is_line_comment("-- something", ""));
+    }
+
+    #[test]
+    fn double_slash_comment_all_languages() {
+        assert!(is_line_comment("// comment", "rust"));
+        assert!(is_line_comment("// comment", "python"));
+        assert!(is_line_comment("// comment", "sql"));
+        assert!(is_line_comment("// comment", ""));
+    }
+
+    // ── tokenizer string literal improvement tests ──────────────────
+
+    #[test]
+    fn tokenize_backtick_simple() {
+        let mut bc = false;
+        let tokens = tokenize_code_line("`hello world`", &code_keywords("js"), &mut bc);
+        assert_eq!(tokens[0].kind, TokenKind::String);
+        assert_eq!(tokens[0].text, "`hello world`");
+    }
+
+    #[test]
+    fn tokenize_backtick_with_escape() {
+        let mut bc = false;
+        let tokens = tokenize_code_line(r"`hello \` world`", &code_keywords("js"), &mut bc);
+        assert_eq!(tokens[0].kind, TokenKind::String);
+        assert!(tokens[0].text.starts_with('`'));
+        assert!(tokens[0].text.ends_with('`'));
+    }
+
+    #[test]
+    fn tokenize_raw_string_no_hash() {
+        let mut bc = false;
+        let tokens = tokenize_code_line(r#"r"hello""#, &rust_keywords(), &mut bc);
+        assert_eq!(tokens[0].kind, TokenKind::String);
+        assert_eq!(tokens[0].text, r#"r"hello""#);
+    }
+
+    #[test]
+    fn tokenize_raw_string_with_hashes() {
+        let mut bc = false;
+        let input = r###"r#"hello "world""#"###;
+        let tokens = tokenize_code_line(input, &rust_keywords(), &mut bc);
+        assert_eq!(tokens[0].kind, TokenKind::String);
+        assert!(tokens[0].text.starts_with("r#\""));
+        assert!(tokens[0].text.ends_with("\"#"));
+    }
+
+    #[test]
+    fn tokenize_triple_quote_double() {
+        let mut bc = false;
+        let tokens = tokenize_code_line(r#""""hello world""""#, &code_keywords("python"), &mut bc);
+        assert_eq!(tokens[0].kind, TokenKind::String);
+        assert!(tokens[0].text.starts_with("\"\"\""));
+        assert!(tokens[0].text.ends_with("\"\"\""));
+    }
+
+    #[test]
+    fn tokenize_triple_quote_single() {
+        let mut bc = false;
+        let tokens = tokenize_code_line("'''hello world'''", &code_keywords("python"), &mut bc);
+        assert_eq!(tokens[0].kind, TokenKind::String);
+        assert!(tokens[0].text.starts_with("'''"));
+        assert!(tokens[0].text.ends_with("'''"));
     }
 }
