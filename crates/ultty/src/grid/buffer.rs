@@ -210,15 +210,26 @@ impl Buffer {
     }
 
     /// Reflow all content (history + visible grid) to new dimensions.
+    ///
+    /// Tracks cursor position through the reflow so it stays on the same
+    /// logical content after re-wrapping.
     fn reflow_all(&mut self, new_dims: Dimensions) {
         use crate::grid::cell::Cell;
 
         let new_cols = new_dims.cols;
         let new_rows = new_dims.rows as usize;
+        let old_cursor_row = self.grid.cursor().position.row as usize;
+        let old_cursor_col = self.grid.cursor().position.col as usize;
+
+        // Track cursor as (logical_line_index, offset_within_logical_line)
+        let mut cursor_logical_line: usize = 0;
+        let mut cursor_logical_col: usize = 0;
+        let mut found_cursor = false;
 
         // Collect all logical lines from history and grid
         let mut logical_lines: Vec<Vec<Cell>> = Vec::new();
         let mut current_line: Vec<Cell> = Vec::new();
+        let mut current_logical_idx: usize = 0;
 
         // Process history rows
         for row in self.history.drain(..) {
@@ -226,65 +237,85 @@ impl Buffer {
                 current_line.push(*cell);
             }
             if !row.is_wrapped() {
-                // Trim trailing blanks
                 while current_line.last().is_some_and(|c| c.is_blank()) {
                     current_line.pop();
                 }
                 logical_lines.push(std::mem::take(&mut current_line));
+                current_logical_idx += 1;
             }
         }
 
         // Process grid rows, but skip trailing blank rows
         let grid_rows: Vec<_> = self.grid.rows().cloned().collect();
 
-        // Find the last non-blank row
         let last_content_row = grid_rows
             .iter()
             .rposition(|row| !row.is_blank())
             .unwrap_or(0);
 
         for (idx, row) in grid_rows.iter().enumerate() {
-            // Skip trailing blank rows (but include blank rows that have content after them)
             if idx > last_content_row && row.is_blank() {
                 continue;
             }
 
+            let cells_before = current_line.len();
             for cell in row.cells() {
                 current_line.push(*cell);
             }
+
+            // Track cursor: it's on this grid row
+            if idx == old_cursor_row && !found_cursor {
+                cursor_logical_line = current_logical_idx;
+                cursor_logical_col = cells_before + old_cursor_col;
+                found_cursor = true;
+            }
+
             if !row.is_wrapped() {
                 while current_line.last().is_some_and(|c| c.is_blank()) {
                     current_line.pop();
                 }
+                // Clamp cursor col if it fell in trimmed blanks
+                // (allow cursor at len() — one past last char is valid)
+                if found_cursor && cursor_logical_line == current_logical_idx {
+                    cursor_logical_col = cursor_logical_col.min(current_line.len());
+                }
                 logical_lines.push(std::mem::take(&mut current_line));
+                current_logical_idx += 1;
             }
         }
 
-        // Don't forget remaining cells from a wrapped line at the end
         if !current_line.is_empty() {
             while current_line.last().is_some_and(|c| c.is_blank()) {
                 current_line.pop();
             }
+            if found_cursor && cursor_logical_line == current_logical_idx {
+                cursor_logical_col = cursor_logical_col.min(current_line.len());
+            }
             logical_lines.push(current_line);
         }
 
-        // Remove trailing empty logical lines (these are just viewport padding)
         while logical_lines.last().is_some_and(|line| line.is_empty()) {
             logical_lines.pop();
         }
 
-        // Re-wrap all logical lines to new width
+        // Re-wrap all logical lines to new width, tracking cursor
         let mut all_rows: Vec<Row> = Vec::new();
+        let mut new_cursor_abs_row: Option<usize> = None;
+        let mut new_cursor_col: usize = 0;
 
-        for line in logical_lines {
+        for (line_idx, line) in logical_lines.iter().enumerate() {
             if line.is_empty() {
-                // Preserve intentional blank lines (from hard line breaks)
+                if found_cursor && line_idx == cursor_logical_line {
+                    new_cursor_abs_row = Some(all_rows.len());
+                    new_cursor_col = 0;
+                }
                 all_rows.push(Row::new(new_cols));
                 continue;
             }
 
             let mut pos = 0;
             while pos < line.len() {
+                let row_start = pos;
                 let mut new_row = Row::new(new_cols);
                 let mut col = 0u16;
 
@@ -297,42 +328,68 @@ impl Buffer {
                     pos += 1;
                 }
 
-                // Mark as wrapped if more content follows
+                // Check if cursor falls in this physical row
+                if found_cursor
+                    && line_idx == cursor_logical_line
+                    && new_cursor_abs_row.is_none()
+                    && cursor_logical_col >= row_start
+                    && cursor_logical_col < pos
+                {
+                    new_cursor_abs_row = Some(all_rows.len());
+                    new_cursor_col = cursor_logical_col - row_start;
+                }
+
                 if pos < line.len() {
                     new_row.set_wrapped(true);
                 }
 
                 all_rows.push(new_row);
             }
+
+            // Cursor at exact end of logical line
+            if found_cursor
+                && line_idx == cursor_logical_line
+                && new_cursor_abs_row.is_none()
+            {
+                new_cursor_abs_row = Some(all_rows.len().saturating_sub(1));
+                new_cursor_col = cursor_logical_col.saturating_sub(
+                    line.len().saturating_sub(line.len() % new_cols as usize),
+                );
+            }
         }
 
-        // Ensure we have at least new_rows rows (add empty rows at end if needed)
         while all_rows.len() < new_rows {
             all_rows.push(Row::new(new_cols));
         }
 
         // Split into history and visible grid
-        // Keep the last new_rows rows in the grid, rest goes to history
-        if all_rows.len() > new_rows {
-            let split_point = all_rows.len() - new_rows;
+        let split_point = if all_rows.len() > new_rows {
+            let sp = all_rows.len() - new_rows;
             if self.max_history > 0 {
-                self.history = all_rows.drain(..split_point).collect();
-
-                // Trim history to max size (remove oldest)
+                self.history = all_rows.drain(..sp).collect();
                 while self.history.len() > self.max_history {
                     self.history.pop_front();
                 }
             } else {
-                // No history storage - discard overflow rows
-                all_rows.drain(..split_point);
+                all_rows.drain(..sp);
                 self.history.clear();
             }
+            sp
         } else {
             self.history.clear();
-        }
+            0
+        };
 
-        // Update grid with remaining rows
         self.grid.set_rows(all_rows, new_dims);
+
+        // Restore tracked cursor position
+        if let Some(abs_row) = new_cursor_abs_row {
+            let grid_row = abs_row.saturating_sub(split_point);
+            self.grid.cursor_mut().position.row =
+                (grid_row as u16).min(new_dims.rows.saturating_sub(1));
+            self.grid.cursor_mut().position.col =
+                (new_cursor_col as u16).min(new_dims.cols.saturating_sub(1));
+        }
     }
 
     /// Write a character, saving to history if scrolling occurs.
@@ -666,5 +723,46 @@ mod tests {
 
         // First history row should start with 'A'
         assert_eq!(buf.history[0][0].char(), 'A');
+    }
+
+    #[test]
+    fn reflow_preserves_cursor_on_narrow() {
+        let mut buf = Buffer::new(Dimensions::new(20, 5));
+
+        // Write "Hello World" on row 0
+        for c in "Hello World".chars() {
+            buf.grid_mut().write_char(c);
+        }
+        // Cursor should be at row 0, col 11 (after 'd')
+        assert_eq!(buf.grid().cursor().position.row, 0);
+        assert_eq!(buf.grid().cursor().position.col, 11);
+
+        // Narrow to 6 columns — "Hello " wraps, cursor should track to "World" part
+        buf.resize(Dimensions::new(6, 5));
+
+        // "Hello " on row 0 (wrapped), "World" on row 1
+        // Cursor was at col 11 in the logical line, which maps to row 1 col 5
+        assert_eq!(buf.grid().cursor().position.row, 1);
+        assert_eq!(buf.grid().cursor().position.col, 5);
+    }
+
+    #[test]
+    fn reflow_preserves_cursor_on_widen() {
+        let mut buf = Buffer::new(Dimensions::new(6, 5));
+
+        // Write text that wraps at 6 columns
+        for c in "Hello World".chars() {
+            buf.grid_mut().write_char(c);
+        }
+        // Cursor on row 1 (wrapped), col 5
+        assert_eq!(buf.grid().cursor().position.row, 1);
+        assert_eq!(buf.grid().cursor().position.col, 5);
+
+        // Widen to 20 — everything fits on one row
+        buf.resize(Dimensions::new(20, 5));
+
+        // Cursor should be back on row 0, col 11
+        assert_eq!(buf.grid().cursor().position.row, 0);
+        assert_eq!(buf.grid().cursor().position.col, 11);
     }
 }

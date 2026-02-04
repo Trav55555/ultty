@@ -79,6 +79,31 @@ impl CopyMode {
         self.search_query.clear();
     }
 
+    /// Update viewport dimensions and clamp cursor/scroll to remain in bounds.
+    pub fn resize(&mut self, total_rows: usize, viewport_rows: usize, viewport_cols: usize) {
+        self.total_rows = total_rows;
+        self.viewport_rows = viewport_rows;
+        self.viewport_cols = viewport_cols;
+        // Clamp cursor to valid range
+        self.cursor_row = self.cursor_row.min(total_rows.saturating_sub(1));
+        self.cursor_col = self.cursor_col.min(viewport_cols.saturating_sub(1));
+        // Clamp scroll offset
+        self.scroll_offset = self
+            .scroll_offset
+            .min(total_rows.saturating_sub(viewport_rows));
+        // Ensure cursor is visible within viewport
+        if self.cursor_row < self.scroll_offset {
+            self.scroll_offset = self.cursor_row;
+        } else if self.cursor_row >= self.scroll_offset + viewport_rows {
+            self.scroll_offset = self.cursor_row.saturating_sub(viewport_rows.saturating_sub(1));
+        }
+        // Clamp selection anchor if set
+        if let Some((ref mut row, ref mut col)) = self.selection_anchor {
+            *row = (*row).min(total_rows.saturating_sub(1));
+            *col = (*col).min(viewport_cols.saturating_sub(1));
+        }
+    }
+
     pub fn exit(&mut self) {
         self.active = false;
         self.selection_anchor = None;
@@ -1534,5 +1559,42 @@ mod tests {
             }
             _ => panic!("Expected Copy with Char selection"),
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Resize clamps cursor and scroll
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn resize_clamps_cursor() {
+        let mut m = CopyMode::new();
+        m.enter(100, 24, 80);
+        // Move cursor to a high position
+        m.cursor_row = 90;
+        m.cursor_col = 70;
+
+        // Shrink viewport
+        m.resize(50, 10, 40);
+
+        // cursor_row should be clamped to 49 (total_rows - 1)
+        assert_eq!(m.cursor_row, 49);
+        // cursor_col should be clamped to 39 (viewport_cols - 1)
+        assert_eq!(m.cursor_col, 39);
+        // scroll_offset should keep cursor visible
+        assert!(m.cursor_row >= m.scroll_offset);
+        assert!(m.cursor_row < m.scroll_offset + 10);
+    }
+
+    #[test]
+    fn resize_clamps_selection_anchor() {
+        let mut m = CopyMode::new();
+        m.enter(100, 24, 80);
+        m.selection_anchor = Some((95, 75));
+
+        m.resize(50, 24, 40);
+
+        let (row, col) = m.selection_anchor.unwrap();
+        assert_eq!(row, 49);
+        assert_eq!(col, 39);
     }
 }

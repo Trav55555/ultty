@@ -967,8 +967,12 @@ impl Grid {
         self.rows.truncate(self.dims.rows as usize);
 
         // Adjust cursor position down by the number of inserted rows
-        self.cursor.position.row =
-            (self.cursor.position.row + count as u16).min(self.dims.rows.saturating_sub(1));
+        self.cursor.position.row = self
+            .cursor
+            .position
+            .row
+            .saturating_add(count.min(u16::MAX as usize) as u16)
+            .min(self.dims.rows.saturating_sub(1));
 
         // Mark all dirty
         self.mark_all_dirty();
@@ -984,7 +988,11 @@ impl Grid {
         self.rows.drain(..count);
 
         // Adjust cursor position up
-        self.cursor.position.row = self.cursor.position.row.saturating_sub(count as u16);
+        self.cursor.position.row = self
+            .cursor
+            .position
+            .row
+            .saturating_sub(count.min(u16::MAX as usize) as u16);
 
         // Mark all dirty
         self.mark_all_dirty();

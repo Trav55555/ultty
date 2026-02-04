@@ -76,6 +76,9 @@ impl App {
     /// Convert pixel position to terminal cell coordinates.
     pub(super) fn pixel_to_cell(&self, x: f64, y: f64) -> (u16, u16) {
         let (cell_width, cell_height) = self.renderer.cell_dimensions();
+        if cell_width <= 0.0 || cell_height <= 0.0 {
+            return (0, 0);
+        }
         let col = (x / cell_width as f64).floor().clamp(0.0, u16::MAX as f64) as u16;
         let row = (y / cell_height as f64).floor().clamp(0.0, u16::MAX as f64) as u16;
         (col, row)

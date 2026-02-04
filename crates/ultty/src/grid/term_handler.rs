@@ -550,8 +550,8 @@ impl<'a> TerminalHandler<'a> {
         let cell_pixel_width = 8u32;
         let cell_pixel_height = 16u32;
 
-        let cell_width = width.div_ceil(cell_pixel_width) as u16;
-        let cell_height = height.div_ceil(cell_pixel_height) as u16;
+        let cell_width = width.div_ceil(cell_pixel_width).min(u16::MAX as u32) as u16;
+        let cell_height = height.div_ceil(cell_pixel_height).min(u16::MAX as u32) as u16;
 
         // Allocate image ID and create the image
         let id = self.terminal.images_mut().allocate_id();

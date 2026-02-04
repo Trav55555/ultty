@@ -793,6 +793,16 @@ impl App {
             tracing::warn!("Failed to resize terminals: {}", e);
         }
 
+        // Clamp copy mode cursor/scroll if active
+        if self.copy_mode.is_active() {
+            let total_rows = self
+                .terminal()
+                .map(|t| t.buffer().history_len() + t.dimensions().rows as usize)
+                .unwrap_or(rows as usize);
+            self.copy_mode
+                .resize(total_rows, rows as usize, cols as usize);
+        }
+
         if let Some(ref mut server) = self.protocol_server {
             server.set_viewport(size.width as f32, size.height as f32);
             server.broadcast_resize(cols, rows);

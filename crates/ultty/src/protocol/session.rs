@@ -21,6 +21,9 @@ use crate::scene::tree::SceneTree;
 /// Capabilities supported by this terminal.
 const TERMINAL_CAPABILITIES: u32 = 0x0001 | 0x0010; // LAYOUT_FLEXBOX | WIDGET_SCROLL
 
+/// Maximum read buffer size (16 MB). Sessions exceeding this are disconnected.
+const MAX_READ_BUF: usize = 16 * 1024 * 1024;
+
 /// A native protocol session with a TUI application.
 pub struct NativeSession {
     /// Session ID.
@@ -185,6 +188,16 @@ impl NativeSession {
         if n > 0 {
             self.read_buf.extend_from_slice(&temp[..n]);
             self.last_activity = std::time::Instant::now();
+            if self.read_buf.len() > MAX_READ_BUF {
+                warn!(
+                    "Session {} read buffer exceeded {} bytes, disconnecting",
+                    self.session_id, MAX_READ_BUF
+                );
+                return Err(io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    "read buffer exceeded maximum size",
+                ));
+            }
         }
         Ok(n)
     }
@@ -206,7 +219,9 @@ impl NativeSession {
             );
             let magic_bytes = FRAME_MAGIC;
             let mut found = false;
-            for i in 1..self.read_buf.len().saturating_sub(1) {
+            // Limit scan to 64 KB to avoid O(n) scan through huge corrupt buffers
+            let scan_limit = self.read_buf.len().saturating_sub(1).min(65536);
+            for i in 1..scan_limit {
                 if self.read_buf[i] == magic_bytes[0]
                     && i + 1 < self.read_buf.len()
                     && self.read_buf[i + 1] == magic_bytes[1]
@@ -221,13 +236,17 @@ impl NativeSession {
                 }
             }
             if !found {
-                // No magic found, discard all but last byte (it might be first byte of magic)
-                let keep = if self.read_buf.last() == Some(&magic_bytes[0]) {
+                // No magic found within scan limit, discard scanned bytes
+                // Keep last byte only if it could be first byte of magic
+                let discard_end = scan_limit.min(self.read_buf.len());
+                let keep = if discard_end < self.read_buf.len()
+                    || self.read_buf.last() == Some(&magic_bytes[0])
+                {
                     1
                 } else {
                     0
                 };
-                let discard = self.read_buf.len() - keep;
+                let discard = discard_end - keep;
                 self.read_buf.advance(discard);
             }
             return Ok(None);
