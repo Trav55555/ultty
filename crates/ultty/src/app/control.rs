@@ -358,17 +358,28 @@ impl App {
 
                             if let Some(ref re) = compiled_regex {
                                 for m in re.find_iter(&text) {
-                                    let col = m.start();
-                                    let match_len = m.len();
-                                    let context_start = col.saturating_sub(20);
-                                    let context_end = (col + match_len + 20).min(text.len());
+                                    let byte_start = m.start();
+                                    let byte_end = m.end();
+                                    let match_text = m.as_str().to_string();
+                                    // Find char-safe context boundaries
+                                    let ctx_start = text[..byte_start]
+                                        .char_indices()
+                                        .rev()
+                                        .nth(19)
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(0);
+                                    let ctx_end = text[byte_end..]
+                                        .char_indices()
+                                        .nth(20)
+                                        .map(|(i, _)| byte_end + i)
+                                        .unwrap_or(text.len());
+                                    let col = text[..byte_start].chars().count();
                                     matches.push(SearchMatch {
                                         line: row,
                                         col,
-                                        text: m.as_str().to_string(),
-                                        context_before: text[context_start..col].to_string(),
-                                        context_after: text[col + match_len..context_end]
-                                            .to_string(),
+                                        text: match_text,
+                                        context_before: text[ctx_start..byte_start].to_string(),
+                                        context_after: text[byte_end..ctx_end].to_string(),
                                     });
                                 }
                             } else {
@@ -383,16 +394,27 @@ impl App {
                                     text.to_lowercase()
                                 };
 
-                                for (col, _) in search_text.match_indices(&pattern_search) {
-                                    let context_start = col.saturating_sub(20);
-                                    let context_end = (col + pattern.len() + 20).min(text.len());
+                                for (byte_off, matched) in search_text.match_indices(&pattern_search) {
+                                    let match_byte_end = byte_off + matched.len();
+                                    // Find char-safe context boundaries
+                                    let ctx_start = search_text[..byte_off]
+                                        .char_indices()
+                                        .rev()
+                                        .nth(19)
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(0);
+                                    let ctx_end = search_text[match_byte_end..]
+                                        .char_indices()
+                                        .nth(20)
+                                        .map(|(i, _)| match_byte_end + i)
+                                        .unwrap_or(text.len());
+                                    let col = search_text[..byte_off].chars().count();
                                     matches.push(SearchMatch {
                                         line: row,
                                         col,
-                                        text: text[col..col + pattern.len()].to_string(),
-                                        context_before: text[context_start..col].to_string(),
-                                        context_after: text[col + pattern.len()..context_end]
-                                            .to_string(),
+                                        text: text[byte_off..match_byte_end].to_string(),
+                                        context_before: text[ctx_start..byte_off].to_string(),
+                                        context_after: text[match_byte_end..ctx_end].to_string(),
                                     });
                                 }
                             }

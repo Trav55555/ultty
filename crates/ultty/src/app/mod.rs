@@ -101,6 +101,12 @@ pub struct App {
     native_search_query: String,
     /// Current highlighted match index
     native_search_index: usize,
+    /// Reusable buffer for URL detection row text (avoids per-frame allocation)
+    url_row_buf: Vec<String>,
+    /// Reusable buffer for URL detection hyperlink grid
+    url_hyperlink_grid: Vec<Vec<u32>>,
+    /// Reusable buffer for URL detection hyperlink map
+    url_hyperlink_map: std::collections::HashMap<u32, String>,
 }
 
 impl App {
@@ -225,6 +231,9 @@ impl App {
             native_search_active: false,
             native_search_query: String::new(),
             native_search_index: 0,
+            url_row_buf: Vec::new(),
+            url_hyperlink_grid: Vec::new(),
+            url_hyperlink_map: std::collections::HashMap::new(),
         })
     }
 
@@ -665,68 +674,71 @@ impl App {
             return;
         }
 
-        // Collect row text and hyperlink data first to avoid borrow conflicts
-        let (rows, dims, hyperlink_grid, hyperlink_map): (
-            Vec<String>,
-            _,
-            Vec<Vec<u32>>,
-            std::collections::HashMap<u32, String>,
-        ) = {
-            let Some(terminal) = self.terminal() else { return; };
-            let dims = terminal.dimensions();
-            let rows: Vec<String> = (0..dims.rows)
-                .map(|row| {
+        // Reuse buffers: clear and refill instead of allocating new Vecs each frame
+        self.url_row_buf.clear();
+        self.url_hyperlink_grid.clear();
+        self.url_hyperlink_map.clear();
+
+        // Access terminal_manager directly (not self.terminal()) to enable
+        // disjoint field borrows — Rust can see url_row_buf/url_hyperlink_grid/
+        // url_hyperlink_map are separate from terminal_manager.
+        let Some(focused) = self.terminal_manager.focused_terminal() else { return; };
+        let terminal = focused.event_loop.terminal();
+        let dims = terminal.dimensions();
+
+        // Fill row text buffer
+        self.url_row_buf.reserve(dims.rows as usize);
+        for row in 0..dims.rows {
+            self.url_row_buf.push(
+                terminal
+                    .buffer()
+                    .visible_row(row)
+                    .map(|r| r.text_trimmed())
+                    .unwrap_or_default(),
+            );
+        }
+
+        // Fill hyperlink grid buffer
+        self.url_hyperlink_grid.reserve(dims.rows as usize);
+        for row in 0..dims.rows {
+            let mut row_links = Vec::with_capacity(dims.cols as usize);
+            for col in 0..dims.cols {
+                row_links.push(
                     terminal
                         .buffer()
-                        .visible_row(row)
-                        .map(|r| r.text_trimmed())
-                        .unwrap_or_default()
-                })
-                .collect();
+                        .grid()
+                        .cell(row, col)
+                        .map(|c| c.hyperlink_id())
+                        .unwrap_or(0),
+                );
+            }
+            self.url_hyperlink_grid.push(row_links);
+        }
 
-            // Collect hyperlink IDs from visible cells
-            let hyperlink_grid: Vec<Vec<u32>> = (0..dims.rows)
-                .map(|row| {
-                    (0..dims.cols)
-                        .map(|col| {
-                            terminal
-                                .buffer()
-                                .grid()
-                                .cell(row, col)
-                                .map(|c| c.hyperlink_id())
-                                .unwrap_or(0)
-                        })
-                        .collect()
-                })
-                .collect();
-
-            // Copy hyperlink map
-            let hyperlink_map: std::collections::HashMap<u32, String> = terminal
-                .all_hyperlinks()
-                .iter()
-                .map(|(k, v)| (*k, v.clone()))
-                .collect();
-
-            (rows, dims, hyperlink_grid, hyperlink_map)
-        };
+        // Fill hyperlink map buffer
+        for (k, v) in terminal.all_hyperlinks().iter() {
+            self.url_hyperlink_map.insert(*k, v.clone());
+        }
 
         // Detect regex-based URLs
+        let rows = &self.url_row_buf;
         self.url_detector.detect(rows.len() as u16, |row| {
             rows.get(row as usize).cloned().unwrap_or_default()
         });
 
         // Detect OSC 8 hyperlinks
+        let grid = &self.url_hyperlink_grid;
+        let map = &self.url_hyperlink_map;
         self.url_detector.detect_hyperlinks(
             dims.rows,
             dims.cols,
             |row, col| {
-                hyperlink_grid
-                    .get(row as usize)
+                grid.get(row as usize)
                     .and_then(|r| r.get(col as usize))
                     .copied()
                     .unwrap_or(0)
             },
-            |id| hyperlink_map.get(&id).cloned(),
+            |id| map.get(&id).cloned(),
         );
     }
 

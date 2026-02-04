@@ -153,7 +153,11 @@ impl ProtocolServer {
                     true
                 }
                 Err(e) => {
-                    error!("Session {} error: {}", session.session_id(), e);
+                    if is_disconnect_error(&e) {
+                        info!("Session {} disconnected: {}", session.session_id(), e);
+                    } else {
+                        error!("Session {} error: {:?}", session.session_id(), e);
+                    }
                     true
                 }
             }
@@ -390,6 +394,17 @@ impl ProtocolServer {
         }
         self.flush();
     }
+}
+
+/// Check if an IO error represents a normal client disconnection.
+fn is_disconnect_error(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::UnexpectedEof
+    )
 }
 
 impl Drop for ProtocolServer {

@@ -1,5 +1,7 @@
 //! Terminal buffer with scrollback history.
 
+use std::collections::VecDeque;
+
 use super::{Dimensions, Grid, Row};
 
 /// Default scrollback buffer size (lines).
@@ -14,7 +16,7 @@ pub struct Buffer {
     /// The visible grid
     grid: Grid,
     /// Scrollback history (oldest first)
-    history: Vec<Row>,
+    history: VecDeque<Row>,
     /// Maximum history size
     max_history: usize,
     /// Current scroll offset (0 = at bottom, >0 = scrolled up)
@@ -31,7 +33,7 @@ impl Buffer {
     pub fn with_scrollback(dims: Dimensions, max_history: usize) -> Self {
         Self {
             grid: Grid::new(dims),
-            history: Vec::with_capacity(max_history.min(1000)), // Pre-allocate reasonably
+            history: VecDeque::with_capacity(max_history.min(1000)), // Pre-allocate reasonably
             max_history,
             scroll_offset: 0,
         }
@@ -97,9 +99,9 @@ impl Buffer {
         }
         for row in rows {
             if self.history.len() >= self.max_history {
-                self.history.remove(0);
+                self.history.pop_front();
             }
-            self.history.push(row);
+            self.history.push_back(row);
         }
     }
 
@@ -318,7 +320,7 @@ impl Buffer {
 
                 // Trim history to max size (remove oldest)
                 while self.history.len() > self.max_history {
-                    self.history.remove(0);
+                    self.history.pop_front();
                 }
             } else {
                 // No history storage - discard overflow rows
