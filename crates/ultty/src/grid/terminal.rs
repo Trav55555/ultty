@@ -511,7 +511,7 @@ impl Terminal {
 
     /// Get hyperlink at a specific cell position.
     pub fn hyperlink_at(&self, row: u16, col: u16) -> Option<&str> {
-        let cell = self.buffer().grid().cell(row, col)?;
+        let cell = self.buffer().grid().cell(col, row)?;
         let id = cell.hyperlink_id();
         if id != 0 {
             self.hyperlink(id)
@@ -907,29 +907,40 @@ impl Selection {
 }
 
 /// Simple percent-decoding for file paths (e.g., %20 -> space).
+/// Handles multi-byte UTF-8 sequences correctly (e.g., %C3%A9 -> é).
 fn percent_decode(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut chars = input.as_bytes().iter().copied().peekable();
 
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            // Try to parse next two chars as hex
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    output.push(byte as char);
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            let h1 = chars.next();
+            let h2 = chars.next();
+            if let (Some(h1), Some(h2)) = (h1, h2) {
+                let hex = [h1, h2];
+                if let Ok(decoded) =
+                    u8::from_str_radix(std::str::from_utf8(&hex).unwrap_or(""), 16)
+                {
+                    bytes.push(decoded);
                     continue;
                 }
+                // Invalid hex escape, keep as-is
+                bytes.push(b'%');
+                bytes.push(h1);
+                bytes.push(h2);
+            } else {
+                // Truncated escape at end of string
+                bytes.push(b'%');
+                if let Some(h1) = h1 {
+                    bytes.push(h1);
+                }
             }
-            // Invalid escape, keep as-is
-            output.push('%');
-            output.push_str(&hex);
         } else {
-            output.push(c);
+            bytes.push(b);
         }
     }
 
-    output
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 #[cfg(test)]
@@ -1165,5 +1176,27 @@ mod tests {
         // Should not panic
         let text = term.selected_text().unwrap();
         assert!(text.contains("XYZ"));
+    }
+
+    #[test]
+    fn percent_decode_ascii() {
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+        assert_eq!(percent_decode("no%25percent"), "no%percent");
+    }
+
+    #[test]
+    fn percent_decode_multibyte_utf8() {
+        // é is U+00E9, encoded as %C3%A9 in UTF-8
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+        // 日 is U+65E5, encoded as %E6%97%A5
+        assert_eq!(percent_decode("%E6%97%A5"), "日");
+    }
+
+    #[test]
+    fn percent_decode_invalid_hex() {
+        // Invalid hex digits should be kept as-is
+        assert_eq!(percent_decode("%GG"), "%GG");
+        // Truncated at end
+        assert_eq!(percent_decode("abc%2"), "abc%2");
     }
 }

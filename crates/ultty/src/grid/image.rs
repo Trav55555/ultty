@@ -247,6 +247,12 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
         return None;
     }
 
+    // Limit dimensions to prevent OOM from crafted Sixel data
+    const MAX_SIXEL_DIM: u32 = 16384;
+    if max_x > MAX_SIXEL_DIM || max_y > MAX_SIXEL_DIM {
+        return None;
+    }
+
     // Allocate pixel buffer (RGBA)
     let mut pixels = vec![0u8; (max_x * max_y * 4) as usize];
 
@@ -378,7 +384,7 @@ fn parse_number(data: &[u8]) -> (u32, usize) {
     let mut i = 0;
 
     while i < data.len() && data[i].is_ascii_digit() {
-        value = value * 10 + (data[i] - b'0') as u32;
+        value = value.saturating_mul(10).saturating_add((data[i] - b'0') as u32);
         i += 1;
     }
 
@@ -396,7 +402,7 @@ fn parse_color_params(data: &[u8]) -> (Vec<u16>, usize) {
         let c = data[i];
         match c {
             b'0'..=b'9' => {
-                current = current * 10 + (c - b'0') as u16;
+                current = current.saturating_mul(10).saturating_add((c - b'0') as u16);
                 has_value = true;
             }
             b';' => {
@@ -506,5 +512,38 @@ mod tests {
         let (_, width, height) = result.unwrap();
         assert_eq!(width, 4);
         assert_eq!(height, 6);
+    }
+
+    #[test]
+    fn parse_number_saturates_on_overflow() {
+        // A very long digit string should saturate to u32::MAX, not wrap
+        let data = b"99999999999999999999";
+        let (value, consumed) = parse_number(data);
+        assert_eq!(consumed, data.len());
+        assert_eq!(value, u32::MAX);
+    }
+
+    #[test]
+    fn parse_color_params_saturates_on_overflow() {
+        let data = b"99999;99999";
+        let (params, _) = parse_color_params(data);
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], u16::MAX);
+        assert_eq!(params[1], u16::MAX);
+    }
+
+    #[test]
+    fn sixel_rejects_oversized_dimensions() {
+        // Craft data that would create a very tall image via many newlines
+        let mut data = Vec::new();
+        data.extend_from_slice(b"#0;2;100;0;0");
+        data.push(b'~'); // One sixel column
+        // 3000 newlines × 6 pixels each = 18000 > 16384 limit
+        for _ in 0..3000 {
+            data.push(b'-');
+        }
+        data.push(b'~');
+        let result = decode_sixel(&data, 0);
+        assert!(result.is_none());
     }
 }

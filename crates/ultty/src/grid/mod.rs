@@ -328,14 +328,14 @@ impl Grid {
             if col > 0 || self.cursor.wrap_pending {
                 // Attach to previous cell (which is at col-1, or last col if wrap pending)
                 let attach_col = if self.cursor.wrap_pending {
-                    self.dims.cols - 1
+                    self.dims.cols.saturating_sub(1)
                 } else {
                     col - 1
                 };
                 self.add_combining_char(row, attach_col, c);
             } else if row > 0 {
                 // Previous row, last column
-                self.add_combining_char(row - 1, self.dims.cols - 1, c);
+                self.add_combining_char(row - 1, self.dims.cols.saturating_sub(1), c);
             }
             // Otherwise ignore (no previous cell to attach to)
             return;
@@ -352,7 +352,7 @@ impl Grid {
             let bottom = self
                 .scroll_region
                 .map(|r| r.bottom)
-                .unwrap_or(self.dims.rows - 1);
+                .unwrap_or(self.dims.rows.saturating_sub(1));
             self.cursor.position.col = 0;
             self.cursor.position.row += 1;
             if self.cursor.position.row > bottom {
@@ -393,7 +393,7 @@ impl Grid {
             let bottom = self
                 .scroll_region
                 .map(|r| r.bottom)
-                .unwrap_or(self.dims.rows - 1);
+                .unwrap_or(self.dims.rows.saturating_sub(1));
             self.cursor.position.col = 0;
             self.cursor.position.row += 1;
             if self.cursor.position.row > bottom {
@@ -442,7 +442,7 @@ impl Grid {
         // Check if we're now at or past the last column
         if self.cursor.position.col >= self.dims.cols {
             // Keep cursor at last valid column
-            self.cursor.position.col = self.dims.cols - 1;
+            self.cursor.position.col = self.dims.cols.saturating_sub(1);
             // Only set pending wrap if auto-wrap (DECAWM) is enabled;
             // when off, subsequent chars overwrite the last column
             if self.auto_wrap {
@@ -460,7 +460,7 @@ impl Grid {
     /// Move cursor down, stopping at bottom edge.
     pub fn cursor_down(&mut self, n: u16) {
         self.cursor.wrap_pending = false;
-        self.cursor.position.row = (self.cursor.position.row + n).min(self.dims.rows - 1);
+        self.cursor.position.row = (self.cursor.position.row + n).min(self.dims.rows.saturating_sub(1));
     }
 
     /// Move cursor left, stopping at left edge.
@@ -472,15 +472,15 @@ impl Grid {
     /// Move cursor right, stopping at right edge.
     pub fn cursor_right(&mut self, n: u16) {
         self.cursor.wrap_pending = false;
-        self.cursor.position.col = (self.cursor.position.col + n).min(self.dims.cols - 1);
+        self.cursor.position.col = (self.cursor.position.col + n).min(self.dims.cols.saturating_sub(1));
     }
 
     /// Set absolute cursor position (1-based like ANSI).
     pub fn set_cursor_position(&mut self, row: u16, col: u16) {
         self.cursor.wrap_pending = false;
         // ANSI positions are 1-based, convert to 0-based
-        self.cursor.position.row = row.saturating_sub(1).min(self.dims.rows - 1);
-        self.cursor.position.col = col.saturating_sub(1).min(self.dims.cols - 1);
+        self.cursor.position.row = row.saturating_sub(1).min(self.dims.rows.saturating_sub(1));
+        self.cursor.position.col = col.saturating_sub(1).min(self.dims.cols.saturating_sub(1));
     }
 
     /// Carriage return - move cursor to column 0.
@@ -497,7 +497,7 @@ impl Grid {
         let bottom = self
             .scroll_region
             .map(|r| r.bottom)
-            .unwrap_or(self.dims.rows - 1);
+            .unwrap_or(self.dims.rows.saturating_sub(1));
 
         if self.cursor.position.row >= bottom {
             self.scroll_up(1);
@@ -519,9 +519,9 @@ impl Grid {
         self.cursor.wrap_pending = false;
         let current = self.cursor.position.col;
         if let Some(&next) = self.tab_stops.range((current + 1)..).next() {
-            self.cursor.position.col = next.min(self.dims.cols - 1);
+            self.cursor.position.col = next.min(self.dims.cols.saturating_sub(1));
         } else {
-            self.cursor.position.col = self.dims.cols - 1;
+            self.cursor.position.col = self.dims.cols.saturating_sub(1);
         }
     }
 
@@ -554,12 +554,12 @@ impl Grid {
         self.cursor.wrap_pending = false;
         // Convert from 1-based to 0-based
         let top = top.saturating_sub(1);
-        let bottom = bottom.saturating_sub(1).min(self.dims.rows - 1);
+        let bottom = bottom.saturating_sub(1).min(self.dims.rows.saturating_sub(1));
 
         if top >= bottom {
             // Invalid region, reset to full screen
             self.scroll_region = None;
-        } else if top == 0 && bottom >= self.dims.rows - 1 {
+        } else if top == 0 && bottom >= self.dims.rows.saturating_sub(1) {
             // Full screen, no need to track
             self.scroll_region = None;
         } else {
@@ -580,7 +580,7 @@ impl Grid {
     /// Get the effective scroll region (returns full screen if none set).
     pub fn effective_scroll_region(&self) -> ScrollRegion {
         self.scroll_region
-            .unwrap_or(ScrollRegion::new(0, self.dims.rows - 1))
+            .unwrap_or(ScrollRegion::new(0, self.dims.rows.saturating_sub(1)))
     }
 
     /// Scroll the grid up by n lines (within scroll region).
@@ -987,11 +987,34 @@ impl Grid {
 
                 while col < new_cols && pos < line.len() {
                     let cell = &line[pos];
+
+                    // Skip spacer cells from the old layout — they will be
+                    // regenerated when we place the wide char below.
+                    if cell.is_wide_spacer() {
+                        pos += 1;
+                        continue;
+                    }
+
+                    // A wide char needs two columns. If only one column
+                    // remains on this row, leave it blank and wrap the
+                    // wide char to the next row.
+                    if cell.is_wide() && col + 1 >= new_cols {
+                        break;
+                    }
+
                     if let Some(dest) = new_row.get_mut(col) {
                         *dest = *cell;
                     }
                     col += 1;
                     pos += 1;
+
+                    // After placing a wide char, insert its spacer cell.
+                    if cell.is_wide() {
+                        if let Some(spacer) = new_row.get_mut(col) {
+                            spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
+                        }
+                        col += 1;
+                    }
                 }
 
                 // If there's more content, mark this row as wrapped
@@ -1687,5 +1710,46 @@ mod tests {
         // Should have wrapped to row 1
         assert_eq!(grid.cursor().position.row, 1);
         assert_eq!(grid.cell(0, 1).unwrap().char(), 'F');
+    }
+
+    #[test]
+    fn zero_dimension_grid_does_not_panic() {
+        let mut grid = Grid::new(Dimensions::new(0, 0));
+
+        // None of these should panic with 0-dimension grid
+        grid.cursor_down(1);
+        grid.cursor_right(1);
+        grid.cursor_up(1);
+        grid.cursor_left(1);
+        grid.set_cursor_position(1, 1);
+        grid.newline();
+        grid.tab();
+        grid.write_char('A');
+
+        let region = grid.effective_scroll_region();
+        assert_eq!(region.top, 0);
+        assert_eq!(region.bottom, 0);
+    }
+
+    #[test]
+    fn reflow_wide_char_at_boundary() {
+        // 4-column grid: write "A" + wide char '中' + "B"
+        let mut grid = Grid::new(Dimensions::new(4, 3));
+        grid.write_char('A');
+        grid.write_char('中'); // takes cols 1-2
+        grid.write_char('B'); // col 3
+
+        // Reflow to 2 columns — after placing 'A' at col 0,
+        // '中' needs 2 cols but only 1 remains, so it wraps.
+        grid.reflow(2);
+
+        // Row 0: 'A' then blank (wide char doesn't fit)
+        assert_eq!(grid.cell(0, 0).unwrap().char(), 'A');
+        assert!(!grid.cell(1, 0).unwrap().is_wide());
+        // Row 1: '中' + spacer
+        assert!(grid.cell(0, 1).unwrap().is_wide());
+        assert!(grid.cell(1, 1).unwrap().is_wide_spacer());
+        // Row 2: 'B'
+        assert_eq!(grid.cell(0, 2).unwrap().char(), 'B');
     }
 }

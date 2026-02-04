@@ -81,8 +81,10 @@ impl<'a> TerminalHandler<'a> {
             Action::EraseCharacters(n) => {
                 let col = self.terminal.grid().cursor().position.col;
                 let row = self.terminal.grid().cursor().position.row;
-                for i in 0..n {
-                    if let Some(cell) = self.terminal.grid_mut().cell_mut(col + i, row) {
+                let cols = self.terminal.grid().dimensions().cols;
+                let end = col.saturating_add(n).min(cols);
+                for c in col..end {
+                    if let Some(cell) = self.terminal.grid_mut().cell_mut(c, row) {
                         cell.clear();
                     }
                 }

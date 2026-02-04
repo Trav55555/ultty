@@ -60,7 +60,8 @@ impl AnsiParser {
             // Digit - accumulate parameter
             b'0'..=b'9' => {
                 let digit = (byte - b'0') as u16;
-                self.current_param = Some(self.current_param.unwrap_or(0) * 10 + digit);
+                self.current_param =
+                    Some(self.current_param.unwrap_or(0).saturating_mul(10).saturating_add(digit));
             }
             // Semicolon - end current parameter
             b';' => {
@@ -857,5 +858,12 @@ mod tests {
         let actions = parse(b"\x1b[?;25h");
         // p1 = 0, which doesn't match any mode
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn csi_param_saturates_on_overflow() {
+        // A huge numeric parameter should saturate to u16::MAX, not wrap
+        let actions = parse(b"\x1b[99999A");
+        assert_eq!(actions, vec![Action::CursorUp(u16::MAX)]);
     }
 }
