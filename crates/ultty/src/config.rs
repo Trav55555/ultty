@@ -99,7 +99,7 @@ impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
             name: String::new(),
-            foreground: RgbColor::new(0xE5, 0xE5, 0xE5),
+            foreground: RgbColor::new(0xF5, 0xF5, 0xF5),
             background: RgbColor::new(0x1E, 0x1E, 0x1E),
             cursor: RgbColor::new(0xFF, 0xFF, 0xFF),
             selection: RgbaColor::new(0x4D, 0x4D, 0x4D, 0x80),
@@ -125,7 +125,7 @@ impl ThemeConfig {
     pub fn dark() -> Self {
         Self {
             name: "Dark".to_string(),
-            foreground: RgbColor::new(0xE5, 0xE5, 0xE5),
+            foreground: RgbColor::new(0xF5, 0xF5, 0xF5),
             background: RgbColor::new(0x1E, 0x1E, 0x1E),
             cursor: RgbColor::new(0xFF, 0xFF, 0xFF),
             selection: RgbaColor::new(0x4D, 0x4D, 0x4D, 0x80),
@@ -173,7 +173,7 @@ impl ThemeConfig {
     pub fn everforest_dark() -> Self {
         Self {
             name: "Everforest Dark".to_string(),
-            foreground: RgbColor::new(0xD3, 0xC6, 0xAA), // fg
+            foreground: RgbColor::new(0xF2, 0xE8, 0xD5), // fg (brightened)
             background: RgbColor::new(0x2D, 0x35, 0x3B), // bg0 (medium)
             cursor: RgbColor::new(0xA7, 0xC0, 0x80),     // green cursor
             selection: RgbaColor::new(0x3D, 0x48, 0x4D, 0xC0), // bg3
@@ -285,7 +285,7 @@ impl Default for PaletteConfig {
             blue: RgbColor::new(0x00, 0x00, 0xEE),
             magenta: RgbColor::new(0xCD, 0x00, 0xCD),
             cyan: RgbColor::new(0x00, 0xCD, 0xCD),
-            white: RgbColor::new(0xE5, 0xE5, 0xE5),
+            white: RgbColor::new(0xF5, 0xF5, 0xF5),
             // Bright colors
             bright_black: RgbColor::new(0x7F, 0x7F, 0x7F),
             bright_red: RgbColor::new(0xFF, 0x00, 0x00),
@@ -429,7 +429,7 @@ impl PaletteConfig {
             blue: RgbColor::new(0x7F, 0xBB, 0xB3),    // blue
             magenta: RgbColor::new(0xD6, 0x99, 0xB6), // purple
             cyan: RgbColor::new(0x83, 0xC0, 0x92),    // aqua
-            white: RgbColor::new(0xD3, 0xC6, 0xAA),   // fg
+            white: RgbColor::new(0xE8, 0xDC, 0xC4),   // fg (brightened)
             // Bright colors
             bright_black: RgbColor::new(0x5C, 0x68, 0x70), // bg4
             bright_red: RgbColor::new(0xE6, 0x7E, 0x80),   // red
@@ -438,7 +438,7 @@ impl PaletteConfig {
             bright_blue: RgbColor::new(0x7F, 0xBB, 0xB3),  // blue
             bright_magenta: RgbColor::new(0xD6, 0x99, 0xB6), // purple
             bright_cyan: RgbColor::new(0x83, 0xC0, 0x92),  // aqua
-            bright_white: RgbColor::new(0xD3, 0xC6, 0xAA), // fg
+            bright_white: RgbColor::new(0xF2, 0xE8, 0xD5), // fg (brightened)
         }
     }
 }

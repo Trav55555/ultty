@@ -101,7 +101,7 @@ impl ColorScheme {
                 Rgba::from_u8(0x00, 0x00, 0xEE), // Blue
                 Rgba::from_u8(0xCD, 0x00, 0xCD), // Magenta
                 Rgba::from_u8(0x00, 0xCD, 0xCD), // Cyan
-                Rgba::from_u8(0xE5, 0xE5, 0xE5), // White
+                Rgba::from_u8(0xF5, 0xF5, 0xF5), // White
                 // Bright colors
                 Rgba::from_u8(0x7F, 0x7F, 0x7F), // Bright Black
                 Rgba::from_u8(0xFF, 0x00, 0x00), // Bright Red
@@ -112,7 +112,7 @@ impl ColorScheme {
                 Rgba::from_u8(0x00, 0xFF, 0xFF), // Bright Cyan
                 Rgba::from_u8(0xFF, 0xFF, 0xFF), // Bright White
             ],
-            foreground: Rgba::from_u8(0xE5, 0xE5, 0xE5),
+            foreground: Rgba::from_u8(0xF5, 0xF5, 0xF5),
             background: Rgba::from_u8(0x1E, 0x1E, 0x1E),
             cursor: Rgba::from_u8(0xFF, 0xFF, 0xFF),
             selection: Rgba::new(0.3, 0.4, 0.6, 0.5),
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn dark_scheme_defaults() {
         let scheme = ColorScheme::dark();
-        assert_eq!(scheme.foreground, Rgba::from_u8(0xE5, 0xE5, 0xE5));
+        assert_eq!(scheme.foreground, Rgba::from_u8(0xF5, 0xF5, 0xF5));
         assert_eq!(scheme.background, Rgba::from_u8(0x1E, 0x1E, 0x1E));
     }
 
