@@ -163,7 +163,7 @@ impl TabBarState {
         };
 
         // If dragged more than half a tab width, swap
-        if self.drag_offset_x > tab_width / 2.0 && dragging_index < self.tabs.len() - 1 {
+        if self.drag_offset_x > tab_width / 2.0 && dragging_index + 1 < self.tabs.len() {
             // Move right
             let new_index = dragging_index + 1;
             self.dragging_tab = Some(new_index);
@@ -765,7 +765,7 @@ mod tests {
     #[test]
     fn tab_bounds_are_contiguous() {
         let state = bar_with(4, 0, 800.0);
-        for i in 0..state.tabs.len() - 1 {
+        for i in 0..state.tabs.len().saturating_sub(1) {
             let (x1, _, w1, _) = state.tabs[i].bounds();
             let (x2, _, _, _) = state.tabs[i + 1].bounds();
             assert!(

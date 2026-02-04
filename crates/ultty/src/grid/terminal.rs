@@ -287,17 +287,25 @@ impl Terminal {
 
         let mut text = String::new();
         let buffer = self.buffer();
+        let dims = buffer.dimensions();
+        let max_col = dims.cols as i32 - 1;
+        let max_row = dims.rows as i32 - 1;
+
+        // Clamp row range to valid grid bounds
+        let first_row = start.row.max(0);
+        let last_row = end.row.min(max_row);
 
         match sel.mode {
             SelectionMode::Normal => {
                 // Character-wise selection
-                for row_idx in start.row..=end.row {
+                for row_idx in first_row..=last_row {
                     if let Some(row) = buffer.visible_row(row_idx as u16) {
-                        let start_col = if row_idx == start.row { start.col } else { 0 };
+                        let start_col =
+                            if row_idx == start.row { start.col.max(0) } else { 0 };
                         let end_col = if row_idx == end.row {
-                            end.col
+                            end.col.min(max_col)
                         } else {
-                            buffer.dimensions().cols as i32 - 1
+                            max_col
                         };
 
                         for col in start_col..=end_col {
@@ -307,7 +315,7 @@ impl Terminal {
                         }
 
                         // Add newline between rows (except last)
-                        if row_idx < end.row {
+                        if row_idx < last_row {
                             text.push('\n');
                         }
                     }
@@ -315,10 +323,10 @@ impl Terminal {
             }
             SelectionMode::Line => {
                 // Line-wise selection
-                for row_idx in start.row..=end.row {
+                for row_idx in first_row..=last_row {
                     if let Some(row) = buffer.visible_row(row_idx as u16) {
                         text.push_str(&row.text_trimmed());
-                        if row_idx < end.row {
+                        if row_idx < last_row {
                             text.push('\n');
                         }
                     }
@@ -327,19 +335,19 @@ impl Terminal {
             SelectionMode::Block => {
                 // Block/rectangular selection
                 let (left, right) = if start.col <= end.col {
-                    (start.col, end.col)
+                    (start.col.max(0), end.col.min(max_col))
                 } else {
-                    (end.col, start.col)
+                    (end.col.max(0), start.col.min(max_col))
                 };
 
-                for row_idx in start.row..=end.row {
+                for row_idx in first_row..=last_row {
                     if let Some(row) = buffer.visible_row(row_idx as u16) {
                         for col in left..=right {
                             if let Some(cell) = row.get(col as u16) {
                                 text.push(cell.char());
                             }
                         }
-                        if row_idx < end.row {
+                        if row_idx < last_row {
                             text.push('\n');
                         }
                     }
@@ -1106,5 +1114,56 @@ mod tests {
 
         assert_eq!(term.grid().cursor().position.col, 9);
         assert_eq!(term.grid().cursor().position.row, 5);
+    }
+
+    #[test]
+    fn selected_text_clamps_negative_coords() {
+        let mut term = Terminal::new(Dimensions::new(10, 5));
+
+        for c in "Hello".chars() {
+            term.grid_mut().write_char(c);
+        }
+
+        // Selection starting at negative col/row (simulating scroll offset)
+        term.start_selection(SelectionPoint::new(-3, -1), SelectionMode::Normal);
+        term.update_selection(SelectionPoint::new(4, 0));
+
+        // Should not panic, and should return text from clamped range
+        let text = term.selected_text().unwrap();
+        assert!(text.contains("Hello"));
+    }
+
+    #[test]
+    fn selected_text_clamps_beyond_grid() {
+        let mut term = Terminal::new(Dimensions::new(10, 5));
+
+        for c in "ABC".chars() {
+            term.grid_mut().write_char(c);
+        }
+
+        // Selection extending past grid bounds
+        term.start_selection(SelectionPoint::new(0, 0), SelectionMode::Normal);
+        term.update_selection(SelectionPoint::new(100, 100));
+
+        // Should not panic, and should include the written text
+        let text = term.selected_text().unwrap();
+        assert!(text.contains("ABC"));
+    }
+
+    #[test]
+    fn selected_text_block_clamps_negative_cols() {
+        let mut term = Terminal::new(Dimensions::new(10, 5));
+
+        for c in "XYZ".chars() {
+            term.grid_mut().write_char(c);
+        }
+
+        // Block selection with negative left col
+        term.start_selection(SelectionPoint::new(-5, 0), SelectionMode::Block);
+        term.update_selection(SelectionPoint::new(2, 0));
+
+        // Should not panic
+        let text = term.selected_text().unwrap();
+        assert!(text.contains("XYZ"));
     }
 }

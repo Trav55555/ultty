@@ -407,7 +407,12 @@ impl Buffer {
         let cursor_col = self.grid.cursor().position.col;
         let cursor_row = self.grid.cursor().position.row;
         let wrap_pending = self.grid.cursor().wrap_pending;
-        let max_row = self.grid.dimensions().rows - 1;
+        let auto_wrap = self.grid.auto_wrap();
+        let scroll_bottom = self
+            .grid
+            .scroll_region()
+            .map(|r| r.bottom)
+            .unwrap_or(self.grid.dimensions().rows.saturating_sub(1));
         let max_col = self.grid.dimensions().cols;
         let char_width = c.width().unwrap_or(0) as u16;
 
@@ -417,25 +422,25 @@ impl Buffer {
         // - If wrap_pending is false and we're writing to the last column, that only sets
         //   wrap_pending but doesn't actually scroll (scroll happens on NEXT char)
         // - Wide chars that don't fit (width > 1 and col + width > cols) wrap before writing
-        let will_scroll = if char_width == 0 {
-            // Zero-width chars never cause scroll
+        // - If auto_wrap is off, no wrapping ever happens
+        let will_scroll = if char_width == 0 || !auto_wrap {
             false
-        } else if wrap_pending {
-            // Wrap is pending - this write will trigger it
-            cursor_row >= max_row
-        } else if char_width > 1 && cursor_col + char_width > max_col {
-            // Wide char that doesn't fit - will wrap before writing
-            cursor_row >= max_row
+        } else if wrap_pending || (char_width > 1 && cursor_col + char_width > max_col) {
+            cursor_row >= scroll_bottom
         } else {
-            // Normal char - writing at last col just sets wrap_pending, no scroll yet
             false
         };
 
         if will_scroll {
-            // Clone top row before grid scrolls
-            let top_row = self.grid.row(0).cloned();
-            if let Some(row) = top_row {
-                self.push_to_history(vec![row]);
+            // Save the row that will be displaced by the scroll.
+            // Only save to history when scrolling the full screen (no scroll region),
+            // since scroll regions are used by apps on the alternate screen which
+            // has no meaningful scrollback.
+            if self.grid.scroll_region().is_none() {
+                let top_row = self.grid.row(0).cloned();
+                if let Some(row) = top_row {
+                    self.push_to_history(vec![row]);
+                }
             }
         }
 
@@ -444,20 +449,37 @@ impl Buffer {
 
     /// Scroll grid up, moving top line to history.
     pub fn scroll_grid_up(&mut self, n: u16) {
-        // Capture rows being scrolled off
-        let n = n as usize;
-        let rows_to_save: Vec<Row> = self.grid.rows().take(n).cloned().collect();
-        self.push_to_history(rows_to_save);
-        self.grid.scroll_up(n as u16);
+        let n_usize = n as usize;
+
+        if self.grid.scroll_region().is_none() {
+            // Full-screen scroll — save top rows to history
+            let rows_to_save: Vec<Row> = self.grid.rows().take(n_usize).cloned().collect();
+            self.push_to_history(rows_to_save);
+        }
+        // With a scroll region, rows displaced from region.top are discarded
+        // (scroll regions are used by apps on the alternate screen which has
+        // no meaningful scrollback).
+
+        self.grid.scroll_up(n);
     }
 
     /// Newline - scroll to history if at bottom.
     pub fn newline(&mut self) {
         let cursor_row = self.grid.cursor().position.row;
-        let max_row = self.grid.dimensions().rows - 1;
+        let scroll_bottom = self
+            .grid
+            .scroll_region()
+            .map(|r| r.bottom)
+            .unwrap_or(self.grid.dimensions().rows.saturating_sub(1));
 
-        if cursor_row >= max_row {
-            self.scroll_grid_up(1);
+        if cursor_row >= scroll_bottom {
+            if self.grid.scroll_region().is_none() {
+                // Full-screen scroll — save top row to history
+                self.scroll_grid_up(1);
+            } else {
+                // Scroll within region — no history capture
+                self.grid.newline();
+            }
         } else {
             self.grid.newline();
         }

@@ -215,6 +215,11 @@ impl Grid {
         self.auto_wrap = enabled;
     }
 
+    /// Get auto-wrap mode (DECAWM).
+    pub fn auto_wrap(&self) -> bool {
+        self.auto_wrap
+    }
+
     /// Get current text attributes.
     pub fn attrs(&self) -> &Cell {
         &self.attrs
@@ -762,21 +767,27 @@ impl Grid {
 
     /// Erase from cursor to end of display.
     pub fn erase_below(&mut self) {
-        // Clear combining chars for affected rows
-        self.clear_combining_rows(self.cursor.position.row, self.dims.rows.saturating_sub(1));
+        let r = self.cursor.position.row;
+        // Clear combining chars: partial cursor row (cursor_col..end) + all rows below
+        for col in self.cursor.position.col..self.dims.cols {
+            self.combining.remove(&(r, col));
+        }
+        if r + 1 < self.dims.rows {
+            self.clear_combining_rows(r + 1, self.dims.rows.saturating_sub(1));
+        }
 
         // Erase from cursor to end of current line
-        if let Some(row) = self.rows.get_mut(self.cursor.position.row as usize) {
+        if let Some(row) = self.rows.get_mut(r as usize) {
             for i in self.cursor.position.col..self.dims.cols {
                 if let Some(cell) = row.get_mut(i) {
                     cell.clear();
                 }
             }
         }
-        self.mark_dirty(self.cursor.position.row);
+        self.mark_dirty(r);
 
         // Erase all lines below cursor
-        for row_idx in (self.cursor.position.row + 1)..self.dims.rows {
+        for row_idx in (r + 1)..self.dims.rows {
             if let Some(row) = self.rows.get_mut(row_idx as usize) {
                 row.clear();
             }
@@ -786,11 +797,17 @@ impl Grid {
 
     /// Erase from start of display to cursor.
     pub fn erase_above(&mut self) {
-        // Clear combining chars for affected rows
-        self.clear_combining_rows(0, self.cursor.position.row);
+        let r = self.cursor.position.row;
+        // Clear combining chars: all rows above cursor + partial cursor row (0..=cursor_col)
+        if r > 0 {
+            self.clear_combining_rows(0, r - 1);
+        }
+        for col in 0..=self.cursor.position.col {
+            self.combining.remove(&(r, col));
+        }
 
         // Erase all lines above cursor
-        for row_idx in 0..self.cursor.position.row {
+        for row_idx in 0..r {
             if let Some(row) = self.rows.get_mut(row_idx as usize) {
                 row.clear();
             }
@@ -798,14 +815,14 @@ impl Grid {
         }
 
         // Erase from start of current line to cursor
-        if let Some(row) = self.rows.get_mut(self.cursor.position.row as usize) {
+        if let Some(row) = self.rows.get_mut(r as usize) {
             for i in 0..=self.cursor.position.col {
                 if let Some(cell) = row.get_mut(i) {
                     cell.clear();
                 }
             }
         }
-        self.mark_dirty(self.cursor.position.row);
+        self.mark_dirty(r);
     }
 
     /// Erase entire display.
