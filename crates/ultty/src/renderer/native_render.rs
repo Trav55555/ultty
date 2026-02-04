@@ -304,9 +304,20 @@ impl Renderer {
             if matched_regions.contains(&region.id) {
                 if let Some(matches) = search_matches {
                     for (match_idx, m) in matches.iter().enumerate().filter(|(_, m)| m.region_id == region.id) {
-                        // Character position: char_offset * char_width
                         let char_w = self.cell_width;
-                        let highlight_x = x + m.char_offset as f32 * char_w;
+
+                        // For RichText, offset by the character count of preceding spans
+                        let span_offset_chars = if let Some(span_idx) = m.span_index {
+                            if let Content::RichText(rt) = &region.content {
+                                rt.spans.iter().take(span_idx).map(|s| s.text.chars().count()).sum::<usize>()
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        };
+
+                        let highlight_x = x + (span_offset_chars + m.char_offset) as f32 * char_w;
                         let highlight_w = m.length as f32 * char_w;
                         // Active match: brighter orange; others: dim yellow
                         let highlight_color = if match_idx == current_match_index {
@@ -809,10 +820,12 @@ impl Renderer {
                     base_idx + 3,
                 ]);
 
+                let password_mask;
                 let display_text = if input.value.is_empty() {
                     &input.placeholder
                 } else if input.password {
-                    &"•".repeat(input.value.len())
+                    password_mask = "•".repeat(input.value.chars().count());
+                    &password_mask
                 } else {
                     &input.value
                 };
@@ -1150,6 +1163,23 @@ impl Renderer {
             self.render_markdown_inline(content, cursor_x, cursor_y, false, self.color_scheme.foreground, text_vertices, text_indices);
             cursor_y += line_height;
             line_idx += 1;
+        }
+
+        // Handle unclosed fenced code block: render remaining lines as code
+        if in_code_block {
+            let code_lines = &lines[fence_start_idx + 1..];
+            if !code_lines.is_empty() {
+                let code_source = code_lines.join("\n");
+                self.render_code_content(
+                    &code_source,
+                    fence_language,
+                    false,
+                    x + self.cell_width,
+                    cursor_y,
+                    text_vertices,
+                    text_indices,
+                );
+            }
         }
     }
 
@@ -2169,5 +2199,84 @@ mod tests {
         assert_eq!(tokens[0].kind, TokenKind::String);
         assert!(tokens[0].text.starts_with("'''"));
         assert!(tokens[0].text.ends_with("'''"));
+    }
+
+    // ── tokenizer edge case tests ───────────────────────────────────
+
+    #[test]
+    fn tokenize_unclosed_string_at_eol() {
+        let mut bc = false;
+        let tokens = tokenize_code_line(r#"let s = "unterminated"#, &rust_keywords(), &mut bc);
+        // Should still produce a String token (without closing quote)
+        let string_tok = tokens.iter().find(|t| t.kind == TokenKind::String)
+            .expect("should have a string token");
+        assert!(string_tok.text.starts_with('"'));
+        assert!(!string_tok.text.ends_with('"'));
+    }
+
+    #[test]
+    fn tokenize_escaped_backslash_at_end() {
+        let mut bc = false;
+        // "test\\" — the \\ is an escaped backslash, string should close properly
+        let tokens = tokenize_code_line(r#""test\\""#, &rust_keywords(), &mut bc);
+        assert_eq!(tokens[0].kind, TokenKind::String);
+        assert_eq!(tokens[0].text, r#""test\\""#);
+    }
+
+    #[test]
+    fn tokenize_nested_block_comment() {
+        let mut bc = false;
+        // /* /* */ */ — first */ closes the comment, second */ is plain text
+        let tokens = tokenize_code_line("/* /* */ */", &rust_keywords(), &mut bc);
+        let comment = tokens.iter().find(|t| t.kind == TokenKind::Comment)
+            .expect("should have comment token");
+        assert_eq!(comment.text, "/* /* */");
+        assert!(!bc, "block comment should be closed");
+        // Remaining " */" should be plain tokens
+        let rest: String = tokens.iter().skip(1).map(|t| t.text.as_str()).collect();
+        assert!(rest.contains("*/"));
+    }
+
+    #[test]
+    fn tokenize_unicode_identifier() {
+        let mut bc = false;
+        let tokens = tokenize_code_line("let café = 42", &rust_keywords(), &mut bc);
+        let kw = &tokens[0];
+        assert_eq!(kw.kind, TokenKind::Keyword);
+        assert_eq!(kw.text, "let");
+        let ident = tokens.iter().find(|t| t.text.contains("caf"))
+            .expect("should find café identifier");
+        assert_eq!(ident.text, "café");
+        assert_eq!(ident.kind, TokenKind::Plain);
+    }
+
+    #[test]
+    fn tokenize_mixed_quotes() {
+        let mut bc = false;
+        // 'hello"world' — single-quoted string containing a double quote
+        let tokens = tokenize_code_line(r#"'hello"world'"#, &rust_keywords(), &mut bc);
+        assert_eq!(tokens[0].kind, TokenKind::String);
+        assert_eq!(tokens[0].text, r#"'hello"world'"#);
+    }
+
+    #[test]
+    fn tokenize_unclosed_backtick_at_eol() {
+        let mut bc = false;
+        let tokens = tokenize_code_line("`unterminated", &code_keywords("js"), &mut bc);
+        let string_tok = tokens.iter().find(|t| t.kind == TokenKind::String)
+            .expect("should have a string token");
+        assert!(string_tok.text.starts_with('`'));
+        assert!(!string_tok.text.ends_with('`'));
+    }
+
+    #[test]
+    fn tokenize_unclosed_triple_quote_at_eol() {
+        let mut bc = false;
+        let tokens = tokenize_code_line(r#""""unterminated"#, &code_keywords("python"), &mut bc);
+        let string_tok = tokens.iter().find(|t| t.kind == TokenKind::String)
+            .expect("should have a string token");
+        assert!(string_tok.text.starts_with("\"\"\""));
+        // Not closed, so should contain the rest of the line
+        assert!(string_tok.text.contains("unterminated"));
     }
 }

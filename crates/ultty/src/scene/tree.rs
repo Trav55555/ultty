@@ -156,21 +156,29 @@ impl SceneTree {
                     // Search text-bearing widgets
                     match widget {
                         WidgetContent::Input(input) => {
-                            let search_text = if input.value.is_empty() {
-                                &input.placeholder
+                            // Search whichever text is actually displayed:
+                            // - empty value → placeholder is shown
+                            // - password with value → masked bullets, skip search
+                            // - normal value → search the value
+                            if input.password && !input.value.is_empty() {
+                                // Don't expose password content through search
                             } else {
-                                &input.value
-                            };
-                            let text_lower = search_text.to_lowercase();
-                            for (byte_off, _) in text_lower.match_indices(&query_lower) {
-                                let char_offset = text_lower[..byte_off].chars().count();
-                                let char_length = query_lower.chars().count();
-                                matches.push(SearchMatch {
-                                    region_id: region.id,
-                                    span_index: None,
-                                    char_offset,
-                                    length: char_length,
-                                });
+                                let search_text = if input.value.is_empty() {
+                                    &input.placeholder
+                                } else {
+                                    &input.value
+                                };
+                                let text_lower = search_text.to_lowercase();
+                                for (byte_off, _) in text_lower.match_indices(&query_lower) {
+                                    let char_offset = text_lower[..byte_off].chars().count();
+                                    let char_length = query_lower.chars().count();
+                                    matches.push(SearchMatch {
+                                        region_id: region.id,
+                                        span_index: None,
+                                        char_offset,
+                                        length: char_length,
+                                    });
+                                }
                             }
                         }
                         WidgetContent::Markdown(md) => {
@@ -985,5 +993,43 @@ mod tests {
 
         let matches = tree.search("hidden");
         assert!(matches.is_empty());
+    }
+
+    // ── Password input search tests ─────────────────────────────────
+
+    #[test]
+    fn search_does_not_expose_password_value() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        r.content = Content::Widget(WidgetContent::Input(InputWidget {
+            value: "secret123".into(),
+            placeholder: "enter password".into(),
+            multiline: false,
+            password: true,
+        }));
+        tree.insert(r);
+
+        // Should NOT find the password value
+        let matches = tree.search("secret");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn search_password_empty_value_finds_placeholder() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        r.content = Content::Widget(WidgetContent::Input(InputWidget {
+            value: String::new(),
+            placeholder: "enter password".into(),
+            multiline: false,
+            password: true,
+        }));
+        tree.insert(r);
+
+        // Placeholder IS displayed when value is empty, so it should be searchable
+        let matches = tree.search("enter");
+        assert_eq!(matches.len(), 1);
     }
 }
