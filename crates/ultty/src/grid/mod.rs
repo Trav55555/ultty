@@ -88,6 +88,7 @@ struct SavedCursorState {
     position: CursorPosition,
     attrs: Cell,
     auto_wrap: bool,
+    origin_mode: bool,
 }
 
 /// Terminal cursor state.
@@ -125,6 +126,7 @@ impl Cursor {
             position: self.position,
             attrs: Cell::default(),
             auto_wrap: true,
+            origin_mode: false,
         });
     }
 
@@ -236,22 +238,28 @@ impl Grid {
         &mut self.cursor
     }
 
-    /// Save cursor state (DECSC): position, text attributes, and auto-wrap mode.
-    pub fn save_cursor(&mut self) {
+    /// Save cursor state (DECSC): position, text attributes, auto-wrap, and origin mode.
+    pub fn save_cursor(&mut self, origin_mode: bool) {
         self.cursor.saved = Some(SavedCursorState {
             position: self.cursor.position,
             attrs: self.attrs,
             auto_wrap: self.auto_wrap,
+            origin_mode,
         });
     }
 
-    /// Restore cursor state (DECRC): position, text attributes, and auto-wrap mode.
-    pub fn restore_cursor(&mut self) {
+    /// Restore cursor state (DECRC): position, text attributes, auto-wrap, and origin mode.
+    /// Returns the saved origin_mode value if a state was restored, so the caller
+    /// can update TerminalModes accordingly.
+    pub fn restore_cursor(&mut self) -> Option<bool> {
         if let Some(state) = self.cursor.saved {
             self.cursor.position = state.position;
             self.cursor.wrap_pending = false;
             self.attrs = state.attrs;
             self.auto_wrap = state.auto_wrap;
+            Some(state.origin_mode)
+        } else {
+            None
         }
     }
 
@@ -268,6 +276,20 @@ impl Grid {
     /// Get auto-wrap mode (DECAWM).
     pub fn auto_wrap(&self) -> bool {
         self.auto_wrap
+    }
+
+    /// Fill entire grid with a character (used by DECALN — ESC # 8).
+    pub fn fill_with_char(&mut self, c: char) {
+        let cols = self.dims.cols;
+        let rows = self.dims.rows;
+        for row_idx in 0..rows {
+            if let Some(row) = self.row_mut(row_idx) {
+                for col in 0..cols {
+                    row[col].set_char(c);
+                }
+                row.mark_dirty();
+            }
+        }
     }
 
     /// Get current text attributes.
@@ -1460,7 +1482,7 @@ mod tests {
     fn save_restore_cursor() {
         let mut grid = Grid::new(Dimensions::new(80, 24));
         grid.set_cursor_position(10, 20);
-        grid.save_cursor();
+        grid.save_cursor(false);
 
         grid.set_cursor_position(1, 1);
         grid.restore_cursor();
@@ -1475,7 +1497,7 @@ mod tests {
         grid.set_cursor_position(5, 10);
         grid.attrs_mut().set_flag(CellFlags::BOLD);
         grid.attrs_mut().set_flag(CellFlags::ITALIC);
-        grid.save_cursor();
+        grid.save_cursor(false);
 
         // Change position and attrs
         grid.set_cursor_position(1, 1);

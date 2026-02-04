@@ -1112,3 +1112,44 @@ fn sgr_overline() {
         vec![Action::SetAttribute(Attribute::NoOverline)]
     );
 }
+
+// ---------------------------------------------------------------
+// Full reset (RIS — ESC c)
+// ---------------------------------------------------------------
+
+#[test]
+fn full_reset_esc_c() {
+    assert_eq!(parse(b"\x1bc"), vec![Action::FullReset]);
+}
+
+// ---------------------------------------------------------------
+// Soft reset (DECSTR — CSI ! p)
+// ---------------------------------------------------------------
+
+#[test]
+fn soft_reset_csi_bang_p() {
+    assert_eq!(parse(b"\x1b[!p"), vec![Action::SoftReset]);
+}
+
+// ---------------------------------------------------------------
+// Screen alignment pattern (DECALN — ESC # 8)
+// ---------------------------------------------------------------
+
+#[test]
+fn decaln_esc_hash_8() {
+    assert_eq!(parse(b"\x1b#8"), vec![Action::ScreenAlignmentPattern]);
+}
+
+// ---------------------------------------------------------------
+// Keypad modes (DECKPAM/DECKPNM)
+// ---------------------------------------------------------------
+
+#[test]
+fn application_keypad_mode() {
+    assert_eq!(parse(b"\x1b="), vec![Action::ApplicationKeypadMode]);
+}
+
+#[test]
+fn normal_keypad_mode() {
+    assert_eq!(parse(b"\x1b>"), vec![Action::NormalKeypadMode]);
+}

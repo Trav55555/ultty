@@ -230,6 +230,11 @@ impl AnsiParser {
                 callback(Action::RequestPrivateMode(p1));
             }
 
+            // Soft reset (DECSTR — CSI ! p)
+            b'p' if self.intermediate == Some(b'!') => {
+                callback(Action::SoftReset);
+            }
+
             _ => {
                 // Unknown CSI sequence - ignore
             }

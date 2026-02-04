@@ -174,8 +174,14 @@ impl<'a> Handler<'a> {
             }
 
             // Cursor save/restore
-            Action::SaveCursorPosition => self.grid.save_cursor(),
-            Action::RestoreCursorPosition => self.grid.restore_cursor(),
+            Action::SaveCursorPosition => self.grid.save_cursor(false),
+            Action::RestoreCursorPosition => { self.grid.restore_cursor(); }
+
+            // Full/soft reset and screen alignment (handled by TerminalHandler)
+            Action::FullReset | Action::SoftReset | Action::ScreenAlignmentPattern => {}
+
+            // Keypad modes (handled by TerminalHandler)
+            Action::ApplicationKeypadMode | Action::NormalKeypadMode => {}
 
             // Text attributes
             Action::SetAttribute(attr) => self.apply_attribute(attr),

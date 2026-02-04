@@ -57,6 +57,8 @@ pub struct TerminalModes {
     /// Bits: 0=disambiguate, 1=report event types, 2=report alternate keys,
     ///       3=report all keys as escape, 4=report associated text
     pub kitty_keyboard_flags: u8,
+    /// Application keypad mode (DECKPAM/DECKPNM — ESC = / ESC >)
+    pub application_keypad: bool,
     /// Alternate scroll mode - when enabled, scroll events scroll the alternate screen
     /// instead of being sent as arrow keys
     pub alternate_scroll: bool,
@@ -73,6 +75,7 @@ impl Default for TerminalModes {
             auto_wrap: true,
             origin_mode: false,
             insert_mode: false,
+            application_keypad: false,
             mouse_mode: MouseMode::None,
             mouse_encoding: MouseEncoding::X10,
             reverse_video: false,
@@ -226,8 +229,16 @@ impl Terminal {
         self.using_alternate
     }
 
-    /// Enter alternate screen buffer.
+    /// Enter alternate screen buffer (mode 47 — no clear).
     pub fn enter_alternate_screen(&mut self) {
+        if !self.using_alternate {
+            self.using_alternate = true;
+            self.selection = None;
+        }
+    }
+
+    /// Enter alternate screen buffer and clear it (modes 1047, 1049).
+    pub fn enter_alternate_screen_clear(&mut self) {
         if !self.using_alternate {
             self.using_alternate = true;
             self.alternate.grid_mut().clear();

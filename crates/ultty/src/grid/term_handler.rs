@@ -100,7 +100,11 @@ impl<'a> TerminalHandler<'a> {
             Action::EraseInDisplay(mode) => match mode {
                 0 => self.terminal.grid_mut().erase_below(),
                 1 => self.terminal.grid_mut().erase_above(),
-                2 | 3 => self.terminal.grid_mut().clear(),
+                2 => self.terminal.grid_mut().clear(),
+                3 => {
+                    self.terminal.grid_mut().clear();
+                    self.terminal.buffer_mut().clear_history();
+                }
                 _ => {}
             },
             Action::EraseInLine(mode) => match mode {
@@ -222,9 +226,16 @@ impl<'a> TerminalHandler<'a> {
                 }
             }
 
-            // Cursor save/restore
-            Action::SaveCursorPosition => self.terminal.grid_mut().save_cursor(),
-            Action::RestoreCursorPosition => self.terminal.grid_mut().restore_cursor(),
+            // Cursor save/restore (DECSC/DECRC)
+            Action::SaveCursorPosition => {
+                let origin = self.terminal.modes().origin_mode;
+                self.terminal.grid_mut().save_cursor(origin);
+            }
+            Action::RestoreCursorPosition => {
+                if let Some(origin) = self.terminal.grid_mut().restore_cursor() {
+                    self.terminal.modes_mut().origin_mode = origin;
+                }
+            }
 
             // Text attributes
             Action::SetAttribute(attr) => self.apply_attribute(attr),
@@ -429,6 +440,55 @@ impl<'a> TerminalHandler<'a> {
             Action::UnknownOsc(_) => {
                 // Ignore unknown OSC sequences
             }
+
+            // Full reset (RIS — ESC c)
+            Action::FullReset => {
+                self.terminal.grid_mut().clear();
+                self.terminal.grid_mut().reset_attrs();
+                self.terminal.grid_mut().set_scroll_region(0, 0);
+                self.terminal.grid_mut().set_auto_wrap(true);
+                self.terminal.grid_mut().set_insert_mode(false);
+                self.terminal.grid_mut().cursor_mut().position =
+                    crate::grid::CursorPosition::origin();
+                self.terminal.grid_mut().cursor_mut().visible = true;
+                self.terminal.grid_mut().cursor_mut().wrap_pending = false;
+                self.terminal.grid_mut().reset_tab_stops();
+                *self.terminal.modes_mut() = crate::grid::terminal::TerminalModes::default();
+                if self.terminal.is_alternate_screen() {
+                    self.terminal.leave_alternate_screen();
+                }
+                self.terminal.buffer_mut().clear_history();
+            }
+
+            // Soft reset (DECSTR — CSI ! p)
+            Action::SoftReset => {
+                self.terminal.grid_mut().reset_attrs();
+                self.terminal.grid_mut().set_scroll_region(0, 0);
+                self.terminal.grid_mut().set_auto_wrap(true);
+                self.terminal.grid_mut().set_insert_mode(false);
+                self.terminal.grid_mut().cursor_mut().visible = true;
+                self.terminal.grid_mut().cursor_mut().wrap_pending = false;
+                self.terminal.modes_mut().origin_mode = false;
+                self.terminal.modes_mut().insert_mode = false;
+                self.terminal.modes_mut().auto_wrap = true;
+            }
+
+            // Screen alignment pattern (DECALN — ESC # 8)
+            Action::ScreenAlignmentPattern => {
+                self.terminal.grid_mut().fill_with_char('E');
+                self.terminal.grid_mut().set_scroll_region(0, 0);
+                self.terminal.grid_mut().cursor_mut().position =
+                    crate::grid::CursorPosition::origin();
+                self.terminal.grid_mut().cursor_mut().wrap_pending = false;
+            }
+
+            // Keypad modes
+            Action::ApplicationKeypadMode => {
+                self.terminal.modes_mut().application_keypad = true;
+            }
+            Action::NormalKeypadMode => {
+                self.terminal.modes_mut().application_keypad = false;
+            }
         }
     }
 
@@ -576,17 +636,16 @@ impl<'a> TerminalHandler<'a> {
             }
             Mode::AlternateScreenClear => {
                 if enabled {
-                    self.terminal.enter_alternate_screen();
-                    self.terminal.grid_mut().clear();
+                    self.terminal.enter_alternate_screen_clear();
                 } else {
                     self.terminal.leave_alternate_screen();
                 }
             }
             Mode::AlternateScreenSaveCursor => {
                 if enabled {
-                    self.terminal.grid_mut().save_cursor();
-                    self.terminal.enter_alternate_screen();
-                    self.terminal.grid_mut().clear();
+                    let origin = self.terminal.modes().origin_mode;
+                    self.terminal.grid_mut().save_cursor(origin);
+                    self.terminal.enter_alternate_screen_clear();
                 } else {
                     self.terminal.leave_alternate_screen();
                     self.terminal.grid_mut().restore_cursor();

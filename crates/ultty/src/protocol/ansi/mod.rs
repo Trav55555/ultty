@@ -254,6 +254,21 @@ pub enum Action {
 
     /// Request DEC private mode status (DECRQM - CSI ? Ps $ p)
     RequestPrivateMode(u16),
+
+    /// Full reset (RIS — ESC c)
+    FullReset,
+
+    /// Soft reset (DECSTR — CSI ! p)
+    SoftReset,
+
+    /// Screen alignment pattern (DECALN — ESC # 8)
+    ScreenAlignmentPattern,
+
+    /// Application keypad mode (DECKPAM — ESC =)
+    ApplicationKeypadMode,
+
+    /// Normal keypad mode (DECKPNM — ESC >)
+    NormalKeypadMode,
 }
 
 /// Text attributes settable via SGR sequences.
@@ -408,6 +423,8 @@ pub(super) enum State {
     CharsetDesignateG0,
     /// Character set designation for G1 (ESC ))
     CharsetDesignateG1,
+    /// ESC # sequence (DECALN, etc.)
+    EscapeHash,
 }
 
 /// ANSI parser state machine.
@@ -492,6 +509,12 @@ impl AnsiParser {
             State::SosStringEsc => self.ignored_string_esc(byte, State::SosString),
             State::CharsetDesignateG0 | State::CharsetDesignateG1 => {
                 self.charset_designate(byte, callback)
+            }
+            State::EscapeHash => {
+                if byte == b'8' {
+                    callback(Action::ScreenAlignmentPattern);
+                }
+                self.reset();
             }
         }
     }
@@ -655,6 +678,25 @@ impl AnsiParser {
             b'E' => {
                 callback(Action::NextLine);
                 self.reset();
+            }
+            // Full reset (RIS — ESC c)
+            b'c' => {
+                callback(Action::FullReset);
+                self.reset();
+            }
+            // Application keypad mode (DECKPAM — ESC =)
+            b'=' => {
+                callback(Action::ApplicationKeypadMode);
+                self.reset();
+            }
+            // Normal keypad mode (DECKPNM — ESC >)
+            b'>' => {
+                callback(Action::NormalKeypadMode);
+                self.reset();
+            }
+            // ESC # sequences (DECALN, etc.)
+            b'#' => {
+                self.state = State::EscapeHash;
             }
             // Another ESC - restart escape
             0x1B => {
