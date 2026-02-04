@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use super::{Dimensions, Grid, Row};
+use super::{CellFlags, Dimensions, Grid, Row};
 
 /// Default scrollback buffer size (lines).
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
@@ -325,13 +325,33 @@ impl Buffer {
                 let mut new_row = Row::new(new_cols);
                 let mut col = 0u16;
 
-                while (col as usize) < new_cols as usize && pos < line.len() {
+                while col < new_cols && pos < line.len() {
                     let cell = &line[pos];
+
+                    // Skip spacer cells from old layout — regenerated when placing wide chars
+                    if cell.is_wide_spacer() {
+                        pos += 1;
+                        continue;
+                    }
+
+                    // Wide char needs 2 columns; if only 1 remains, wrap to next row
+                    if cell.is_wide() && col + 1 >= new_cols {
+                        break;
+                    }
+
                     if let Some(dest) = new_row.get_mut(col) {
                         *dest = *cell;
                     }
                     col += 1;
                     pos += 1;
+
+                    // After placing a wide char, insert its spacer cell
+                    if cell.is_wide() {
+                        if let Some(spacer) = new_row.get_mut(col) {
+                            spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
+                        }
+                        col += 1;
+                    }
                 }
 
                 // Check if cursor falls in this physical row

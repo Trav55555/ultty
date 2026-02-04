@@ -127,6 +127,18 @@ impl Row {
             return;
         }
 
+        // If inserting at a wide char spacer, clear the orphaned primary cell
+        if at > 0 && self.cells[at].is_wide_spacer() {
+            self.cells[at - 1].clear();
+        }
+
+        // If the cell that will be pushed off-screen is a wide char,
+        // clear its spacer to avoid orphaning it
+        let pushed = len.saturating_sub(count);
+        if pushed < len && self.cells[pushed].is_wide() && pushed + 1 < len {
+            self.cells[pushed + 1].clear();
+        }
+
         // Shift cells right using bulk copy
         let src_end = len.saturating_sub(count);
         if at < src_end {
@@ -149,6 +161,17 @@ impl Row {
 
         if at >= len || count == 0 {
             return;
+        }
+
+        // If deleting starts at a wide char spacer, clear the orphaned primary cell
+        if at > 0 && self.cells[at].is_wide_spacer() {
+            self.cells[at - 1].clear();
+        }
+
+        // If the deletion range ends in the middle of a wide char, clear the spacer
+        let end = (at + count).min(len);
+        if end < len && self.cells[end].is_wide_spacer() {
+            self.cells[end].clear();
         }
 
         // Shift cells left using bulk copy

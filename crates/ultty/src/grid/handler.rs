@@ -135,8 +135,8 @@ impl<'a> Handler<'a> {
             }
 
             // Cursor save/restore
-            Action::SaveCursorPosition => self.grid.cursor_mut().save(),
-            Action::RestoreCursorPosition => self.grid.cursor_mut().restore(),
+            Action::SaveCursorPosition => self.grid.save_cursor(),
+            Action::RestoreCursorPosition => self.grid.restore_cursor(),
 
             // Text attributes
             Action::SetAttribute(attr) => self.apply_attribute(attr),

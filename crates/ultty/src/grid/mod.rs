@@ -82,6 +82,14 @@ impl CursorPosition {
     }
 }
 
+/// Saved cursor state for DECSC/DECRC.
+#[derive(Debug, Clone, Copy)]
+struct SavedCursorState {
+    position: CursorPosition,
+    attrs: Cell,
+    auto_wrap: bool,
+}
+
 /// Terminal cursor state.
 #[derive(Debug, Clone, Copy)]
 pub struct Cursor {
@@ -89,8 +97,8 @@ pub struct Cursor {
     pub visible: bool,
     pub shape: CursorShape,
     pub blinking: bool,
-    /// Saved cursor for ESC 7 / ESC 8
-    saved: Option<CursorPosition>,
+    /// Saved cursor state for ESC 7 / ESC 8 (position + attributes)
+    saved: Option<SavedCursorState>,
     /// Pending wrap flag - cursor is at end of line, next char will wrap
     /// This implements standard terminal "autowrap pending" behavior where
     /// the cursor stays at the last column until the next character is typed.
@@ -111,13 +119,19 @@ impl Default for Cursor {
 }
 
 impl Cursor {
+    /// Save cursor position only (used internally; prefer Grid::save_cursor for full DECSC).
     pub fn save(&mut self) {
-        self.saved = Some(self.position);
+        self.saved = Some(SavedCursorState {
+            position: self.position,
+            attrs: Cell::default(),
+            auto_wrap: true,
+        });
     }
 
+    /// Restore cursor position only (used internally; prefer Grid::restore_cursor for full DECRC).
     pub fn restore(&mut self) {
-        if let Some(pos) = self.saved {
-            self.position = pos;
+        if let Some(state) = self.saved {
+            self.position = state.position;
         }
     }
 }
@@ -214,6 +228,25 @@ impl Grid {
     /// Get mutable cursor state.
     pub fn cursor_mut(&mut self) -> &mut Cursor {
         &mut self.cursor
+    }
+
+    /// Save cursor state (DECSC): position, text attributes, and auto-wrap mode.
+    pub fn save_cursor(&mut self) {
+        self.cursor.saved = Some(SavedCursorState {
+            position: self.cursor.position,
+            attrs: self.attrs,
+            auto_wrap: self.auto_wrap,
+        });
+    }
+
+    /// Restore cursor state (DECRC): position, text attributes, and auto-wrap mode.
+    pub fn restore_cursor(&mut self) {
+        if let Some(state) = self.cursor.saved {
+            self.cursor.position = state.position;
+            self.cursor.wrap_pending = false;
+            self.attrs = state.attrs;
+            self.auto_wrap = state.auto_wrap;
+        }
     }
 
     /// Set auto-wrap mode (DECAWM).
@@ -457,16 +490,32 @@ impl Grid {
         }
     }
 
-    /// Move cursor up, stopping at top edge.
+    /// Move cursor up, stopping at scroll region top if inside region.
     pub fn cursor_up(&mut self, n: u16) {
         self.cursor.wrap_pending = false;
-        self.cursor.position.row = self.cursor.position.row.saturating_sub(n);
+        let region = self.effective_scroll_region();
+        let top = if self.cursor.position.row >= region.top
+            && self.cursor.position.row <= region.bottom
+        {
+            region.top
+        } else {
+            0
+        };
+        self.cursor.position.row = self.cursor.position.row.saturating_sub(n).max(top);
     }
 
-    /// Move cursor down, stopping at bottom edge.
+    /// Move cursor down, stopping at scroll region bottom if inside region.
     pub fn cursor_down(&mut self, n: u16) {
         self.cursor.wrap_pending = false;
-        self.cursor.position.row = (self.cursor.position.row + n).min(self.dims.rows.saturating_sub(1));
+        let region = self.effective_scroll_region();
+        let bottom = if self.cursor.position.row >= region.top
+            && self.cursor.position.row <= region.bottom
+        {
+            region.bottom
+        } else {
+            self.dims.rows.saturating_sub(1)
+        };
+        self.cursor.position.row = (self.cursor.position.row + n).min(bottom);
     }
 
     /// Move cursor left, stopping at left edge.
@@ -1319,13 +1368,35 @@ mod tests {
     fn save_restore_cursor() {
         let mut grid = Grid::new(Dimensions::new(80, 24));
         grid.set_cursor_position(10, 20);
-        grid.cursor_mut().save();
+        grid.save_cursor();
 
         grid.set_cursor_position(1, 1);
-        grid.cursor_mut().restore();
+        grid.restore_cursor();
 
         assert_eq!(grid.cursor().position.row, 9);
         assert_eq!(grid.cursor().position.col, 19);
+    }
+
+    #[test]
+    fn save_restore_cursor_preserves_attrs() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        grid.set_cursor_position(5, 10);
+        grid.attrs_mut().set_flag(CellFlags::BOLD);
+        grid.attrs_mut().set_flag(CellFlags::ITALIC);
+        grid.save_cursor();
+
+        // Change position and attrs
+        grid.set_cursor_position(1, 1);
+        grid.reset_attrs();
+
+        assert!(!grid.attrs().has_flag(CellFlags::BOLD));
+
+        grid.restore_cursor();
+
+        assert_eq!(grid.cursor().position.row, 4);
+        assert_eq!(grid.cursor().position.col, 9);
+        assert!(grid.attrs().has_flag(CellFlags::BOLD));
+        assert!(grid.attrs().has_flag(CellFlags::ITALIC));
     }
 
     #[test]

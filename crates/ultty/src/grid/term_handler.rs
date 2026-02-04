@@ -57,8 +57,10 @@ impl<'a> TerminalHandler<'a> {
                 // to the scroll region, not the screen
                 let row = if self.terminal.modes().origin_mode {
                     let region = self.terminal.grid().effective_scroll_region();
-                    // Add scroll region top offset (row is 1-based, region.top is 0-based)
-                    row.saturating_add(region.top)
+                    let region_height = region.bottom.saturating_sub(region.top) + 1;
+                    // Clamp row to region height, then offset by region.top
+                    // (row is 1-based, so region_height is the max valid value)
+                    row.min(region_height).saturating_add(region.top)
                 } else {
                     row
                 };
@@ -93,9 +95,11 @@ impl<'a> TerminalHandler<'a> {
             // Line operations
             Action::InsertLines(n) => {
                 self.terminal.grid_mut().insert_lines(n);
+                self.terminal.grid_mut().carriage_return();
             }
             Action::DeleteLines(n) => {
                 self.terminal.grid_mut().delete_lines(n);
+                self.terminal.grid_mut().carriage_return();
             }
             Action::DeleteCharacters(n) => {
                 let row_idx = self.terminal.grid().cursor().position.row;
@@ -168,8 +172,8 @@ impl<'a> TerminalHandler<'a> {
             }
 
             // Cursor save/restore
-            Action::SaveCursorPosition => self.terminal.grid_mut().cursor_mut().save(),
-            Action::RestoreCursorPosition => self.terminal.grid_mut().cursor_mut().restore(),
+            Action::SaveCursorPosition => self.terminal.grid_mut().save_cursor(),
+            Action::RestoreCursorPosition => self.terminal.grid_mut().restore_cursor(),
 
             // Text attributes
             Action::SetAttribute(attr) => self.apply_attribute(attr),
@@ -187,7 +191,13 @@ impl<'a> TerminalHandler<'a> {
             // Terminal queries
             Action::ReportCursorPosition => {
                 // Send cursor position report: CSI row ; col R
-                let row = self.terminal.grid().cursor().position.row + 1; // 1-based
+                let abs_row = self.terminal.grid().cursor().position.row;
+                let row = if self.terminal.modes().origin_mode {
+                    let region = self.terminal.grid().effective_scroll_region();
+                    abs_row.saturating_sub(region.top) + 1
+                } else {
+                    abs_row + 1
+                };
                 let col = self.terminal.grid().cursor().position.col + 1; // 1-based
                 let response = format!("\x1b[{};{}R", row, col);
                 self.terminal.queue_response(response.into_bytes());
@@ -514,12 +524,12 @@ impl<'a> TerminalHandler<'a> {
             }
             Mode::AlternateScreenSaveCursor => {
                 if enabled {
-                    self.terminal.grid_mut().cursor_mut().save();
+                    self.terminal.grid_mut().save_cursor();
                     self.terminal.enter_alternate_screen();
                     self.terminal.grid_mut().clear();
                 } else {
                     self.terminal.leave_alternate_screen();
-                    self.terminal.grid_mut().cursor_mut().restore();
+                    self.terminal.grid_mut().restore_cursor();
                 }
             }
             Mode::AlternateScrollMode => {
