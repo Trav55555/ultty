@@ -68,6 +68,23 @@ impl<'a> TerminalHandler<'a> {
                 };
                 self.terminal.grid_mut().set_cursor_position(row, col);
             }
+            Action::CursorVerticalAbsolute(row) => {
+                // CSI d — move to absolute row, leave column unchanged
+                // Respects origin mode like CursorPosition
+                let row = if self.terminal.modes().origin_mode {
+                    let region = self.terminal.grid().effective_scroll_region();
+                    let region_height = region.bottom.saturating_sub(region.top) + 1;
+                    row.min(region_height).saturating_add(region.top)
+                } else {
+                    row
+                };
+                let max_row = self.terminal.grid().dimensions().rows.saturating_sub(1);
+                self.terminal.grid_mut().cursor_mut().position.row = row.saturating_sub(1).min(max_row);
+                self.terminal.grid_mut().cursor_mut().wrap_pending = false;
+            }
+            Action::CursorBackwardTab(n) => {
+                self.terminal.grid_mut().backward_tab(n);
+            }
 
             // Erase operations
             Action::EraseInDisplay(mode) => match mode {
@@ -86,10 +103,11 @@ impl<'a> TerminalHandler<'a> {
                 let col = self.terminal.grid().cursor().position.col;
                 let row = self.terminal.grid().cursor().position.row;
                 let cols = self.terminal.grid().dimensions().cols;
+                let bg = self.terminal.grid().attrs().bg();
                 let end = col.saturating_add(n).min(cols);
                 for c in col..end {
                     if let Some(cell) = self.terminal.grid_mut().cell_mut(c, row) {
-                        cell.clear();
+                        cell.erase(bg);
                     }
                 }
             }

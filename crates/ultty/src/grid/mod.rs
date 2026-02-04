@@ -580,6 +580,21 @@ impl Grid {
         }
     }
 
+    /// Move cursor backward N tab stops (CBT — CSI Z).
+    pub fn backward_tab(&mut self, n: u16) {
+        self.cursor.wrap_pending = false;
+        let mut current = self.cursor.position.col;
+        for _ in 0..n {
+            if let Some(&prev) = self.tab_stops.range(..current).next_back() {
+                current = prev;
+            } else {
+                current = 0;
+                break;
+            }
+        }
+        self.cursor.position.col = current;
+    }
+
     /// Set a tab stop at the current cursor column.
     pub fn set_tab_stop(&mut self) {
         self.tab_stops.insert(self.cursor.position.col);
@@ -825,6 +840,7 @@ impl Grid {
     /// Erase from cursor to end of display.
     pub fn erase_below(&mut self) {
         let r = self.cursor.position.row;
+        let bg = self.attrs.bg();
         // Clear combining chars: partial cursor row (cursor_col..end) + all rows below
         for col in self.cursor.position.col..self.dims.cols {
             self.combining.remove(&(r, col));
@@ -837,7 +853,7 @@ impl Grid {
         if let Some(row) = self.rows.get_mut(r as usize) {
             for i in self.cursor.position.col..self.dims.cols {
                 if let Some(cell) = row.get_mut(i) {
-                    cell.clear();
+                    cell.erase(bg);
                 }
             }
         }
@@ -846,7 +862,7 @@ impl Grid {
         // Erase all lines below cursor
         for row_idx in (r + 1)..self.dims.rows {
             if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                row.clear();
+                row.erase(bg);
             }
             self.mark_dirty(row_idx);
         }
@@ -855,6 +871,7 @@ impl Grid {
     /// Erase from start of display to cursor.
     pub fn erase_above(&mut self) {
         let r = self.cursor.position.row;
+        let bg = self.attrs.bg();
         // Clear combining chars: all rows above cursor + partial cursor row (0..=cursor_col)
         if r > 0 {
             self.clear_combining_rows(0, r - 1);
@@ -866,7 +883,7 @@ impl Grid {
         // Erase all lines above cursor
         for row_idx in 0..r {
             if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                row.clear();
+                row.erase(bg);
             }
             self.mark_dirty(row_idx);
         }
@@ -875,7 +892,7 @@ impl Grid {
         if let Some(row) = self.rows.get_mut(r as usize) {
             for i in 0..=self.cursor.position.col {
                 if let Some(cell) = row.get_mut(i) {
-                    cell.clear();
+                    cell.erase(bg);
                 }
             }
         }
@@ -884,9 +901,10 @@ impl Grid {
 
     /// Erase entire display.
     pub fn clear(&mut self) {
+        let bg = self.attrs.bg();
         self.combining.clear();
         for row in &mut self.rows {
-            row.clear();
+            row.erase(bg);
         }
         self.mark_all_dirty();
     }
@@ -894,6 +912,7 @@ impl Grid {
     /// Erase from cursor to end of line.
     pub fn erase_line_right(&mut self) {
         let r = self.cursor.position.row;
+        let bg = self.attrs.bg();
         // Clear combining chars for erased cells on this row
         for col in self.cursor.position.col..self.dims.cols {
             self.combining.remove(&(r, col));
@@ -901,7 +920,7 @@ impl Grid {
         if let Some(row) = self.rows.get_mut(r as usize) {
             for i in self.cursor.position.col..self.dims.cols {
                 if let Some(cell) = row.get_mut(i) {
-                    cell.clear();
+                    cell.erase(bg);
                 }
             }
             // Erasing to end of line means this line ends here (hard break),
@@ -916,6 +935,7 @@ impl Grid {
     /// Erase from start of line to cursor.
     pub fn erase_line_left(&mut self) {
         let r = self.cursor.position.row;
+        let bg = self.attrs.bg();
         // Clear combining chars for erased cells on this row
         for col in 0..=self.cursor.position.col {
             self.combining.remove(&(r, col));
@@ -923,7 +943,7 @@ impl Grid {
         if let Some(row) = self.rows.get_mut(r as usize) {
             for i in 0..=self.cursor.position.col {
                 if let Some(cell) = row.get_mut(i) {
-                    cell.clear();
+                    cell.erase(bg);
                 }
             }
         }
@@ -933,9 +953,10 @@ impl Grid {
     /// Erase entire current line.
     pub fn erase_line(&mut self) {
         let r = self.cursor.position.row;
+        let bg = self.attrs.bg();
         self.clear_combining_rows(r, r);
         if let Some(row) = self.rows.get_mut(r as usize) {
-            row.clear();
+            row.erase(bg);
         }
         self.mark_dirty(r);
     }
@@ -975,12 +996,16 @@ impl Grid {
         // Reset scroll region — apps that need one will re-set it after resize
         self.scroll_region = None;
 
-        // Extend tab stops to cover any new columns
+        // Update tab stops for new width
         let old_cols = self.dims.cols;
         if new_dims.cols > old_cols {
+            // Extend tab stops to cover any new columns
             for col in (old_cols..new_dims.cols).filter(|c| c % 8 == 0) {
                 self.tab_stops.insert(col);
             }
+        } else if new_dims.cols < old_cols {
+            // Remove tab stops beyond new width
+            self.tab_stops.retain(|&col| col < new_dims.cols);
         }
 
         self.dims = new_dims;
@@ -1711,6 +1736,50 @@ mod tests {
         assert!(grid.tab_stops.contains(&40));
         assert!(grid.tab_stops.contains(&48));
         assert!(grid.tab_stops.contains(&72));
+    }
+
+    #[test]
+    fn resize_shrink_removes_tab_stops_beyond_width() {
+        let mut grid = Grid::new(Dimensions::new(80, 5));
+        // Default: tabs at 0, 8, 16, ..., 72
+        assert!(grid.tab_stops.contains(&72));
+        assert!(grid.tab_stops.contains(&40));
+
+        // Shrink to 20 columns
+        grid.resize(Dimensions::new(20, 5));
+        // Tab stops beyond col 20 should be removed
+        assert!(grid.tab_stops.contains(&0));
+        assert!(grid.tab_stops.contains(&8));
+        assert!(grid.tab_stops.contains(&16));
+        assert!(!grid.tab_stops.contains(&24));
+        assert!(!grid.tab_stops.contains(&40));
+        assert!(!grid.tab_stops.contains(&72));
+    }
+
+    #[test]
+    fn backward_tab_moves_to_previous_stop() {
+        let mut grid = Grid::new(Dimensions::new(80, 5));
+        grid.cursor.position.col = 20;
+        grid.backward_tab(1);
+        assert_eq!(grid.cursor.position.col, 16);
+    }
+
+    #[test]
+    fn backward_tab_multiple_stops() {
+        let mut grid = Grid::new(Dimensions::new(80, 5));
+        grid.cursor.position.col = 25;
+        // 25 → 24 → 16 → 8
+        grid.backward_tab(3);
+        assert_eq!(grid.cursor.position.col, 8);
+    }
+
+    #[test]
+    fn backward_tab_at_start_stays_at_zero() {
+        let mut grid = Grid::new(Dimensions::new(80, 5));
+        grid.cursor.position.col = 3;
+        // Only one tab stop (0) before col 3
+        grid.backward_tab(5);
+        assert_eq!(grid.cursor.position.col, 0);
     }
 
     #[test]

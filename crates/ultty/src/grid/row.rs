@@ -67,6 +67,15 @@ impl Row {
         self.dirty = true;
     }
 
+    /// Erase all cells per ECMA-48: reset to space, preserve given background.
+    pub fn erase(&mut self, bg: super::cell::Color) {
+        for cell in &mut self.cells {
+            cell.erase(bg);
+        }
+        self.wrapped = false;
+        self.dirty = true;
+    }
+
     /// Resize the row.
     pub fn resize(&mut self, new_width: u16) {
         self.cells.resize(new_width as usize, Cell::default());

@@ -50,6 +50,15 @@ impl<'a> Handler<'a> {
             Action::CursorPosition { row, col } => {
                 self.grid.set_cursor_position(row, col);
             }
+            Action::CursorVerticalAbsolute(row) => {
+                // CSI d — move to absolute row, leave column unchanged
+                let max_row = self.grid.dimensions().rows.saturating_sub(1);
+                self.grid.cursor_mut().position.row = row.saturating_sub(1).min(max_row);
+                self.grid.cursor_mut().wrap_pending = false;
+            }
+            Action::CursorBackwardTab(n) => {
+                self.grid.backward_tab(n);
+            }
 
             // Erase operations
             Action::EraseInDisplay(mode) => match mode {
@@ -68,10 +77,11 @@ impl<'a> Handler<'a> {
                 let col = self.grid.cursor().position.col;
                 let row = self.grid.cursor().position.row;
                 let cols = self.grid.dimensions().cols;
+                let bg = self.grid.attrs().bg();
                 let end = col.saturating_add(n).min(cols);
                 for c in col..end {
                     if let Some(cell) = self.grid.cell_mut(c, row) {
-                        cell.clear();
+                        cell.erase(bg);
                     }
                 }
             }
@@ -486,5 +496,82 @@ mod tests {
         // Delete 1 line — column should reset to 0
         process(&mut grid, b"\x1b[M");
         assert_eq!(grid.cursor().position.col, 0);
+    }
+
+    #[test]
+    fn vpa_sets_row_only() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        // Move to row 5, col 20
+        process(&mut grid, b"\x1b[5;20H");
+        assert_eq!(grid.cursor().position.row, 4);
+        assert_eq!(grid.cursor().position.col, 19);
+
+        // VPA (CSI 10 d) — set row to 10, col stays at 19
+        process(&mut grid, b"\x1b[10d");
+        assert_eq!(grid.cursor().position.row, 9);
+        assert_eq!(grid.cursor().position.col, 19);
+    }
+
+    #[test]
+    fn vpa_clamps_to_grid_height() {
+        let mut grid = Grid::new(Dimensions::new(80, 5));
+        process(&mut grid, b"\x1b[999d");
+        assert_eq!(grid.cursor().position.row, 4);
+    }
+
+    #[test]
+    fn cbt_moves_backward_one_tab_stop() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        // Move to col 20
+        process(&mut grid, b"\x1b[1;21H");
+        assert_eq!(grid.cursor().position.col, 20);
+
+        // CBT (CSI Z) — backward 1 tab stop to col 16
+        process(&mut grid, b"\x1b[Z");
+        assert_eq!(grid.cursor().position.col, 16);
+    }
+
+    #[test]
+    fn cbt_moves_backward_multiple_stops() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        process(&mut grid, b"\x1b[1;25H");
+        assert_eq!(grid.cursor().position.col, 24);
+
+        // CBT 3 — backward 3 tab stops: 24 → 16 → 8 → 0
+        process(&mut grid, b"\x1b[3Z");
+        assert_eq!(grid.cursor().position.col, 0);
+    }
+
+    #[test]
+    fn erase_preserves_background_color() {
+        let mut grid = Grid::new(Dimensions::new(10, 5));
+        // Write some text
+        process(&mut grid, b"Hello");
+        // Set background to red (SGR 41)
+        process(&mut grid, b"\x1b[41m");
+        // Move to start and erase line
+        process(&mut grid, b"\x1b[1;1H\x1b[2K");
+
+        // All cells on row 0 should have red background
+        for col in 0..10 {
+            let cell = grid.cell(col, 0).unwrap();
+            assert_eq!(cell.bg(), Color::Named(1), "col {} should have red bg", col);
+        }
+    }
+
+    #[test]
+    fn erase_right_preserves_background() {
+        let mut grid = Grid::new(Dimensions::new(10, 5));
+        process(&mut grid, b"ABCDE");
+        // Set background to green (SGR 42), move to col 2, erase right
+        process(&mut grid, b"\x1b[42m\x1b[1;3H\x1b[K");
+
+        // Cells 0-1 should have default bg (not erased)
+        assert_eq!(grid.cell(0, 0).unwrap().bg(), Color::Default);
+        assert_eq!(grid.cell(1, 0).unwrap().bg(), Color::Default);
+        // Cells 2+ should have green bg
+        for col in 2..10 {
+            assert_eq!(grid.cell(col, 0).unwrap().bg(), Color::Named(2), "col {}", col);
+        }
     }
 }

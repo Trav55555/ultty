@@ -61,6 +61,12 @@ pub enum Action {
     /// Move cursor to row;column (CSI H or CSI f)
     CursorPosition { row: u16, col: u16 },
 
+    /// Move cursor to absolute row (CSI d)
+    CursorVerticalAbsolute(u16),
+
+    /// Move cursor N tab stops backward (CSI Z)
+    CursorBackwardTab(u16),
+
     // === Erase Operations ===
     /// Erase in display (CSI J)
     /// 0 = cursor to end, 1 = start to cursor, 2 = entire, 3 = entire + scrollback

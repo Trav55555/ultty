@@ -252,6 +252,13 @@ impl Cell {
         *self = Self::default();
     }
 
+    /// Erase the cell per ECMA-48: reset to space, preserve background color.
+    #[inline]
+    pub fn erase(&mut self, bg: Color) {
+        *self = Self::default();
+        self.bg = bg;
+    }
+
     /// Copy attributes (colors, flags, hyperlink) from another cell, keeping the character.
     #[inline]
     pub fn copy_attrs_from(&mut self, other: &Cell) {

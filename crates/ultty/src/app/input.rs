@@ -885,6 +885,27 @@ impl App {
         // Check if application cursor keys mode is enabled (DECCKM)
         let app_cursor = self.terminal().is_some_and(|t| t.modes().application_cursor_keys);
 
+        // Compute xterm modifier code: Shift=2, Alt=3, Shift+Alt=4, Ctrl=5,
+        // Shift+Ctrl=6, Alt+Ctrl=7, Shift+Alt+Ctrl=8
+        let modifier_code = {
+            let mut m = 0u8;
+            if self.modifiers.shift_key() { m |= 1; }
+            if self.modifiers.alt_key() { m |= 2; }
+            if self.modifiers.control_key() { m |= 4; }
+            if m > 0 { m + 1 } else { 0 }
+        };
+
+        // Helper: send a dynamically formatted sequence and return early
+        macro_rules! send_modified {
+            ($self:expr, $seq:expr) => {{
+                if let Err(e) = $self.send_input($seq.as_bytes()) {
+                    tracing::warn!("Failed to send input: {}", e);
+                }
+                $self.forward_key_to_native_sessions(&event);
+                return;
+            }};
+        }
+
         // Convert key to terminal input
         let input: Option<&[u8]> = match &event.logical_key {
             Key::Named(named) => match named {
@@ -893,28 +914,95 @@ impl App {
                 NamedKey::Backspace => Some(b"\x7f"),
                 NamedKey::Tab => Some(b"\t"),
                 NamedKey::Escape => Some(b"\x1b"),
-                NamedKey::ArrowUp => Some(if app_cursor { b"\x1bOA" } else { b"\x1b[A" }),
-                NamedKey::ArrowDown => Some(if app_cursor { b"\x1bOB" } else { b"\x1b[B" }),
-                NamedKey::ArrowRight => Some(if app_cursor { b"\x1bOC" } else { b"\x1b[C" }),
-                NamedKey::ArrowLeft => Some(if app_cursor { b"\x1bOD" } else { b"\x1b[D" }),
-                NamedKey::Home => Some(if app_cursor { b"\x1bOH" } else { b"\x1b[H" }),
-                NamedKey::End => Some(if app_cursor { b"\x1bOF" } else { b"\x1b[F" }),
-                NamedKey::PageUp => Some(b"\x1b[5~"),
-                NamedKey::PageDown => Some(b"\x1b[6~"),
-                NamedKey::Insert => Some(b"\x1b[2~"),
-                NamedKey::Delete => Some(b"\x1b[3~"),
-                NamedKey::F1 => Some(b"\x1bOP"),
-                NamedKey::F2 => Some(b"\x1bOQ"),
-                NamedKey::F3 => Some(b"\x1bOR"),
-                NamedKey::F4 => Some(b"\x1bOS"),
-                NamedKey::F5 => Some(b"\x1b[15~"),
-                NamedKey::F6 => Some(b"\x1b[17~"),
-                NamedKey::F7 => Some(b"\x1b[18~"),
-                NamedKey::F8 => Some(b"\x1b[19~"),
-                NamedKey::F9 => Some(b"\x1b[20~"),
-                NamedKey::F10 => Some(b"\x1b[21~"),
-                NamedKey::F11 => Some(b"\x1b[23~"),
-                NamedKey::F12 => Some(b"\x1b[24~"),
+
+                // Arrow keys: modified → CSI 1;{mod} X, unmodified → SS3 X or CSI X
+                NamedKey::ArrowUp | NamedKey::ArrowDown
+                | NamedKey::ArrowRight | NamedKey::ArrowLeft => {
+                    let suffix = match named {
+                        NamedKey::ArrowUp => 'A',
+                        NamedKey::ArrowDown => 'B',
+                        NamedKey::ArrowRight => 'C',
+                        _ => 'D',
+                    };
+                    if modifier_code > 0 {
+                        send_modified!(self, format!("\x1b[1;{}{}", modifier_code, suffix));
+                    }
+                    Some(if app_cursor {
+                        match suffix { 'A' => &b"\x1bOA"[..], 'B' => &b"\x1bOB"[..],
+                                       'C' => &b"\x1bOC"[..], _ => &b"\x1bOD"[..] }
+                    } else {
+                        match suffix { 'A' => &b"\x1b[A"[..], 'B' => &b"\x1b[B"[..],
+                                       'C' => &b"\x1b[C"[..], _ => &b"\x1b[D"[..] }
+                    })
+                }
+
+                // Home/End: modified → CSI 1;{mod} H/F
+                NamedKey::Home | NamedKey::End => {
+                    let suffix = if matches!(named, NamedKey::Home) { 'H' } else { 'F' };
+                    if modifier_code > 0 {
+                        send_modified!(self, format!("\x1b[1;{}{}", modifier_code, suffix));
+                    }
+                    Some(match (app_cursor, suffix) {
+                        (true, 'H') => &b"\x1bOH"[..],
+                        (true, _) => &b"\x1bOF"[..],
+                        (false, 'H') => &b"\x1b[H"[..],
+                        (false, _) => &b"\x1b[F"[..],
+                    })
+                }
+
+                // Tilde-encoded keys: modified → CSI {n};{mod} ~
+                NamedKey::PageUp | NamedKey::PageDown
+                | NamedKey::Insert | NamedKey::Delete => {
+                    let n = match named {
+                        NamedKey::Insert => 2,
+                        NamedKey::Delete => 3,
+                        NamedKey::PageUp => 5,
+                        _ => 6,
+                    };
+                    if modifier_code > 0 {
+                        send_modified!(self, format!("\x1b[{};{}~", n, modifier_code));
+                    }
+                    match n {
+                        2 => Some(&b"\x1b[2~"[..]), 3 => Some(&b"\x1b[3~"[..]),
+                        5 => Some(&b"\x1b[5~"[..]), _ => Some(&b"\x1b[6~"[..]),
+                    }
+                }
+
+                // F1-F4: modified → CSI 1;{mod} P/Q/R/S
+                NamedKey::F1 | NamedKey::F2 | NamedKey::F3 | NamedKey::F4 => {
+                    let suffix = match named {
+                        NamedKey::F1 => 'P', NamedKey::F2 => 'Q',
+                        NamedKey::F3 => 'R', _ => 'S',
+                    };
+                    if modifier_code > 0 {
+                        send_modified!(self, format!("\x1b[1;{}{}", modifier_code, suffix));
+                    }
+                    match suffix {
+                        'P' => Some(&b"\x1bOP"[..]), 'Q' => Some(&b"\x1bOQ"[..]),
+                        'R' => Some(&b"\x1bOR"[..]), _ => Some(&b"\x1bOS"[..]),
+                    }
+                }
+
+                // F5-F12: modified → CSI {n};{mod} ~
+                NamedKey::F5 | NamedKey::F6 | NamedKey::F7 | NamedKey::F8
+                | NamedKey::F9 | NamedKey::F10 | NamedKey::F11 | NamedKey::F12 => {
+                    let n = match named {
+                        NamedKey::F5 => 15, NamedKey::F6 => 17,
+                        NamedKey::F7 => 18, NamedKey::F8 => 19,
+                        NamedKey::F9 => 20, NamedKey::F10 => 21,
+                        NamedKey::F11 => 23, _ => 24,
+                    };
+                    if modifier_code > 0 {
+                        send_modified!(self, format!("\x1b[{};{}~", n, modifier_code));
+                    }
+                    match n {
+                        15 => Some(&b"\x1b[15~"[..]), 17 => Some(&b"\x1b[17~"[..]),
+                        18 => Some(&b"\x1b[18~"[..]), 19 => Some(&b"\x1b[19~"[..]),
+                        20 => Some(&b"\x1b[20~"[..]), 21 => Some(&b"\x1b[21~"[..]),
+                        23 => Some(&b"\x1b[23~"[..]), _ => Some(&b"\x1b[24~"[..]),
+                    }
+                }
+
                 _ => None,
             },
             Key::Character(c) => {
@@ -927,6 +1015,7 @@ impl App {
                     if let Err(e) = self.send_input(&[ctrl_char as u8]) {
                         tracing::warn!("Failed to send input: {}", e);
                     }
+                    self.forward_key_to_native_sessions(&event);
                     return;
                 }
                 // Handle Alt+key combinations (ESC prefix)
@@ -938,6 +1027,7 @@ impl App {
                     if let Err(e) = self.send_input(&buf[..len]) {
                         tracing::warn!("Failed to send input: {}", e);
                     }
+                    self.forward_key_to_native_sessions(&event);
                     return;
                 }
                 None

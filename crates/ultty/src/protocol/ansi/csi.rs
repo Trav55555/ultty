@@ -111,6 +111,8 @@ impl AnsiParser {
                 row: p1.max(1),
                 col: p2.max(1),
             }),
+            b'd' => callback(Action::CursorVerticalAbsolute(p1.max(1))),
+            b'Z' => callback(Action::CursorBackwardTab(p1.max(1))),
 
             // Erase operations (default to 0, not 1)
             b'J' => callback(Action::EraseInDisplay(
