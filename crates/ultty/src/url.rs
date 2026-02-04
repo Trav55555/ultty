@@ -4,6 +4,7 @@
 //! to open URLs in the default browser.
 
 use regex::Regex;
+use std::hash::{Hash, Hasher};
 use std::sync::LazyLock;
 
 /// URL regex pattern.
@@ -41,6 +42,8 @@ pub struct UrlDetector {
     urls: Vec<DetectedUrl>,
     /// Whether detection is enabled
     enabled: bool,
+    /// Per-row content hashes for dirty tracking (row index -> hash)
+    row_hashes: Vec<u64>,
 }
 
 impl UrlDetector {
@@ -49,6 +52,7 @@ impl UrlDetector {
         Self {
             urls: Vec::new(),
             enabled,
+            row_hashes: Vec::new(),
         }
     }
 
@@ -62,26 +66,57 @@ impl UrlDetector {
         self.enabled = enabled;
         if !enabled {
             self.urls.clear();
+            self.row_hashes.clear();
         }
     }
 
     /// Detect URLs in the visible terminal grid.
     ///
-    /// Call this when terminal content changes.
+    /// Uses per-row content hashing to skip unchanged rows. Only rows whose
+    /// content hash differs from the previous call are re-scanned.
     pub fn detect<F>(&mut self, rows: u16, get_row_text: F)
     where
         F: Fn(u16) -> String,
     {
-        self.urls.clear();
-
         if !self.enabled {
+            self.urls.clear();
+            self.row_hashes.clear();
             return;
+        }
+
+        let row_count = rows as usize;
+
+        // Resize hash cache if row count changed — full rescan needed
+        if self.row_hashes.len() != row_count {
+            self.row_hashes.resize(row_count, 0);
+            // Force full rescan by zeroing all hashes
+            self.row_hashes.fill(0);
+            self.urls.clear();
         }
 
         for row_idx in 0..rows {
             let text = get_row_text(row_idx);
+            let hash = Self::hash_str(&text);
+
+            if hash == self.row_hashes[row_idx as usize]
+                && self.row_hashes[row_idx as usize] != 0
+            {
+                // Row unchanged, keep existing URLs for this row
+                continue;
+            }
+
+            // Row changed: remove old URLs for this row and re-detect
+            self.row_hashes[row_idx as usize] = hash;
+            self.urls.retain(|u| u.row != row_idx);
             self.detect_in_line(&text, row_idx);
         }
+    }
+
+    /// Hash a string for dirty-row comparison.
+    fn hash_str(s: &str) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Detect URLs in a single line.

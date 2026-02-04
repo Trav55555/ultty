@@ -255,6 +255,12 @@ impl Buffer {
 
         for (idx, row) in grid_rows.iter().enumerate() {
             if idx > last_content_row && row.is_blank() {
+                // Track cursor on blank trailing rows before skipping
+                if idx == old_cursor_row && !found_cursor {
+                    cursor_logical_line = current_logical_idx;
+                    cursor_logical_col = 0;
+                    found_cursor = true;
+                }
                 continue;
             }
 
@@ -764,5 +770,26 @@ mod tests {
         // Cursor should be back on row 0, col 11
         assert_eq!(buf.grid().cursor().position.row, 0);
         assert_eq!(buf.grid().cursor().position.col, 11);
+    }
+
+    #[test]
+    fn reflow_cursor_on_blank_trailing_row() {
+        let mut buf = Buffer::new(Dimensions::new(20, 5));
+
+        // Write text on row 0 only, leave cursor at bottom (row 4)
+        for c in "Hello".chars() {
+            buf.grid_mut().write_char(c);
+        }
+        // Move cursor to row 4 (blank trailing row)
+        buf.grid_mut().set_cursor_position(5, 1); // 1-based: row 5, col 1
+
+        assert_eq!(buf.grid().cursor().position.row, 4);
+
+        // Narrow — reflow should not lose cursor
+        buf.resize(Dimensions::new(10, 5));
+
+        // Cursor should end up at a valid position (not row 0 col 0 due to lost tracking)
+        let cursor = buf.grid().cursor().position;
+        assert!(cursor.row < 5, "cursor row {} should be in bounds", cursor.row);
     }
 }

@@ -121,18 +121,20 @@ impl Row {
     pub fn insert_cells(&mut self, at: u16, count: u16) {
         let at = at as usize;
         let count = count as usize;
+        let len = self.cells.len();
 
-        // Shift cells to the right
-        for i in (at + count..self.cells.len()).rev() {
-            self.cells[i] = self.cells[i - count];
+        if at >= len || count == 0 {
+            return;
+        }
+
+        // Shift cells right using bulk copy
+        let src_end = len.saturating_sub(count);
+        if at < src_end {
+            self.cells.copy_within(at..src_end, at + count);
         }
 
         // Clear the inserted cells
-        for i in at..at
-            .min(self.cells.len())
-            .saturating_add(count)
-            .min(self.cells.len())
-        {
+        for i in at..(at + count).min(len) {
             self.cells[i].clear();
         }
 
@@ -143,14 +145,20 @@ impl Row {
     pub fn delete_cells(&mut self, at: u16, count: u16) {
         let at = at as usize;
         let count = count as usize;
+        let len = self.cells.len();
 
-        // Shift cells to the left
-        for i in at..self.cells.len().saturating_sub(count) {
-            self.cells[i] = self.cells[i + count];
+        if at >= len || count == 0 {
+            return;
+        }
+
+        // Shift cells left using bulk copy
+        let src_start = (at + count).min(len);
+        if src_start < len {
+            self.cells.copy_within(src_start..len, at);
         }
 
         // Clear the cells at the end
-        for i in self.cells.len().saturating_sub(count)..self.cells.len() {
+        for i in len.saturating_sub(count)..len {
             self.cells[i].clear();
         }
 

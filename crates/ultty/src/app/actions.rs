@@ -302,28 +302,40 @@ impl App {
         }
     }
 
-    /// Show a desktop notification.
+    /// Show a desktop notification via a dedicated background thread.
+    ///
+    /// Uses a single long-lived thread with a channel to avoid spawning
+    /// a new thread per notification.
     pub(super) fn show_notification(title: &str, body: &str) {
-        use notify_rust::Notification;
+        use std::sync::{mpsc, OnceLock};
+
+        static SENDER: OnceLock<mpsc::Sender<(String, String)>> = OnceLock::new();
+
+        let sender = SENDER.get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<(String, String)>();
+            std::thread::Builder::new()
+                .name("notification".into())
+                .spawn(move || {
+                    use notify_rust::Notification;
+                    for (title, body) in rx {
+                        if let Err(e) = Notification::new()
+                            .summary(&title)
+                            .body(&body)
+                            .appname("Ultty")
+                            .timeout(5000)
+                            .show()
+                        {
+                            tracing::warn!("Failed to show notification: {}", e);
+                        } else {
+                            tracing::debug!("Showed notification: {} - {}", title, body);
+                        }
+                    }
+                })
+                .expect("failed to spawn notification thread");
+            tx
+        });
 
         let title = if title.is_empty() { "Ultty" } else { title };
-
-        std::thread::spawn({
-            let title = title.to_string();
-            let body = body.to_string();
-            move || {
-                if let Err(e) = Notification::new()
-                    .summary(&title)
-                    .body(&body)
-                    .appname("Ultty")
-                    .timeout(5000)
-                    .show()
-                {
-                    tracing::warn!("Failed to show notification: {}", e);
-                } else {
-                    tracing::debug!("Showed notification: {} - {}", title, body);
-                }
-            }
-        });
+        let _ = sender.send((title.to_string(), body.to_string()));
     }
 }

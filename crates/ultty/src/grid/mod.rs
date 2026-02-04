@@ -345,6 +345,20 @@ impl Grid {
             return;
         }
 
+        // Wide character can never fit in a terminal narrower than its width
+        if width > 1 && self.dims.cols < width {
+            // Replace with a space to avoid infinite scroll loop
+            if let Some(cell) = self.cell_mut(col, row) {
+                cell.set_char(' ');
+            }
+            self.cursor.position.col = col + 1;
+            if self.cursor.position.col >= self.dims.cols {
+                self.cursor.wrap_pending = true;
+            }
+            self.mark_dirty(row);
+            return;
+        }
+
         // Check if wide char would wrap (needs 2 columns but only 1 left)
         if width > 1 && col + width > self.dims.cols {
             // Mark current row as wrapped (soft wrap)

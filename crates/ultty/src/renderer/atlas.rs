@@ -198,38 +198,18 @@ impl GlyphAtlas {
         self.process_image(cache_key, image)
     }
 
-    /// Evict least recently used glyphs to make room.
+    /// Evict glyphs to make room in the atlas.
+    ///
+    /// Resetting atlas allocation invalidates all UV coordinates, so we must
+    /// clear the entire cache. Glyphs that are still needed will be
+    /// re-rasterized and re-uploaded on next access.
     fn evict_lru(&mut self) {
-        // Find the 25% least recently used glyphs
-        let evict_count = self.cache.len() / 4;
-        if evict_count == 0 {
-            return;
-        }
-
-        // Collect access times and keys
-        let mut entries: Vec<_> = self.cache.iter()
-            .map(|(k, v)| (*k, v.last_access))
-            .collect();
-
-        // Sort by access time (oldest first)
-        entries.sort_by_key(|(_, access)| *access);
-
-        // Remove oldest entries
-        for (key, _) in entries.into_iter().take(evict_count) {
-            self.cache.remove(&key);
-        }
-
-        // Reset atlas allocation (we'll need to re-upload glyphs)
-        // This is a simple approach - a more sophisticated approach would
-        // track which regions are freed and reuse them
+        let evicted = self.cache.len();
+        self.cache.clear();
         self.rows.clear();
         self.current_y = 0;
 
-        tracing::debug!(
-            "Evicted {} glyphs from atlas, {} remaining",
-            evict_count,
-            self.cache.len()
-        );
+        tracing::debug!("Evicted all {} glyphs from atlas", evicted);
     }
 
     /// Process a rasterized glyph image.

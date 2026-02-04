@@ -273,8 +273,15 @@ impl NativeSession {
                 Ok(Some(msg))
             }
             Err(e) => {
-                error!("Session {} decode error: {}", self.session_id, e);
-                Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+                // Skip the corrupted message instead of killing the session.
+                // The framing (magic + length) was valid, so we can safely
+                // advance past it and continue processing.
+                warn!(
+                    "Session {} decode error (skipping {} byte message): {}",
+                    self.session_id, total_len, e
+                );
+                self.read_buf.advance(total_len);
+                Ok(None)
             }
         }
     }
