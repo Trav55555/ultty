@@ -1347,7 +1347,7 @@ impl Renderer {
                         self.color_scheme.resolve(cell.fg(), true)
                     };
                     let fg = if cell.has_flag(CellFlags::DIM) {
-                        Rgba::new(fg.r * 0.5, fg.g * 0.5, fg.b * 0.5, fg.a)
+                        Rgba::new(fg.r * 0.65, fg.g * 0.65, fg.b * 0.65, fg.a)
                     } else {
                         fg
                     };

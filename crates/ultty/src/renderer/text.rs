@@ -423,9 +423,9 @@ impl TextRenderer {
 
                 let fg_color = if cell.has_flag(CellFlags::DIM) {
                     Rgba::new(
-                        fg_color.r * 0.5,
-                        fg_color.g * 0.5,
-                        fg_color.b * 0.5,
+                        fg_color.r * 0.65,
+                        fg_color.g * 0.65,
+                        fg_color.b * 0.65,
                         fg_color.a,
                     )
                 } else {
