@@ -65,6 +65,9 @@ impl<'a> Handler<'a> {
             Action::RepeatLastChar(n) => {
                 self.grid.repeat_last_char(n);
             }
+            Action::SetInsertMode(enabled) => {
+                self.grid.set_insert_mode(enabled);
+            }
 
             // Erase operations
             Action::EraseInDisplay(mode) => match mode {
@@ -118,15 +121,17 @@ impl<'a> Handler<'a> {
             Action::DeleteCharacters(n) => {
                 let row_idx = self.grid.cursor().position.row;
                 let col = self.grid.cursor().position.col;
+                let bg = self.grid.attrs().bg();
                 if let Some(row) = self.grid.row_mut(row_idx) {
-                    row.delete_cells(col, n);
+                    row.delete_cells(col, n, bg);
                 }
             }
             Action::InsertCharacters(n) => {
                 let row_idx = self.grid.cursor().position.row;
                 let col = self.grid.cursor().position.col;
+                let bg = self.grid.attrs().bg();
                 if let Some(row) = self.grid.row_mut(row_idx) {
-                    row.insert_cells(col, n);
+                    row.insert_cells(col, n, bg);
                 }
             }
 
@@ -237,6 +242,11 @@ impl<'a> Handler<'a> {
             Attribute::Reverse => new_attrs.flags_mut().set(CellFlags::REVERSE),
             Attribute::Hidden => new_attrs.flags_mut().set(CellFlags::HIDDEN),
             Attribute::Strikethrough => new_attrs.flags_mut().set(CellFlags::STRIKETHROUGH),
+            Attribute::DoubleUnderline => {
+                new_attrs.flags_mut().set(CellFlags::DOUBLE_UNDERLINE);
+                new_attrs.flags_mut().set(CellFlags::UNDERLINE);
+            }
+            Attribute::Overline => new_attrs.flags_mut().set(CellFlags::OVERLINE),
 
             Attribute::NoBold => {
                 // SGR 22: reset both BOLD and DIM per ECMA-48
@@ -244,11 +254,15 @@ impl<'a> Handler<'a> {
                 new_attrs.flags_mut().unset(CellFlags::DIM);
             }
             Attribute::NoItalic => new_attrs.flags_mut().unset(CellFlags::ITALIC),
-            Attribute::NoUnderline => new_attrs.flags_mut().unset(CellFlags::UNDERLINE),
+            Attribute::NoUnderline => {
+                new_attrs.flags_mut().unset(CellFlags::UNDERLINE);
+                new_attrs.flags_mut().unset(CellFlags::DOUBLE_UNDERLINE);
+            }
             Attribute::NoBlink => new_attrs.flags_mut().unset(CellFlags::BLINK),
             Attribute::NoReverse => new_attrs.flags_mut().unset(CellFlags::REVERSE),
             Attribute::NoHidden => new_attrs.flags_mut().unset(CellFlags::HIDDEN),
             Attribute::NoStrikethrough => new_attrs.flags_mut().unset(CellFlags::STRIKETHROUGH),
+            Attribute::NoOverline => new_attrs.flags_mut().unset(CellFlags::OVERLINE),
 
             Attribute::ForegroundColor(color) => {
                 new_attrs.set_fg(convert_color(color));

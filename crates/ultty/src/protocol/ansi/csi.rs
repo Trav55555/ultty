@@ -139,8 +139,8 @@ impl AnsiParser {
             b'S' => callback(Action::ScrollUp(p1.max(1))),
             b'T' => callback(Action::ScrollDown(p1.max(1))),
             b'r' => callback(Action::SetScrollingRegion {
-                top: p1,
-                bottom: p2,
+                top: self.params.first().copied().unwrap_or(0),
+                bottom: self.params.get(1).copied().unwrap_or(0),
             }),
 
             // Cursor save/restore
@@ -206,6 +206,21 @@ impl AnsiParser {
                 for &param in &self.params {
                     if let Some(action) = self.private_mode_reset(param) {
                         callback(action);
+                    }
+                }
+            }
+            // ANSI SM/RM (non-private mode set/reset)
+            b'h' if !self.is_private => {
+                for &param in &self.params {
+                    if param == 4 {
+                        callback(Action::SetInsertMode(true));
+                    }
+                }
+            }
+            b'l' if !self.is_private => {
+                for &param in &self.params {
+                    if param == 4 {
+                        callback(Action::SetInsertMode(false));
                     }
                 }
             }

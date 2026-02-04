@@ -192,6 +192,8 @@ pub struct Grid {
     /// Auto-wrap mode (DECAWM) — when false, characters at the right margin
     /// overwrite the last column instead of wrapping to the next line.
     auto_wrap: bool,
+    /// Insert/Replace mode (IRM) — when true, characters insert rather than overwrite
+    insert_mode: bool,
     /// Last printed character (for REP — CSI b)
     last_char: char,
 }
@@ -214,6 +216,7 @@ impl Grid {
             combining: std::collections::HashMap::new(),
             tab_stops,
             auto_wrap: true,
+            insert_mode: false,
             last_char: ' ',
         }
     }
@@ -255,6 +258,11 @@ impl Grid {
     /// Set auto-wrap mode (DECAWM).
     pub fn set_auto_wrap(&mut self, enabled: bool) {
         self.auto_wrap = enabled;
+    }
+
+    /// Set insert/replace mode (IRM).
+    pub fn set_insert_mode(&mut self, enabled: bool) {
+        self.insert_mode = enabled;
     }
 
     /// Get auto-wrap mode (DECAWM).
@@ -453,6 +461,28 @@ impl Grid {
         // Clear any combining characters from previous content
         self.clear_combining(row, col);
 
+        // Insert mode (IRM): shift existing cells right before writing
+        if self.insert_mode {
+            let bg = attrs.bg();
+            if let Some(r) = self.row_mut(row) {
+                r.insert_cells(col, width, bg);
+            }
+        }
+
+        // Clean up orphaned wide-char parts before overwriting
+        let is_wide = self.cell(col, row).is_some_and(|c| c.is_wide());
+        let is_spacer = self.cell(col, row).is_some_and(|c| c.is_wide_spacer());
+        if is_wide && col + 1 < self.dims.cols {
+            if let Some(spacer) = self.cell_mut(col + 1, row) {
+                spacer.clear();
+            }
+        }
+        if is_spacer && col > 0 {
+            if let Some(primary) = self.cell_mut(col - 1, row) {
+                primary.clear();
+            }
+        }
+
         // Write the character
         if let Some(cell) = self.cell_mut(col, row) {
             cell.set_char(c);
@@ -643,6 +673,9 @@ impl Grid {
     /// Pass (1, rows) to reset to full screen.
     pub fn set_scroll_region(&mut self, top: u16, bottom: u16) {
         self.cursor.wrap_pending = false;
+        // 0 means "default": top defaults to 1, bottom defaults to screen height
+        let top = if top == 0 { 1 } else { top };
+        let bottom = if bottom == 0 { self.dims.rows } else { bottom };
         // Convert from 1-based to 0-based
         let top = top.saturating_sub(1);
         let bottom = bottom.saturating_sub(1).min(self.dims.rows.saturating_sub(1));
@@ -657,9 +690,8 @@ impl Grid {
             self.scroll_region = Some(ScrollRegion::new(top, bottom));
         }
 
-        // Move cursor to home position (top-left of scroll region if origin mode)
-        // For now, just move to absolute top-left
-        self.cursor.position.row = top;
+        // DECSTBM homes cursor to absolute (0,0)
+        self.cursor.position.row = 0;
         self.cursor.position.col = 0;
     }
 
@@ -1932,5 +1964,86 @@ mod tests {
         assert!(grid.cell(1, 1).unwrap().is_wide_spacer());
         // Row 2: 'B'
         assert_eq!(grid.cell(0, 2).unwrap().char(), 'B');
+    }
+
+    #[test]
+    fn decstbm_default_bottom_uses_screen_height() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        // CSI 5 r — top=5, bottom=0 (default = screen height)
+        grid.set_scroll_region(5, 0);
+        let region = grid.scroll_region().unwrap();
+        assert_eq!(region.top, 4); // 5-1 = 4 (0-based)
+        assert_eq!(region.bottom, 23); // 24-1 = 23 (0-based)
+    }
+
+    #[test]
+    fn decstbm_bare_resets_to_full_screen() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        // First set a region
+        grid.set_scroll_region(5, 10);
+        assert!(grid.scroll_region().is_some());
+        // CSI r — top=0, bottom=0 (defaults to full screen)
+        grid.set_scroll_region(0, 0);
+        assert!(grid.scroll_region().is_none());
+        // Cursor should be at home (0,0)
+        assert_eq!(grid.cursor().position.row, 0);
+        assert_eq!(grid.cursor().position.col, 0);
+    }
+
+    #[test]
+    fn decstbm_homes_cursor_to_origin() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        grid.set_cursor_position(10, 20);
+        grid.set_scroll_region(5, 15);
+        // Cursor should be at absolute (0, 0) when DECOM is off
+        assert_eq!(grid.cursor().position.row, 0);
+        assert_eq!(grid.cursor().position.col, 0);
+    }
+
+    #[test]
+    fn write_char_clears_orphaned_wide_spacer() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        // Write a wide char at col 0
+        grid.write_char('中');
+        assert!(grid.cell(0, 0).unwrap().is_wide());
+        assert!(grid.cell(1, 0).unwrap().is_wide_spacer());
+        // Overwrite the wide char with a narrow char (1-based: row=1, col=1)
+        grid.set_cursor_position(1, 1);
+        grid.write_char('A');
+        assert_eq!(grid.cell(0, 0).unwrap().char(), 'A');
+        assert!(!grid.cell(0, 0).unwrap().is_wide());
+        // The spacer at col 1 should be cleared
+        assert!(!grid.cell(1, 0).unwrap().is_wide_spacer());
+    }
+
+    #[test]
+    fn write_char_clears_orphaned_wide_primary() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        // Write a wide char at col 0
+        grid.write_char('中');
+        // Overwrite the spacer (col 1) with a narrow char (1-based: row=1, col=2)
+        grid.set_cursor_position(1, 2);
+        grid.write_char('B');
+        assert_eq!(grid.cell(1, 0).unwrap().char(), 'B');
+        assert!(!grid.cell(1, 0).unwrap().is_wide_spacer());
+        // The primary at col 0 should have WIDE_CHAR cleared
+        assert!(!grid.cell(0, 0).unwrap().is_wide());
+    }
+
+    #[test]
+    fn insert_mode_shifts_cells_right() {
+        let mut grid = Grid::new(Dimensions::new(10, 1));
+        grid.write_char('A');
+        grid.write_char('B');
+        grid.write_char('C');
+        // Move cursor to col 1 (1-based: row=1, col=2) and enable insert mode
+        grid.set_cursor_position(1, 2);
+        grid.set_insert_mode(true);
+        grid.write_char('X');
+        // Should be A X B C
+        assert_eq!(grid.cell(0, 0).unwrap().char(), 'A');
+        assert_eq!(grid.cell(1, 0).unwrap().char(), 'X');
+        assert_eq!(grid.cell(2, 0).unwrap().char(), 'B');
+        assert_eq!(grid.cell(3, 0).unwrap().char(), 'C');
     }
 }

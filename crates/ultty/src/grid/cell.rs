@@ -21,6 +21,8 @@ impl CellFlags {
     pub const HYPERLINK: CellFlags = CellFlags(1 << 10);
     /// Cell has combining characters stored in the grid's combining map
     pub const HAS_COMBINING: CellFlags = CellFlags(1 << 11);
+    pub const DOUBLE_UNDERLINE: CellFlags = CellFlags(1 << 12);
+    pub const OVERLINE: CellFlags = CellFlags(1 << 13);
 
     #[inline]
     pub fn contains(self, other: CellFlags) -> bool {

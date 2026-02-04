@@ -73,6 +73,9 @@ pub enum Action {
     /// Repeat last printed character N times (CSI b)
     RepeatLastChar(u16),
 
+    /// Set/reset insert mode (IRM) — CSI 4 h / CSI 4 l
+    SetInsertMode(bool),
+
     // === Erase Operations ===
     /// Erase in display (CSI J)
     /// 0 = cursor to end, 1 = start to cursor, 2 = entire, 3 = entire + scrollback
@@ -272,6 +275,9 @@ pub enum Attribute {
     // Background colors
     BackgroundColor(Color),
 
+    DoubleUnderline,
+    Overline,
+
     // Disable specific attributes
     NoBold,
     NoItalic,
@@ -280,6 +286,7 @@ pub enum Attribute {
     NoReverse,
     NoHidden,
     NoStrikethrough,
+    NoOverline,
 }
 
 /// Color values for text attributes.

@@ -127,7 +127,8 @@ impl Row {
     }
 
     /// Insert blank cells at position, shifting existing cells right.
-    pub fn insert_cells(&mut self, at: u16, count: u16) {
+    /// Blank cells are filled with the given background color per ECMA-48.
+    pub fn insert_cells(&mut self, at: u16, count: u16, bg: super::cell::Color) {
         let at = at as usize;
         let count = count as usize;
         let len = self.cells.len();
@@ -154,16 +155,17 @@ impl Row {
             self.cells.copy_within(at..src_end, at + count);
         }
 
-        // Clear the inserted cells
+        // Fill inserted cells with background color
         for i in at..(at + count).min(len) {
-            self.cells[i].clear();
+            self.cells[i].erase(bg);
         }
 
         self.dirty = true;
     }
 
     /// Delete cells at position, shifting remaining cells left.
-    pub fn delete_cells(&mut self, at: u16, count: u16) {
+    /// Vacated cells at the end are filled with the given background color per ECMA-48.
+    pub fn delete_cells(&mut self, at: u16, count: u16, bg: super::cell::Color) {
         let at = at as usize;
         let count = count as usize;
         let len = self.cells.len();
@@ -189,9 +191,9 @@ impl Row {
             self.cells.copy_within(src_start..len, at);
         }
 
-        // Clear the cells at the end
+        // Fill vacated cells at end with background color
         for i in len.saturating_sub(count)..len {
-            self.cells[i].clear();
+            self.cells[i].erase(bg);
         }
 
         self.dirty = true;
@@ -292,7 +294,7 @@ mod tests {
         row[1].set_char('B');
         row[2].set_char('C');
 
-        row.insert_cells(1, 2);
+        row.insert_cells(1, 2, crate::grid::cell::Color::Default);
 
         assert_eq!(row[0].char(), 'A');
         assert_eq!(row[1].char(), ' ');
@@ -309,7 +311,7 @@ mod tests {
         row[2].set_char('C');
         row[3].set_char('D');
 
-        row.delete_cells(1, 2);
+        row.delete_cells(1, 2, crate::grid::cell::Color::Default);
 
         assert_eq!(row[0].char(), 'A');
         assert_eq!(row[1].char(), 'D');

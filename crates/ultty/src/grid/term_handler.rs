@@ -91,6 +91,10 @@ impl<'a> TerminalHandler<'a> {
             Action::RepeatLastChar(n) => {
                 self.terminal.grid_mut().repeat_last_char(n);
             }
+            Action::SetInsertMode(enabled) => {
+                self.terminal.grid_mut().set_insert_mode(enabled);
+                self.terminal.modes_mut().insert_mode = enabled;
+            }
 
             // Erase operations
             Action::EraseInDisplay(mode) => match mode {
@@ -144,15 +148,17 @@ impl<'a> TerminalHandler<'a> {
             Action::DeleteCharacters(n) => {
                 let row_idx = self.terminal.grid().cursor().position.row;
                 let col = self.terminal.grid().cursor().position.col;
+                let bg = self.terminal.grid().attrs().bg();
                 if let Some(row) = self.terminal.grid_mut().row_mut(row_idx) {
-                    row.delete_cells(col, n);
+                    row.delete_cells(col, n, bg);
                 }
             }
             Action::InsertCharacters(n) => {
                 let row_idx = self.terminal.grid().cursor().position.row;
                 let col = self.terminal.grid().cursor().position.col;
+                let bg = self.terminal.grid().attrs().bg();
                 if let Some(row) = self.terminal.grid_mut().row_mut(row_idx) {
-                    row.insert_cells(col, n);
+                    row.insert_cells(col, n, bg);
                 }
             }
 
@@ -209,6 +215,11 @@ impl<'a> TerminalHandler<'a> {
             }
             Action::SetScrollingRegion { top, bottom } => {
                 self.terminal.grid_mut().set_scroll_region(top, bottom);
+                // When origin mode is active, home to top of scroll region
+                if self.terminal.modes().origin_mode {
+                    let region = self.terminal.grid().effective_scroll_region();
+                    self.terminal.grid_mut().cursor_mut().position.row = region.top;
+                }
             }
 
             // Cursor save/restore
@@ -435,6 +446,11 @@ impl<'a> TerminalHandler<'a> {
             Attribute::Reverse => new_attrs.flags_mut().set(CellFlags::REVERSE),
             Attribute::Hidden => new_attrs.flags_mut().set(CellFlags::HIDDEN),
             Attribute::Strikethrough => new_attrs.flags_mut().set(CellFlags::STRIKETHROUGH),
+            Attribute::DoubleUnderline => {
+                new_attrs.flags_mut().set(CellFlags::DOUBLE_UNDERLINE);
+                new_attrs.flags_mut().set(CellFlags::UNDERLINE);
+            }
+            Attribute::Overline => new_attrs.flags_mut().set(CellFlags::OVERLINE),
 
             Attribute::NoBold => {
                 // SGR 22: reset both BOLD and DIM per ECMA-48
@@ -442,11 +458,15 @@ impl<'a> TerminalHandler<'a> {
                 new_attrs.flags_mut().unset(CellFlags::DIM);
             }
             Attribute::NoItalic => new_attrs.flags_mut().unset(CellFlags::ITALIC),
-            Attribute::NoUnderline => new_attrs.flags_mut().unset(CellFlags::UNDERLINE),
+            Attribute::NoUnderline => {
+                new_attrs.flags_mut().unset(CellFlags::UNDERLINE);
+                new_attrs.flags_mut().unset(CellFlags::DOUBLE_UNDERLINE);
+            }
             Attribute::NoBlink => new_attrs.flags_mut().unset(CellFlags::BLINK),
             Attribute::NoReverse => new_attrs.flags_mut().unset(CellFlags::REVERSE),
             Attribute::NoHidden => new_attrs.flags_mut().unset(CellFlags::HIDDEN),
             Attribute::NoStrikethrough => new_attrs.flags_mut().unset(CellFlags::STRIKETHROUGH),
+            Attribute::NoOverline => new_attrs.flags_mut().unset(CellFlags::OVERLINE),
 
             Attribute::ForegroundColor(color) => {
                 new_attrs.set_fg(convert_color(color));

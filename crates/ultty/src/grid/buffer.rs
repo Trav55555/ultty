@@ -485,6 +485,7 @@ impl Buffer {
 
     /// Newline - scroll to history if at bottom.
     pub fn newline(&mut self) {
+        self.grid.cursor_mut().wrap_pending = false;
         let cursor_row = self.grid.cursor().position.row;
         let scroll_bottom = self
             .grid

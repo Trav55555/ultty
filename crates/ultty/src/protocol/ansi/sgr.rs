@@ -27,6 +27,7 @@ impl AnsiParser {
                 7 => callback(Action::SetAttribute(Attribute::Reverse)),
                 8 => callback(Action::SetAttribute(Attribute::Hidden)),
                 9 => callback(Action::SetAttribute(Attribute::Strikethrough)),
+                21 => callback(Action::SetAttribute(Attribute::DoubleUnderline)),
                 22 => callback(Action::SetAttribute(Attribute::NoBold)),
                 23 => callback(Action::SetAttribute(Attribute::NoItalic)),
                 24 => callback(Action::SetAttribute(Attribute::NoUnderline)),
@@ -34,6 +35,8 @@ impl AnsiParser {
                 27 => callback(Action::SetAttribute(Attribute::NoReverse)),
                 28 => callback(Action::SetAttribute(Attribute::NoHidden)),
                 29 => callback(Action::SetAttribute(Attribute::NoStrikethrough)),
+                53 => callback(Action::SetAttribute(Attribute::Overline)),
+                55 => callback(Action::SetAttribute(Attribute::NoOverline)),
 
                 // Foreground colors
                 30..=37 => {

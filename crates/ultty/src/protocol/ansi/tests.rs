@@ -1056,3 +1056,59 @@ fn request_private_mode() {
         vec![Action::RequestPrivateMode(2026)]
     );
 }
+
+// ---------------------------------------------------------------
+// DECSTBM default params
+// ---------------------------------------------------------------
+
+#[test]
+fn decstbm_default_params() {
+    // CSI r with no params sends 0, 0 as sentinels
+    assert_eq!(
+        parse(b"\x1b[r"),
+        vec![Action::SetScrollingRegion { top: 0, bottom: 0 }]
+    );
+}
+
+#[test]
+fn decstbm_one_param() {
+    // CSI 5 r — top=5, bottom=0 (default)
+    assert_eq!(
+        parse(b"\x1b[5r"),
+        vec![Action::SetScrollingRegion { top: 5, bottom: 0 }]
+    );
+}
+
+// ---------------------------------------------------------------
+// Insert mode (IRM) — CSI 4 h / CSI 4 l
+// ---------------------------------------------------------------
+
+#[test]
+fn insert_mode_set_reset() {
+    assert_eq!(parse(b"\x1b[4h"), vec![Action::SetInsertMode(true)]);
+    assert_eq!(parse(b"\x1b[4l"), vec![Action::SetInsertMode(false)]);
+}
+
+// ---------------------------------------------------------------
+// SGR double underline, overline
+// ---------------------------------------------------------------
+
+#[test]
+fn sgr_double_underline() {
+    assert_eq!(
+        parse(b"\x1b[21m"),
+        vec![Action::SetAttribute(Attribute::DoubleUnderline)]
+    );
+}
+
+#[test]
+fn sgr_overline() {
+    assert_eq!(
+        parse(b"\x1b[53m"),
+        vec![Action::SetAttribute(Attribute::Overline)]
+    );
+    assert_eq!(
+        parse(b"\x1b[55m"),
+        vec![Action::SetAttribute(Attribute::NoOverline)]
+    );
+}
