@@ -351,14 +351,9 @@ impl<'a> TerminalHandler<'a> {
                     1 => if modes.application_cursor_keys { 1 } else { 2 },
                     7 => if modes.auto_wrap { 1 } else { 2 },
                     25 => if self.terminal.grid().cursor().visible { 1 } else { 2 },
-                    1000 | 1002 | 1003 => {
-                        let active = matches!(modes.mouse_mode,
-                            crate::grid::terminal::MouseMode::Normal |
-                            crate::grid::terminal::MouseMode::ButtonEvent |
-                            crate::grid::terminal::MouseMode::AnyEvent
-                        );
-                        if active { 1 } else { 2 }
-                    }
+                    1000 => if modes.mouse_mode == crate::grid::terminal::MouseMode::Normal { 1 } else { 2 },
+                    1002 => if modes.mouse_mode == crate::grid::terminal::MouseMode::ButtonEvent { 1 } else { 2 },
+                    1003 => if modes.mouse_mode == crate::grid::terminal::MouseMode::AnyEvent { 1 } else { 2 },
                     1004 => if modes.focus_reporting { 1 } else { 2 },
                     1006 => if matches!(modes.mouse_encoding, crate::grid::terminal::MouseEncoding::Sgr) { 1 } else { 2 },
                     2004 => if modes.bracketed_paste { 1 } else { 2 },
@@ -391,7 +386,11 @@ impl<'a> TerminalHandler<'a> {
             Attribute::Hidden => new_attrs.flags_mut().set(CellFlags::HIDDEN),
             Attribute::Strikethrough => new_attrs.flags_mut().set(CellFlags::STRIKETHROUGH),
 
-            Attribute::NoBold => new_attrs.flags_mut().unset(CellFlags::BOLD),
+            Attribute::NoBold => {
+                // SGR 22: reset both BOLD and DIM per ECMA-48
+                new_attrs.flags_mut().unset(CellFlags::BOLD);
+                new_attrs.flags_mut().unset(CellFlags::DIM);
+            }
             Attribute::NoItalic => new_attrs.flags_mut().unset(CellFlags::ITALIC),
             Attribute::NoUnderline => new_attrs.flags_mut().unset(CellFlags::UNDERLINE),
             Attribute::NoBlink => new_attrs.flags_mut().unset(CellFlags::BLINK),

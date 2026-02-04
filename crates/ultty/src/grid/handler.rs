@@ -65,8 +65,10 @@ impl<'a> Handler<'a> {
             Action::EraseCharacters(n) => {
                 let col = self.grid.cursor().position.col;
                 let row = self.grid.cursor().position.row;
-                for i in 0..n {
-                    if let Some(cell) = self.grid.cell_mut(col + i, row) {
+                let cols = self.grid.dimensions().cols;
+                let end = col.saturating_add(n).min(cols);
+                for c in col..end {
+                    if let Some(cell) = self.grid.cell_mut(c, row) {
                         cell.clear();
                     }
                 }
@@ -202,7 +204,11 @@ impl<'a> Handler<'a> {
             Attribute::Hidden => new_attrs.flags_mut().set(CellFlags::HIDDEN),
             Attribute::Strikethrough => new_attrs.flags_mut().set(CellFlags::STRIKETHROUGH),
 
-            Attribute::NoBold => new_attrs.flags_mut().unset(CellFlags::BOLD),
+            Attribute::NoBold => {
+                // SGR 22: reset both BOLD and DIM per ECMA-48
+                new_attrs.flags_mut().unset(CellFlags::BOLD);
+                new_attrs.flags_mut().unset(CellFlags::DIM);
+            }
             Attribute::NoItalic => new_attrs.flags_mut().unset(CellFlags::ITALIC),
             Attribute::NoUnderline => new_attrs.flags_mut().unset(CellFlags::UNDERLINE),
             Attribute::NoBlink => new_attrs.flags_mut().unset(CellFlags::BLINK),

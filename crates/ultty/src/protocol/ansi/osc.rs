@@ -3,6 +3,9 @@
 use super::{Action, State};
 use super::AnsiParser;
 
+/// Maximum size for OSC/DCS string buffers to prevent unbounded memory growth.
+const MAX_STRING_BUFFER: usize = 65536;
+
 impl AnsiParser {
     /// OSC string state - accumulating OSC content.
     pub(super) fn osc_string<F>(&mut self, byte: u8, callback: &mut F)
@@ -19,8 +22,16 @@ impl AnsiParser {
                 self.dispatch_osc(callback);
                 self.reset();
             }
+            // CAN/SUB abort the sequence
+            0x18 | 0x1A => {
+                self.reset();
+            }
             _ => {
-                self.osc_buffer.push(byte);
+                if self.osc_buffer.len() < MAX_STRING_BUFFER {
+                    self.osc_buffer.push(byte);
+                } else {
+                    self.reset();
+                }
             }
         }
     }
@@ -211,7 +222,11 @@ impl AnsiParser {
             }
             _ => {
                 // Accumulate DCS content
-                self.dcs_buffer.push(byte);
+                if self.dcs_buffer.len() < MAX_STRING_BUFFER {
+                    self.dcs_buffer.push(byte);
+                } else {
+                    self.reset();
+                }
             }
         }
     }

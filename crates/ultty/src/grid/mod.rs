@@ -140,6 +140,12 @@ pub struct ScrollRegion {
 
 impl ScrollRegion {
     pub fn new(top: u16, bottom: u16) -> Self {
+        // Ensure top <= bottom to prevent underflow in region_height calculations
+        let (top, bottom) = if top <= bottom {
+            (top, bottom)
+        } else {
+            (bottom, top)
+        };
         Self { top, bottom }
     }
 
@@ -587,7 +593,7 @@ impl Grid {
     pub fn scroll_up(&mut self, n: u16) {
         let region = self.effective_scroll_region();
         let n = n as usize;
-        let region_height = (region.bottom - region.top + 1) as usize;
+        let region_height = (region.bottom.saturating_sub(region.top) + 1) as usize;
 
         // Clear combining chars for the entire scroll region
         self.clear_combining_rows(region.top, region.bottom);
@@ -625,7 +631,7 @@ impl Grid {
     pub fn scroll_down(&mut self, n: u16) {
         let region = self.effective_scroll_region();
         let n = n as usize;
-        let region_height = (region.bottom - region.top + 1) as usize;
+        let region_height = (region.bottom.saturating_sub(region.top) + 1) as usize;
 
         // Clear combining chars for the entire scroll region
         self.clear_combining_rows(region.top, region.bottom);
@@ -674,7 +680,7 @@ impl Grid {
         self.clear_combining_rows(cursor_row, region.bottom);
 
         let n = n as usize;
-        let region_height = (region.bottom - cursor_row + 1) as usize;
+        let region_height = (region.bottom.saturating_sub(cursor_row) + 1) as usize;
 
         if n >= region_height {
             // Clear from cursor to bottom of region
@@ -727,7 +733,7 @@ impl Grid {
         self.clear_combining_rows(cursor_row, region.bottom);
 
         let n = n as usize;
-        let region_height = (region.bottom - cursor_row + 1) as usize;
+        let region_height = (region.bottom.saturating_sub(cursor_row) + 1) as usize;
 
         if n >= region_height {
             // Clear from cursor to bottom of region

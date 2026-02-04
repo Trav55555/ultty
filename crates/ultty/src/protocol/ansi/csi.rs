@@ -188,13 +188,17 @@ impl AnsiParser {
 
             // Mode set/reset
             b'h' if self.is_private => {
-                if let Some(action) = self.private_mode_set(p1) {
-                    callback(action);
+                for &param in &self.params {
+                    if let Some(action) = self.private_mode_set(param) {
+                        callback(action);
+                    }
                 }
             }
             b'l' if self.is_private => {
-                if let Some(action) = self.private_mode_reset(p1) {
-                    callback(action);
+                for &param in &self.params {
+                    if let Some(action) = self.private_mode_reset(param) {
+                        callback(action);
+                    }
                 }
             }
 
@@ -852,12 +856,36 @@ mod tests {
 
     #[test]
     fn csi_private_semicolon_no_preceding_digit() {
-        // CSI ? ; 25 h - first param defaults to 0
-        // With empty first param, p1 = 0, which is unknown mode -> no action
-        // Then second param 25 isn't processed for mode set (only p1 is checked)
+        // CSI ? ; 25 h - first param defaults to 0, second param is 25 (show cursor)
+        // p1 = 0 doesn't match any mode, but p2 = 25 enables cursor visibility
         let actions = parse(b"\x1b[?;25h");
-        // p1 = 0, which doesn't match any mode
-        assert!(actions.is_empty());
+        assert_eq!(actions, vec![Action::SetMode(Mode::CursorVisible)]);
+    }
+
+    #[test]
+    fn csi_private_mode_set_multiple_params() {
+        // CSI ? 1049 ; 2004 h - enable alternate screen + bracketed paste
+        let actions = parse(b"\x1b[?1049;2004h");
+        assert_eq!(
+            actions,
+            vec![
+                Action::SetMode(Mode::AlternateScreenSaveCursor),
+                Action::SetMode(Mode::BracketedPaste),
+            ]
+        );
+    }
+
+    #[test]
+    fn csi_private_mode_reset_multiple_params() {
+        // CSI ? 1049 ; 2004 l - disable alternate screen + bracketed paste
+        let actions = parse(b"\x1b[?1049;2004l");
+        assert_eq!(
+            actions,
+            vec![
+                Action::ResetMode(Mode::AlternateScreenSaveCursor),
+                Action::ResetMode(Mode::BracketedPaste),
+            ]
+        );
     }
 
     #[test]
