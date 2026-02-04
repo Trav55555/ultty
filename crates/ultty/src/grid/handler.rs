@@ -42,8 +42,10 @@ impl<'a> Handler<'a> {
                 self.grid.carriage_return();
             }
             Action::CursorHorizontalAbsolute(col) => {
-                let row = self.grid.cursor().position.row + 1; // 1-based
-                self.grid.set_cursor_position(row, col);
+                // CSI G — move to absolute column, leave row unchanged
+                let max_col = self.grid.dimensions().cols.saturating_sub(1);
+                self.grid.cursor_mut().position.col = col.saturating_sub(1).min(max_col);
+                self.grid.cursor_mut().wrap_pending = false;
             }
             Action::CursorPosition { row, col } => {
                 self.grid.set_cursor_position(row, col);
@@ -77,9 +79,11 @@ impl<'a> Handler<'a> {
             // Line operations
             Action::InsertLines(n) => {
                 self.grid.insert_lines(n);
+                self.grid.carriage_return();
             }
             Action::DeleteLines(n) => {
                 self.grid.delete_lines(n);
+                self.grid.carriage_return();
             }
             Action::DeleteCharacters(n) => {
                 let row_idx = self.grid.cursor().position.row;
@@ -437,5 +441,50 @@ mod tests {
         let cell = grid.cell(0, 0).unwrap();
         assert_eq!(cell.char(), ' ');
         assert_eq!(cell.bg(), Color::Rgb(64, 73, 74));
+    }
+
+    #[test]
+    fn cha_sets_column_only() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        // Move to row 5, col 10
+        process(&mut grid, b"\x1b[5;10H");
+        assert_eq!(grid.cursor().position.row, 4);
+        assert_eq!(grid.cursor().position.col, 9);
+
+        // CHA (CSI 20 G) — set column to 20, row stays at 4
+        process(&mut grid, b"\x1b[20G");
+        assert_eq!(grid.cursor().position.row, 4); // unchanged
+        assert_eq!(grid.cursor().position.col, 19); // 0-indexed
+    }
+
+    #[test]
+    fn cha_clamps_to_grid_width() {
+        let mut grid = Grid::new(Dimensions::new(10, 5));
+        // CHA to column 999 — should clamp to col 9 (0-indexed)
+        process(&mut grid, b"\x1b[999G");
+        assert_eq!(grid.cursor().position.col, 9);
+    }
+
+    #[test]
+    fn insert_lines_resets_column() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        // Move to row 5, col 10
+        process(&mut grid, b"\x1b[5;10H");
+        assert_eq!(grid.cursor().position.col, 9);
+
+        // Insert 1 line — column should reset to 0
+        process(&mut grid, b"\x1b[L");
+        assert_eq!(grid.cursor().position.col, 0);
+    }
+
+    #[test]
+    fn delete_lines_resets_column() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        process(&mut grid, b"\x1b[5;10H");
+        assert_eq!(grid.cursor().position.col, 9);
+
+        // Delete 1 line — column should reset to 0
+        process(&mut grid, b"\x1b[M");
+        assert_eq!(grid.cursor().position.col, 0);
     }
 }

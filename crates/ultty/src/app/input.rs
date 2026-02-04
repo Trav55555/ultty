@@ -918,16 +918,27 @@ impl App {
                 _ => None,
             },
             Key::Character(c) => {
+                let ch = c.chars().next().unwrap_or('\0');
                 // Handle Ctrl+key combinations
-                if self.modifiers.control_key() && !self.modifiers.shift_key() {
-                    let ch = c.chars().next().unwrap_or('\0');
-                    if ch.is_ascii_lowercase() {
-                        let ctrl_char = (ch as u8 - b'a' + 1) as char;
-                        if let Err(e) = self.send_input(&[ctrl_char as u8]) {
-                            tracing::warn!("Failed to send input: {}", e);
-                        }
-                        return;
+                if self.modifiers.control_key() && !self.modifiers.shift_key()
+                    && ch.is_ascii_alphabetic()
+                {
+                    let ctrl_char = (ch.to_ascii_lowercase() as u8 - b'a' + 1) as char;
+                    if let Err(e) = self.send_input(&[ctrl_char as u8]) {
+                        tracing::warn!("Failed to send input: {}", e);
                     }
+                    return;
+                }
+                // Handle Alt+key combinations (ESC prefix)
+                if self.modifiers.alt_key() {
+                    let mut buf = [0u8; 5]; // ESC + up to 4 UTF-8 bytes
+                    buf[0] = 0x1b;
+                    let encoded = ch.encode_utf8(&mut buf[1..]);
+                    let len = 1 + encoded.len();
+                    if let Err(e) = self.send_input(&buf[..len]) {
+                        tracing::warn!("Failed to send input: {}", e);
+                    }
+                    return;
                 }
                 None
             }

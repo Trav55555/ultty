@@ -83,7 +83,8 @@ impl AnsiParser {
                 // Format: clipboard;base64data
                 "52" => {
                     if let Some(semi_pos) = data.find(';') {
-                        let clipboard = data.chars().next().unwrap_or('c');
+                        // Format: Pc;base64data where Pc is clipboard name (c, p, s, 0, etc.)
+                        let clipboard = data[..semi_pos].chars().next().unwrap_or('c');
                         let b64data = &data[semi_pos + 1..];
                         // Decode base64
                         if let Ok(decoded) = base64_decode(b64data) {

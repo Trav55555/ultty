@@ -717,6 +717,7 @@ impl Grid {
     /// Insert n blank lines at the cursor position (IL).
     /// Content from cursor row to bottom of scroll region shifts down.
     pub fn insert_lines(&mut self, n: u16) {
+        self.cursor.wrap_pending = false;
         let region = self.effective_scroll_region();
         let cursor_row = self.cursor.position.row;
 
@@ -770,6 +771,7 @@ impl Grid {
     /// Delete n lines at the cursor position (DL).
     /// Content below cursor shifts up, blank lines appear at bottom of scroll region.
     pub fn delete_lines(&mut self, n: u16) {
+        self.cursor.wrap_pending = false;
         let region = self.effective_scroll_region();
         let cursor_row = self.cursor.position.row;
 

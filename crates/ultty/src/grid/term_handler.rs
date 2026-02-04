@@ -49,8 +49,10 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.grid_mut().carriage_return();
             }
             Action::CursorHorizontalAbsolute(col) => {
-                let row = self.terminal.grid().cursor().position.row + 1;
-                self.terminal.grid_mut().set_cursor_position(row, col);
+                // CSI G — move to absolute column, leave row unchanged
+                let max_col = self.terminal.grid().dimensions().cols.saturating_sub(1);
+                self.terminal.grid_mut().cursor_mut().position.col = col.saturating_sub(1).min(max_col);
+                self.terminal.grid_mut().cursor_mut().wrap_pending = false;
             }
             Action::CursorPosition { row, col } => {
                 // When origin mode (DECOM) is enabled, cursor positions are relative
@@ -956,5 +958,40 @@ mod tests {
         assert_eq!(cell.char(), '▀');
         assert_eq!(cell.fg(), Color::Rgb(122, 132, 120));
         assert_eq!(cell.bg(), Color::Rgb(64, 73, 74));
+    }
+
+    #[test]
+    fn cha_moves_column_only() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+        // Move to row 10, col 5
+        process(&mut term, b"\x1b[10;5H");
+        assert_eq!(term.grid().cursor().position.row, 9);
+        assert_eq!(term.grid().cursor().position.col, 4);
+
+        // CHA to column 30 — row should stay at 9
+        process(&mut term, b"\x1b[30G");
+        assert_eq!(term.grid().cursor().position.row, 9);
+        assert_eq!(term.grid().cursor().position.col, 29);
+    }
+
+    #[test]
+    fn cha_clamps_to_grid_width() {
+        let mut term = Terminal::new(Dimensions::new(10, 5));
+        // CHA to column 999 — should clamp to rightmost column
+        process(&mut term, b"\x1b[999G");
+        assert_eq!(term.grid().cursor().position.col, 9);
+    }
+
+    #[test]
+    fn cha_clears_wrap_pending() {
+        let mut term = Terminal::new(Dimensions::new(5, 3));
+        // Fill row to trigger wrap_pending
+        process(&mut term, b"ABCDE");
+        assert!(term.grid().cursor().wrap_pending);
+
+        // CHA should clear wrap_pending
+        process(&mut term, b"\x1b[1G");
+        assert!(!term.grid().cursor().wrap_pending);
+        assert_eq!(term.grid().cursor().position.col, 0);
     }
 }
