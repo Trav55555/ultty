@@ -431,7 +431,7 @@ impl PaletteConfig {
             cyan: RgbColor::new(0x83, 0xC0, 0x92),    // aqua
             white: RgbColor::new(0xE8, 0xDC, 0xC4),   // fg (brightened)
             // Bright colors
-            bright_black: RgbColor::new(0x7A, 0x84, 0x78), // bg4 (brightened)
+            bright_black: RgbColor::new(0x9D, 0xA9, 0xA0), // grey1 (5.1:1 contrast)
             bright_red: RgbColor::new(0xE6, 0x7E, 0x80),   // red
             bright_green: RgbColor::new(0xA7, 0xC0, 0x80), // green
             bright_yellow: RgbColor::new(0xE6, 0x98, 0x75), // orange
