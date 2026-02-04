@@ -107,6 +107,8 @@ pub struct App {
     url_hyperlink_grid: Vec<Vec<u32>>,
     /// Reusable buffer for URL detection hyperlink map
     url_hyperlink_map: std::collections::HashMap<u32, String>,
+    /// Accumulated pixel scroll delta for smooth scrolling on Wayland/HiDPI
+    scroll_pixel_accum: f64,
 }
 
 impl App {
@@ -234,6 +236,7 @@ impl App {
             url_row_buf: Vec::new(),
             url_hyperlink_grid: Vec::new(),
             url_hyperlink_map: std::collections::HashMap::new(),
+            scroll_pixel_accum: 0.0,
         })
     }
 

@@ -529,10 +529,19 @@ impl App {
         // winit scroll delta: positive y = scroll UP (wheel rolled away from user)
         // This should reveal content ABOVE (scroll up in terminal terms)
         let lines = match delta {
-            MouseScrollDelta::LineDelta(_, y) => y as i32,
+            MouseScrollDelta::LineDelta(_, y) => {
+                self.scroll_pixel_accum = 0.0;
+                y as i32
+            }
             MouseScrollDelta::PixelDelta(pos) => {
+                // Accumulate pixel deltas to avoid dropping small scroll events
+                // (common on Wayland/HiDPI where each event is a few pixels)
+                self.scroll_pixel_accum += pos.y;
                 let (_, cell_height) = self.renderer.cell_dimensions();
-                (pos.y / cell_height as f64).round() as i32
+                let cell_h = cell_height as f64;
+                let lines = (self.scroll_pixel_accum / cell_h).trunc() as i32;
+                self.scroll_pixel_accum -= lines as f64 * cell_h;
+                lines
             }
         };
 
