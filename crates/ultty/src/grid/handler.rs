@@ -59,6 +59,12 @@ impl<'a> Handler<'a> {
             Action::CursorBackwardTab(n) => {
                 self.grid.backward_tab(n);
             }
+            Action::CursorForwardTab(n) => {
+                self.grid.forward_tab(n);
+            }
+            Action::RepeatLastChar(n) => {
+                self.grid.repeat_last_char(n);
+            }
 
             // Erase operations
             Action::EraseInDisplay(mode) => match mode {
@@ -79,6 +85,20 @@ impl<'a> Handler<'a> {
                 let cols = self.grid.dimensions().cols;
                 let bg = self.grid.attrs().bg();
                 let end = col.saturating_add(n).min(cols);
+
+                // Check for orphaned wide char at the start boundary
+                if col > 0 && self.grid.cell(col, row).is_some_and(|c| c.is_wide_spacer()) {
+                    if let Some(primary) = self.grid.cell_mut(col - 1, row) {
+                        primary.erase(bg);
+                    }
+                }
+                // Check for orphaned wide char spacer at the end boundary
+                if end < cols && self.grid.cell(end, row).is_some_and(|c| c.is_wide_spacer()) {
+                    if let Some(spacer) = self.grid.cell_mut(end, row) {
+                        spacer.erase(bg);
+                    }
+                }
+
                 for c in col..end {
                     if let Some(cell) = self.grid.cell_mut(c, row) {
                         cell.erase(bg);

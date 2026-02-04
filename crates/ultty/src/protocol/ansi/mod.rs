@@ -67,6 +67,12 @@ pub enum Action {
     /// Move cursor N tab stops backward (CSI Z)
     CursorBackwardTab(u16),
 
+    /// Move cursor N tab stops forward (CSI I)
+    CursorForwardTab(u16),
+
+    /// Repeat last printed character N times (CSI b)
+    RepeatLastChar(u16),
+
     // === Erase Operations ===
     /// Erase in display (CSI J)
     /// 0 = cursor to end, 1 = start to cursor, 2 = entire, 3 = entire + scrollback

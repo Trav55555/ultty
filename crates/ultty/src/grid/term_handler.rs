@@ -85,6 +85,12 @@ impl<'a> TerminalHandler<'a> {
             Action::CursorBackwardTab(n) => {
                 self.terminal.grid_mut().backward_tab(n);
             }
+            Action::CursorForwardTab(n) => {
+                self.terminal.grid_mut().forward_tab(n);
+            }
+            Action::RepeatLastChar(n) => {
+                self.terminal.grid_mut().repeat_last_char(n);
+            }
 
             // Erase operations
             Action::EraseInDisplay(mode) => match mode {
@@ -105,6 +111,20 @@ impl<'a> TerminalHandler<'a> {
                 let cols = self.terminal.grid().dimensions().cols;
                 let bg = self.terminal.grid().attrs().bg();
                 let end = col.saturating_add(n).min(cols);
+
+                // Check for orphaned wide char at the start boundary
+                if col > 0 && self.terminal.grid().cell(col, row).is_some_and(|c| c.is_wide_spacer()) {
+                    if let Some(primary) = self.terminal.grid_mut().cell_mut(col - 1, row) {
+                        primary.erase(bg);
+                    }
+                }
+                // Check for orphaned wide char spacer at the end boundary
+                if end < cols && self.terminal.grid().cell(end, row).is_some_and(|c| c.is_wide_spacer()) {
+                    if let Some(spacer) = self.terminal.grid_mut().cell_mut(end, row) {
+                        spacer.erase(bg);
+                    }
+                }
+
                 for c in col..end {
                     if let Some(cell) = self.terminal.grid_mut().cell_mut(c, row) {
                         cell.erase(bg);

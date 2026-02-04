@@ -192,6 +192,8 @@ pub struct Grid {
     /// Auto-wrap mode (DECAWM) — when false, characters at the right margin
     /// overwrite the last column instead of wrapping to the next line.
     auto_wrap: bool,
+    /// Last printed character (for REP — CSI b)
+    last_char: char,
 }
 
 impl Grid {
@@ -212,6 +214,7 @@ impl Grid {
             combining: std::collections::HashMap::new(),
             tab_stops,
             auto_wrap: true,
+            last_char: ' ',
         }
     }
 
@@ -475,6 +478,9 @@ impl Grid {
             }
         }
 
+        // Track last printed char for REP (CSI b)
+        self.last_char = c;
+
         // Advance cursor by character width
         self.cursor.position.col += width;
 
@@ -580,6 +586,21 @@ impl Grid {
         }
     }
 
+    /// Repeat the last printed character N times (REP — CSI b).
+    pub fn repeat_last_char(&mut self, n: u16) {
+        let c = self.last_char;
+        for _ in 0..n {
+            self.write_char(c);
+        }
+    }
+
+    /// Move cursor forward N tab stops (CHT — CSI I).
+    pub fn forward_tab(&mut self, n: u16) {
+        for _ in 0..n {
+            self.tab();
+        }
+    }
+
     /// Move cursor backward N tab stops (CBT — CSI Z).
     pub fn backward_tab(&mut self, n: u16) {
         self.cursor.wrap_pending = false;
@@ -656,6 +677,7 @@ impl Grid {
     /// Scroll the grid up by n lines (within scroll region).
     pub fn scroll_up(&mut self, n: u16) {
         let region = self.effective_scroll_region();
+        let bg = self.attrs.bg();
         let n = n as usize;
         let region_height = (region.bottom.saturating_sub(region.top) + 1) as usize;
 
@@ -666,7 +688,7 @@ impl Grid {
             // Clear the entire scroll region
             for row_idx in region.top..=region.bottom {
                 if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                    row.clear();
+                    row.erase(bg);
                 }
                 self.mark_dirty(row_idx);
             }
@@ -679,10 +701,12 @@ impl Grid {
             self.rows[row_idx] = self.rows[src_row].clone();
         }
 
-        // Clear the bottom n rows of the region
+        // Erase the bottom n rows of the region with current bg
         for i in 0..n {
             let row_idx = region.bottom as usize - i;
-            self.rows[row_idx] = Row::new(self.dims.cols);
+            let mut row = Row::new(self.dims.cols);
+            row.erase(bg);
+            self.rows[row_idx] = row;
         }
 
         // Mark affected rows dirty
@@ -694,6 +718,7 @@ impl Grid {
     /// Scroll the grid down by n lines (within scroll region).
     pub fn scroll_down(&mut self, n: u16) {
         let region = self.effective_scroll_region();
+        let bg = self.attrs.bg();
         let n = n as usize;
         let region_height = (region.bottom.saturating_sub(region.top) + 1) as usize;
 
@@ -704,7 +729,7 @@ impl Grid {
             // Clear the entire scroll region
             for row_idx in region.top..=region.bottom {
                 if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                    row.clear();
+                    row.erase(bg);
                 }
                 self.mark_dirty(row_idx);
             }
@@ -717,10 +742,12 @@ impl Grid {
             self.rows[row_idx] = self.rows[src_row].clone();
         }
 
-        // Clear the top n rows of the region
+        // Erase the top n rows of the region with current bg
         for i in 0..n {
             let row_idx = region.top as usize + i;
-            self.rows[row_idx] = Row::new(self.dims.cols);
+            let mut row = Row::new(self.dims.cols);
+            row.erase(bg);
+            self.rows[row_idx] = row;
         }
 
         // Mark affected rows dirty
@@ -734,6 +761,7 @@ impl Grid {
     pub fn insert_lines(&mut self, n: u16) {
         self.cursor.wrap_pending = false;
         let region = self.effective_scroll_region();
+        let bg = self.attrs.bg();
         let cursor_row = self.cursor.position.row;
 
         // Only operate if cursor is within scroll region
@@ -751,7 +779,7 @@ impl Grid {
             // Clear from cursor to bottom of region
             for row_idx in cursor_row..=region.bottom {
                 if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                    row.clear();
+                    row.erase(bg);
                 }
                 self.mark_dirty(row_idx);
             }
@@ -769,11 +797,13 @@ impl Grid {
             }
         }
 
-        // Clear the n rows at cursor position
+        // Erase the n rows at cursor position with current bg
         for i in 0..n {
             let row_idx = cursor_row as usize + i;
             if row_idx <= region.bottom as usize {
-                self.rows[row_idx] = Row::new(self.dims.cols);
+                let mut row = Row::new(self.dims.cols);
+                row.erase(bg);
+                self.rows[row_idx] = row;
             }
         }
 
@@ -788,6 +818,7 @@ impl Grid {
     pub fn delete_lines(&mut self, n: u16) {
         self.cursor.wrap_pending = false;
         let region = self.effective_scroll_region();
+        let bg = self.attrs.bg();
         let cursor_row = self.cursor.position.row;
 
         // Only operate if cursor is within scroll region
@@ -805,7 +836,7 @@ impl Grid {
             // Clear from cursor to bottom of region
             for row_idx in cursor_row..=region.bottom {
                 if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                    row.clear();
+                    row.erase(bg);
                 }
                 self.mark_dirty(row_idx);
             }
@@ -823,11 +854,13 @@ impl Grid {
             }
         }
 
-        // Clear the bottom n rows of the region
+        // Erase the bottom n rows of the region with current bg
         for i in 0..n {
             let row_idx = region.bottom as usize - i;
             if row_idx >= cursor_row as usize {
-                self.rows[row_idx] = Row::new(self.dims.cols);
+                let mut row = Row::new(self.dims.cols);
+                row.erase(bg);
+                self.rows[row_idx] = row;
             }
         }
 

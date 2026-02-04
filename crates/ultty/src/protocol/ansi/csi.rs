@@ -113,6 +113,12 @@ impl AnsiParser {
             }),
             b'd' => callback(Action::CursorVerticalAbsolute(p1.max(1))),
             b'Z' => callback(Action::CursorBackwardTab(p1.max(1))),
+            b'I' => callback(Action::CursorForwardTab(p1.max(1))),
+            b'b' => callback(Action::RepeatLastChar(p1.max(1))),
+            // HPA — Horizontal Position Absolute (alias for CHA)
+            b'`' => callback(Action::CursorHorizontalAbsolute(p1.max(1))),
+            // HPR — Horizontal Position Relative (alias for CUF)
+            b'a' => callback(Action::CursorForward(p1.max(1))),
 
             // Erase operations (default to 0, not 1)
             b'J' => callback(Action::EraseInDisplay(
