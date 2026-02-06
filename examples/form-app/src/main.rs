@@ -121,27 +121,31 @@ enum Message {
 impl Application for FormApp {
     type Message = Message;
 
-    fn update(&mut self, msg: Message) {
+    fn update(&mut self, msg: Message) -> Cmd<Message> {
         match msg {
             Message::FocusNext => {
                 if self.active_field < self.fields.len() - 1 {
                     self.fields[self.active_field].revalidate();
                     self.active_field += 1;
                 }
+                Cmd::none()
             }
             Message::FocusPrev => {
                 if self.active_field > 0 {
                     self.fields[self.active_field].revalidate();
                     self.active_field -= 1;
                 }
+                Cmd::none()
             }
             Message::AppendChar(c) => {
                 self.fields[self.active_field].value.push(c);
                 self.fields[self.active_field].revalidate();
+                Cmd::none()
             }
             Message::DeleteChar => {
                 self.fields[self.active_field].value.pop();
                 self.fields[self.active_field].revalidate();
+                Cmd::none()
             }
             Message::Submit => {
                 // Validate every field before submitting.
@@ -151,6 +155,7 @@ impl Application for FormApp {
                 if self.all_valid() {
                     self.submitted = true;
                 }
+                Cmd::none()
             }
         }
     }
@@ -196,9 +201,7 @@ impl FormApp {
         let mut col = Column::new().padding(1.0).gap(1.0);
 
         // Title
-        col = col.child(
-            RichText::new().span("Form Demo", Style::new().bold().fg(Color::CYAN)),
-        );
+        col = col.child(RichText::new().span("Form Demo", Style::new().bold().fg(Color::CYAN)));
         col = col.child(Text::new(
             "Fill in the fields below. Tab/Shift+Tab or Up/Down to navigate.",
         ));
@@ -269,12 +272,10 @@ impl FormApp {
 
         // Error message (if any)
         if let Some(ref error) = field.error {
-            col = col.child(
-                RichText::new().span(
-                    format!("     {} {}", "!", error),
-                    Style::new().fg(Color::RED),
-                ),
-            );
+            col = col.child(RichText::new().span(
+                format!("     {} {}", "!", error),
+                Style::new().fg(Color::RED),
+            ));
         }
 
         col
@@ -283,9 +284,8 @@ impl FormApp {
     fn summary_view(&self) -> Column {
         let mut col = Column::new().padding(1.0).gap(1.0);
 
-        col = col.child(
-            RichText::new().span("Form Submitted!", Style::new().bold().fg(Color::GREEN)),
-        );
+        col = col
+            .child(RichText::new().span("Form Submitted!", Style::new().bold().fg(Color::GREEN)));
 
         col = col.child(Text::new("---"));
 

@@ -27,9 +27,7 @@ mod tests {
 
     #[test]
     fn column_with_children() {
-        let col = Column::new()
-            .child(Text::new("a"))
-            .child(Text::new("b"));
+        let col = Column::new().child(Text::new("a")).child(Text::new("b"));
         assert_eq!(<Column as View>::children_count(&col), 2);
     }
 
@@ -112,9 +110,7 @@ mod tests {
 
     #[test]
     fn row_children_count_method() {
-        let row = Row::new()
-            .child(Text::new("a"))
-            .child(Text::new("b"));
+        let row = Row::new().child(Text::new("a")).child(Text::new("b"));
         assert_eq!(row.children_count(), 2);
     }
 

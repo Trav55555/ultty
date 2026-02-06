@@ -720,10 +720,7 @@ mod tests {
         let mut state = VimState::new();
 
         let result = parser.parse_key(&mut state, &Key::Char('u'), Modifiers::NONE);
-        assert!(matches!(
-            result,
-            Some(ParseResult::Action(VimAction::Undo))
-        ));
+        assert!(matches!(result, Some(ParseResult::Action(VimAction::Undo))));
     }
 
     #[test]

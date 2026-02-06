@@ -42,9 +42,7 @@ impl ChatApp {
             s if s.contains("hello") || s.contains("hi") => "Hey there! How can I help?".into(),
             s if s.contains("how are you") => "I'm doing great, thanks for asking!".into(),
             s if s.contains("bye") => "Goodbye! Have a great day!".into(),
-            s if s.contains("help") => {
-                "I can echo your messages and respond to greetings!".into()
-            }
+            s if s.contains("help") => "I can echo your messages and respond to greetings!".into(),
             _ => format!("You said: {}", user_text),
         };
 
@@ -67,12 +65,19 @@ enum Message {
 impl Application for ChatApp {
     type Message = Message;
 
-    fn update(&mut self, msg: Message) {
+    fn update(&mut self, msg: Message) -> Cmd<Message> {
         match msg {
-            Message::Send => self.send_message(),
-            Message::AppendChar(c) => self.input.push(c),
+            Message::Send => {
+                self.send_message();
+                Cmd::none()
+            }
+            Message::AppendChar(c) => {
+                self.input.push(c);
+                Cmd::none()
+            }
             Message::DeleteChar => {
                 self.input.pop();
+                Cmd::none()
             }
         }
     }
@@ -93,9 +98,7 @@ impl Application for ChatApp {
         Column::new()
             .padding(1.0)
             .gap(1.0)
-            .child(
-                RichText::new().span("Chat Demo", Style::new().bold().fg(Color::CYAN)),
-            )
+            .child(RichText::new().span("Chat Demo", Style::new().bold().fg(Color::CYAN)))
             .child(ScrollView::new().child(self.message_list()))
             .child(Text::new(format!("> {}|", self.input)))
             .child(RichText::new().span(
@@ -117,10 +120,10 @@ impl ChatApp {
             } else {
                 Color::BLUE
             };
-            col = col.child(
-                RichText::new()
-                    .span(format!("{}: {}", msg.sender, msg.text), Style::new().fg(color)),
-            );
+            col = col.child(RichText::new().span(
+                format!("{}: {}", msg.sender, msg.text),
+                Style::new().fg(color),
+            ));
         }
         col
     }

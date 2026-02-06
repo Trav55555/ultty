@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ulttui::event::{Event, Key};
 use ulttui::prelude::*;
@@ -71,28 +71,38 @@ enum Message {
     MoveDown,
     SelectFirst,
     SelectLast,
+    Tick,
 }
 
 impl Application for DashboardApp {
     type Message = Message;
 
-    fn update(&mut self, msg: Message) {
+    fn update(&mut self, msg: Message) -> Cmd<Message> {
         match msg {
             Message::MoveUp => {
                 self.selected = self.selected.saturating_sub(1);
+                Cmd::none()
             }
             Message::MoveDown => {
                 if self.selected < ITEMS.len() - 1 {
                     self.selected += 1;
                 }
+                Cmd::none()
             }
             Message::SelectFirst => {
                 self.selected = 0;
+                Cmd::none()
             }
             Message::SelectLast => {
                 self.selected = ITEMS.len() - 1;
+                Cmd::none()
             }
+            Message::Tick => Cmd::none(),
         }
+    }
+
+    fn subscriptions(&self) -> Sub<Message> {
+        Sub::every(Duration::from_secs(1), || Message::Tick)
     }
 
     fn on_event(&mut self, event: &Event) -> Option<Message> {
@@ -127,12 +137,11 @@ impl Application for DashboardApp {
         Column::new()
             .child(
                 // Header
-                Row::new()
-                    .child(Text::new(format!(
-                        " Dashboard | {} | {} items",
-                        self.elapsed_display(),
-                        ITEMS.len()
-                    ))),
+                Row::new().child(Text::new(format!(
+                    " Dashboard | {} | {} items",
+                    self.elapsed_display(),
+                    ITEMS.len()
+                ))),
             )
             .child(
                 // Main content: navigation + detail
@@ -152,7 +161,7 @@ impl Application for DashboardApp {
             )
             .child(
                 // Footer
-                Text::new(" j/k: navigate | g/G: first/last | Ctrl+C: quit"),
+                Text::new(" j/k: navigate | g/G: first/last | Ctrl+C: quit | timer: 1s"),
             )
     }
 }

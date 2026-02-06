@@ -155,11 +155,8 @@ impl View for Column {
         let total_gap = self.gap * (self.children.len().saturating_sub(1)) as u16;
         let available = inner.height.saturating_sub(total_gap);
 
-        let constraints: Vec<Constraint> = self
-            .children
-            .iter()
-            .map(|_| Constraint::Min(1))
-            .collect();
+        let constraints: Vec<Constraint> =
+            self.children.iter().map(|_| Constraint::Min(1)).collect();
 
         let no_gap_area = Rect::new(inner.x, inner.y, inner.width, available);
         let chunks = Layout::default()

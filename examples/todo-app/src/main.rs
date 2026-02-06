@@ -58,22 +58,25 @@ enum Message {
 impl Application for TodoApp {
     type Message = Message;
 
-    fn update(&mut self, msg: Message) {
+    fn update(&mut self, msg: Message) -> Cmd<Message> {
         match msg {
             Message::MoveUp => {
                 if self.selected > 0 {
                     self.selected -= 1;
                 }
+                Cmd::none()
             }
             Message::MoveDown => {
                 if self.selected < self.items.len().saturating_sub(1) {
                     self.selected += 1;
                 }
+                Cmd::none()
             }
             Message::Toggle => {
                 if let Some(item) = self.items.get_mut(self.selected) {
                     item.completed = !item.completed;
                 }
+                Cmd::none()
             }
         }
     }

@@ -24,20 +24,23 @@ enum Message {
 impl Application for CounterApp {
     type Message = Message;
 
-    fn update(&mut self, msg: Message) {
+    fn update(&mut self, msg: Message) -> Cmd<Message> {
         match msg {
             Message::Increment => {
                 self.count += 1;
                 self.history.push(self.count);
+                Cmd::none()
             }
             Message::Decrement => {
                 self.count -= 1;
                 self.history.push(self.count);
+                Cmd::none()
             }
             Message::Reset => {
                 self.count = 0;
                 self.history.clear();
                 self.history.push(0);
+                Cmd::none()
             }
         }
     }

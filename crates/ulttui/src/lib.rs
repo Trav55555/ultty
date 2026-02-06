@@ -33,18 +33,27 @@
 
 pub mod app;
 pub mod backend;
+pub mod cmd;
 pub mod event;
+pub mod focus;
 pub mod layout;
+pub mod theme;
 pub mod vim;
 pub mod widgets;
 
 /// Prelude for convenient imports.
 pub mod prelude {
     pub use crate::app::{App, Application};
+    pub use crate::cmd::{Cmd, Sub};
     pub use crate::event::Event;
+    pub use crate::focus::FocusManager;
     pub use crate::layout::{Column, Row};
+    pub use crate::theme::Theme;
     pub use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
-    pub use crate::widgets::{Button, List, Modal, ScrollView, Table, Tabs, Text, TextInput, View};
+    pub use crate::widgets::{
+        Badge, BadgeVariant, Button, Divider, List, Modal, ProgressBar, ScrollView, Spinner, Table,
+        Tabs, Text, TextInput, View,
+    };
 
     // Re-export protocol types
     pub use ultty_protocol::{Color, Constraints, Dimension, Style};

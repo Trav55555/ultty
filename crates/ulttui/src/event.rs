@@ -9,6 +9,12 @@ pub enum Event {
     Key(KeyEvent),
     /// Mouse event.
     Mouse(MouseEvent),
+    /// A widget was clicked/activated (Enter on focused Button).
+    Click { id: String },
+    /// A widget's value changed (text change in TextInput, checkbox toggle, etc.).
+    Change { id: String, value: String },
+    /// A widget submitted (Enter in TextInput).
+    Submit { id: String },
     /// Terminal resized.
     Resize { width: u16, height: u16 },
     /// Focus gained.
@@ -116,6 +122,43 @@ mod tests {
         };
         let e = Event::Mouse(mouse_event);
         assert!(matches!(e, Event::Mouse(_)));
+    }
+
+    #[test]
+    fn event_click() {
+        let e = Event::Click {
+            id: "btn".to_string(),
+        };
+        match e {
+            Event::Click { id } => assert_eq!(id, "btn"),
+            _ => panic!("Expected Click event"),
+        }
+    }
+
+    #[test]
+    fn event_change() {
+        let e = Event::Change {
+            id: "input".to_string(),
+            value: "hello".to_string(),
+        };
+        match e {
+            Event::Change { id, value } => {
+                assert_eq!(id, "input");
+                assert_eq!(value, "hello");
+            }
+            _ => panic!("Expected Change event"),
+        }
+    }
+
+    #[test]
+    fn event_submit() {
+        let e = Event::Submit {
+            id: "input".to_string(),
+        };
+        match e {
+            Event::Submit { id } => assert_eq!(id, "input"),
+            _ => panic!("Expected Submit event"),
+        }
     }
 
     #[test]
