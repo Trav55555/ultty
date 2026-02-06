@@ -47,10 +47,15 @@ impl Application for CounterApp {
 
     fn on_event(&mut self, event: &Event) -> Option<Message> {
         match event {
-            Event::Key(key_event) => match key_event.key {
-                Key::Char('+') | Key::Char('=') => Some(Message::Increment),
-                Key::Char('-') | Key::Char('_') => Some(Message::Decrement),
-                Key::Char('r') => Some(Message::Reset),
+            Event::Key(ke) => match (&ke.key, ke.focused_id.as_deref()) {
+                // Semantic: Enter on focused button triggers its action
+                (Key::Enter, Some("dec")) => Some(Message::Decrement),
+                (Key::Enter, Some("inc")) => Some(Message::Increment),
+                (Key::Enter, Some("reset")) => Some(Message::Reset),
+                // Keyboard shortcuts still work regardless of focus
+                (Key::Char('+') | Key::Char('='), _) => Some(Message::Increment),
+                (Key::Char('-') | Key::Char('_'), _) => Some(Message::Decrement),
+                (Key::Char('r'), _) => Some(Message::Reset),
                 _ => None,
             },
             _ => None,
@@ -74,9 +79,9 @@ impl Application for CounterApp {
             .child(
                 Row::new()
                     .gap(1.0)
-                    .child(Button::new("-"))
-                    .child(Button::new("+"))
-                    .child(Button::new("Reset")),
+                    .child(Button::new("-").id("dec"))
+                    .child(Button::new("+").id("inc"))
+                    .child(Button::new("Reset").id("reset")),
             )
             .child(
                 Column::new()
@@ -91,7 +96,9 @@ impl Application for CounterApp {
                             .join(" <- "),
                     )),
             )
-            .child(Text::new("Keys: +/- to change, r to reset, Ctrl+C to quit"))
+            .child(Text::new(
+                "Tab to focus buttons, Enter to activate, +/- keys, r to reset",
+            ))
     }
 }
 
