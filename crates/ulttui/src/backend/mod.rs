@@ -2,6 +2,8 @@
 
 mod ansi;
 mod detect;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod mock;
 mod native;
 
 use crate::event::Event;
@@ -13,6 +15,9 @@ pub enum Backend {
     Native(native::NativeBackend),
     /// ANSI fallback (any terminal).
     Ansi(ansi::AnsiBackend),
+    /// Mock backend (tests only).
+    #[cfg(any(test, feature = "test-utils"))]
+    Mock(mock::MockBackend),
 }
 
 impl Backend {
@@ -30,6 +35,8 @@ impl Backend {
         match self {
             Backend::Native(b) => b.init(),
             Backend::Ansi(b) => b.init(),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(b) => b.init(),
         }
     }
 
@@ -38,6 +45,8 @@ impl Backend {
         match self {
             Backend::Native(b) => b.shutdown(),
             Backend::Ansi(b) => b.shutdown(),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(b) => b.shutdown(),
         }
     }
 
@@ -46,6 +55,8 @@ impl Backend {
         match self {
             Backend::Native(b) => b.render(view),
             Backend::Ansi(b) => b.render(view),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(b) => b.render(view),
         }
     }
 
@@ -54,6 +65,8 @@ impl Backend {
         match self {
             Backend::Native(b) => b.poll_event(),
             Backend::Ansi(b) => b.poll_event(),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(b) => b.poll_event(),
         }
     }
 }
