@@ -133,6 +133,40 @@ impl Theme {
             },
         }
     }
+
+    pub fn high_contrast() -> Self {
+        Theme {
+            primary: Color::Rgb(255, 255, 0),
+            background: Color::Rgb(0, 0, 0),
+            foreground: Color::Rgb(255, 255, 255),
+            muted: Color::Rgb(200, 200, 200),
+            error: Color::Rgb(255, 64, 64),
+            success: Color::Rgb(64, 255, 64),
+            warning: Color::Rgb(255, 200, 0),
+            button: ButtonTheme {
+                fg: Color::Rgb(255, 255, 255),
+                bg: Color::Rgb(0, 0, 0),
+                focused_fg: Color::Rgb(0, 0, 0),
+                focused_bg: Color::Rgb(255, 255, 0),
+            },
+            input: InputTheme {
+                fg: Color::Rgb(255, 255, 255),
+                bg: Color::Rgb(0, 0, 0),
+                placeholder_fg: Color::Rgb(200, 200, 200),
+                cursor_fg: Color::Rgb(255, 255, 0),
+                focused_border: Color::Rgb(255, 255, 0),
+            },
+            control: ControlTheme {
+                fg: Color::Rgb(255, 255, 255),
+                active_fg: Color::Rgb(64, 255, 64),
+                indicator: Color::Rgb(255, 255, 0),
+            },
+            selection: SelectionTheme {
+                fg: Color::Rgb(0, 0, 0),
+                bg: Color::Rgb(0, 255, 255),
+            },
+        }
+    }
 }
 
 thread_local! {
@@ -192,6 +226,7 @@ pub fn to_ratatui_color(c: Color) -> ratatui::style::Color {
 #[cfg(test)]
 mod tests {
     use super::Theme;
+    use ultty_protocol::Color;
 
     #[test]
     fn dark_theme_has_distinct_colors() {
@@ -207,6 +242,22 @@ mod tests {
         assert_ne!(theme.primary, theme.background);
         assert_ne!(theme.background, theme.foreground);
         assert_ne!(theme.primary, theme.foreground);
+    }
+
+    #[test]
+    fn high_contrast_theme_has_distinct_colors() {
+        let theme = Theme::high_contrast();
+        assert_ne!(theme.primary, theme.background);
+        assert_ne!(theme.background, theme.foreground);
+        assert_ne!(theme.selection.bg, theme.selection.fg);
+    }
+
+    #[test]
+    fn high_contrast_theme_uses_black_background() {
+        let theme = Theme::high_contrast();
+        assert_eq!(theme.background, Color::Rgb(0, 0, 0));
+        assert_eq!(theme.foreground, Color::Rgb(255, 255, 255));
+        assert_eq!(theme.button.focused_bg, theme.primary);
     }
 
     #[test]

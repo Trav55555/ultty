@@ -47,10 +47,13 @@ impl View for Button {
 
     fn style(&self) -> ProtoStyle {
         let theme = Theme::current();
-        ProtoStyle::new()
-            .fg(theme.button.fg)
-            .bg(theme.button.bg)
-            .bold()
+        let is_focused = super::register_and_check_focus(self.widget_id());
+        let (fg, bg) = if is_focused {
+            (theme.button.focused_fg, theme.button.focused_bg)
+        } else {
+            (theme.button.fg, theme.button.bg)
+        };
+        ProtoStyle::new().fg(fg).bg(bg).bold()
     }
 
     fn content(&self) -> ultty_protocol::Content {
@@ -214,6 +217,25 @@ mod tests {
             .map(|id| FocusManager::with_current(|fm| fm.is_focused(id)))
             .unwrap_or(false);
         assert!(is_focused);
+
+        FocusManager::set_current(old);
+    }
+
+    #[test]
+    fn focused_button_style_uses_focused_colors() {
+        use crate::focus::FocusManager;
+
+        let old = FocusManager::set_current(FocusManager::new());
+        FocusManager::with_current_mut(|fm| {
+            fm.register("btn".to_string());
+            fm.focus("btn");
+        });
+
+        let btn = Button::new("OK").id("btn");
+        let style = <Button as View>::style(&btn);
+        let theme = crate::theme::Theme::dark();
+        assert_eq!(style.fg, Some(theme.button.focused_fg));
+        assert_eq!(style.bg, Some(theme.button.focused_bg));
 
         FocusManager::set_current(old);
     }

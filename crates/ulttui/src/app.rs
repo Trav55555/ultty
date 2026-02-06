@@ -49,6 +49,7 @@ pub struct App<A: Application> {
     app: A,
     backend: Backend,
     focus: FocusManager,
+    focus_initialized: bool,
     theme: Theme,
     subscriptions: Vec<SubState<A::Message>>,
     spawn_handles: Vec<tokio::task::JoinHandle<A::Message>>,
@@ -68,6 +69,7 @@ impl<A: Application> App<A> {
             app,
             backend: Backend::detect(),
             focus: FocusManager::new(),
+            focus_initialized: false,
             theme: Theme::dark(),
             subscriptions: Vec::new(),
             spawn_handles: Vec::new(),
@@ -100,6 +102,13 @@ impl<A: Application> App<A> {
             self.focus = FocusManager::set_current(old_fm);
             self.theme = Theme::replace_current(old_theme);
             render_result?;
+
+            if !self.focus_initialized {
+                if self.focus.focused_id().is_none() {
+                    self.focus.focus_next();
+                }
+                self.focus_initialized = self.focus.focused_id().is_some();
+            }
 
             self.process_subscriptions(&rt);
 
@@ -266,6 +275,7 @@ impl<A: Application> App<A> {
             app,
             backend,
             focus: FocusManager::new(),
+            focus_initialized: false,
             theme: Theme::dark(),
             subscriptions: Vec::new(),
             spawn_handles: Vec::new(),

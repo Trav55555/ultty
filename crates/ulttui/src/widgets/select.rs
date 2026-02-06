@@ -77,7 +77,20 @@ impl View for Select {
         Select::widget_id(self)
     }
 
+    fn style(&self) -> ultty_protocol::Style {
+        let theme = Theme::current();
+        let is_focused = super::register_and_check_focus(self.widget_id());
+        let fg = if is_focused {
+            theme.control.indicator
+        } else {
+            theme.control.fg
+        };
+        ultty_protocol::Style::new().fg(fg)
+    }
+
     fn content(&self) -> ultty_protocol::Content {
+        let is_focused = super::register_and_check_focus(self.widget_id());
+        let focus_prefix = if is_focused { ">> " } else { "" };
         let text = if self.expanded {
             let mut lines = Vec::new();
             for (i, option) in self.options.iter().enumerate() {
@@ -88,7 +101,7 @@ impl View for Select {
             lines.join("\n")
         } else {
             let selected_text = self.selected_value();
-            format!("\u{25bc} {}", selected_text)
+            format!("{}\u{25bc} {}", focus_prefix, selected_text)
         };
 
         ultty_protocol::Content::Text(ultty_protocol::TextContent {
@@ -106,13 +119,13 @@ impl View for Select {
     fn on_key(&mut self, key: &KeyEvent) -> Option<FocusAction> {
         if self.expanded {
             match &key.key {
-                Key::Up => {
+                Key::Up | Key::Char('k') => {
                     if self.cursor > 0 {
                         self.cursor -= 1;
                     }
                     Some(FocusAction::Consumed)
                 }
-                Key::Down => {
+                Key::Down | Key::Char('j') => {
                     if self.cursor + 1 < self.options.len() {
                         self.cursor += 1;
                     }
@@ -136,6 +149,7 @@ impl View for Select {
                     self.cursor = self.selected;
                     Some(FocusAction::Consumed)
                 }
+                Key::Tab if key.modifiers.shift => Some(FocusAction::Previous),
                 Key::Tab => Some(FocusAction::Next),
                 _ => None,
             }
@@ -193,6 +207,7 @@ impl View for Select {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::focus::FocusManager;
 
     fn sample_options() -> Vec<String> {
         vec!["Red".to_string(), "Green".to_string(), "Blue".to_string()]
@@ -346,6 +361,21 @@ mod tests {
     }
 
     #[test]
+    fn shift_tab_moves_focus_previous_when_collapsed() {
+        let mut s = Select::new(sample_options());
+        let key = KeyEvent {
+            key: Key::Tab,
+            modifiers: crate::event::Modifiers {
+                shift: true,
+                ..crate::event::Modifiers::default()
+            },
+            focused_id: None,
+        };
+        let result = s.on_key(&key);
+        assert!(matches!(result, Some(FocusAction::Previous)));
+    }
+
+    #[test]
     fn expanded_content_shows_all_options() {
         let mut s = Select::new(sample_options());
         let enter = KeyEvent {
@@ -364,5 +394,55 @@ mod tests {
             }
             _ => panic!("Expected Text content"),
         }
+    }
+
+    #[test]
+    fn expanded_j_k_navigation_matches_arrows() {
+        let mut s = Select::new(sample_options());
+        let enter = KeyEvent {
+            key: Key::Enter,
+            modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
+        };
+        s.on_key(&enter);
+
+        let j = KeyEvent {
+            key: Key::Char('j'),
+            modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
+        };
+        let k = KeyEvent {
+            key: Key::Char('k'),
+            modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
+        };
+
+        s.on_key(&j);
+        s.on_key(&enter);
+        assert_eq!(s.selected_index(), 1);
+
+        s.on_key(&enter);
+        s.on_key(&k);
+        s.on_key(&enter);
+        assert_eq!(s.selected_index(), 0);
+    }
+
+    #[test]
+    fn focused_select_collapsed_content_has_focus_prefix() {
+        let old = FocusManager::set_current(FocusManager::new());
+        FocusManager::with_current_mut(|fm| {
+            fm.register("color".to_string());
+            fm.focus("color");
+        });
+
+        let s = Select::new(sample_options()).id("color");
+        match s.content() {
+            ultty_protocol::Content::Text(tc) => {
+                assert!(tc.text.starts_with(">> "));
+            }
+            _ => panic!("Expected Text content"),
+        }
+
+        FocusManager::set_current(old);
     }
 }

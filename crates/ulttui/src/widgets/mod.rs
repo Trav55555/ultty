@@ -12,6 +12,7 @@ mod progress;
 mod scroll;
 mod select;
 mod spinner;
+mod state;
 mod table;
 mod tabs;
 mod text;
@@ -29,14 +30,25 @@ pub use progress::ProgressBar;
 pub use scroll::ScrollView;
 pub use select::Select;
 pub use spinner::Spinner;
+pub use state::{EmptyState, ErrorState, LoadingState};
 pub use table::Table;
 pub use tabs::Tabs;
 pub use text::{RichText, Text, TextInput};
 pub use toggle::Toggle;
 
 use crate::event::{Event, KeyEvent};
+use crate::focus::FocusManager;
 use ratatui::layout::Rect;
 use ratatui::Frame;
+
+pub(crate) fn register_and_check_focus(widget_id: Option<&str>) -> bool {
+    if let Some(id) = widget_id {
+        FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
+        FocusManager::with_current(|fm| fm.is_focused(id))
+    } else {
+        false
+    }
+}
 
 /// Trait for renderable views.
 pub trait View {

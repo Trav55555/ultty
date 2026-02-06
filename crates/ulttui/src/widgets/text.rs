@@ -463,6 +463,16 @@ impl TextInput {
             _ => VimResult::Ignored,
         }
     }
+
+    fn mode_indicator(&self) -> &'static str {
+        match self.vim_state.mode {
+            VimMode::Normal => "[N] ",
+            VimMode::Insert => "[I] ",
+            VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock => "[V] ",
+            VimMode::Command => "[:] ",
+            VimMode::Search => "[/] ",
+        }
+    }
 }
 
 impl View for TextInput {
@@ -471,10 +481,17 @@ impl View for TextInput {
     }
 
     fn content(&self) -> ultty_protocol::Content {
+        let is_focused = super::register_and_check_focus(self.widget_id());
+        let focus_prefix = if is_focused { ">> " } else { "" };
+        let mode_indicator = self.mode_indicator();
         ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(
             ultty_protocol::InputWidget {
-                value: self.value.clone(),
-                placeholder: self.placeholder.clone(),
+                value: if self.value.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}{}{}", focus_prefix, mode_indicator, self.value)
+                },
+                placeholder: format!("{}{}{}", focus_prefix, mode_indicator, self.placeholder),
                 multiline: self.multiline,
                 password: false,
             },
@@ -508,13 +525,7 @@ impl View for TextInput {
             )
         };
 
-        let mode_indicator = match self.vim_state.mode {
-            VimMode::Normal => "[N] ",
-            VimMode::Insert => "[I] ",
-            VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock => "[V] ",
-            VimMode::Command => "[:] ",
-            VimMode::Search => "[/] ",
-        };
+        let mode_indicator = self.mode_indicator();
 
         let mode_span = Span::styled(
             mode_indicator,
@@ -740,6 +751,7 @@ impl VimExt for TextInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::focus::FocusManager;
 
     #[test]
     fn test_cursor_movement() {
@@ -787,6 +799,36 @@ mod tests {
     fn text_input_with_id() {
         let input = TextInput::new().id("name");
         assert_eq!(input.widget_id(), Some("name"));
+    }
+
+    #[test]
+    fn native_content_includes_mode_indicator() {
+        let input = TextInput::new().placeholder("Name");
+        match <TextInput as View>::content(&input) {
+            ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(w)) => {
+                assert!(w.placeholder.starts_with("[N] "));
+            }
+            _ => panic!("Expected input widget content"),
+        }
+    }
+
+    #[test]
+    fn focused_native_content_includes_focus_prefix() {
+        let old = FocusManager::set_current(FocusManager::new());
+        FocusManager::with_current_mut(|fm| {
+            fm.register("name".to_string());
+            fm.focus("name");
+        });
+
+        let input = TextInput::new().id("name").placeholder("Name");
+        match <TextInput as View>::content(&input) {
+            ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(w)) => {
+                assert!(w.placeholder.starts_with(">> [N] "));
+            }
+            _ => panic!("Expected input widget content"),
+        }
+
+        FocusManager::set_current(old);
     }
 
     mod color_conversion {

@@ -59,6 +59,19 @@ impl View for Toggle {
         Toggle::widget_id(self)
     }
 
+    fn style(&self) -> ultty_protocol::Style {
+        let theme = Theme::current();
+        let is_focused = super::register_and_check_focus(self.widget_id());
+        let fg = if is_focused {
+            theme.control.indicator
+        } else if self.on {
+            theme.control.active_fg
+        } else {
+            theme.control.fg
+        };
+        ultty_protocol::Style::new().fg(fg).bold()
+    }
+
     fn content(&self) -> ultty_protocol::Content {
         let prefix = if self.on { "(*) " } else { "( ) " };
         ultty_protocol::Content::Text(ultty_protocol::TextContent {
@@ -79,6 +92,7 @@ impl View for Toggle {
                 self.toggle();
                 Some(FocusAction::Consumed)
             }
+            Key::Tab if key.modifiers.shift => Some(FocusAction::Previous),
             Key::Tab => Some(FocusAction::Next),
             _ => None,
         }
@@ -123,6 +137,7 @@ impl View for Toggle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::focus::FocusManager;
 
     #[test]
     fn new_toggle_is_off() {
@@ -217,5 +232,36 @@ mod tests {
         };
         let result = t.on_key(&key);
         assert!(matches!(result, Some(FocusAction::Next)));
+    }
+
+    #[test]
+    fn shift_tab_moves_focus_previous() {
+        let mut t = Toggle::new("Test");
+        let key = KeyEvent {
+            key: Key::Tab,
+            modifiers: crate::event::Modifiers {
+                shift: true,
+                ..crate::event::Modifiers::default()
+            },
+            focused_id: None,
+        };
+        let result = t.on_key(&key);
+        assert!(matches!(result, Some(FocusAction::Previous)));
+    }
+
+    #[test]
+    fn focused_toggle_style_uses_indicator_color() {
+        let old = FocusManager::set_current(FocusManager::new());
+        FocusManager::with_current_mut(|fm| {
+            fm.register("theme".to_string());
+            fm.focus("theme");
+        });
+
+        let t = Toggle::new("Theme").id("theme");
+        let style = <Toggle as View>::style(&t);
+        let theme = Theme::dark();
+        assert_eq!(style.fg, Some(theme.control.indicator));
+
+        FocusManager::set_current(old);
     }
 }

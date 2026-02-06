@@ -59,6 +59,19 @@ impl View for Checkbox {
         Checkbox::widget_id(self)
     }
 
+    fn style(&self) -> ultty_protocol::Style {
+        let theme = Theme::current();
+        let is_focused = super::register_and_check_focus(self.widget_id());
+        let fg = if is_focused {
+            theme.control.indicator
+        } else if self.checked {
+            theme.control.active_fg
+        } else {
+            theme.control.fg
+        };
+        ultty_protocol::Style::new().fg(fg).bold()
+    }
+
     fn content(&self) -> ultty_protocol::Content {
         let prefix = if self.checked { "[x] " } else { "[ ] " };
         ultty_protocol::Content::Text(ultty_protocol::TextContent {
@@ -79,6 +92,7 @@ impl View for Checkbox {
                 self.toggle();
                 Some(FocusAction::Consumed)
             }
+            Key::Tab if key.modifiers.shift => Some(FocusAction::Previous),
             Key::Tab => Some(FocusAction::Next),
             _ => None,
         }
@@ -123,6 +137,7 @@ impl View for Checkbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::focus::FocusManager;
 
     #[test]
     fn new_checkbox_is_unchecked() {
@@ -217,5 +232,36 @@ mod tests {
         };
         let result = cb.on_key(&key);
         assert!(matches!(result, Some(FocusAction::Next)));
+    }
+
+    #[test]
+    fn shift_tab_moves_focus_previous() {
+        let mut cb = Checkbox::new("Test");
+        let key = KeyEvent {
+            key: Key::Tab,
+            modifiers: crate::event::Modifiers {
+                shift: true,
+                ..crate::event::Modifiers::default()
+            },
+            focused_id: None,
+        };
+        let result = cb.on_key(&key);
+        assert!(matches!(result, Some(FocusAction::Previous)));
+    }
+
+    #[test]
+    fn focused_checkbox_style_uses_indicator_color() {
+        let old = FocusManager::set_current(FocusManager::new());
+        FocusManager::with_current_mut(|fm| {
+            fm.register("terms".to_string());
+            fm.focus("terms");
+        });
+
+        let cb = Checkbox::new("Accept").id("terms");
+        let style = <Checkbox as View>::style(&cb);
+        let theme = Theme::dark();
+        assert_eq!(style.fg, Some(theme.control.indicator));
+
+        FocusManager::set_current(old);
     }
 }

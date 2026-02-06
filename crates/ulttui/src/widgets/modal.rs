@@ -292,16 +292,20 @@ impl View for Modal {
             return None;
         }
         match key.key {
-            Key::Left | Key::Char('h') => {
+            Key::Left | Key::Up | Key::Char('h') => {
                 self.select_prev_button();
                 Some(super::FocusAction::Consumed)
             }
-            Key::Right | Key::Char('l') => {
+            Key::Right | Key::Down | Key::Char('l') => {
                 self.select_next_button();
                 Some(super::FocusAction::Consumed)
             }
             Key::Tab => {
-                self.select_next_button();
+                if key.modifiers.shift {
+                    self.select_prev_button();
+                } else {
+                    self.select_next_button();
+                }
                 Some(super::FocusAction::Consumed)
             }
             Key::Enter => Some(super::FocusAction::Consumed),
@@ -471,6 +475,14 @@ mod tests {
         }
     }
 
+    fn key_with_modifiers(k: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            modifiers,
+            focused_id: None,
+        }
+    }
+
     #[test]
     fn modal_on_key_right_selects_next() {
         let mut modal = Modal::new().buttons(vec!["A", "B", "C"]);
@@ -482,10 +494,28 @@ mod tests {
     }
 
     #[test]
+    fn modal_on_key_down_selects_next() {
+        let mut modal = Modal::new().buttons(vec!["A", "B", "C"]);
+        assert_eq!(modal.selected_button_index(), 0);
+        let result = modal.on_key(&key(Key::Down));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(modal.selected_button_index(), 1);
+    }
+
+    #[test]
     fn modal_on_key_left_selects_prev() {
         let mut modal = Modal::new().buttons(vec!["A", "B", "C"]);
         modal.select_next_button(); // go to 1
         let result = modal.on_key(&key(Key::Left));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(modal.selected_button_index(), 0);
+    }
+
+    #[test]
+    fn modal_on_key_up_selects_prev() {
+        let mut modal = Modal::new().buttons(vec!["A", "B", "C"]);
+        modal.select_next_button(); // go to 1
+        let result = modal.on_key(&key(Key::Up));
         assert!(matches!(result, Some(FocusAction::Consumed)));
         assert_eq!(modal.selected_button_index(), 0);
     }
@@ -513,6 +543,20 @@ mod tests {
         let result = modal.on_key(&key(Key::Tab));
         assert!(matches!(result, Some(FocusAction::Consumed)));
         assert_eq!(modal.selected_button_index(), 1);
+    }
+
+    #[test]
+    fn modal_on_key_shift_tab_selects_previous() {
+        let mut modal = Modal::new().buttons(vec!["A", "B", "C"]);
+        let result = modal.on_key(&key_with_modifiers(
+            Key::Tab,
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        ));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(modal.selected_button_index(), 2);
     }
 
     #[test]
