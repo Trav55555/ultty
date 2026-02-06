@@ -1,12 +1,13 @@
 //! Scroll view widget with vim navigation.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use super::View;
+use crate::theme::{to_ratatui_color, Theme};
 use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
 use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimState};
 use ultty_protocol::{AppMessage, Constraints, OverflowAxis, RegionId};
@@ -241,10 +242,11 @@ impl View for ScrollView {
             "ScrollView".to_string()
         };
 
+        let theme = Theme::current();
         let block = Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .border_style(Style::default().fg(Color::DarkGray));
+            .border_style(Style::default().fg(to_ratatui_color(theme.muted)));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -252,11 +254,7 @@ impl View for ScrollView {
         if let Some(child) = &self.child {
             child.render_ansi(frame, inner);
         } else {
-            let scroll_info = format!(
-                "Scroll: {:.0}/{:.0}",
-                self.scroll_y,
-                max_scroll
-            );
+            let scroll_info = format!("Scroll: {:.0}/{:.0}", self.scroll_y, max_scroll);
             let paragraph = Paragraph::new(Line::raw(scroll_info));
             frame.render_widget(paragraph, inner);
         }
@@ -454,9 +452,7 @@ impl VimExt for ScrollView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{
-        Event, Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind,
-    };
+    use crate::event::{Event, Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
     use crate::widgets::FocusAction;
 
     #[test]

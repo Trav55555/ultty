@@ -1,17 +1,18 @@
 //! List widget with vim navigation.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List as RatatuiList, ListItem};
 use ratatui::Frame;
 
 use super::View;
+use crate::theme::{to_ratatui_color, Theme};
 use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
 use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimState};
 use ultty_protocol::{
-    AppMessage, BorderStyle, Color as ProtoColor, Constraints, Dimension, Display, FlexDirection,
-    NamedColor, RegionId, Style as ProtoStyle, TextContent,
+    AppMessage, BorderStyle, Constraints, Dimension, Display, FlexDirection, RegionId,
+    Style as ProtoStyle, TextContent,
 };
 
 /// A selectable list with vim navigation.
@@ -169,10 +170,11 @@ impl<T: std::fmt::Display> View for List<T> {
         let item = &self.items[actual_idx];
         let text = format!("{}", item);
 
+        let theme = Theme::current();
         let style = if index == self.selected {
             ProtoStyle::new()
-                .fg(ProtoColor::Named(NamedColor::Black))
-                .bg(ProtoColor::Named(NamedColor::White))
+                .fg(theme.selection.fg)
+                .bg(theme.selection.bg)
                 .bold()
         } else {
             ProtoStyle::default()
@@ -203,6 +205,7 @@ impl<T: std::fmt::Display> View for List<T> {
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
+        let theme = Theme::current();
         let items: Vec<ListItem> = self
             .filtered_indices
             .iter()
@@ -212,8 +215,8 @@ impl<T: std::fmt::Display> View for List<T> {
                 let content = format!("{}", item);
                 let style = if display_idx == self.selected {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::White)
+                        .fg(to_ratatui_color(theme.selection.fg))
+                        .bg(to_ratatui_color(theme.selection.bg))
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -237,8 +240,8 @@ impl<T: std::fmt::Display> View for List<T> {
             .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(to_ratatui_color(theme.selection.fg))
+                    .bg(to_ratatui_color(theme.selection.bg))
                     .add_modifier(Modifier::BOLD),
             );
 

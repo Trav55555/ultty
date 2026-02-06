@@ -1,13 +1,14 @@
 //! Image widget for displaying inline images.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use ultty_protocol::{Content, ImageScale, ImageWidget as ProtoImageWidget, WidgetContent};
 
 use super::View;
+use crate::theme::{to_ratatui_color, Theme};
 
 /// Image widget that displays inline RGBA pixel data.
 pub struct Image {
@@ -52,11 +53,12 @@ impl View for Image {
             ImageScale::Stretch => "stretch",
             ImageScale::None => "none",
         };
+        let theme = Theme::current();
         let title = format!("Image {}x{} ({})", self.width, self.height, scale_label);
         let block = Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .border_style(Style::default().fg(Color::DarkGray));
+            .border_style(Style::default().fg(to_ratatui_color(theme.muted)));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -70,7 +72,7 @@ impl View for Image {
                 self.data.len()
             );
             let paragraph = Paragraph::new(Line::from(text))
-                .style(Style::default().fg(Color::DarkGray));
+                .style(Style::default().fg(to_ratatui_color(theme.muted)));
             frame.render_widget(paragraph, inner);
         }
     }

@@ -1,11 +1,12 @@
 //! Table widget with column headers and row data.
 
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::{Constraint, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Cell, Row as RatatuiRow, Table as RatatuiTable};
 use ratatui::Frame;
 
 use super::View;
+use crate::theme::{to_ratatui_color, Theme};
 use ultty_protocol::{
     AppMessage, Color as ProtoColor, Constraints, Dimension, Display, FlexDirection, NamedColor,
     RegionId, Style as ProtoStyle, TextContent,
@@ -19,7 +20,6 @@ pub struct Table {
     selected: usize,
     column_widths: Vec<f32>,
 }
-
 
 impl std::fmt::Debug for Table {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -157,10 +157,11 @@ impl View for Table {
             // Data row
             let row_idx = index - 1;
             let is_selected = row_idx == self.selected;
+            let theme = Theme::current();
             let style = if is_selected {
                 ProtoStyle::new()
-                    .fg(ProtoColor::Named(NamedColor::Black))
-                    .bg(ProtoColor::Named(NamedColor::White))
+                    .fg(theme.selection.fg)
+                    .bg(theme.selection.bg)
                     .bold()
             } else {
                 ProtoStyle::default()
@@ -207,18 +208,8 @@ impl View for Table {
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
-        use ratatui::layout::Constraint;
-
-        let col_count = self.headers.len().max(
-            self.rows
-                .first()
-                .map(|r| r.len())
-                .unwrap_or(0),
-        );
-
-        let widths: Vec<Constraint> = if self.column_widths.is_empty() {
-            vec![Constraint::Ratio(1, col_count.max(1) as u32); col_count]
-        } else {
+        let theme = Theme::current();
+        let widths: Vec<Constraint> = {
             self.column_widths
                 .iter()
                 .map(|&w| Constraint::Min(w as u16))
@@ -231,7 +222,7 @@ impl View for Table {
             .map(|h| {
                 Cell::from(h.as_str()).style(
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(to_ratatui_color(theme.primary))
                         .add_modifier(Modifier::BOLD),
                 )
             })
@@ -246,8 +237,8 @@ impl View for Table {
                 let cells: Vec<Cell> = row.iter().map(|c| Cell::from(c.as_str())).collect();
                 let style = if i == self.selected {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::White)
+                        .fg(to_ratatui_color(theme.selection.fg))
+                        .bg(to_ratatui_color(theme.selection.bg))
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -313,20 +304,16 @@ impl View for Table {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{
-        Event, Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind,
-    };
+    use crate::event::{Event, Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
     use crate::widgets::FocusAction;
 
     #[test]
     fn table_navigation() {
-        let mut table = Table::new()
-            .headers(vec!["Name", "Age"])
-            .rows(vec![
-                vec!["Alice", "30"],
-                vec!["Bob", "25"],
-                vec!["Carol", "35"],
-            ]);
+        let mut table = Table::new().headers(vec!["Name", "Age"]).rows(vec![
+            vec!["Alice", "30"],
+            vec!["Bob", "25"],
+            vec!["Carol", "35"],
+        ]);
 
         assert_eq!(table.selected_index(), 0);
         table.move_selection(1);
@@ -355,15 +342,14 @@ mod tests {
             .headers(vec!["Name"])
             .rows(vec![vec!["Alice"], vec!["Bob"]]);
 
-        assert_eq!(
-            table.selected_row(),
-            Some(&vec!["Alice".to_string()])
-        );
+        assert_eq!(table.selected_row(), Some(&vec!["Alice".to_string()]));
     }
 
     #[test]
     fn table_empty() {
-        let mut table = Table::new().headers(vec!["X"]).rows(Vec::<Vec<String>>::new());
+        let mut table = Table::new()
+            .headers(vec!["X"])
+            .rows(Vec::<Vec<String>>::new());
         table.move_selection(1); // should not panic
         assert_eq!(table.selected_index(), 0);
         assert_eq!(table.selected_row(), None);
@@ -396,15 +382,14 @@ mod tests {
 
     #[test]
     fn table_selected_row_after_move() {
-        let mut table = Table::new()
-            .headers(vec!["Name"])
-            .rows(vec![vec!["Alice"], vec!["Bob"], vec!["Carol"]]);
+        let mut table = Table::new().headers(vec!["Name"]).rows(vec![
+            vec!["Alice"],
+            vec!["Bob"],
+            vec!["Carol"],
+        ]);
 
         table.move_selection(2);
-        assert_eq!(
-            table.selected_row(),
-            Some(&vec!["Carol".to_string()])
-        );
+        assert_eq!(table.selected_row(), Some(&vec!["Carol".to_string()]));
     }
 
     #[test]
@@ -578,36 +563,34 @@ mod tests {
 
     #[test]
     fn table_on_key_tab_focus_next() {
-        let mut table = Table::new()
-            .headers(vec!["X"])
-            .rows(vec![vec!["a"]]);
+        let mut table = Table::new().headers(vec!["X"]).rows(vec![vec!["a"]]);
         let result = table.on_key(&key(Key::Tab));
         assert!(matches!(result, Some(FocusAction::Next)));
     }
 
     #[test]
     fn table_on_key_shift_tab_focus_previous() {
-        let mut table = Table::new()
-            .headers(vec!["X"])
-            .rows(vec![vec!["a"]]);
+        let mut table = Table::new().headers(vec!["X"]).rows(vec![vec!["a"]]);
         let result = table.on_key(&key_with_shift(Key::Tab));
         assert!(matches!(result, Some(FocusAction::Previous)));
     }
 
     #[test]
     fn table_on_key_unhandled_returns_none() {
-        let mut table = Table::new()
-            .headers(vec!["X"])
-            .rows(vec![vec!["a"]]);
+        let mut table = Table::new().headers(vec!["X"]).rows(vec![vec!["a"]]);
         let result = table.on_key(&key(Key::Char('z')));
         assert!(result.is_none());
     }
 
     #[test]
     fn table_on_event_scroll_up() {
-        let mut table = Table::new()
-            .headers(vec!["X"])
-            .rows(vec![vec!["a"], vec!["b"], vec!["c"], vec!["d"], vec!["e"]]);
+        let mut table = Table::new().headers(vec!["X"]).rows(vec![
+            vec!["a"],
+            vec!["b"],
+            vec!["c"],
+            vec!["d"],
+            vec!["e"],
+        ]);
         table.move_selection(4);
         assert_eq!(table.selected_index(), 4);
 
@@ -624,9 +607,13 @@ mod tests {
 
     #[test]
     fn table_on_event_scroll_down() {
-        let mut table = Table::new()
-            .headers(vec!["X"])
-            .rows(vec![vec!["a"], vec!["b"], vec!["c"], vec!["d"], vec!["e"]]);
+        let mut table = Table::new().headers(vec!["X"]).rows(vec![
+            vec!["a"],
+            vec!["b"],
+            vec!["c"],
+            vec!["d"],
+            vec!["e"],
+        ]);
 
         let event = Event::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
@@ -641,9 +628,7 @@ mod tests {
 
     #[test]
     fn table_on_event_non_scroll_ignored() {
-        let mut table = Table::new()
-            .headers(vec!["X"])
-            .rows(vec![vec!["a"]]);
+        let mut table = Table::new().headers(vec!["X"]).rows(vec![vec!["a"]]);
 
         let event = Event::Mouse(MouseEvent {
             kind: MouseEventKind::Moved,
@@ -657,9 +642,7 @@ mod tests {
 
     #[test]
     fn table_on_event_non_mouse_ignored() {
-        let mut table = Table::new()
-            .headers(vec!["X"])
-            .rows(vec![vec!["a"]]);
+        let mut table = Table::new().headers(vec!["X"]).rows(vec![vec!["a"]]);
 
         let handled = table.on_event(&Event::FocusGained);
         assert!(!handled);

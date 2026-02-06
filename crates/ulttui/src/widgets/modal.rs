@@ -1,15 +1,16 @@
 //! Modal/Dialog widget.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::View;
+use crate::theme::{to_ratatui_color, Theme};
 use ultty_protocol::{
-    AppMessage, BorderStyle, Color as ProtoColor, Constraints, Dimension, Display, FlexDirection,
-    NamedColor, RegionId, Style as ProtoStyle, TextContent,
+    AppMessage, BorderStyle, Constraints, Dimension, Display, FlexDirection, RegionId,
+    Style as ProtoStyle, TextContent,
 };
 
 /// A modal dialog overlay.
@@ -124,9 +125,10 @@ impl View for Modal {
     }
 
     fn style(&self) -> ProtoStyle {
+        let theme = Theme::current();
         ProtoStyle::new()
             .border(BorderStyle::rounded())
-            .bg(ProtoColor::Named(NamedColor::Black))
+            .bg(theme.background)
     }
 
     fn children_count(&self) -> usize {
@@ -187,15 +189,14 @@ impl View for Modal {
                 for (i, label) in self.buttons.iter().enumerate() {
                     let btn_id = RegionId::new(*next_id);
                     *next_id += 1;
+                    let theme = Theme::current();
                     let btn_style = if i == self.selected_button {
                         ProtoStyle::new()
-                            .fg(ProtoColor::Named(NamedColor::Black))
-                            .bg(ProtoColor::Named(NamedColor::White))
+                            .fg(theme.button.focused_fg)
+                            .bg(theme.button.focused_bg)
                             .bold()
                     } else {
-                        ProtoStyle::new()
-                            .fg(ProtoColor::Named(NamedColor::White))
-                            .bg(ProtoColor::Named(NamedColor::BrightBlack))
+                        ProtoStyle::new().fg(theme.button.fg).bg(theme.button.bg)
                     };
                     send_message(&AppMessage::CreateRegion {
                         id: btn_id,
@@ -234,17 +235,23 @@ impl View for Modal {
         // Clear the background
         frame.render_widget(Clear, modal_area);
 
+        let theme = Theme::current();
         let block = Block::default()
             .borders(Borders::ALL)
             .title(self.title.as_str())
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(Style::default().fg(to_ratatui_color(theme.primary)));
 
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
 
         // Body text
         if inner.height > 2 {
-            let body_area = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(2));
+            let body_area = Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(2),
+            );
             let body = Paragraph::new(self.body.as_str()).wrap(Wrap { trim: true });
             frame.render_widget(body, body_area);
         }
@@ -257,13 +264,13 @@ impl View for Modal {
                 let text = format!("[ {} ]", label);
                 let style = if i == self.selected_button {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::White)
+                        .fg(to_ratatui_color(theme.button.focused_fg))
+                        .bg(to_ratatui_color(theme.button.focused_bg))
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
-                        .fg(Color::White)
-                        .bg(Color::DarkGray)
+                        .fg(to_ratatui_color(theme.button.fg))
+                        .bg(to_ratatui_color(theme.button.bg))
                 };
                 let btn_width = text.len() as u16;
                 if btn_x + btn_width <= inner.x + inner.width {

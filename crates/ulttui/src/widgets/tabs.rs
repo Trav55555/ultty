@@ -1,15 +1,16 @@
 //! Tabs widget for switching between views.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::View;
+use crate::theme::{to_ratatui_color, Theme};
 use ultty_protocol::{
-    AppMessage, Color as ProtoColor, Constraints, Dimension, Display, FlexDirection, NamedColor,
-    RegionId, Style as ProtoStyle, TextContent,
+    AppMessage, Constraints, Dimension, Display, FlexDirection, RegionId, Style as ProtoStyle,
+    TextContent,
 };
 
 /// A tab bar widget.
@@ -112,14 +113,15 @@ impl View for Tabs {
         let region_id = RegionId::new(*next_id);
         *next_id += 1;
 
+        let theme = Theme::current();
         let is_active = index == self.active;
         let style = if is_active {
             ProtoStyle::new()
-                .fg(ProtoColor::Named(NamedColor::Black))
-                .bg(ProtoColor::Named(NamedColor::White))
+                .fg(theme.selection.fg)
+                .bg(theme.selection.bg)
                 .bold()
         } else {
-            ProtoStyle::new().fg(ProtoColor::Named(NamedColor::White))
+            ProtoStyle::new().fg(theme.foreground)
         };
 
         send_message(&AppMessage::CreateRegion {
@@ -141,6 +143,7 @@ impl View for Tabs {
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
+        let theme = Theme::current();
         let spans: Vec<Span> = self
             .labels
             .iter()
@@ -149,11 +152,11 @@ impl View for Tabs {
                 let is_active = i == self.active;
                 let style = if is_active {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::White)
+                        .fg(to_ratatui_color(theme.selection.fg))
+                        .bg(to_ratatui_color(theme.selection.bg))
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(to_ratatui_color(theme.muted))
                 };
 
                 let mut spans = vec![Span::styled(format!(" {} ", label), style)];
@@ -261,9 +264,7 @@ mod tests {
 
     #[test]
     fn tabs_builder_active() {
-        let tabs = Tabs::new()
-            .labels(vec!["A", "B", "C"])
-            .active(2);
+        let tabs = Tabs::new().labels(vec!["A", "B", "C"]).active(2);
         assert_eq!(tabs.active_index(), 2);
         assert_eq!(tabs.active_label(), Some("C"));
     }
@@ -458,7 +459,9 @@ mod tests {
 
     #[test]
     fn tabs_active_label_returns_correct_label() {
-        let tabs = Tabs::new().labels(vec!["Home", "About", "Contact"]).active(1);
+        let tabs = Tabs::new()
+            .labels(vec!["Home", "About", "Contact"])
+            .active(1);
         assert_eq!(tabs.active_label(), Some("About"));
     }
 }
