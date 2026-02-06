@@ -246,6 +246,7 @@ mod tests {
         let key = KeyEvent {
             key: Key::Enter,
             modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
         };
         let result = s.on_key(&key);
         assert!(matches!(result, Some(FocusAction::Consumed)));
@@ -255,6 +256,7 @@ mod tests {
         let key = KeyEvent {
             key: Key::Escape,
             modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
         };
         let result = s.on_key(&key);
         assert!(matches!(result, Some(FocusAction::Consumed)));
@@ -269,6 +271,7 @@ mod tests {
         let enter = KeyEvent {
             key: Key::Enter,
             modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
         };
         s.on_key(&enter);
         assert!(s.is_expanded());
@@ -277,6 +280,7 @@ mod tests {
         let down = KeyEvent {
             key: Key::Down,
             modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
         };
         s.on_key(&down);
         s.on_key(&down);
@@ -296,6 +300,7 @@ mod tests {
         let enter = KeyEvent {
             key: Key::Enter,
             modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
         };
         s.on_key(&enter);
 
@@ -303,6 +308,7 @@ mod tests {
         let up = KeyEvent {
             key: Key::Up,
             modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
         };
         s.on_key(&up);
         // cursor should still be 0
@@ -311,6 +317,7 @@ mod tests {
         let down = KeyEvent {
             key: Key::Down,
             modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
         };
         for _ in 0..5 {
             s.on_key(&down);
@@ -332,6 +339,7 @@ mod tests {
         let key = KeyEvent {
             key: Key::Tab,
             modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
         };
         let result = s.on_key(&key);
         assert!(matches!(result, Some(FocusAction::Next)));
@@ -343,6 +351,7 @@ mod tests {
         let enter = KeyEvent {
             key: Key::Enter,
             modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
         };
         s.on_key(&enter);
         assert!(s.is_expanded());

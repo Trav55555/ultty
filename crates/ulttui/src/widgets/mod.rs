@@ -199,6 +199,7 @@ mod tests {
         let key = KeyEvent {
             key: crate::event::Key::Enter,
             modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
         };
         assert!(v.on_key(&key).is_none());
     }

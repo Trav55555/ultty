@@ -152,6 +152,7 @@ mod tests {
         let key = KeyEvent {
             key: Key::Enter,
             modifiers: Default::default(),
+            focused_id: None,
         };
         assert!(matches!(btn.on_key(&key), Some(FocusAction::Consumed)));
     }
@@ -162,6 +163,7 @@ mod tests {
         let key = KeyEvent {
             key: Key::Tab,
             modifiers: Default::default(),
+            focused_id: None,
         };
         assert!(matches!(btn.on_key(&key), Some(FocusAction::Next)));
     }
@@ -172,6 +174,7 @@ mod tests {
         let key = KeyEvent {
             key: Key::Char('a'),
             modifiers: Default::default(),
+            focused_id: None,
         };
         assert!(btn.on_key(&key).is_none());
     }

@@ -30,6 +30,8 @@ pub struct KeyEvent {
     pub key: Key,
     /// Modifier keys.
     pub modifiers: Modifiers,
+    /// The widget ID that was focused when this key was pressed.
+    pub focused_id: Option<String>,
 }
 
 /// Key code.
@@ -107,6 +109,7 @@ mod tests {
         let key_event = KeyEvent {
             key: Key::Char('a'),
             modifiers: Modifiers::default(),
+            focused_id: None,
         };
         let e = Event::Key(key_event);
         assert!(matches!(e, Event::Key(_)));
@@ -277,6 +280,7 @@ mod tests {
                 alt: false,
                 meta: false,
             },
+            focused_id: None,
         };
         assert_eq!(ke.key, Key::Enter);
         assert!(ke.modifiers.ctrl);
@@ -288,6 +292,7 @@ mod tests {
         let ke = KeyEvent {
             key: Key::Char('a'),
             modifiers: Modifiers::default(),
+            focused_id: None,
         };
         assert!(!ke.modifiers.shift);
         assert!(!ke.modifiers.ctrl);
@@ -305,6 +310,7 @@ mod tests {
                 alt: true,
                 meta: false,
             },
+            focused_id: None,
         };
         let ke2 = ke.clone();
         assert_eq!(ke2.key, Key::Char('j'));
@@ -317,9 +323,30 @@ mod tests {
         let ke = KeyEvent {
             key: Key::Tab,
             modifiers: Modifiers::default(),
+            focused_id: None,
         };
         let s = format!("{:?}", ke);
         assert!(s.contains("Tab"));
+    }
+
+    #[test]
+    fn key_event_with_focused_id() {
+        let ke = KeyEvent {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+            focused_id: Some("btn".to_string()),
+        };
+        assert_eq!(ke.focused_id.as_deref(), Some("btn"));
+    }
+
+    #[test]
+    fn key_event_without_focused_id() {
+        let ke = KeyEvent {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+            focused_id: None,
+        };
+        assert!(ke.focused_id.is_none());
     }
 
     // --- Modifiers ---

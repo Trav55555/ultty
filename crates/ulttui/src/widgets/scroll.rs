@@ -833,6 +833,7 @@ mod tests {
         KeyEvent {
             key: k,
             modifiers: Modifiers::default(),
+            focused_id: None,
         }
     }
 
@@ -843,6 +844,7 @@ mod tests {
                 ctrl: true,
                 ..Default::default()
             },
+            focused_id: None,
         }
     }
 
@@ -853,6 +855,7 @@ mod tests {
                 shift: true,
                 ..Default::default()
             },
+            focused_id: None,
         }
     }
 

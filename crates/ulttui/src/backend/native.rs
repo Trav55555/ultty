@@ -312,6 +312,7 @@ impl NativeBackend {
             InputType::KeyDown { key, modifiers } => Some(Event::Key(crate::event::KeyEvent {
                 key: self.convert_key(key),
                 modifiers: self.convert_modifiers(modifiers),
+                focused_id: None,
             })),
             InputType::MouseDown { button } => Some(Event::Mouse(crate::event::MouseEvent {
                 kind: crate::event::MouseEventKind::Down(Self::convert_mouse_button(button)),

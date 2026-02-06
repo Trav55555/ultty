@@ -97,15 +97,18 @@ impl<A: Application> App<A> {
 
             self.poll_spawned_tasks(&rt);
 
-            if let Some(event) = self.backend.poll_event()? {
-                match &event {
-                    Event::Quit => break,
-                    Event::Key(key_event) => {
-                        if self.handle_navigation(key_event) {
-                            continue;
-                        }
+            if let Some(mut event) = self.backend.poll_event()? {
+                if let Event::Key(ref mut key_event) = event {
+                    key_event.focused_id =
+                        self.focus.focused_id().map(str::to_string);
+
+                    if self.handle_navigation(key_event) {
+                        continue;
                     }
-                    _ => {}
+                }
+
+                if matches!(&event, Event::Quit) {
+                    break;
                 }
 
                 if let Some(msg) = self.app.on_event(&event) {

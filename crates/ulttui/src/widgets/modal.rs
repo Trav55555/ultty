@@ -467,6 +467,7 @@ mod tests {
         KeyEvent {
             key: k,
             modifiers: Modifiers::default(),
+            focused_id: None,
         }
     }
 

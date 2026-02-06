@@ -106,6 +106,7 @@ fn convert_event(event: CrosstermEvent) -> Option<Event> {
             Some(Event::Key(KeyEvent {
                 key: key_code,
                 modifiers,
+                focused_id: None,
             }))
         }
         CrosstermEvent::Mouse(mouse) => {

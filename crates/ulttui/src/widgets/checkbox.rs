@@ -187,6 +187,7 @@ mod tests {
         let key = KeyEvent {
             key: Key::Char(' '),
             modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
         };
         let result = cb.on_key(&key);
         assert!(matches!(result, Some(FocusAction::Consumed)));
@@ -199,6 +200,7 @@ mod tests {
         let key = KeyEvent {
             key: Key::Enter,
             modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
         };
         let result = cb.on_key(&key);
         assert!(matches!(result, Some(FocusAction::Consumed)));
@@ -211,6 +213,7 @@ mod tests {
         let key = KeyEvent {
             key: Key::Tab,
             modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
         };
         let result = cb.on_key(&key);
         assert!(matches!(result, Some(FocusAction::Next)));

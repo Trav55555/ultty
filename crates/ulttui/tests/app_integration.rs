@@ -115,6 +115,7 @@ fn make_key(ch: char) -> Option<Event> {
     Some(Event::Key(KeyEvent {
         key: Key::Char(ch),
         modifiers: Modifiers::default(),
+        focused_id: None,
     }))
 }
 
@@ -125,6 +126,7 @@ fn make_tab(shift: bool) -> Option<Event> {
             shift,
             ..Modifiers::default()
         },
+        focused_id: None,
     }))
 }
 
