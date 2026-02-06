@@ -7,7 +7,7 @@ use ratatui::Frame;
 
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
-use ultty_protocol::{Content, TextContent};
+use ultty_protocol::{Content, SpinnerStyle, SpinnerWidget, WidgetContent};
 
 const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -49,12 +49,10 @@ impl Default for Spinner {
 
 impl View for Spinner {
     fn content(&self) -> Content {
-        let frame = FRAMES[self.frame];
-        let text = match &self.label {
-            Some(label) => format!("{frame} {label}"),
-            None => frame.to_string(),
-        };
-        Content::Text(TextContent::new(text))
+        Content::Widget(WidgetContent::Spinner(SpinnerWidget {
+            label: self.label.clone(),
+            style: SpinnerStyle::Braille,
+        }))
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
@@ -77,32 +75,33 @@ impl View for Spinner {
 mod tests {
     use super::*;
 
-    fn content_text(spinner: &Spinner) -> String {
-        match spinner.content() {
-            Content::Text(tc) => tc.text,
-            _ => panic!("Expected Text content"),
-        }
-    }
-
     #[test]
-    fn default_frame_zero() {
+    fn content_returns_spinner_widget() {
         let spinner = Spinner::new();
-        let text = content_text(&spinner);
-        assert!(text.starts_with(FRAMES[0]));
+        match spinner.content() {
+            Content::Widget(WidgetContent::Spinner(sw)) => {
+                assert_eq!(sw.style, SpinnerStyle::Braille);
+                assert!(sw.label.is_none());
+            }
+            _ => panic!("Expected Spinner widget content"),
+        }
     }
 
     #[test]
     fn frame_wraps() {
         let spinner = Spinner::new().frame(FRAMES.len() + 1);
-        let text = content_text(&spinner);
-        assert!(text.starts_with(FRAMES[1]));
+        assert_eq!(spinner.frame, 1);
     }
 
     #[test]
-    fn label_builder() {
+    fn content_preserves_label() {
         let spinner = Spinner::new().label("Loading");
-        let text = content_text(&spinner);
-        assert!(text.contains("Loading"));
+        match spinner.content() {
+            Content::Widget(WidgetContent::Spinner(sw)) => {
+                assert_eq!(sw.label.as_deref(), Some("Loading"));
+            }
+            _ => panic!("Expected Spinner widget content"),
+        }
     }
 
     #[test]

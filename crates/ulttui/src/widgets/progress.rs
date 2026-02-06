@@ -7,7 +7,7 @@ use ratatui::Frame;
 
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
-use ultty_protocol::{Content, TextContent};
+use ultty_protocol::{Content, ProgressWidget, WidgetContent};
 
 /// A horizontal progress bar.
 #[derive(Debug)]
@@ -36,12 +36,12 @@ impl ProgressBar {
 
 impl View for ProgressBar {
     fn content(&self) -> Content {
-        let pct = self.value as u32;
-        let text = match &self.label {
-            Some(label) => format!("{label} [{pct}%]"),
-            None => format!("[{pct}%]"),
-        };
-        Content::Text(TextContent::new(text))
+        Content::Widget(WidgetContent::Progress(ProgressWidget {
+            value: self.value / 100.0,
+            label: self.label.clone(),
+            animated: false,
+            indeterminate: false,
+        }))
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
@@ -102,20 +102,43 @@ mod tests {
     #[test]
     fn label_builder() {
         let bar = ProgressBar::new(10.0).label("Loading");
-        let content = bar.content();
-        match content {
-            Content::Text(tc) => assert!(tc.text.contains("Loading")),
-            _ => panic!("Expected Text content"),
+        match bar.content() {
+            Content::Widget(WidgetContent::Progress(pw)) => {
+                assert_eq!(pw.label.as_deref(), Some("Loading"));
+            }
+            _ => panic!("Expected Progress widget content"),
         }
     }
 
     #[test]
-    fn content_shows_percentage() {
+    fn content_returns_progress_widget() {
         let bar = ProgressBar::new(42.0);
-        let content = bar.content();
-        match content {
-            Content::Text(tc) => assert!(tc.text.contains("42%")),
-            _ => panic!("Expected Text content"),
+        match bar.content() {
+            Content::Widget(WidgetContent::Progress(pw)) => {
+                assert!((pw.value - 0.42).abs() < 0.01);
+                assert!(!pw.animated);
+                assert!(!pw.indeterminate);
+            }
+            _ => panic!("Expected Progress widget content"),
+        }
+    }
+
+    #[test]
+    fn content_value_normalized() {
+        let bar = ProgressBar::new(100.0);
+        match bar.content() {
+            Content::Widget(WidgetContent::Progress(pw)) => {
+                assert!((pw.value - 1.0).abs() < f32::EPSILON);
+            }
+            _ => panic!("Expected Progress widget content"),
+        }
+
+        let bar_zero = ProgressBar::new(0.0);
+        match bar_zero.content() {
+            Content::Widget(WidgetContent::Progress(pw)) => {
+                assert!((pw.value).abs() < f32::EPSILON);
+            }
+            _ => panic!("Expected Progress widget content"),
         }
     }
 
