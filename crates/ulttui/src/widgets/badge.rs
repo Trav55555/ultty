@@ -7,7 +7,7 @@ use ratatui::Frame;
 
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
-use ultty_protocol::{Content, TextContent};
+use ultty_protocol::{Content, RichText as ProtoRichText, Style as ProtoStyle};
 
 /// Badge variants for semantic color.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -62,7 +62,15 @@ impl Badge {
 
 impl View for Badge {
     fn content(&self) -> Content {
-        Content::Text(TextContent::new(format!(" {} ", self.text)))
+        let theme = Theme::current();
+        let color = match self.variant {
+            BadgeVariant::Primary => theme.primary,
+            BadgeVariant::Success => theme.success,
+            BadgeVariant::Error => theme.error,
+            BadgeVariant::Warning => theme.warning,
+        };
+        let style = ProtoStyle::new().fg(color);
+        Content::RichText(ProtoRichText::new().span(format!(" {} ", self.text), style))
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
@@ -125,12 +133,26 @@ mod tests {
     }
 
     #[test]
-    fn content_has_text() {
+    fn content_returns_richtext() {
         let badge = Badge::new("Info");
-        let content = badge.content();
-        match content {
-            Content::Text(tc) => assert!(tc.text.contains("Info")),
-            _ => panic!("Expected Text content"),
+        match badge.content() {
+            Content::RichText(rt) => {
+                assert_eq!(rt.spans.len(), 1);
+                assert!(rt.spans[0].text.contains("Info"));
+            }
+            _ => panic!("Expected RichText content"),
+        }
+    }
+
+    #[test]
+    fn success_variant_uses_success_color() {
+        let badge = Badge::success("OK");
+        let theme = Theme::current();
+        match badge.content() {
+            Content::RichText(rt) => {
+                assert_eq!(rt.spans[0].style.fg, Some(theme.success));
+            }
+            _ => panic!("Expected RichText content"),
         }
     }
 }

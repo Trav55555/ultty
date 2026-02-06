@@ -124,4 +124,11 @@ mod tests {
         let constraints = divider.constraints();
         assert_eq!(constraints.height, Dimension::cells(1.0));
     }
+
+    #[test]
+    fn vertical_constraints() {
+        let divider = Divider::vertical();
+        let constraints = divider.constraints();
+        assert_eq!(constraints.width, Dimension::cells(1.0));
+    }
 }
