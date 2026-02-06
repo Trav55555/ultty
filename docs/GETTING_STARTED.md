@@ -1,35 +1,61 @@
-# Getting Started with Ultty
+# Getting Started with ulttui
 
-This guide will help you get started with the Ultty terminal emulator and TUI framework.
+Build TUI applications that work in any terminal, with native GPU acceleration in Ultty.
 
 ## Installation
 
-### From Source
+Add `ulttui` to your `Cargo.toml`:
 
-```bash
-git clone https://github.com/yourusername/ultty.git
-cd ultty
-cargo build --release
-
-# Install the terminal
-cargo install --path crates/ultty
+```toml
+[dependencies]
+ulttui = { path = "../crates/ulttui" }
+anyhow = "1"
 ```
 
-### Running the Terminal
+## The Elm Architecture
 
-```bash
-# Run ultty
-ultty
+ulttui follows the Elm architecture: **State → View → Event → Message → Update → State**.
 
-# Or run from cargo
-cargo run -p ultty
+```
+┌──────────────────────────────────────────┐
+│                                          │
+│   State ──► view() ──► Render            │
+│     ▲                    │               │
+│     │                    ▼               │
+│   update() ◄── on_event() ◄── Input     │
+│     │                                    │
+│     ▼                                    │
+│   Cmd (side effects)                     │
+│                                          │
+└──────────────────────────────────────────┘
 ```
 
-## Building TUI Applications
+Every app implements the `Application` trait:
 
-Ultty includes a framework (`ulttui`) for building TUI applications that work in any terminal but get native acceleration in Ultty.
+```rust
+use ulttui::prelude::*;
+use ulttui::event::{Event, Key};
 
-### Hello World
+struct MyApp { /* state */ }
+
+enum Msg { /* messages */ }
+
+impl Application for MyApp {
+    type Message = Msg;
+
+    fn update(&mut self, msg: Msg) -> Cmd<Msg> { /* handle message, return command */ }
+    fn on_event(&mut self, event: &Event) -> Option<Msg> { /* map input to message */ }
+    fn view(&self) -> impl View { /* build UI from state */ }
+}
+
+fn main() -> anyhow::Result<()> {
+    MyApp { /* initial state */ }.run()
+}
+```
+
+## Hello World
+
+The simplest app — just renders text:
 
 ```rust
 use ulttui::prelude::*;
@@ -38,99 +64,208 @@ struct HelloApp;
 
 impl Application for HelloApp {
     type Message = ();
-    
+
     fn view(&self) -> impl View {
         Text::new("Hello, World!")
     }
 }
 
-fn main() {
-    HelloApp.run().unwrap();
+fn main() -> anyhow::Result<()> {
+    HelloApp.run()
 }
 ```
 
-### Counter Example
+## Counter Example
+
+A complete app with state, messages, and commands:
 
 ```rust
 use ulttui::prelude::*;
+use ulttui::event::{Event, Key};
 
-struct Counter {
-    count: i32,
-}
+struct Counter { count: i32 }
 
 enum Msg {
     Increment,
     Decrement,
+    Reset,
 }
 
 impl Application for Counter {
     type Message = Msg;
-    
-    fn update(&mut self, msg: Msg) {
+
+    fn update(&mut self, msg: Msg) -> Cmd<Msg> {
         match msg {
             Msg::Increment => self.count += 1,
             Msg::Decrement => self.count -= 1,
+            Msg::Reset => self.count = 0,
+        }
+        Cmd::none()
+    }
+
+    fn on_event(&mut self, event: &Event) -> Option<Msg> {
+        match event {
+            Event::Key(ke) => match ke.key {
+                Key::Char('+') => Some(Msg::Increment),
+                Key::Char('-') => Some(Msg::Decrement),
+                Key::Char('r') => Some(Msg::Reset),
+                _ => None,
+            },
+            _ => None,
         }
     }
-    
+
     fn view(&self) -> impl View {
         Column::new()
             .child(Text::new(format!("Count: {}", self.count)))
             .child(
                 Row::new()
-                    .child(Button::new("-").on_click(|| Msg::Decrement))
-                    .child(Button::new("+").on_click(|| Msg::Increment))
+                    .child(Button::new("-"))
+                    .child(Button::new("+"))
+                    .child(Button::new("Reset")),
             )
+            .child(Text::new("+/-: change | r: reset | Ctrl+C: quit"))
     }
 }
 
-fn main() {
-    Counter { count: 0 }.run().unwrap();
+fn main() -> anyhow::Result<()> {
+    Counter { count: 0 }.run()
+}
+```
+
+## Commands (Side Effects)
+
+`update()` returns a `Cmd<M>` to trigger side effects:
+
+```rust
+fn update(&mut self, msg: Msg) -> Cmd<Msg> {
+    match msg {
+        // No side effect
+        Msg::Increment => { self.count += 1; Cmd::none() }
+
+        // Dispatch another message immediately
+        Msg::DoubleIncrement => Cmd::batch(vec![
+            Cmd::message(Msg::Increment),
+            Cmd::message(Msg::Increment),
+        ]),
+
+        // Spawn an async task
+        Msg::FetchData => Cmd::spawn(async {
+            let data = reqwest::get("https://api.example.com/data")
+                .await.unwrap().text().await.unwrap();
+            Msg::DataLoaded(data)
+        }),
+
+        // Delayed message
+        Msg::StartTimer => Cmd::after(
+            Duration::from_secs(5),
+            || Msg::TimerDone,
+        ),
+
+        Msg::DataLoaded(data) => { self.data = data; Cmd::none() }
+        Msg::TimerDone => { self.done = true; Cmd::none() }
+    }
+}
+```
+
+## Subscriptions (Recurring Events)
+
+Override `subscriptions()` for time-based events:
+
+```rust
+fn subscriptions(&self) -> Sub<Msg> {
+    // Tick every second
+    Sub::every(Duration::from_secs(1), || Msg::Tick)
+}
+
+// Combine multiple subscriptions
+fn subscriptions(&self) -> Sub<Msg> {
+    Sub::batch(vec![
+        Sub::every(Duration::from_secs(1), || Msg::Tick),
+        Sub::every(Duration::from_millis(100), || Msg::FastTick),
+    ])
+}
+```
+
+## Widget IDs and Events
+
+Interactive widgets can have IDs for targeted event handling:
+
+```rust
+fn view(&self) -> impl View {
+    Column::new()
+        .child(TextInput::new().id("username").placeholder("Username"))
+        .child(TextInput::new().id("password").placeholder("Password"))
+        .child(Button::new("Submit").id("submit"))
+}
+
+fn on_event(&mut self, event: &Event) -> Option<Msg> {
+    match event {
+        Event::Click { id } if id == "submit" => Some(Msg::Submit),
+        Event::Change { id, value } if id == "username" => Some(Msg::SetUsername(value.clone())),
+        Event::Submit { id } if id == "username" => Some(Msg::FocusPassword),
+        _ => None,
+    }
+}
+```
+
+## Themes
+
+Use built-in dark/light themes or customize:
+
+```rust
+// Default (dark theme)
+MyApp::new().run()?;
+
+// Light theme
+MyApp::new().run_with_theme(Theme::light())?;
+
+// Access current theme in widgets
+let theme = Theme::current();
+```
+
+## Layouts
+
+Build layouts with `Column`, `Row`, and `Stack`:
+
+```rust
+fn view(&self) -> impl View {
+    Column::new()
+        .padding(1.0)
+        .gap(1.0)
+        .child(Text::new("Header"))
+        .child(
+            Row::new()
+                .gap(2.0)
+                .child(Text::new("Left"))
+                .child(Text::new("Right")),
+        )
+        .child(Text::new("Footer"))
 }
 ```
 
 ## Running Examples
 
 ```bash
-# Raw protocol demo (run inside ultty)
-cargo run -p hello-native
-
-# Counter app
-cargo run -p counter-app
-
-# Todo list app
-cargo run -p todo-app
+cargo run -p counter-app    # Counter with +/- buttons
+cargo run -p todo-app       # Todo list with add/remove
+cargo run -p dashboard      # Dashboard with live timer (Sub::every)
+cargo run -p form-app       # Form with text inputs and checkboxes
+cargo run -p chat           # Chat interface with message history
+cargo run -p hello-native   # Raw protocol demo (run inside ultty)
 ```
 
-## Configuration
-
-Ultty looks for configuration in `~/.config/ultty/ultty.toml`:
-
-```toml
-[font]
-family = "JetBrains Mono"
-size = 14.0
-
-[colors]
-foreground = "#c0caf5"
-background = "#1a1b26"
-
-[behavior]
-bell_visual = true
-bell_sound = false
-```
-
-## Architecture Overview
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Ultty Terminal                           │
+│                    Ultty Terminal                            │
 ├─────────────────────────────────────────────────────────────┤
 │  Scene Graph ◄── Layout Engine ◄── Protocol Parser          │
-│       │              (Taffy)            ▲                   │
-│       ▼                                 │                   │
-│  GPU Renderer ────────────────── Binary Protocol            │
-│    (wgpu)                        (Unix socket)              │
+│       │              (Taffy)            ▲                    │
+│       ▼                                 │                    │
+│  GPU Renderer ────────────────── Binary Protocol             │
+│    (wgpu)                        (Unix socket)               │
 └─────────────────────────────────────────────────────────────┘
                                           ▲
                                           │
@@ -144,16 +279,8 @@ bell_sound = false
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Key Features
-
-- **GPU Rendering**: Hardware-accelerated rendering via wgpu
-- **Native Protocol**: Binary protocol for TUI apps (no ANSI parsing)
-- **Dual-Mode Framework**: Apps work in any terminal, optimized in ultty
-- **Performance**: Sub-millisecond layout, <5ms frame render
-- **Modern Features**: Sixel images, hyperlinks, shell integration
-
 ## Next Steps
 
-- Read the [Protocol Specification](PROTOCOL_SPEC.md) for native app development
-- Check the [Testing Strategy](TESTING_STRATEGY.md) for testing approaches
-- Explore the example apps in `examples/`
+- [Widget Reference](WIDGET_REFERENCE.md) — All built-in widgets and their APIs
+- [Protocol Specification](spec/PROTOCOL_SPEC.md) — Native protocol for advanced use
+- Explore `examples/` for real-world patterns

@@ -12,6 +12,7 @@ members = [
     "examples/chat",
     "examples/form-app",
     "examples/split-panes",
+    "examples/async-fetch",
 ]
 
 [workspace.package]

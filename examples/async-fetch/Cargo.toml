@@ -1,0 +1,9 @@
+[package]
+name = "async-fetch"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ulttui = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
