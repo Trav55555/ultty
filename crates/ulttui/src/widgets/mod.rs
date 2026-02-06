@@ -1,26 +1,34 @@
 //! Built-in widgets.
 
+mod badge;
 mod button;
 mod checkbox;
 mod container;
+mod divider;
 mod image;
 mod list;
 mod modal;
+mod progress;
 mod scroll;
 mod select;
+mod spinner;
 mod table;
 mod tabs;
 mod text;
 mod toggle;
 
+pub use badge::{Badge, BadgeVariant};
 pub use button::Button;
 pub use checkbox::Checkbox;
 pub use container::{Column, Row, Stack};
+pub use divider::Divider;
 pub use image::Image;
 pub use list::List;
 pub use modal::Modal;
+pub use progress::ProgressBar;
 pub use scroll::ScrollView;
 pub use select::Select;
+pub use spinner::Spinner;
 pub use table::Table;
 pub use tabs::Tabs;
 pub use text::{RichText, Text, TextInput};
@@ -59,6 +67,11 @@ pub trait View {
     }
 
     fn render_ansi(&self, _frame: &mut Frame, _area: Rect) {}
+
+    /// Widget ID for focus management. Override in focusable widgets.
+    fn widget_id(&self) -> Option<&str> {
+        None
+    }
 
     fn is_focusable(&self) -> bool {
         false
@@ -108,6 +121,10 @@ impl<T: View> View for &T {
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         (*self).render_ansi(frame, area)
+    }
+
+    fn widget_id(&self) -> Option<&str> {
+        (*self).widget_id()
     }
 
     fn is_focusable(&self) -> bool {
@@ -246,7 +263,10 @@ mod tests {
     fn ref_view_delegates_content() {
         let v = EmptyView;
         let r: &EmptyView = &v;
-        assert_eq!(<&EmptyView as View>::content(&r), ultty_protocol::Content::None);
+        assert_eq!(
+            <&EmptyView as View>::content(&r),
+            ultty_protocol::Content::None
+        );
     }
 
     #[test]

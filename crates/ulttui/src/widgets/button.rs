@@ -1,33 +1,38 @@
 //! Button widget.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::{FocusAction, View};
 use crate::event::{Key, KeyEvent};
-use ultty_protocol::{Color as ProtoColor, NamedColor, Style as ProtoStyle};
+use crate::theme::{to_ratatui_color, Theme};
+use ultty_protocol::Style as ProtoStyle;
 
 /// Clickable button.
 #[derive(Debug)]
 pub struct Button {
     label: String,
+    id: Option<String>,
 }
 
 impl Button {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
+            id: None,
         }
     }
 
-    pub fn on_click<F, M>(self, _handler: F) -> Self
-    where
-        F: Fn() -> M + 'static,
-    {
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
         self
+    }
+
+    pub fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
     }
 
     pub fn label(&self) -> &str {
@@ -36,10 +41,15 @@ impl Button {
 }
 
 impl View for Button {
+    fn widget_id(&self) -> Option<&str> {
+        Button::widget_id(self)
+    }
+
     fn style(&self) -> ProtoStyle {
+        let theme = Theme::current();
         ProtoStyle::new()
-            .fg(ProtoColor::Named(NamedColor::White))
-            .bg(ProtoColor::Named(NamedColor::BrightBlack))
+            .fg(theme.button.fg)
+            .bg(theme.button.bg)
             .bold()
     }
 
@@ -51,11 +61,29 @@ impl View for Button {
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
+        // Register with focus manager if we have an ID
+        if let Some(id) = self.widget_id() {
+            crate::focus::FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
+        }
+        let is_focused = self
+            .widget_id()
+            .map(|id| crate::focus::FocusManager::with_current(|fm| fm.is_focused(id)))
+            .unwrap_or(false);
+
         let styled_label = format!("[ {} ]", self.label);
-        let style = Style::default()
-            .fg(Color::White)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD);
+        let theme = Theme::current();
+        let (fg, bg) = if is_focused {
+            (
+                to_ratatui_color(theme.button.focused_fg),
+                to_ratatui_color(theme.button.focused_bg),
+            )
+        } else {
+            (
+                to_ratatui_color(theme.button.fg),
+                to_ratatui_color(theme.button.bg),
+            )
+        };
+        let style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
 
         let paragraph = Paragraph::new(Line::styled(styled_label, style));
         frame.render_widget(paragraph, area);
@@ -78,7 +106,7 @@ impl View for Button {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ultty_protocol::{Color, Content, NamedColor};
+    use ultty_protocol::Content;
 
     #[test]
     fn button_label() {
@@ -100,15 +128,22 @@ mod tests {
     fn button_style() {
         let btn = Button::new("X");
         let style = <Button as View>::style(&btn);
+        let theme = crate::theme::Theme::dark();
         assert!(style.bold);
-        assert_eq!(style.fg, Some(Color::Named(NamedColor::White)));
-        assert_eq!(style.bg, Some(Color::Named(NamedColor::BrightBlack)));
+        assert_eq!(style.fg, Some(theme.button.fg));
+        assert_eq!(style.bg, Some(theme.button.bg));
     }
 
     #[test]
     fn button_is_focusable() {
         let btn = Button::new("X");
         assert!(btn.is_focusable());
+    }
+
+    #[test]
+    fn button_with_id() {
+        let btn = Button::new("OK").id("submit");
+        assert_eq!(btn.widget_id(), Some("submit"));
     }
 
     #[test]
@@ -139,5 +174,44 @@ mod tests {
             modifiers: Default::default(),
         };
         assert!(btn.on_key(&key).is_none());
+    }
+
+    #[test]
+    fn button_registers_with_focus_manager() {
+        use crate::focus::FocusManager;
+
+        let old = FocusManager::set_current(FocusManager::new());
+        FocusManager::with_current_mut(|fm| fm.begin_frame());
+
+        let btn = Button::new("OK").id("submit");
+        if let Some(id) = btn.widget_id() {
+            FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
+        }
+        FocusManager::with_current_mut(|fm| fm.focus_next());
+
+        let focused = FocusManager::with_current(|fm| fm.focused_id().map(str::to_string));
+        assert_eq!(focused.as_deref(), Some("submit"));
+
+        FocusManager::set_current(old);
+    }
+
+    #[test]
+    fn focused_button_is_detected() {
+        use crate::focus::FocusManager;
+
+        let old = FocusManager::set_current(FocusManager::new());
+        FocusManager::with_current_mut(|fm| {
+            fm.register("btn".to_string());
+            fm.focus("btn");
+        });
+
+        let btn = Button::new("OK").id("btn");
+        let is_focused = btn
+            .widget_id()
+            .map(|id| FocusManager::with_current(|fm| fm.is_focused(id)))
+            .unwrap_or(false);
+        assert!(is_focused);
+
+        FocusManager::set_current(old);
     }
 }

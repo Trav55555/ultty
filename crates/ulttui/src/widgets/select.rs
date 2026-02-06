@@ -1,13 +1,14 @@
 //! Select (dropdown) widget.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::{FocusAction, View};
 use crate::event::{Key, KeyEvent};
+use crate::theme::{to_ratatui_color, Theme};
 
 /// A select widget with a list of options.
 ///
@@ -19,6 +20,7 @@ pub struct Select {
     selected: usize,
     expanded: bool,
     cursor: usize,
+    id: Option<String>,
 }
 
 impl Select {
@@ -29,6 +31,7 @@ impl Select {
             selected: 0,
             expanded: false,
             options,
+            id: None,
         }
     }
 
@@ -39,6 +42,15 @@ impl Select {
             self.cursor = index;
         }
         self
+    }
+
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    pub fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
     }
 
     /// Returns the currently selected index.
@@ -61,6 +73,10 @@ impl Select {
 }
 
 impl View for Select {
+    fn widget_id(&self) -> Option<&str> {
+        Select::widget_id(self)
+    }
+
     fn content(&self) -> ultty_protocol::Content {
         let text = if self.expanded {
             let mut lines = Vec::new();
@@ -127,15 +143,29 @@ impl View for Select {
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
+        use ratatui::text::Span;
+
+        // Register with focus manager if we have an ID
+        if let Some(id) = self.widget_id() {
+            crate::focus::FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
+        }
+        let is_focused = self
+            .widget_id()
+            .map(|id| crate::focus::FocusManager::with_current(|fm| fm.is_focused(id)))
+            .unwrap_or(false);
+
+        let theme = Theme::current();
         if self.expanded {
             let mut lines = Vec::new();
             for (i, option) in self.options.iter().enumerate() {
                 let cursor = if i == self.cursor { "> " } else { "  " };
                 let mark = if i == self.selected { "* " } else { "  " };
                 let style = if i == self.cursor {
-                    Style::default().add_modifier(Modifier::REVERSED)
-                } else {
                     Style::default()
+                        .fg(to_ratatui_color(theme.selection.fg))
+                        .bg(to_ratatui_color(theme.selection.bg))
+                } else {
+                    Style::default().fg(to_ratatui_color(theme.control.fg))
                 };
                 lines.push(Line::styled(format!("{}{}{}", cursor, mark, option), style));
             }
@@ -143,8 +173,18 @@ impl View for Select {
             frame.render_widget(paragraph, area);
         } else {
             let selected_text = self.selected_value();
-            let text = format!("\u{25bc} {}", selected_text);
-            let paragraph = Paragraph::new(Line::from(text));
+            let arrow = "\u{25bc} ";
+            let arrow_style = if is_focused {
+                Style::default().fg(to_ratatui_color(theme.control.indicator))
+            } else {
+                Style::default().fg(to_ratatui_color(theme.control.fg))
+            };
+            let text_style = Style::default().fg(to_ratatui_color(theme.control.fg));
+            let line = Line::from(vec![
+                Span::styled(arrow, arrow_style),
+                Span::styled(selected_text, text_style),
+            ]);
+            let paragraph = Paragraph::new(line);
             frame.render_widget(paragraph, area);
         }
     }
@@ -155,11 +195,7 @@ mod tests {
     use super::*;
 
     fn sample_options() -> Vec<String> {
-        vec![
-            "Red".to_string(),
-            "Green".to_string(),
-            "Blue".to_string(),
-        ]
+        vec!["Red".to_string(), "Green".to_string(), "Blue".to_string()]
     }
 
     #[test]
@@ -175,6 +211,12 @@ mod tests {
         let s = Select::new(sample_options()).selected(2);
         assert_eq!(s.selected_index(), 2);
         assert_eq!(s.selected_value(), "Blue");
+    }
+
+    #[test]
+    fn select_with_id() {
+        let s = Select::new(sample_options()).id("color");
+        assert_eq!(s.widget_id(), Some("color"));
     }
 
     #[test]

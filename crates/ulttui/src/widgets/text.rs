@@ -6,6 +6,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::View;
+use crate::theme::{to_ratatui_color, Theme};
 use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
 use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimState};
 
@@ -144,6 +145,7 @@ fn convert_color(color: &ultty_protocol::Color) -> ratatui::style::Color {
 #[derive(Debug, Clone)]
 pub struct TextInput {
     value: String,
+    id: Option<String>,
     placeholder: String,
     multiline: bool,
     cursor: usize,
@@ -156,6 +158,7 @@ impl Default for TextInput {
     fn default() -> Self {
         Self {
             value: String::new(),
+            id: None,
             placeholder: String::new(),
             multiline: false,
             cursor: 0,
@@ -169,6 +172,15 @@ impl Default for TextInput {
 impl TextInput {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    pub fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
     }
 
     pub fn value(mut self, value: impl Into<String>) -> Self {
@@ -454,6 +466,10 @@ impl TextInput {
 }
 
 impl View for TextInput {
+    fn widget_id(&self) -> Option<&str> {
+        TextInput::widget_id(self)
+    }
+
     fn content(&self) -> ultty_protocol::Content {
         ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(
             ultty_protocol::InputWidget {
@@ -466,16 +482,30 @@ impl View for TextInput {
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
-        use ratatui::style::{Color as RColor, Modifier, Style as RStyle};
+        use ratatui::style::{Modifier, Style as RStyle};
         use ratatui::text::Span;
+        use ratatui::widgets::{Block, Borders};
 
+        // Register with focus manager if we have an ID
+        if let Some(id) = self.widget_id() {
+            crate::focus::FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
+        }
+        let is_focused = self
+            .widget_id()
+            .map(|id| crate::focus::FocusManager::with_current(|fm| fm.is_focused(id)))
+            .unwrap_or(false);
+
+        let theme = Theme::current();
         let (display_text, style) = if self.value.is_empty() {
             (
                 self.placeholder.as_str(),
-                RStyle::default().fg(RColor::DarkGray),
+                RStyle::default().fg(to_ratatui_color(theme.input.placeholder_fg)),
             )
         } else {
-            (self.value.as_str(), RStyle::default())
+            (
+                self.value.as_str(),
+                RStyle::default().fg(to_ratatui_color(theme.input.fg)),
+            )
         };
 
         let mode_indicator = match self.vim_state.mode {
@@ -493,7 +523,15 @@ impl View for TextInput {
         let text_span = Span::styled(display_text.to_string(), style);
         let line = Line::from(vec![mode_span, text_span]);
 
-        let paragraph = Paragraph::new(line);
+        let mut paragraph = Paragraph::new(line);
+        if is_focused {
+            let border_style = RStyle::default().fg(to_ratatui_color(theme.input.focused_border));
+            paragraph = paragraph.block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border_style),
+            );
+        }
         frame.render_widget(paragraph, area);
     }
 
@@ -743,6 +781,12 @@ mod tests {
 
         input.move_cursor(&VimMotion::Right, 3);
         assert_eq!(input.selection(), Some((0, 3)));
+    }
+
+    #[test]
+    fn text_input_with_id() {
+        let input = TextInput::new().id("name");
+        assert_eq!(input.widget_id(), Some("name"));
     }
 
     mod color_conversion {

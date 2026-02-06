@@ -8,12 +8,14 @@ use ratatui::Frame;
 
 use super::{FocusAction, View};
 use crate::event::{Key, KeyEvent};
+use crate::theme::{to_ratatui_color, Theme};
 
 /// A toggle switch with a label.
 #[derive(Debug)]
 pub struct Toggle {
     on: bool,
     label: String,
+    id: Option<String>,
 }
 
 impl Toggle {
@@ -22,6 +24,7 @@ impl Toggle {
         Self {
             on: false,
             label: label.into(),
+            id: None,
         }
     }
 
@@ -29,6 +32,15 @@ impl Toggle {
     pub fn on(mut self, on: bool) -> Self {
         self.on = on;
         self
+    }
+
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    pub fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
     }
 
     /// Returns whether the toggle is currently on.
@@ -43,6 +55,10 @@ impl Toggle {
 }
 
 impl View for Toggle {
+    fn widget_id(&self) -> Option<&str> {
+        Toggle::widget_id(self)
+    }
+
     fn content(&self) -> ultty_protocol::Content {
         let prefix = if self.on { "(*) " } else { "( ) " };
         ultty_protocol::Content::Text(ultty_protocol::TextContent {
@@ -69,10 +85,37 @@ impl View for Toggle {
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
+        use ratatui::text::Span;
+
+        // Register with focus manager if we have an ID
+        if let Some(id) = self.widget_id() {
+            crate::focus::FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
+        }
+        let is_focused = self
+            .widget_id()
+            .map(|id| crate::focus::FocusManager::with_current(|fm| fm.is_focused(id)))
+            .unwrap_or(false);
+
         let prefix = if self.on { "(*) " } else { "( ) " };
-        let text = format!("{}{}", prefix, self.label);
-        let style = Style::default().add_modifier(Modifier::BOLD);
-        let paragraph = Paragraph::new(Line::from(text)).style(style);
+        let theme = Theme::current();
+        let fg_color = if self.on {
+            to_ratatui_color(theme.control.active_fg)
+        } else {
+            to_ratatui_color(theme.control.fg)
+        };
+        let label_style = Style::default().fg(fg_color).add_modifier(Modifier::BOLD);
+        let prefix_style = if is_focused {
+            Style::default()
+                .fg(to_ratatui_color(theme.control.indicator))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            label_style
+        };
+        let line = Line::from(vec![
+            Span::styled(prefix, prefix_style),
+            Span::styled(self.label.as_str(), label_style),
+        ]);
+        let paragraph = Paragraph::new(line);
         frame.render_widget(paragraph, area);
     }
 }
@@ -91,6 +134,12 @@ mod tests {
     fn toggle_on_builder() {
         let t = Toggle::new("Dark mode").on(true);
         assert!(t.is_on());
+    }
+
+    #[test]
+    fn toggle_with_id() {
+        let t = Toggle::new("Dark mode").id("theme");
+        assert_eq!(t.widget_id(), Some("theme"));
     }
 
     #[test]

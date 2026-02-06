@@ -8,12 +8,14 @@ use ratatui::Frame;
 
 use super::{FocusAction, View};
 use crate::event::{Key, KeyEvent};
+use crate::theme::{to_ratatui_color, Theme};
 
 /// A toggleable checkbox with a label.
 #[derive(Debug)]
 pub struct Checkbox {
     checked: bool,
     label: String,
+    id: Option<String>,
 }
 
 impl Checkbox {
@@ -22,6 +24,7 @@ impl Checkbox {
         Self {
             checked: false,
             label: label.into(),
+            id: None,
         }
     }
 
@@ -29,6 +32,15 @@ impl Checkbox {
     pub fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
         self
+    }
+
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    pub fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
     }
 
     /// Returns whether the checkbox is currently checked.
@@ -43,6 +55,10 @@ impl Checkbox {
 }
 
 impl View for Checkbox {
+    fn widget_id(&self) -> Option<&str> {
+        Checkbox::widget_id(self)
+    }
+
     fn content(&self) -> ultty_protocol::Content {
         let prefix = if self.checked { "[x] " } else { "[ ] " };
         ultty_protocol::Content::Text(ultty_protocol::TextContent {
@@ -69,10 +85,37 @@ impl View for Checkbox {
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
+        use ratatui::text::Span;
+
+        // Register with focus manager if we have an ID
+        if let Some(id) = self.widget_id() {
+            crate::focus::FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
+        }
+        let is_focused = self
+            .widget_id()
+            .map(|id| crate::focus::FocusManager::with_current(|fm| fm.is_focused(id)))
+            .unwrap_or(false);
+
         let prefix = if self.checked { "[x] " } else { "[ ] " };
-        let text = format!("{}{}", prefix, self.label);
-        let style = Style::default().add_modifier(Modifier::BOLD);
-        let paragraph = Paragraph::new(Line::from(text)).style(style);
+        let theme = Theme::current();
+        let fg_color = if self.checked {
+            to_ratatui_color(theme.control.active_fg)
+        } else {
+            to_ratatui_color(theme.control.fg)
+        };
+        let label_style = Style::default().fg(fg_color).add_modifier(Modifier::BOLD);
+        let prefix_style = if is_focused {
+            Style::default()
+                .fg(to_ratatui_color(theme.control.indicator))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            label_style
+        };
+        let line = Line::from(vec![
+            Span::styled(prefix, prefix_style),
+            Span::styled(self.label.as_str(), label_style),
+        ]);
+        let paragraph = Paragraph::new(line);
         frame.render_widget(paragraph, area);
     }
 }
@@ -91,6 +134,12 @@ mod tests {
     fn checkbox_checked_builder() {
         let cb = Checkbox::new("Accept").checked(true);
         assert!(cb.is_checked());
+    }
+
+    #[test]
+    fn checkbox_with_id() {
+        let cb = Checkbox::new("Accept").id("terms");
+        assert_eq!(cb.widget_id(), Some("terms"));
     }
 
     #[test]
