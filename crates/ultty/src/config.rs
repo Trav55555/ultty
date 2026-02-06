@@ -555,7 +555,7 @@ impl Default for KeybindingConfig {
             vim_mode: "ctrl+shift+space".to_string(),
             find: "ctrl+shift+f".to_string(),
             reload_config: "ctrl+shift+r".to_string(),
-            show_shortcuts: "f1".to_string(),
+            show_shortcuts: "ctrl+shift+?".to_string(),
             cycle_theme: "ctrl+shift+n".to_string(),
             font_increase: "ctrl+=".to_string(),
             font_decrease: "ctrl+-".to_string(),
