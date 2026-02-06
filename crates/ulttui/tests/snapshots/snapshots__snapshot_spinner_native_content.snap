@@ -1,0 +1,5 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+expression: "format!(\"{content:?}\")"
+---
+Widget(Spinner(SpinnerWidget { label: Some("Working"), style: Braille }))

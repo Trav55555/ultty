@@ -6,7 +6,9 @@
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
-use ulttui::widgets::{Button, Column, List, Row, Stack, Text, View};
+use ulttui::widgets::{
+    Badge, Button, Column, Divider, List, ProgressBar, Row, Spinner, Stack, Text, View,
+};
 
 /// Render a widget and return its buffer as a string for snapshot comparison.
 fn render_to_string(widget: &impl View, width: u16, height: u16) -> String {
@@ -159,7 +161,9 @@ fn snapshot_complex_ui() {
 
 #[test]
 fn snapshot_truncation() {
-    let text = Text::new("This is a very long string that should be truncated when rendered in a small area");
+    let text = Text::new(
+        "This is a very long string that should be truncated when rendered in a small area",
+    );
     let output = render_to_string(&text, 20, 1);
     insta::assert_snapshot!(output);
 }
@@ -169,4 +173,81 @@ fn snapshot_special_chars() {
     let text = Text::new("Tabs:\t\tSpaces   End");
     let output = render_to_string(&text, 30, 1);
     insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_progress_bar_50_percent() {
+    let bar = ProgressBar::new(50.0);
+    let output = render_to_string(&bar, 40, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_progress_bar_with_label() {
+    let bar = ProgressBar::new(75.0).label("Loading");
+    let output = render_to_string(&bar, 40, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_progress_bar_native_content() {
+    let bar = ProgressBar::new(42.0);
+    let content = bar.content();
+    insta::assert_snapshot!(format!("{content:?}"));
+}
+
+#[test]
+fn snapshot_spinner_frame_0() {
+    let spinner = Spinner::new();
+    let output = render_to_string(&spinner, 20, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_spinner_with_label() {
+    let spinner = Spinner::new().label("Loading...");
+    let output = render_to_string(&spinner, 20, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_spinner_native_content() {
+    let spinner = Spinner::new().label("Working");
+    let content = spinner.content();
+    insta::assert_snapshot!(format!("{content:?}"));
+}
+
+#[test]
+fn snapshot_divider_horizontal() {
+    let divider = Divider::horizontal();
+    let output = render_to_string(&divider, 30, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_divider_custom_char() {
+    let divider = Divider::horizontal().char('=');
+    let output = render_to_string(&divider, 20, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_badge_primary() {
+    let badge = Badge::new("Info");
+    let output = render_to_string(&badge, 15, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_badge_success() {
+    let badge = Badge::success("OK");
+    let output = render_to_string(&badge, 15, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_badge_native_content() {
+    let badge = Badge::success("Done");
+    let content = badge.content();
+    insta::assert_snapshot!(format!("{content:?}"));
 }

@@ -1,0 +1,5 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+expression: "format!(\"{content:?}\")"
+---
+Widget(Progress(ProgressWidget { value: 0.42, label: None, animated: false, indeterminate: false }))

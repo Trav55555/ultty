@@ -118,11 +118,25 @@ cargo clippy --workspace --all-targets
   - [x] Text, RichText, TextInput widgets
   - [x] Button, List, ScrollView widgets
   - [x] Column, Row, Stack containers
+  - [x] Checkbox, Toggle, Select, Table, Tabs, Modal, Image widgets
+  - [x] ProgressBar, Spinner, Divider, Badge utility widgets
+- [x] Framework: Elm architecture (Cmd/Sub side effects)
+- [x] Framework: Theme system (dark/light presets, thread-local)
+- [x] Framework: Focus management (ID-based, Tab/Shift+Tab navigation)
+- [x] Framework: Semantic event dispatch (focused_id on KeyEvent)
+- [x] Framework: Native protocol content for all widgets
 - [x] Framework: ANSI fallback (via ratatui)
+- [x] Framework: Snapshot tests (25 tests covering all widget types)
+- [x] Framework: Integration tests (MockBackend, headless event loop)
+- [x] Framework: E2E test with ulttyctl automation
 - [x] Examples
   - [x] hello-native (raw protocol demo)
-  - [x] counter-app (framework counter app)
+  - [x] counter-app (framework counter app with focused_id events)
   - [x] todo-app (framework todo list app)
+  - [x] dashboard (multi-panel with live updates)
+  - [x] form-app (form with validation)
+  - [x] chat (chat interface)
+  - [x] async-fetch (Cmd::spawn + Spinner + Badge demo)
 - [x] Terminal Features
   - [x] Scrollback search (Ctrl+Shift+F)
   - [x] Split panes (Ctrl+Shift+D/E)
