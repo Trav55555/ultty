@@ -13,6 +13,55 @@ use ultty_protocol::{
 
 use super::tree::SceneTree;
 
+#[derive(Debug)]
+pub enum LayoutEngineError {
+    SetStyle {
+        region_id: RegionId,
+        source: taffy::TaffyError,
+    },
+    NewLeaf {
+        region_id: RegionId,
+        source: taffy::TaffyError,
+    },
+    Remove {
+        region_id: RegionId,
+        source: taffy::TaffyError,
+    },
+    SetChildren {
+        region_id: RegionId,
+        source: taffy::TaffyError,
+    },
+    Compute {
+        source: taffy::TaffyError,
+    },
+}
+
+impl std::fmt::Display for LayoutEngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SetStyle { region_id, source } => {
+                write!(f, "set_style failed for region {}: {}", region_id.0, source)
+            }
+            Self::NewLeaf { region_id, source } => {
+                write!(f, "new_leaf failed for region {}: {}", region_id.0, source)
+            }
+            Self::Remove { region_id, source } => {
+                write!(f, "remove failed for region {}: {}", region_id.0, source)
+            }
+            Self::SetChildren { region_id, source } => {
+                write!(
+                    f,
+                    "set_children failed for region {}: {}",
+                    region_id.0, source
+                )
+            }
+            Self::Compute { source } => write!(f, "compute_layout failed: {}", source),
+        }
+    }
+}
+
+impl std::error::Error for LayoutEngineError {}
+
 pub struct LayoutEngine {
     taffy: TaffyTree<()>,
     region_to_node: HashMap<RegionId, NodeId>,
@@ -28,7 +77,7 @@ impl LayoutEngine {
         }
     }
 
-    pub fn sync(&mut self, scene: &SceneTree) {
+    pub fn sync(&mut self, scene: &SceneTree) -> Result<(), LayoutEngineError> {
         let mut seen = std::collections::HashSet::new();
 
         for region in scene.iter_depth_first() {
@@ -36,13 +85,23 @@ impl LayoutEngine {
 
             if let Some(&node_id) = self.region_to_node.get(&region.id) {
                 let style = constraints_to_style(&region.constraints);
-                let _ = self.taffy.set_style(node_id, style);
+                self.taffy.set_style(node_id, style).map_err(|source| {
+                    LayoutEngineError::SetStyle {
+                        region_id: region.id,
+                        source,
+                    }
+                })?;
             } else {
                 let style = constraints_to_style(&region.constraints);
-                if let Ok(node_id) = self.taffy.new_leaf(style) {
-                    self.region_to_node.insert(region.id, node_id);
-                    self.node_to_region.insert(node_id, region.id);
-                }
+                let node_id =
+                    self.taffy
+                        .new_leaf(style)
+                        .map_err(|source| LayoutEngineError::NewLeaf {
+                            region_id: region.id,
+                            source,
+                        })?;
+                self.region_to_node.insert(region.id, node_id);
+                self.node_to_region.insert(node_id, region.id);
             }
         }
 
@@ -54,7 +113,9 @@ impl LayoutEngine {
             .collect();
 
         for (region_id, node_id) in stale {
-            let _ = self.taffy.remove(node_id);
+            self.taffy
+                .remove(node_id)
+                .map_err(|source| LayoutEngineError::Remove { region_id, source })?;
             self.region_to_node.remove(&region_id);
             self.node_to_region.remove(&node_id);
         }
@@ -67,19 +128,30 @@ impl LayoutEngine {
                     .filter_map(|child_id| self.region_to_node.get(child_id).copied())
                     .collect();
 
-                let _ = self.taffy.set_children(parent_node, &child_nodes);
+                self.taffy
+                    .set_children(parent_node, &child_nodes)
+                    .map_err(|source| LayoutEngineError::SetChildren {
+                        region_id: region.id,
+                        source,
+                    })?;
             }
         }
+
+        Ok(())
     }
 
-    pub fn compute(&mut self, width: f32, height: f32) {
+    pub fn compute(&mut self, width: f32, height: f32) -> Result<(), LayoutEngineError> {
         if let Some(&root_node) = self.region_to_node.get(&RegionId::ROOT) {
             let size = Size {
                 width: AvailableSpace::Definite(width),
                 height: AvailableSpace::Definite(height),
             };
-            let _ = self.taffy.compute_layout(root_node, size);
+            self.taffy
+                .compute_layout(root_node, size)
+                .map_err(|source| LayoutEngineError::Compute { source })?;
         }
+
+        Ok(())
     }
 
     pub fn get_layout(&self, region_id: RegionId) -> Option<taffy::Layout> {
@@ -272,8 +344,8 @@ mod tests {
     fn layout_sync_and_compute() {
         let scene = build_scene();
         let mut engine = LayoutEngine::new();
-        engine.sync(&scene);
-        engine.compute(80.0, 24.0);
+        engine.sync(&scene).unwrap();
+        engine.compute(80.0, 24.0).unwrap();
 
         let root_layout = engine.get_layout(RegionId::ROOT).unwrap();
         assert_eq!(root_layout.size.width, 80.0);
@@ -292,13 +364,13 @@ mod tests {
     fn layout_removes_stale_nodes() {
         let mut scene = build_scene();
         let mut engine = LayoutEngine::new();
-        engine.sync(&scene);
+        engine.sync(&scene).unwrap();
 
         assert!(engine.get_layout(RegionId::new(1)).is_some());
 
         // Remove a region from the scene
         scene.remove(RegionId::new(1));
-        engine.sync(&scene);
+        engine.sync(&scene).unwrap();
 
         assert!(engine.get_layout(RegionId::new(1)).is_none());
     }
@@ -307,8 +379,8 @@ mod tests {
     fn layout_empty_tree() {
         let scene = SceneTree::new();
         let mut engine = LayoutEngine::new();
-        engine.sync(&scene);
-        engine.compute(80.0, 24.0);
+        engine.sync(&scene).unwrap();
+        engine.compute(80.0, 24.0).unwrap();
 
         // Root with default constraints gets no explicit size
         let root = engine.get_layout(RegionId::ROOT).unwrap();
@@ -347,8 +419,8 @@ mod tests {
         tree.insert(right);
 
         let mut engine = LayoutEngine::new();
-        engine.sync(&tree);
-        engine.compute(100.0, 10.0);
+        engine.sync(&tree).unwrap();
+        engine.compute(100.0, 10.0).unwrap();
 
         let left_layout = engine.get_layout(RegionId::new(1)).unwrap();
         assert_eq!(left_layout.size.width, 30.0);
@@ -378,7 +450,10 @@ mod tests {
             (ProtoDisplay::Grid, taffy::Display::Grid),
             (ProtoDisplay::None, taffy::Display::None),
         ] {
-            let c = Constraints { display: proto, ..default_constraints() };
+            let c = Constraints {
+                display: proto,
+                ..default_constraints()
+            };
             let style = constraints_to_style(&c);
             assert_eq!(style.display, expected, "Display::{proto:?}");
         }
@@ -388,11 +463,20 @@ mod tests {
     fn constraints_flex_direction_variants() {
         for (proto, expected) in [
             (ProtoFlexDirection::Row, taffy::FlexDirection::Row),
-            (ProtoFlexDirection::RowReverse, taffy::FlexDirection::RowReverse),
+            (
+                ProtoFlexDirection::RowReverse,
+                taffy::FlexDirection::RowReverse,
+            ),
             (ProtoFlexDirection::Column, taffy::FlexDirection::Column),
-            (ProtoFlexDirection::ColumnReverse, taffy::FlexDirection::ColumnReverse),
+            (
+                ProtoFlexDirection::ColumnReverse,
+                taffy::FlexDirection::ColumnReverse,
+            ),
         ] {
-            let c = Constraints { flex_direction: proto, ..default_constraints() };
+            let c = Constraints {
+                flex_direction: proto,
+                ..default_constraints()
+            };
             let style = constraints_to_style(&c);
             assert_eq!(style.flex_direction, expected, "FlexDirection::{proto:?}");
         }
@@ -405,7 +489,10 @@ mod tests {
             (ProtoFlexWrap::Wrap, taffy::FlexWrap::Wrap),
             (ProtoFlexWrap::WrapReverse, taffy::FlexWrap::WrapReverse),
         ] {
-            let c = Constraints { flex_wrap: proto, ..default_constraints() };
+            let c = Constraints {
+                flex_wrap: proto,
+                ..default_constraints()
+            };
             let style = constraints_to_style(&c);
             assert_eq!(style.flex_wrap, expected, "FlexWrap::{proto:?}");
         }
@@ -417,13 +504,29 @@ mod tests {
             (ProtoJustifyContent::Start, taffy::JustifyContent::Start),
             (ProtoJustifyContent::End, taffy::JustifyContent::End),
             (ProtoJustifyContent::Center, taffy::JustifyContent::Center),
-            (ProtoJustifyContent::SpaceBetween, taffy::JustifyContent::SpaceBetween),
-            (ProtoJustifyContent::SpaceAround, taffy::JustifyContent::SpaceAround),
-            (ProtoJustifyContent::SpaceEvenly, taffy::JustifyContent::SpaceEvenly),
+            (
+                ProtoJustifyContent::SpaceBetween,
+                taffy::JustifyContent::SpaceBetween,
+            ),
+            (
+                ProtoJustifyContent::SpaceAround,
+                taffy::JustifyContent::SpaceAround,
+            ),
+            (
+                ProtoJustifyContent::SpaceEvenly,
+                taffy::JustifyContent::SpaceEvenly,
+            ),
         ] {
-            let c = Constraints { justify_content: proto, ..default_constraints() };
+            let c = Constraints {
+                justify_content: proto,
+                ..default_constraints()
+            };
             let style = constraints_to_style(&c);
-            assert_eq!(style.justify_content, Some(expected), "JustifyContent::{proto:?}");
+            assert_eq!(
+                style.justify_content,
+                Some(expected),
+                "JustifyContent::{proto:?}"
+            );
         }
     }
 
@@ -436,7 +539,10 @@ mod tests {
             (ProtoAlignItems::Baseline, taffy::AlignItems::Baseline),
             (ProtoAlignItems::Stretch, taffy::AlignItems::Stretch),
         ] {
-            let c = Constraints { align_items: proto, ..default_constraints() };
+            let c = Constraints {
+                align_items: proto,
+                ..default_constraints()
+            };
             let style = constraints_to_style(&c);
             assert_eq!(style.align_items, Some(expected), "AlignItems::{proto:?}");
         }
@@ -444,7 +550,10 @@ mod tests {
 
     #[test]
     fn constraints_align_self_auto_maps_to_none() {
-        let c = Constraints { align_self: ProtoAlignSelf::Auto, ..default_constraints() };
+        let c = Constraints {
+            align_self: ProtoAlignSelf::Auto,
+            ..default_constraints()
+        };
         let style = constraints_to_style(&c);
         assert_eq!(style.align_self, None);
     }
@@ -458,7 +567,10 @@ mod tests {
             (ProtoAlignSelf::Baseline, taffy::AlignSelf::Baseline),
             (ProtoAlignSelf::Stretch, taffy::AlignSelf::Stretch),
         ] {
-            let c = Constraints { align_self: proto, ..default_constraints() };
+            let c = Constraints {
+                align_self: proto,
+                ..default_constraints()
+            };
             let style = constraints_to_style(&c);
             assert_eq!(style.align_self, Some(expected), "AlignSelf::{proto:?}");
         }
@@ -470,14 +582,30 @@ mod tests {
             (ProtoAlignContent::Start, taffy::AlignContent::Start),
             (ProtoAlignContent::End, taffy::AlignContent::End),
             (ProtoAlignContent::Center, taffy::AlignContent::Center),
-            (ProtoAlignContent::SpaceBetween, taffy::AlignContent::SpaceBetween),
-            (ProtoAlignContent::SpaceAround, taffy::AlignContent::SpaceAround),
-            (ProtoAlignContent::SpaceEvenly, taffy::AlignContent::SpaceEvenly),
+            (
+                ProtoAlignContent::SpaceBetween,
+                taffy::AlignContent::SpaceBetween,
+            ),
+            (
+                ProtoAlignContent::SpaceAround,
+                taffy::AlignContent::SpaceAround,
+            ),
+            (
+                ProtoAlignContent::SpaceEvenly,
+                taffy::AlignContent::SpaceEvenly,
+            ),
             (ProtoAlignContent::Stretch, taffy::AlignContent::Stretch),
         ] {
-            let c = Constraints { align_content: proto, ..default_constraints() };
+            let c = Constraints {
+                align_content: proto,
+                ..default_constraints()
+            };
             let style = constraints_to_style(&c);
-            assert_eq!(style.align_content, Some(expected), "AlignContent::{proto:?}");
+            assert_eq!(
+                style.align_content,
+                Some(expected),
+                "AlignContent::{proto:?}"
+            );
         }
     }
 
@@ -548,59 +676,125 @@ mod tests {
     #[test]
     fn dimension_to_taffy_auto_and_cells() {
         assert_eq!(dimension_to_taffy(&ProtoDimension::Auto), Dimension::Auto);
-        assert_eq!(dimension_to_taffy(&ProtoDimension::Cells(10.0)), Dimension::Length(10.0));
+        assert_eq!(
+            dimension_to_taffy(&ProtoDimension::Cells(10.0)),
+            Dimension::Length(10.0)
+        );
     }
 
     #[test]
     fn dimension_to_taffy_percent_divides_by_100() {
-        assert_eq!(dimension_to_taffy(&ProtoDimension::Percent(50.0)), Dimension::Percent(0.5));
-        assert_eq!(dimension_to_taffy(&ProtoDimension::Percent(100.0)), Dimension::Percent(1.0));
+        assert_eq!(
+            dimension_to_taffy(&ProtoDimension::Percent(50.0)),
+            Dimension::Percent(0.5)
+        );
+        assert_eq!(
+            dimension_to_taffy(&ProtoDimension::Percent(100.0)),
+            Dimension::Percent(1.0)
+        );
     }
 
     #[test]
     fn dimension_to_taffy_fr_mincontent_maxcontent_fallback_to_auto() {
-        assert_eq!(dimension_to_taffy(&ProtoDimension::Fr(1.0)), Dimension::Auto);
-        assert_eq!(dimension_to_taffy(&ProtoDimension::MinContent), Dimension::Auto);
-        assert_eq!(dimension_to_taffy(&ProtoDimension::MaxContent), Dimension::Auto);
+        assert_eq!(
+            dimension_to_taffy(&ProtoDimension::Fr(1.0)),
+            Dimension::Auto
+        );
+        assert_eq!(
+            dimension_to_taffy(&ProtoDimension::MinContent),
+            Dimension::Auto
+        );
+        assert_eq!(
+            dimension_to_taffy(&ProtoDimension::MaxContent),
+            Dimension::Auto
+        );
     }
 
     #[test]
     fn dimension_to_taffy_viewport_units() {
-        assert_eq!(dimension_to_taffy(&ProtoDimension::Vw(50.0)), Dimension::Percent(0.5));
-        assert_eq!(dimension_to_taffy(&ProtoDimension::Vh(50.0)), Dimension::Percent(0.5));
+        assert_eq!(
+            dimension_to_taffy(&ProtoDimension::Vw(50.0)),
+            Dimension::Percent(0.5)
+        );
+        assert_eq!(
+            dimension_to_taffy(&ProtoDimension::Vh(50.0)),
+            Dimension::Percent(0.5)
+        );
     }
 
     // ── dimension_to_length_auto tests ──────────────────────────────
 
     #[test]
     fn length_auto_basic_variants() {
-        assert_eq!(dimension_to_length_auto(&ProtoDimension::Auto), LengthPercentageAuto::Auto);
-        assert_eq!(dimension_to_length_auto(&ProtoDimension::Cells(5.0)), LengthPercentageAuto::Length(5.0));
-        assert_eq!(dimension_to_length_auto(&ProtoDimension::Percent(25.0)), LengthPercentageAuto::Percent(0.25));
+        assert_eq!(
+            dimension_to_length_auto(&ProtoDimension::Auto),
+            LengthPercentageAuto::Auto
+        );
+        assert_eq!(
+            dimension_to_length_auto(&ProtoDimension::Cells(5.0)),
+            LengthPercentageAuto::Length(5.0)
+        );
+        assert_eq!(
+            dimension_to_length_auto(&ProtoDimension::Percent(25.0)),
+            LengthPercentageAuto::Percent(0.25)
+        );
     }
 
     #[test]
     fn length_auto_catch_all_returns_auto() {
-        assert_eq!(dimension_to_length_auto(&ProtoDimension::Fr(1.0)), LengthPercentageAuto::Auto);
-        assert_eq!(dimension_to_length_auto(&ProtoDimension::Vw(50.0)), LengthPercentageAuto::Auto);
-        assert_eq!(dimension_to_length_auto(&ProtoDimension::Vh(50.0)), LengthPercentageAuto::Auto);
-        assert_eq!(dimension_to_length_auto(&ProtoDimension::MinContent), LengthPercentageAuto::Auto);
-        assert_eq!(dimension_to_length_auto(&ProtoDimension::MaxContent), LengthPercentageAuto::Auto);
+        assert_eq!(
+            dimension_to_length_auto(&ProtoDimension::Fr(1.0)),
+            LengthPercentageAuto::Auto
+        );
+        assert_eq!(
+            dimension_to_length_auto(&ProtoDimension::Vw(50.0)),
+            LengthPercentageAuto::Auto
+        );
+        assert_eq!(
+            dimension_to_length_auto(&ProtoDimension::Vh(50.0)),
+            LengthPercentageAuto::Auto
+        );
+        assert_eq!(
+            dimension_to_length_auto(&ProtoDimension::MinContent),
+            LengthPercentageAuto::Auto
+        );
+        assert_eq!(
+            dimension_to_length_auto(&ProtoDimension::MaxContent),
+            LengthPercentageAuto::Auto
+        );
     }
 
     // ── dimension_to_length_pct tests ───────────────────────────────
 
     #[test]
     fn length_pct_cells_and_percent() {
-        assert_eq!(dimension_to_length_pct(&ProtoDimension::Cells(5.0)), LengthPercentage::Length(5.0));
-        assert_eq!(dimension_to_length_pct(&ProtoDimension::Percent(50.0)), LengthPercentage::Percent(0.5));
+        assert_eq!(
+            dimension_to_length_pct(&ProtoDimension::Cells(5.0)),
+            LengthPercentage::Length(5.0)
+        );
+        assert_eq!(
+            dimension_to_length_pct(&ProtoDimension::Percent(50.0)),
+            LengthPercentage::Percent(0.5)
+        );
     }
 
     #[test]
     fn length_pct_catch_all_returns_zero_length() {
-        assert_eq!(dimension_to_length_pct(&ProtoDimension::Auto), LengthPercentage::Length(0.0));
-        assert_eq!(dimension_to_length_pct(&ProtoDimension::Fr(1.0)), LengthPercentage::Length(0.0));
-        assert_eq!(dimension_to_length_pct(&ProtoDimension::Vw(50.0)), LengthPercentage::Length(0.0));
-        assert_eq!(dimension_to_length_pct(&ProtoDimension::Vh(50.0)), LengthPercentage::Length(0.0));
+        assert_eq!(
+            dimension_to_length_pct(&ProtoDimension::Auto),
+            LengthPercentage::Length(0.0)
+        );
+        assert_eq!(
+            dimension_to_length_pct(&ProtoDimension::Fr(1.0)),
+            LengthPercentage::Length(0.0)
+        );
+        assert_eq!(
+            dimension_to_length_pct(&ProtoDimension::Vw(50.0)),
+            LengthPercentage::Length(0.0)
+        );
+        assert_eq!(
+            dimension_to_length_pct(&ProtoDimension::Vh(50.0)),
+            LengthPercentage::Length(0.0)
+        );
     }
 }

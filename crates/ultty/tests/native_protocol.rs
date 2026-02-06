@@ -9,7 +9,7 @@ use std::time::Duration;
 use bytes::BytesMut;
 use ultty_protocol::{
     AppMessage, BorderStyle, BorderType, CodeWidget, Constraints, Content, Decode, Dimension,
-    Display, Encode, FrameId, FlexDirection, InputType, InputWidget, Key, MarkdownWidget,
+    Display, Encode, FlexDirection, FrameId, InputType, InputWidget, Key, MarkdownWidget,
     Modifiers, MouseButton, ProgressWidget, RegionId, RichText, Span, SpinnerWidget, Style,
     TerminalMessage, TextAlign, TextContent, TextOverflow, TextWrap, WidgetContent, EVENT_FOCUS,
     EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL, PROTOCOL_VERSION,
@@ -567,6 +567,93 @@ fn test_error_for_unknown_region() {
 }
 
 #[test]
+fn test_error_for_end_frame_mismatch() {
+    let socket_path = temp_socket_path();
+    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    server.set_viewport(80.0, 24.0);
+
+    let (mut client, _root) = handshake(&mut server, &socket_path);
+
+    let mut buf = BytesMut::new();
+    AppMessage::BeginFrame {
+        frame_id: FrameId(1),
+    }
+    .encode(&mut buf);
+    AppMessage::EndFrame {
+        frame_id: FrameId(2),
+    }
+    .encode(&mut buf);
+    client.write_all(&buf).unwrap();
+
+    server.poll(Some(Duration::from_millis(10))).unwrap();
+
+    let mut response = vec![0u8; 4096];
+    let n = client.read(&mut response).unwrap();
+    assert!(n > 0, "Expected response from server");
+
+    let mut cursor = &response[..n];
+    let mut found_error = false;
+    while !cursor.is_empty() {
+        match TerminalMessage::decode(&mut cursor) {
+            Ok(TerminalMessage::Error { code, message }) => {
+                assert_eq!(code, 400);
+                assert!(
+                    message.contains("end_frame mismatch"),
+                    "Error should mention mismatch"
+                );
+                found_error = true;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(
+        found_error,
+        "Expected Error message for mismatched EndFrame"
+    );
+}
+
+#[test]
+fn test_error_for_decode_failure() {
+    let socket_path = temp_socket_path();
+    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    server.set_viewport(80.0, 24.0);
+
+    let (mut client, _root) = handshake(&mut server, &socket_path);
+
+    // Build a valid message frame then corrupt type code to force decode failure.
+    let mut bad = BytesMut::new();
+    AppMessage::Pong.encode(&mut bad);
+    bad[2] = 0xff;
+    bad[3] = 0xff;
+    client.write_all(&bad).unwrap();
+
+    server.poll(Some(Duration::from_millis(10))).unwrap();
+
+    let mut response = vec![0u8; 4096];
+    let n = client.read(&mut response).unwrap();
+    assert!(n > 0, "Expected response from server");
+
+    let mut cursor = &response[..n];
+    let mut found_error = false;
+    while !cursor.is_empty() {
+        match TerminalMessage::decode(&mut cursor) {
+            Ok(TerminalMessage::Error { code, message }) => {
+                assert_eq!(code, 400);
+                assert!(
+                    message.contains("decode error"),
+                    "Error should mention decode failure"
+                );
+                found_error = true;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(found_error, "Expected Error message for decode failure");
+}
+
+#[test]
 fn test_focus_event_delivery() {
     let socket_path = temp_socket_path();
     let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
@@ -838,7 +925,10 @@ fn test_scroll_animated_converges() {
     let (sx, sy) = session.scroll_offset(region_id);
     assert_eq!(sx, 0.0);
     assert_eq!(sy, 100.0);
-    assert!(iterations > 1, "Should take multiple iterations to converge");
+    assert!(
+        iterations > 1,
+        "Should take multiple iterations to converge"
+    );
 }
 
 #[test]
@@ -1222,7 +1312,10 @@ fn test_unsubscribe_stops_events() {
         .unwrap();
     let mut response = vec![0u8; 4096];
     match client.read(&mut response) {
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+        Err(e)
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut =>
+        {
             // Expected: no data after unsubscribe
         }
         Ok(0) => {
@@ -1709,7 +1802,11 @@ fn test_keepalive_ping_pong() {
 
     // Server should process the Pong without error and session should remain active
     server.poll(Some(Duration::from_millis(10))).unwrap();
-    assert_eq!(server.session_count(), 1, "Session should remain active after Pong");
+    assert_eq!(
+        server.session_count(),
+        1,
+        "Session should remain active after Pong"
+    );
 
     // Verify Ping can be encoded and decoded (roundtrip via the server sending Ping)
     // We test this by encoding a Ping and verifying the client can decode it
@@ -1719,5 +1816,8 @@ fn test_keepalive_ping_pong() {
     // Simulate writing ping to client and decoding
     let mut cursor = &ping_buf[..];
     let decoded = TerminalMessage::decode(&mut cursor).unwrap();
-    assert!(matches!(decoded, TerminalMessage::Ping), "Expected Ping message");
+    assert!(
+        matches!(decoded, TerminalMessage::Ping),
+        "Expected Ping message"
+    );
 }

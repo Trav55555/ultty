@@ -1,4 +1,7 @@
 //! Focus management for interactive widgets.
+//!
+//! Focus state is thread-local and owned by the UI/render thread.
+//! Do not access `with_current`/`with_current_mut` from background tasks.
 
 /// Tracks which widget is currently focused.
 #[derive(Debug, Default)]

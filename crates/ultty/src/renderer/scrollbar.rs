@@ -60,6 +60,59 @@ impl ScrollbarState {
     }
 }
 
+impl Renderer {
+    /// Emit scrollbar vertices.
+    pub(super) fn emit_scrollbar(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        scrollbar: &ScrollbarState,
+    ) {
+        let scrollbar_width = 8.0;
+        let scrollbar_margin = 2.0;
+        let terminal_height = self.config.height as f32 - self.tab_bar_height;
+
+        // Scrollbar track position (right side of terminal)
+        let track_x = self.config.width as f32 - scrollbar_width - scrollbar_margin;
+        let track_y = self.tab_bar_height + scrollbar_margin;
+        let track_height = terminal_height - scrollbar_margin * 2.0;
+
+        // Draw track (darker background)
+        let track_color = Rgba::new(0.15, 0.15, 0.15, 0.6);
+        self.emit_rect(
+            vertices,
+            indices,
+            track_x,
+            track_y,
+            scrollbar_width,
+            track_height,
+            track_color,
+        );
+
+        // Calculate thumb position and size
+        let (thumb_pos, thumb_size) = scrollbar.thumb_geometry();
+        let thumb_y = track_y + thumb_pos * track_height;
+        let thumb_height = (thumb_size * track_height).max(20.0); // Minimum thumb size
+
+        // Draw thumb (brighter)
+        let thumb_color = if scrollbar.scroll_offset > 0 {
+            Rgba::new(0.5, 0.5, 0.5, 0.8) // Active scroll position
+        } else {
+            Rgba::new(0.35, 0.35, 0.35, 0.6) // At bottom
+        };
+
+        self.emit_rect(
+            vertices,
+            indices,
+            track_x + 1.0,
+            thumb_y,
+            scrollbar_width - 2.0,
+            thumb_height,
+            thumb_color,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,7 +182,10 @@ mod tests {
         let (pos, size) = sb.thumb_geometry();
         // Thumb center should be near the middle
         let center = pos + size / 2.0;
-        assert!((center - 0.5).abs() < 0.05, "center={center}, pos={pos}, size={size}");
+        assert!(
+            (center - 0.5).abs() < 0.05,
+            "center={center}, pos={pos}, size={size}"
+        );
     }
 
     #[test]
@@ -139,58 +195,5 @@ mod tests {
         assert_eq!(sb.viewport_lines, 0);
         assert_eq!(sb.scroll_offset, 0);
         assert!(!sb.is_visible());
-    }
-}
-
-impl Renderer {
-    /// Emit scrollbar vertices.
-    pub(super) fn emit_scrollbar(
-        &self,
-        vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u32>,
-        scrollbar: &ScrollbarState,
-    ) {
-        let scrollbar_width = 8.0;
-        let scrollbar_margin = 2.0;
-        let terminal_height = self.config.height as f32 - self.tab_bar_height;
-
-        // Scrollbar track position (right side of terminal)
-        let track_x = self.config.width as f32 - scrollbar_width - scrollbar_margin;
-        let track_y = self.tab_bar_height + scrollbar_margin;
-        let track_height = terminal_height - scrollbar_margin * 2.0;
-
-        // Draw track (darker background)
-        let track_color = Rgba::new(0.15, 0.15, 0.15, 0.6);
-        self.emit_rect(
-            vertices,
-            indices,
-            track_x,
-            track_y,
-            scrollbar_width,
-            track_height,
-            track_color,
-        );
-
-        // Calculate thumb position and size
-        let (thumb_pos, thumb_size) = scrollbar.thumb_geometry();
-        let thumb_y = track_y + thumb_pos * track_height;
-        let thumb_height = (thumb_size * track_height).max(20.0); // Minimum thumb size
-
-        // Draw thumb (brighter)
-        let thumb_color = if scrollbar.scroll_offset > 0 {
-            Rgba::new(0.5, 0.5, 0.5, 0.8) // Active scroll position
-        } else {
-            Rgba::new(0.35, 0.35, 0.35, 0.6) // At bottom
-        };
-
-        self.emit_rect(
-            vertices,
-            indices,
-            track_x + 1.0,
-            thumb_y,
-            scrollbar_width - 2.0,
-            thumb_height,
-            thumb_color,
-        );
     }
 }

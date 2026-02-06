@@ -1,4 +1,7 @@
 //! Theme system for consistent widget styling.
+//!
+//! Theme state is thread-local and intended for the UI/render thread only.
+//! Background tasks should not depend on `Theme::current()`.
 
 use std::cell::RefCell;
 
@@ -146,6 +149,14 @@ impl Theme {
     pub fn set_current(theme: Theme) {
         CURRENT_THEME.with(|t| *t.borrow_mut() = theme);
     }
+
+    /// Replace the current theme and return the previous one.
+    pub fn replace_current(theme: Theme) -> Theme {
+        CURRENT_THEME.with(|t| {
+            let mut borrowed = t.borrow_mut();
+            std::mem::replace(&mut *borrowed, theme)
+        })
+    }
 }
 
 /// Convert a protocol Color to a ratatui Color for ANSI rendering.
@@ -203,6 +214,19 @@ mod tests {
         let theme = Theme::light();
         Theme::set_current(theme.clone());
         assert_eq!(Theme::current().primary, theme.primary);
+    }
+
+    #[test]
+    fn replace_current_returns_old_theme() {
+        let original = Theme::dark();
+        Theme::set_current(original.clone());
+
+        let new_theme = Theme::light();
+        let old = Theme::replace_current(new_theme.clone());
+        assert_eq!(old.primary, original.primary);
+        assert_eq!(Theme::current().primary, new_theme.primary);
+
+        Theme::set_current(old);
     }
 
     #[test]

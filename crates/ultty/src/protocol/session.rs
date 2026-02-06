@@ -94,6 +94,18 @@ struct StyleAnimation {
 }
 
 impl NativeSession {
+    fn queue_error_message(&mut self, code: u16, message: String) {
+        if let Err(e) = self.send_message(&TerminalMessage::Error {
+            code,
+            message: message.clone(),
+        }) {
+            warn!(
+                "Session {} failed to queue error message '{}': {}",
+                self.session_id, message, e
+            );
+        }
+    }
+
     /// Create a new session from an accepted socket connection.
     pub fn new(stream: UnixStream, session_id: u64) -> io::Result<Self> {
         // Set non-blocking for polling
@@ -276,10 +288,12 @@ impl NativeSession {
                 // Skip the corrupted message instead of killing the session.
                 // The framing (magic + length) was valid, so we can safely
                 // advance past it and continue processing.
+                let message = format!("decode error: skipped {} byte message: {}", total_len, e);
                 warn!(
                     "Session {} decode error (skipping {} byte message): {}",
                     self.session_id, total_len, e
                 );
+                self.queue_error_message(400, message);
                 self.read_buf.advance(total_len);
                 Ok(None)
             }
@@ -353,12 +367,7 @@ impl NativeSession {
                 }
             }
 
-            AppMessage::Scroll {
-                id,
-                x,
-                y,
-                animate,
-            } => {
+            AppMessage::Scroll { id, x, y, animate } => {
                 if animate {
                     self.scroll_targets.insert(id, (x, y));
                     // Initialize current position if not yet set
@@ -372,7 +381,10 @@ impl NativeSession {
                     }
                 }
                 self.scene_dirty = true;
-                debug!("Scroll set for {:?}: ({}, {}), animate={}", id, x, y, animate);
+                debug!(
+                    "Scroll set for {:?}: ({}, {}), animate={}",
+                    id, x, y, animate
+                );
             }
 
             AppMessage::Focus { id } => {
@@ -394,12 +406,11 @@ impl NativeSession {
 
                 // Send focus gained event to new region if subscribed
                 if self.is_subscribed(id, ultty_protocol::EVENT_FOCUS) {
-                    let _ = self.send_message(&TerminalMessage::Focus(
-                        ultty_protocol::FocusEvent {
+                    let _ =
+                        self.send_message(&TerminalMessage::Focus(ultty_protocol::FocusEvent {
                             region_id: id,
                             focused: true,
-                        },
-                    ));
+                        }));
                 }
             }
 
@@ -425,7 +436,11 @@ impl NativeSession {
             }
 
             AppMessage::ClipboardSet { text } => {
-                debug!("Session {} clipboard set: {} chars", self.session_id, text.len());
+                debug!(
+                    "Session {} clipboard set: {} chars",
+                    self.session_id,
+                    text.len()
+                );
                 self.pending_clipboard_set = Some(text);
             }
 
@@ -509,10 +524,7 @@ impl NativeSession {
             self.render_dirty = true;
         } else {
             warn!("SetConstraints for unknown region {:?}", id);
-            let _ = self.send_message(&TerminalMessage::Error {
-                code: 404,
-                message: format!("region {} not found", id.0),
-            });
+            self.queue_error_message(404, format!("region {} not found", id.0));
         }
     }
 
@@ -548,10 +560,7 @@ impl NativeSession {
             self.render_dirty = true;
         } else {
             warn!("SetStyle for unknown region {:?}", id);
-            let _ = self.send_message(&TerminalMessage::Error {
-                code: 404,
-                message: format!("region {} not found", id.0),
-            });
+            self.queue_error_message(404, format!("region {} not found", id.0));
         }
     }
 
@@ -572,10 +581,7 @@ impl NativeSession {
             self.render_dirty = true;
         } else {
             warn!("SetContent for unknown region {:?}", id);
-            let _ = self.send_message(&TerminalMessage::Error {
-                code: 404,
-                message: format!("region {} not found", id.0),
-            });
+            self.queue_error_message(404, format!("region {} not found", id.0));
         }
     }
 
@@ -589,10 +595,7 @@ impl NativeSession {
             debug!("Deleted region {:?}", id);
         } else {
             warn!("DeleteRegion for unknown region {:?}", id);
-            let _ = self.send_message(&TerminalMessage::Error {
-                code: 404,
-                message: format!("region {} not found", id.0),
-            });
+            self.queue_error_message(404, format!("region {} not found", id.0));
         }
     }
 
@@ -625,10 +628,7 @@ impl NativeSession {
             debug!("Reparented region {:?} to {:?}", id, new_parent);
         } else {
             warn!("ReparentRegion for unknown region {:?}", id);
-            let _ = self.send_message(&TerminalMessage::Error {
-                code: 404,
-                message: format!("region {} not found", id.0),
-            });
+            self.queue_error_message(404, format!("region {} not found", id.0));
         }
     }
 
@@ -642,11 +642,18 @@ impl NativeSession {
     fn handle_end_frame(&mut self, frame_id: FrameId) -> io::Result<()> {
         debug!("End frame {:?}", frame_id);
 
-        if self.current_frame != Some(frame_id) {
+        let expected = self.current_frame;
+        if expected != Some(frame_id) {
+            let message = format!(
+                "end_frame mismatch: expected {:?}, got {:?}",
+                expected, frame_id
+            );
             warn!(
                 "EndFrame mismatch: expected {:?}, got {:?}",
-                self.current_frame, frame_id
+                expected, frame_id
             );
+            self.queue_error_message(400, message);
+            return Ok(());
         }
 
         self.current_frame = None;
@@ -670,11 +677,21 @@ impl NativeSession {
         trigger: LayoutTrigger,
     ) -> io::Result<()> {
         // Sync scene tree to Taffy
-        self.layout.sync(&self.scene);
+        if let Err(e) = self.layout.sync(&self.scene) {
+            warn!("Session {} layout sync error: {}", self.session_id, e);
+            self.queue_error_message(500, format!("layout sync failed: {}", e));
+            return Ok(());
+        }
 
         // Compute layout
-        self.layout
-            .compute(self.viewport_width, self.viewport_height);
+        if let Err(e) = self
+            .layout
+            .compute(self.viewport_width, self.viewport_height)
+        {
+            warn!("Session {} layout compute error: {}", self.session_id, e);
+            self.queue_error_message(500, format!("layout compute failed: {}", e));
+            return Ok(());
+        }
 
         // Collect computed layouts
         let mut regions = Vec::new();
@@ -792,10 +809,7 @@ impl NativeSession {
         if self.awaiting_pong {
             if let Some(ping_time) = self.last_ping_sent {
                 if now.duration_since(ping_time) > std::time::Duration::from_secs(10) {
-                    info!(
-                        "Session {} pong timeout",
-                        self.session_id,
-                    );
+                    info!("Session {} pong timeout", self.session_id,);
                     return Ok(false);
                 }
             }
@@ -1082,7 +1096,12 @@ impl NativeSession {
     }
 
     /// Send a scroll event notification to the client for a specific region.
-    pub fn send_scroll_event(&mut self, id: RegionId, scroll_x: f32, scroll_y: f32) -> io::Result<()> {
+    pub fn send_scroll_event(
+        &mut self,
+        id: RegionId,
+        scroll_x: f32,
+        scroll_y: f32,
+    ) -> io::Result<()> {
         self.send_message(&TerminalMessage::Scroll(ultty_protocol::ScrollEvent {
             region_id: id,
             scroll_x,
@@ -1211,7 +1230,9 @@ mod tests {
 
         assert!(!session.is_subscribed(id, ultty_protocol::EVENT_MOUSE));
 
-        session.subscriptions.insert(id, ultty_protocol::EVENT_MOUSE);
+        session
+            .subscriptions
+            .insert(id, ultty_protocol::EVENT_MOUSE);
         assert!(session.is_subscribed(id, ultty_protocol::EVENT_MOUSE));
         assert!(!session.is_subscribed(id, ultty_protocol::EVENT_KEY));
     }

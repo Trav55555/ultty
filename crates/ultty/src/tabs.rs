@@ -783,17 +783,23 @@ mod tests {
 
     #[test]
     fn min_less_than_max_tab_width() {
-        assert!(MIN_TAB_WIDTH < MAX_TAB_WIDTH);
+        const {
+            assert!(MIN_TAB_WIDTH < MAX_TAB_WIDTH);
+        }
     }
 
     #[test]
     fn tab_bar_height_positive() {
-        assert!(TAB_BAR_HEIGHT > 0.0);
+        const {
+            assert!(TAB_BAR_HEIGHT > 0.0);
+        }
     }
 
     #[test]
     fn tab_padding_positive() {
-        assert!(TAB_PADDING > 0.0);
+        const {
+            assert!(TAB_PADDING > 0.0);
+        }
     }
 
     // ---------------------------------------------------------------

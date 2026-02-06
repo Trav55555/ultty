@@ -6,6 +6,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use tracing::warn;
 
 /// Main configuration structure.
 #[derive(Debug, Clone, Deserialize)]
@@ -39,7 +40,9 @@ impl Config {
     /// Load configuration from a specific path.
     pub fn load_from_path(path: &PathBuf) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
-        toml::from_str(&contents).map_err(ConfigError::Parse)
+        let config: Self = toml::from_str(&contents).map_err(ConfigError::Parse)?;
+        config.warn_on_duplicate_keybindings();
+        Ok(config)
     }
 
     /// Get the default config file path.
@@ -50,6 +53,17 @@ impl Config {
     /// Get the config directory path.
     pub fn config_dir() -> Option<PathBuf> {
         dirs::config_dir().map(|p| p.join("ultty"))
+    }
+
+    fn warn_on_duplicate_keybindings(&self) {
+        let duplicates = self.keybindings.duplicate_bindings();
+        for (binding, actions) in duplicates {
+            warn!(
+                "Duplicate keybinding '{}' assigned to actions: {}",
+                binding,
+                actions.join(", ")
+            );
+        }
     }
 }
 
@@ -561,13 +575,84 @@ impl Default for KeybindingConfig {
             font_decrease: "ctrl+-".to_string(),
             font_reset: "ctrl+0".to_string(),
             screenshot: "ctrl+shift+s".to_string(),
-            debug_dump: "ctrl+shift+d".to_string(),
+            debug_dump: "ctrl+shift+alt+d".to_string(),
             custom: HashMap::new(),
         }
     }
 }
 
 impl KeybindingConfig {
+    /// Return duplicate keybindings as (binding, actions) pairs.
+    pub fn duplicate_bindings(&self) -> Vec<(String, Vec<String>)> {
+        let mut by_binding: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (action, binding) in self.all_bindings() {
+            let normalized = binding.trim().to_lowercase();
+            if normalized.is_empty() {
+                continue;
+            }
+            by_binding.entry(normalized).or_default().push(action);
+        }
+
+        let mut duplicates: Vec<(String, Vec<String>)> = by_binding
+            .into_iter()
+            .filter_map(|(binding, mut actions)| {
+                if actions.len() > 1 {
+                    actions.sort();
+                    Some((binding, actions))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        duplicates.sort_by(|a, b| a.0.cmp(&b.0));
+        duplicates
+    }
+
+    fn all_bindings(&self) -> Vec<(String, String)> {
+        let mut bindings = vec![
+            ("copy".to_string(), self.copy.clone()),
+            ("paste".to_string(), self.paste.clone()),
+            ("new_tab".to_string(), self.new_tab.clone()),
+            ("close_tab".to_string(), self.close_tab.clone()),
+            ("next_tab".to_string(), self.next_tab.clone()),
+            ("prev_tab".to_string(), self.prev_tab.clone()),
+            (
+                "split_horizontal".to_string(),
+                self.split_horizontal.clone(),
+            ),
+            ("split_vertical".to_string(), self.split_vertical.clone()),
+            ("focus_pane_left".to_string(), self.focus_pane_left.clone()),
+            (
+                "focus_pane_right".to_string(),
+                self.focus_pane_right.clone(),
+            ),
+            ("focus_pane_up".to_string(), self.focus_pane_up.clone()),
+            ("focus_pane_down".to_string(), self.focus_pane_down.clone()),
+            ("close_pane".to_string(), self.close_pane.clone()),
+            ("vim_mode".to_string(), self.vim_mode.clone()),
+            ("find".to_string(), self.find.clone()),
+            ("reload_config".to_string(), self.reload_config.clone()),
+            ("show_shortcuts".to_string(), self.show_shortcuts.clone()),
+            ("cycle_theme".to_string(), self.cycle_theme.clone()),
+            ("font_increase".to_string(), self.font_increase.clone()),
+            ("font_decrease".to_string(), self.font_decrease.clone()),
+            ("font_reset".to_string(), self.font_reset.clone()),
+            ("screenshot".to_string(), self.screenshot.clone()),
+            ("debug_dump".to_string(), self.debug_dump.clone()),
+        ];
+
+        let mut custom: Vec<(String, String)> = self
+            .custom
+            .iter()
+            .map(|(action, binding)| (action.clone(), binding.clone()))
+            .collect();
+        custom.sort_by(|a, b| a.0.cmp(&b.0));
+        bindings.extend(custom);
+        bindings
+    }
+
     /// Parse a keybinding string into modifiers and key.
     ///
     /// Format: `mod1+mod2+key` where modifiers are ctrl, shift, alt, super
@@ -963,5 +1048,20 @@ session_name = "dev"
         assert!(!config.tmux.passthrough);
         assert!(config.tmux.auto_detect);
         assert_eq!(config.tmux.session_name, Some("dev".to_string()));
+    }
+
+    #[test]
+    fn duplicate_bindings_detected() {
+        let keybindings = KeybindingConfig {
+            copy: "ctrl+shift+c".to_string(),
+            paste: "ctrl+shift+c".to_string(),
+            ..Default::default()
+        };
+
+        let duplicates = keybindings.duplicate_bindings();
+        assert_eq!(duplicates.len(), 1);
+        assert_eq!(duplicates[0].0, "ctrl+shift+c");
+        assert!(duplicates[0].1.contains(&"copy".to_string()));
+        assert!(duplicates[0].1.contains(&"paste".to_string()));
     }
 }

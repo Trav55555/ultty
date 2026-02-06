@@ -309,7 +309,7 @@ fn invalid_utf8_does_not_crash() {
 #[test]
 fn very_long_osc_does_not_crash() {
     let mut data = vec![0x1b, b']', b'0', b';'];
-    data.extend(std::iter::repeat(b'x').take(100_000));
+    data.extend(std::iter::repeat_n(b'x', 100_000));
     data.push(0x07);
 
     let mut parser = AnsiParser::new();
@@ -334,9 +334,7 @@ fn very_long_csi_params_does_not_crash() {
 #[test]
 fn deeply_nested_escapes_handled() {
     let mut data = Vec::new();
-    for _ in 0..100 {
-        data.push(0x1b);
-    }
+    data.extend(std::iter::repeat_n(0x1b, 100));
     data.push(b'[');
     data.push(b'1');
     data.push(b'm');

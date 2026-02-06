@@ -98,9 +98,7 @@ impl UrlDetector {
             let text = get_row_text(row_idx);
             let hash = Self::hash_str(&text);
 
-            if hash == self.row_hashes[row_idx as usize]
-                && self.row_hashes[row_idx as usize] != 0
-            {
+            if hash == self.row_hashes[row_idx as usize] && self.row_hashes[row_idx as usize] != 0 {
                 // Row unchanged, keep existing URLs for this row
                 continue;
             }
@@ -144,10 +142,15 @@ impl UrlDetector {
     ///
     /// This scans visible cells for hyperlink IDs and adds them to the detected URLs.
     /// The `get_hyperlink` function maps cell hyperlink IDs to their URIs.
-    pub fn detect_hyperlinks<F, G>(&mut self, rows: u16, cols: u16, get_cell_hyperlink: F, get_hyperlink_uri: G)
-    where
-        F: Fn(u16, u16) -> u32,  // (row, col) -> hyperlink_id
-        G: Fn(u32) -> Option<String>,  // hyperlink_id -> uri
+    pub fn detect_hyperlinks<F, G>(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        get_cell_hyperlink: F,
+        get_hyperlink_uri: G,
+    ) where
+        F: Fn(u16, u16) -> u32,       // (row, col) -> hyperlink_id
+        G: Fn(u32) -> Option<String>, // hyperlink_id -> uri
     {
         if !self.enabled {
             return;
@@ -245,7 +248,9 @@ mod tests {
     #[test]
     fn detect_https_url() {
         let mut detector = UrlDetector::new(true);
-        detector.detect(1, |_| "Check https://github.com/user/repo for code".to_string());
+        detector.detect(1, |_| {
+            "Check https://github.com/user/repo for code".to_string()
+        });
         assert_eq!(detector.urls.len(), 1);
         assert_eq!(detector.urls[0].url, "https://github.com/user/repo");
     }
@@ -261,7 +266,10 @@ mod tests {
     #[test]
     fn detect_url_with_path_and_query() {
         let found = urls_from("Link: https://example.com/path/to/page?foo=bar&baz=qux");
-        assert_eq!(found, vec!["https://example.com/path/to/page?foo=bar&baz=qux"]);
+        assert_eq!(
+            found,
+            vec!["https://example.com/path/to/page?foo=bar&baz=qux"]
+        );
     }
 
     #[test]
@@ -356,8 +364,8 @@ mod tests {
         // "Visit " is 6 chars, URL starts at col 6
         assert!(detector.has_url_at(6, 0));
         assert!(detector.has_url_at(10, 0));
-        assert!(!detector.has_url_at(5, 0));  // Before URL
-        assert!(!detector.has_url_at(0, 1));  // Wrong row
+        assert!(!detector.has_url_at(5, 0)); // Before URL
+        assert!(!detector.has_url_at(0, 1)); // Wrong row
     }
 
     #[test]
@@ -595,9 +603,9 @@ mod tests {
             end_col: 20,
             row: 3,
         };
-        assert!(url.contains(5, 3));   // start inclusive
-        assert!(url.contains(19, 3));  // end-1 inclusive
-        assert!(!url.contains(4, 3));  // before start
+        assert!(url.contains(5, 3)); // start inclusive
+        assert!(url.contains(19, 3)); // end-1 inclusive
+        assert!(!url.contains(4, 3)); // before start
         assert!(!url.contains(20, 3)); // at end (exclusive)
         assert!(!url.contains(10, 2)); // wrong row
         assert!(!url.contains(10, 4)); // wrong row
@@ -677,9 +685,16 @@ mod tests {
         let mut detector = UrlDetector::new(true);
         // Simulate a 1x10 grid where cols 2..5 have hyperlink id 1
         detector.detect_hyperlinks(
-            1, 10,
+            1,
+            10,
             |_row, col| if (2..5).contains(&col) { 1 } else { 0 },
-            |id| if id == 1 { Some("https://example.com".to_string()) } else { None },
+            |id| {
+                if id == 1 {
+                    Some("https://example.com".to_string())
+                } else {
+                    None
+                }
+            },
         );
         assert_eq!(detector.urls.len(), 1);
         assert_eq!(detector.urls[0].url, "https://example.com");
@@ -693,11 +708,16 @@ mod tests {
         let mut detector = UrlDetector::new(true);
         // id=1 at cols 0..3, id=2 at cols 5..8
         detector.detect_hyperlinks(
-            1, 10,
+            1,
+            10,
             |_row, col| {
-                if col < 3 { 1 }
-                else if (5..8).contains(&col) { 2 }
-                else { 0 }
+                if col < 3 {
+                    1
+                } else if (5..8).contains(&col) {
+                    2
+                } else {
+                    0
+                }
             },
             |id| match id {
                 1 => Some("https://a.com".to_string()),
@@ -714,11 +734,16 @@ mod tests {
     fn detect_hyperlinks_across_rows() {
         let mut detector = UrlDetector::new(true);
         detector.detect_hyperlinks(
-            3, 5,
+            3,
+            5,
             |row, col| {
-                if row == 0 && col < 3 { 1 }
-                else if row == 2 && col >= 1 && col < 4 { 2 }
-                else { 0 }
+                if row == 0 && col < 3 {
+                    1
+                } else if row == 2 && (1..4).contains(&col) {
+                    2
+                } else {
+                    0
+                }
             },
             |id| match id {
                 1 => Some("https://row0.com".to_string()),
@@ -734,11 +759,7 @@ mod tests {
     #[test]
     fn detect_hyperlinks_disabled() {
         let mut detector = UrlDetector::new(false);
-        detector.detect_hyperlinks(
-            1, 5,
-            |_, _| 1,
-            |_| Some("https://x.com".to_string()),
-        );
+        detector.detect_hyperlinks(1, 5, |_, _| 1, |_| Some("https://x.com".to_string()));
         assert!(detector.urls.is_empty());
     }
 
@@ -746,11 +767,7 @@ mod tests {
     fn detect_hyperlinks_unknown_id() {
         let mut detector = UrlDetector::new(true);
         // hyperlink id 99 has no URI mapping
-        detector.detect_hyperlinks(
-            1, 5,
-            |_, col| if col < 3 { 99 } else { 0 },
-            |_| None,
-        );
+        detector.detect_hyperlinks(1, 5, |_, col| if col < 3 { 99 } else { 0 }, |_| None);
         assert!(detector.urls.is_empty());
     }
 
@@ -776,13 +793,19 @@ mod tests {
     #[test]
     fn github_url_with_path() {
         let found = urls_from("https://github.com/user/repo/blob/main/src/lib.rs");
-        assert_eq!(found, vec!["https://github.com/user/repo/blob/main/src/lib.rs"]);
+        assert_eq!(
+            found,
+            vec!["https://github.com/user/repo/blob/main/src/lib.rs"]
+        );
     }
 
     #[test]
     fn url_with_complex_query() {
         let found = urls_from("https://www.google.com/search?q=rust+language&hl=en&num=10");
-        assert_eq!(found, vec!["https://www.google.com/search?q=rust+language&hl=en&num=10"]);
+        assert_eq!(
+            found,
+            vec!["https://www.google.com/search?q=rust+language&hl=en&num=10"]
+        );
     }
 
     #[test]

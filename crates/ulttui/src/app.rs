@@ -6,6 +6,7 @@ use crate::backend::Backend;
 use crate::cmd::{Cmd, Sub};
 use crate::event::{Event, Key, KeyEvent};
 use crate::focus::FocusManager;
+use crate::theme::Theme;
 use crate::widgets::View;
 use tokio::runtime::Runtime;
 
@@ -48,6 +49,7 @@ pub struct App<A: Application> {
     app: A,
     backend: Backend,
     focus: FocusManager,
+    theme: Theme,
     subscriptions: Vec<SubState<A::Message>>,
     spawn_handles: Vec<tokio::task::JoinHandle<A::Message>>,
 }
@@ -66,14 +68,16 @@ impl<A: Application> App<A> {
             app,
             backend: Backend::detect(),
             focus: FocusManager::new(),
+            theme: Theme::dark(),
             subscriptions: Vec::new(),
             spawn_handles: Vec::new(),
         }
     }
 
-    pub fn new_with_theme(app: A, theme: crate::theme::Theme) -> Self {
-        crate::theme::Theme::set_current(theme);
-        Self::new(app)
+    pub fn new_with_theme(app: A, theme: Theme) -> Self {
+        let mut runner = Self::new(app);
+        runner.theme = theme;
+        runner
     }
 
     pub fn run(mut self) -> anyhow::Result<()> {
@@ -83,15 +87,19 @@ impl<A: Application> App<A> {
         loop {
             let fm = std::mem::take(&mut self.focus);
             let old_fm = FocusManager::set_current(fm);
+            let old_theme = Theme::replace_current(self.theme.clone());
 
-            FocusManager::with_current_mut(|fm| fm.begin_frame());
-            {
+            let render_result = (|| -> anyhow::Result<()> {
+                FocusManager::with_current_mut(|fm| fm.begin_frame());
                 let view = self.app.view();
                 self.backend.render(&view)?;
-            }
-            FocusManager::with_current_mut(|fm| fm.end_frame());
+                FocusManager::with_current_mut(|fm| fm.end_frame());
+                Ok(())
+            })();
 
             self.focus = FocusManager::set_current(old_fm);
+            self.theme = Theme::replace_current(old_theme);
+            render_result?;
 
             self.process_subscriptions(&rt);
 
@@ -258,6 +266,7 @@ impl<A: Application> App<A> {
             app,
             backend,
             focus: FocusManager::new(),
+            theme: Theme::dark(),
             subscriptions: Vec::new(),
             spawn_handles: Vec::new(),
         }

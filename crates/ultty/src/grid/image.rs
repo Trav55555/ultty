@@ -384,7 +384,9 @@ fn parse_number(data: &[u8]) -> (u32, usize) {
     let mut i = 0;
 
     while i < data.len() && data[i].is_ascii_digit() {
-        value = value.saturating_mul(10).saturating_add((data[i] - b'0') as u32);
+        value = value
+            .saturating_mul(10)
+            .saturating_add((data[i] - b'0') as u32);
         i += 1;
     }
 
@@ -538,10 +540,8 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(b"#0;2;100;0;0");
         data.push(b'~'); // One sixel column
-        // 3000 newlines × 6 pixels each = 18000 > 16384 limit
-        for _ in 0..3000 {
-            data.push(b'-');
-        }
+                         // 3000 newlines × 6 pixels each = 18000 > 16384 limit
+        data.extend(std::iter::repeat_n(b'-', 3000));
         data.push(b'~');
         let result = decode_sixel(&data, 0);
         assert!(result.is_none());

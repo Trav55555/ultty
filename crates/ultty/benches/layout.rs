@@ -115,7 +115,7 @@ fn bench_layout_sync(c: &mut Criterion) {
         group.bench_function(format!("flat_{}_regions", count), |b| {
             let mut engine = LayoutEngine::new();
             b.iter(|| {
-                engine.sync(black_box(&tree));
+                engine.sync(black_box(&tree)).expect("layout sync failed");
             })
         });
     }
@@ -127,7 +127,7 @@ fn bench_layout_sync(c: &mut Criterion) {
             |b| {
                 let mut engine = LayoutEngine::new();
                 b.iter(|| {
-                    engine.sync(black_box(&tree));
+                    engine.sync(black_box(&tree)).expect("layout sync failed");
                 })
             },
         );
@@ -142,11 +142,13 @@ fn bench_layout_compute(c: &mut Criterion) {
     for count in [10, 100, 500, 1000] {
         let tree = create_flat_tree(count);
         let mut engine = LayoutEngine::new();
-        engine.sync(&tree);
+        engine.sync(&tree).expect("layout sync failed");
 
         group.bench_function(format!("flat_{}_regions", count), |b| {
             b.iter(|| {
-                engine.compute(black_box(1920.0), black_box(1080.0));
+                engine
+                    .compute(black_box(1920.0), black_box(1080.0))
+                    .expect("layout compute failed");
             })
         });
     }
@@ -154,14 +156,16 @@ fn bench_layout_compute(c: &mut Criterion) {
     for (rows, cols) in [(10, 10), (20, 20), (50, 10)] {
         let tree = create_flexbox_tree(rows, cols);
         let mut engine = LayoutEngine::new();
-        engine.sync(&tree);
+        engine.sync(&tree).expect("layout sync failed");
         let total = rows * cols + rows + 1;
 
         group.bench_function(
             format!("flexbox_{}x{}_{}_regions", rows, cols, total),
             |b| {
                 b.iter(|| {
-                    engine.compute(black_box(1920.0), black_box(1080.0));
+                    engine
+                        .compute(black_box(1920.0), black_box(1080.0))
+                        .expect("layout compute failed");
                 })
             },
         );
@@ -182,8 +186,10 @@ fn bench_layout_full_cycle(c: &mut Criterion) {
             |b| {
                 b.iter(|| {
                     let mut engine = LayoutEngine::new();
-                    engine.sync(black_box(&tree));
-                    engine.compute(black_box(1920.0), black_box(1080.0));
+                    engine.sync(black_box(&tree)).expect("layout sync failed");
+                    engine
+                        .compute(black_box(1920.0), black_box(1080.0))
+                        .expect("layout compute failed");
                 })
             },
         );
