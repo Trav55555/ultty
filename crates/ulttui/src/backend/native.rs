@@ -1,6 +1,6 @@
 //! Native protocol backend for Ultty terminal.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
@@ -26,7 +26,7 @@ pub struct NativeBackend {
     next_region_id: u32,
     next_frame_id: u32,
     region_layouts: HashMap<RegionId, ComputedRegionLayout>,
-    active_regions: HashSet<RegionId>,
+    previous_frame_root: Option<RegionId>,
     pending_events: Vec<Event>,
 }
 
@@ -42,7 +42,7 @@ impl NativeBackend {
             next_region_id: 1,
             next_frame_id: 1,
             region_layouts: HashMap::new(),
-            active_regions: HashSet::new(),
+            previous_frame_root: None,
             pending_events: Vec::new(),
         }
     }
@@ -82,12 +82,12 @@ impl NativeBackend {
 
         self.send_message(&AppMessage::BeginFrame { frame_id })?;
 
-        let old_regions: Vec<_> = self.active_regions.drain().collect();
-        for region_id in old_regions {
-            self.send_message(&AppMessage::DeleteRegion { id: region_id })?;
+        if let Some(previous_root) = self.previous_frame_root.take() {
+            self.send_message(&AppMessage::DeleteRegion { id: previous_root })?;
         }
 
-        self.render_view_tree(view, self.root_region)?;
+        let frame_root = self.render_view_tree(view, self.root_region, true)?;
+        self.previous_frame_root = Some(frame_root);
 
         self.send_message(&AppMessage::EndFrame { frame_id })?;
 
@@ -96,16 +96,35 @@ impl NativeBackend {
         Ok(())
     }
 
-    fn render_view_tree(&mut self, view: &impl View, parent: RegionId) -> anyhow::Result<RegionId> {
+    fn render_view_tree(
+        &mut self,
+        view: &impl View,
+        parent: RegionId,
+        is_root: bool,
+    ) -> anyhow::Result<RegionId> {
         let region_id = RegionId::new(self.next_region_id);
         self.next_region_id += 1;
+
+        let mut constraints = view.constraints();
+        let mut style = view.style();
+        if is_root {
+            // Root view fills the entire viewport
+            constraints.width = ultty_protocol::Dimension::Percent(100.0);
+            constraints.height = ultty_protocol::Dimension::Percent(100.0);
+            // Opaque background so native app covers the PTY terminal content
+            if style.bg.is_none() {
+                let theme = crate::theme::Theme::current();
+                style.bg = Some(theme.background);
+            }
+            style.opacity = 1.0;
+        }
 
         self.send_message(&AppMessage::CreateRegion {
             id: region_id,
             parent,
             insert_index: -1,
-            constraints: view.constraints(),
-            style: view.style(),
+            constraints,
+            style,
         })?;
 
         let content = view.content();
@@ -116,11 +135,8 @@ impl NativeBackend {
             })?;
         }
 
-        self.active_regions.insert(region_id);
-
         let children_count = view.children_count();
         let mut pending_messages: Vec<AppMessage> = Vec::new();
-        let mut created_regions: Vec<RegionId> = Vec::new();
 
         for i in 0..children_count {
             let mut next_id = self.next_region_id;
@@ -130,10 +146,10 @@ impl NativeBackend {
                 Ok(())
             };
 
-            if let Some(child_id) =
-                view.render_child_native(i, &mut send_fn, region_id, &mut next_id)?
+            if view
+                .render_child_native(i, &mut send_fn, region_id, &mut next_id)?
+                .is_some()
             {
-                created_regions.push(child_id);
                 self.next_region_id = next_id;
             }
             pending_messages.extend(captured_messages);
@@ -141,9 +157,6 @@ impl NativeBackend {
 
         for msg in pending_messages {
             self.send_message(&msg)?;
-        }
-        for child_id in created_regions {
-            self.active_regions.insert(child_id);
         }
 
         Ok(region_id)

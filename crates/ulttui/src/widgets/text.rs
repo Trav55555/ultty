@@ -29,6 +29,16 @@ impl Text {
 }
 
 impl View for Text {
+    fn constraints(&self) -> ultty_protocol::Constraints {
+        let line_count = self.content.lines().count().max(1);
+        ultty_protocol::Constraints {
+            width: ultty_protocol::Dimension::Percent(100.0),
+            height: ultty_protocol::Dimension::Cells(line_count as f32),
+            flex_shrink: 1.0,
+            ..Default::default()
+        }
+    }
+
     fn content(&self) -> ultty_protocol::Content {
         ultty_protocol::Content::Text(ultty_protocol::TextContent::new(&self.content))
     }
@@ -65,6 +75,15 @@ impl RichText {
 }
 
 impl View for RichText {
+    fn constraints(&self) -> ultty_protocol::Constraints {
+        ultty_protocol::Constraints {
+            width: ultty_protocol::Dimension::Percent(100.0),
+            height: ultty_protocol::Dimension::Cells(1.0),
+            flex_shrink: 1.0,
+            ..Default::default()
+        }
+    }
+
     fn content(&self) -> ultty_protocol::Content {
         let mut rich = ultty_protocol::RichText::new();
         for (text, style) in &self.spans {

@@ -26,16 +26,17 @@ impl App {
             if server.update_animations() {
                 self.needs_redraw = true;
             }
+            // Redraw when any native session has new content
+            if server.sessions().any(|s| s.is_render_dirty()) {
+                self.needs_redraw = true;
+            }
             // Check keepalive timeouts
             server.check_keepalives();
 
             // Handle clipboard operations from native sessions
             let gets = server.pending_clipboard_gets();
             for key in gets {
-                let text = self
-                    .clipboard
-                    .as_mut()
-                    .and_then(|cb| cb.get_text().ok());
+                let text = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok());
                 server.send_clipboard_content(key, text);
             }
             let sets = server.pending_clipboard_sets();

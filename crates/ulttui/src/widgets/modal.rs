@@ -118,8 +118,10 @@ impl View for Modal {
         Constraints {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
+            align_self: ultty_protocol::AlignSelf::Center,
             width: Dimension::Cells(50.0),
-            max_height: Dimension::Cells(20.0),
+            height: Dimension::Cells(10.0),
+            margin: ultty_protocol::Edges::all(Dimension::Auto),
             ..Default::default()
         }
     }

@@ -93,7 +93,8 @@ impl Renderer {
                 if url.row < dims.rows {
                     let x0 = url.start_col as f32 * self.cell_width;
                     let x1 = url.end_col as f32 * self.cell_width;
-                    let y = (url.row as f32 + 1.0) * self.cell_height - underline_height + self.tab_bar_height;
+                    let y = (url.row as f32 + 1.0) * self.cell_height - underline_height
+                        + self.tab_bar_height;
 
                     let base_idx = vertices.len() as u32;
                     let color_arr = underline_color.to_array();
@@ -155,11 +156,35 @@ impl Renderer {
         // Top border
         self.emit_rect(vertices, indices, 0.0, 0.0, width, border_width, bell_color);
         // Bottom border
-        self.emit_rect(vertices, indices, 0.0, height - border_width, width, border_width, bell_color);
+        self.emit_rect(
+            vertices,
+            indices,
+            0.0,
+            height - border_width,
+            width,
+            border_width,
+            bell_color,
+        );
         // Left border
-        self.emit_rect(vertices, indices, 0.0, 0.0, border_width, height, bell_color);
+        self.emit_rect(
+            vertices,
+            indices,
+            0.0,
+            0.0,
+            border_width,
+            height,
+            bell_color,
+        );
         // Right border
-        self.emit_rect(vertices, indices, width - border_width, 0.0, border_width, height, bell_color);
+        self.emit_rect(
+            vertices,
+            indices,
+            width - border_width,
+            0.0,
+            border_width,
+            height,
+            bell_color,
+        );
     }
 
     /// Emit quads for vim selection.
@@ -175,7 +200,12 @@ impl Renderer {
         color: Rgba,
     ) {
         match selection {
-            VimSelection::Char { start_row, start_col, end_row, end_col } => {
+            VimSelection::Char {
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+            } => {
                 for row in *start_row..=*end_row {
                     let visible_row = row.saturating_sub(scroll_offset);
                     if visible_row >= viewport_rows {
@@ -183,7 +213,11 @@ impl Renderer {
                     }
 
                     let sc = if row == *start_row { *start_col } else { 0 };
-                    let ec = if row == *end_row { *end_col } else { viewport_cols - 1 };
+                    let ec = if row == *end_row {
+                        *end_col
+                    } else {
+                        viewport_cols - 1
+                    };
 
                     self.emit_quad(
                         vertices,
@@ -212,7 +246,12 @@ impl Renderer {
                     );
                 }
             }
-            VimSelection::Block { start_row, start_col, end_row, end_col } => {
+            VimSelection::Block {
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+            } => {
                 for row in *start_row..=*end_row {
                     let visible_row = row.saturating_sub(scroll_offset);
                     if visible_row >= viewport_rows {
@@ -234,7 +273,10 @@ impl Renderer {
 
     /// Build vim mode indicator vertices.
     /// Displays the current mode at the bottom-left of the terminal area.
-    pub(super) fn build_vim_mode_indicator_vertices(&mut self, copy_mode: &CopyMode) -> (Vec<Vertex>, Vec<u32>) {
+    pub(super) fn build_vim_mode_indicator_vertices(
+        &mut self,
+        copy_mode: &CopyMode,
+    ) -> (Vec<Vertex>, Vec<u32>) {
         if !copy_mode.is_active() {
             return (Vec::new(), Vec::new());
         }
@@ -280,11 +322,11 @@ impl Renderer {
 
         // Build text vertices using the text renderer
         let text_color = match mode {
-            VimMode::Normal => Rgba::new(0.5, 0.8, 0.5, 1.0),  // Green
+            VimMode::Normal => Rgba::new(0.5, 0.8, 0.5, 1.0), // Green
             VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock => {
-                Rgba::new(0.8, 0.6, 0.2, 1.0)  // Orange
+                Rgba::new(0.8, 0.6, 0.2, 1.0) // Orange
             }
-            VimMode::Search => Rgba::new(0.5, 0.7, 1.0, 1.0),  // Blue
+            VimMode::Search => Rgba::new(0.5, 0.7, 1.0, 1.0), // Blue
             _ => self.color_scheme.foreground,
         };
 
@@ -309,30 +351,31 @@ impl Renderer {
     pub(super) fn build_shortcuts_overlay_vertices(
         &mut self,
         keybindings: &[(String, String)],
-    ) -> (Vec<Vertex>, Vec<u32>) {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
+    ) -> (Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>) {
+        let mut bg_vertices = Vec::new();
+        let mut bg_indices = Vec::new();
+        let mut text_vertices = Vec::new();
+        let mut text_indices = Vec::new();
+
+        let mut append_text = |mut verts: Vec<Vertex>, inds: Vec<u32>| {
+            let base_idx = text_vertices.len() as u32;
+            text_vertices.append(&mut verts);
+            text_indices.extend(inds.into_iter().map(|i| i + base_idx));
+        };
 
         let padding = 20.0;
+        let column_gap = 36.0;
         let line_height = self.cell_height * 1.5;
         let title = "Keyboard Shortcuts";
 
         // Calculate dimensions
-        let max_key_width = keybindings
-            .iter()
-            .map(|(k, _)| k.len())
-            .max()
-            .unwrap_or(10) as f32
+        let max_key_width = keybindings.iter().map(|(k, _)| k.len()).max().unwrap_or(10) as f32
             * self.cell_width
             * 0.6;
-        let max_desc_width = keybindings
-            .iter()
-            .map(|(_, d)| d.len())
-            .max()
-            .unwrap_or(20) as f32
+        let max_desc_width = keybindings.iter().map(|(_, d)| d.len()).max().unwrap_or(20) as f32
             * self.cell_width
             * 0.6;
-        let content_width = max_key_width + max_desc_width + padding * 3.0;
+        let content_width = max_key_width + max_desc_width + padding * 2.0 + column_gap;
         let content_height = (keybindings.len() as f32 + 2.0) * line_height + padding * 2.0;
 
         // Center the modal
@@ -344,8 +387,8 @@ impl Renderer {
         // Draw semi-transparent backdrop
         let backdrop_color = Rgba::new(0.0, 0.0, 0.0, 0.7);
         self.emit_rect(
-            &mut vertices,
-            &mut indices,
+            &mut bg_vertices,
+            &mut bg_indices,
             0.0,
             0.0,
             self.config.width as f32,
@@ -356,8 +399,8 @@ impl Renderer {
         // Draw modal background
         let modal_bg = Rgba::new(0.15, 0.15, 0.15, 0.95);
         self.emit_rect(
-            &mut vertices,
-            &mut indices,
+            &mut bg_vertices,
+            &mut bg_indices,
             modal_x,
             modal_y,
             modal_width,
@@ -370,8 +413,8 @@ impl Renderer {
         let border_width = 2.0;
         // Top border
         self.emit_rect(
-            &mut vertices,
-            &mut indices,
+            &mut bg_vertices,
+            &mut bg_indices,
             modal_x,
             modal_y,
             modal_width,
@@ -380,8 +423,8 @@ impl Renderer {
         );
         // Bottom border
         self.emit_rect(
-            &mut vertices,
-            &mut indices,
+            &mut bg_vertices,
+            &mut bg_indices,
             modal_x,
             modal_y + modal_height - border_width,
             modal_width,
@@ -390,8 +433,8 @@ impl Renderer {
         );
         // Left border
         self.emit_rect(
-            &mut vertices,
-            &mut indices,
+            &mut bg_vertices,
+            &mut bg_indices,
             modal_x,
             modal_y,
             border_width,
@@ -400,8 +443,8 @@ impl Renderer {
         );
         // Right border
         self.emit_rect(
-            &mut vertices,
-            &mut indices,
+            &mut bg_vertices,
+            &mut bg_indices,
             modal_x + modal_width - border_width,
             modal_y,
             border_width,
@@ -418,15 +461,13 @@ impl Renderer {
             modal_width - padding * 2.0,
             title_color,
         );
-        let base_idx = vertices.len() as u32;
-        vertices.extend(title_vertices);
-        indices.extend(title_indices.iter().map(|i| i + base_idx));
+        append_text(title_vertices, title_indices);
 
         // Draw separator line under title
         let sep_y = modal_y + padding + line_height;
         self.emit_rect(
-            &mut vertices,
-            &mut indices,
+            &mut bg_vertices,
+            &mut bg_indices,
             modal_x + padding,
             sep_y,
             modal_width - padding * 2.0,
@@ -453,21 +494,17 @@ impl Renderer {
                 max_key_width + padding,
                 key_color,
             );
-            let base_idx = vertices.len() as u32;
-            vertices.extend(key_vertices);
-            indices.extend(key_indices.iter().map(|i| i + base_idx));
+            append_text(key_vertices, key_indices);
 
             // Draw description
             let (desc_vertices, desc_indices) = self.text_renderer.build_label_vertices(
                 desc,
-                modal_x + padding + max_key_width + padding,
+                modal_x + padding + max_key_width + column_gap,
                 y,
                 max_desc_width + padding,
                 desc_color,
             );
-            let base_idx = vertices.len() as u32;
-            vertices.extend(desc_vertices);
-            indices.extend(desc_indices.iter().map(|i| i + base_idx));
+            append_text(desc_vertices, desc_indices);
         }
 
         // Draw footer hint
@@ -480,11 +517,9 @@ impl Renderer {
             modal_width - padding * 2.0,
             footer_color,
         );
-        let base_idx = vertices.len() as u32;
-        vertices.extend(footer_vertices);
-        indices.extend(footer_indices.iter().map(|i| i + base_idx));
+        append_text(footer_vertices, footer_indices);
 
-        (vertices, indices)
+        (bg_vertices, bg_indices, text_vertices, text_indices)
     }
 
     /// Render the keyboard shortcuts overlay.
@@ -494,37 +529,28 @@ impl Renderer {
         view: &wgpu::TextureView,
         keybindings: &[(String, String)],
     ) {
-        let (vertices, indices) = self.build_shortcuts_overlay_vertices(keybindings);
-        if vertices.is_empty() {
+        let (bg_vertices, bg_indices, text_vertices, text_indices) =
+            self.build_shortcuts_overlay_vertices(keybindings);
+        if bg_vertices.is_empty() && text_vertices.is_empty() {
             return;
         }
 
-        // Separate background vertices (quads) from text vertices
-        // The first several vertices are background quads (backdrop, modal, borders)
-        // Text vertices come after
-        // We need to count how many background quads we have
-        // Each quad has 4 vertices and 6 indices
-        // Let's render all vertices with bg_pipeline first (for backgrounds) then text_pipeline
+        if !bg_vertices.is_empty() && !bg_indices.is_empty() {
+            let vb = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("shortcuts_bg_vb"),
+                    contents: bytemuck::cast_slice(&bg_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let ib = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("shortcuts_bg_ib"),
+                    contents: bytemuck::cast_slice(&bg_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
 
-        // For simplicity, render everything with the background pipeline
-        // The text vertices will use the text renderer which has its own atlas
-
-        // Count background quads: backdrop (1) + modal (1) + 4 borders + separator (1) = 7 quads = 28 vertices
-        // Actually let's just render everything together since emit_rect uses Vertex which works with bg_pipeline
-
-        let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("shortcuts_vb"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("shortcuts_ib"),
-            contents: bytemuck::cast_slice(&indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        // Render with background pipeline (handles colored quads)
-        {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shortcuts_bg_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -544,11 +570,25 @@ impl Renderer {
             rp.set_bind_group(0, &self.uniform_bind_group, &[]);
             rp.set_vertex_buffer(0, vb.slice(..));
             rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..indices.len() as u32, 0, 0..1);
+            rp.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
         }
 
-        // Render text with text pipeline
-        {
+        if !text_vertices.is_empty() && !text_indices.is_empty() {
+            let vb = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("shortcuts_text_vb"),
+                    contents: bytemuck::cast_slice(&text_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let ib = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("shortcuts_text_ib"),
+                    contents: bytemuck::cast_slice(&text_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shortcuts_text_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -569,7 +609,7 @@ impl Renderer {
             rp.set_bind_group(1, self.text_renderer.atlas_bind_group(), &[]);
             rp.set_vertex_buffer(0, vb.slice(..));
             rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..indices.len() as u32, 0, 0..1);
+            rp.draw_indexed(0..text_indices.len() as u32, 0, 0..1);
         }
     }
 }

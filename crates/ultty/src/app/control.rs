@@ -275,17 +275,33 @@ impl App {
                 ControlResponse::Ok
             }
 
+            ControlRequest::SetAgentStatus { status: _ } => {
+                self.needs_redraw = true;
+                ControlResponse::Ok
+            }
+
             ControlRequest::Screenshot { path } => {
                 if let Some(terminal) = self.terminal_manager.focused_terminal() {
                     let term = terminal.event_loop.terminal();
                     let overlay = OverlayState::default();
+
+                    let native_sessions: Vec<&ultty::protocol::NativeSession> = self
+                        .protocol_server
+                        .as_ref()
+                        .map(|s| s.sessions().collect())
+                        .unwrap_or_default();
 
                     if let Some(path_str) = path {
                         let path = std::path::PathBuf::from(&path_str);
                         if let Some(parent) = path.parent() {
                             let _ = std::fs::create_dir_all(parent);
                         }
-                        match self.renderer.capture_screenshot(term, &overlay, &path) {
+                        match self.renderer.capture_screenshot_with_native(
+                            term,
+                            &overlay,
+                            &path,
+                            &native_sessions,
+                        ) {
                             Ok(()) => ControlResponse::Data(ControlData::ScreenshotSaved(
                                 path.display().to_string(),
                             )),
@@ -295,7 +311,11 @@ impl App {
                             },
                         }
                     } else {
-                        match self.renderer.capture_screenshot_bytes(term, &overlay) {
+                        match self.renderer.capture_screenshot_bytes_with_native(
+                            term,
+                            &overlay,
+                            &native_sessions,
+                        ) {
                             Ok(data) => ControlResponse::Data(ControlData::ScreenshotData(data)),
                             Err(e) => ControlResponse::Error {
                                 code: 5,
@@ -394,7 +414,9 @@ impl App {
                                     text.to_lowercase()
                                 };
 
-                                for (byte_off, matched) in search_text.match_indices(&pattern_search) {
+                                for (byte_off, matched) in
+                                    search_text.match_indices(&pattern_search)
+                                {
                                     let match_byte_end = byte_off + matched.len();
                                     // Find char-safe context boundaries
                                     let ctx_start = search_text[..byte_off]
@@ -541,7 +563,11 @@ impl App {
 
         let ctrl = modifiers.contains(ultty_protocol::Modifiers::CTRL);
         let alt = modifiers.contains(ultty_protocol::Modifiers::ALT);
-        let app_cursor = terminal.event_loop.terminal().modes().application_cursor_keys;
+        let app_cursor = terminal
+            .event_loop
+            .terminal()
+            .modes()
+            .application_cursor_keys;
 
         let bytes = key_to_bytes(key, ctrl, alt, app_cursor);
 
@@ -555,12 +581,7 @@ impl App {
 ///
 /// `app_cursor` controls whether application cursor key mode (DECCKM) sequences
 /// are emitted for arrow/Home/End keys.
-fn key_to_bytes(
-    key: &ultty_protocol::Key,
-    ctrl: bool,
-    alt: bool,
-    app_cursor: bool,
-) -> Vec<u8> {
+fn key_to_bytes(key: &ultty_protocol::Key, ctrl: bool, alt: bool, app_cursor: bool) -> Vec<u8> {
     match key {
         ultty_protocol::Key::Char(c) => {
             if ctrl && c.is_ascii_alphabetic() {
@@ -582,24 +603,48 @@ fn key_to_bytes(
         ultty_protocol::Key::Delete => b"\x1b[3~".to_vec(),
         ultty_protocol::Key::Insert => b"\x1b[2~".to_vec(),
         ultty_protocol::Key::Home => {
-            if app_cursor { b"\x1bOH".to_vec() } else { b"\x1b[H".to_vec() }
+            if app_cursor {
+                b"\x1bOH".to_vec()
+            } else {
+                b"\x1b[H".to_vec()
+            }
         }
         ultty_protocol::Key::End => {
-            if app_cursor { b"\x1bOF".to_vec() } else { b"\x1b[F".to_vec() }
+            if app_cursor {
+                b"\x1bOF".to_vec()
+            } else {
+                b"\x1b[F".to_vec()
+            }
         }
         ultty_protocol::Key::PageUp => b"\x1b[5~".to_vec(),
         ultty_protocol::Key::PageDown => b"\x1b[6~".to_vec(),
         ultty_protocol::Key::Up => {
-            if app_cursor { b"\x1bOA".to_vec() } else { b"\x1b[A".to_vec() }
+            if app_cursor {
+                b"\x1bOA".to_vec()
+            } else {
+                b"\x1b[A".to_vec()
+            }
         }
         ultty_protocol::Key::Down => {
-            if app_cursor { b"\x1bOB".to_vec() } else { b"\x1b[B".to_vec() }
+            if app_cursor {
+                b"\x1bOB".to_vec()
+            } else {
+                b"\x1b[B".to_vec()
+            }
         }
         ultty_protocol::Key::Right => {
-            if app_cursor { b"\x1bOC".to_vec() } else { b"\x1b[C".to_vec() }
+            if app_cursor {
+                b"\x1bOC".to_vec()
+            } else {
+                b"\x1b[C".to_vec()
+            }
         }
         ultty_protocol::Key::Left => {
-            if app_cursor { b"\x1bOD".to_vec() } else { b"\x1b[D".to_vec() }
+            if app_cursor {
+                b"\x1bOD".to_vec()
+            } else {
+                b"\x1b[D".to_vec()
+            }
         }
         ultty_protocol::Key::Function(n) => match n {
             1 => b"\x1bOP".to_vec(),
@@ -678,26 +723,17 @@ mod tests {
 
     #[test]
     fn key_delete() {
-        assert_eq!(
-            key_to_bytes(&Key::Delete, false, false, false),
-            b"\x1b[3~"
-        );
+        assert_eq!(key_to_bytes(&Key::Delete, false, false, false), b"\x1b[3~");
     }
 
     #[test]
     fn key_insert() {
-        assert_eq!(
-            key_to_bytes(&Key::Insert, false, false, false),
-            b"\x1b[2~"
-        );
+        assert_eq!(key_to_bytes(&Key::Insert, false, false, false), b"\x1b[2~");
     }
 
     #[test]
     fn key_page_up_down() {
-        assert_eq!(
-            key_to_bytes(&Key::PageUp, false, false, false),
-            b"\x1b[5~"
-        );
+        assert_eq!(key_to_bytes(&Key::PageUp, false, false, false), b"\x1b[5~");
         assert_eq!(
             key_to_bytes(&Key::PageDown, false, false, false),
             b"\x1b[6~"
@@ -733,10 +769,7 @@ mod tests {
     fn key_ctrl_non_alpha_passes_through() {
         // Ctrl + non-alpha char should not produce a control character;
         // it falls through to the alt/plain branch.
-        assert_eq!(
-            key_to_bytes(&Key::Char('5'), true, false, false),
-            b"5"
-        );
+        assert_eq!(key_to_bytes(&Key::Char('5'), true, false, false), b"5");
     }
 
     // ---------------------------------------------------------------
@@ -768,10 +801,7 @@ mod tests {
     #[test]
     fn key_ctrl_takes_precedence_over_alt_for_alpha() {
         // When both ctrl and alt are set for an alpha char, ctrl wins.
-        assert_eq!(
-            key_to_bytes(&Key::Char('c'), true, true, false),
-            vec![3]
-        );
+        assert_eq!(key_to_bytes(&Key::Char('c'), true, true, false), vec![3]);
     }
 
     // ---------------------------------------------------------------
@@ -812,29 +842,74 @@ mod tests {
 
     #[test]
     fn function_keys_f1_through_f4() {
-        assert_eq!(key_to_bytes(&Key::Function(1), false, false, false), b"\x1bOP");
-        assert_eq!(key_to_bytes(&Key::Function(2), false, false, false), b"\x1bOQ");
-        assert_eq!(key_to_bytes(&Key::Function(3), false, false, false), b"\x1bOR");
-        assert_eq!(key_to_bytes(&Key::Function(4), false, false, false), b"\x1bOS");
+        assert_eq!(
+            key_to_bytes(&Key::Function(1), false, false, false),
+            b"\x1bOP"
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Function(2), false, false, false),
+            b"\x1bOQ"
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Function(3), false, false, false),
+            b"\x1bOR"
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Function(4), false, false, false),
+            b"\x1bOS"
+        );
     }
 
     #[test]
     fn function_keys_f5_through_f12() {
-        assert_eq!(key_to_bytes(&Key::Function(5), false, false, false), b"\x1b[15~");
-        assert_eq!(key_to_bytes(&Key::Function(6), false, false, false), b"\x1b[17~");
-        assert_eq!(key_to_bytes(&Key::Function(7), false, false, false), b"\x1b[18~");
-        assert_eq!(key_to_bytes(&Key::Function(8), false, false, false), b"\x1b[19~");
-        assert_eq!(key_to_bytes(&Key::Function(9), false, false, false), b"\x1b[20~");
-        assert_eq!(key_to_bytes(&Key::Function(10), false, false, false), b"\x1b[21~");
-        assert_eq!(key_to_bytes(&Key::Function(11), false, false, false), b"\x1b[23~");
-        assert_eq!(key_to_bytes(&Key::Function(12), false, false, false), b"\x1b[24~");
+        assert_eq!(
+            key_to_bytes(&Key::Function(5), false, false, false),
+            b"\x1b[15~"
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Function(6), false, false, false),
+            b"\x1b[17~"
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Function(7), false, false, false),
+            b"\x1b[18~"
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Function(8), false, false, false),
+            b"\x1b[19~"
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Function(9), false, false, false),
+            b"\x1b[20~"
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Function(10), false, false, false),
+            b"\x1b[21~"
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Function(11), false, false, false),
+            b"\x1b[23~"
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Function(12), false, false, false),
+            b"\x1b[24~"
+        );
     }
 
     #[test]
     fn function_key_out_of_range_returns_empty() {
-        assert_eq!(key_to_bytes(&Key::Function(0), false, false, false), Vec::<u8>::new());
-        assert_eq!(key_to_bytes(&Key::Function(13), false, false, false), Vec::<u8>::new());
-        assert_eq!(key_to_bytes(&Key::Function(255), false, false, false), Vec::<u8>::new());
+        assert_eq!(
+            key_to_bytes(&Key::Function(0), false, false, false),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Function(13), false, false, false),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            key_to_bytes(&Key::Function(255), false, false, false),
+            Vec::<u8>::new()
+        );
     }
 
     // ---------------------------------------------------------------

@@ -163,6 +163,11 @@ impl App {
         let (cols, rows) = renderer.terminal_dimensions();
         tracing::info!("Terminal size: {}x{}", cols, rows);
 
+        // Start native protocol server BEFORE spawning shell so child processes
+        // inherit ULTTY_SOCKET env var and can use native protocol
+        let protocol_server = Self::start_protocol_server();
+        let control_server = Self::start_control_server();
+
         // Create terminal manager - with launch profile if configured
         let terminal_manager = Self::create_terminal_manager(&config, cols, rows)?;
 
@@ -192,10 +197,6 @@ impl App {
         if tmux.is_nested() && config.tmux.auto_detect {
             tracing::info!("Running inside tmux, passthrough mode enabled");
         }
-
-        // Start native protocol server for TUI apps
-        let protocol_server = Self::start_protocol_server();
-        let control_server = Self::start_control_server();
 
         Ok(Self {
             window,
@@ -815,7 +816,7 @@ impl App {
         }
 
         if let Some(ref mut server) = self.protocol_server {
-            server.set_viewport(size.width as f32, size.height as f32);
+            server.set_viewport(cols as f32, rows as f32);
             server.broadcast_resize(cols, rows);
         }
 

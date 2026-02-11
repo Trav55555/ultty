@@ -70,11 +70,23 @@ impl Renderer {
     /// Capture a screenshot of the terminal to a PNG file.
     ///
     /// This renders the terminal to an offscreen texture and saves it as PNG.
+    /// Includes native protocol session rendering when sessions are provided.
     pub fn capture_screenshot(
         &mut self,
         terminal: &Terminal,
         overlay: &OverlayState,
         path: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        self.capture_screenshot_with_native(terminal, overlay, path, &[])
+    }
+
+    /// Capture a screenshot including native protocol sessions.
+    pub fn capture_screenshot_with_native(
+        &mut self,
+        terminal: &Terminal,
+        overlay: &OverlayState,
+        path: &std::path::Path,
+        native_sessions: &[&crate::protocol::NativeSession],
     ) -> anyhow::Result<()> {
         let width = self.config.width;
         let height = self.config.height;
@@ -101,9 +113,11 @@ impl Renderer {
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
 
         // Create encoder
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("screenshot_encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("screenshot_encoder"),
+            });
 
         // Build vertex data for backgrounds
         let (bg_vertices, bg_indices) = self.build_background_vertices(terminal, overlay);
@@ -167,11 +181,14 @@ impl Renderer {
             &self.uniform_bind_group,
         );
 
-        // Note: cursor is already included in build_background_vertices
+        for session in native_sessions {
+            self.render_native_session(&mut encoder, &view, session, None, 0);
+        }
 
         // Calculate buffer size with proper alignment
         let bytes_per_pixel = 4u32; // RGBA or BGRA
-        let padded_row = padded_bytes_per_row(width, bytes_per_pixel, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let padded_row =
+            padded_bytes_per_row(width, bytes_per_pixel, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let buffer_size = (padded_row * height) as u64;
 
         // Create output buffer
@@ -222,7 +239,8 @@ impl Renderer {
             self.config.format,
             wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
         );
-        let pixels = unpad_and_convert_pixels(&data, width, height, padded_row, bytes_per_pixel, is_bgra);
+        let pixels =
+            unpad_and_convert_pixels(&data, width, height, padded_row, bytes_per_pixel, is_bgra);
         drop(data);
         output_buffer.unmap();
 
@@ -233,17 +251,32 @@ impl Renderer {
         Ok(())
     }
 
+    /// Capture a screenshot as PNG bytes.
     pub fn capture_screenshot_bytes(
         &mut self,
         terminal: &Terminal,
         overlay: &OverlayState,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.capture_screenshot_bytes_with_native(terminal, overlay, &[])
+    }
+
+    /// Capture a screenshot as PNG bytes, including native protocol sessions.
+    pub fn capture_screenshot_bytes_with_native(
+        &mut self,
+        terminal: &Terminal,
+        overlay: &OverlayState,
+        native_sessions: &[&crate::protocol::NativeSession],
     ) -> anyhow::Result<Vec<u8>> {
         let width = self.config.width;
         let height = self.config.height;
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("screenshot_texture"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -255,21 +288,27 @@ impl Renderer {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("screenshot_encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("screenshot_encoder"),
+            });
 
         let (bg_vertices, bg_indices) = self.build_background_vertices(terminal, overlay);
-        let bg_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("screenshot_bg_vb"),
-            contents: bytemuck::cast_slice(&bg_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let bg_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("screenshot_bg_ib"),
-            contents: bytemuck::cast_slice(&bg_indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let bg_vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("screenshot_bg_vb"),
+                contents: bytemuck::cast_slice(&bg_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let bg_index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("screenshot_bg_ib"),
+                contents: bytemuck::cast_slice(&bg_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
 
         {
             let linear_bg = self.color_scheme.background.to_linear();
@@ -310,8 +349,13 @@ impl Renderer {
             &self.uniform_bind_group,
         );
 
+        for session in native_sessions {
+            self.render_native_session(&mut encoder, &view, session, None, 0);
+        }
+
         let bytes_per_pixel = 4u32;
-        let padded_row = padded_bytes_per_row(width, bytes_per_pixel, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let padded_row =
+            padded_bytes_per_row(width, bytes_per_pixel, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let buffer_size = (padded_row * height) as u64;
 
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -336,7 +380,11 @@ impl Renderer {
                     rows_per_image: Some(height),
                 },
             },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
         );
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -354,7 +402,8 @@ impl Renderer {
             self.config.format,
             wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
         );
-        let pixels = unpad_and_convert_pixels(&data, width, height, padded_row, bytes_per_pixel, is_bgra);
+        let pixels =
+            unpad_and_convert_pixels(&data, width, height, padded_row, bytes_per_pixel, is_bgra);
         drop(data);
         output_buffer.unmap();
 
@@ -439,7 +488,10 @@ mod tests {
         data[256..264].copy_from_slice(&[9, 10, 11, 12, 13, 14, 15, 16]);
 
         let pixels = unpad_and_convert_pixels(&data, 2, 2, padded, 4, false);
-        assert_eq!(pixels, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(
+            pixels,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
     }
 
     // ---------------------------------------------------------------
@@ -490,9 +542,9 @@ mod tests {
         assert_eq!(
             pixels,
             vec![
-                255, 0, 0, 255,   // red
-                0, 255, 0, 255,   // green
-                0, 0, 255, 255,   // blue
+                255, 0, 0, 255, // red
+                0, 255, 0, 255, // green
+                0, 0, 255, 255, // blue
             ]
         );
     }
@@ -546,9 +598,9 @@ mod tests {
     fn encode_png_roundtrip_2x2() {
         // 2x2 image: red, green, blue, white
         let original_pixels = vec![
-            255, 0, 0, 255,     // red
-            0, 255, 0, 255,     // green
-            0, 0, 255, 255,     // blue
+            255, 0, 0, 255, // red
+            0, 255, 0, 255, // green
+            0, 0, 255, 255, // blue
             255, 255, 255, 255, // white
         ];
         let png_data = encode_rgba_png(&original_pixels, 2, 2).unwrap();
@@ -603,9 +655,6 @@ mod tests {
 
         // BGRA(255,0,0,255) -> RGBA(0,0,255,255)
         // BGRA(0,255,0,128) -> RGBA(0,255,0,128)
-        assert_eq!(
-            decoded,
-            &[0, 0, 255, 255, 0, 255, 0, 128]
-        );
+        assert_eq!(decoded, &[0, 0, 255, 255, 0, 255, 0, 128]);
     }
 }

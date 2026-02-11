@@ -303,13 +303,21 @@ impl Renderer {
             // Draw search highlight rectangles for matched regions
             if matched_regions.contains(&region.id) {
                 if let Some(matches) = search_matches {
-                    for (match_idx, m) in matches.iter().enumerate().filter(|(_, m)| m.region_id == region.id) {
+                    for (match_idx, m) in matches
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, m)| m.region_id == region.id)
+                    {
                         let char_w = self.cell_width;
 
                         // For RichText, offset by the character count of preceding spans
                         let span_offset_chars = if let Some(span_idx) = m.span_index {
                             if let Content::RichText(rt) = &region.content {
-                                rt.spans.iter().take(span_idx).map(|s| s.text.chars().count()).sum::<usize>()
+                                rt.spans
+                                    .iter()
+                                    .take(span_idx)
+                                    .map(|s| s.text.chars().count())
+                                    .sum::<usize>()
                             } else {
                                 0
                             }
@@ -461,23 +469,43 @@ impl Renderer {
 
             let color = [1.0f32, 1.0, 1.0, 1.0];
             let vertices = vec![
-                Vertex { position: [img_render.x, img_render.y], tex_coord: [0.0, 0.0], color },
-                Vertex { position: [img_render.x + img_render.w, img_render.y], tex_coord: [1.0, 0.0], color },
-                Vertex { position: [img_render.x + img_render.w, img_render.y + img_render.h], tex_coord: [1.0, 1.0], color },
-                Vertex { position: [img_render.x, img_render.y + img_render.h], tex_coord: [0.0, 1.0], color },
+                Vertex {
+                    position: [img_render.x, img_render.y],
+                    tex_coord: [0.0, 0.0],
+                    color,
+                },
+                Vertex {
+                    position: [img_render.x + img_render.w, img_render.y],
+                    tex_coord: [1.0, 0.0],
+                    color,
+                },
+                Vertex {
+                    position: [img_render.x + img_render.w, img_render.y + img_render.h],
+                    tex_coord: [1.0, 1.0],
+                    color,
+                },
+                Vertex {
+                    position: [img_render.x, img_render.y + img_render.h],
+                    tex_coord: [0.0, 1.0],
+                    color,
+                },
             ];
             let indices: Vec<u32> = vec![0, 1, 2, 0, 2, 3];
 
-            let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("native_image_vb"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("native_image_ib"),
-                contents: bytemuck::cast_slice(&indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
+            let vb = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("native_image_vb"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let ib = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("native_image_ib"),
+                    contents: bytemuck::cast_slice(&indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
 
             {
                 let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -596,7 +624,11 @@ impl Renderer {
                         / 1000.0;
                     // Ping-pong between 0 and 1
                     let phase = (t * 1.5) % 2.0;
-                    if phase < 1.0 { phase } else { 2.0 - phase }
+                    if phase < 1.0 {
+                        phase
+                    } else {
+                        2.0 - phase
+                    }
                 } else if progress.animated {
                     self.has_animations = true;
                     // Lerp stored value toward target
@@ -745,7 +777,8 @@ impl Renderer {
                 }
             }
             WidgetContent::Spinner(spinner) => {
-                static BRAILLE_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                static BRAILLE_FRAMES: &[char] =
+                    &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
                 static DOTS_FRAMES: &[char] = &['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
                 static LINE_FRAMES: &[char] = &['|', '/', '-', '\\'];
                 static BOUNCE_FRAMES: &[char] = &['⠁', '⠂', '⠄', '⠂'];
@@ -776,14 +809,9 @@ impl Renderer {
                     spinner_char.to_string()
                 };
 
-                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                    &text,
-                    x,
-                    y,
-                    fg_color,
-                    false,
-                    false,
-                );
+                let (verts, idxs, _) = self
+                    .text_renderer
+                    .build_styled_text_vertices(&text, x, y, fg_color, false, false);
                 let base_idx = text_vertices.len() as u32;
                 text_vertices.extend(verts);
                 text_indices.extend(idxs.iter().map(|i| i + base_idx));
@@ -849,14 +877,7 @@ impl Renderer {
                 text_indices.extend(idxs.iter().map(|i| i + base_idx));
             }
             WidgetContent::Markdown(md) => {
-                self.render_markdown_content(
-                    &md.source,
-                    x,
-                    y,
-                    w,
-                    text_vertices,
-                    text_indices,
-                );
+                self.render_markdown_content(&md.source, x, y, w, text_vertices, text_indices);
             }
             WidgetContent::Code(code) => {
                 self.render_code_content(
@@ -1028,19 +1049,43 @@ impl Renderer {
 
             // Headers
             if let Some(stripped) = line.strip_prefix("### ") {
-                self.render_markdown_inline(stripped, x, cursor_y, true, self.color_scheme.named[6], text_vertices, text_indices);
+                self.render_markdown_inline(
+                    stripped,
+                    x,
+                    cursor_y,
+                    true,
+                    self.color_scheme.named[6],
+                    text_vertices,
+                    text_indices,
+                );
                 cursor_y += line_height;
                 line_idx += 1;
                 continue;
             }
             if let Some(stripped) = line.strip_prefix("## ") {
-                self.render_markdown_inline(stripped, x, cursor_y, true, self.color_scheme.named[5], text_vertices, text_indices);
+                self.render_markdown_inline(
+                    stripped,
+                    x,
+                    cursor_y,
+                    true,
+                    self.color_scheme.named[5],
+                    text_vertices,
+                    text_indices,
+                );
                 cursor_y += line_height;
                 line_idx += 1;
                 continue;
             }
             if let Some(stripped) = line.strip_prefix("# ") {
-                self.render_markdown_inline(stripped, x, cursor_y, true, self.color_scheme.named[4], text_vertices, text_indices);
+                self.render_markdown_inline(
+                    stripped,
+                    x,
+                    cursor_y,
+                    true,
+                    self.color_scheme.named[4],
+                    text_vertices,
+                    text_indices,
+                );
                 cursor_y += line_height;
                 line_idx += 1;
                 continue;
@@ -1050,25 +1095,54 @@ impl Renderer {
             if let Some(rest) = line.strip_prefix("- [ ] ") {
                 let checkbox = "☐ ";
                 let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
-                    checkbox, x, cursor_y, self.color_scheme.named[8], false, false,
+                    checkbox,
+                    x,
+                    cursor_y,
+                    self.color_scheme.named[8],
+                    false,
+                    false,
                 );
                 let base_idx = text_vertices.len() as u32;
                 text_vertices.extend(verts);
                 text_indices.extend(idxs.iter().map(|i| i + base_idx));
-                self.render_markdown_inline(rest, x + advance, cursor_y, false, self.color_scheme.foreground, text_vertices, text_indices);
+                self.render_markdown_inline(
+                    rest,
+                    x + advance,
+                    cursor_y,
+                    false,
+                    self.color_scheme.foreground,
+                    text_vertices,
+                    text_indices,
+                );
                 cursor_y += line_height;
                 line_idx += 1;
                 continue;
             }
-            if let Some(rest) = line.strip_prefix("- [x] ").or_else(|| line.strip_prefix("- [X] ")) {
+            if let Some(rest) = line
+                .strip_prefix("- [x] ")
+                .or_else(|| line.strip_prefix("- [X] "))
+            {
                 let checkbox = "☑ ";
                 let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
-                    checkbox, x, cursor_y, self.color_scheme.named[2], false, false,
+                    checkbox,
+                    x,
+                    cursor_y,
+                    self.color_scheme.named[2],
+                    false,
+                    false,
                 );
                 let base_idx = text_vertices.len() as u32;
                 text_vertices.extend(verts);
                 text_indices.extend(idxs.iter().map(|i| i + base_idx));
-                self.render_markdown_inline(rest, x + advance, cursor_y, false, self.color_scheme.foreground, text_vertices, text_indices);
+                self.render_markdown_inline(
+                    rest,
+                    x + advance,
+                    cursor_y,
+                    false,
+                    self.color_scheme.foreground,
+                    text_vertices,
+                    text_indices,
+                );
                 cursor_y += line_height;
                 line_idx += 1;
                 continue;
@@ -1095,14 +1169,27 @@ impl Renderer {
                     let bar_x = x + self.cell_width * 2.0 * depth as f32;
                     let bar = "│";
                     let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                        bar, bar_x, cursor_y, self.color_scheme.named[8], false, false,
+                        bar,
+                        bar_x,
+                        cursor_y,
+                        self.color_scheme.named[8],
+                        false,
+                        false,
                     );
                     let base_idx = text_vertices.len() as u32;
                     text_vertices.extend(verts);
                     text_indices.extend(idxs.iter().map(|i| i + base_idx));
                 }
                 if !rest.is_empty() {
-                    self.render_markdown_inline(rest, x + indent, cursor_y, false, self.color_scheme.foreground, text_vertices, text_indices);
+                    self.render_markdown_inline(
+                        rest,
+                        x + indent,
+                        cursor_y,
+                        false,
+                        self.color_scheme.foreground,
+                        text_vertices,
+                        text_indices,
+                    );
                 }
                 cursor_y += line_height;
                 line_idx += 1;
@@ -1110,11 +1197,12 @@ impl Renderer {
             }
 
             // Unordered list items
-            let (prefix, content) = if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-                ("• ", rest)
-            } else {
-                ("", line)
-            };
+            let (prefix, content) =
+                if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+                    ("• ", rest)
+                } else {
+                    ("", line)
+                };
 
             // Numbered list items (1. 2. etc.)
             let (prefix, content) = if prefix.is_empty() {
@@ -1133,7 +1221,15 @@ impl Renderer {
                         let base_idx = text_vertices.len() as u32;
                         text_vertices.extend(verts);
                         text_indices.extend(idxs.iter().map(|i| i + base_idx));
-                        self.render_markdown_inline(&content[dot_pos + 2..], x + advance, cursor_y, false, self.color_scheme.foreground, text_vertices, text_indices);
+                        self.render_markdown_inline(
+                            &content[dot_pos + 2..],
+                            x + advance,
+                            cursor_y,
+                            false,
+                            self.color_scheme.foreground,
+                            text_vertices,
+                            text_indices,
+                        );
                         cursor_y += line_height;
                         line_idx += 1;
                         continue;
@@ -1160,7 +1256,15 @@ impl Renderer {
                 cursor_x += advance;
             }
 
-            self.render_markdown_inline(content, cursor_x, cursor_y, false, self.color_scheme.foreground, text_vertices, text_indices);
+            self.render_markdown_inline(
+                content,
+                cursor_x,
+                cursor_y,
+                false,
+                self.color_scheme.foreground,
+                text_vertices,
+                text_indices,
+            );
             cursor_y += line_height;
             line_idx += 1;
         }
@@ -1230,7 +1334,12 @@ impl Renderer {
                 let total_chars: usize = col_widths.iter().map(|w| w + 3).sum::<usize>() + 1;
                 let rule = "─".repeat(total_chars);
                 let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                    &rule, x, cursor_y, self.color_scheme.named[8], false, false,
+                    &rule,
+                    x,
+                    cursor_y,
+                    self.color_scheme.named[8],
+                    false,
+                    false,
                 );
                 let base_idx = text_vertices.len() as u32;
                 text_vertices.extend(verts);
@@ -1287,7 +1396,16 @@ impl Renderer {
             // **bold**
             if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
                 if !segment.is_empty() {
-                    cursor_x += self.emit_md_segment(&segment, cursor_x, y, line_bold, false, line_color, text_vertices, text_indices);
+                    cursor_x += self.emit_md_segment(
+                        &segment,
+                        cursor_x,
+                        y,
+                        line_bold,
+                        false,
+                        line_color,
+                        text_vertices,
+                        text_indices,
+                    );
                     segment.clear();
                 }
                 i += 2;
@@ -1296,15 +1414,35 @@ impl Renderer {
                     bold_text.push(chars[i]);
                     i += 1;
                 }
-                if i + 1 < len { i += 2; } // skip closing **
-                cursor_x += self.emit_md_segment(&bold_text, cursor_x, y, true, false, line_color, text_vertices, text_indices);
+                if i + 1 < len {
+                    i += 2;
+                } // skip closing **
+                cursor_x += self.emit_md_segment(
+                    &bold_text,
+                    cursor_x,
+                    y,
+                    true,
+                    false,
+                    line_color,
+                    text_vertices,
+                    text_indices,
+                );
                 continue;
             }
 
             // *italic*
             if chars[i] == '*' && (i + 1 >= len || chars[i + 1] != '*') {
                 if !segment.is_empty() {
-                    cursor_x += self.emit_md_segment(&segment, cursor_x, y, line_bold, false, line_color, text_vertices, text_indices);
+                    cursor_x += self.emit_md_segment(
+                        &segment,
+                        cursor_x,
+                        y,
+                        line_bold,
+                        false,
+                        line_color,
+                        text_vertices,
+                        text_indices,
+                    );
                     segment.clear();
                 }
                 i += 1;
@@ -1313,15 +1451,35 @@ impl Renderer {
                     italic_text.push(chars[i]);
                     i += 1;
                 }
-                if i < len { i += 1; } // skip closing *
-                cursor_x += self.emit_md_segment(&italic_text, cursor_x, y, line_bold, true, line_color, text_vertices, text_indices);
+                if i < len {
+                    i += 1;
+                } // skip closing *
+                cursor_x += self.emit_md_segment(
+                    &italic_text,
+                    cursor_x,
+                    y,
+                    line_bold,
+                    true,
+                    line_color,
+                    text_vertices,
+                    text_indices,
+                );
                 continue;
             }
 
             // ~~strikethrough~~
             if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
                 if !segment.is_empty() {
-                    cursor_x += self.emit_md_segment(&segment, cursor_x, y, line_bold, false, line_color, text_vertices, text_indices);
+                    cursor_x += self.emit_md_segment(
+                        &segment,
+                        cursor_x,
+                        y,
+                        line_bold,
+                        false,
+                        line_color,
+                        text_vertices,
+                        text_indices,
+                    );
                     segment.clear();
                 }
                 i += 2;
@@ -1330,18 +1488,38 @@ impl Renderer {
                     strike_text.push(chars[i]);
                     i += 1;
                 }
-                if i + 1 < len { i += 2; } // skip closing ~~
-                // Render strikethrough text with dim color and strikethrough decoration
-                // Since we don't have actual text decoration support, render with dim + overstrike
+                if i + 1 < len {
+                    i += 2;
+                } // skip closing ~~
+                  // Render strikethrough text with dim color and strikethrough decoration
+                  // Since we don't have actual text decoration support, render with dim + overstrike
                 let strike_color = self.color_scheme.named[8]; // dim
-                cursor_x += self.emit_md_segment(&strike_text, cursor_x, y, false, false, strike_color, text_vertices, text_indices);
+                cursor_x += self.emit_md_segment(
+                    &strike_text,
+                    cursor_x,
+                    y,
+                    false,
+                    false,
+                    strike_color,
+                    text_vertices,
+                    text_indices,
+                );
                 continue;
             }
 
             // `inline code`
             if chars[i] == '`' {
                 if !segment.is_empty() {
-                    cursor_x += self.emit_md_segment(&segment, cursor_x, y, line_bold, false, line_color, text_vertices, text_indices);
+                    cursor_x += self.emit_md_segment(
+                        &segment,
+                        cursor_x,
+                        y,
+                        line_bold,
+                        false,
+                        line_color,
+                        text_vertices,
+                        text_indices,
+                    );
                     segment.clear();
                 }
                 i += 1;
@@ -1350,8 +1528,19 @@ impl Renderer {
                     code_text.push(chars[i]);
                     i += 1;
                 }
-                if i < len { i += 1; } // skip closing `
-                cursor_x += self.emit_md_segment(&code_text, cursor_x, y, false, false, self.color_scheme.named[7], text_vertices, text_indices);
+                if i < len {
+                    i += 1;
+                } // skip closing `
+                cursor_x += self.emit_md_segment(
+                    &code_text,
+                    cursor_x,
+                    y,
+                    false,
+                    false,
+                    self.color_scheme.named[7],
+                    text_vertices,
+                    text_indices,
+                );
                 continue;
             }
 
@@ -1366,15 +1555,37 @@ impl Renderer {
                 if j + 1 < len && chars[j] == ']' && chars[j + 1] == '(' {
                     // Skip past (url)
                     j += 2;
-                    while j < len && chars[j] != ')' { j += 1; }
-                    if j < len { j += 1; }
+                    while j < len && chars[j] != ')' {
+                        j += 1;
+                    }
+                    if j < len {
+                        j += 1;
+                    }
 
                     if !segment.is_empty() {
-                        cursor_x += self.emit_md_segment(&segment, cursor_x, y, line_bold, false, line_color, text_vertices, text_indices);
+                        cursor_x += self.emit_md_segment(
+                            &segment,
+                            cursor_x,
+                            y,
+                            line_bold,
+                            false,
+                            line_color,
+                            text_vertices,
+                            text_indices,
+                        );
                         segment.clear();
                     }
                     // Render link text in blue/cyan
-                    cursor_x += self.emit_md_segment(&link_text, cursor_x, y, false, false, self.color_scheme.named[6], text_vertices, text_indices);
+                    cursor_x += self.emit_md_segment(
+                        &link_text,
+                        cursor_x,
+                        y,
+                        false,
+                        false,
+                        self.color_scheme.named[6],
+                        text_vertices,
+                        text_indices,
+                    );
                     i = j;
                     continue;
                 }
@@ -1385,7 +1596,16 @@ impl Renderer {
         }
 
         if !segment.is_empty() {
-            self.emit_md_segment(&segment, cursor_x, y, line_bold, false, line_color, text_vertices, text_indices);
+            self.emit_md_segment(
+                &segment,
+                cursor_x,
+                y,
+                line_bold,
+                false,
+                line_color,
+                text_vertices,
+                text_indices,
+            );
         }
     }
 
@@ -1402,9 +1622,9 @@ impl Renderer {
         text_vertices: &mut Vec<Vertex>,
         text_indices: &mut Vec<u32>,
     ) -> f32 {
-        let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
-            text, x, y, color, bold, italic,
-        );
+        let (verts, idxs, advance) = self
+            .text_renderer
+            .build_styled_text_vertices(text, x, y, color, bold, italic);
         let base_idx = text_vertices.len() as u32;
         text_vertices.extend(verts);
         text_indices.extend(idxs.iter().map(|i| i + base_idx));
@@ -1447,7 +1667,16 @@ impl Renderer {
                 cursor_x += advance;
             }
 
-            self.render_code_line(line, language, &keywords, &mut in_block_comment, cursor_x, cursor_y, text_vertices, text_indices);
+            self.render_code_line(
+                line,
+                language,
+                &keywords,
+                &mut in_block_comment,
+                cursor_x,
+                cursor_y,
+                text_vertices,
+                text_indices,
+            );
             cursor_y += line_height;
         }
     }
@@ -1465,13 +1694,13 @@ impl Renderer {
         text_vertices: &mut Vec<Vertex>,
         text_indices: &mut Vec<u32>,
     ) {
-        let keyword_color = self.color_scheme.named[5];   // magenta
-        let string_color = self.color_scheme.named[2];    // green
-        let comment_color = self.color_scheme.named[8];   // bright black (dim)
-        let number_color = self.color_scheme.named[3];    // yellow
-        let type_color = self.color_scheme.named[6];      // cyan
-        let operator_color = self.color_scheme.named[1];  // red
-        let code_color = self.color_scheme.named[7];      // white/default code
+        let keyword_color = self.color_scheme.named[5]; // magenta
+        let string_color = self.color_scheme.named[2]; // green
+        let comment_color = self.color_scheme.named[8]; // bright black (dim)
+        let number_color = self.color_scheme.named[3]; // yellow
+        let type_color = self.color_scheme.named[6]; // cyan
+        let operator_color = self.color_scheme.named[1]; // red
+        let code_color = self.color_scheme.named[7]; // white/default code
 
         // If we're inside a block comment, render entire line as comment
         // and check for closing */
@@ -1481,18 +1710,37 @@ impl Renderer {
                 let comment_part = &line[..end_pos + 2];
                 let rest = &line[end_pos + 2..];
                 let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
-                    comment_part, x, y, comment_color, false, true,
+                    comment_part,
+                    x,
+                    y,
+                    comment_color,
+                    false,
+                    true,
                 );
                 let base_idx = text_vertices.len() as u32;
                 text_vertices.extend(verts);
                 text_indices.extend(idxs.iter().map(|i| i + base_idx));
                 *in_block_comment = false;
                 if !rest.is_empty() {
-                    self.render_code_line(rest, language, keywords, in_block_comment, x + advance, y, text_vertices, text_indices);
+                    self.render_code_line(
+                        rest,
+                        language,
+                        keywords,
+                        in_block_comment,
+                        x + advance,
+                        y,
+                        text_vertices,
+                        text_indices,
+                    );
                 }
             } else {
                 let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                    line, x, y, comment_color, false, true,
+                    line,
+                    x,
+                    y,
+                    comment_color,
+                    false,
+                    true,
                 );
                 let base_idx = text_vertices.len() as u32;
                 text_vertices.extend(verts);
@@ -1506,7 +1754,12 @@ impl Renderer {
         // Full-line comment detection (language-aware)
         if is_line_comment(trimmed, language) {
             let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                line, x, y, comment_color, false, true,
+                line,
+                x,
+                y,
+                comment_color,
+                false,
+                true,
             );
             let base_idx = text_vertices.len() as u32;
             text_vertices.extend(verts);
@@ -1529,7 +1782,12 @@ impl Renderer {
                 TokenKind::Plain => (code_color, false, false),
             };
             let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
-                &token.text, cursor_x, y, color, bold, italic,
+                &token.text,
+                cursor_x,
+                y,
+                color,
+                bold,
+                italic,
             );
             let base_idx = text_vertices.len() as u32;
             text_vertices.extend(verts);
@@ -1561,63 +1819,185 @@ struct CodeToken {
 fn code_keywords(language: &str) -> Vec<&'static str> {
     match language.to_lowercase().as_str() {
         "rust" | "rs" => vec![
-            "fn", "let", "mut", "const", "static", "struct", "enum", "impl", "trait",
-            "pub", "use", "mod", "crate", "self", "super", "return", "if", "else",
-            "match", "for", "while", "loop", "break", "continue", "where", "type",
-            "async", "await", "move", "ref", "as", "in", "true", "false",
+            "fn", "let", "mut", "const", "static", "struct", "enum", "impl", "trait", "pub", "use",
+            "mod", "crate", "self", "super", "return", "if", "else", "match", "for", "while",
+            "loop", "break", "continue", "where", "type", "async", "await", "move", "ref", "as",
+            "in", "true", "false",
         ],
         "python" | "py" => vec![
-            "def", "class", "import", "from", "return", "if", "elif", "else",
-            "for", "while", "break", "continue", "pass", "with", "as", "try",
-            "except", "finally", "raise", "yield", "lambda", "and", "or", "not",
-            "in", "is", "True", "False", "None", "self", "async", "await",
+            "def", "class", "import", "from", "return", "if", "elif", "else", "for", "while",
+            "break", "continue", "pass", "with", "as", "try", "except", "finally", "raise",
+            "yield", "lambda", "and", "or", "not", "in", "is", "True", "False", "None", "self",
+            "async", "await",
         ],
         "javascript" | "js" | "typescript" | "ts" => vec![
-            "function", "const", "let", "var", "return", "if", "else", "for",
-            "while", "do", "switch", "case", "break", "continue", "class",
-            "extends", "import", "export", "from", "default", "new", "this",
-            "typeof", "instanceof", "async", "await", "try", "catch", "finally",
-            "throw", "true", "false", "null", "undefined",
+            "function",
+            "const",
+            "let",
+            "var",
+            "return",
+            "if",
+            "else",
+            "for",
+            "while",
+            "do",
+            "switch",
+            "case",
+            "break",
+            "continue",
+            "class",
+            "extends",
+            "import",
+            "export",
+            "from",
+            "default",
+            "new",
+            "this",
+            "typeof",
+            "instanceof",
+            "async",
+            "await",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "true",
+            "false",
+            "null",
+            "undefined",
         ],
         "go" => vec![
-            "func", "package", "import", "return", "if", "else", "for", "range",
-            "switch", "case", "break", "continue", "type", "struct", "interface",
-            "map", "chan", "go", "defer", "select", "var", "const", "true", "false", "nil",
+            "func",
+            "package",
+            "import",
+            "return",
+            "if",
+            "else",
+            "for",
+            "range",
+            "switch",
+            "case",
+            "break",
+            "continue",
+            "type",
+            "struct",
+            "interface",
+            "map",
+            "chan",
+            "go",
+            "defer",
+            "select",
+            "var",
+            "const",
+            "true",
+            "false",
+            "nil",
         ],
         "c" | "cpp" | "c++" | "h" => vec![
-            "int", "char", "float", "double", "void", "return", "if", "else",
-            "for", "while", "do", "switch", "case", "break", "continue",
-            "struct", "enum", "typedef", "const", "static", "extern",
-            "include", "define", "true", "false", "NULL", "nullptr",
+            "int", "char", "float", "double", "void", "return", "if", "else", "for", "while", "do",
+            "switch", "case", "break", "continue", "struct", "enum", "typedef", "const", "static",
+            "extern", "include", "define", "true", "false", "NULL", "nullptr",
         ],
         "ruby" | "rb" => vec![
-            "def", "end", "class", "module", "require", "include", "extend",
-            "return", "if", "elsif", "else", "unless", "case", "when",
-            "for", "while", "until", "do", "begin", "rescue", "ensure",
-            "raise", "yield", "block_given?", "self", "super", "nil",
-            "true", "false", "and", "or", "not", "attr_reader", "attr_writer",
-            "attr_accessor", "puts", "print", "lambda", "proc",
+            "def",
+            "end",
+            "class",
+            "module",
+            "require",
+            "include",
+            "extend",
+            "return",
+            "if",
+            "elsif",
+            "else",
+            "unless",
+            "case",
+            "when",
+            "for",
+            "while",
+            "until",
+            "do",
+            "begin",
+            "rescue",
+            "ensure",
+            "raise",
+            "yield",
+            "block_given?",
+            "self",
+            "super",
+            "nil",
+            "true",
+            "false",
+            "and",
+            "or",
+            "not",
+            "attr_reader",
+            "attr_writer",
+            "attr_accessor",
+            "puts",
+            "print",
+            "lambda",
+            "proc",
         ],
         "java" => vec![
-            "public", "private", "protected", "static", "final", "abstract",
-            "class", "interface", "extends", "implements", "import", "package",
-            "return", "if", "else", "for", "while", "do", "switch", "case",
-            "break", "continue", "new", "this", "super", "try", "catch",
-            "finally", "throw", "throws", "void", "int", "long", "double",
-            "float", "boolean", "char", "byte", "short", "String",
-            "true", "false", "null", "instanceof", "synchronized", "volatile",
+            "public",
+            "private",
+            "protected",
+            "static",
+            "final",
+            "abstract",
+            "class",
+            "interface",
+            "extends",
+            "implements",
+            "import",
+            "package",
+            "return",
+            "if",
+            "else",
+            "for",
+            "while",
+            "do",
+            "switch",
+            "case",
+            "break",
+            "continue",
+            "new",
+            "this",
+            "super",
+            "try",
+            "catch",
+            "finally",
+            "throw",
+            "throws",
+            "void",
+            "int",
+            "long",
+            "double",
+            "float",
+            "boolean",
+            "char",
+            "byte",
+            "short",
+            "String",
+            "true",
+            "false",
+            "null",
+            "instanceof",
+            "synchronized",
+            "volatile",
         ],
         _ => vec![
-            "fn", "function", "def", "class", "return", "if", "else", "for",
-            "while", "import", "from", "let", "const", "var", "true", "false",
+            "fn", "function", "def", "class", "return", "if", "else", "for", "while", "import",
+            "from", "let", "const", "var", "true", "false",
         ],
     }
 }
 
 /// Multi-character operators to highlight.
 const OPERATORS: &[&str] = &[
-    "=>", "->", "::", "+=", "-=", "*=", "/=", "%=", "&&", "||",
-    "==", "!=", "<=", ">=", "<<", ">>", "..", "?.",
+    "=>", "->", "::", "+=", "-=", "*=", "/=", "%=", "&&", "||", "==", "!=", "<=", ">=", "<<", ">>",
+    "..", "?.",
 ];
 
 /// Check if a trimmed line starts with a line-comment prefix for the given language.
@@ -1631,9 +2011,22 @@ fn is_line_comment(trimmed: &str, language: &str) -> bool {
         let lang = language.to_lowercase();
         let known_no_hash = matches!(
             lang.as_str(),
-            "rust" | "rs" | "c" | "cpp" | "c++" | "h"
-            | "javascript" | "js" | "typescript" | "ts"
-            | "java" | "go" | "sql" | "lua" | "haskell" | "hs"
+            "rust"
+                | "rs"
+                | "c"
+                | "cpp"
+                | "c++"
+                | "h"
+                | "javascript"
+                | "js"
+                | "typescript"
+                | "ts"
+                | "java"
+                | "go"
+                | "sql"
+                | "lua"
+                | "haskell"
+                | "hs"
         );
         return !known_no_hash;
     }
@@ -1651,12 +2044,18 @@ fn is_type_like(word: &str) -> bool {
         Some(c) => c,
         None => return false,
     };
-    first.is_ascii_uppercase() && word.len() > 1 && word.chars().skip(1).any(|c| c.is_ascii_lowercase())
+    first.is_ascii_uppercase()
+        && word.len() > 1
+        && word.chars().skip(1).any(|c| c.is_ascii_lowercase())
 }
 
 /// Tokenize a line of code into styled segments.
 #[allow(clippy::too_many_lines)]
-fn tokenize_code_line(line: &str, keywords: &[&str], in_block_comment: &mut bool) -> Vec<CodeToken> {
+fn tokenize_code_line(
+    line: &str,
+    keywords: &[&str],
+    in_block_comment: &mut bool,
+) -> Vec<CodeToken> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = line.chars().collect();
     let len = chars.len();
@@ -1672,7 +2071,10 @@ fn tokenize_code_line(line: &str, keywords: &[&str], in_block_comment: &mut bool
                     s.push_str("*/");
                     i += 2;
                     // Block comment closed on same line
-                    tokens.push(CodeToken { text: s, kind: TokenKind::Comment });
+                    tokens.push(CodeToken {
+                        text: s,
+                        kind: TokenKind::Comment,
+                    });
                     s = String::new();
                     break;
                 }
@@ -1682,7 +2084,10 @@ fn tokenize_code_line(line: &str, keywords: &[&str], in_block_comment: &mut bool
             if !s.is_empty() {
                 // Block comment continues to next line
                 *in_block_comment = true;
-                tokens.push(CodeToken { text: s, kind: TokenKind::Comment });
+                tokens.push(CodeToken {
+                    text: s,
+                    kind: TokenKind::Comment,
+                });
             }
             continue;
         }
@@ -1706,7 +2111,11 @@ fn tokenize_code_line(line: &str, keywords: &[&str], in_block_comment: &mut bool
             let mut s: String = chars[i..i + 3].iter().collect();
             i += 3;
             loop {
-                if i + 2 < len && chars[i] == quote && chars[i + 1] == quote && chars[i + 2] == quote {
+                if i + 2 < len
+                    && chars[i] == quote
+                    && chars[i + 1] == quote
+                    && chars[i + 2] == quote
+                {
                     s.push(quote);
                     s.push(quote);
                     s.push(quote);
@@ -1719,7 +2128,10 @@ fn tokenize_code_line(line: &str, keywords: &[&str], in_block_comment: &mut bool
                 s.push(chars[i]);
                 i += 1;
             }
-            tokens.push(CodeToken { text: s, kind: TokenKind::String });
+            tokens.push(CodeToken {
+                text: s,
+                kind: TokenKind::String,
+            });
             continue;
         }
 
@@ -1764,7 +2176,10 @@ fn tokenize_code_line(line: &str, keywords: &[&str], in_block_comment: &mut bool
                     j += 1;
                 }
                 i = j;
-                tokens.push(CodeToken { text: s, kind: TokenKind::String });
+                tokens.push(CodeToken {
+                    text: s,
+                    kind: TokenKind::String,
+                });
                 continue;
             }
             // Not a raw string (e.g. just identifier starting with 'r'), fall through
@@ -1786,7 +2201,10 @@ fn tokenize_code_line(line: &str, keywords: &[&str], in_block_comment: &mut bool
                 s.push('`');
                 i += 1;
             }
-            tokens.push(CodeToken { text: s, kind: TokenKind::String });
+            tokens.push(CodeToken {
+                text: s,
+                kind: TokenKind::String,
+            });
             continue;
         }
 
@@ -1808,18 +2226,28 @@ fn tokenize_code_line(line: &str, keywords: &[&str], in_block_comment: &mut bool
                 s.push(chars[i]);
                 i += 1;
             }
-            tokens.push(CodeToken { text: s, kind: TokenKind::String });
+            tokens.push(CodeToken {
+                text: s,
+                kind: TokenKind::String,
+            });
             continue;
         }
 
         // Numbers
-        if chars[i].is_ascii_digit() || (chars[i] == '.' && i + 1 < len && chars[i + 1].is_ascii_digit()) {
+        if chars[i].is_ascii_digit()
+            || (chars[i] == '.' && i + 1 < len && chars[i + 1].is_ascii_digit())
+        {
             let mut s = String::new();
-            while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '_') {
+            while i < len
+                && (chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '_')
+            {
                 s.push(chars[i]);
                 i += 1;
             }
-            tokens.push(CodeToken { text: s, kind: TokenKind::Number });
+            tokens.push(CodeToken {
+                text: s,
+                kind: TokenKind::Number,
+            });
             continue;
         }
 
@@ -1846,7 +2274,10 @@ fn tokenize_code_line(line: &str, keywords: &[&str], in_block_comment: &mut bool
         let mut matched_op = false;
         for op in OPERATORS {
             if remaining.starts_with(op) {
-                tokens.push(CodeToken { text: op.to_string(), kind: TokenKind::Operator });
+                tokens.push(CodeToken {
+                    text: op.to_string(),
+                    kind: TokenKind::Operator,
+                });
                 i += op.len();
                 matched_op = true;
                 break;
@@ -1858,8 +2289,12 @@ fn tokenize_code_line(line: &str, keywords: &[&str], in_block_comment: &mut bool
 
         // Whitespace and single-char operators — accumulate as plain
         let mut plain = String::new();
-        while i < len && !chars[i].is_alphanumeric() && chars[i] != '_'
-            && chars[i] != '"' && chars[i] != '\'' && chars[i] != '`'
+        while i < len
+            && !chars[i].is_alphanumeric()
+            && chars[i] != '_'
+            && chars[i] != '"'
+            && chars[i] != '\''
+            && chars[i] != '`'
             && !(i + 1 < len && chars[i] == '/' && chars[i + 1] == '/')
             && !(i + 1 < len && chars[i] == '/' && chars[i + 1] == '*')
         {
@@ -1872,7 +2307,10 @@ fn tokenize_code_line(line: &str, keywords: &[&str], in_block_comment: &mut bool
             i += 1;
         }
         if !plain.is_empty() {
-            tokens.push(CodeToken { text: plain, kind: TokenKind::Plain });
+            tokens.push(CodeToken {
+                text: plain,
+                kind: TokenKind::Plain,
+            });
         }
     }
 
@@ -1924,7 +2362,10 @@ mod tests {
 
         // Known languages return non-empty lists
         for lang in &["go", "c", "ruby", "java"] {
-            assert!(!code_keywords(lang).is_empty(), "{lang} should have keywords");
+            assert!(
+                !code_keywords(lang).is_empty(),
+                "{lang} should have keywords"
+            );
         }
     }
 
@@ -1958,9 +2399,9 @@ mod tests {
 
     #[test]
     fn is_type_like_edge_cases() {
-        assert!(!is_type_like("IO"));     // all uppercase, no lowercase after first
-        assert!(is_type_like("Io"));      // upper + lower
-        assert!(!is_type_like("123"));    // digits
+        assert!(!is_type_like("IO")); // all uppercase, no lowercase after first
+        assert!(is_type_like("Io")); // upper + lower
+        assert!(!is_type_like("123")); // digits
     }
 
     // ── tokenize_code_line tests ────────────────────────────────────
@@ -2006,7 +2447,10 @@ mod tests {
     fn tokenize_inline_comment() {
         let mut bc = false;
         let tokens = tokenize_code_line("x // comment", &rust_keywords(), &mut bc);
-        let comment_token = tokens.iter().find(|t| t.kind == TokenKind::Comment).unwrap();
+        let comment_token = tokens
+            .iter()
+            .find(|t| t.kind == TokenKind::Comment)
+            .unwrap();
         assert_eq!(comment_token.text, "// comment");
         assert!(!bc);
     }
@@ -2015,7 +2459,10 @@ mod tests {
     fn tokenize_block_comment_single_line() {
         let mut bc = false;
         let tokens = tokenize_code_line("a /* b */ c", &rust_keywords(), &mut bc);
-        let comment_token = tokens.iter().find(|t| t.kind == TokenKind::Comment).unwrap();
+        let comment_token = tokens
+            .iter()
+            .find(|t| t.kind == TokenKind::Comment)
+            .unwrap();
         assert!(comment_token.text.contains("/* b */"));
         assert!(!bc, "block comment should close on same line");
     }
@@ -2025,7 +2472,10 @@ mod tests {
         let mut bc = false;
         let tokens = tokenize_code_line("a /* b", &rust_keywords(), &mut bc);
         assert!(bc, "block comment should remain open");
-        let comment_token = tokens.iter().find(|t| t.kind == TokenKind::Comment).unwrap();
+        let comment_token = tokens
+            .iter()
+            .find(|t| t.kind == TokenKind::Comment)
+            .unwrap();
         assert!(comment_token.text.starts_with("/*"));
     }
 
@@ -2100,7 +2550,10 @@ mod tests {
     fn tokenize_operator_and_and() {
         let mut bc = false;
         let tokens = tokenize_code_line("a && b", &rust_keywords(), &mut bc);
-        let op = tokens.iter().find(|t| t.kind == TokenKind::Operator).unwrap();
+        let op = tokens
+            .iter()
+            .find(|t| t.kind == TokenKind::Operator)
+            .unwrap();
         assert_eq!(op.text, "&&");
     }
 
@@ -2208,7 +2661,9 @@ mod tests {
         let mut bc = false;
         let tokens = tokenize_code_line(r#"let s = "unterminated"#, &rust_keywords(), &mut bc);
         // Should still produce a String token (without closing quote)
-        let string_tok = tokens.iter().find(|t| t.kind == TokenKind::String)
+        let string_tok = tokens
+            .iter()
+            .find(|t| t.kind == TokenKind::String)
             .expect("should have a string token");
         assert!(string_tok.text.starts_with('"'));
         assert!(!string_tok.text.ends_with('"'));
@@ -2228,7 +2683,9 @@ mod tests {
         let mut bc = false;
         // /* /* */ */ — first */ closes the comment, second */ is plain text
         let tokens = tokenize_code_line("/* /* */ */", &rust_keywords(), &mut bc);
-        let comment = tokens.iter().find(|t| t.kind == TokenKind::Comment)
+        let comment = tokens
+            .iter()
+            .find(|t| t.kind == TokenKind::Comment)
             .expect("should have comment token");
         assert_eq!(comment.text, "/* /* */");
         assert!(!bc, "block comment should be closed");
@@ -2244,7 +2701,9 @@ mod tests {
         let kw = &tokens[0];
         assert_eq!(kw.kind, TokenKind::Keyword);
         assert_eq!(kw.text, "let");
-        let ident = tokens.iter().find(|t| t.text.contains("caf"))
+        let ident = tokens
+            .iter()
+            .find(|t| t.text.contains("caf"))
             .expect("should find café identifier");
         assert_eq!(ident.text, "café");
         assert_eq!(ident.kind, TokenKind::Plain);
@@ -2263,7 +2722,9 @@ mod tests {
     fn tokenize_unclosed_backtick_at_eol() {
         let mut bc = false;
         let tokens = tokenize_code_line("`unterminated", &code_keywords("js"), &mut bc);
-        let string_tok = tokens.iter().find(|t| t.kind == TokenKind::String)
+        let string_tok = tokens
+            .iter()
+            .find(|t| t.kind == TokenKind::String)
             .expect("should have a string token");
         assert!(string_tok.text.starts_with('`'));
         assert!(!string_tok.text.ends_with('`'));
@@ -2273,7 +2734,9 @@ mod tests {
     fn tokenize_unclosed_triple_quote_at_eol() {
         let mut bc = false;
         let tokens = tokenize_code_line(r#""""unterminated"#, &code_keywords("python"), &mut bc);
-        let string_tok = tokens.iter().find(|t| t.kind == TokenKind::String)
+        let string_tok = tokens
+            .iter()
+            .find(|t| t.kind == TokenKind::String)
             .expect("should have a string token");
         assert!(string_tok.text.starts_with("\"\"\""));
         // Not closed, so should contain the rest of the line

@@ -1192,8 +1192,9 @@ impl Renderer {
         let sessions: Vec<_> = sessions.collect();
         let any_dirty = sessions.iter().any(|s| s.is_render_dirty());
 
-        if !any_dirty && self.cached_native_bg.is_some() {
-            // Reuse cached GPU buffers — skip expensive vertex rebuild
+        let has_cached_native = self.cached_native_bg.is_some() || self.cached_native_text.is_some();
+
+        if !any_dirty && has_cached_native {
             self.draw_cached_native_buffers(&mut encoder, &view);
         } else {
             for session in &sessions {
@@ -1629,4 +1630,3 @@ mod tests {
         assert!((pos - expected_middle).abs() < 0.1);
     }
 }
-

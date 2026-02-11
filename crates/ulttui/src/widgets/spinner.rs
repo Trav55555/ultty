@@ -7,7 +7,7 @@ use ratatui::Frame;
 
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
-use ultty_protocol::{Content, SpinnerStyle, SpinnerWidget, WidgetContent};
+use ultty_protocol::{Constraints, Content, Dimension, SpinnerStyle, SpinnerWidget, WidgetContent};
 
 const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -48,6 +48,14 @@ impl Default for Spinner {
 }
 
 impl View for Spinner {
+    fn constraints(&self) -> Constraints {
+        Constraints {
+            width: Dimension::Cells(1.0),
+            height: Dimension::Cells(1.0),
+            ..Default::default()
+        }
+    }
+
     fn content(&self) -> Content {
         Content::Widget(WidgetContent::Spinner(SpinnerWidget {
             label: self.label.clone(),

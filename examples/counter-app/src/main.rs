@@ -1,5 +1,6 @@
 use ulttui::event::{Event, Key};
 use ulttui::prelude::*;
+use ulttui::widgets::RichText;
 
 struct CounterApp {
     count: i32,
@@ -63,41 +64,83 @@ impl Application for CounterApp {
     }
 
     fn view(&self) -> impl View {
+        let theme = Theme::current();
+        let count_color = if self.count > 0 {
+            theme.success
+        } else if self.count < 0 {
+            theme.error
+        } else {
+            theme.warning
+        };
+
+        let changes = self.history.len().saturating_sub(1);
+        let trend = match self
+            .history
+            .iter()
+            .rev()
+            .take(2)
+            .copied()
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            [latest, prev] if latest > prev => "UP",
+            [latest, prev] if latest < prev => "DOWN",
+            [_, _] => "FLAT",
+            _ => "FLAT",
+        };
+
+        let recent_history = self
+            .history
+            .iter()
+            .rev()
+            .take(6)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(" -> ");
+
         Column::new()
-            .padding(1.0)
+            .padding(2.0)
             .gap(1.0)
-            .child(Text::new("Counter App - ulttui Framework Demo"))
             .child(
-                Row::new()
-                    .gap(2.0)
-                    .child(Text::new(format!("Count: {}", self.count)))
-                    .child(Text::new(format!(
-                        "History: {} changes",
-                        self.history.len() - 1
-                    ))),
+                RichText::new()
+                    .span("Counter Studio", Style::new().fg(theme.primary).bold())
+                    .span("  native ulttui demo", Style::new().fg(theme.muted)),
             )
+            .child(Divider::horizontal())
+            .child(RichText::new().span("CURRENT VALUE", Style::new().fg(theme.muted)))
+            .child(RichText::new().span(
+                format!("{:^22}", self.count),
+                Style::new().fg(count_color).bold(),
+            ))
+            .child(
+                RichText::new()
+                    .span("changes ", Style::new().fg(theme.muted))
+                    .span(
+                        format!("{}", changes),
+                        Style::new().fg(theme.foreground).bold(),
+                    )
+                    .span("  trend ", Style::new().fg(theme.muted))
+                    .span(trend, Style::new().fg(theme.primary).bold()),
+            )
+            .child(Divider::horizontal())
             .child(
                 Row::new()
                     .gap(1.0)
-                    .child(Button::new("-").id("dec"))
-                    .child(Button::new("+").id("inc"))
+                    .child(Button::new("- Decrease").id("dec"))
+                    .child(Button::new("+ Increase").id("inc"))
                     .child(Button::new("Reset").id("reset")),
             )
+            .child(Divider::horizontal())
             .child(
                 Column::new()
-                    .child(Text::new("Recent history:"))
-                    .child(Text::new(
-                        self.history
-                            .iter()
-                            .rev()
-                            .take(5)
-                            .map(|n| n.to_string())
-                            .collect::<Vec<_>>()
-                            .join(" <- "),
-                    )),
+                    .gap(1.0)
+                    .child(RichText::new().span("RECENT HISTORY", Style::new().fg(theme.muted)))
+                    .child(RichText::new().span(recent_history, Style::new().fg(theme.foreground))),
             )
-            .child(Text::new(
-                "Tab to focus buttons, Enter to activate, +/- keys, r to reset",
+            .child(Divider::horizontal())
+            .child(RichText::new().span(
+                "Tab to focus buttons, Enter to trigger, +/- to change, r to reset",
+                Style::new().fg(theme.muted),
             ))
     }
 }

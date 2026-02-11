@@ -81,6 +81,8 @@ impl Column {
             constraints: Constraints {
                 display: Display::Flex,
                 flex_direction: FlexDirection::Column,
+                flex_grow: 1.0,
+                width: Dimension::Percent(100.0),
                 ..Default::default()
             },
             children: Vec::new(),
@@ -206,6 +208,7 @@ impl Row {
             constraints: Constraints {
                 display: Display::Flex,
                 flex_direction: FlexDirection::Row,
+                width: Dimension::Percent(100.0),
                 ..Default::default()
             },
             children: Vec::new(),
@@ -314,7 +317,13 @@ impl std::fmt::Debug for Stack {
 impl Stack {
     pub fn new() -> Self {
         Self {
-            constraints: Constraints::default(),
+            constraints: Constraints {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Column,
+                width: Dimension::Percent(100.0),
+                height: Dimension::Percent(100.0),
+                ..Default::default()
+            },
             children: Vec::new(),
         }
     }

@@ -41,6 +41,15 @@ impl Button {
 }
 
 impl View for Button {
+    fn constraints(&self) -> ultty_protocol::Constraints {
+        let label_width = self.label.chars().count() as f32 + 4.0;
+        ultty_protocol::Constraints {
+            width: ultty_protocol::Dimension::Cells(label_width),
+            height: ultty_protocol::Dimension::Cells(1.0),
+            ..Default::default()
+        }
+    }
+
     fn widget_id(&self) -> Option<&str> {
         Button::widget_id(self)
     }

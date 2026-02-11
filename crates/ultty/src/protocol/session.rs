@@ -10,8 +10,9 @@ use std::os::unix::net::UnixStream;
 use bytes::{Buf, BytesMut};
 use tracing::{debug, error, info, warn};
 use ultty_protocol::{
-    AppMessage, ComputedRegionLayout, Constraints, Content, Decode, Encode, FrameId, LayoutTrigger,
-    RegionId, Style, TerminalMessage, FRAME_MAGIC, PROTOCOL_VERSION,
+    AppMessage, ComputedRegionLayout, Constraints, Content, Decode, Dimension, Display, Encode,
+    FlexDirection, FrameId, LayoutTrigger, RegionId, Style, TerminalMessage, FRAME_MAGIC,
+    PROTOCOL_VERSION,
 };
 
 use crate::scene::layout::LayoutEngine;
@@ -43,6 +44,7 @@ pub struct NativeSession {
     viewport_height: f32,
     /// Current frame being built (if any).
     current_frame: Option<FrameId>,
+    pending_frame_ops: Vec<AppMessage>,
     /// Whether scene changed during current frame.
     scene_dirty: bool,
     /// Whether layout constraints changed (requires Taffy recomputation).
@@ -108,12 +110,19 @@ impl NativeSession {
 
     /// Create a new session from an accepted socket connection.
     pub fn new(stream: UnixStream, session_id: u64) -> io::Result<Self> {
-        // Set non-blocking for polling
         stream.set_nonblocking(true)?;
+
+        let mut scene = SceneTree::new();
+        if let Some(root) = scene.get_mut(RegionId::ROOT) {
+            root.constraints.width = Dimension::Percent(100.0);
+            root.constraints.height = Dimension::Percent(100.0);
+            root.constraints.display = Display::Flex;
+            root.constraints.flex_direction = FlexDirection::Column;
+        }
 
         Ok(Self {
             session_id,
-            scene: SceneTree::new(),
+            scene,
             layout: LayoutEngine::new(),
             stream,
             read_buf: BytesMut::with_capacity(8192),
@@ -121,6 +130,7 @@ impl NativeSession {
             viewport_width: 80.0,
             viewport_height: 24.0,
             current_frame: None,
+            pending_frame_ops: Vec::new(),
             scene_dirty: false,
             constraints_dirty: false,
             render_dirty: true,
@@ -144,6 +154,12 @@ impl NativeSession {
         {
             self.viewport_width = width;
             self.viewport_height = height;
+            if let Some(root) = self.scene.get_mut(RegionId::ROOT) {
+                root.constraints.width = Dimension::Percent(100.0);
+                root.constraints.height = Dimension::Percent(100.0);
+                root.constraints.display = Display::Flex;
+                root.constraints.flex_direction = FlexDirection::Column;
+            }
             self.scene_dirty = true;
             self.constraints_dirty = true;
             self.render_dirty = true;
@@ -303,6 +319,39 @@ impl NativeSession {
     /// Handle a decoded message. Returns false if session should close.
     fn handle_message(&mut self, msg: AppMessage) -> io::Result<bool> {
         debug!("Session {} received: {:?}", self.session_id, msg);
+
+        if self.current_frame.is_some() {
+            match msg {
+                AppMessage::EndFrame { frame_id } => {
+                    self.handle_end_frame(frame_id)?;
+                    return Ok(true);
+                }
+                AppMessage::BeginFrame { frame_id } => {
+                    let message = format!(
+                        "begin_frame while frame {:?} in progress (got {:?})",
+                        self.current_frame, frame_id
+                    );
+                    warn!("Session {} {}", self.session_id, message);
+                    self.queue_error_message(400, message);
+                    return Ok(true);
+                }
+                AppMessage::Disconnect => {
+                    info!("Session {} disconnected (explicit)", self.session_id);
+                    return Ok(false);
+                }
+                AppMessage::ClientHello { .. } => {
+                    self.queue_error_message(
+                        400,
+                        "client_hello not valid during frame".to_string(),
+                    );
+                    return Ok(true);
+                }
+                other => {
+                    self.pending_frame_ops.push(other);
+                    return Ok(true);
+                }
+            }
+        }
 
         match msg {
             AppMessage::ClientHello {
@@ -648,6 +697,7 @@ impl NativeSession {
 
     /// Handle BeginFrame.
     fn handle_begin_frame(&mut self, frame_id: FrameId) {
+        self.pending_frame_ops.clear();
         self.current_frame = Some(frame_id);
         debug!("Begin frame {:?}", frame_id);
     }
@@ -671,6 +721,12 @@ impl NativeSession {
         }
 
         self.current_frame = None;
+        let queued_ops = std::mem::take(&mut self.pending_frame_ops);
+        for op in queued_ops {
+            if !self.handle_message(op)? {
+                return Ok(());
+            }
+        }
 
         // Compute layout if scene changed
         if self.scene_dirty {

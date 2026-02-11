@@ -105,11 +105,12 @@ impl App {
 
         if let Some(ref server) = self.protocol_server {
             if server.session_count() > 0 {
-                let search_matches = if self.native_search_active && !self.native_search_matches.is_empty() {
-                    Some(self.native_search_matches.as_slice())
-                } else {
-                    None
-                };
+                let search_matches =
+                    if self.native_search_active && !self.native_search_matches.is_empty() {
+                        Some(self.native_search_matches.as_slice())
+                    } else {
+                        None
+                    };
 
                 // Collect live region IDs for image cache eviction
                 let live_regions: std::collections::HashSet<ultty_protocol::RegionId> = server

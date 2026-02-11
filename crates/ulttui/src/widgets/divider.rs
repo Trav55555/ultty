@@ -41,12 +41,14 @@ impl View for Divider {
     fn constraints(&self) -> Constraints {
         if self.horizontal {
             Constraints {
+                width: Dimension::Percent(100.0),
                 height: Dimension::cells(1.0),
                 ..Default::default()
             }
         } else {
             Constraints {
                 width: Dimension::cells(1.0),
+                height: Dimension::Percent(100.0),
                 ..Default::default()
             }
         }

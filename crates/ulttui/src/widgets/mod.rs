@@ -342,10 +342,12 @@ mod tests {
     }
 
     #[test]
-    fn text_default_constraints() {
+    fn text_has_intrinsic_height_constraints() {
         let t = Text::new("test");
         let c = <Text as View>::constraints(&t);
-        assert_eq!(c, ultty_protocol::Constraints::default());
+        assert_eq!(c.width, ultty_protocol::Dimension::Percent(100.0));
+        assert_eq!(c.height, ultty_protocol::Dimension::Cells(1.0));
+        assert_eq!(c.flex_shrink, 1.0);
     }
 
     #[test]

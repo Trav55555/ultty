@@ -7,7 +7,9 @@ use ratatui::Frame;
 
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
-use ultty_protocol::{Content, RichText as ProtoRichText, Style as ProtoStyle};
+use ultty_protocol::{
+    Constraints, Content, Dimension, RichText as ProtoRichText, Style as ProtoStyle,
+};
 
 /// Badge variants for semantic color.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -61,6 +63,13 @@ impl Badge {
 }
 
 impl View for Badge {
+    fn constraints(&self) -> Constraints {
+        Constraints {
+            height: Dimension::Cells(1.0),
+            ..Default::default()
+        }
+    }
+
     fn content(&self) -> Content {
         let theme = Theme::current();
         let color = match self.variant {

@@ -168,8 +168,18 @@ impl App {
         // Use default overlay state for clean screenshot
         let overlay = OverlayState::default();
 
-        // Capture screenshot
-        match self.renderer.capture_screenshot(terminal, &overlay, &path) {
+        let native_sessions: Vec<&ultty::protocol::NativeSession> = self
+            .protocol_server
+            .as_ref()
+            .map(|s| s.sessions().collect())
+            .unwrap_or_default();
+
+        match self.renderer.capture_screenshot_with_native(
+            terminal,
+            &overlay,
+            &path,
+            &native_sessions,
+        ) {
             Ok(()) => {
                 tracing::info!("Screenshot saved to {}", path.display());
                 // Show notification if possible
@@ -194,7 +204,9 @@ impl App {
         let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
         let filename = format!("/tmp/ultty-debug-{}.txt", timestamp);
 
-        let Some(terminal) = self.terminal() else { return; };
+        let Some(terminal) = self.terminal() else {
+            return;
+        };
         let grid = terminal.grid();
         let dims = grid.dimensions();
         let cursor = grid.cursor();

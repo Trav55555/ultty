@@ -38,6 +38,7 @@ impl std::fmt::Debug for ScrollView {
 impl Default for ScrollView {
     fn default() -> Self {
         let mut constraints = Constraints::default();
+        constraints.flex_grow = 1.0;
         constraints.overflow.y = OverflowAxis::Scroll;
         Self {
             constraints,

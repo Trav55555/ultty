@@ -1,7 +1,7 @@
 //! Style types for visual presentation.
 
 /// Complete style specification.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Style {
     /// Foreground color.
     pub fg: Option<Color>,
@@ -96,13 +96,27 @@ pub const TRANSITION_BORDER_COLOR: u32 = 0x08;
 /// Transition property: animate all supported properties.
 pub const TRANSITION_ALL: u32 = 0x0F;
 
+impl Default for Style {
+    fn default() -> Self {
+        Self {
+            fg: None,
+            bg: None,
+            border: BorderStyle::NONE,
+            border_color: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            opacity: 1.0,
+            transition: None,
+        }
+    }
+}
+
 impl Style {
     /// Create a new style with defaults.
     pub fn new() -> Self {
-        Self {
-            opacity: 1.0,
-            ..Default::default()
-        }
+        Self::default()
     }
 
     /// Set foreground color.

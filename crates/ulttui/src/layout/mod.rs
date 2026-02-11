@@ -124,10 +124,11 @@ mod tests {
     // --- Stack layout ---
 
     #[test]
-    fn stack_new_has_default_constraints() {
+    fn stack_new_fills_parent_constraints() {
         let stack = Stack::new();
         let c = <Stack as View>::constraints(&stack);
-        assert_eq!(c, ultty_protocol::Constraints::default());
+        assert_eq!(c.width, Dimension::Percent(100.0));
+        assert_eq!(c.height, Dimension::Percent(100.0));
     }
 
     #[test]
