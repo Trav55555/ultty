@@ -44,6 +44,12 @@ pub enum AppMessage {
     /// Set region content.
     SetContent { id: RegionId, content: Content },
 
+    /// Set metadata on a region (for agent-aware workflows).
+    SetRegionMetadata {
+        id: RegionId,
+        metadata: Vec<(String, String)>,
+    },
+
     /// Delete a region.
     DeleteRegion { id: RegionId },
 

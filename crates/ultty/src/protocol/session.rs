@@ -334,6 +334,10 @@ impl NativeSession {
                 self.handle_set_content(id, content);
             }
 
+            AppMessage::SetRegionMetadata { id, metadata } => {
+                self.handle_set_region_metadata(id, metadata);
+            }
+
             AppMessage::DeleteRegion { id } => {
                 self.handle_delete_region(id);
             }
@@ -581,6 +585,16 @@ impl NativeSession {
             self.render_dirty = true;
         } else {
             warn!("SetContent for unknown region {:?}", id);
+            self.queue_error_message(404, format!("region {} not found", id.0));
+        }
+    }
+
+    /// Handle SetRegionMetadata.
+    fn handle_set_region_metadata(&mut self, id: RegionId, metadata: Vec<(String, String)>) {
+        if let Some(region) = self.scene.get_mut(id) {
+            region.metadata = metadata;
+        } else {
+            warn!("SetRegionMetadata for unknown region {:?}", id);
             self.queue_error_message(404, format!("region {} not found", id.0));
         }
     }
@@ -1254,5 +1268,38 @@ mod tests {
         let mut session = make_session();
         session.set_viewport(120.0, 40.0);
         // No direct accessor, but shouldn't panic
+    }
+
+    #[test]
+    fn session_stores_metadata() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+
+        let metadata = vec![
+            ("owner".to_string(), "agent".to_string()),
+            ("task_id".to_string(), "auth-refactor".to_string()),
+            ("locked".to_string(), "true".to_string()),
+        ];
+
+        session.scene_dirty = false;
+        session.constraints_dirty = false;
+        session.render_dirty = false;
+
+        session
+            .handle_message(AppMessage::SetRegionMetadata {
+                id,
+                metadata: metadata.clone(),
+            })
+            .unwrap();
+
+        let stored = &session.scene.get(id).unwrap().metadata;
+        assert_eq!(stored, &metadata);
+        assert!(!session.scene_dirty);
+        assert!(!session.constraints_dirty);
+        assert!(!session.render_dirty);
     }
 }

@@ -1849,6 +1849,7 @@ mod msg_type {
     // App -> Terminal
     pub const CLIENT_HELLO: u16 = 0x0001;
     pub const CREATE_REGION: u16 = 0x0010;
+    pub const SET_REGION_METADATA: u16 = 0x0014;
     pub const SET_CONTENT: u16 = 0x0020;
     pub const SET_STYLE: u16 = 0x0021;
     pub const SET_CONSTRAINTS: u16 = 0x0022;
@@ -1926,6 +1927,15 @@ impl Encode for AppMessage {
                 id.encode(buf);
                 content.encode(buf);
                 msg_type::SET_CONTENT
+            }
+            AppMessage::SetRegionMetadata { id, metadata } => {
+                id.encode(buf);
+                buf.put_u32_le(metadata.len() as u32);
+                for (key, value) in metadata {
+                    encode_string(key, buf);
+                    encode_string(value, buf);
+                }
+                msg_type::SET_REGION_METADATA
             }
             AppMessage::DeleteRegion { id } => {
                 id.encode(buf);
@@ -2069,6 +2079,23 @@ impl Decode for AppMessage {
                 let id = RegionId::decode(buf)?;
                 let content = Content::decode(buf)?;
                 Ok(AppMessage::SetContent { id, content })
+            }
+            msg_type::SET_REGION_METADATA => {
+                let id = RegionId::decode(buf)?;
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
+                let len = buf.get_u32_le() as usize;
+                let mut metadata = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let key = decode_string(buf)?;
+                    let value = decode_string(buf)?;
+                    metadata.push((key, value));
+                }
+                Ok(AppMessage::SetRegionMetadata { id, metadata })
             }
             msg_type::DELETE_REGION => {
                 let id = RegionId::decode(buf)?;
@@ -2429,6 +2456,34 @@ mod tests {
         let mut cursor = bytes.as_ref();
         let decoded = AppMessage::decode(&mut cursor).unwrap();
         assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn test_set_region_metadata_roundtrip() {
+        let msg = AppMessage::SetRegionMetadata {
+            id: RegionId(42),
+            metadata: vec![
+                ("owner".into(), "agent".into()),
+                ("task_id".into(), "auth-refactor".into()),
+                ("locked".into(), "true".into()),
+            ],
+        };
+        let bytes = msg.encode_to_bytes();
+        let mut cursor = bytes.as_ref();
+        let decoded = AppMessage::decode(&mut cursor).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn test_set_region_metadata_empty() {
+        let msg = AppMessage::SetRegionMetadata {
+            id: RegionId(1),
+            metadata: vec![],
+        };
+        let bytes = msg.encode_to_bytes();
+        let mut cursor = bytes.as_ref();
+        let decoded = AppMessage::decode(&mut cursor).unwrap();
+        assert_eq!(msg, decoded);
     }
 
     #[test]

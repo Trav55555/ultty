@@ -93,6 +93,10 @@ pub enum ControlRequest {
         opacity: f32,
     },
 
+    SetAgentStatus {
+        status: AgentStatusUpdate,
+    },
+
     // === Screenshot ===
     Screenshot {
         path: Option<String>,
@@ -112,6 +116,18 @@ pub enum ControlRequest {
     Ping,
 
     Version,
+}
+
+/// Agent status update for terminal status bar display.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentStatusUpdate {
+    pub cost_usd: f64,
+    pub budget_usd: f64,
+    pub pressure: String,
+    pub model: String,
+    pub context_quality: String,
+    pub step: String,
+    pub agent_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -18,6 +18,8 @@ pub struct Region {
     pub content: Content,
     /// Style.
     pub style: Style,
+    /// Arbitrary metadata as key-value pairs.
+    pub metadata: Vec<(String, String)>,
     /// Dirty flag for rendering.
     pub dirty: bool,
 }
@@ -42,6 +44,7 @@ impl Region {
             computed: ComputedLayout::default(),
             content: Content::None,
             style: Style::default(),
+            metadata: Vec::new(),
             dirty: true,
         }
     }
@@ -67,6 +70,7 @@ mod tests {
         assert!(region.children.is_empty());
         assert_eq!(region.content, Content::None);
         assert_eq!(region.style, Style::default());
+        assert!(region.metadata.is_empty());
         assert!(region.dirty, "newly created region should be dirty");
     }
 
