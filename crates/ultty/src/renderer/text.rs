@@ -382,8 +382,8 @@ impl TextRenderer {
         x_offset: f32,
         y_offset: f32,
     ) -> (Vec<Vertex>, Vec<u32>) {
-        let grid = terminal.grid();
-        let dims = grid.dimensions();
+        let term_buffer = terminal.buffer();
+        let dims = terminal.dimensions();
         // Estimate ~half of cells have visible glyphs
         let est_glyphs = (dims.rows as usize * dims.cols as usize) / 2;
         let mut vertices = Vec::with_capacity(est_glyphs * 4);
@@ -394,7 +394,7 @@ impl TextRenderer {
         let shaping = self.get_shaping();
 
         for row_idx in 0..dims.rows {
-            let row = match grid.row(row_idx) {
+            let row = match term_buffer.visible_row(row_idx) {
                 Some(r) => r,
                 None => continue,
             };
@@ -467,7 +467,8 @@ impl TextRenderer {
                         }
                     }
                 } else {
-                    let grapheme = grid
+                    let grapheme = terminal
+                        .grid()
                         .grapheme(row_idx, col_idx)
                         .unwrap_or_else(|| ch.to_string());
                     let attrs = if self.font_family.is_empty() {
@@ -591,17 +592,20 @@ impl TextRenderer {
 
         buffer.set_text(&mut self.font_system, text, attrs, shaping);
 
-        let mut current_x = x;
         let max_x = x + max_width;
 
         // Get glyphs from layout
         if let Some(run) = buffer.layout_runs().next() {
             for glyph in run.glyphs.iter() {
+                let glyph_start = x + glyph.x;
+                let glyph_end = glyph_start + glyph.w;
+
                 // Check if we've exceeded max width
-                if current_x + glyph.w > max_x {
+                if glyph_end > max_x {
                     // Add ellipsis if there's room
-                    if current_x + self.cell_width < max_x {
-                        self.render_char_at(&mut vertices, &mut indices, '…', current_x, y, color);
+                    if max_width > self.cell_width {
+                        let ellipsis_x = (max_x - self.cell_width).max(x);
+                        self.render_char_at(&mut vertices, &mut indices, '…', ellipsis_x, y, color);
                     }
                     break;
                 }
@@ -613,7 +617,7 @@ impl TextRenderer {
                     .get_glyph(&mut self.font_system, physical.cache_key)
                 {
                     if glyph_info.width > 0.0 && glyph_info.height > 0.0 {
-                        let gx = current_x + glyph_info.left + physical.x as f32;
+                        let gx = x + glyph_info.left + physical.x as f32;
                         let gy = y + (self.cell_height - glyph_info.top) + physical.y as f32;
 
                         self.emit_glyph_quad(
@@ -626,8 +630,6 @@ impl TextRenderer {
                         );
                     }
                 }
-
-                current_x += glyph.w;
             }
         }
 

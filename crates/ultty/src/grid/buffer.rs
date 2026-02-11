@@ -46,8 +46,6 @@ impl Buffer {
 
     /// Get mutable access to the grid.
     pub fn grid_mut(&mut self) -> &mut Grid {
-        // Reset scroll when modifying grid
-        self.scroll_offset = 0;
         &mut self.grid
     }
 
@@ -373,14 +371,10 @@ impl Buffer {
             }
 
             // Cursor at exact end of logical line
-            if found_cursor
-                && line_idx == cursor_logical_line
-                && new_cursor_abs_row.is_none()
-            {
+            if found_cursor && line_idx == cursor_logical_line && new_cursor_abs_row.is_none() {
                 new_cursor_abs_row = Some(all_rows.len().saturating_sub(1));
-                new_cursor_col = cursor_logical_col.saturating_sub(
-                    line.len().saturating_sub(line.len() % new_cols as usize),
-                );
+                new_cursor_col = cursor_logical_col
+                    .saturating_sub(line.len().saturating_sub(line.len() % new_cols as usize));
             }
         }
 
@@ -833,6 +827,10 @@ mod tests {
 
         // Cursor should end up at a valid position (not row 0 col 0 due to lost tracking)
         let cursor = buf.grid().cursor().position;
-        assert!(cursor.row < 5, "cursor row {} should be in bounds", cursor.row);
+        assert!(
+            cursor.row < 5,
+            "cursor row {} should be in bounds",
+            cursor.row
+        );
     }
 }

@@ -52,12 +52,18 @@ impl NativeBackend {
             detect::socket_path().ok_or_else(|| anyhow::anyhow!("ULTTY_SOCKET not set"))?;
 
         let stream = UnixStream::connect(&socket_path)?;
-        stream.set_nonblocking(true)?;
-        stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+        // Start blocking for handshake — read_timeout set after session is ready
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         self.stream = Some(stream);
 
         self.send_client_hello()?;
         self.wait_for_session_ready()?;
+
+        // Keep blocking mode for writes; use short read_timeout for the event poll loop
+        if let Some(ref stream) = self.stream {
+            stream.set_read_timeout(Some(Duration::from_millis(16)))?;
+        }
 
         Ok(())
     }
@@ -162,10 +168,6 @@ impl NativeBackend {
     }
 
     fn wait_for_session_ready(&mut self) -> anyhow::Result<()> {
-        if let Some(ref stream) = self.stream {
-            stream.set_nonblocking(false)?;
-        }
-
         let mut attempts = 0;
         while attempts < 50 {
             self.read_available()?;
@@ -191,16 +193,13 @@ impl NativeBackend {
                         self.root_region = root_region;
                         self.viewport_width = width;
                         self.viewport_height = height;
-                        if let Some(ref stream) = self.stream {
-                            stream.set_nonblocking(true)?;
-                        }
                         return Ok(());
                     }
                     _ => {}
                 }
             }
 
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(50));
             attempts += 1;
         }
 

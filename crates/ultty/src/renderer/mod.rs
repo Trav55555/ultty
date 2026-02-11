@@ -1253,14 +1253,14 @@ impl Renderer {
 
     /// Build background vertex data from terminal state.
     fn build_background_vertices(&self, terminal: &Terminal, overlay: &OverlayState) -> (Vec<Vertex>, Vec<u32>) {
-        let grid = terminal.grid();
-        let dims = grid.dimensions();
+        let buffer = terminal.buffer();
+        let dims = terminal.dimensions();
         let est_quads = dims.rows as usize * 4;
         let mut vertices = Vec::with_capacity(est_quads * 4);
         let mut indices = Vec::with_capacity(est_quads * 6);
 
         for row_idx in 0..dims.rows {
-            let row = match grid.row(row_idx) {
+            let row = match buffer.visible_row(row_idx) {
                 Some(r) => r,
                 None => continue,
             };
@@ -1330,7 +1330,7 @@ impl Renderer {
 
         // Block characters (U+2580..U+259F) rendered as solid quads for pixel-perfect cell fill
         for row_idx in 0..dims.rows {
-            let row = match grid.row(row_idx) {
+            let row = match buffer.visible_row(row_idx) {
                 Some(r) => r,
                 None => continue,
             };

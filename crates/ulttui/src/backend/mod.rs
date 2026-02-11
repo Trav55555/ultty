@@ -22,6 +22,10 @@ pub enum Backend {
 
 impl Backend {
     /// Detect and create the appropriate backend.
+    ///
+    /// This creates a backend based on environment detection, but the actual
+    /// connection (for native) is deferred to `init()` so we can fall back to
+    /// ANSI if the native connection fails.
     pub fn detect() -> Self {
         if detect::is_ultty() {
             Backend::Native(native::NativeBackend::new())
@@ -31,9 +35,23 @@ impl Backend {
     }
 
     /// Initialize the backend.
+    ///
+    /// For native backends, if the connection fails, automatically falls back to ANSI.
     pub fn init(&mut self) -> anyhow::Result<()> {
         match self {
-            Backend::Native(b) => b.init(),
+            Backend::Native(b) => match b.init() {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    tracing::warn!(
+                        "Native backend initialization failed: {}. Falling back to ANSI.",
+                        e
+                    );
+                    let mut ansi = ansi::AnsiBackend::new();
+                    ansi.init()?;
+                    *self = Backend::Ansi(ansi);
+                    Ok(())
+                }
+            },
             Backend::Ansi(b) => b.init(),
             #[cfg(any(test, feature = "test-utils"))]
             Backend::Mock(b) => b.init(),

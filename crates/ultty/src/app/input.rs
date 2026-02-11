@@ -4,7 +4,9 @@ use std::time::Instant;
 
 use super::{App, CLICK_THRESHOLD};
 use ultty::config::KeybindingConfig;
-use ultty::grid::{MouseButton as TerminalMouseButton, MouseModifiers, SelectionMode, SelectionPoint};
+use ultty::grid::{
+    MouseButton as TerminalMouseButton, MouseModifiers, SelectionMode, SelectionPoint,
+};
 use ultty::url::UrlDetector;
 use ultty::vim::CopyModeResult;
 use ultty_protocol::{Key as ProtocolKey, Modifiers as ProtocolModifiers};
@@ -44,6 +46,7 @@ impl App {
                 self.handle_mouse_button(button, state);
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                tracing::debug!("WindowEvent::MouseWheel received: delta={:?}", delta);
                 self.handle_scroll(delta);
             }
             WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
@@ -112,9 +115,7 @@ impl App {
     }
 
     /// Convert winit MouseButton to protocol MouseButton.
-    fn winit_to_protocol_mouse_button(
-        button: MouseButton,
-    ) -> Option<ultty_protocol::MouseButton> {
+    fn winit_to_protocol_mouse_button(button: MouseButton) -> Option<ultty_protocol::MouseButton> {
         match button {
             MouseButton::Left => Some(ultty_protocol::MouseButton::Left),
             MouseButton::Middle => Some(ultty_protocol::MouseButton::Middle),
@@ -161,8 +162,9 @@ impl App {
                     term_button
                 };
                 let mods = self.mouse_modifiers();
-                if let Some(bytes) =
-                    self.terminal().and_then(|t| t.encode_mouse_event(term_button, col, row, pressed, false, mods))
+                if let Some(bytes) = self
+                    .terminal()
+                    .and_then(|t| t.encode_mouse_event(term_button, col, row, pressed, false, mods))
                 {
                     let _ = self.send_input(&bytes);
                 }
@@ -239,11 +241,7 @@ impl App {
                     let event_type = ultty_protocol::InputType::MouseDown {
                         button: proto_button,
                     };
-                    self.forward_mouse_to_native_sessions(
-                        event_type,
-                        col as f32,
-                        row as f32,
-                    );
+                    self.forward_mouse_to_native_sessions(event_type, col as f32, row as f32);
                 }
 
                 // Check for Ctrl+Click on URL
@@ -310,11 +308,7 @@ impl App {
                     let event_type = ultty_protocol::InputType::MouseUp {
                         button: proto_button,
                     };
-                    self.forward_mouse_to_native_sessions(
-                        event_type,
-                        col as f32,
-                        row as f32,
-                    );
+                    self.forward_mouse_to_native_sessions(event_type, col as f32, row as f32);
                 }
 
                 // End tab drag if active
@@ -378,14 +372,9 @@ impl App {
             let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
             // When button is held, report as Left button for drag
             let mods = self.mouse_modifiers();
-            if let Some(bytes) = self.terminal().and_then(|t| t.encode_mouse_event(
-                TerminalMouseButton::Left,
-                col,
-                row,
-                true,
-                true,
-                mods,
-            )) {
+            if let Some(bytes) = self.terminal().and_then(|t| {
+                t.encode_mouse_event(TerminalMouseButton::Left, col, row, true, true, mods)
+            }) {
                 let _ = self.send_input(&bytes);
             }
             return;
@@ -394,7 +383,9 @@ impl App {
         let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
         let point = SelectionPoint::new(col as i32, row as i32);
 
-        if let Some(t) = self.terminal_mut() { t.update_selection(point); }
+        if let Some(t) = self.terminal_mut() {
+            t.update_selection(point);
+        }
         self.needs_redraw = true;
     }
 
@@ -408,14 +399,9 @@ impl App {
         let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
         // Motion without button uses Release (3) + motion flag (32) = 35
         let mods = self.mouse_modifiers();
-        if let Some(bytes) = self.terminal().and_then(|t| t.encode_mouse_event(
-            TerminalMouseButton::Release,
-            col,
-            row,
-            true,
-            true,
-            mods,
-        )) {
+        if let Some(bytes) = self.terminal().and_then(|t| {
+            t.encode_mouse_event(TerminalMouseButton::Release, col, row, true, true, mods)
+        }) {
             let _ = self.send_input(&bytes);
         }
     }
@@ -445,7 +431,9 @@ impl App {
         let fraction = ((y - scrollbar_top) / scrollbar_height).clamp(0.0, 1.0);
 
         // Get buffer info
-        let Some(terminal) = self.terminal() else { return; };
+        let Some(terminal) = self.terminal() else {
+            return;
+        };
         let buffer = terminal.buffer();
         let total_lines = buffer.total_lines();
         let viewport_rows = terminal.dimensions().rows as usize;
@@ -459,7 +447,9 @@ impl App {
         let target_offset = ((1.0 - fraction) * max_offset as f32).round() as usize;
 
         // Apply scroll
-        let Some(t) = self.terminal_mut() else { return; };
+        let Some(t) = self.terminal_mut() else {
+            return;
+        };
         let buffer = t.buffer_mut();
         let current = buffer.scroll_offset();
         if target_offset > current {
@@ -475,7 +465,9 @@ impl App {
     fn select_word(&mut self, col: u16, row: u16) {
         // First, find word boundaries (immutable borrow)
         let word_bounds = {
-            let Some(terminal) = self.terminal() else { return; };
+            let Some(terminal) = self.terminal() else {
+                return;
+            };
             let grid = terminal.grid();
 
             if let Some(grid_row) = grid.row(row) {
@@ -519,31 +511,48 @@ impl App {
         if let Some((start_col, end_col)) = word_bounds {
             let start = SelectionPoint::new(start_col as i32, row as i32);
             let end = SelectionPoint::new(end_col as i32, row as i32);
-            if let Some(t) = self.terminal_mut() { t.start_selection(start, SelectionMode::Normal); }
-            if let Some(t) = self.terminal_mut() { t.update_selection(end); }
+            if let Some(t) = self.terminal_mut() {
+                t.start_selection(start, SelectionMode::Normal);
+            }
+            if let Some(t) = self.terminal_mut() {
+                t.update_selection(end);
+            }
         }
     }
 
     /// Handle scroll wheel.
     fn handle_scroll(&mut self, delta: MouseScrollDelta) {
+        tracing::debug!("handle_scroll: delta={:?}", delta);
+
         // winit scroll delta: positive y = scroll UP (wheel rolled away from user)
         // This should reveal content ABOVE (scroll up in terminal terms)
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => {
+                self.scroll_line_accum += y as f64;
+                let lines = self.scroll_line_accum.trunc() as i32;
+                self.scroll_line_accum -= lines as f64;
                 self.scroll_pixel_accum = 0.0;
-                y as i32
+                lines
             }
             MouseScrollDelta::PixelDelta(pos) => {
                 // Accumulate pixel deltas to avoid dropping small scroll events
                 // (common on Wayland/HiDPI where each event is a few pixels)
                 self.scroll_pixel_accum += pos.y;
+                self.scroll_line_accum = 0.0;
                 let (_, cell_height) = self.renderer.cell_dimensions();
-                let cell_h = cell_height as f64;
+                let cell_h = (cell_height as f64).max(1.0);
                 let lines = (self.scroll_pixel_accum / cell_h).trunc() as i32;
                 self.scroll_pixel_accum -= lines as f64 * cell_h;
                 lines
             }
         };
+
+        tracing::debug!(
+            "handle_scroll: computed lines={}, pixel_accum={}, line_accum={}",
+            lines,
+            self.scroll_pixel_accum,
+            self.scroll_line_accum
+        );
 
         if lines == 0 {
             return;
@@ -615,10 +624,16 @@ impl App {
         if in_alternate && alternate_scroll {
             // Send arrow keys for scrolling in alternate screen
             // Check DECCKM mode to send correct escape sequence
-            let app_cursor = self.terminal().is_some_and(|t| t.modes().application_cursor_keys);
+            let app_cursor = self
+                .terminal()
+                .is_some_and(|t| t.modes().application_cursor_keys);
             let count = lines.unsigned_abs() as usize;
             let arrow: &[u8] = if lines > 0 {
-                if app_cursor { b"\x1bOA" } else { b"\x1b[A" } // Up
+                if app_cursor {
+                    b"\x1bOA"
+                } else {
+                    b"\x1b[A"
+                } // Up
             } else if app_cursor {
                 b"\x1bOB" // Down (application mode)
             } else {
@@ -636,8 +651,17 @@ impl App {
         }
 
         // Normal mode: scroll the scrollback buffer
-        let Some(t) = self.terminal_mut() else { return; };
+        let Some(t) = self.terminal_mut() else {
+            return;
+        };
         let buffer = t.buffer_mut();
+        let offset_before = buffer.scroll_offset();
+
+        tracing::debug!(
+            "Scrollback: lines={}, offset_before={}",
+            lines,
+            offset_before
+        );
 
         if lines > 0 {
             buffer.scroll_up(lines as usize);
@@ -868,7 +892,9 @@ impl App {
             event.logical_key,
             Key::Named(NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super)
         ) {
-            if let Some(t) = self.terminal_mut() { t.clear_selection(); }
+            if let Some(t) = self.terminal_mut() {
+                t.clear_selection();
+            }
         }
 
         // Handle paste shortcut (Ctrl+Shift+V or Shift+Insert)
@@ -892,16 +918,28 @@ impl App {
         }
 
         // Check if application cursor keys mode is enabled (DECCKM)
-        let app_cursor = self.terminal().is_some_and(|t| t.modes().application_cursor_keys);
+        let app_cursor = self
+            .terminal()
+            .is_some_and(|t| t.modes().application_cursor_keys);
 
         // Compute xterm modifier code: Shift=2, Alt=3, Shift+Alt=4, Ctrl=5,
         // Shift+Ctrl=6, Alt+Ctrl=7, Shift+Alt+Ctrl=8
         let modifier_code = {
             let mut m = 0u8;
-            if self.modifiers.shift_key() { m |= 1; }
-            if self.modifiers.alt_key() { m |= 2; }
-            if self.modifiers.control_key() { m |= 4; }
-            if m > 0 { m + 1 } else { 0 }
+            if self.modifiers.shift_key() {
+                m |= 1;
+            }
+            if self.modifiers.alt_key() {
+                m |= 2;
+            }
+            if self.modifiers.control_key() {
+                m |= 4;
+            }
+            if m > 0 {
+                m + 1
+            } else {
+                0
+            }
         };
 
         // Helper: send a dynamically formatted sequence and return early
@@ -925,8 +963,10 @@ impl App {
                 NamedKey::Escape => Some(b"\x1b"),
 
                 // Arrow keys: modified → CSI 1;{mod} X, unmodified → SS3 X or CSI X
-                NamedKey::ArrowUp | NamedKey::ArrowDown
-                | NamedKey::ArrowRight | NamedKey::ArrowLeft => {
+                NamedKey::ArrowUp
+                | NamedKey::ArrowDown
+                | NamedKey::ArrowRight
+                | NamedKey::ArrowLeft => {
                     let suffix = match named {
                         NamedKey::ArrowUp => 'A',
                         NamedKey::ArrowDown => 'B',
@@ -937,17 +977,29 @@ impl App {
                         send_modified!(self, format!("\x1b[1;{}{}", modifier_code, suffix));
                     }
                     Some(if app_cursor {
-                        match suffix { 'A' => &b"\x1bOA"[..], 'B' => &b"\x1bOB"[..],
-                                       'C' => &b"\x1bOC"[..], _ => &b"\x1bOD"[..] }
+                        match suffix {
+                            'A' => &b"\x1bOA"[..],
+                            'B' => &b"\x1bOB"[..],
+                            'C' => &b"\x1bOC"[..],
+                            _ => &b"\x1bOD"[..],
+                        }
                     } else {
-                        match suffix { 'A' => &b"\x1b[A"[..], 'B' => &b"\x1b[B"[..],
-                                       'C' => &b"\x1b[C"[..], _ => &b"\x1b[D"[..] }
+                        match suffix {
+                            'A' => &b"\x1b[A"[..],
+                            'B' => &b"\x1b[B"[..],
+                            'C' => &b"\x1b[C"[..],
+                            _ => &b"\x1b[D"[..],
+                        }
                     })
                 }
 
                 // Home/End: modified → CSI 1;{mod} H/F
                 NamedKey::Home | NamedKey::End => {
-                    let suffix = if matches!(named, NamedKey::Home) { 'H' } else { 'F' };
+                    let suffix = if matches!(named, NamedKey::Home) {
+                        'H'
+                    } else {
+                        'F'
+                    };
                     if modifier_code > 0 {
                         send_modified!(self, format!("\x1b[1;{}{}", modifier_code, suffix));
                     }
@@ -960,8 +1012,7 @@ impl App {
                 }
 
                 // Tilde-encoded keys: modified → CSI {n};{mod} ~
-                NamedKey::PageUp | NamedKey::PageDown
-                | NamedKey::Insert | NamedKey::Delete => {
+                NamedKey::PageUp | NamedKey::PageDown | NamedKey::Insert | NamedKey::Delete => {
                     let n = match named {
                         NamedKey::Insert => 2,
                         NamedKey::Delete => 3,
@@ -972,43 +1023,63 @@ impl App {
                         send_modified!(self, format!("\x1b[{};{}~", n, modifier_code));
                     }
                     match n {
-                        2 => Some(&b"\x1b[2~"[..]), 3 => Some(&b"\x1b[3~"[..]),
-                        5 => Some(&b"\x1b[5~"[..]), _ => Some(&b"\x1b[6~"[..]),
+                        2 => Some(&b"\x1b[2~"[..]),
+                        3 => Some(&b"\x1b[3~"[..]),
+                        5 => Some(&b"\x1b[5~"[..]),
+                        _ => Some(&b"\x1b[6~"[..]),
                     }
                 }
 
                 // F1-F4: modified → CSI 1;{mod} P/Q/R/S
                 NamedKey::F1 | NamedKey::F2 | NamedKey::F3 | NamedKey::F4 => {
                     let suffix = match named {
-                        NamedKey::F1 => 'P', NamedKey::F2 => 'Q',
-                        NamedKey::F3 => 'R', _ => 'S',
+                        NamedKey::F1 => 'P',
+                        NamedKey::F2 => 'Q',
+                        NamedKey::F3 => 'R',
+                        _ => 'S',
                     };
                     if modifier_code > 0 {
                         send_modified!(self, format!("\x1b[1;{}{}", modifier_code, suffix));
                     }
                     match suffix {
-                        'P' => Some(&b"\x1bOP"[..]), 'Q' => Some(&b"\x1bOQ"[..]),
-                        'R' => Some(&b"\x1bOR"[..]), _ => Some(&b"\x1bOS"[..]),
+                        'P' => Some(&b"\x1bOP"[..]),
+                        'Q' => Some(&b"\x1bOQ"[..]),
+                        'R' => Some(&b"\x1bOR"[..]),
+                        _ => Some(&b"\x1bOS"[..]),
                     }
                 }
 
                 // F5-F12: modified → CSI {n};{mod} ~
-                NamedKey::F5 | NamedKey::F6 | NamedKey::F7 | NamedKey::F8
-                | NamedKey::F9 | NamedKey::F10 | NamedKey::F11 | NamedKey::F12 => {
+                NamedKey::F5
+                | NamedKey::F6
+                | NamedKey::F7
+                | NamedKey::F8
+                | NamedKey::F9
+                | NamedKey::F10
+                | NamedKey::F11
+                | NamedKey::F12 => {
                     let n = match named {
-                        NamedKey::F5 => 15, NamedKey::F6 => 17,
-                        NamedKey::F7 => 18, NamedKey::F8 => 19,
-                        NamedKey::F9 => 20, NamedKey::F10 => 21,
-                        NamedKey::F11 => 23, _ => 24,
+                        NamedKey::F5 => 15,
+                        NamedKey::F6 => 17,
+                        NamedKey::F7 => 18,
+                        NamedKey::F8 => 19,
+                        NamedKey::F9 => 20,
+                        NamedKey::F10 => 21,
+                        NamedKey::F11 => 23,
+                        _ => 24,
                     };
                     if modifier_code > 0 {
                         send_modified!(self, format!("\x1b[{};{}~", n, modifier_code));
                     }
                     match n {
-                        15 => Some(&b"\x1b[15~"[..]), 17 => Some(&b"\x1b[17~"[..]),
-                        18 => Some(&b"\x1b[18~"[..]), 19 => Some(&b"\x1b[19~"[..]),
-                        20 => Some(&b"\x1b[20~"[..]), 21 => Some(&b"\x1b[21~"[..]),
-                        23 => Some(&b"\x1b[23~"[..]), _ => Some(&b"\x1b[24~"[..]),
+                        15 => Some(&b"\x1b[15~"[..]),
+                        17 => Some(&b"\x1b[17~"[..]),
+                        18 => Some(&b"\x1b[18~"[..]),
+                        19 => Some(&b"\x1b[19~"[..]),
+                        20 => Some(&b"\x1b[20~"[..]),
+                        21 => Some(&b"\x1b[21~"[..]),
+                        23 => Some(&b"\x1b[23~"[..]),
+                        _ => Some(&b"\x1b[24~"[..]),
                     }
                 }
 
@@ -1017,7 +1088,8 @@ impl App {
             Key::Character(c) => {
                 let ch = c.chars().next().unwrap_or('\0');
                 // Handle Ctrl+key combinations
-                if self.modifiers.control_key() && !self.modifiers.shift_key()
+                if self.modifiers.control_key()
+                    && !self.modifiers.shift_key()
                     && ch.is_ascii_alphabetic()
                 {
                     let ctrl_char = (ch.to_ascii_lowercase() as u8 - b'a' + 1) as char;
@@ -1178,13 +1250,20 @@ impl App {
                 };
                 parsed.key == key_name
             }
-            Key::Character(c) => parsed.key == c.to_lowercase(),
+            Key::Character(c) => {
+                let event_key = c.to_lowercase();
+                parsed.key == event_key
+                    || (parsed.key == "?" && event_key == "/")
+                    || (parsed.key == "/" && event_key == "?")
+            }
             _ => false,
         }
     }
 
     fn enter_copy_mode(&mut self) {
-        let Some(terminal) = self.terminal() else { return; };
+        let Some(terminal) = self.terminal() else {
+            return;
+        };
         let buffer = terminal.buffer();
         let dims = terminal.dimensions();
 
@@ -1198,7 +1277,9 @@ impl App {
     }
 
     fn enter_search_mode(&mut self) {
-        let Some(terminal) = self.terminal() else { return; };
+        let Some(terminal) = self.terminal() else {
+            return;
+        };
         let buffer = terminal.buffer();
         let dims = terminal.dimensions();
 

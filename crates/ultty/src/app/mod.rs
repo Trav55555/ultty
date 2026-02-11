@@ -109,6 +109,7 @@ pub struct App {
     url_hyperlink_map: std::collections::HashMap<u32, String>,
     /// Accumulated pixel scroll delta for smooth scrolling on Wayland/HiDPI
     scroll_pixel_accum: f64,
+    scroll_line_accum: f64,
 }
 
 impl App {
@@ -237,6 +238,7 @@ impl App {
             url_hyperlink_grid: Vec::new(),
             url_hyperlink_map: std::collections::HashMap::new(),
             scroll_pixel_accum: 0.0,
+            scroll_line_accum: 0.0,
         })
     }
 
@@ -466,7 +468,9 @@ impl App {
 
     /// Extract text from a vim selection.
     fn extract_selection_text(&self, selection: &VimSelection) -> String {
-        let Some(terminal) = self.terminal() else { return String::new(); };
+        let Some(terminal) = self.terminal() else {
+            return String::new();
+        };
         let buffer = terminal.buffer();
         let mut text = String::new();
 
@@ -537,7 +541,9 @@ impl App {
             return;
         }
 
-        let Some(terminal) = self.terminal() else { return; };
+        let Some(terminal) = self.terminal() else {
+            return;
+        };
         let buffer = terminal.buffer();
         let mut matches = Vec::new();
 
@@ -685,7 +691,9 @@ impl App {
         // Access terminal_manager directly (not self.terminal()) to enable
         // disjoint field borrows — Rust can see url_row_buf/url_hyperlink_grid/
         // url_hyperlink_map are separate from terminal_manager.
-        let Some(focused) = self.terminal_manager.focused_terminal() else { return; };
+        let Some(focused) = self.terminal_manager.focused_terminal() else {
+            return;
+        };
         let terminal = focused.event_loop.terminal();
         let dims = terminal.dimensions();
 
