@@ -10,7 +10,7 @@ ultty/
 │   ├── ultty/            # The terminal emulator (GPU-rendered)
 │   ├── ulttui/           # The framework (apps link this)
 │   └── ultty-protocol/   # Shared wire protocol
-├── examples/             # Reference implementations
+├── examples/             # Reference implementations (7 apps + porygon-tui)
 ├── docs/                 # Specs and guides
 └── tools/                # Dev utilities
 ```
@@ -76,6 +76,7 @@ cargo run -p ultty
 cargo run -p hello-native  # Raw protocol demo (run inside ultty)
 cargo run -p counter-app   # Framework counter app
 cargo run -p todo-app      # Framework todo list app
+cargo run -p porygon-tui   # Porygon AI agent interface (requires porygon daemon)
 
 # Run tests
 cargo test --workspace
@@ -136,7 +137,8 @@ cargo clippy --workspace --all-targets
   - [x] dashboard (multi-panel with live updates)
   - [x] form-app (form with validation)
   - [x] chat (chat interface)
-  - [x] async-fetch (Cmd::spawn + Spinner + Badge demo)
+   - [x] async-fetch (Cmd::spawn + Spinner + Badge demo)
+   - [x] porygon-tui (Porygon AI agent interface: chat, approval modal, status bar)
 - [x] Terminal Features
   - [x] Scrollback search (Ctrl+Shift+F)
   - [x] Split panes (Ctrl+Shift+D/E)
@@ -153,7 +155,12 @@ cargo clippy --workspace --all-targets
   - [x] Screenshot capture (file or bytes)
   - [x] Batch command execution
   - [x] JSON output mode
-  - [x] Token-based authentication
+   - [x] Token-based authentication
+- [x] Protocol Extensions (Agentic UX)
+  - [x] SetRegionMetadata (tag 0x0014): pane-level key-value metadata
+  - [x] AgentStatusUpdate control message: phase, model, cost pressure, context quality
+  - [x] Region metadata field for runtime pane state
+
 
 ## Dependencies Policy
 
