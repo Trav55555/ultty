@@ -53,6 +53,7 @@ struct PorygonTui {
     input: String,
     status: AgentStatus,
     daemon_url: String,
+    client: reqwest::Client,
     connected: bool,
     error: Option<String>,
     spinner_frame: usize,
@@ -75,6 +76,7 @@ impl PorygonTui {
             input: String::new(),
             status: AgentStatus::default(),
             daemon_url,
+            client: reqwest::Client::new(),
             connected: false,
             error: None,
             spinner_frame: 0,
@@ -135,8 +137,9 @@ impl Application for PorygonTui {
                 self.status.step = "awaiting daemon response".into();
 
                 let url = format!("{}/api/ask", self.daemon_url);
+                let client = self.client.clone();
                 Cmd::spawn(async move {
-                    match send_to_daemon(&url, &user_text).await {
+                    match send_to_daemon(&client, &url, &user_text).await {
                         Ok(response) => Msg::DaemonResponse(response),
                         Err(err) => Msg::DaemonError(err),
                     }
@@ -144,24 +147,33 @@ impl Application for PorygonTui {
             }
             Msg::PollConnection => {
                 let url = self.daemon_url.clone();
-                Cmd::spawn(async move { Msg::ConnectionChecked(check_connection(&url).await) })
+                let client = self.client.clone();
+                Cmd::spawn(async move { Msg::ConnectionChecked(check_connection(&client, &url).await) })
             }
             Msg::PollStatus => {
                 let url = self.daemon_url.clone();
+                let client = self.client.clone();
                 Cmd::spawn(async move {
-                    match fetch_status(&url).await {
+                    match fetch_status(&client, &url).await {
                         Ok(status) => Msg::StatusUpdated(status),
-                        Err(_) => Msg::StatusUpdated(AgentStatus::default()),
+                        Err(err) => {
+                            eprintln!("status poll failed, using defaults: {err}");
+                            Msg::StatusUpdated(AgentStatus::default())
+                        }
                     }
                 })
             }
             Msg::PollApprovals => {
                 let url = format!("{}/api/approvals/pending", self.daemon_url);
+                let client = self.client.clone();
                 Cmd::spawn(async move {
-                    match fetch_pending_approval(&url).await {
+                    match fetch_pending_approval(&client, &url).await {
                         Ok(Some(request)) => Msg::ApprovalReceived(request),
                         Ok(None) => Msg::NoApprovalsPending,
-                        Err(_) => Msg::NoApprovalsPending,
+                        Err(err) => {
+                            eprintln!("approval poll failed, assuming no approvals: {err}");
+                            Msg::NoApprovalsPending
+                        }
                     }
                 })
             }
@@ -218,8 +230,11 @@ impl Application for PorygonTui {
                 self.show_approval_modal = false;
                 if let Some(request) = self.pending_approval.take() {
                     let url = format!("{}/api/approvals/{}/decide", self.daemon_url, request.id);
+                    let client = self.client.clone();
                     Cmd::spawn(async move {
-                        let _ = submit_approval(&url, approved).await;
+                        if let Err(err) = submit_approval(&client, &url, approved).await {
+                            eprintln!("approval submission failed: {err}");
+                        }
                         Msg::ApprovalSubmitted
                     })
                 } else {
@@ -434,8 +449,7 @@ struct StatusResponse {
     agent_name: Option<String>,
 }
 
-async fn send_to_daemon(url: &str, message: &str) -> Result<String, String> {
-    let client = reqwest::Client::new();
+async fn send_to_daemon(client: &reqwest::Client, url: &str, message: &str) -> Result<String, String> {
     let response = client
         .post(url)
         .json(&AskRequest {
@@ -458,8 +472,8 @@ async fn send_to_daemon(url: &str, message: &str) -> Result<String, String> {
         .unwrap_or_else(|| "(empty response)".to_string()))
 }
 
-async fn check_connection(daemon_url: &str) -> bool {
-    reqwest::Client::new()
+async fn check_connection(client: &reqwest::Client, daemon_url: &str) -> bool {
+    client
         .get(daemon_url)
         .timeout(Duration::from_secs(2))
         .send()
@@ -467,9 +481,9 @@ async fn check_connection(daemon_url: &str) -> bool {
         .is_ok()
 }
 
-async fn fetch_status(daemon_url: &str) -> anyhow::Result<AgentStatus> {
+async fn fetch_status(client: &reqwest::Client, daemon_url: &str) -> anyhow::Result<AgentStatus> {
     let url = format!("{daemon_url}/api/status");
-    let body: StatusResponse = reqwest::Client::new()
+    let body: StatusResponse = client
         .get(url)
         .timeout(Duration::from_secs(2))
         .send()
@@ -488,8 +502,11 @@ async fn fetch_status(daemon_url: &str) -> anyhow::Result<AgentStatus> {
     Ok(status)
 }
 
-async fn fetch_pending_approval(url: &str) -> anyhow::Result<Option<ApprovalRequest>> {
-    let response = reqwest::Client::new()
+async fn fetch_pending_approval(
+    client: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<Option<ApprovalRequest>> {
+    let response = client
         .get(url)
         .timeout(Duration::from_secs(1))
         .send()
@@ -505,8 +522,8 @@ async fn fetch_pending_approval(url: &str) -> anyhow::Result<Option<ApprovalRequ
     Ok(Some(request))
 }
 
-async fn submit_approval(url: &str, approved: bool) -> anyhow::Result<()> {
-    reqwest::Client::new()
+async fn submit_approval(client: &reqwest::Client, url: &str, approved: bool) -> anyhow::Result<()> {
+    client
         .post(url)
         .json(&serde_json::json!({ "approved": approved }))
         .timeout(Duration::from_secs(5))

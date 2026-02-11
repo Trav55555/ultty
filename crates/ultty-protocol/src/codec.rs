@@ -49,6 +49,12 @@ const MAX_IMAGE_DATA_LEN: usize = 64 * 1024 * 1024;
 /// Maximum allowed RichText span count to prevent OOM attacks.
 const MAX_SPAN_COUNT: usize = 10_000;
 
+/// Maximum allowed metadata key/value pair count to prevent OOM attacks.
+const MAX_METADATA_PAIRS: usize = 1024;
+
+/// Maximum total bytes across all metadata keys and values (1 MB).
+const MAX_METADATA_TOTAL_BYTES: usize = 1024 * 1024;
+
 // ============================================================================
 // Traits
 // ============================================================================
@@ -2089,10 +2095,24 @@ impl Decode for AppMessage {
                     });
                 }
                 let len = buf.get_u32_le() as usize;
+                if len > MAX_METADATA_PAIRS {
+                    return Err(ProtocolError::InvalidData(format!(
+                        "metadata pair count {} exceeds maximum {}",
+                        len, MAX_METADATA_PAIRS
+                    )));
+                }
                 let mut metadata = Vec::with_capacity(len);
+                let mut total_metadata_bytes = 0usize;
                 for _ in 0..len {
                     let key = decode_string(buf)?;
                     let value = decode_string(buf)?;
+                    total_metadata_bytes += key.len() + value.len();
+                    if total_metadata_bytes > MAX_METADATA_TOTAL_BYTES {
+                        return Err(ProtocolError::InvalidData(format!(
+                            "metadata total size {} exceeds maximum {}",
+                            total_metadata_bytes, MAX_METADATA_TOTAL_BYTES
+                        )));
+                    }
                     metadata.push((key, value));
                 }
                 Ok(AppMessage::SetRegionMetadata { id, metadata })
@@ -2484,6 +2504,40 @@ mod tests {
         let mut cursor = bytes.as_ref();
         let decoded = AppMessage::decode(&mut cursor).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn test_reject_oversized_metadata_pair_count() {
+        let mut buf = BytesMut::new();
+        buf.put_slice(&FRAME_MAGIC);
+        buf.put_u16_le(msg_type::SET_REGION_METADATA);
+        buf.put_u32_le(8);
+        RegionId(1).encode(&mut buf);
+        buf.put_u32_le((MAX_METADATA_PAIRS + 1) as u32);
+
+        let mut cursor = buf.freeze();
+        let result = AppMessage::decode(&mut cursor);
+        assert!(matches!(result, Err(ProtocolError::InvalidData(_))));
+    }
+
+    #[test]
+    fn test_reject_oversized_metadata_total_bytes() {
+        let key = "k";
+        let value = "x".repeat(MAX_METADATA_TOTAL_BYTES);
+
+        let mut buf = BytesMut::new();
+        buf.put_slice(&FRAME_MAGIC);
+        buf.put_u16_le(msg_type::SET_REGION_METADATA);
+        let payload_len = 4 + 4 + 4 + key.len() + 4 + value.len();
+        buf.put_u32_le(payload_len as u32);
+        RegionId(1).encode(&mut buf);
+        buf.put_u32_le(1);
+        encode_string(key, &mut buf);
+        encode_string(&value, &mut buf);
+
+        let mut cursor = buf.freeze();
+        let result = AppMessage::decode(&mut cursor);
+        assert!(matches!(result, Err(ProtocolError::InvalidData(_))));
     }
 
     #[test]
