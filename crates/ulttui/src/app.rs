@@ -1,5 +1,6 @@
 //! Application trait and runner.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::backend::Backend;
@@ -53,6 +54,7 @@ pub struct App<A: Application> {
     theme: Theme,
     subscriptions: Vec<SubState<A::Message>>,
     spawn_handles: Vec<tokio::task::JoinHandle<A::Message>>,
+    msg_queue: VecDeque<A::Message>,
 }
 
 #[allow(dead_code)]
@@ -73,6 +75,7 @@ impl<A: Application> App<A> {
             theme: Theme::dark(),
             subscriptions: Vec::new(),
             spawn_handles: Vec::new(),
+            msg_queue: VecDeque::new(),
         }
     }
 
@@ -82,44 +85,34 @@ impl<A: Application> App<A> {
         runner
     }
 
+    /// Run the application event loop.
+    ///
+    /// Event loop contract (Bubble Tea parity):
+    /// 1. Poll backend for events
+    /// 2. Normalize events → messages via on_event()
+    /// 3. Drain message queue (update → Cmd scheduling)
+    /// 4. Process subscriptions → enqueue messages
+    /// 5. Poll spawned tasks → enqueue messages
+    /// 6. Drain message queue again (from subs/spawns)
+    /// 7. Render view
     pub fn run(mut self) -> anyhow::Result<()> {
         let rt = Runtime::new()?;
         self.backend.init()?;
 
+        // Initial render so UI appears immediately before first poll.
+        self.render()?;
+
         loop {
-            let fm = std::mem::take(&mut self.focus);
-            let old_fm = FocusManager::set_current(fm);
-            let old_theme = Theme::replace_current(self.theme.clone());
-
-            let render_result = (|| -> anyhow::Result<()> {
-                FocusManager::with_current_mut(|fm| fm.begin_frame());
-                let view = self.app.view();
-                self.backend.render(&view)?;
-                FocusManager::with_current_mut(|fm| fm.end_frame());
-                Ok(())
-            })();
-
-            self.focus = FocusManager::set_current(old_fm);
-            self.theme = Theme::replace_current(old_theme);
-            render_result?;
-
-            if !self.focus_initialized {
-                if self.focus.focused_id().is_none() {
-                    self.focus.focus_next();
-                }
-                self.focus_initialized = self.focus.focused_id().is_some();
-            }
-
-            self.process_subscriptions(&rt);
-
-            self.poll_spawned_tasks(&rt);
-
+            // 1. Poll backend for events
             if let Some(mut event) = self.backend.poll_event()? {
+                // 2. Normalize events → messages via on_event()
                 if let Event::Key(ref mut key_event) = event {
                     key_event.focused_id =
                         self.focus.focused_id().map(str::to_string);
 
                     if self.handle_navigation(key_event) {
+                        // Navigation consumed the event; re-render and continue.
+                        self.render()?;
                         continue;
                     }
                 }
@@ -129,13 +122,72 @@ impl<A: Application> App<A> {
                 }
 
                 if let Some(msg) = self.app.on_event(&event) {
-                    let cmd = self.app.update(msg);
-                    self.process_cmd(cmd, &rt);
+                    self.msg_queue.push_back(msg);
                 }
             }
+
+            // 3. Drain message queue (update → Cmd scheduling)
+            self.drain_messages(&rt);
+
+            // 4. Process subscriptions → enqueue messages
+            self.process_subscriptions();
+
+            // 5. Poll spawned tasks → enqueue messages
+            self.poll_spawned_tasks(&rt);
+
+            // 6. Drain message queue again (from subs/spawns)
+            self.drain_messages(&rt);
+
+            // 7. Render view
+            self.render()?;
         }
 
         self.backend.shutdown()?;
+        Ok(())
+    }
+
+    /// Drain the message queue, calling update for each message and scheduling
+    /// any resulting commands. Includes a safety limit to prevent infinite loops
+    /// from recursive `Cmd::Message` chains.
+    fn drain_messages(&mut self, rt: &Runtime) {
+        const MAX_ITERATIONS: usize = 100;
+        let mut iterations = 0;
+
+        while let Some(msg) = self.msg_queue.pop_front() {
+            iterations += 1;
+            if iterations > MAX_ITERATIONS {
+                break;
+            }
+            let cmd = self.app.update(msg);
+            self.process_cmd(cmd, rt);
+        }
+    }
+
+    /// Render the current view, managing focus and theme thread-locals.
+    fn render(&mut self) -> anyhow::Result<()> {
+        let fm = std::mem::take(&mut self.focus);
+        let old_fm = FocusManager::set_current(fm);
+        let old_theme = Theme::replace_current(self.theme.clone());
+
+        let render_result = (|| -> anyhow::Result<()> {
+            FocusManager::with_current_mut(|fm| fm.begin_frame());
+            let view = self.app.view();
+            self.backend.render(&view)?;
+            FocusManager::with_current_mut(|fm| fm.end_frame());
+            Ok(())
+        })();
+
+        self.focus = FocusManager::set_current(old_fm);
+        self.theme = Theme::replace_current(old_theme);
+        render_result?;
+
+        if !self.focus_initialized {
+            if self.focus.focused_id().is_none() {
+                self.focus.focus_next();
+            }
+            self.focus_initialized = self.focus.focused_id().is_some();
+        }
+
         Ok(())
     }
 
@@ -153,7 +205,7 @@ impl<A: Application> App<A> {
         }
     }
 
-    fn process_subscriptions(&mut self, rt: &Runtime) {
+    fn process_subscriptions(&mut self) {
         let now = Instant::now();
         let old_states = std::mem::take(&mut self.subscriptions);
         let mut new_states = Vec::new();
@@ -172,8 +224,7 @@ impl<A: Application> App<A> {
         self.subscriptions = new_states;
 
         for msg in messages {
-            let cmd = self.app.update(msg);
-            self.process_cmd(cmd, rt);
+            self.msg_queue.push_back(msg);
         }
     }
 
@@ -257,8 +308,7 @@ impl<A: Application> App<A> {
             if self.spawn_handles[index].is_finished() {
                 let handle = self.spawn_handles.swap_remove(index);
                 if let Ok(msg) = rt.block_on(handle) {
-                    let cmd = self.app.update(msg);
-                    self.process_cmd(cmd, rt);
+                    self.msg_queue.push_back(msg);
                 }
             } else {
                 index += 1;
@@ -279,14 +329,72 @@ impl<A: Application> App<A> {
             theme: Theme::dark(),
             subscriptions: Vec::new(),
             spawn_handles: Vec::new(),
+            msg_queue: VecDeque::new(),
         }
     }
 }
 
 #[cfg(test)]
 mod async_tests {
-    use super::Runtime;
+    use super::*;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    struct TestApp {
+        updates: Arc<Mutex<Vec<i32>>>,
+    }
+
+    impl Application for TestApp {
+        type Message = i32;
+
+        fn update(&mut self, msg: i32) -> Cmd<i32> {
+            self.updates.lock().unwrap().push(msg);
+            Cmd::none()
+        }
+
+        fn view(&self) -> impl View {
+            crate::widgets::Text::new("test")
+        }
+    }
+
+    struct RecursiveApp {
+        updates: Arc<Mutex<Vec<i32>>>,
+    }
+
+    impl Application for RecursiveApp {
+        type Message = i32;
+
+        fn update(&mut self, msg: i32) -> Cmd<i32> {
+            self.updates.lock().unwrap().push(msg);
+            if msg > 0 {
+                Cmd::message(msg - 1)
+            } else {
+                Cmd::none()
+            }
+        }
+
+        fn view(&self) -> impl View {
+            crate::widgets::Text::new("test")
+        }
+    }
+
+    fn make_test_app() -> (App<TestApp>, Arc<Mutex<Vec<i32>>>) {
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let app = TestApp {
+            updates: updates.clone(),
+        };
+        let runner = App::new(app);
+        (runner, updates)
+    }
+
+    fn make_recursive_app() -> (App<RecursiveApp>, Arc<Mutex<Vec<i32>>>) {
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let app = RecursiveApp {
+            updates: updates.clone(),
+        };
+        let runner = App::new(app);
+        (runner, updates)
+    }
 
     #[test]
     fn cmd_spawn_produces_message() {
@@ -307,5 +415,107 @@ mod async_tests {
         let result = rt.block_on(handle).expect("join");
         assert_eq!(result, "done");
         assert!(start.elapsed() >= Duration::from_millis(40));
+    }
+
+    #[test]
+    fn cmd_batch_processes_all_sub_commands() {
+        let (mut runner, updates) = make_test_app();
+        let rt = Runtime::new().expect("runtime");
+
+        let cmd = Cmd::batch(vec![Cmd::message(1), Cmd::message(2), Cmd::message(3)]);
+        runner.process_cmd(cmd, &rt);
+
+        let log = updates.lock().unwrap();
+        assert_eq!(*log, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn cmd_nested_batch_flattens_correctly() {
+        let (mut runner, updates) = make_test_app();
+        let rt = Runtime::new().expect("runtime");
+
+        let inner = Cmd::batch(vec![Cmd::message(2), Cmd::message(3)]);
+        let cmd = Cmd::batch(vec![Cmd::message(1), inner, Cmd::message(4)]);
+        runner.process_cmd(cmd, &rt);
+
+        let log = updates.lock().unwrap();
+        assert_eq!(*log, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn cmd_message_dispatches_immediately_and_feeds_back() {
+        let (mut runner, updates) = make_recursive_app();
+        let rt = Runtime::new().expect("runtime");
+
+        let cmd = Cmd::message(3);
+        runner.process_cmd(cmd, &rt);
+
+        let log = updates.lock().unwrap();
+        assert_eq!(*log, vec![3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn cmd_message_max_iterations_safety() {
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        struct InfiniteApp {
+            updates: Arc<Mutex<Vec<i32>>>,
+        }
+        impl Application for InfiniteApp {
+            type Message = i32;
+            fn update(&mut self, msg: i32) -> Cmd<i32> {
+                self.updates.lock().unwrap().push(msg);
+                Cmd::message(msg + 1)
+            }
+            fn view(&self) -> impl View {
+                crate::widgets::Text::new("test")
+            }
+        }
+
+        let app = InfiniteApp {
+            updates: updates.clone(),
+        };
+        let mut runner = App::new(app);
+        let rt = Runtime::new().expect("runtime");
+
+        runner.process_cmd(Cmd::message(0), &rt);
+
+        let log = updates.lock().unwrap();
+        // process_cmd has MAX_ITERATIONS=100, first call is msg 0 which counts as iteration 1
+        // so we get at most 100 updates (iterations 1..=100)
+        assert!(log.len() <= 101);
+        assert!(log.len() >= 100);
+    }
+
+    #[test]
+    fn sub_every_no_burst_replay() {
+        let (runner, _updates) = make_test_app();
+
+        let interval = Duration::from_millis(100);
+        let far_past = Instant::now() - Duration::from_secs(10);
+
+        let old_states = vec![SubState {
+            interval,
+            f: Box::new(|| 42i32),
+            last_tick: far_past,
+        }];
+
+        let mut new_states = Vec::new();
+        let mut messages = Vec::new();
+        let mut index = 0;
+
+        let sub = Sub::every(interval, || 99);
+        runner.collect_subscriptions(
+            sub,
+            Instant::now(),
+            &old_states,
+            &mut index,
+            &mut new_states,
+            &mut messages,
+        );
+
+        // Even though 10 seconds have passed (100x the interval),
+        // only ONE message should be emitted — no burst replay.
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0], 99);
     }
 }

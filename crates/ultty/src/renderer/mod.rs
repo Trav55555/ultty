@@ -1138,7 +1138,12 @@ impl Renderer {
             render_pass.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
         }
 
-        self.render_images(&mut encoder, &view, terminal)?;
+        let sessions: Vec<_> = sessions.collect();
+        let has_native_sessions = !sessions.is_empty();
+
+        if !has_native_sessions {
+            self.render_images(&mut encoder, &view, terminal)?;
+        }
 
         if !tab_bar_vertices.is_empty() {
             let tab_bar_vertex_buffer = self
@@ -1178,18 +1183,19 @@ impl Renderer {
             render_pass.draw_indexed(0..tab_bar_indices.len() as u32, 0, 0..1);
         }
 
-        self.text_renderer.render(
-            &mut encoder,
-            &view,
-            terminal,
-            &self.color_scheme,
-            self.cell_width,
-            self.cell_height,
-            self.tab_bar_height,
-            &self.uniform_bind_group,
-        )?;
+        if !has_native_sessions {
+            self.text_renderer.render(
+                &mut encoder,
+                &view,
+                terminal,
+                &self.color_scheme,
+                self.cell_width,
+                self.cell_height,
+                self.tab_bar_height,
+                &self.uniform_bind_group,
+            )?;
+        }
 
-        let sessions: Vec<_> = sessions.collect();
         let any_dirty = sessions.iter().any(|s| s.is_render_dirty());
 
         let has_cached_native = self.cached_native_bg.is_some() || self.cached_native_text.is_some();

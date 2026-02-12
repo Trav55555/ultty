@@ -1,0 +1,254 @@
+//! Semantic text primitives that use theme design tokens.
+
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style as RStyle};
+use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
+use ratatui::Frame;
+
+use super::View;
+use crate::theme::{to_ratatui_color, Theme};
+use ultty_protocol::{Constraints, Content, Dimension, Style as ProtoStyle};
+
+/// Large section heading. Uses `text_title` color, bold.
+pub struct Title {
+    text: String,
+}
+
+impl Title {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+}
+
+impl View for Title {
+    fn constraints(&self) -> Constraints {
+        Constraints {
+            width: Dimension::Percent(100.0),
+            height: Dimension::Cells(1.0),
+            flex_shrink: 1.0,
+            ..Default::default()
+        }
+    }
+
+    fn content(&self) -> Content {
+        let theme = Theme::current();
+        let style = ProtoStyle::new().fg(theme.tokens.text_title).bold();
+        Content::RichText(ultty_protocol::RichText::new().span(&self.text, style))
+    }
+
+    fn render_ansi(&self, frame: &mut Frame, area: Rect) {
+        let theme = Theme::current();
+        let style = RStyle::default()
+            .fg(to_ratatui_color(theme.tokens.text_title))
+            .add_modifier(Modifier::BOLD);
+        frame.render_widget(Paragraph::new(Line::styled(&self.text, style)), area);
+    }
+}
+
+/// Standard body text. Uses `text_body` color.
+pub struct Body {
+    text: String,
+}
+
+impl Body {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+}
+
+impl View for Body {
+    fn constraints(&self) -> Constraints {
+        Constraints {
+            width: Dimension::Percent(100.0),
+            height: Dimension::Cells(1.0),
+            flex_shrink: 1.0,
+            ..Default::default()
+        }
+    }
+
+    fn content(&self) -> Content {
+        let theme = Theme::current();
+        let style = ProtoStyle::new().fg(theme.tokens.text_body);
+        Content::RichText(ultty_protocol::RichText::new().span(&self.text, style))
+    }
+
+    fn render_ansi(&self, frame: &mut Frame, area: Rect) {
+        let theme = Theme::current();
+        let style = RStyle::default().fg(to_ratatui_color(theme.tokens.text_body));
+        frame.render_widget(Paragraph::new(Line::styled(&self.text, style)), area);
+    }
+}
+
+/// De-emphasized text. Uses `text_muted` color.
+pub struct Muted {
+    text: String,
+}
+
+impl Muted {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+}
+
+impl View for Muted {
+    fn constraints(&self) -> Constraints {
+        Constraints {
+            width: Dimension::Percent(100.0),
+            height: Dimension::Cells(1.0),
+            flex_shrink: 1.0,
+            ..Default::default()
+        }
+    }
+
+    fn content(&self) -> Content {
+        let theme = Theme::current();
+        let style = ProtoStyle::new().fg(theme.tokens.text_muted);
+        Content::RichText(ultty_protocol::RichText::new().span(&self.text, style))
+    }
+
+    fn render_ansi(&self, frame: &mut Frame, area: Rect) {
+        let theme = Theme::current();
+        let style = RStyle::default().fg(to_ratatui_color(theme.tokens.text_muted));
+        frame.render_widget(Paragraph::new(Line::styled(&self.text, style)), area);
+    }
+}
+
+/// Emphasized text. Uses `text_accent` color, bold.
+pub struct Accent {
+    text: String,
+}
+
+impl Accent {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+}
+
+impl View for Accent {
+    fn constraints(&self) -> Constraints {
+        Constraints {
+            width: Dimension::Percent(100.0),
+            height: Dimension::Cells(1.0),
+            flex_shrink: 1.0,
+            ..Default::default()
+        }
+    }
+
+    fn content(&self) -> Content {
+        let theme = Theme::current();
+        let style = ProtoStyle::new().fg(theme.tokens.text_accent).bold();
+        Content::RichText(ultty_protocol::RichText::new().span(&self.text, style))
+    }
+
+    fn render_ansi(&self, frame: &mut Frame, area: Rect) {
+        let theme = Theme::current();
+        let style = RStyle::default()
+            .fg(to_ratatui_color(theme.tokens.text_accent))
+            .add_modifier(Modifier::BOLD);
+        frame.render_widget(Paragraph::new(Line::styled(&self.text, style)), area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_content_is_rich_text() {
+        let t = Title::new("Hello");
+        assert!(matches!(t.content(), Content::RichText(_)));
+    }
+
+    #[test]
+    fn title_not_focusable() {
+        let t = Title::new("Hello");
+        assert!(!t.is_focusable());
+    }
+
+    #[test]
+    fn title_uses_text_title_color() {
+        let theme = Theme::dark();
+        Theme::set_current(theme.clone());
+        let t = Title::new("Hello");
+        if let Content::RichText(rt) = t.content() {
+            assert_eq!(rt.spans[0].style.fg, Some(theme.tokens.text_title));
+            assert!(rt.spans[0].style.bold);
+        } else {
+            panic!("Expected RichText");
+        }
+    }
+
+    #[test]
+    fn body_content_is_rich_text() {
+        let b = Body::new("Hello");
+        assert!(matches!(b.content(), Content::RichText(_)));
+    }
+
+    #[test]
+    fn body_not_focusable() {
+        let b = Body::new("Hello");
+        assert!(!b.is_focusable());
+    }
+
+    #[test]
+    fn body_uses_text_body_color() {
+        let theme = Theme::dark();
+        Theme::set_current(theme.clone());
+        let b = Body::new("Hello");
+        if let Content::RichText(rt) = b.content() {
+            assert_eq!(rt.spans[0].style.fg, Some(theme.tokens.text_body));
+        } else {
+            panic!("Expected RichText");
+        }
+    }
+
+    #[test]
+    fn muted_content_is_rich_text() {
+        let m = Muted::new("Hello");
+        assert!(matches!(m.content(), Content::RichText(_)));
+    }
+
+    #[test]
+    fn muted_not_focusable() {
+        let m = Muted::new("Hello");
+        assert!(!m.is_focusable());
+    }
+
+    #[test]
+    fn muted_uses_text_muted_color() {
+        let theme = Theme::dark();
+        Theme::set_current(theme.clone());
+        let m = Muted::new("Hello");
+        if let Content::RichText(rt) = m.content() {
+            assert_eq!(rt.spans[0].style.fg, Some(theme.tokens.text_muted));
+        } else {
+            panic!("Expected RichText");
+        }
+    }
+
+    #[test]
+    fn accent_content_is_rich_text() {
+        let a = Accent::new("Hello");
+        assert!(matches!(a.content(), Content::RichText(_)));
+    }
+
+    #[test]
+    fn accent_not_focusable() {
+        let a = Accent::new("Hello");
+        assert!(!a.is_focusable());
+    }
+
+    #[test]
+    fn accent_uses_text_accent_color() {
+        let theme = Theme::dark();
+        Theme::set_current(theme.clone());
+        let a = Accent::new("Hello");
+        if let Content::RichText(rt) = a.content() {
+            assert_eq!(rt.spans[0].style.fg, Some(theme.tokens.text_accent));
+            assert!(rt.spans[0].style.bold);
+        } else {
+            panic!("Expected RichText");
+        }
+    }
+}

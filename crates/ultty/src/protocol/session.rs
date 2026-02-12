@@ -1112,11 +1112,21 @@ impl NativeSession {
         RegionId::ROOT
     }
 
+    /// Returns true if any region in this session is subscribed to key events.
+    pub fn has_key_subscription(&self) -> bool {
+        self.subscriptions
+            .values()
+            .any(|mask| mask & ultty_protocol::EVENT_KEY != 0)
+    }
+
     pub fn send_key(
         &mut self,
         key: ultty_protocol::Key,
         modifiers: ultty_protocol::Modifiers,
     ) -> io::Result<()> {
+        if !self.has_key_subscription() {
+            return Ok(());
+        }
         let target = self.key_target();
         self.send_input(ultty_protocol::InputEvent {
             region_id: target,
@@ -1131,6 +1141,9 @@ impl NativeSession {
         key: ultty_protocol::Key,
         modifiers: ultty_protocol::Modifiers,
     ) -> io::Result<()> {
+        if !self.has_key_subscription() {
+            return Ok(());
+        }
         let target = self.key_target();
         self.send_input(ultty_protocol::InputEvent {
             region_id: target,
@@ -1141,6 +1154,9 @@ impl NativeSession {
     }
 
     pub fn send_text_input(&mut self, text: String) -> io::Result<()> {
+        if !self.has_key_subscription() {
+            return Ok(());
+        }
         let target = self.key_target();
         self.send_input(ultty_protocol::InputEvent {
             region_id: target,

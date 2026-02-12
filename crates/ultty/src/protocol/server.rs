@@ -189,14 +189,6 @@ impl ProtocolServer {
         self.sessions.values_mut()
     }
 
-    /// Check if a session has any key event subscription (on ROOT or focused region).
-    fn session_wants_keys(session: &NativeSession) -> bool {
-        session.is_subscribed(ultty_protocol::RegionId::ROOT, ultty_protocol::EVENT_KEY)
-            || session
-                .focused_region()
-                .is_some_and(|id| session.is_subscribed(id, ultty_protocol::EVENT_KEY))
-    }
-
     /// Send a key event to all connected native sessions that have subscribed to key events.
     pub fn broadcast_key(
         &mut self,
@@ -204,17 +196,19 @@ impl ProtocolServer {
         modifiers: ultty_protocol::Modifiers,
     ) {
         for session in self.sessions.values_mut() {
-            if Self::session_wants_keys(session) {
-                if let Err(e) = session.send_key(key.clone(), modifiers) {
-                    tracing::warn!(
-                        "Failed to send key to session {}: {}",
-                        session.session_id(),
-                        e
-                    );
-                }
+            if let Err(e) = session.send_key(key.clone(), modifiers) {
+                tracing::warn!(
+                    "Failed to send key to session {}: {}",
+                    session.session_id(),
+                    e
+                );
             }
         }
         self.flush();
+    }
+
+    pub fn has_key_subscribers(&self) -> bool {
+        self.sessions.values().any(|s| s.has_key_subscription())
     }
 
     /// Send a key-up event to all connected native sessions that have subscribed to key events.
@@ -224,14 +218,12 @@ impl ProtocolServer {
         modifiers: ultty_protocol::Modifiers,
     ) {
         for session in self.sessions.values_mut() {
-            if Self::session_wants_keys(session) {
-                if let Err(e) = session.send_key_up(key.clone(), modifiers) {
-                    tracing::warn!(
-                        "Failed to send key_up to session {}: {}",
-                        session.session_id(),
-                        e
-                    );
-                }
+            if let Err(e) = session.send_key_up(key.clone(), modifiers) {
+                tracing::warn!(
+                    "Failed to send key_up to session {}: {}",
+                    session.session_id(),
+                    e
+                );
             }
         }
         self.flush();
@@ -240,14 +232,12 @@ impl ProtocolServer {
     /// Send a text input event to all connected native sessions that have subscribed to key events.
     pub fn broadcast_text_input(&mut self, text: String) {
         for session in self.sessions.values_mut() {
-            if Self::session_wants_keys(session) {
-                if let Err(e) = session.send_text_input(text.clone()) {
-                    tracing::warn!(
-                        "Failed to send text_input to session {}: {}",
-                        session.session_id(),
-                        e
-                    );
-                }
+            if let Err(e) = session.send_text_input(text.clone()) {
+                tracing::warn!(
+                    "Failed to send text_input to session {}: {}",
+                    session.session_id(),
+                    e
+                );
             }
         }
         self.flush();
@@ -370,11 +360,7 @@ impl ProtocolServer {
         for session in self.sessions.values_mut() {
             if session.has_pending_writes() {
                 if let Err(e) = session.flush() {
-                    tracing::warn!(
-                        "Failed to flush session {}: {}",
-                        session.session_id(),
-                        e
-                    );
+                    tracing::warn!("Failed to flush session {}: {}", session.session_id(), e);
                 }
             }
         }
@@ -615,15 +601,10 @@ mod tests {
 
         let mut server = ProtocolServer::new(&path).unwrap();
         let _client = UnixStream::connect(&path).unwrap();
-        server
-            .poll(Some(Duration::from_millis(100)))
-            .unwrap();
+        server.poll(Some(Duration::from_millis(100))).unwrap();
 
         assert_eq!(server.session_count(), 1);
-        server.broadcast_key(
-            ultty_protocol::Key::Enter,
-            ultty_protocol::Modifiers::CTRL,
-        );
+        server.broadcast_key(ultty_protocol::Key::Enter, ultty_protocol::Modifiers::CTRL);
     }
 
     // ---------------------------------------------------------------
@@ -636,9 +617,7 @@ mod tests {
 
         let mut server = ProtocolServer::new(&path).unwrap();
         let _client = UnixStream::connect(&path).unwrap();
-        server
-            .poll(Some(Duration::from_millis(100)))
-            .unwrap();
+        server.poll(Some(Duration::from_millis(100))).unwrap();
 
         server.broadcast_mouse(
             ultty_protocol::InputType::MouseScroll {
@@ -660,9 +639,7 @@ mod tests {
 
         let mut server = ProtocolServer::new(&path).unwrap();
         let _client = UnixStream::connect(&path).unwrap();
-        server
-            .poll(Some(Duration::from_millis(100)))
-            .unwrap();
+        server.poll(Some(Duration::from_millis(100))).unwrap();
 
         server.broadcast_resize(200, 60);
     }
@@ -683,9 +660,8 @@ mod tests {
 
         // A second server on the same path should succeed because
         // new() removes the stale file.
-        let _server2 = ProtocolServer::new(&path).expect(
-            "should be able to create server on path with stale socket",
-        );
+        let _server2 = ProtocolServer::new(&path)
+            .expect("should be able to create server on path with stale socket");
     }
 
     // ---------------------------------------------------------------
@@ -698,9 +674,7 @@ mod tests {
 
         let mut server = ProtocolServer::new(&path).unwrap();
         let _client = UnixStream::connect(&path).unwrap();
-        server
-            .poll(Some(Duration::from_millis(100)))
-            .unwrap();
+        server.poll(Some(Duration::from_millis(100))).unwrap();
 
         server.set_viewport(200.0, 50.0);
 
@@ -724,9 +698,7 @@ mod tests {
         assert_eq!(server.sessions().count(), 0);
 
         let _c1 = UnixStream::connect(&path).unwrap();
-        server
-            .poll(Some(Duration::from_millis(100)))
-            .unwrap();
+        server.poll(Some(Duration::from_millis(100))).unwrap();
 
         assert_eq!(server.sessions().count(), 1);
     }

@@ -33,6 +33,41 @@ pub struct Theme {
     pub control: ControlTheme,
     /// Selection/highlight styling.
     pub selection: SelectionTheme,
+    /// Design tokens for consistent spacing and surfaces.
+    pub tokens: DesignTokens,
+}
+
+/// Design tokens for layout spacing and surface hierarchy.
+#[derive(Debug, Clone)]
+pub struct DesignTokens {
+    /// Spacing scale: extra-small (0.5 cells).
+    pub space_xs: f32,
+    /// Spacing scale: small (1 cell).
+    pub space_sm: f32,
+    /// Spacing scale: medium (2 cells).
+    pub space_md: f32,
+    /// Spacing scale: large (3 cells).
+    pub space_lg: f32,
+    /// Spacing scale: extra-large (4 cells).
+    pub space_xl: f32,
+    /// Base surface (lowest elevation).
+    pub surface_0: Color,
+    /// Elevated surface.
+    pub surface_1: Color,
+    /// Highest elevation surface.
+    pub surface_2: Color,
+    /// Subtle border color.
+    pub border_subtle: Color,
+    /// Strong border color.
+    pub border_strong: Color,
+    /// Title text color.
+    pub text_title: Color,
+    /// Body text color.
+    pub text_body: Color,
+    /// Muted text color.
+    pub text_muted: Color,
+    /// Accent text color.
+    pub text_accent: Color,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +132,22 @@ impl Theme {
                 fg: Color::Rgb(30, 30, 46),
                 bg: Color::Rgb(97, 175, 239),
             },
+            tokens: DesignTokens {
+                space_xs: 0.5,
+                space_sm: 1.0,
+                space_md: 2.0,
+                space_lg: 3.0,
+                space_xl: 4.0,
+                surface_0: Color::Rgb(30, 30, 46),
+                surface_1: Color::Rgb(49, 50, 68),
+                surface_2: Color::Rgb(69, 71, 90),
+                border_subtle: Color::Rgb(69, 71, 90),
+                border_strong: Color::Rgb(108, 112, 134),
+                text_title: Color::Rgb(205, 214, 244),
+                text_body: Color::Rgb(186, 194, 222),
+                text_muted: Color::Rgb(108, 112, 134),
+                text_accent: Color::Rgb(97, 175, 239),
+            },
         }
     }
 
@@ -131,6 +182,22 @@ impl Theme {
                 fg: Color::Rgb(239, 241, 245),
                 bg: Color::Rgb(30, 102, 245),
             },
+            tokens: DesignTokens {
+                space_xs: 0.5,
+                space_sm: 1.0,
+                space_md: 2.0,
+                space_lg: 3.0,
+                space_xl: 4.0,
+                surface_0: Color::Rgb(239, 241, 245),
+                surface_1: Color::Rgb(230, 233, 239),
+                surface_2: Color::Rgb(204, 208, 218),
+                border_subtle: Color::Rgb(204, 208, 218),
+                border_strong: Color::Rgb(140, 143, 161),
+                text_title: Color::Rgb(76, 79, 105),
+                text_body: Color::Rgb(92, 95, 119),
+                text_muted: Color::Rgb(140, 143, 161),
+                text_accent: Color::Rgb(30, 102, 245),
+            },
         }
     }
 
@@ -164,6 +231,22 @@ impl Theme {
             selection: SelectionTheme {
                 fg: Color::Rgb(0, 0, 0),
                 bg: Color::Rgb(0, 255, 255),
+            },
+            tokens: DesignTokens {
+                space_xs: 0.5,
+                space_sm: 1.0,
+                space_md: 2.0,
+                space_lg: 3.0,
+                space_xl: 4.0,
+                surface_0: Color::Rgb(0, 0, 0),
+                surface_1: Color::Rgb(32, 32, 32),
+                surface_2: Color::Rgb(64, 64, 64),
+                border_subtle: Color::Rgb(128, 128, 128),
+                border_strong: Color::Rgb(255, 255, 255),
+                text_title: Color::Rgb(255, 255, 255),
+                text_body: Color::Rgb(255, 255, 255),
+                text_muted: Color::Rgb(200, 200, 200),
+                text_accent: Color::Rgb(255, 255, 0),
             },
         }
     }
@@ -287,5 +370,26 @@ mod tests {
         assert_eq!(theme.primary, dark.primary);
         assert_eq!(theme.background, dark.background);
         assert_eq!(theme.foreground, dark.foreground);
+    }
+
+    #[test]
+    fn tokens_spacing_scale_is_ordered() {
+        for theme in [Theme::dark(), Theme::light(), Theme::high_contrast()] {
+            let t = &theme.tokens;
+            assert!(t.space_xs < t.space_sm);
+            assert!(t.space_sm < t.space_md);
+            assert!(t.space_md < t.space_lg);
+            assert!(t.space_lg < t.space_xl);
+        }
+    }
+
+    #[test]
+    fn tokens_surfaces_are_distinct() {
+        for theme in [Theme::dark(), Theme::light(), Theme::high_contrast()] {
+            let t = &theme.tokens;
+            assert_ne!(t.surface_0, t.surface_1);
+            assert_ne!(t.surface_1, t.surface_2);
+            assert_ne!(t.surface_0, t.surface_2);
+        }
     }
 }

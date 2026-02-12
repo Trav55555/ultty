@@ -8,7 +8,8 @@ use std::time::Duration;
 use bytes::{Buf, BytesMut};
 use ultty_protocol::{
     AppMessage, ComputedRegionLayout, Content, Decode, Encode, FrameId, InputEvent, InputType, Key,
-    Modifiers, RegionId, TerminalMessage, FRAME_MAGIC, PROTOCOL_VERSION,
+    Modifiers, RegionId, TerminalMessage, EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL, FRAME_MAGIC,
+    PROTOCOL_VERSION,
 };
 
 use crate::event::Event;
@@ -59,6 +60,10 @@ impl NativeBackend {
 
         self.send_client_hello()?;
         self.wait_for_session_ready()?;
+        self.send_message(&AppMessage::Subscribe {
+            id: self.root_region,
+            events: EVENT_KEY | EVENT_MOUSE | EVENT_SCROLL,
+        })?;
 
         // Keep blocking mode for writes; use short read_timeout for the event poll loop
         if let Some(ref stream) = self.stream {

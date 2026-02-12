@@ -131,6 +131,13 @@ impl App {
             ControlRequest::GetSelection => ControlResponse::Data(ControlData::Selection(None)),
 
             ControlRequest::SendText { text } => {
+                if let Some(ref mut server) = self.protocol_server {
+                    if server.has_key_subscribers() {
+                        server.broadcast_text_input(text);
+                        return ControlResponse::Ok;
+                    }
+                }
+
                 if let Some(terminal) = self.terminal_manager.focused_terminal_mut() {
                     let _ = terminal.event_loop.send_input(text.as_bytes());
                     ControlResponse::Ok
@@ -143,6 +150,13 @@ impl App {
             }
 
             ControlRequest::SendKey { key, modifiers } => {
+                if let Some(ref mut server) = self.protocol_server {
+                    if server.has_key_subscribers() {
+                        server.broadcast_key(key, modifiers);
+                        return ControlResponse::Ok;
+                    }
+                }
+
                 self.forward_key_to_pty(&key, modifiers);
                 ControlResponse::Ok
             }

@@ -51,8 +51,9 @@ pub mod prelude {
     pub use crate::theme::Theme;
     pub use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
     pub use crate::widgets::{
-        Badge, BadgeVariant, Button, Divider, List, Modal, ProgressBar, ScrollView, Spinner, Table,
-        Tabs, Text, TextInput, View,
+        Accent, Badge, BadgeVariant, Body, Button, Card, Divider, Inset, List, Modal, Muted,
+        ProgressBar, ScrollView, Section, Spacer, Spinner, Table, Tabs, Text, TextInput, Title,
+        View,
     };
 
     // Re-export protocol types
