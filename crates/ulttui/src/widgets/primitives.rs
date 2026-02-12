@@ -247,17 +247,31 @@ impl View for Section {
 /// Elevated card with `surface_1` background and subtle border.
 pub struct Card {
     children: Vec<Box<dyn View>>,
+    max_width: Option<f32>,
+    align_center: bool,
 }
 
 impl Card {
     pub fn new() -> Self {
         Self {
             children: Vec::new(),
+            max_width: None,
+            align_center: false,
         }
     }
 
     pub fn child<V: View + 'static>(mut self, child: V) -> Self {
         self.children.push(Box::new(child));
+        self
+    }
+
+    pub fn max_width(mut self, cells: f32) -> Self {
+        self.max_width = Some(cells);
+        self
+    }
+
+    pub fn center(mut self) -> Self {
+        self.align_center = true;
         self
     }
 }
@@ -271,18 +285,28 @@ impl Default for Card {
 impl View for Card {
     fn constraints(&self) -> Constraints {
         let theme = Theme::current();
-        Constraints {
+        let mut c = Constraints {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
             flex_grow: 1.0,
-            width: Dimension::Percent(100.0),
             padding: ultty_protocol::Edges::all(Dimension::Cells(theme.tokens.space_md)),
             gap: ultty_protocol::Size {
                 width: Dimension::Auto,
                 height: Dimension::Cells(theme.tokens.space_sm),
             },
             ..Default::default()
+        };
+        if let Some(mw) = self.max_width {
+            c.width = Dimension::Cells(mw);
+            c.max_width = Dimension::Cells(mw);
+            c.flex_grow = 0.0;
+        } else {
+            c.width = Dimension::Percent(100.0);
         }
+        if self.align_center {
+            c.align_self = ultty_protocol::AlignSelf::Center;
+        }
+        c
     }
 
     fn style(&self) -> ProtoStyle {

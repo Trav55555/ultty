@@ -166,6 +166,10 @@ impl Renderer {
             let w = layout.width * self.cell_width;
             let h = layout.height * self.cell_height;
 
+            let cx = layout.content_x * self.cell_width;
+            let cy = layout.content_y * self.cell_height + self.tab_bar_height;
+            let cw = layout.content_width;
+
             if let Some(bg_color) = &region.style.bg {
                 let color = self.color_scheme.resolve_protocol_color(bg_color);
                 let base_idx = bg_vertices.len() as u32;
@@ -231,17 +235,17 @@ impl Renderer {
                     );
 
                     let chars: Vec<char> = text_content.text.chars().collect();
-                    let region_width = layout.width as usize;
-                    let render_text = if chars.len() == 1 && region_width > 1 {
-                        chars[0].to_string().repeat(region_width)
+                    let fill_width = cw as usize;
+                    let render_text = if chars.len() == 1 && fill_width > 1 {
+                        chars[0].to_string().repeat(fill_width)
                     } else {
                         text_content.text.clone()
                     };
 
                     let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
                         &render_text,
-                        x,
-                        y,
+                        cx,
+                        cy,
                         fg_color,
                         region.style.bold,
                         region.style.italic,
@@ -252,7 +256,7 @@ impl Renderer {
                     text_indices.extend(idxs.iter().map(|i| i + base_idx));
                 }
                 Content::RichText(rich_text) => {
-                    let mut cursor_x = x;
+                    let mut cursor_x = cx;
                     for span in &rich_text.spans {
                         let resolved = span
                             .style
@@ -277,7 +281,7 @@ impl Renderer {
                         let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
                             &span.text,
                             cursor_x,
-                            y,
+                            cy,
                             fg_color,
                             span.style.bold || region.style.bold,
                             span.style.italic || region.style.italic,
@@ -293,8 +297,8 @@ impl Renderer {
                     self.render_widget_content(
                         widget,
                         region.id,
-                        x,
-                        y,
+                        cx,
+                        cy,
                         w,
                         h,
                         &region.style,
@@ -962,6 +966,146 @@ impl Renderer {
                     text_vertices.extend(verts);
                     text_indices.extend(idxs.iter().map(|i| i + base_idx));
                 }
+            }
+            WidgetContent::Button(button) => {
+                use ultty_protocol::ButtonStyle as Bs;
+
+                let (bg_col, fg_col, border_col) = match button.style {
+                    Bs::Primary => {
+                        let bg = self.color_scheme.named[4];
+                        let fg = self.color_scheme.background;
+                        (bg, fg, bg)
+                    }
+                    Bs::Danger => {
+                        let bg = self.color_scheme.named[1];
+                        let fg = self.color_scheme.background;
+                        (bg, fg, bg)
+                    }
+                    Bs::Success => {
+                        let bg = self.color_scheme.named[2];
+                        let fg = self.color_scheme.background;
+                        (bg, fg, bg)
+                    }
+                    Bs::Default => {
+                        let bg = self.color_scheme.named[8];
+                        let fg = self.color_scheme.foreground;
+                        let border = self.color_scheme.named[7];
+                        (bg, fg, border)
+                    }
+                };
+
+                let padding = self.cell_width * 0.5;
+                let inner_x = x + padding;
+                let inner_w = w - padding * 2.0;
+
+                let base_idx = bg_vertices.len() as u32;
+                bg_vertices.push(Vertex {
+                    position: [x, y],
+                    tex_coord: [0.0, 0.0],
+                    color: [bg_col.r, bg_col.g, bg_col.b, 0.8 * region_style.opacity],
+                });
+                bg_vertices.push(Vertex {
+                    position: [x + w, y],
+                    tex_coord: [1.0, 0.0],
+                    color: [bg_col.r, bg_col.g, bg_col.b, 0.8 * region_style.opacity],
+                });
+                bg_vertices.push(Vertex {
+                    position: [x + w, y + h],
+                    tex_coord: [1.0, 1.0],
+                    color: [bg_col.r, bg_col.g, bg_col.b, 0.8 * region_style.opacity],
+                });
+                bg_vertices.push(Vertex {
+                    position: [x, y + h],
+                    tex_coord: [0.0, 1.0],
+                    color: [bg_col.r, bg_col.g, bg_col.b, 0.8 * region_style.opacity],
+                });
+                bg_indices.extend_from_slice(&[
+                    base_idx,
+                    base_idx + 1,
+                    base_idx + 2,
+                    base_idx,
+                    base_idx + 2,
+                    base_idx + 3,
+                ]);
+
+                let thickness = 1.0f32;
+                let bc = [
+                    border_col.r,
+                    border_col.g,
+                    border_col.b,
+                    region_style.opacity,
+                ];
+                let edges = [
+                    (
+                        [x, y],
+                        [x + w, y],
+                        [x + w, y + thickness],
+                        [x, y + thickness],
+                    ),
+                    (
+                        [x + w - thickness, y],
+                        [x + w, y],
+                        [x + w, y + h],
+                        [x + w - thickness, y + h],
+                    ),
+                    (
+                        [x, y + h - thickness],
+                        [x + w, y + h - thickness],
+                        [x + w, y + h],
+                        [x, y + h],
+                    ),
+                    (
+                        [x, y],
+                        [x + thickness, y],
+                        [x + thickness, y + h],
+                        [x, y + h],
+                    ),
+                ];
+                for (tl, tr, br, bl) in edges {
+                    let base = bg_vertices.len() as u32;
+                    bg_vertices.push(Vertex {
+                        position: tl,
+                        tex_coord: [0.0, 0.0],
+                        color: bc,
+                    });
+                    bg_vertices.push(Vertex {
+                        position: tr,
+                        tex_coord: [1.0, 0.0],
+                        color: bc,
+                    });
+                    bg_vertices.push(Vertex {
+                        position: br,
+                        tex_coord: [1.0, 1.0],
+                        color: bc,
+                    });
+                    bg_vertices.push(Vertex {
+                        position: bl,
+                        tex_coord: [0.0, 1.0],
+                        color: bc,
+                    });
+                    bg_indices.extend_from_slice(&[
+                        base,
+                        base + 1,
+                        base + 2,
+                        base,
+                        base + 2,
+                        base + 3,
+                    ]);
+                }
+
+                let label_width = button.label.chars().count() as f32 * self.cell_width;
+                let text_x = inner_x + (inner_w - label_width).max(0.0) / 2.0;
+                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                    &button.label,
+                    text_x,
+                    y,
+                    fg_col,
+                    true,
+                    false,
+                );
+                let base_idx = text_vertices.len() as u32;
+                text_vertices.extend(verts);
+                text_indices.extend(idxs.iter().map(|i| i + base_idx));
             }
         }
     }

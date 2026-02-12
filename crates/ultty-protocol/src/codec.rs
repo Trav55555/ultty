@@ -10,9 +10,9 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{
     content::{
-        CodeWidget, Content, ImageScale, ImageWidget, InputWidget, MarkdownWidget, ProgressWidget,
-        RichText, Span, SpinnerStyle, SpinnerWidget, TextAlign, TextContent, TextOverflow,
-        TextWrap, WidgetContent,
+        ButtonStyle, ButtonWidget, CodeWidget, Content, ImageScale, ImageWidget, InputWidget,
+        MarkdownWidget, ProgressWidget, RichText, Span, SpinnerStyle, SpinnerWidget, TextAlign,
+        TextContent, TextOverflow, TextWrap, WidgetContent,
     },
     events::{
         FocusEvent, InputEvent, InputType, Key, Modifiers, MouseButton, ResizeEvent, ScrollEvent,
@@ -1378,6 +1378,48 @@ impl Decode for ImageWidget {
     }
 }
 
+impl Encode for ButtonStyle {
+    fn encode(&self, buf: &mut BytesMut) {
+        buf.put_u8(*self as u8);
+    }
+}
+
+impl Decode for ButtonStyle {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof {
+                needed: 1,
+                have: buf.remaining(),
+            });
+        }
+        match buf.get_u8() {
+            0 => Ok(ButtonStyle::Default),
+            1 => Ok(ButtonStyle::Primary),
+            2 => Ok(ButtonStyle::Danger),
+            3 => Ok(ButtonStyle::Success),
+            v => Err(ProtocolError::InvalidData(format!(
+                "invalid button style: {}",
+                v
+            ))),
+        }
+    }
+}
+
+impl Encode for ButtonWidget {
+    fn encode(&self, buf: &mut BytesMut) {
+        encode_string(&self.label, buf);
+        self.style.encode(buf);
+    }
+}
+
+impl Decode for ButtonWidget {
+    fn decode(buf: &mut impl Buf) -> Result<Self> {
+        let label = decode_string(buf)?;
+        let style = ButtonStyle::decode(buf)?;
+        Ok(ButtonWidget { label, style })
+    }
+}
+
 impl Encode for WidgetContent {
     fn encode(&self, buf: &mut BytesMut) {
         match self {
@@ -1405,6 +1447,10 @@ impl Encode for WidgetContent {
                 buf.put_u8(5);
                 w.encode(buf);
             }
+            WidgetContent::Button(w) => {
+                buf.put_u8(6);
+                w.encode(buf);
+            }
         }
     }
 }
@@ -1424,6 +1470,7 @@ impl Decode for WidgetContent {
             3 => Ok(WidgetContent::Progress(ProgressWidget::decode(buf)?)),
             4 => Ok(WidgetContent::Spinner(SpinnerWidget::decode(buf)?)),
             5 => Ok(WidgetContent::Image(ImageWidget::decode(buf)?)),
+            6 => Ok(WidgetContent::Button(ButtonWidget::decode(buf)?)),
             v => Err(ProtocolError::InvalidData(format!(
                 "invalid widget type: {}",
                 v

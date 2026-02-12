@@ -40,9 +40,9 @@ pub mod vim;
 
 pub use codec::{Decode, Encode};
 pub use content::{
-    CodeWidget, Content, ImageScale, ImageWidget, InputWidget, MarkdownWidget, ProgressWidget,
-    RichText, Span, SpinnerStyle, SpinnerWidget, TextAlign, TextContent, TextOverflow, TextWrap,
-    WidgetContent,
+    ButtonStyle, ButtonWidget, CodeWidget, Content, ImageScale, ImageWidget, InputWidget,
+    MarkdownWidget, ProgressWidget, RichText, Span, SpinnerStyle, SpinnerWidget, TextAlign,
+    TextContent, TextOverflow, TextWrap, WidgetContent,
 };
 pub use error::{ProtocolError, Result};
 pub use events::{

@@ -20,14 +20,14 @@ impl Divider {
     pub fn horizontal() -> Self {
         Self {
             horizontal: true,
-            ch: '─',
+            ch: '-',
         }
     }
 
     pub fn vertical() -> Self {
         Self {
             horizontal: false,
-            ch: '│',
+            ch: '|',
         }
     }
 
@@ -89,7 +89,7 @@ mod tests {
         let divider = Divider::horizontal();
         let content = divider.content();
         match content {
-            Content::Text(tc) => assert_eq!(tc.text, "─"),
+            Content::Text(tc) => assert_eq!(tc.text, "-"),
             _ => panic!("Expected Text content"),
         }
     }
@@ -99,7 +99,7 @@ mod tests {
         let divider = Divider::vertical();
         let content = divider.content();
         match content {
-            Content::Text(tc) => assert_eq!(tc.text, "│"),
+            Content::Text(tc) => assert_eq!(tc.text, "|"),
             _ => panic!("Expected Text content"),
         }
     }

@@ -31,6 +31,10 @@ pub struct ComputedLayout {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    pub content_x: f32,
+    pub content_y: f32,
+    pub content_width: f32,
+    pub content_height: f32,
 }
 
 impl Region {
@@ -97,11 +101,17 @@ mod tests {
             y: 20.0,
             width: 100.0,
             height: 50.0,
+            content_x: 12.0,
+            content_y: 22.0,
+            content_width: 96.0,
+            content_height: 46.0,
         };
         assert_eq!(layout.x, 10.0);
         assert_eq!(layout.y, 20.0);
         assert_eq!(layout.width, 100.0);
         assert_eq!(layout.height, 50.0);
+        assert_eq!(layout.content_x, 12.0);
+        assert_eq!(layout.content_y, 22.0);
     }
 
     #[test]
@@ -111,6 +121,7 @@ mod tests {
             y: 2.0,
             width: 3.0,
             height: 4.0,
+            ..Default::default()
         };
         let cloned = layout;
         assert_eq!(cloned.x, layout.x);
@@ -171,6 +182,7 @@ mod tests {
             y: 10.0,
             width: 200.0,
             height: 100.0,
+            ..Default::default()
         };
         assert_eq!(region.computed.x, 5.0);
         assert_eq!(region.computed.y, 10.0);

@@ -9,13 +9,24 @@ use ratatui::Frame;
 use super::{FocusAction, View};
 use crate::event::{Key, KeyEvent};
 use crate::theme::{to_ratatui_color, Theme};
-use ultty_protocol::Style as ProtoStyle;
+use ultty_protocol::{ButtonStyle as ProtoButtonStyle, ButtonWidget, Style as ProtoStyle};
 
 /// Clickable button.
 #[derive(Debug)]
 pub struct Button {
     label: String,
     id: Option<String>,
+    style: ButtonStyle,
+}
+
+/// Button style variant.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum ButtonStyle {
+    #[default]
+    Default,
+    Primary,
+    Danger,
+    Success,
 }
 
 impl Button {
@@ -23,11 +34,27 @@ impl Button {
         Self {
             label: label.into(),
             id: None,
+            style: ButtonStyle::default(),
         }
     }
 
     pub fn id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
+        self
+    }
+
+    pub fn primary(mut self) -> Self {
+        self.style = ButtonStyle::Primary;
+        self
+    }
+
+    pub fn danger(mut self) -> Self {
+        self.style = ButtonStyle::Danger;
+        self
+    }
+
+    pub fn success(mut self) -> Self {
+        self.style = ButtonStyle::Success;
         self
     }
 
@@ -42,7 +69,7 @@ impl Button {
 
 impl View for Button {
     fn constraints(&self) -> ultty_protocol::Constraints {
-        let label_width = self.label.chars().count() as f32 + 4.0;
+        let label_width = self.label.chars().count() as f32 + 2.0;
         ultty_protocol::Constraints {
             width: ultty_protocol::Dimension::Cells(label_width),
             height: ultty_protocol::Dimension::Cells(1.0),
@@ -66,14 +93,19 @@ impl View for Button {
     }
 
     fn content(&self) -> ultty_protocol::Content {
-        ultty_protocol::Content::Text(ultty_protocol::TextContent::new(format!(
-            "[ {} ]",
-            self.label
-        )))
+        let proto_style = match self.style {
+            ButtonStyle::Default => ProtoButtonStyle::Default,
+            ButtonStyle::Primary => ProtoButtonStyle::Primary,
+            ButtonStyle::Danger => ProtoButtonStyle::Danger,
+            ButtonStyle::Success => ProtoButtonStyle::Success,
+        };
+        ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Button(ButtonWidget {
+            label: self.label.clone(),
+            style: proto_style,
+        }))
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
-        // Register with focus manager if we have an ID
         if let Some(id) = self.widget_id() {
             crate::focus::FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
         }
@@ -131,8 +163,30 @@ mod tests {
         let btn = Button::new("OK");
         let content = <Button as View>::content(&btn);
         match content {
-            Content::Text(tc) => assert_eq!(tc.text, "[ OK ]"),
-            _ => panic!("Expected Text content"),
+            Content::Widget(w) => match w {
+                ultty_protocol::WidgetContent::Button(b) => {
+                    assert_eq!(b.label, "OK");
+                    assert_eq!(b.style, ultty_protocol::ButtonStyle::Default);
+                }
+                _ => panic!("Expected Button widget"),
+            },
+            _ => panic!("Expected Widget content"),
+        }
+    }
+
+    #[test]
+    fn button_content_primary() {
+        let btn = Button::new("Submit").primary();
+        let content = <Button as View>::content(&btn);
+        match content {
+            Content::Widget(w) => match w {
+                ultty_protocol::WidgetContent::Button(b) => {
+                    assert_eq!(b.label, "Submit");
+                    assert_eq!(b.style, ultty_protocol::ButtonStyle::Primary);
+                }
+                _ => panic!("Expected Button widget"),
+            },
+            _ => panic!("Expected Widget content"),
         }
     }
 

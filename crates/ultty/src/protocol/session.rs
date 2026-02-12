@@ -763,20 +763,32 @@ impl NativeSession {
             return Ok(());
         }
 
-        // Collect computed layouts
+        // Taffy location is parent-relative; accumulate to get absolute positions.
+        let mut absolute_offsets: HashMap<RegionId, (f32, f32)> = HashMap::new();
+        absolute_offsets.insert(RegionId::ROOT, (0.0, 0.0));
+
         let mut regions = Vec::new();
         for region in self.scene.iter_depth_first() {
             if let Some(taffy_layout) = self.layout.get_layout(region.id) {
-                // Update the region's computed layout
-                // (We can't mutate while iterating, so we'll do a second pass)
+                let (parent_abs_x, parent_abs_y) = region
+                    .parent
+                    .and_then(|pid| absolute_offsets.get(&pid))
+                    .copied()
+                    .unwrap_or((0.0, 0.0));
+
+                let abs_x = parent_abs_x + taffy_layout.location.x;
+                let abs_y = parent_abs_y + taffy_layout.location.y;
+
+                absolute_offsets.insert(region.id, (abs_x, abs_y));
+
                 let computed = ComputedRegionLayout {
                     id: region.id,
-                    x: taffy_layout.location.x,
-                    y: taffy_layout.location.y,
+                    x: abs_x,
+                    y: abs_y,
                     width: taffy_layout.size.width,
                     height: taffy_layout.size.height,
-                    content_x: taffy_layout.location.x + taffy_layout.padding.left,
-                    content_y: taffy_layout.location.y + taffy_layout.padding.top,
+                    content_x: abs_x + taffy_layout.padding.left,
+                    content_y: abs_y + taffy_layout.padding.top,
                     content_width: taffy_layout.size.width
                         - taffy_layout.padding.left
                         - taffy_layout.padding.right,
@@ -797,6 +809,10 @@ impl NativeSession {
                     y: layout.y,
                     width: layout.width,
                     height: layout.height,
+                    content_x: layout.content_x,
+                    content_y: layout.content_y,
+                    content_width: layout.content_width,
+                    content_height: layout.content_height,
                 };
                 region.dirty = false;
             }
@@ -1227,6 +1243,7 @@ mod tests {
                 y: 0.0,
                 width: 80.0,
                 height: 24.0,
+                ..Default::default()
             };
         }
 
@@ -1238,6 +1255,7 @@ mod tests {
             y: 5.0,
             width: 20.0,
             height: 10.0,
+            ..Default::default()
         };
         session.scene.insert(child);
 
@@ -1256,6 +1274,7 @@ mod tests {
                 y: 0.0,
                 width: 80.0,
                 height: 24.0,
+                ..Default::default()
             };
         }
 
@@ -1266,6 +1285,7 @@ mod tests {
             y: 50.0,
             width: 10.0,
             height: 10.0,
+            ..Default::default()
         };
         session.scene.insert(child);
 

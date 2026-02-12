@@ -9,6 +9,17 @@ impl CounterApp {
     fn new() -> Self {
         Self { count: 0 }
     }
+
+    fn count_color(&self) -> Color {
+        let theme = Theme::current();
+        if self.count > 0 {
+            theme.success
+        } else if self.count < 0 {
+            theme.error
+        } else {
+            theme.foreground
+        }
+    }
 }
 
 enum Message {
@@ -38,6 +49,7 @@ impl Application for CounterApp {
                 (Key::Char('+') | Key::Char('='), _) => Some(Message::Increment),
                 (Key::Char('-') | Key::Char('_'), _) => Some(Message::Decrement),
                 (Key::Char('r'), _) => Some(Message::Reset),
+                (Key::Char('q'), _) => std::process::exit(0),
                 _ => None,
             },
             _ => None,
@@ -45,17 +57,36 @@ impl Application for CounterApp {
     }
 
     fn view(&self) -> impl View {
-        Card::new()
-            .child(Title::new("Counter"))
-            .child(Accent::new(format!("{}", self.count)))
+        Column::new()
+            .height(Dimension::Percent(100.0))
+            .justify_center()
+            .align_center()
             .child(
-                Row::new()
-                    .gap(1.0)
-                    .child(Button::new("-1").id("dec"))
-                    .child(Button::new("+1").id("inc"))
-                    .child(Button::new("Reset").id("reset")),
+                Card::new()
+                    .max_width(40.0)
+                    .child(Row::new().justify_center().child(Title::new("Counter")))
+                    .child(Divider::horizontal())
+                    .child(Row::new().justify_center().child(
+                        ulttui::widgets::RichText::new().span(
+                            &format!("{}", self.count),
+                            Style::new().fg(self.count_color()).bold(),
+                        ),
+                    ))
+                    .child(Divider::horizontal())
+                    .child(
+                        Row::new()
+                            .gap(2.0)
+                            .justify_center()
+                            .child(Button::new("  -1  ").id("dec"))
+                            .child(Button::new("  +1  ").id("inc"))
+                            .child(Button::new(" Reset ").id("reset")),
+                    )
+                    .child(
+                        Row::new()
+                            .justify_center()
+                            .child(Muted::new("+/- keys · Tab · Enter · q quit")),
+                    ),
             )
-            .child(Muted::new("Tab to focus, Enter to press, +/- keys"))
     }
 }
 

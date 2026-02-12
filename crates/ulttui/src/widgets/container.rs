@@ -106,6 +106,31 @@ impl Column {
         self
     }
 
+    pub fn justify_center(mut self) -> Self {
+        self.constraints.justify_content = ultty_protocol::JustifyContent::Center;
+        self
+    }
+
+    pub fn justify_between(mut self) -> Self {
+        self.constraints.justify_content = ultty_protocol::JustifyContent::SpaceBetween;
+        self
+    }
+
+    pub fn align_center(mut self) -> Self {
+        self.constraints.align_items = ultty_protocol::AlignItems::Center;
+        self
+    }
+
+    pub fn align_stretch(mut self) -> Self {
+        self.constraints.align_items = ultty_protocol::AlignItems::Stretch;
+        self
+    }
+
+    pub fn height(mut self, h: Dimension) -> Self {
+        self.constraints.height = h;
+        self
+    }
+
     pub fn children_count(&self) -> usize {
         self.children.len()
     }
@@ -224,6 +249,21 @@ impl Row {
     pub fn gap(mut self, gap: f32) -> Self {
         self.constraints.gap.width = Dimension::Cells(gap);
         self.gap = gap as u16;
+        self
+    }
+
+    pub fn justify_center(mut self) -> Self {
+        self.constraints.justify_content = ultty_protocol::JustifyContent::Center;
+        self
+    }
+
+    pub fn justify_between(mut self) -> Self {
+        self.constraints.justify_content = ultty_protocol::JustifyContent::SpaceBetween;
+        self
+    }
+
+    pub fn align_center(mut self) -> Self {
+        self.constraints.align_items = ultty_protocol::AlignItems::Center;
         self
     }
 

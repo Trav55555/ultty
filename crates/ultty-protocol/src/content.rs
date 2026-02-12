@@ -149,6 +149,8 @@ pub enum WidgetContent {
     Spinner(SpinnerWidget),
     /// Inline image.
     Image(ImageWidget),
+    /// Button widget.
+    Button(ButtonWidget),
 }
 
 /// Text input widget.
@@ -245,4 +247,44 @@ pub enum ImageScale {
     Stretch = 2,
     /// No scaling (original size).
     None = 3,
+}
+
+/// Button widget.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ButtonWidget {
+    /// Button label text.
+    pub label: String,
+    /// Button style variant.
+    pub style: ButtonStyle,
+}
+
+impl ButtonWidget {
+    /// Create a new button with the given label.
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            style: ButtonStyle::default(),
+        }
+    }
+
+    /// Set the button style.
+    pub fn style(mut self, style: ButtonStyle) -> Self {
+        self.style = style;
+        self
+    }
+}
+
+/// Button style variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum ButtonStyle {
+    /// Default/secondary button.
+    #[default]
+    Default = 0,
+    /// Primary action button.
+    Primary = 1,
+    /// Destructive action button.
+    Danger = 2,
+    /// Success/confirm button.
+    Success = 3,
 }
