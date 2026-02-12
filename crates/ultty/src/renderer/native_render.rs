@@ -230,8 +230,16 @@ impl Renderer {
                         resolved.a * region.style.opacity,
                     );
 
+                    let chars: Vec<char> = text_content.text.chars().collect();
+                    let region_width = layout.width as usize;
+                    let render_text = if chars.len() == 1 && region_width > 1 {
+                        chars[0].to_string().repeat(region_width)
+                    } else {
+                        text_content.text.clone()
+                    };
+
                     let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                        &text_content.text,
+                        &render_text,
                         x,
                         y,
                         fg_color,
