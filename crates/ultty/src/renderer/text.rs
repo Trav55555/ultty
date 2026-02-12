@@ -268,7 +268,7 @@ impl TextRenderer {
                     self.emit_glyph_quad(&mut vertices, &mut indices, gx, gy, &glyph_info, fg);
                 }
 
-                cursor_x += self.cell_width;
+                cursor_x += glyph.w;
             }
         }
 

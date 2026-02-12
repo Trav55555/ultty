@@ -122,8 +122,7 @@ pub enum AlignContent {
 }
 
 /// Dimension value.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Dimension {
     /// Automatic sizing.
     #[default]
@@ -143,7 +142,6 @@ pub enum Dimension {
     /// Maximum content size.
     MaxContent,
 }
-
 
 impl Dimension {
     /// Create a cells dimension.

@@ -970,139 +970,17 @@ impl Renderer {
             WidgetContent::Button(button) => {
                 use ultty_protocol::ButtonStyle as Bs;
 
-                let (bg_col, fg_col, border_col) = match button.style {
-                    Bs::Primary => {
-                        let bg = self.color_scheme.named[4];
-                        let fg = self.color_scheme.background;
-                        (bg, fg, bg)
-                    }
-                    Bs::Danger => {
-                        let bg = self.color_scheme.named[1];
-                        let fg = self.color_scheme.background;
-                        (bg, fg, bg)
-                    }
-                    Bs::Success => {
-                        let bg = self.color_scheme.named[2];
-                        let fg = self.color_scheme.background;
-                        (bg, fg, bg)
-                    }
-                    Bs::Default => {
-                        let bg = self.color_scheme.named[8];
-                        let fg = self.color_scheme.foreground;
-                        let border = self.color_scheme.named[7];
-                        (bg, fg, border)
-                    }
+                let fg_col = match button.style {
+                    Bs::Primary => self.color_scheme.named[4],
+                    Bs::Danger => self.color_scheme.named[1],
+                    Bs::Success => self.color_scheme.named[2],
+                    Bs::Default => self.color_scheme.foreground,
                 };
 
-                let padding = self.cell_width * 0.5;
-                let inner_x = x + padding;
-                let inner_w = w - padding * 2.0;
-
-                let base_idx = bg_vertices.len() as u32;
-                bg_vertices.push(Vertex {
-                    position: [x, y],
-                    tex_coord: [0.0, 0.0],
-                    color: [bg_col.r, bg_col.g, bg_col.b, 0.8 * region_style.opacity],
-                });
-                bg_vertices.push(Vertex {
-                    position: [x + w, y],
-                    tex_coord: [1.0, 0.0],
-                    color: [bg_col.r, bg_col.g, bg_col.b, 0.8 * region_style.opacity],
-                });
-                bg_vertices.push(Vertex {
-                    position: [x + w, y + h],
-                    tex_coord: [1.0, 1.0],
-                    color: [bg_col.r, bg_col.g, bg_col.b, 0.8 * region_style.opacity],
-                });
-                bg_vertices.push(Vertex {
-                    position: [x, y + h],
-                    tex_coord: [0.0, 1.0],
-                    color: [bg_col.r, bg_col.g, bg_col.b, 0.8 * region_style.opacity],
-                });
-                bg_indices.extend_from_slice(&[
-                    base_idx,
-                    base_idx + 1,
-                    base_idx + 2,
-                    base_idx,
-                    base_idx + 2,
-                    base_idx + 3,
-                ]);
-
-                let thickness = 1.0f32;
-                let bc = [
-                    border_col.r,
-                    border_col.g,
-                    border_col.b,
-                    region_style.opacity,
-                ];
-                let edges = [
-                    (
-                        [x, y],
-                        [x + w, y],
-                        [x + w, y + thickness],
-                        [x, y + thickness],
-                    ),
-                    (
-                        [x + w - thickness, y],
-                        [x + w, y],
-                        [x + w, y + h],
-                        [x + w - thickness, y + h],
-                    ),
-                    (
-                        [x, y + h - thickness],
-                        [x + w, y + h - thickness],
-                        [x + w, y + h],
-                        [x, y + h],
-                    ),
-                    (
-                        [x, y],
-                        [x + thickness, y],
-                        [x + thickness, y + h],
-                        [x, y + h],
-                    ),
-                ];
-                for (tl, tr, br, bl) in edges {
-                    let base = bg_vertices.len() as u32;
-                    bg_vertices.push(Vertex {
-                        position: tl,
-                        tex_coord: [0.0, 0.0],
-                        color: bc,
-                    });
-                    bg_vertices.push(Vertex {
-                        position: tr,
-                        tex_coord: [1.0, 0.0],
-                        color: bc,
-                    });
-                    bg_vertices.push(Vertex {
-                        position: br,
-                        tex_coord: [1.0, 1.0],
-                        color: bc,
-                    });
-                    bg_vertices.push(Vertex {
-                        position: bl,
-                        tex_coord: [0.0, 1.0],
-                        color: bc,
-                    });
-                    bg_indices.extend_from_slice(&[
-                        base,
-                        base + 1,
-                        base + 2,
-                        base,
-                        base + 2,
-                        base + 3,
-                    ]);
-                }
-
-                let label_width = button.label.chars().count() as f32 * self.cell_width;
-                let text_x = inner_x + (inner_w - label_width).max(0.0) / 2.0;
-                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                    &button.label,
-                    text_x,
-                    y,
-                    fg_col,
-                    true,
-                    false,
-                );
+                let label = format!("[ {} ]", button.label);
+                let (verts, idxs, _) = self
+                    .text_renderer
+                    .build_styled_text_vertices(&label, x, y, fg_col, true, false);
                 let base_idx = text_vertices.len() as u32;
                 text_vertices.extend(verts);
                 text_indices.extend(idxs.iter().map(|i| i + base_idx));
