@@ -98,6 +98,20 @@ struct MemoryResult {
     timestamp: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ToolInfo {
+    name: String,
+    description: Option<String>,
+    parameters: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct McpServerInfo {
+    name: String,
+    status: Option<String>,
+    tools_count: Option<usize>,
+}
+
 #[derive(Debug, Clone)]
 struct AgentStatus {
     cost_usd: f64,
@@ -255,6 +269,25 @@ struct ApprovalRequest {
     reversible: bool,
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum ToolStatus {
+    Pending,
+    Approved,
+    Rejected,
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct ToolCall {
+    name: String,
+    args: String,
+    status: ToolStatus,
+    result: Option<String>,
+}
+
 impl Default for AgentStatus {
     fn default() -> Self {
         Self {
@@ -295,6 +328,7 @@ struct PorygonTui {
     command_registry: CommandRegistry,
     session_id: Option<String>,
     suggestions: Vec<(String, String)>,
+    tool_calls: Vec<ToolCall>,
 }
 
 impl PorygonTui {
@@ -350,6 +384,7 @@ impl PorygonTui {
             command_registry: CommandRegistry::new(),
             session_id: None,
             suggestions: Vec::new(),
+            tool_calls: Vec::new(),
         }
     }
 }
@@ -385,6 +420,11 @@ enum Msg {
     MemoryStored,
     MemoryRecalled(Vec<MemoryResult>),
     MemoryError(String),
+    ToolsFetched(Vec<ToolInfo>),
+    ToolDetailsFetched(ToolInfo),
+    McpStatusFetched(Vec<McpServerInfo>),
+    McpToolsFetched(Vec<ToolInfo>),
+    ToolsError(String),
     ExitRequested,
 }
 
@@ -676,12 +716,25 @@ impl Application for PorygonTui {
             }
             Msg::WeatherFailed => Cmd::none(),
             Msg::ApprovalReceived(request) => {
+                self.tool_calls.push(ToolCall {
+                    name: request.tool_name.clone(),
+                    args: serde_json::to_string_pretty(&request.params).unwrap_or_default(),
+                    status: ToolStatus::Pending,
+                    result: None,
+                });
                 self.pending_approval = Some(request);
                 self.show_approval_modal = true;
                 Cmd::none()
             }
             Msg::ApprovalDecision(approved) => {
                 self.show_approval_modal = false;
+                if let Some(last) = self.tool_calls.last_mut() {
+                    last.status = if approved {
+                        ToolStatus::Approved
+                    } else {
+                        ToolStatus::Rejected
+                    };
+                }
                 if let Some(request) = self.pending_approval.take() {
                     let url = format!("{}/api/approvals/{}/decide", self.daemon_url, request.id);
                     let client = self.client.clone();
@@ -797,6 +850,100 @@ impl Application for PorygonTui {
                 });
                 self.auto_scroll_chat();
                 Cmd::ShowToast(Toast::error(format!("Memory error: {err}")))
+            }
+            Msg::ToolsFetched(tools) => {
+                let mut table = String::from("**Available Tools:**\n\n");
+                if tools.is_empty() {
+                    table.push_str("No tools available.");
+                } else {
+                    table.push_str("| Name | Description |\n");
+                    table.push_str("|---|---|\n");
+                    for tool in tools {
+                        let desc = tool.description.unwrap_or_else(|| "N/A".to_string());
+                        table.push_str(&format!("| {} | {} |\n", tool.name, desc));
+                    }
+                }
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: table,
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::none()
+            }
+            Msg::ToolDetailsFetched(tool) => {
+                let params_str = tool
+                    .parameters
+                    .as_ref()
+                    .and_then(|p| serde_json::to_string_pretty(p).ok())
+                    .unwrap_or_else(|| "N/A".to_string());
+                let desc = tool
+                    .description
+                    .unwrap_or_else(|| "No description".to_string());
+                let content = format!(
+                    "**Tool: {}**\n\n{}\n\n**Parameters:**\n```json\n{}\n```",
+                    tool.name, desc, params_str
+                );
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content,
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::none()
+            }
+            Msg::McpStatusFetched(servers) => {
+                let mut table = String::from("**MCP Server Status:**\n\n");
+                if servers.is_empty() {
+                    table.push_str("No MCP servers configured.");
+                } else {
+                    table.push_str("| Server | Status | Tools |\n");
+                    table.push_str("|---|---|---|\n");
+                    for server in servers {
+                        let status = server.status.unwrap_or_else(|| "unknown".to_string());
+                        let tools_count = server.tools_count.unwrap_or(0);
+                        table.push_str(&format!(
+                            "| {} | {} | {} |\n",
+                            server.name, status, tools_count
+                        ));
+                    }
+                }
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: table,
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::none()
+            }
+            Msg::McpToolsFetched(tools) => {
+                let mut table = String::from("**MCP Tools:**\n\n");
+                if tools.is_empty() {
+                    table.push_str("No MCP tools available.");
+                } else {
+                    table.push_str("| Name | Description |\n");
+                    table.push_str("|---|---|\n");
+                    for tool in tools {
+                        let desc = tool.description.unwrap_or_else(|| "N/A".to_string());
+                        table.push_str(&format!("| {} | {} |\n", tool.name, desc));
+                    }
+                }
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: table,
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::none()
+            }
+            Msg::ToolsError(err) => {
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: format!("Tools error: {err}"),
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::ShowToast(Toast::error(format!("Tools error: {err}")))
             }
             Msg::ExitRequested => {
                 if self.connected && self.messages.len() > 1 {
@@ -966,7 +1113,7 @@ impl Application for PorygonTui {
                 return Stack::new().child(main_content).child(
                     Modal::new()
                         .title("Tool Approval Required")
-                        .body(self.approval_modal_body(req))
+                        .body_view(self.approval_modal_view(req))
                         .buttons(vec!["Approve (y/Enter)", "Reject (n/Esc)"])
                         .visible(true),
                 );
@@ -994,16 +1141,54 @@ impl PorygonTui {
         }
     }
 
-    fn approval_modal_body(&self, req: &ApprovalRequest) -> String {
-        let params_display = serde_json::to_string_pretty(&req.params)
-            .unwrap_or_else(|_| format!("{:?}", req.params));
-        let risk = format!("{:.0}%", req.risk_score * 100.0);
-        let reversible = if req.reversible { "yes" } else { "no" };
+    fn approval_modal_view(&self, req: &ApprovalRequest) -> Column {
+        let risk_pct = format!("{:.0}%", req.risk_score * 100.0);
+        let risk_color = if req.risk_score >= 0.7 {
+            Color::Rgb(255, 93, 110)
+        } else if req.risk_score >= 0.3 {
+            Color::Rgb(249, 226, 175)
+        } else {
+            Color::Rgb(166, 227, 161)
+        };
+        let reversible_text = if req.reversible { "yes" } else { "no" };
 
-        format!(
-            "Tool: {}\nRisk: {}\nBlast radius: {}\nReversible: {}\n\nReasoning:\n{}\n\nParameters:\n{}",
-            req.tool_name, risk, req.blast_radius, reversible, req.reasoning, params_display
-        )
+        let params_str = serde_json::to_string_pretty(&req.params)
+            .unwrap_or_else(|_| format!("{:?}", req.params));
+
+        Column::new()
+            .gap(0.5)
+            .width(Dimension::Percent(100.0))
+            .child(
+                RichText::new()
+                    .span("Tool: ", Style::new().fg(Color::Rgb(136, 136, 136)))
+                    .span(
+                        &req.tool_name,
+                        Style::new().fg(Color::Rgb(58, 224, 221)).bold(),
+                    )
+                    .fill_width(),
+            )
+            .child(
+                RichText::new()
+                    .span("Risk: ", Style::new().fg(Color::Rgb(136, 136, 136)))
+                    .span(&risk_pct, Style::new().fg(risk_color).bold())
+                    .span("  Blast: ", Style::new().fg(Color::Rgb(136, 136, 136)))
+                    .span(&req.blast_radius, Style::default())
+                    .span("  Reversible: ", Style::new().fg(Color::Rgb(136, 136, 136)))
+                    .span(reversible_text, Style::default())
+                    .fill_width(),
+            )
+            .child(
+                RichText::new()
+                    .span(
+                        &req.reasoning,
+                        Style {
+                            dim: true,
+                            ..Style::new()
+                        },
+                    )
+                    .fill_width(),
+            )
+            .child(MarkdownView::new(format!("```json\n{}\n```", params_str)))
     }
 
     fn hex_gauge(&self) -> String {
@@ -1499,6 +1684,61 @@ impl PorygonTui {
             col = col.child(card);
         }
 
+        // Tool call cards
+        for tool in &self.tool_calls {
+            let (status_icon, status_color, status_text) = match tool.status {
+                ToolStatus::Pending => ("◷", Color::Rgb(249, 226, 175), "pending"),
+                ToolStatus::Approved => ("✓", Color::Rgb(166, 227, 161), "approved"),
+                ToolStatus::Rejected => ("✗", Color::Rgb(255, 93, 110), "rejected"),
+                ToolStatus::Running => ("⟳", Color::Rgb(58, 224, 221), "running"),
+                ToolStatus::Completed => ("✓", Color::Rgb(166, 227, 161), "completed"),
+                ToolStatus::Failed => ("✗", Color::Rgb(255, 93, 110), "failed"),
+            };
+
+            let header = RichText::new()
+                .span("🔧 ", Style::default())
+                .span(&tool.name, Style::new().fg(Color::Rgb(58, 224, 221)).bold())
+                .span(
+                    format!(" [{status_icon} {status_text}]"),
+                    Style::new().fg(status_color),
+                )
+                .fill_width();
+
+            let mut body_col = Column::new().gap(0.0);
+            if !tool.args.is_empty() {
+                body_col =
+                    body_col.child(MarkdownView::new(format!("```json\n{}\n```", tool.args)));
+            }
+            if let Some(ref result) = tool.result {
+                body_col = body_col.child(
+                    RichText::new()
+                        .span("Result: ", Style::new().bold())
+                        .span(result, Style::default())
+                        .fill_width(),
+                );
+            }
+
+            let tool_card = Column::new()
+                .bg(Color::Rgb(35, 35, 42))
+                .border(BorderStyle::thin())
+                .border_color(status_color)
+                .padding(0.5)
+                .width(Dimension::Percent(100.0))
+                .child(header);
+
+            // Show args/result expanded for non-completed items, collapsed otherwise
+            if !tool.args.is_empty() || tool.result.is_some() {
+                col = col.child(
+                    Column::new()
+                        .width(Dimension::Percent(100.0))
+                        .child(tool_card)
+                        .child(body_col),
+                );
+            } else {
+                col = col.child(tool_card);
+            }
+        }
+
         if self.waiting_response {
             col = col.child(
                 Row::new()
@@ -1932,6 +2172,82 @@ impl PorygonTui {
                     match recall_memory(&client, &daemon_url, &query).await {
                         Ok(results) => Msg::MemoryRecalled(results),
                         Err(err) => Msg::MemoryError(err),
+                    }
+                })
+            }
+            CommandAction::FetchTools => {
+                if !self.connected {
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: "Not connected to daemon. Cannot fetch tools.".into(),
+                        timestamp: format_timestamp(),
+                    });
+                    self.auto_scroll_chat();
+                    return Cmd::none();
+                }
+                let daemon_url = self.daemon_url.clone();
+                let client = self.client.clone();
+                Cmd::spawn(async move {
+                    match fetch_tools(&client, &daemon_url).await {
+                        Ok(tools) => Msg::ToolsFetched(tools),
+                        Err(err) => Msg::ToolsError(err),
+                    }
+                })
+            }
+            CommandAction::FetchToolDetails { name } => {
+                if !self.connected {
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: "Not connected to daemon. Cannot fetch tool details.".into(),
+                        timestamp: format_timestamp(),
+                    });
+                    self.auto_scroll_chat();
+                    return Cmd::none();
+                }
+                let daemon_url = self.daemon_url.clone();
+                let client = self.client.clone();
+                Cmd::spawn(async move {
+                    match fetch_tool_details(&client, &daemon_url, &name).await {
+                        Ok(tool) => Msg::ToolDetailsFetched(tool),
+                        Err(err) => Msg::ToolsError(err),
+                    }
+                })
+            }
+            CommandAction::FetchMcpStatus => {
+                if !self.connected {
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: "Not connected to daemon. Cannot fetch MCP status.".into(),
+                        timestamp: format_timestamp(),
+                    });
+                    self.auto_scroll_chat();
+                    return Cmd::none();
+                }
+                let daemon_url = self.daemon_url.clone();
+                let client = self.client.clone();
+                Cmd::spawn(async move {
+                    match fetch_mcp_status(&client, &daemon_url).await {
+                        Ok(servers) => Msg::McpStatusFetched(servers),
+                        Err(err) => Msg::ToolsError(err),
+                    }
+                })
+            }
+            CommandAction::FetchMcpTools => {
+                if !self.connected {
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: "Not connected to daemon. Cannot fetch MCP tools.".into(),
+                        timestamp: format_timestamp(),
+                    });
+                    self.auto_scroll_chat();
+                    return Cmd::none();
+                }
+                let daemon_url = self.daemon_url.clone();
+                let client = self.client.clone();
+                Cmd::spawn(async move {
+                    match fetch_mcp_tools(&client, &daemon_url).await {
+                        Ok(tools) => Msg::McpToolsFetched(tools),
+                        Err(err) => Msg::ToolsError(err),
                     }
                 })
             }
@@ -2565,6 +2881,72 @@ async fn recall_memory(
     let response = client
         .post(&url)
         .json(&payload)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("daemon returned {}", response.status()));
+    }
+    response.json().await.map_err(|e| e.to_string())
+}
+
+async fn fetch_tools(client: &reqwest::Client, daemon_url: &str) -> Result<Vec<ToolInfo>, String> {
+    let url = format!("{daemon_url}/tools/list");
+    let response = client
+        .get(&url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("daemon returned {}", response.status()));
+    }
+    response.json().await.map_err(|e| e.to_string())
+}
+
+async fn fetch_tool_details(
+    client: &reqwest::Client,
+    daemon_url: &str,
+    name: &str,
+) -> Result<ToolInfo, String> {
+    let url = format!("{daemon_url}/tools/{name}");
+    let response = client
+        .get(&url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("daemon returned {}", response.status()));
+    }
+    response.json().await.map_err(|e| e.to_string())
+}
+
+async fn fetch_mcp_status(
+    client: &reqwest::Client,
+    daemon_url: &str,
+) -> Result<Vec<McpServerInfo>, String> {
+    let url = format!("{daemon_url}/mcp/status");
+    let response = client
+        .get(&url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("daemon returned {}", response.status()));
+    }
+    response.json().await.map_err(|e| e.to_string())
+}
+
+async fn fetch_mcp_tools(
+    client: &reqwest::Client,
+    daemon_url: &str,
+) -> Result<Vec<ToolInfo>, String> {
+    let url = format!("{daemon_url}/mcp/tools");
+    let response = client
+        .get(&url)
         .timeout(Duration::from_secs(5))
         .send()
         .await

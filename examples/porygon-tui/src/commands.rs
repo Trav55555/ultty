@@ -35,6 +35,14 @@ pub enum CommandAction {
     StoreMemory { text: String },
     /// Search memories via the daemon.
     RecallMemory { query: String },
+    /// Fetch tool registry from daemon.
+    FetchTools,
+    /// Fetch details for a specific tool.
+    FetchToolDetails { name: String },
+    /// Fetch MCP server status.
+    FetchMcpStatus,
+    /// Fetch MCP tools list.
+    FetchMcpTools,
 }
 
 /// Metadata for a registered command.
@@ -102,6 +110,26 @@ impl CommandRegistry {
                     name: "clear",
                     description: "Clear chat history",
                     usage: "/clear",
+                },
+                Command {
+                    name: "tools",
+                    description: "List available tools",
+                    usage: "/tools",
+                },
+                Command {
+                    name: "tool",
+                    description: "Show tool details",
+                    usage: "/tool <name>",
+                },
+                Command {
+                    name: "mcp",
+                    description: "MCP server status",
+                    usage: "/mcp",
+                },
+                Command {
+                    name: "mcp-tools",
+                    description: "List MCP tools",
+                    usage: "/mcp-tools",
                 },
             ],
         }
@@ -177,6 +205,20 @@ impl CommandRegistry {
                 "/models is not yet implemented.".to_string(),
             )),
             "clear" => Some(CommandAction::ClearChat),
+            "tools" => Some(CommandAction::FetchTools),
+            "tool" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /tool <name>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::FetchToolDetails {
+                        name: args.join(" "),
+                    })
+                }
+            }
+            "mcp" => Some(CommandAction::FetchMcpStatus),
+            "mcp-tools" => Some(CommandAction::FetchMcpTools),
             _ => Some(CommandAction::SystemMessage(format!(
                 "Unknown command: /{command_name}. Type /help for help."
             ))),

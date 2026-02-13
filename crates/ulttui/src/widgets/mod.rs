@@ -3,6 +3,7 @@
 mod badge;
 mod button;
 mod checkbox;
+mod collapsible;
 mod container;
 mod divider;
 mod dock;
@@ -25,6 +26,7 @@ mod typography;
 pub use badge::{Badge, BadgeVariant};
 pub use button::Button;
 pub use checkbox::Checkbox;
+pub use collapsible::Collapsible;
 pub use container::{Column, Row, Stack};
 pub use divider::Divider;
 pub use dock::DockLayout;

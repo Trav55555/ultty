@@ -109,12 +109,12 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 
 ### FP Phase 3 — Tool Visibility (P1, ~12-15 hrs)
 
-- [ ] 3.1: Framework: Rich modal body (View instead of String) — `ulttui/src/widgets/modal.rs`
-- [ ] 3.2: Framework: Collapsible widget — new `ulttui/src/widgets/collapsible.rs`
-- [ ] 3.3: App: Tool execution display in chat
-- [ ] 3.4: App: Enhanced approval modal with rich content
-- [ ] 3.5: App: Tool registry browser (`/tools`)
-- [ ] 3.6: App: MCP server status panel (`/mcp`)
+- [x] 3.1: Framework: Rich modal body (`body_view()` method) — `ulttui/src/widgets/modal.rs`
+- [x] 3.2: Framework: Collapsible widget — new `ulttui/src/widgets/collapsible.rs`
+- [x] 3.3: App: Tool execution display in chat (ToolCall struct, status tracking, inline cards)
+- [x] 3.4: App: Enhanced approval modal with rich content (risk badge, code-block params)
+- [x] 3.5: App: Tool registry browser (`/tools`, `/tool <name>`)
+- [x] 3.6: App: MCP server status panel (`/mcp`, `/mcp-tools`)
 
 ### FP Phase 4 — Project Context (P1, ~15-20 hrs)
 
@@ -153,8 +153,8 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 |-------|-------|------|-----------|------------|
 | Visual Parity | 18 | 18 | 0 | 0 |
 | Tech Debt | 21 | 8 | 13 | ~10 |
-| Feature Parity | 38 | 15 | 23 | ~63-88 |
-| **Total** | **77** | **41** | **36** | **~73-98** |
+| Feature Parity | 38 | 21 | 17 | ~51-73 |
+| **Total** | **77** | **47** | **30** | **~61-83** |
 
 ## Recommended Order
 
@@ -162,6 +162,6 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 2. ~~**Feature Parity 1.1-1.10** — Streaming foundation (protocol → terminal → framework → app)~~ ✅
 3. ~~**Feature Parity 2.1-2.5** — Session & memory commands~~ ✅
 4. ~~**Tech Debt 2.1-2.6** — Split native_render.rs~~ ✅
-5. **Feature Parity 3.1-3.6** — Tool visibility ← **NEXT**
-6. **Feature Parity 4.1-4.5** — Project context
+5. ~~**Feature Parity 3.1-3.6** — Tool visibility~~ ✅
+6. **Feature Parity 4.1-4.5** — Project context ← **NEXT**
 7. Remaining tech debt + FP phases 5-7 interleaved

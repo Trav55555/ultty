@@ -55,8 +55,8 @@ pub mod prelude {
     pub use crate::toast::{Toast, ToastOverlay, ToastSeverity};
     pub use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
     pub use crate::widgets::{
-        Accent, Badge, BadgeVariant, Body, Button, Card, Divider, DockLayout, Inset, List,
-        MarkdownView, Modal, Muted, ProgressBar, ScrollView, Section, Spacer, Spinner, Table,
+        Accent, Badge, BadgeVariant, Body, Button, Card, Collapsible, Divider, DockLayout, Inset,
+        List, MarkdownView, Modal, Muted, ProgressBar, ScrollView, Section, Spacer, Spinner, Table,
         Tabs, Text, TextInput, Title, View,
     };
 
