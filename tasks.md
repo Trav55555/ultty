@@ -41,12 +41,12 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 
 ### TD Phase 2 — Split `native_render.rs`
 
-- [ ] 2.1: Create `RenderContext` struct — `crates/ultty/src/renderer/native_render.rs`
-- [ ] 2.2: Extract syntax tokenizer → `native_render/syntax.rs`
-- [ ] 2.3: Extract markdown GPU renderer → `native_render/markdown.rs`
-- [ ] 2.4: Extract code renderer → `native_render/code.rs`
-- [ ] 2.5: Extract border generation → `native_render/borders.rs`
-- [ ] 2.6: Extract widget content dispatch → `native_render/widgets.rs`
+- [x] 2.1: Create `RenderContext` struct — `crates/ultty/src/renderer/native_render.rs`
+- [x] 2.2: Extract syntax tokenizer → `native_render/syntax.rs`
+- [x] 2.3: Extract markdown GPU renderer → `native_render/markdown.rs`
+- [x] 2.4: Extract code renderer → `native_render/code.rs`
+- [x] 2.5: Extract border generation → `native_render/borders.rs`
+- [x] 2.6: Extract widget content dispatch → `native_render/widgets.rs`
 
 ### TD Phase 3 — Deduplicate
 
@@ -101,11 +101,11 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 
 ### FP Phase 2 — Session & Memory (P0, ~10-15 hrs)
 
-- [ ] 2.1: App: Slash command parser — new `porygon-tui/src/commands.rs`
-- [ ] 2.2: App: Session list and resume (`/sessions`, `/resume`)
-- [ ] 2.3: App: Memory commands (`/remember`, `/recall`)
-- [ ] 2.4: App: Auto-save session on exit
-- [ ] 2.5: App: Input autocomplete for slash commands
+- [x] 2.1: App: Slash command parser — new `porygon-tui/src/commands.rs`
+- [x] 2.2: App: Session list and resume (`/sessions`, `/resume`, `/save`, `/clear`)
+- [x] 2.3: App: Memory commands (`/remember`, `/recall`)
+- [x] 2.4: App: Auto-save session on exit — `Cmd::Quit` + `Event::Quit` forwarding
+- [x] 2.5: App: Input autocomplete for slash commands
 
 ### FP Phase 3 — Tool Visibility (P1, ~12-15 hrs)
 
@@ -152,17 +152,16 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 | Track | Total | Done | Remaining | Est. Hours |
 |-------|-------|------|-----------|------------|
 | Visual Parity | 18 | 18 | 0 | 0 |
-| Tech Debt | 21 | 2 | 19 | ~14 |
-| Feature Parity | 38 | 10 | 28 | ~73-103 |
-| **Total** | **77** | **30** | **47** | **~87-117** |
+| Tech Debt | 21 | 8 | 13 | ~10 |
+| Feature Parity | 38 | 15 | 23 | ~63-88 |
+| **Total** | **77** | **41** | **36** | **~73-98** |
 
 ## Recommended Order
 
 1. ~~**Tech Debt 1.1-1.2** — Fix red tests + clippy~~ ✅
 2. ~~**Feature Parity 1.1-1.10** — Streaming foundation (protocol → terminal → framework → app)~~ ✅
-3. **Feature Parity 2.1** — Slash command system (unblocks all Phase 2-6 app work) ← **NEXT**
-4. **Feature Parity 2.2-2.5** — Session + memory
-5. **Tech Debt 2.1-2.6** — Split native_render.rs (before adding more renderer code)
-6. **Feature Parity 3.1-3.6** — Tool visibility
-7. **Feature Parity 4.1-4.5** — Project context
-8. Remaining tech debt + FP phases 5-7 interleaved
+3. ~~**Feature Parity 2.1-2.5** — Session & memory commands~~ ✅
+4. ~~**Tech Debt 2.1-2.6** — Split native_render.rs~~ ✅
+5. **Feature Parity 3.1-3.6** — Tool visibility ← **NEXT**
+6. **Feature Parity 4.1-4.5** — Project context
+7. Remaining tech debt + FP phases 5-7 interleaved
