@@ -158,13 +158,11 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 
 ## Recommended Order
 
-1. **Tech Debt 1.1-1.2** — Fix red tests + clippy (unblocks CI)
-2. **Feature Parity 1.1-1.4** — Protocol + terminal streaming primitives
-3. **Feature Parity 1.5-1.8** — Framework streaming support
-4. **Feature Parity 1.9-1.10** — App streaming integration
-5. **Feature Parity 2.1** — Slash command system (unblocks all Phase 2-6 app work)
-6. **Feature Parity 2.2-2.5** — Session + memory
-7. **Tech Debt 2.1-2.6** — Split native_render.rs (before adding more renderer code)
-8. **Feature Parity 3.1-3.6** — Tool visibility
-9. **Feature Parity 4.1-4.5** — Project context
-10. Remaining tech debt + FP phases 5-7 interleaved
+1. ~~**Tech Debt 1.1-1.2** — Fix red tests + clippy~~ ✅
+2. ~~**Feature Parity 1.1-1.10** — Streaming foundation (protocol → terminal → framework → app)~~ ✅
+3. **Feature Parity 2.1** — Slash command system (unblocks all Phase 2-6 app work) ← **NEXT**
+4. **Feature Parity 2.2-2.5** — Session + memory
+5. **Tech Debt 2.1-2.6** — Split native_render.rs (before adding more renderer code)
+6. **Feature Parity 3.1-3.6** — Tool visibility
+7. **Feature Parity 4.1-4.5** — Project context
+8. Remaining tech debt + FP phases 5-7 interleaved

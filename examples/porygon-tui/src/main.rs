@@ -3,12 +3,13 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use ulttui::event::{Event, Key};
 use ulttui::prelude::*;
+use ulttui::theme::{ButtonTheme, ControlTheme, DesignTokens, InputTheme, SelectionTheme, Theme};
 use ulttui::toast::Toast;
-use ulttui::theme::{
-    ButtonTheme, ControlTheme, DesignTokens, InputTheme, SelectionTheme, Theme,
-};
 use ulttui::widgets::{RichText, Stack};
 use ultty_protocol::{BorderEdges, BorderStyle, BorderType, Color, Dimension};
+
+mod commands;
+use commands::{CommandAction, CommandRegistry};
 
 fn porygon_theme() -> Theme {
     let primary = Color::Rgb(255, 93, 110); // Coral
@@ -75,11 +76,26 @@ fn porygon_theme() -> Theme {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct ChatMessage {
     role: String,
     content: String,
     timestamp: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SessionInfo {
+    id: String,
+    name: Option<String>,
+    date: Option<String>,
+    message_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MemoryResult {
+    content: String,
+    score: Option<f64>,
+    timestamp: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -207,28 +223,22 @@ impl Screen for SplashScreen {
             .padding(2.0)
             .justify_center()
             .child(logo)
-            .child(
-                RichText::new().span(
-                    "Digital Evolution Interface // PORYGON-OS v1.4.2",
-                    Style::new().bold().fg(Color::Rgb(58, 224, 221)),
-                ),
-            )
+            .child(RichText::new().span(
+                "Digital Evolution Interface // PORYGON-OS v1.4.2",
+                Style::new().bold().fg(Color::Rgb(58, 224, 221)),
+            ))
             .child(Divider::horizontal())
             .child(boot_container)
             .child(Divider::horizontal())
-            .child(
-                RichText::new().span(
-                    prompt_text,
-                    Style::new().bold().fg(Color::Rgb(58, 224, 221)),
-                ),
-            )
+            .child(RichText::new().span(
+                prompt_text,
+                Style::new().bold().fg(Color::Rgb(58, 224, 221)),
+            ))
     }
 
     fn on_event(&mut self, event: &Event) -> ScreenAction {
         match event {
-            Event::Key(ke) if ke.key == Key::Enter && self.boot_complete() => {
-                ScreenAction::Dismiss
-            }
+            Event::Key(ke) if ke.key == Key::Enter && self.boot_complete() => ScreenAction::Dismiss,
             _ => ScreenAction::Continue,
         }
     }
@@ -282,12 +292,15 @@ struct PorygonTui {
     terminal_width: u16,
     terminal_height: u16,
     started_connection_msg: bool,
+    command_registry: CommandRegistry,
+    session_id: Option<String>,
+    suggestions: Vec<(String, String)>,
 }
 
 impl PorygonTui {
     fn new() -> Self {
-        let daemon_url = std::env::var("PORYGON_URL")
-            .unwrap_or_else(|_| "http://localhost:18789".to_string());
+        let daemon_url =
+            std::env::var("PORYGON_URL").unwrap_or_else(|_| "http://localhost:18789".to_string());
 
         Self {
             messages: vec![ChatMessage {
@@ -334,6 +347,9 @@ impl PorygonTui {
             terminal_width: 200,
             terminal_height: 50,
             started_connection_msg: false,
+            command_registry: CommandRegistry::new(),
+            session_id: None,
+            suggestions: Vec::new(),
         }
     }
 }
@@ -362,6 +378,14 @@ enum Msg {
     StreamComplete,
     StreamError(String),
     AbortStream,
+    SessionsFetched(Vec<SessionInfo>),
+    SessionResumed(Vec<ChatMessage>),
+    SessionSaved,
+    SessionError(String),
+    MemoryStored,
+    MemoryRecalled(Vec<MemoryResult>),
+    MemoryError(String),
+    ExitRequested,
 }
 
 impl Application for PorygonTui {
@@ -386,19 +410,28 @@ impl Application for PorygonTui {
                 }
 
                 let user_text = self.input.submit_value();
+                self.suggestions.clear();
                 self.messages.push(ChatMessage {
                     role: "user".into(),
                     content: user_text.clone(),
                     timestamp: format_timestamp(),
                 });
-                // Always jump to bottom when user sends a message
                 self.update_scroll_dimensions();
                 self.chat_scroll.scroll_to_bottom();
+
+                // Check if this is a slash command
+                if user_text.starts_with('/') {
+                    if let Some(action) = self.command_registry.parse(&user_text) {
+                        return self.handle_command_action(action);
+                    }
+                }
 
                 if !self.connected {
                     self.messages.push(ChatMessage {
                         role: "system".into(),
-                        content: "No daemon connected. Messages will be sent once a daemon is available.".into(),
+                        content:
+                            "No daemon connected. Messages will be sent once a daemon is available."
+                                .into(),
                         timestamp: format_timestamp(),
                     });
                     self.auto_scroll_chat();
@@ -433,7 +466,9 @@ impl Application for PorygonTui {
             Msg::PollConnection => {
                 let url = self.daemon_url.clone();
                 let client = self.client.clone();
-                Cmd::spawn(async move { Msg::ConnectionChecked(check_connection(&client, &url).await) })
+                Cmd::spawn(
+                    async move { Msg::ConnectionChecked(check_connection(&client, &url).await) },
+                )
             }
             Msg::PollStatus => {
                 let url = self.daemon_url.clone();
@@ -443,7 +478,11 @@ impl Application for PorygonTui {
                         Ok(status) => Msg::StatusUpdated(status),
                         Err(_) => {
                             let (cpu, ram) = get_system_stats();
-                            Msg::StatusUpdated(AgentStatus { cpu_usage: cpu, ram_usage: ram, ..AgentStatus::default() })
+                            Msg::StatusUpdated(AgentStatus {
+                                cpu_usage: cpu,
+                                ram_usage: ram,
+                                ..AgentStatus::default()
+                            })
                         }
                     }
                 })
@@ -455,9 +494,7 @@ impl Application for PorygonTui {
                     match fetch_pending_approval(&client, &url).await {
                         Ok(Some(request)) => Msg::ApprovalReceived(request),
                         Ok(None) => Msg::NoApprovalsPending,
-                        Err(_) => {
-                            Msg::NoApprovalsPending
-                        }
+                        Err(_) => Msg::NoApprovalsPending,
                     }
                 })
             }
@@ -658,6 +695,133 @@ impl Application for PorygonTui {
             }
             Msg::ApprovalSubmitted => Cmd::none(),
             Msg::NoApprovalsPending => Cmd::none(),
+            Msg::SessionsFetched(sessions) => {
+                let mut table = String::from("**Saved Sessions:**\n\n");
+                if sessions.is_empty() {
+                    table.push_str("No saved sessions found.");
+                } else {
+                    table.push_str("| ID | Name | Date | Messages |\n");
+                    table.push_str("|---|---|---|---|\n");
+                    for session in sessions {
+                        let name = session.name.unwrap_or_else(|| "Unnamed".to_string());
+                        let date = session.date.unwrap_or_else(|| "Unknown".to_string());
+                        let count = session.message_count.unwrap_or(0);
+                        table.push_str(&format!(
+                            "| {} | {} | {} | {} |\n",
+                            session.id, name, date, count
+                        ));
+                    }
+                    table.push_str("\nUse `/resume <id>` to load a session.");
+                }
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: table,
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::none()
+            }
+            Msg::SessionResumed(messages) => {
+                self.messages = messages;
+                self.messages.insert(
+                    0,
+                    ChatMessage {
+                        role: "system".into(),
+                        content: "Session resumed.".into(),
+                        timestamp: format_timestamp(),
+                    },
+                );
+                self.auto_scroll_chat();
+                Cmd::ShowToast(Toast::success("Session resumed"))
+            }
+            Msg::SessionSaved => {
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: "Session saved successfully.".into(),
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::ShowToast(Toast::success("Session saved"))
+            }
+            Msg::SessionError(err) => {
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: format!("Session error: {err}"),
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::ShowToast(Toast::error(format!("Session error: {err}")))
+            }
+            Msg::MemoryStored => {
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: "Memory stored successfully.".into(),
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::ShowToast(Toast::success("Memory stored"))
+            }
+            Msg::MemoryRecalled(results) => {
+                if results.is_empty() {
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: "No matching memories found.".into(),
+                        timestamp: format_timestamp(),
+                    });
+                } else {
+                    let mut formatted = String::from("**Memory Results:**\n\n");
+                    for result in results {
+                        formatted.push_str(&format!("• {}", result.content));
+                        if let Some(score) = result.score {
+                            formatted.push_str(&format!(" (score: {:.2})", score));
+                        }
+                        if let Some(timestamp) = result.timestamp {
+                            formatted.push_str(&format!(" — {}", timestamp));
+                        }
+                        formatted.push_str("\n\n");
+                    }
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: formatted,
+                        timestamp: format_timestamp(),
+                    });
+                }
+                self.auto_scroll_chat();
+                Cmd::none()
+            }
+            Msg::MemoryError(err) => {
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: format!("Memory error: {err}"),
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::ShowToast(Toast::error(format!("Memory error: {err}")))
+            }
+            Msg::ExitRequested => {
+                if self.connected && self.messages.len() > 1 {
+                    let daemon_url = self.daemon_url.clone();
+                    let client = self.client.clone();
+                    let session_id = self.session_id.clone();
+                    let messages = self.messages[1..].to_vec();
+                    Cmd::batch(vec![
+                        Cmd::spawn(async move {
+                            let _ = save_session(
+                                &client,
+                                &daemon_url,
+                                session_id.as_deref(),
+                                None,
+                                &messages,
+                            )
+                            .await;
+                            Msg::SessionSaved
+                        }),
+                        Cmd::Quit,
+                    ])
+                } else {
+                    Cmd::Quit
+                }
+            }
         }
     }
 
@@ -691,6 +855,7 @@ impl Application for PorygonTui {
         }
 
         match event {
+            Event::Quit => Some(Msg::ExitRequested),
             Event::Resize { width, height } => {
                 self.terminal_width = *width;
                 self.terminal_height = *height;
@@ -699,6 +864,17 @@ impl Application for PorygonTui {
             Event::Submit { id } if id == "chat-input" => Some(Msg::SendMessage),
             Event::Change { id, value } if id == "chat-input" => {
                 self.input.set_value(value.clone());
+                if value.starts_with('/') {
+                    self.suggestions = self
+                        .command_registry
+                        .completions(value)
+                        .iter()
+                        .take(5)
+                        .map(|cmd| (format!("/{}", cmd.name), cmd.description.to_string()))
+                        .collect();
+                } else {
+                    self.suggestions.clear();
+                }
                 None
             }
             Event::Mouse(mouse) => {
@@ -717,6 +893,14 @@ impl Application for PorygonTui {
             }
             Event::Key(ke) => {
                 match ke.key {
+                    Key::Tab if !self.suggestions.is_empty() => {
+                        if let Some((first, _)) = self.suggestions.first() {
+                            let completed = format!("{} ", first);
+                            self.input.set_value(completed);
+                            self.suggestions.clear();
+                        }
+                        return None;
+                    }
                     Key::PageUp => {
                         self.update_scroll_dimensions();
                         let vh = self.chat_scroll.viewport_height();
@@ -753,8 +937,7 @@ impl Application for PorygonTui {
             .child(self.input_view())
             .child(Divider::horizontal())
             .child(self.status_bar_view());
-        let mut chat_area = ScrollView::new()
-            .child(self.messages_view());
+        let mut chat_area = ScrollView::new().child(self.messages_view());
         // Transfer scroll state from persistent field
         let (_, scroll_y) = self.chat_scroll.scroll_position();
         if scroll_y > 0.0 {
@@ -770,8 +953,7 @@ impl Application for PorygonTui {
             .child(chat_area)
             .child(bottom_bar);
 
-        let mut dock = DockLayout::new()
-            .dock_top(self.header_view().flex_shrink(0.0));
+        let mut dock = DockLayout::new().dock_top(self.header_view().flex_shrink(0.0));
 
         if self.terminal_width >= 80 {
             dock = dock.dock_right(self.sidebar_view());
@@ -827,7 +1009,11 @@ impl PorygonTui {
     fn hex_gauge(&self) -> String {
         let count = 5usize;
         let idx = self.spinner_frame % (count * 2);
-        let filled = if idx < count { idx + 1 } else { count * 2 - idx - 1 };
+        let filled = if idx < count {
+            idx + 1
+        } else {
+            count * 2 - idx - 1
+        };
         let mut s = String::new();
         for i in 0..count {
             s.push_str(if i < filled { "⬢" } else { "⬡" });
@@ -849,10 +1035,7 @@ impl PorygonTui {
             .span(format!(" {} ", conn_icon), Style::new().fg(conn_color));
 
         if self.waiting_response {
-            header = header.span(
-                format!(" {} ", self.hex_gauge()),
-                white.clone(),
-            );
+            header = header.span(format!(" {} ", self.hex_gauge()), white.clone());
         }
 
         Row::new()
@@ -861,10 +1044,7 @@ impl PorygonTui {
             .flex_shrink(0.0)
             .child(header)
             .child(Spacer)
-            .child(RichText::new().span(
-                format!(" {} ", self.clock_text),
-                white,
-            ))
+            .child(RichText::new().span(format!(" {} ", self.clock_text), white))
     }
 
     fn weather_view(&self) -> Column {
@@ -889,10 +1069,7 @@ impl PorygonTui {
                 Column::new()
                     .align_center()
                     .width(Dimension::Percent(100.0))
-                    .child(
-                        RichText::new()
-                            .span("WEATHER", Style::new().fg(cyan).bold()),
-                    ),
+                    .child(RichText::new().span("WEATHER", Style::new().fg(cyan).bold())),
             );
             panel = panel.child(
                 Column::new()
@@ -904,7 +1081,13 @@ impl PorygonTui {
                                 format!("{} {}°C {}", w.emoji, w.temp_c, w.description),
                                 Style::default(),
                             )
-                            .span(city_str, Style { dim: true, ..Style::new() }),
+                            .span(
+                                city_str,
+                                Style {
+                                    dim: true,
+                                    ..Style::new()
+                                },
+                            ),
                     ),
             );
             if let Some(today) = w.forecast.first() {
@@ -914,14 +1097,8 @@ impl PorygonTui {
                         .width(Dimension::Percent(100.0))
                         .child(
                             RichText::new()
-                                .span(
-                                    format!("H:{}° ", today.1),
-                                    Style::new().fg(coral),
-                                )
-                                .span(
-                                    format!("L:{}°", today.2),
-                                    Style::new().fg(cyan),
-                                ),
+                                .span(format!("H:{}° ", today.1), Style::new().fg(coral))
+                                .span(format!("L:{}°", today.2), Style::new().fg(cyan)),
                         ),
                 );
             }
@@ -935,8 +1112,7 @@ impl PorygonTui {
                 // Downsample with cosine interpolation
                 let mut samples = Vec::with_capacity(sample_count);
                 for i in 0..sample_count {
-                    let t = i as f64 / (sample_count - 1).max(1) as f64
-                        * (n - 1).max(0) as f64;
+                    let t = i as f64 / (sample_count - 1).max(1) as f64 * (n - 1).max(0) as f64;
                     let idx = t.floor() as usize;
                     let frac = t - idx as f64;
                     let a = w.hourly_temps[idx.min(n - 1)];
@@ -961,10 +1137,8 @@ impl PorygonTui {
 
                 // Plot data points
                 for (i, &temp) in samples.iter().enumerate() {
-                    let norm =
-                        ((temp - data_min) / data_range).clamp(0.0, 1.0);
-                    let y = ((1.0 - norm) * (y_levels - 1) as f64).round()
-                        as usize;
+                    let norm = ((temp - data_min) / data_range).clamp(0.0, 1.0);
+                    let y = ((1.0 - norm) * (y_levels - 1) as f64).round() as usize;
                     let y = y.min(y_levels - 1);
 
                     let text_row = y / 4;
@@ -1015,11 +1189,8 @@ impl PorygonTui {
 
                 // Add 0°C horizontal line if it falls within data range
                 if data_min < 0.0 && data_max > 0.0 {
-                    let zero_norm =
-                        ((0.0 - data_min) / data_range).clamp(0.0, 1.0);
-                    let zero_y = ((1.0 - zero_norm)
-                        * (y_levels - 1) as f64)
-                        .round() as usize;
+                    let zero_norm = ((0.0 - data_min) / data_range).clamp(0.0, 1.0);
+                    let zero_y = ((1.0 - zero_norm) * (y_levels - 1) as f64).round() as usize;
                     let zero_y = zero_y.min(y_levels - 1);
                     let zero_row = zero_y / 4;
                     let zero_y_in_char = zero_y % 4;
@@ -1050,11 +1221,8 @@ impl PorygonTui {
                 // Scale labels for each row
                 // Find which row contains the 0°C line
                 let zero_row_idx = if data_min < 0.0 && data_max > 0.0 {
-                    let zero_norm =
-                        ((0.0 - data_min) / data_range).clamp(0.0, 1.0);
-                    let zero_y = ((1.0 - zero_norm)
-                        * (y_levels - 1) as f64)
-                        .round() as usize;
+                    let zero_norm = ((0.0 - data_min) / data_range).clamp(0.0, 1.0);
+                    let zero_y = ((1.0 - zero_norm) * (y_levels - 1) as f64).round() as usize;
                     Some(zero_y.min(y_levels - 1) / 4)
                 } else {
                     None
@@ -1066,8 +1234,7 @@ impl PorygonTui {
                             format!("{:>3}°", 0)
                         } else {
                             let mid_y = row as f64 * 4.0 + 2.0;
-                            let norm =
-                                1.0 - mid_y / (y_levels - 1) as f64;
+                            let norm = 1.0 - mid_y / (y_levels - 1) as f64;
                             let temp = data_min + norm * data_range;
                             format!("{:>3.0}°", temp)
                         }
@@ -1080,46 +1247,40 @@ impl PorygonTui {
                     // Y-axis label
                     rt = rt.span(
                         row_temps[row].clone(),
-                        Style { dim: true, ..Style::new() },
+                        Style {
+                            dim: true,
+                            ..Style::new()
+                        },
                     );
 
                     for col in 0..chart_width {
-                        let ch = char::from_u32(
-                            0x2800 + grid[row][col] as u32,
-                        )
-                        .unwrap_or(' ');
+                        let ch = char::from_u32(0x2800 + grid[row][col] as u32).unwrap_or(' ');
 
                         let color = if boundary_set.contains(&col) {
                             dim_line
                         } else {
-                            let avg =
-                                if char_temps[row][col].is_empty() {
-                                    data_min
-                                } else {
-                                    char_temps[row][col].iter().sum::<f64>()
-                                        / char_temps[row][col].len()
-                                            as f64
-                                };
-                            let t = ((avg - data_min) / data_range)
-                                .clamp(0.0, 1.0);
-                            let r =
-                                (58.0 + t * (255.0 - 58.0)) as u8;
-                            let g =
-                                (224.0 + t * (93.0 - 224.0)) as u8;
-                            let b =
-                                (221.0 + t * (110.0 - 221.0)) as u8;
+                            let avg = if char_temps[row][col].is_empty() {
+                                data_min
+                            } else {
+                                char_temps[row][col].iter().sum::<f64>()
+                                    / char_temps[row][col].len() as f64
+                            };
+                            let t = ((avg - data_min) / data_range).clamp(0.0, 1.0);
+                            let r = (58.0 + t * (255.0 - 58.0)) as u8;
+                            let g = (224.0 + t * (93.0 - 224.0)) as u8;
+                            let b = (221.0 + t * (110.0 - 221.0)) as u8;
                             Color::Rgb(r, g, b)
                         };
 
-                        rt = rt.span(
-                            ch.to_string(),
-                            Style::new().fg(color),
-                        );
+                        rt = rt.span(ch.to_string(), Style::new().fg(color));
                     }
                     panel = panel.child(rt.fill_width());
                 }
 
-                let dim_s = Style { dim: true, ..Style::new() };
+                let dim_s = Style {
+                    dim: true,
+                    ..Style::new()
+                };
 
                 // Day label row below chart (day-of-month numbers)
                 {
@@ -1130,8 +1291,7 @@ impl PorygonTui {
                         .unwrap_or_default()
                         .as_secs();
                     let time_t = secs as libc::time_t;
-                    let mut tm: libc::tm =
-                        unsafe { std::mem::zeroed() };
+                    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
                     unsafe { libc::localtime_r(&time_t, &mut tm) };
                     let today_mday = tm.tm_mday as usize;
 
@@ -1148,35 +1308,20 @@ impl PorygonTui {
                         let start = edges[seg];
                         let end = edges[seg + 1];
                         let span_w = end - start;
-                        let day_num =
-                            format!("{}", (today_mday + seg - 1) % 31 + 1);
+                        let day_num = format!("{}", (today_mday + seg - 1) % 31 + 1);
 
                         if span_w >= day_num.len() {
-                            let pad_left =
-                                (span_w - day_num.len()) / 2;
-                            let pad_right =
-                                span_w - day_num.len() - pad_left;
+                            let pad_left = (span_w - day_num.len()) / 2;
+                            let pad_right = span_w - day_num.len() - pad_left;
                             if pad_left > 0 {
-                                label_rt = label_rt.span(
-                                    " ".repeat(pad_left),
-                                    dim_s.clone(),
-                                );
+                                label_rt = label_rt.span(" ".repeat(pad_left), dim_s.clone());
                             }
-                            label_rt = label_rt.span(
-                                day_num,
-                                dim_s.clone(),
-                            );
+                            label_rt = label_rt.span(day_num, dim_s.clone());
                             if pad_right > 0 {
-                                label_rt = label_rt.span(
-                                    " ".repeat(pad_right),
-                                    dim_s.clone(),
-                                );
+                                label_rt = label_rt.span(" ".repeat(pad_right), dim_s.clone());
                             }
                         } else {
-                            label_rt = label_rt.span(
-                                day_num[..span_w].to_string(),
-                                dim_s.clone(),
-                            );
+                            label_rt = label_rt.span(day_num[..span_w].to_string(), dim_s.clone());
                         }
                     }
                     panel = panel.child(label_rt.fill_width());
@@ -1191,19 +1336,10 @@ impl PorygonTui {
                     };
                     panel = panel.child(
                         RichText::new()
-                            .span(
-                                format!("{day_num}  "),
-                                dim_s.clone(),
-                            )
-                            .span(
-                                format!("{h:>3}°"),
-                                Style::new().fg(coral),
-                            )
+                            .span(format!("{day_num}  "), dim_s.clone())
+                            .span(format!("{h:>3}°"), Style::new().fg(coral))
                             .span(" / ", dim_s.clone())
-                            .span(
-                                format!("{l:>3}°"),
-                                Style::new().fg(cyan),
-                            )
+                            .span(format!("{l:>3}°"), Style::new().fg(cyan))
                             .fill_width(),
                     );
                 }
@@ -1211,11 +1347,14 @@ impl PorygonTui {
         } else {
             panel = panel.child(
                 RichText::new()
+                    .span("WEATHER: ", Style::new().fg(cyan).bold())
                     .span(
-                        "WEATHER: ",
-                        Style::new().fg(cyan).bold(),
-                    )
-                    .span("Loading...", Style { dim: true, ..Style::new() }),
+                        "Loading...",
+                        Style {
+                            dim: true,
+                            ..Style::new()
+                        },
+                    ),
             );
         }
 
@@ -1228,7 +1367,10 @@ impl PorygonTui {
         let moon = moon_phase();
         let coral = Color::Rgb(255, 93, 110);
         let cyan = Color::Rgb(58, 224, 221);
-        let dim_s = Style { dim: true, ..Style::new() };
+        let dim_s = Style {
+            dim: true,
+            ..Style::new()
+        };
 
         // Rotating wheel: 7 visible slots, current phase at center (slot 3)
         // Each slot: emoji (2 cols) + gap (2 spaces) = 4 cols per slot
@@ -1267,14 +1409,8 @@ impl PorygonTui {
         // Next full moon info
         let full_rt = RichText::new()
             .span("🌕 ", Style::new().fg(Color::Rgb(249, 226, 175)))
-            .span(
-                moon.full_moon_date.to_string(),
-                Style::new().fg(coral),
-            )
-            .span(
-                format!(" ({}d)", moon.days_to_full),
-                dim_s,
-            );
+            .span(moon.full_moon_date.to_string(), Style::new().fg(coral))
+            .span(format!(" ({}d)", moon.days_to_full), dim_s);
 
         Column::new()
             .bg(Color::Rgb(26, 26, 29))
@@ -1286,19 +1422,13 @@ impl PorygonTui {
                 Column::new()
                     .align_center()
                     .width(Dimension::Percent(100.0))
-                    .child(
-                        RichText::new()
-                            .span("MOON", Style::new().fg(cyan).bold()),
-                    ),
+                    .child(RichText::new().span("MOON", Style::new().fg(cyan).bold())),
             )
             .child(
                 Column::new()
                     .align_center()
                     .width(Dimension::Percent(100.0))
-                    .child(
-                        RichText::new()
-                            .span(moon.name, Style::default()),
-                    ),
+                    .child(RichText::new().span(moon.name, Style::default())),
             )
             .child(
                 Column::new()
@@ -1316,7 +1446,10 @@ impl PorygonTui {
     }
 
     fn messages_view(&self) -> Column {
-        let mut col = Column::new().gap(0.5).padding(1.0).width(Dimension::Percent(100.0));
+        let mut col = Column::new()
+            .gap(0.5)
+            .padding(1.0)
+            .width(Dimension::Percent(100.0));
         for (i, msg) in self.messages.iter().enumerate() {
             let (prefix, fg_color, bg_color, bdr_color) = match msg.role.as_str() {
                 "user" => (
@@ -1362,9 +1495,7 @@ impl PorygonTui {
 
             let is_streaming_msg =
                 self.waiting_response && i + 1 == self.messages.len() && msg.role == "assistant";
-            card = card.child(
-                MarkdownView::new(msg.content.clone()).streaming(is_streaming_msg),
-            );
+            card = card.child(MarkdownView::new(msg.content.clone()).streaming(is_streaming_msg));
             col = col.child(card);
         }
 
@@ -1381,7 +1512,7 @@ impl PorygonTui {
     }
 
     fn input_view(&self) -> Column {
-        Column::new()
+        let mut col = Column::new()
             .gap(0.0)
             .child(
                 RichText::new().span(
@@ -1392,13 +1523,34 @@ impl PorygonTui {
                         .bold(),
                 ),
             )
-            .child(self.input.clone())
-            .child(
-                RichText::new().span(
-                    format!("  {}", self.daemon_url),
-                    Style::new().fg(Color::Rgb(136, 136, 136)),
-                ),
-            )
+            .child(self.input.clone());
+
+        if !self.suggestions.is_empty() {
+            let mut suggestions_col = Column::new()
+                .bg(Color::Rgb(45, 45, 50))
+                .padding(0.5)
+                .gap(0.0);
+            for (name, desc) in &self.suggestions {
+                suggestions_col = suggestions_col.child(
+                    RichText::new()
+                        .span(name, Style::new().fg(Color::Rgb(58, 224, 221)))
+                        .span(
+                            format!("  — {}", desc),
+                            Style {
+                                dim: true,
+                                ..Style::new()
+                            },
+                        )
+                        .fill_width(),
+                );
+            }
+            col = col.child(suggestions_col);
+        }
+
+        col.child(RichText::new().span(
+            format!("  {}", self.daemon_url),
+            Style::new().fg(Color::Rgb(136, 136, 136)),
+        ))
     }
 
     fn sidebar_view(&self) -> Column {
@@ -1439,7 +1591,10 @@ impl PorygonTui {
         };
         let pct = (ratio * 100.0).round() as u32;
 
-        let dim = Style { dim: true, ..Style::new() };
+        let dim = Style {
+            dim: true,
+            ..Style::new()
+        };
         let label_style = Style::new().fg(Color::Rgb(136, 136, 136));
 
         let mut cassette = Column::new()
@@ -1455,64 +1610,112 @@ impl PorygonTui {
                     .child(RichText::new().span(
                         "▚▚ CASSETTE STATUS ▚▚",
                         Style::new().fg(Color::Rgb(255, 93, 110)).bold(),
-                    ))
+                    )),
             )
             .child(conn_status.fill_width())
-            .child(RichText::new()
-                .span("MODEL:  ", label_style.clone())
-                .span(self.status.model.as_str(), Style::new().fg(Color::Rgb(247, 247, 247)))
-                .fill_width())
-            .child(RichText::new()
-                .span("AGENT:  ", label_style.clone())
-                .span(self.status.agent_name.as_str(), Style::new().fg(Color::Rgb(58, 224, 221)))
-                .fill_width())
-            .child(RichText::new()
-                .span("MODE:   ", label_style.clone())
-                .span("ACTIVE", Style::new().fg(Color::Rgb(255, 93, 110)).bold())
-                .fill_width())
+            .child(
+                RichText::new()
+                    .span("MODEL:  ", label_style.clone())
+                    .span(
+                        self.status.model.as_str(),
+                        Style::new().fg(Color::Rgb(247, 247, 247)),
+                    )
+                    .fill_width(),
+            )
+            .child(
+                RichText::new()
+                    .span("AGENT:  ", label_style.clone())
+                    .span(
+                        self.status.agent_name.as_str(),
+                        Style::new().fg(Color::Rgb(58, 224, 221)),
+                    )
+                    .fill_width(),
+            )
+            .child(
+                RichText::new()
+                    .span("MODE:   ", label_style.clone())
+                    .span("ACTIVE", Style::new().fg(Color::Rgb(255, 93, 110)).bold())
+                    .fill_width(),
+            )
             .child(Divider::horizontal())
-            .child(RichText::new()
-                .span("BUDGET: ", label_style.clone())
-                .span(
-                    format!("${:.2}", self.status.budget_usd),
-                    Style::default(),
-                ).fill_width())
-            .child(RichText::new()
-                .span("USAGE:  ", label_style.clone())
-                .span(&bar, Style::new().fg(bar_color))
-                .span(format!(" {pct}%"), dim.clone())
-                .fill_width())
-            .child(RichText::new()
-                .span("CPU     ", label_style.clone())
-                .span(
-                    format!("[{}{}]", "█".repeat((self.status.cpu_usage * 10.0).round() as usize), "░".repeat(10 - (self.status.cpu_usage * 10.0).round() as usize)),
-                    Style::new().fg(if self.status.cpu_usage > 0.8 { Color::Rgb(255, 93, 110) } else { Color::Rgb(166, 227, 161) })
-                )
-                .span(format!(" {:.0}%", self.status.cpu_usage * 100.0), dim.clone())
-                .fill_width())
-            .child(RichText::new()
-                .span("RAM     ", label_style.clone())
-                .span(
-                    format!("[{}{}]", "█".repeat((self.status.ram_usage * 10.0).round() as usize), "░".repeat(10 - (self.status.ram_usage * 10.0).round() as usize)),
-                    Style::new().fg(if self.status.ram_usage > 0.8 { Color::Rgb(255, 93, 110) } else { Color::Rgb(58, 224, 221) })
-                )
-                .span(format!(" {:.0}%", self.status.ram_usage * 100.0), dim.clone())
-                .fill_width())
+            .child(
+                RichText::new()
+                    .span("BUDGET: ", label_style.clone())
+                    .span(format!("${:.2}", self.status.budget_usd), Style::default())
+                    .fill_width(),
+            )
+            .child(
+                RichText::new()
+                    .span("USAGE:  ", label_style.clone())
+                    .span(&bar, Style::new().fg(bar_color))
+                    .span(format!(" {pct}%"), dim.clone())
+                    .fill_width(),
+            )
+            .child(
+                RichText::new()
+                    .span("CPU     ", label_style.clone())
+                    .span(
+                        format!(
+                            "[{}{}]",
+                            "█".repeat((self.status.cpu_usage * 10.0).round() as usize),
+                            "░".repeat(10 - (self.status.cpu_usage * 10.0).round() as usize)
+                        ),
+                        Style::new().fg(if self.status.cpu_usage > 0.8 {
+                            Color::Rgb(255, 93, 110)
+                        } else {
+                            Color::Rgb(166, 227, 161)
+                        }),
+                    )
+                    .span(
+                        format!(" {:.0}%", self.status.cpu_usage * 100.0),
+                        dim.clone(),
+                    )
+                    .fill_width(),
+            )
+            .child(
+                RichText::new()
+                    .span("RAM     ", label_style.clone())
+                    .span(
+                        format!(
+                            "[{}{}]",
+                            "█".repeat((self.status.ram_usage * 10.0).round() as usize),
+                            "░".repeat(10 - (self.status.ram_usage * 10.0).round() as usize)
+                        ),
+                        Style::new().fg(if self.status.ram_usage > 0.8 {
+                            Color::Rgb(255, 93, 110)
+                        } else {
+                            Color::Rgb(58, 224, 221)
+                        }),
+                    )
+                    .span(
+                        format!(" {:.0}%", self.status.ram_usage * 100.0),
+                        dim.clone(),
+                    )
+                    .fill_width(),
+            )
             .child(Divider::horizontal())
-            .child(RichText::new()
-                .span("CONTEXT: ", label_style.clone())
-                .span(format!("{ctx_icon} {ctx_label}"), Style::new().fg(ctx_color).bold())
-                .fill_width())
-            .child(RichText::new()
-                .span("STEP:    ", label_style)
-                .span(self.status.step.as_str(), dim)
-                .fill_width());
+            .child(
+                RichText::new()
+                    .span("CONTEXT: ", label_style.clone())
+                    .span(
+                        format!("{ctx_icon} {ctx_label}"),
+                        Style::new().fg(ctx_color).bold(),
+                    )
+                    .fill_width(),
+            )
+            .child(
+                RichText::new()
+                    .span("STEP:    ", label_style)
+                    .span(self.status.step.as_str(), dim)
+                    .fill_width(),
+            );
 
         if self.waiting_response {
-            cassette = cassette.child(RichText::new().span(
-                self.hex_gauge(),
-                Style::new().fg(Color::Rgb(255, 93, 110)),
-            ).fill_width());
+            cassette = cassette.child(
+                RichText::new()
+                    .span(self.hex_gauge(), Style::new().fg(Color::Rgb(255, 93, 110)))
+                    .fill_width(),
+            );
         }
 
         if let Some(err) = &self.error {
@@ -1521,10 +1724,14 @@ impl PorygonTui {
             } else {
                 err.clone()
             };
-            cassette = cassette.child(RichText::new().span(
-                format!("ERR: {err_msg}"),
-                Style::new().fg(Color::Rgb(249, 226, 175)),
-            ).fill_width());
+            cassette = cassette.child(
+                RichText::new()
+                    .span(
+                        format!("ERR: {err_msg}"),
+                        Style::new().fg(Color::Rgb(249, 226, 175)),
+                    )
+                    .fill_width(),
+            );
         }
 
         Column::new()
@@ -1572,13 +1779,163 @@ impl PorygonTui {
                 )
                 .span(
                     format!(" {} ", step_text),
-                    Style { dim: true, ..Style::new() },
+                    Style {
+                        dim: true,
+                        ..Style::new()
+                    },
                 )
                 .span(
                     " Enter:send Esc:abort PgUp/Dn:scroll Ctrl+C:quit ",
-                    Style { dim: true, ..Style::new() },
+                    Style {
+                        dim: true,
+                        ..Style::new()
+                    },
                 ),
         )
+    }
+
+    fn handle_command_action(&mut self, action: CommandAction) -> Cmd<Msg> {
+        match action {
+            CommandAction::SystemMessage(text) => {
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: text,
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::none()
+            }
+            CommandAction::ShowToast(text) => {
+                self.auto_scroll_chat();
+                Cmd::ShowToast(Toast::info(text))
+            }
+            CommandAction::DaemonRequest { .. } => {
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: "Daemon commands not yet wired.".to_string(),
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::none()
+            }
+            CommandAction::Batch(actions) => {
+                let cmds: Vec<Cmd<Msg>> = actions
+                    .into_iter()
+                    .map(|action| self.handle_command_action(action))
+                    .collect();
+                Cmd::batch(cmds)
+            }
+            CommandAction::ClearChat => {
+                self.messages.truncate(1);
+                self.auto_scroll_chat();
+                Cmd::ShowToast(Toast::success("Chat cleared"))
+            }
+            CommandAction::FetchSessions => {
+                if !self.connected {
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: "Not connected to daemon. Cannot fetch sessions.".into(),
+                        timestamp: format_timestamp(),
+                    });
+                    self.auto_scroll_chat();
+                    return Cmd::none();
+                }
+                let daemon_url = self.daemon_url.clone();
+                let client = self.client.clone();
+                Cmd::spawn(async move {
+                    match fetch_sessions(&client, &daemon_url).await {
+                        Ok(sessions) => Msg::SessionsFetched(sessions),
+                        Err(err) => Msg::SessionError(err),
+                    }
+                })
+            }
+            CommandAction::ResumeSession { id } => {
+                if !self.connected {
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: "Not connected to daemon. Cannot resume session.".into(),
+                        timestamp: format_timestamp(),
+                    });
+                    self.auto_scroll_chat();
+                    return Cmd::none();
+                }
+                let daemon_url = self.daemon_url.clone();
+                let client = self.client.clone();
+                Cmd::spawn(async move {
+                    match fetch_session(&client, &daemon_url, &id).await {
+                        Ok(messages) => Msg::SessionResumed(messages),
+                        Err(err) => Msg::SessionError(err),
+                    }
+                })
+            }
+            CommandAction::SaveSession { name } => {
+                if !self.connected {
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: "Not connected to daemon. Cannot save session.".into(),
+                        timestamp: format_timestamp(),
+                    });
+                    self.auto_scroll_chat();
+                    return Cmd::none();
+                }
+                let daemon_url = self.daemon_url.clone();
+                let client = self.client.clone();
+                let session_id = self.session_id.clone();
+                let messages = self.messages[1..].to_vec();
+                Cmd::spawn(async move {
+                    match save_session(
+                        &client,
+                        &daemon_url,
+                        session_id.as_deref(),
+                        name.as_deref(),
+                        &messages,
+                    )
+                    .await
+                    {
+                        Ok(()) => Msg::SessionSaved,
+                        Err(err) => Msg::SessionError(err),
+                    }
+                })
+            }
+            CommandAction::StoreMemory { text } => {
+                if !self.connected {
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: "Not connected to daemon. Cannot store memory.".into(),
+                        timestamp: format_timestamp(),
+                    });
+                    self.auto_scroll_chat();
+                    return Cmd::none();
+                }
+                let daemon_url = self.daemon_url.clone();
+                let client = self.client.clone();
+                Cmd::spawn(async move {
+                    match store_memory(&client, &daemon_url, &text).await {
+                        Ok(()) => Msg::MemoryStored,
+                        Err(err) => Msg::MemoryError(err),
+                    }
+                })
+            }
+            CommandAction::RecallMemory { query } => {
+                if !self.connected {
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: "Not connected to daemon. Cannot recall memories.".into(),
+                        timestamp: format_timestamp(),
+                    });
+                    self.auto_scroll_chat();
+                    return Cmd::none();
+                }
+                let daemon_url = self.daemon_url.clone();
+                let client = self.client.clone();
+                Cmd::spawn(async move {
+                    match recall_memory(&client, &daemon_url, &query).await {
+                        Ok(results) => Msg::MemoryRecalled(results),
+                        Err(err) => Msg::MemoryError(err),
+                    }
+                })
+            }
+        }
     }
 }
 
@@ -1616,7 +1973,11 @@ struct StatusResponse {
     ram_usage: Option<f64>,
 }
 
-async fn send_to_daemon(client: &reqwest::Client, url: &str, message: &str) -> Result<String, String> {
+async fn send_to_daemon(
+    client: &reqwest::Client,
+    url: &str,
+    message: &str,
+) -> Result<String, String> {
     let response = client
         .post(url)
         .json(&AskRequest {
@@ -1844,15 +2205,31 @@ fn get_system_stats() -> (f64, f64) {
             let mut available = 0.0;
             for line in meminfo.lines() {
                 if line.starts_with("MemTotal:") {
-                    total = line.split_whitespace().nth(1).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                    total = line
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
                 } else if line.starts_with("MemFree:") {
-                    free = line.split_whitespace().nth(1).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                    free = line
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
                 } else if line.starts_with("MemAvailable:") {
-                    available = line.split_whitespace().nth(1).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                    available = line
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
                 }
             }
             if total > 0.0 {
-                let used = if available > 0.0 { total - available } else { total - free };
+                let used = if available > 0.0 {
+                    total - available
+                } else {
+                    total - free
+                };
                 ram = (used / total).clamp(0.0, 1.0);
             }
         }
@@ -1995,16 +2372,16 @@ fn moon_phase() -> MoonInfo {
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { libc::localtime_r(&time_t, &mut tm) };
     let months = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
-    let full_moon_date = format!(
-        "{} {}",
-        months[tm.tm_mon as usize],
-        tm.tm_mday,
-    );
+    let full_moon_date = format!("{} {}", months[tm.tm_mon as usize], tm.tm_mday,);
 
-    MoonInfo { idx, name: names[idx], days_to_full, full_moon_date }
+    MoonInfo {
+        idx,
+        name: names[idx],
+        days_to_full,
+        full_moon_date,
+    }
 }
 
 fn format_clock() -> String {
@@ -2062,7 +2439,11 @@ async fn fetch_pending_approval(
     Ok(Some(request))
 }
 
-async fn submit_approval(client: &reqwest::Client, url: &str, approved: bool) -> anyhow::Result<()> {
+async fn submit_approval(
+    client: &reqwest::Client,
+    url: &str,
+    approved: bool,
+) -> anyhow::Result<()> {
     client
         .post(url)
         .json(&serde_json::json!({ "approved": approved }))
@@ -2070,6 +2451,128 @@ async fn submit_approval(client: &reqwest::Client, url: &str, approved: bool) ->
         .send()
         .await?;
     Ok(())
+}
+
+async fn fetch_sessions(
+    client: &reqwest::Client,
+    daemon_url: &str,
+) -> Result<Vec<SessionInfo>, String> {
+    let url = format!("{daemon_url}/session/list");
+    let response = client
+        .get(&url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("daemon returned {}", response.status()));
+    }
+    response.json().await.map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionResumeResponse {
+    messages: Vec<SessionMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionMessage {
+    role: String,
+    content: String,
+    timestamp: Option<String>,
+}
+
+async fn fetch_session(
+    client: &reqwest::Client,
+    daemon_url: &str,
+    id: &str,
+) -> Result<Vec<ChatMessage>, String> {
+    let url = format!("{daemon_url}/session/{id}");
+    let response = client
+        .get(&url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("daemon returned {}", response.status()));
+    }
+    let body: SessionResumeResponse = response.json().await.map_err(|e| e.to_string())?;
+    Ok(body
+        .messages
+        .into_iter()
+        .map(|msg| ChatMessage {
+            role: msg.role,
+            content: msg.content,
+            timestamp: msg.timestamp.unwrap_or_else(format_timestamp),
+        })
+        .collect())
+}
+
+async fn save_session(
+    client: &reqwest::Client,
+    daemon_url: &str,
+    session_id: Option<&str>,
+    name: Option<&str>,
+    messages: &[ChatMessage],
+) -> Result<(), String> {
+    let url = format!("{daemon_url}/session/save");
+    let payload = serde_json::json!({
+        "name": name,
+        "session_id": session_id,
+        "messages": messages,
+    });
+    let response = client
+        .post(&url)
+        .json(&payload)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("daemon returned {}", response.status()));
+    }
+    Ok(())
+}
+
+async fn store_memory(
+    client: &reqwest::Client,
+    daemon_url: &str,
+    text: &str,
+) -> Result<(), String> {
+    let url = format!("{daemon_url}/memory/remember");
+    let payload = serde_json::json!({ "content": text });
+    let response = client
+        .post(&url)
+        .json(&payload)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("daemon returned {}", response.status()));
+    }
+    Ok(())
+}
+
+async fn recall_memory(
+    client: &reqwest::Client,
+    daemon_url: &str,
+    query: &str,
+) -> Result<Vec<MemoryResult>, String> {
+    let url = format!("{daemon_url}/memory/recall");
+    let payload = serde_json::json!({ "query": query });
+    let response = client
+        .post(&url)
+        .json(&payload)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("daemon returned {}", response.status()));
+    }
+    response.json().await.map_err(|e| e.to_string())
 }
 
 fn main() -> anyhow::Result<()> {

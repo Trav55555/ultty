@@ -38,6 +38,8 @@ pub enum Cmd<M> {
     ShowToast(Toast),
     PushScreen(Box<dyn Screen>),
     PopScreen,
+    /// Request clean application shutdown.
+    Quit,
 }
 
 impl<M> Cmd<M> {
@@ -113,6 +115,7 @@ impl<M> std::fmt::Debug for Cmd<M> {
             Cmd::ShowToast(_) => "Cmd::ShowToast",
             Cmd::PushScreen(_) => "Cmd::PushScreen",
             Cmd::PopScreen => "Cmd::PopScreen",
+            Cmd::Quit => "Cmd::Quit",
         };
         f.write_str(name)
     }

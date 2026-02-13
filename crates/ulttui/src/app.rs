@@ -84,12 +84,19 @@ impl View for OverlayView<'_> {
     ) -> anyhow::Result<Option<RegionId>> {
         let base_count = self.base.children_count();
         if index < base_count {
-            return self.base.render_child_native(index, send_message, parent, next_id);
+            return self
+                .base
+                .render_child_native(index, send_message, parent, next_id);
         }
 
         if index == base_count {
             if let Some(overlay) = &self.overlay {
-                return Ok(Some(render_view_to_native(overlay, send_message, parent, next_id)?));
+                return Ok(Some(render_view_to_native(
+                    overlay,
+                    send_message,
+                    parent,
+                    next_id,
+                )?));
             }
         }
 
@@ -153,6 +160,7 @@ pub struct App<A: Application> {
     msg_queue: VecDeque<A::Message>,
     screen_stack: Vec<Box<dyn Screen>>,
     active_toasts: Vec<(Toast, Instant)>,
+    quit_requested: bool,
 }
 
 #[allow(dead_code)]
@@ -180,6 +188,7 @@ impl<A: Application> App<A> {
             msg_queue: VecDeque::new(),
             screen_stack: Vec::new(),
             active_toasts: Vec::new(),
+            quit_requested: false,
         }
     }
 
@@ -210,6 +219,12 @@ impl<A: Application> App<A> {
             // 1. Poll backend for events
             if let Some(mut event) = self.backend.poll_event()? {
                 if matches!(&event, Event::Quit) {
+                    if let Some(msg) = self.app.on_event(&event) {
+                        self.msg_queue.push_back(msg);
+                    }
+                    self.drain_messages(&rt);
+                    self.poll_spawned_tasks(&rt);
+                    self.drain_messages(&rt);
                     break;
                 }
 
@@ -275,6 +290,10 @@ impl<A: Application> App<A> {
 
             // 7. Render view
             self.render()?;
+
+            if self.quit_requested {
+                break;
+            }
         }
 
         // Clean up active subscriptions
@@ -528,6 +547,9 @@ impl<A: Application> App<A> {
                 Cmd::PopScreen => {
                     self.screen_stack.pop();
                 }
+                Cmd::Quit => {
+                    self.quit_requested = true;
+                }
             }
         }
     }
@@ -569,10 +591,7 @@ impl<A: Application> App<A> {
             toast_list = toast_list.child(Badge::new(&toast.message).variant(variant));
         }
 
-        Column::new()
-            .flex_grow(1.0)
-            .child(Spacer)
-            .child(toast_list)
+        Column::new().flex_grow(1.0).child(Spacer).child(toast_list)
     }
 }
 
@@ -595,6 +614,7 @@ impl<A: Application> App<A> {
             msg_queue: VecDeque::new(),
             screen_stack: Vec::new(),
             active_toasts: Vec::new(),
+            quit_requested: false,
         }
     }
 }
