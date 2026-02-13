@@ -1009,6 +1009,11 @@ impl NativeSession {
         self.scroll_offsets.get(&id).copied().unwrap_or((0.0, 0.0))
     }
 
+    /// Check if a region is currently streaming content.
+    pub fn is_streaming(&self, region_id: ultty_protocol::RegionId) -> bool {
+        self.active_streams.contains_key(&region_id)
+    }
+
     /// Advance animated scroll positions toward their targets.
     /// Returns `true` if any animations are still active (needs another frame).
     pub fn update_scroll_animations(&mut self) -> bool {
@@ -1520,6 +1525,48 @@ mod tests {
             .handle_message(AppMessage::StreamEnd { id, stream_id: 99 })
             .unwrap();
         assert_eq!(session.active_streams.get(&id), Some(&42));
+    }
+
+    #[test]
+    fn test_is_streaming_returns_true_during_stream() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+
+        session
+            .handle_message(AppMessage::StreamStart { id, stream_id: 42 })
+            .unwrap();
+
+        assert!(session.is_streaming(id));
+    }
+
+    #[test]
+    fn test_is_streaming_returns_false_after_stream_end() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+
+        session
+            .handle_message(AppMessage::StreamStart { id, stream_id: 42 })
+            .unwrap();
+        session
+            .handle_message(AppMessage::StreamEnd { id, stream_id: 42 })
+            .unwrap();
+
+        assert!(!session.is_streaming(id));
+    }
+
+    #[test]
+    fn test_is_streaming_returns_false_for_unknown_region() {
+        let session = make_session();
+
+        assert!(!session.is_streaming(RegionId::new(9999)));
     }
 
     #[test]

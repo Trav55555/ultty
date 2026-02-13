@@ -326,9 +326,11 @@ impl Renderer {
                         resolved.a * region.style.opacity,
                     );
 
-                    let (_, cell_h) = self.text_renderer.cell_dimensions();
+                    let (cell_w, cell_h) = self.text_renderer.cell_dimensions();
                     let max_cols = cw as usize;
                     let mut visual_line = 0usize;
+                    let mut cursor_line = 0usize;
+                    let mut cursor_col = 0usize;
 
                     for line in text_content.text.split('\n') {
                         let chars: Vec<char> = line.chars().collect();
@@ -340,12 +342,19 @@ impl Renderer {
                         };
 
                         if render_text.is_empty() {
+                            cursor_line = visual_line;
+                            cursor_col = 0;
                             visual_line += 1;
                             continue;
                         }
 
                         let wrapped = wrap_line(&render_text, max_cols);
-                        for sub_line in &wrapped {
+                        for (sub_idx, sub_line) in wrapped.iter().enumerate() {
+                            if sub_idx + 1 == wrapped.len() {
+                                cursor_line = visual_line;
+                                cursor_col = sub_line.chars().count();
+                            }
+
                             let line_y = cy + visual_line as f32 * cell_h;
                             if line_y + cell_h <= clip_min_y || line_y >= clip_max_y {
                                 visual_line += 1;
@@ -372,6 +381,43 @@ impl Renderer {
                                 &mut text_indices,
                             );
                             visual_line += 1;
+                        }
+                    }
+
+                    if session.is_streaming(region.id) {
+                        let blink_on = (std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                            / 500)
+                            .is_multiple_of(2);
+
+                        if blink_on {
+                            if max_cols > 0 && cursor_col >= max_cols {
+                                cursor_line += cursor_col / max_cols;
+                                cursor_col %= max_cols;
+                            }
+
+                            let cursor_x = cx + cursor_col as f32 * cell_w;
+                            let cursor_y = cy + cursor_line as f32 * cell_h;
+                            let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                                "▊",
+                                cursor_x,
+                                cursor_y,
+                                fg_color,
+                                region.style.bold,
+                                region.style.italic,
+                            );
+                            append_clipped_glyphs(
+                                &verts,
+                                &idxs,
+                                clip_min_x,
+                                clip_min_y,
+                                clip_max_x,
+                                clip_max_y,
+                                &mut text_vertices,
+                                &mut text_indices,
+                            );
                         }
                     }
                 }

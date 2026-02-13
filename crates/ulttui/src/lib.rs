@@ -55,9 +55,10 @@ pub mod prelude {
     pub use crate::toast::{Toast, ToastOverlay, ToastSeverity};
     pub use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
     pub use crate::widgets::{
-        Accent, Badge, BadgeVariant, Body, Button, Card, Collapsible, Divider, DockLayout, Inset,
-        List, MarkdownView, Modal, Muted, ProgressBar, ScrollView, Section, Spacer, Spinner, Table,
-        Tabs, Text, TextInput, Title, View,
+        Accent, Badge, BadgeVariant, Body, Button, Card, Collapsible, DiffKind, DiffLine, DiffMode,
+        DiffView, Divider, DockLayout, Inset, List, MarkdownView, Modal, Muted, ProgressBar,
+        ScrollView, Section, Spacer, Spinner, Table, Tabs, Text, TextInput, Title, Tree, TreeNode,
+        View,
     };
 
     // Re-export protocol types

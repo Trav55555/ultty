@@ -19,6 +19,8 @@ pub struct ScrollView {
     scroll_y: f32,
     content_height: f32,
     viewport_height: f32,
+    virtual_scroll: bool,
+    item_height: f32,
     vim_state: VimState,
     vim_config: VimConfig,
     search_query: Option<String>,
@@ -31,6 +33,7 @@ impl std::fmt::Debug for ScrollView {
         f.debug_struct("ScrollView")
             .field("scroll_y", &self.scroll_y)
             .field("has_child", &self.child.is_some())
+            .field("virtual_scroll", &self.virtual_scroll)
             .finish()
     }
 }
@@ -57,6 +60,8 @@ impl Default for ScrollView {
             scroll_y: 0.0,
             content_height: 0.0,
             viewport_height: 0.0,
+            virtual_scroll: false,
+            item_height: 1.0,
             vim_state: VimState::new(),
             vim_config: VimConfig::for_scroll_view(),
             search_query: None,
@@ -78,6 +83,16 @@ impl ScrollView {
 
     pub fn horizontal(mut self) -> Self {
         self.constraints.overflow.x = OverflowAxis::Scroll;
+        self
+    }
+
+    pub fn virtual_scroll(mut self, enabled: bool) -> Self {
+        self.virtual_scroll = enabled;
+        self
+    }
+
+    pub fn item_height(mut self, height: f32) -> Self {
+        self.item_height = if height > 0.0 { height } else { 1.0 };
         self
     }
 
@@ -109,6 +124,36 @@ impl ScrollView {
 
     pub fn scroll_by(&mut self, delta: f32) {
         self.scroll_to(self.scroll_y + delta);
+    }
+
+    fn visible_range(&self, total_children: usize) -> (usize, usize) {
+        if !self.virtual_scroll || total_children == 0 {
+            return (0, total_children);
+        }
+
+        let item_height = if self.item_height > 0.0 {
+            self.item_height
+        } else {
+            1.0
+        };
+        let buffer_pages = 1.0;
+        let buffer = self.viewport_height * buffer_pages;
+
+        let visible_start = (self.scroll_y - buffer).max(0.0);
+        let visible_end = self.scroll_y + self.viewport_height + buffer;
+
+        let start_idx = (visible_start / item_height) as usize;
+        let end_idx = ((visible_end / item_height).ceil() as usize).min(total_children);
+
+        (start_idx, end_idx)
+    }
+
+    pub fn visible_child_range(&self, total_items: usize) -> Option<(usize, usize)> {
+        if !self.virtual_scroll || total_items == 0 {
+            return None;
+        }
+
+        Some(self.visible_range(total_items))
     }
 
     fn line_height(&self) -> f32 {
@@ -536,6 +581,94 @@ mod tests {
         assert_eq!(scroll.scroll_position(), (0.0, 0.0));
         assert_eq!(scroll.content_height, 0.0);
         assert_eq!(scroll.viewport_height, 0.0);
+    }
+
+    #[test]
+    fn scroll_virtual_scroll_default_off() {
+        let scroll = ScrollView::new();
+        assert!(!scroll.virtual_scroll);
+    }
+
+    #[test]
+    fn scroll_virtual_scroll_builder() {
+        let scroll = ScrollView::new().virtual_scroll(true);
+        assert!(scroll.virtual_scroll);
+    }
+
+    #[test]
+    fn scroll_item_height_default() {
+        let scroll = ScrollView::new();
+        assert_eq!(scroll.item_height, 1.0);
+    }
+
+    #[test]
+    fn scroll_item_height_builder() {
+        let scroll = ScrollView::new().item_height(3.0);
+        assert_eq!(scroll.item_height, 3.0);
+    }
+
+    #[test]
+    fn scroll_visible_range_disabled() {
+        let scroll = ScrollView::new();
+        assert_eq!(scroll.visible_range(100), (0, 100));
+    }
+
+    #[test]
+    fn scroll_visible_range_enabled_at_top() {
+        let mut scroll = ScrollView::new().virtual_scroll(true).item_height(1.0);
+        scroll.set_viewport_height(50.0);
+        scroll.set_content_height(1000.0);
+
+        let (start, end) = scroll.visible_range(1000);
+        assert_eq!(start, 0);
+        assert!(end <= 101);
+        assert!(end >= 50);
+    }
+
+    #[test]
+    fn scroll_visible_range_enabled_scrolled() {
+        let mut scroll = ScrollView::new().virtual_scroll(true).item_height(1.0);
+        scroll.set_viewport_height(50.0);
+        scroll.set_content_height(1000.0);
+        scroll.scroll_to(500.0);
+
+        let (start, end) = scroll.visible_range(1000);
+        assert!(start > 0);
+        assert!(start <= 450);
+        assert!(end >= 550);
+        assert!(end <= 601);
+    }
+
+    #[test]
+    fn scroll_visible_range_clamps_to_total() {
+        let mut scroll = ScrollView::new().virtual_scroll(true).item_height(1.0);
+        scroll.set_viewport_height(50.0);
+        scroll.set_content_height(30.0);
+
+        let (start, end) = scroll.visible_range(30);
+        assert_eq!(start, 0);
+        assert_eq!(end, 30);
+    }
+
+    #[test]
+    fn scroll_visible_child_range_none_when_disabled() {
+        let scroll = ScrollView::new();
+        assert!(scroll.visible_child_range(100).is_none());
+    }
+
+    #[test]
+    fn scroll_visible_child_range_some_when_enabled() {
+        let mut scroll = ScrollView::new().virtual_scroll(true);
+        scroll.set_viewport_height(50.0);
+        scroll.set_content_height(1000.0);
+
+        assert!(scroll.visible_child_range(1000).is_some());
+    }
+
+    #[test]
+    fn scroll_visible_child_range_empty_total() {
+        let scroll = ScrollView::new().virtual_scroll(true);
+        assert!(scroll.visible_child_range(0).is_none());
     }
 
     #[test]

@@ -118,32 +118,32 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 
 ### FP Phase 4 — Project Context (P1, ~15-20 hrs)
 
-- [ ] 4.1: Framework: Tree widget — new `ulttui/src/widgets/tree.rs`
-- [ ] 4.2: Framework: Diff widget — new `ulttui/src/widgets/diff.rs`
-- [ ] 4.3: App: File tree panel (`/tree`, `/scan`)
-- [ ] 4.4: App: Project info display (`/project`, `/switch`)
-- [ ] 4.5: App: File diff viewer for tool outputs
+- [x] 4.1: Framework: Tree widget — new `ulttui/src/widgets/tree.rs`
+- [x] 4.2: Framework: Diff widget — new `ulttui/src/widgets/diff.rs`
+- [x] 4.3: App: File tree panel (`/tree`, `/scan`)
+- [x] 4.4: App: Project info display (`/project`, `/switch`)
+- [x] 4.5: App: File diff viewer for tool outputs
 
 ### FP Phase 5 — Planning & Tasks (P2, ~8-10 hrs)
 
-- [ ] 5.1: App: Plan creation and tracking (`/plan`, `/next`, `/current`)
-- [ ] 5.2: App: Kanban board (`/kanban`, `/add`, `/done`)
-- [ ] 5.3: App: Async task queue display (`/tasks`, `/cancel-task`)
-- [ ] 5.4: App: Cron job management (`/cron`, `/cron-run`)
+- [x] 5.1: App: Plan creation and tracking (`/plan`, `/next`, `/current`)
+- [x] 5.2: App: Kanban board (`/kanban`, `/add`, `/done`)
+- [x] 5.3: App: Async task queue display (`/tasks`, `/task`, `/cancel-task`)
+- [x] 5.4: App: Cron job management (`/cron`, `/cron-run`, `/cron-toggle`)
 
 ### FP Phase 6 — Advanced UX (P2, ~10-15 hrs)
 
-- [ ] 6.1: App: Model selection (`/models`, `/model`)
-- [ ] 6.2: App: Web search integration (`/search`, `/ai-search`)
-- [ ] 6.3: App: Trainer profile and event stream (`/profile`, `/party`)
-- [ ] 6.4: App: Validation pipeline (`/validate`, `/gym`)
-- [ ] 6.5: Framework: Virtual scrolling for long conversations — `ulttui/src/widgets/scroll.rs`
+- [x] 6.1: App: Model selection (`/models`, `/model`)
+- [x] 6.2: App: Web search integration (`/search`, `/ai-search`)
+- [x] 6.3: App: Trainer profile and event stream (`/profile`, `/party`)
+- [x] 6.4: App: Validation pipeline (`/validate`, `/gym`)
+- [x] 6.5: Framework: Virtual scrolling for long conversations — `ulttui/src/widgets/scroll.rs`
 
 ### FP Phase 7 — Competitive Advantages (P3, ~8-10 hrs)
 
-- [ ] 7.1: Terminal: Streaming cursor animation — `ultty/src/renderer/native_render.rs`
-- [ ] 7.2: Terminal: Native image widget rendering — `ultty/src/renderer/native_render.rs`
-- [ ] 7.3: App: porygon-tui module split (commands, daemon, sidebar, views, types)
+- [x] 7.1: Terminal: Streaming cursor animation — `ultty/src/renderer/native_render/mod.rs`
+- [x] 7.2: Terminal: Native image widget rendering — verified complete
+- [x] 7.3: App: porygon-tui module split (commands, daemon, sidebar, views, types)
 
 ---
 
@@ -153,8 +153,8 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 |-------|-------|------|-----------|------------|
 | Visual Parity | 18 | 18 | 0 | 0 |
 | Tech Debt | 21 | 8 | 13 | ~10 |
-| Feature Parity | 38 | 21 | 17 | ~51-73 |
-| **Total** | **77** | **47** | **30** | **~61-83** |
+| Feature Parity | 38 | 38 | 0 | 0 |
+| **Total** | **77** | **64** | **13** | **~10** |
 
 ## Recommended Order
 
@@ -163,5 +163,8 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 3. ~~**Feature Parity 2.1-2.5** — Session & memory commands~~ ✅
 4. ~~**Tech Debt 2.1-2.6** — Split native_render.rs~~ ✅
 5. ~~**Feature Parity 3.1-3.6** — Tool visibility~~ ✅
-6. **Feature Parity 4.1-4.5** — Project context ← **NEXT**
-7. Remaining tech debt + FP phases 5-7 interleaved
+6. ~~**Feature Parity 4.1-4.5** — Project context~~ ✅
+7. ~~**Feature Parity 5.1-5.4** — Planning & tasks~~ ✅
+8. ~~**Feature Parity 6.1-6.5** — Advanced UX~~ ✅
+9. ~~**Feature Parity 7.1-7.3** — Competitive advantages~~ ✅
+10. **Tech Debt 3.1-9.1** — Remaining tech debt ← **NEXT**

@@ -43,6 +43,52 @@ pub enum CommandAction {
     FetchMcpStatus,
     /// Fetch MCP tools list.
     FetchMcpTools,
+    /// Fetch the project file tree from daemon.
+    FetchFileTree,
+    /// Fetch project metadata from daemon.
+    FetchProjectInfo,
+    /// Switch to a different project directory.
+    SwitchProject { path: String },
+    /// Create a new plan with an objective.
+    CreatePlan { objective: String },
+    /// Fetch the current active plan.
+    FetchCurrentPlan,
+    /// Advance to the next step of the current plan.
+    AdvancePlan,
+    /// Fetch the kanban board.
+    FetchKanban,
+    /// Add a task to the kanban board.
+    AddKanbanTask { title: String },
+    /// Mark a kanban task as done.
+    CompleteKanbanTask { id: String },
+    /// Fetch the async task queue.
+    FetchAsyncTasks,
+    /// Fetch details for a specific async task.
+    FetchAsyncTaskDetail { id: String },
+    /// Cancel an async task.
+    CancelAsyncTask { id: String },
+    /// Fetch cron jobs list.
+    FetchCronJobs,
+    /// Trigger a cron job immediately.
+    TriggerCronJob { id: String },
+    /// Toggle a cron job enabled/disabled.
+    ToggleCronJob { id: String },
+    /// Fetch available models list.
+    FetchModels,
+    /// Set the active model.
+    SetModel { id: String },
+    /// Perform a web search.
+    WebSearch { query: String },
+    /// Perform an AI-summarized search.
+    AiSearch { query: String },
+    /// Fetch trainer profile.
+    FetchProfile,
+    /// Fetch agent party list.
+    FetchParty,
+    /// Validate a command for safety.
+    ValidateCommand { command: String },
+    /// Run the full validation pipeline.
+    RunGym,
 }
 
 /// Metadata for a registered command.
@@ -107,6 +153,36 @@ impl CommandRegistry {
                     usage: "/models",
                 },
                 Command {
+                    name: "search",
+                    description: "Web search",
+                    usage: "/search <query>",
+                },
+                Command {
+                    name: "ai-search",
+                    description: "AI-summarized search",
+                    usage: "/ai-search <query>",
+                },
+                Command {
+                    name: "profile",
+                    description: "Trainer profile",
+                    usage: "/profile",
+                },
+                Command {
+                    name: "party",
+                    description: "List agents",
+                    usage: "/party",
+                },
+                Command {
+                    name: "validate",
+                    description: "Validate command safety",
+                    usage: "/validate <command>",
+                },
+                Command {
+                    name: "gym",
+                    description: "Run validation pipeline",
+                    usage: "/gym",
+                },
+                Command {
                     name: "clear",
                     description: "Clear chat history",
                     usage: "/clear",
@@ -130,6 +206,86 @@ impl CommandRegistry {
                     name: "mcp-tools",
                     description: "List MCP tools",
                     usage: "/mcp-tools",
+                },
+                Command {
+                    name: "tree",
+                    description: "Show project file tree",
+                    usage: "/tree",
+                },
+                Command {
+                    name: "scan",
+                    description: "Scan project file tree",
+                    usage: "/scan",
+                },
+                Command {
+                    name: "project",
+                    description: "Show project info",
+                    usage: "/project",
+                },
+                Command {
+                    name: "switch",
+                    description: "Switch project directory",
+                    usage: "/switch <path>",
+                },
+                Command {
+                    name: "plan",
+                    description: "Create a plan",
+                    usage: "/plan <goal>",
+                },
+                Command {
+                    name: "current",
+                    description: "Show current plan",
+                    usage: "/current",
+                },
+                Command {
+                    name: "next",
+                    description: "Advance plan step",
+                    usage: "/next",
+                },
+                Command {
+                    name: "kanban",
+                    description: "Show kanban board",
+                    usage: "/kanban",
+                },
+                Command {
+                    name: "add",
+                    description: "Add kanban task",
+                    usage: "/add <task>",
+                },
+                Command {
+                    name: "done",
+                    description: "Complete kanban task",
+                    usage: "/done <id>",
+                },
+                Command {
+                    name: "tasks",
+                    description: "List async tasks",
+                    usage: "/tasks",
+                },
+                Command {
+                    name: "task",
+                    description: "Show task details",
+                    usage: "/task <id>",
+                },
+                Command {
+                    name: "cancel-task",
+                    description: "Cancel async task",
+                    usage: "/cancel-task <id>",
+                },
+                Command {
+                    name: "cron",
+                    description: "List cron jobs",
+                    usage: "/cron",
+                },
+                Command {
+                    name: "cron-run",
+                    description: "Trigger cron job",
+                    usage: "/cron-run <id>",
+                },
+                Command {
+                    name: "cron-toggle",
+                    description: "Toggle cron job",
+                    usage: "/cron-toggle <id>",
                 },
             ],
         }
@@ -198,12 +354,52 @@ impl CommandRegistry {
                     })
                 }
             }
-            "model" => Some(CommandAction::SystemMessage(
-                "/model is not yet implemented.".to_string(),
-            )),
-            "models" => Some(CommandAction::SystemMessage(
-                "/models is not yet implemented.".to_string(),
-            )),
+            "models" => Some(CommandAction::FetchModels),
+            "model" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /model <id>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::SetModel { id: args.join(" ") })
+                }
+            }
+            "search" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /search <query>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::WebSearch {
+                        query: args.join(" "),
+                    })
+                }
+            }
+            "ai-search" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /ai-search <query>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::AiSearch {
+                        query: args.join(" "),
+                    })
+                }
+            }
+            "profile" => Some(CommandAction::FetchProfile),
+            "party" => Some(CommandAction::FetchParty),
+            "validate" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /validate <command>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::ValidateCommand {
+                        command: args.join(" "),
+                    })
+                }
+            }
+            "gym" => Some(CommandAction::RunGym),
             "clear" => Some(CommandAction::ClearChat),
             "tools" => Some(CommandAction::FetchTools),
             "tool" => {
@@ -219,6 +415,91 @@ impl CommandRegistry {
             }
             "mcp" => Some(CommandAction::FetchMcpStatus),
             "mcp-tools" => Some(CommandAction::FetchMcpTools),
+            "tree" | "scan" => Some(CommandAction::FetchFileTree),
+            "project" => Some(CommandAction::FetchProjectInfo),
+            "switch" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /switch <path>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::SwitchProject {
+                        path: args.join(" "),
+                    })
+                }
+            }
+            "plan" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /plan <goal>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::CreatePlan {
+                        objective: args.join(" "),
+                    })
+                }
+            }
+            "current" => Some(CommandAction::FetchCurrentPlan),
+            "next" => Some(CommandAction::AdvancePlan),
+            "kanban" => Some(CommandAction::FetchKanban),
+            "add" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /add <task>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::AddKanbanTask {
+                        title: args.join(" "),
+                    })
+                }
+            }
+            "done" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /done <id>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::CompleteKanbanTask { id: args.join(" ") })
+                }
+            }
+            "tasks" => Some(CommandAction::FetchAsyncTasks),
+            "task" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /task <id>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::FetchAsyncTaskDetail { id: args.join(" ") })
+                }
+            }
+            "cancel-task" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /cancel-task <id>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::CancelAsyncTask { id: args.join(" ") })
+                }
+            }
+            "cron" => Some(CommandAction::FetchCronJobs),
+            "cron-run" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /cron-run <id>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::TriggerCronJob { id: args.join(" ") })
+                }
+            }
+            "cron-toggle" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /cron-toggle <id>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::ToggleCronJob { id: args.join(" ") })
+                }
+            }
             _ => Some(CommandAction::SystemMessage(format!(
                 "Unknown command: /{command_name}. Type /help for help."
             ))),
