@@ -1,7 +1,7 @@
 //! OSC (Operating System Command), DCS, APC, and other string sequence handling.
 
-use super::{Action, State};
 use super::AnsiParser;
+use super::{Action, State};
 
 /// Maximum size for OSC/DCS string buffers to prevent unbounded memory growth.
 const MAX_STRING_BUFFER: usize = 65536;
@@ -424,10 +424,7 @@ mod tests {
 
     #[test]
     fn osc_set_title_empty() {
-        assert_eq!(
-            parse(b"\x1b]0;\x07"),
-            vec![Action::SetTitle(String::new())]
-        );
+        assert_eq!(parse(b"\x1b]0;\x07"), vec![Action::SetTitle(String::new())]);
     }
 
     #[test]
@@ -492,26 +489,17 @@ mod tests {
 
     #[test]
     fn osc_query_foreground_color() {
-        assert_eq!(
-            parse(b"\x1b]10;?\x07"),
-            vec![Action::QueryForegroundColor]
-        );
+        assert_eq!(parse(b"\x1b]10;?\x07"), vec![Action::QueryForegroundColor]);
     }
 
     #[test]
     fn osc_query_background_color() {
-        assert_eq!(
-            parse(b"\x1b]11;?\x07"),
-            vec![Action::QueryBackgroundColor]
-        );
+        assert_eq!(parse(b"\x1b]11;?\x07"), vec![Action::QueryBackgroundColor]);
     }
 
     #[test]
     fn osc_query_cursor_color() {
-        assert_eq!(
-            parse(b"\x1b]12;?\x07"),
-            vec![Action::QueryCursorColor]
-        );
+        assert_eq!(parse(b"\x1b]12;?\x07"), vec![Action::QueryCursorColor]);
     }
 
     #[test]
@@ -579,10 +567,7 @@ mod tests {
         // After ST, the parser should return to ground state and handle normal text
         assert_eq!(
             parse(b"\x1b]0;Title\x1b\\A"),
-            vec![
-                Action::SetTitle("Title".to_string()),
-                Action::Print('A'),
-            ]
+            vec![Action::SetTitle("Title".to_string()), Action::Print('A'),]
         );
     }
 

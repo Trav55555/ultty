@@ -229,10 +229,13 @@ impl GlyphAtlas {
                 top: image.placement.top as f32,
                 is_color: false,
             };
-            self.cache.insert(cache_key, CacheEntry {
-                info,
-                last_access: self.access_counter,
-            });
+            self.cache.insert(
+                cache_key,
+                CacheEntry {
+                    info,
+                    last_access: self.access_counter,
+                },
+            );
             return Some(info);
         }
 
@@ -243,7 +246,9 @@ impl GlyphAtlas {
         let (data, is_color) = match image.content {
             SwashContent::Mask => {
                 // Expand 1-byte alpha to RGBA: (255, 255, 255, alpha)
-                let rgba: Vec<u8> = image.data.iter()
+                let rgba: Vec<u8> = image
+                    .data
+                    .iter()
                     .flat_map(|&a| [255, 255, 255, a])
                     .collect();
                 (rgba, false)
@@ -254,7 +259,9 @@ impl GlyphAtlas {
             }
             SwashContent::SubpixelMask => {
                 // Treat as mono, use first subpixel channel as alpha
-                let rgba: Vec<u8> = image.data.chunks(3)
+                let rgba: Vec<u8> = image
+                    .data
+                    .chunks(3)
                     .flat_map(|c| [255, 255, 255, c[0]])
                     .collect();
                 (rgba, false)
@@ -298,10 +305,13 @@ impl GlyphAtlas {
             is_color,
         };
 
-        self.cache.insert(cache_key, CacheEntry {
-            info,
-            last_access: self.access_counter,
-        });
+        self.cache.insert(
+            cache_key,
+            CacheEntry {
+                info,
+                last_access: self.access_counter,
+            },
+        );
         Some(info)
     }
 

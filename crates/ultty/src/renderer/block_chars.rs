@@ -16,42 +16,119 @@ pub fn block_char_rects(ch: char) -> Option<([Rect4; 3], usize)> {
     let zero: Rect4 = (0.0, 0.0, 0.0, 0.0);
     let mut v = [zero; 3];
     let mut n = 0usize;
-    macro_rules! push { ($r:expr) => { v[n] = $r; n += 1; } }
+    macro_rules! push {
+        ($r:expr) => {
+            v[n] = $r;
+            n += 1;
+        };
+    }
     match ch {
-        '\u{2588}' => { push!((0.0, 0.0, 1.0, 1.0)); }      // █ full
-        '\u{2580}' => { push!((0.0, 0.0, 1.0, 0.5)); }      // ▀ upper half
-        '\u{2584}' => { push!((0.0, 0.5, 1.0, 0.5)); }      // ▄ lower half
-        '\u{258C}' => { push!((0.0, 0.0, 0.5, 1.0)); }      // ▌ left half
-        '\u{2590}' => { push!((0.5, 0.0, 0.5, 1.0)); }      // ▐ right half
-        '\u{2581}' => { push!((0.0, 7.0/8.0, 1.0, 1.0/8.0)); }
-        '\u{2582}' => { push!((0.0, 6.0/8.0, 1.0, 2.0/8.0)); }
-        '\u{2583}' => { push!((0.0, 5.0/8.0, 1.0, 3.0/8.0)); }
-        '\u{2585}' => { push!((0.0, 3.0/8.0, 1.0, 5.0/8.0)); }
-        '\u{2586}' => { push!((0.0, 2.0/8.0, 1.0, 6.0/8.0)); }
-        '\u{2587}' => { push!((0.0, 1.0/8.0, 1.0, 7.0/8.0)); }
-        '\u{2589}' => { push!((0.0, 0.0, 7.0/8.0, 1.0)); }
-        '\u{258A}' => { push!((0.0, 0.0, 6.0/8.0, 1.0)); }
-        '\u{258B}' => { push!((0.0, 0.0, 5.0/8.0, 1.0)); }
-        '\u{258D}' => { push!((0.0, 0.0, 3.0/8.0, 1.0)); }
-        '\u{258E}' => { push!((0.0, 0.0, 2.0/8.0, 1.0)); }
-        '\u{258F}' => { push!((0.0, 0.0, 1.0/8.0, 1.0)); }
-        '\u{2594}' => { push!((0.0, 0.0, 1.0, 1.0/8.0)); }
-        '\u{2595}' => { push!((7.0/8.0, 0.0, 1.0/8.0, 1.0)); }
+        '\u{2588}' => {
+            push!((0.0, 0.0, 1.0, 1.0));
+        } // █ full
+        '\u{2580}' => {
+            push!((0.0, 0.0, 1.0, 0.5));
+        } // ▀ upper half
+        '\u{2584}' => {
+            push!((0.0, 0.5, 1.0, 0.5));
+        } // ▄ lower half
+        '\u{258C}' => {
+            push!((0.0, 0.0, 0.5, 1.0));
+        } // ▌ left half
+        '\u{2590}' => {
+            push!((0.5, 0.0, 0.5, 1.0));
+        } // ▐ right half
+        '\u{2581}' => {
+            push!((0.0, 7.0 / 8.0, 1.0, 1.0 / 8.0));
+        }
+        '\u{2582}' => {
+            push!((0.0, 6.0 / 8.0, 1.0, 2.0 / 8.0));
+        }
+        '\u{2583}' => {
+            push!((0.0, 5.0 / 8.0, 1.0, 3.0 / 8.0));
+        }
+        '\u{2585}' => {
+            push!((0.0, 3.0 / 8.0, 1.0, 5.0 / 8.0));
+        }
+        '\u{2586}' => {
+            push!((0.0, 2.0 / 8.0, 1.0, 6.0 / 8.0));
+        }
+        '\u{2587}' => {
+            push!((0.0, 1.0 / 8.0, 1.0, 7.0 / 8.0));
+        }
+        '\u{2589}' => {
+            push!((0.0, 0.0, 7.0 / 8.0, 1.0));
+        }
+        '\u{258A}' => {
+            push!((0.0, 0.0, 6.0 / 8.0, 1.0));
+        }
+        '\u{258B}' => {
+            push!((0.0, 0.0, 5.0 / 8.0, 1.0));
+        }
+        '\u{258D}' => {
+            push!((0.0, 0.0, 3.0 / 8.0, 1.0));
+        }
+        '\u{258E}' => {
+            push!((0.0, 0.0, 2.0 / 8.0, 1.0));
+        }
+        '\u{258F}' => {
+            push!((0.0, 0.0, 1.0 / 8.0, 1.0));
+        }
+        '\u{2594}' => {
+            push!((0.0, 0.0, 1.0, 1.0 / 8.0));
+        }
+        '\u{2595}' => {
+            push!((7.0 / 8.0, 0.0, 1.0 / 8.0, 1.0));
+        }
         // Single quadrants
-        '\u{2596}' => { push!(LL); }                          // ▖
-        '\u{2597}' => { push!(LR); }                          // ▗
-        '\u{2598}' => { push!(UL); }                          // ▘
-        '\u{259D}' => { push!(UR); }                          // ▝
+        '\u{2596}' => {
+            push!(LL);
+        } // ▖
+        '\u{2597}' => {
+            push!(LR);
+        } // ▗
+        '\u{2598}' => {
+            push!(UL);
+        } // ▘
+        '\u{259D}' => {
+            push!(UR);
+        } // ▝
         // Multi-quadrant composites
-        '\u{2599}' => { push!(UL); push!(LL); push!(LR); }   // ▙
-        '\u{259A}' => { push!(UL); push!(LR); }              // ▚
-        '\u{259B}' => { push!(UL); push!(UR); push!(LL); }   // ▛
-        '\u{259C}' => { push!(UL); push!(UR); push!(LR); }   // ▜
-        '\u{259E}' => { push!(UR); push!(LL); }              // ▞
-        '\u{259F}' => { push!(UR); push!(LL); push!(LR); }   // ▟
+        '\u{2599}' => {
+            push!(UL);
+            push!(LL);
+            push!(LR);
+        } // ▙
+        '\u{259A}' => {
+            push!(UL);
+            push!(LR);
+        } // ▚
+        '\u{259B}' => {
+            push!(UL);
+            push!(UR);
+            push!(LL);
+        } // ▛
+        '\u{259C}' => {
+            push!(UL);
+            push!(UR);
+            push!(LR);
+        } // ▜
+        '\u{259E}' => {
+            push!(UR);
+            push!(LL);
+        } // ▞
+        '\u{259F}' => {
+            push!(UR);
+            push!(LL);
+            push!(LR);
+        } // ▟
         // Shade characters — fall through to font rendering
-        '\u{2591}'..='\u{2593}' => { return None; }
-        _ => { return None; }
+        '\u{2591}'..='\u{2593}' => {
+            return None;
+        }
+        _ => {
+            return None;
+        }
     }
     Some((v, n))
 }
@@ -62,8 +139,8 @@ mod tests {
 
     /// Helper: asserts that a character maps to exactly `expected_count` rectangles.
     fn assert_rect_count(ch: char, expected_count: usize) {
-        let (rects, count) = block_char_rects(ch)
-            .unwrap_or_else(|| panic!("expected Some for U+{:04X}", ch as u32));
+        let (rects, count) =
+            block_char_rects(ch).unwrap_or_else(|| panic!("expected Some for U+{:04X}", ch as u32));
         assert_eq!(
             count, expected_count,
             "U+{:04X}: expected {} rects, got {}",
@@ -71,7 +148,11 @@ mod tests {
         );
         // Verify unused slots are zeroed
         for (i, rect) in rects.iter().enumerate().skip(count) {
-            assert_eq!(*rect, (0.0, 0.0, 0.0, 0.0), "unused slot {i} should be zero");
+            assert_eq!(
+                *rect,
+                (0.0, 0.0, 0.0, 0.0),
+                "unused slot {i} should be zero"
+            );
         }
     }
 
@@ -82,8 +163,10 @@ mod tests {
         let (x, y, w, h) = rects[0];
         let (ex, ey, ew, eh) = expected;
         assert!(
-            (x - ex).abs() < 1e-5 && (y - ey).abs() < 1e-5
-                && (w - ew).abs() < 1e-5 && (h - eh).abs() < 1e-5,
+            (x - ex).abs() < 1e-5
+                && (y - ey).abs() < 1e-5
+                && (w - ew).abs() < 1e-5
+                && (h - eh).abs() < 1e-5,
             "U+{:04X}: expected ({ex}, {ey}, {ew}, {eh}), got ({x}, {y}, {w}, {h})",
             ch as u32,
         );

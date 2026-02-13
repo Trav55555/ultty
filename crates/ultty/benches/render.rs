@@ -53,7 +53,11 @@ fn bench_render_empty(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     for (cols, rows) in [(80, 24), (120, 40), (200, 60)] {
-        let mut renderer = rt.block_on(async { Renderer::new_headless(cols as u32 * 10, rows as u32 * 20).await.unwrap() });
+        let mut renderer = rt.block_on(async {
+            Renderer::new_headless(cols as u32 * 10, rows as u32 * 20)
+                .await
+                .unwrap()
+        });
         let terminal = create_empty_terminal(cols, rows);
         let overlay = OverlayState::default();
 
@@ -62,7 +66,9 @@ fn bench_render_empty(c: &mut Criterion) {
             &(cols, rows),
             |b, _| {
                 b.iter(|| {
-                    renderer.render_to_texture(black_box(&terminal), black_box(&overlay)).unwrap();
+                    renderer
+                        .render_to_texture(black_box(&terminal), black_box(&overlay))
+                        .unwrap();
                 })
             },
         );
@@ -77,7 +83,11 @@ fn bench_render_filled(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     for (cols, rows) in [(80, 24), (120, 40), (200, 60)] {
-        let mut renderer = rt.block_on(async { Renderer::new_headless(cols as u32 * 10, rows as u32 * 20).await.unwrap() });
+        let mut renderer = rt.block_on(async {
+            Renderer::new_headless(cols as u32 * 10, rows as u32 * 20)
+                .await
+                .unwrap()
+        });
         let terminal = create_filled_terminal(cols, rows);
         let overlay = OverlayState::default();
 
@@ -86,7 +96,9 @@ fn bench_render_filled(c: &mut Criterion) {
             &(cols, rows),
             |b, _| {
                 b.iter(|| {
-                    renderer.render_to_texture(black_box(&terminal), black_box(&overlay)).unwrap();
+                    renderer
+                        .render_to_texture(black_box(&terminal), black_box(&overlay))
+                        .unwrap();
                 })
             },
         );
@@ -101,7 +113,11 @@ fn bench_render_mixed(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     for (cols, rows) in [(80, 24), (120, 40), (200, 60)] {
-        let mut renderer = rt.block_on(async { Renderer::new_headless(cols as u32 * 10, rows as u32 * 20).await.unwrap() });
+        let mut renderer = rt.block_on(async {
+            Renderer::new_headless(cols as u32 * 10, rows as u32 * 20)
+                .await
+                .unwrap()
+        });
         let terminal = create_mixed_terminal(cols, rows);
         let overlay = OverlayState::default();
 
@@ -110,7 +126,9 @@ fn bench_render_mixed(c: &mut Criterion) {
             &(cols, rows),
             |b, _| {
                 b.iter(|| {
-                    renderer.render_to_texture(black_box(&terminal), black_box(&overlay)).unwrap();
+                    renderer
+                        .render_to_texture(black_box(&terminal), black_box(&overlay))
+                        .unwrap();
                 })
             },
         );
@@ -127,13 +145,19 @@ fn bench_render_large(c: &mut Criterion) {
 
     let cols = 300u16;
     let rows = 100u16;
-    let mut renderer = rt.block_on(async { Renderer::new_headless(cols as u32 * 10, rows as u32 * 20).await.unwrap() });
+    let mut renderer = rt.block_on(async {
+        Renderer::new_headless(cols as u32 * 10, rows as u32 * 20)
+            .await
+            .unwrap()
+    });
     let terminal = create_filled_terminal(cols, rows);
     let overlay = OverlayState::default();
 
     group.bench_function("300x100_filled", |b| {
         b.iter(|| {
-            renderer.render_to_texture(black_box(&terminal), black_box(&overlay)).unwrap();
+            renderer
+                .render_to_texture(black_box(&terminal), black_box(&overlay))
+                .unwrap();
         })
     });
 

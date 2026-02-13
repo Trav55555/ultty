@@ -146,7 +146,11 @@ impl UlttyClient {
                     for r in &regions {
                         tracing::debug!(
                             "  Region {:?}: ({}, {}) {}x{}",
-                            r.id, r.x, r.y, r.width, r.height
+                            r.id,
+                            r.x,
+                            r.y,
+                            r.width,
+                            r.height
                         );
                     }
                     self.stream.set_nonblocking(true)?;
@@ -219,13 +223,7 @@ impl UlttyClient {
     }
 
     /// Programmatic scroll on a region.
-    pub fn scroll(
-        &mut self,
-        id: RegionId,
-        x: f32,
-        y: f32,
-        animate: bool,
-    ) -> Result<(), Error> {
+    pub fn scroll(&mut self, id: RegionId, x: f32, y: f32, animate: bool) -> Result<(), Error> {
         self.send(&AppMessage::Scroll { id, x, y, animate })
     }
 
@@ -291,7 +289,9 @@ impl UlttyClient {
                         self.viewport_height = height;
                         tracing::info!(
                             "Session ready: id={}, viewport={}x{}",
-                            session_id, width, height
+                            session_id,
+                            width,
+                            height
                         );
                         return Ok(());
                     }

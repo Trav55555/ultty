@@ -134,7 +134,13 @@ fn make_tab(shift: bool) -> Option<Event> {
 
 #[test]
 fn event_loop_processes_key_events() {
-    let events = vec![make_key('+'), make_key('+'), make_key('+'), None, Some(Event::Quit)];
+    let events = vec![
+        make_key('+'),
+        make_key('+'),
+        make_key('+'),
+        None,
+        Some(Event::Quit),
+    ];
     let shared = Arc::new(Mutex::new(0));
     let app = TestCounter {
         count: 0,
@@ -157,10 +163,7 @@ fn tab_navigation_does_not_crash() {
         Some(Event::Quit),
     ];
     let shared = Arc::new(Mutex::new(0));
-    let app = TestCounter {
-        count: 0,
-        shared,
-    };
+    let app = TestCounter { count: 0, shared };
     let mock = MockBackend::new(events);
     let runner = App::new_with_backend(app, Backend::Mock(mock));
     runner.run().unwrap();

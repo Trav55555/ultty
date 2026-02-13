@@ -1,6 +1,6 @@
 //! Child process management for PTY.
 
-use super::{default_shell, current_dir, Pty, PtyError, PtySize, Result, SlavePty};
+use super::{current_dir, default_shell, Pty, PtyError, PtySize, Result, SlavePty};
 use nix::libc;
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
@@ -37,12 +37,7 @@ impl Child {
     }
 
     /// Spawn a command in a PTY.
-    pub fn spawn(
-        program: &str,
-        args: &[&str],
-        working_dir: &Path,
-        size: PtySize,
-    ) -> Result<Self> {
+    pub fn spawn(program: &str, args: &[&str], working_dir: &Path, size: PtySize) -> Result<Self> {
         let (pty, slave) = Pty::open_with_size(size)?;
 
         // SAFETY: fork() is safe to call here because:
@@ -308,7 +303,11 @@ mod tests {
 
         if n > 0 {
             let output = String::from_utf8_lossy(&buf[..n]);
-            assert!(output.contains("hello"), "Expected 'hello', got: {}", output);
+            assert!(
+                output.contains("hello"),
+                "Expected 'hello', got: {}",
+                output
+            );
         }
 
         // Wait for child to exit

@@ -1123,7 +1123,10 @@ mod tests {
 
         // Fixed items total: 1 + 5 + 1 + 1 = 8 cells
         // ScrollView should get the remaining: 30 - 8 = 22 cells
-        assert_eq!(scroll_layout.size.height, 22.0, "ScrollView height (30 - 8 fixed)");
+        assert_eq!(
+            scroll_layout.size.height, 22.0,
+            "ScrollView height (30 - 8 fixed)"
+        );
 
         // Input should be at y = scroll_height + div1 = 22 + 1 = 23
         assert_eq!(div1_layout.location.y, 22.0, "Divider 1 y position");

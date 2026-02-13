@@ -104,7 +104,10 @@ impl Renderer {
     }
 
     /// Build tab title text vertices.
-    pub(super) fn build_tab_title_vertices(&mut self, tab_bar: &TabBarState) -> (Vec<Vertex>, Vec<u32>) {
+    pub(super) fn build_tab_title_vertices(
+        &mut self,
+        tab_bar: &TabBarState,
+    ) -> (Vec<Vertex>, Vec<u32>) {
         let mut all_vertices = Vec::new();
         let mut all_indices = Vec::new();
 

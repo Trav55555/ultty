@@ -497,7 +497,12 @@ fn arb_code_widget() -> impl Strategy<Value = CodeWidget> {
 }
 
 fn arb_progress_widget() -> impl Strategy<Value = ProgressWidget> {
-    (0.0f32..=1.0, proptest::option::of(".*"), proptest::bool::ANY, proptest::bool::ANY)
+    (
+        0.0f32..=1.0,
+        proptest::option::of(".*"),
+        proptest::bool::ANY,
+        proptest::bool::ANY,
+    )
         .prop_map(|(value, label, animated, indeterminate)| ProgressWidget {
             value,
             label,
@@ -519,18 +524,16 @@ fn arb_spinner_widget() -> impl Strategy<Value = SpinnerWidget> {
 }
 
 fn arb_image_widget() -> impl Strategy<Value = ultty_protocol::ImageWidget> {
-    (1u32..=64, 1u32..=64, 0u8..=3).prop_map(|(w, h, scale_val)| {
-        ultty_protocol::ImageWidget {
-            data: vec![0u8; (w * h * 4) as usize],
-            width: w,
-            height: h,
-            scale: match scale_val {
-                0 => ultty_protocol::ImageScale::Fit,
-                1 => ultty_protocol::ImageScale::Fill,
-                2 => ultty_protocol::ImageScale::Stretch,
-                _ => ultty_protocol::ImageScale::None,
-            },
-        }
+    (1u32..=64, 1u32..=64, 0u8..=3).prop_map(|(w, h, scale_val)| ultty_protocol::ImageWidget {
+        data: vec![0u8; (w * h * 4) as usize],
+        width: w,
+        height: h,
+        scale: match scale_val {
+            0 => ultty_protocol::ImageScale::Fit,
+            1 => ultty_protocol::ImageScale::Fill,
+            2 => ultty_protocol::ImageScale::Stretch,
+            _ => ultty_protocol::ImageScale::None,
+        },
     })
 }
 

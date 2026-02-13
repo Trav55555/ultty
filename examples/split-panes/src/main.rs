@@ -71,10 +71,7 @@ fn update_focus(
     client.set_content(
         status_region,
         Content::Text(TextContent {
-            text: format!(
-                " [{}]  Press 1/2/3 to focus pane | q to quit",
-                label
-            ),
+            text: format!(" [{}]  Press 1/2/3 to focus pane | q to quit", label),
             wrap: TextWrap::None,
             align: TextAlign::Left,
             overflow: TextOverflow::Clip,

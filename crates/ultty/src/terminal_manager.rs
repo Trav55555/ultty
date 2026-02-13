@@ -230,12 +230,8 @@ impl TerminalManager {
         let terminal_id = TerminalId(self.next_terminal_id);
         self.next_terminal_id += 1;
 
-        let terminal = ManagedTerminal::new(
-            terminal_id,
-            tab_id,
-            self.default_cols,
-            self.default_rows,
-        )?;
+        let terminal =
+            ManagedTerminal::new(terminal_id, tab_id, self.default_cols, self.default_rows)?;
 
         self.terminals.push(terminal);
         Ok(terminal_id)
@@ -298,7 +294,11 @@ impl TerminalManager {
             return;
         }
 
-        let current_idx = self.tabs.iter().position(|t| t.id == self.active_tab).unwrap_or(0);
+        let current_idx = self
+            .tabs
+            .iter()
+            .position(|t| t.id == self.active_tab)
+            .unwrap_or(0);
         let next_idx = (current_idx + 1) % self.tabs.len();
         self.active_tab = self.tabs[next_idx].id;
     }
@@ -309,7 +309,11 @@ impl TerminalManager {
             return;
         }
 
-        let current_idx = self.tabs.iter().position(|t| t.id == self.active_tab).unwrap_or(0);
+        let current_idx = self
+            .tabs
+            .iter()
+            .position(|t| t.id == self.active_tab)
+            .unwrap_or(0);
         let prev_idx = if current_idx == 0 {
             self.tabs.len() - 1
         } else {
@@ -355,7 +359,8 @@ impl TerminalManager {
     /// Remove exited terminals and their empty tabs.
     pub fn cleanup_exited(&mut self) {
         // Find exited terminals
-        let exited: Vec<TerminalId> = self.terminals
+        let exited: Vec<TerminalId> = self
+            .terminals
             .iter()
             .filter(|t| t.has_exited())
             .map(|t| t.id)
@@ -363,7 +368,11 @@ impl TerminalManager {
 
         for terminal_id in exited {
             // Find and update the tab
-            if let Some(tab) = self.tabs.iter_mut().find(|t| t.terminals.contains(&terminal_id)) {
+            if let Some(tab) = self
+                .tabs
+                .iter_mut()
+                .find(|t| t.terminals.contains(&terminal_id))
+            {
                 tab.remove_terminal(terminal_id);
             }
 
@@ -431,7 +440,9 @@ impl TerminalManager {
 
     /// Get the split direction of the active tab.
     pub fn split_direction(&self) -> SplitDirection {
-        self.active_tab().map(|t| t.split_direction).unwrap_or_default()
+        self.active_tab()
+            .map(|t| t.split_direction)
+            .unwrap_or_default()
     }
 
     /// Focus the next pane in the active tab.
@@ -444,7 +455,9 @@ impl TerminalManager {
             return;
         }
 
-        let current_idx = tab.terminals.iter()
+        let current_idx = tab
+            .terminals
+            .iter()
             .position(|&id| id == tab.focused_terminal)
             .unwrap_or(0);
 
@@ -462,7 +475,9 @@ impl TerminalManager {
             return;
         }
 
-        let current_idx = tab.terminals.iter()
+        let current_idx = tab
+            .terminals
+            .iter()
             .position(|&id| id == tab.focused_terminal)
             .unwrap_or(0);
 
@@ -507,7 +522,8 @@ impl TerminalManager {
             return Vec::new();
         };
 
-        tab.terminals.iter()
+        tab.terminals
+            .iter()
             .filter_map(|&id| self.terminal(id))
             .collect()
     }
@@ -528,12 +544,7 @@ impl TerminalManager {
         let tab_id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
 
-        let terminal_id = self.create_terminal_with_command(
-            tab_id,
-            command,
-            args,
-            working_dir,
-        )?;
+        let terminal_id = self.create_terminal_with_command(tab_id, command, args, working_dir)?;
 
         let mut tab = Tab::new(tab_id, terminal_id);
         if let Some(title) = title {
@@ -575,7 +586,8 @@ impl TerminalManager {
             &full_args,
             self.default_cols,
             self.default_rows,
-        ).map_err(io::Error::other)?;
+        )
+        .map_err(io::Error::other)?;
 
         // Change working directory if specified
         if let Some(dir) = working_dir {
@@ -611,7 +623,8 @@ impl TerminalManager {
             return 0;
         };
 
-        tab.terminals.iter()
+        tab.terminals
+            .iter()
             .position(|&id| id == tab.focused_terminal)
             .unwrap_or(0)
     }
@@ -620,41 +633,54 @@ impl TerminalManager {
     pub fn to_session_data(&self) -> crate::session::SessionData {
         use crate::session::{SessionData, TabData, TerminalData};
 
-        let active_tab_index = self.tabs.iter()
+        let active_tab_index = self
+            .tabs
+            .iter()
             .position(|t| t.id == self.active_tab)
             .unwrap_or(0);
 
-        let tabs = self.tabs.iter().map(|tab| {
-            let terminals = tab.terminals.iter().filter_map(|&tid| {
-                self.terminals.iter().find(|t| t.id == tid).map(|t| {
-                    let working_dir: Option<String> = t.event_loop
-                        .terminal()
-                        .working_directory()
-                        .map(|s| s.to_string());
-                    TerminalData {
-                        title: t.title.clone(),
-                        working_directory: working_dir,
-                        is_focused: tid == tab.focused_terminal,
-                    }
-                })
-            }).collect();
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                let terminals = tab
+                    .terminals
+                    .iter()
+                    .filter_map(|&tid| {
+                        self.terminals.iter().find(|t| t.id == tid).map(|t| {
+                            let working_dir: Option<String> = t
+                                .event_loop
+                                .terminal()
+                                .working_directory()
+                                .map(|s| s.to_string());
+                            TerminalData {
+                                title: t.title.clone(),
+                                working_directory: working_dir,
+                                is_focused: tid == tab.focused_terminal,
+                            }
+                        })
+                    })
+                    .collect();
 
-            // Get working directory from the first terminal or focused terminal
-            let working_directory: Option<String> = tab.terminals.first()
-                .and_then(|&tid| self.terminals.iter().find(|t| t.id == tid))
-                .and_then(|t| t.event_loop.terminal().working_directory())
-                .map(|s| s.to_string());
+                // Get working directory from the first terminal or focused terminal
+                let working_directory: Option<String> = tab
+                    .terminals
+                    .first()
+                    .and_then(|&tid| self.terminals.iter().find(|t| t.id == tid))
+                    .and_then(|t| t.event_loop.terminal().working_directory())
+                    .map(|s| s.to_string());
 
-            TabData {
-                title: tab.title.clone(),
-                working_directory,
-                terminals,
-                split_direction: match tab.split_direction {
-                    SplitDirection::Horizontal => "Horizontal".to_string(),
-                    SplitDirection::Vertical => "Vertical".to_string(),
-                },
-            }
-        }).collect();
+                TabData {
+                    title: tab.title.clone(),
+                    working_directory,
+                    terminals,
+                    split_direction: match tab.split_direction {
+                        SplitDirection::Horizontal => "Horizontal".to_string(),
+                        SplitDirection::Vertical => "Vertical".to_string(),
+                    },
+                }
+            })
+            .collect();
 
         SessionData {
             version: 1,
@@ -665,7 +691,11 @@ impl TerminalManager {
     }
 
     /// Create a terminal manager from session data.
-    pub fn from_session(session: &crate::session::SessionData, cols: u16, rows: u16) -> io::Result<Self> {
+    pub fn from_session(
+        session: &crate::session::SessionData,
+        cols: u16,
+        rows: u16,
+    ) -> io::Result<Self> {
         if session.tabs.is_empty() {
             // No tabs in session, create default
             return Self::new(cols, rows);
@@ -737,7 +767,10 @@ impl TerminalManager {
                 id: tab_id,
                 terminals: terminal_ids,
                 focused_terminal: focused_terminal_id.ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "no focused terminal in restored tab")
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "no focused terminal in restored tab",
+                    )
                 })?,
                 title: tab_data.title.clone(),
                 split_direction,

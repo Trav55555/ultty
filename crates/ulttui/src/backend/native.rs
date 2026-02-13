@@ -383,11 +383,12 @@ impl NativeBackend {
                 // Queue all into pending_events (not returning the first separately,
                 // which would place it after the rest when the caller pushes it back).
                 for ch in text.chars() {
-                    self.pending_events.push_back(Event::Key(crate::event::KeyEvent {
-                        key: crate::event::Key::Char(ch),
-                        modifiers: crate::event::Modifiers::default(),
-                        focused_id: None,
-                    }));
+                    self.pending_events
+                        .push_back(Event::Key(crate::event::KeyEvent {
+                            key: crate::event::Key::Char(ch),
+                            modifiers: crate::event::Modifiers::default(),
+                            focused_id: None,
+                        }));
                 }
                 None
             }

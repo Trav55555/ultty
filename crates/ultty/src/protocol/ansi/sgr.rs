@@ -1,7 +1,7 @@
 //! SGR (Select Graphic Rendition) sequence handling.
 
-use super::{Action, Attribute, Color, NamedColor};
 use super::AnsiParser;
+use super::{Action, Attribute, Color, NamedColor};
 
 impl AnsiParser {
     /// Dispatch SGR (Select Graphic Rendition) sequence.
@@ -560,9 +560,7 @@ mod tests {
             parse(b"\x1b[1;31m"),
             vec![
                 Action::SetAttribute(Attribute::Bold),
-                Action::SetAttribute(Attribute::ForegroundColor(
-                    Color::Named(NamedColor::Red)
-                )),
+                Action::SetAttribute(Attribute::ForegroundColor(Color::Named(NamedColor::Red))),
             ]
         );
     }
@@ -574,9 +572,7 @@ mod tests {
             vec![
                 Action::ResetAttributes,
                 Action::SetAttribute(Attribute::Bold),
-                Action::SetAttribute(Attribute::ForegroundColor(
-                    Color::Named(NamedColor::Green)
-                )),
+                Action::SetAttribute(Attribute::ForegroundColor(Color::Named(NamedColor::Green))),
             ]
         );
     }
@@ -588,12 +584,8 @@ mod tests {
             vec![
                 Action::SetAttribute(Attribute::Italic),
                 Action::SetAttribute(Attribute::Underline),
-                Action::SetAttribute(Attribute::ForegroundColor(
-                    Color::Named(NamedColor::Blue)
-                )),
-                Action::SetAttribute(Attribute::BackgroundColor(
-                    Color::Named(NamedColor::White)
-                )),
+                Action::SetAttribute(Attribute::ForegroundColor(Color::Named(NamedColor::Blue))),
+                Action::SetAttribute(Attribute::BackgroundColor(Color::Named(NamedColor::White))),
             ]
         );
     }
@@ -604,9 +596,11 @@ mod tests {
             parse(b"\x1b[1;38;2;255;0;0m"),
             vec![
                 Action::SetAttribute(Attribute::Bold),
-                Action::SetAttribute(Attribute::ForegroundColor(
-                    Color::Rgb { r: 255, g: 0, b: 0 }
-                )),
+                Action::SetAttribute(Attribute::ForegroundColor(Color::Rgb {
+                    r: 255,
+                    g: 0,
+                    b: 0
+                })),
             ]
         );
     }
@@ -616,12 +610,8 @@ mod tests {
         assert_eq!(
             parse(b"\x1b[38;5;82;48;5;232m"),
             vec![
-                Action::SetAttribute(Attribute::ForegroundColor(
-                    Color::Indexed(82)
-                )),
-                Action::SetAttribute(Attribute::BackgroundColor(
-                    Color::Indexed(232)
-                )),
+                Action::SetAttribute(Attribute::ForegroundColor(Color::Indexed(82))),
+                Action::SetAttribute(Attribute::BackgroundColor(Color::Indexed(232))),
             ]
         );
     }
@@ -676,9 +666,9 @@ mod tests {
             parse(b"\x1b[38;2;100;150m"),
             vec![
                 Action::SetAttribute(Attribute::Dim),
-                Action::SetAttribute(Attribute::BackgroundColor(
-                    Color::Named(NamedColor::BrightBlack)
-                )),
+                Action::SetAttribute(Attribute::BackgroundColor(Color::Named(
+                    NamedColor::BrightBlack
+                ))),
             ]
         );
     }

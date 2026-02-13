@@ -11,9 +11,9 @@ pub mod block_chars;
 pub mod color;
 mod cursor;
 mod image;
-mod panes;
 mod native_render;
 mod overlays;
+mod panes;
 mod pipeline;
 mod screenshot;
 mod scrollbar;
@@ -26,14 +26,14 @@ pub use pipeline::RenderPipeline;
 pub use scrollbar::ScrollbarState;
 pub use text::TextRenderer;
 
-use block_chars::block_char_rects;
 use crate::config::{ColorConfig, FontConfig};
-use crate::grid::{CellFlags, CursorShape, ImageId, Terminal};
 #[cfg(test)]
 use crate::grid::Color;
+use crate::grid::{CellFlags, CursorShape, ImageId, Terminal};
 use crate::tabs::TabBarState;
 use crate::url::DetectedUrl;
 use crate::vim::CopyMode;
+use block_chars::block_char_rects;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
@@ -94,12 +94,24 @@ pub struct PaneInfo {
 impl PaneInfo {
     /// Create a new pane info.
     pub fn new(x: f32, y: f32, width: f32, height: f32, is_focused: bool) -> Self {
-        Self { x, y, width, height, is_focused }
+        Self {
+            x,
+            y,
+            width,
+            height,
+            is_focused,
+        }
     }
 
     /// Create pane info for a single full-screen terminal.
     pub fn full_screen(width: f32, height: f32) -> Self {
-        Self { x: 0.0, y: 0.0, width, height, is_focused: true }
+        Self {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+            is_focused: true,
+        }
     }
 }
 
@@ -267,7 +279,10 @@ impl Renderer {
             .unwrap_or(surface_caps.formats[0]);
 
         // Prefer pre-multiplied alpha for transparency support
-        let alpha_mode = if surface_caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+        let alpha_mode = if surface_caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
             wgpu::CompositeAlphaMode::PreMultiplied
         } else {
             surface_caps.alpha_modes[0]
@@ -319,8 +334,7 @@ impl Renderer {
         });
 
         // Create render pipeline
-        let bg_pipeline =
-            RenderPipeline::new(&device, surface_format, &uniform_bind_group_layout)?;
+        let bg_pipeline = RenderPipeline::new(&device, surface_format, &uniform_bind_group_layout)?;
 
         // Create text renderer
         let text_renderer = TextRenderer::with_config(
@@ -377,7 +391,9 @@ impl Renderer {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or_else(|| anyhow::anyhow!("Failed to find suitable GPU adapter for headless rendering"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("Failed to find suitable GPU adapter for headless rendering")
+            })?;
 
         let (device, queue) = adapter
             .request_device(
@@ -442,8 +458,7 @@ impl Renderer {
         });
 
         // Create render pipeline
-        let bg_pipeline =
-            RenderPipeline::new(&device, surface_format, &uniform_bind_group_layout)?;
+        let bg_pipeline = RenderPipeline::new(&device, surface_format, &uniform_bind_group_layout)?;
 
         // Create text renderer with default font config
         let font_config = crate::config::FontConfig::default();
@@ -585,21 +600,21 @@ impl Renderer {
         // Build and render overlays
         let (overlay_vertices, overlay_indices) = self.build_overlay_vertices(terminal, overlay);
         if !overlay_vertices.is_empty() {
-            let overlay_vertex_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("overlay_vertex_buffer"),
-                    contents: bytemuck::cast_slice(&overlay_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
+            let overlay_vertex_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("overlay_vertex_buffer"),
+                        contents: bytemuck::cast_slice(&overlay_vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
 
-            let overlay_index_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("overlay_index_buffer"),
-                    contents: bytemuck::cast_slice(&overlay_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
+            let overlay_index_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("overlay_index_buffer"),
+                        contents: bytemuck::cast_slice(&overlay_indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
 
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bench_overlay_render_pass"),
@@ -675,8 +690,12 @@ impl Renderer {
     }
 
     /// Clear cached native image textures, retaining only the given region IDs.
-    pub fn retain_native_images(&mut self, live_regions: &std::collections::HashSet<ultty_protocol::RegionId>) {
-        self.native_image_cache.retain(|id, _| live_regions.contains(id));
+    pub fn retain_native_images(
+        &mut self,
+        live_regions: &std::collections::HashSet<ultty_protocol::RegionId>,
+    ) {
+        self.native_image_cache
+            .retain(|id, _| live_regions.contains(id));
     }
 
     /// Set the color scheme.
@@ -820,21 +839,21 @@ impl Renderer {
 
         // Render tab bar if visible
         if !tab_bar_vertices.is_empty() {
-            let tab_bar_vertex_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("tab_bar_vertex_buffer"),
-                    contents: bytemuck::cast_slice(&tab_bar_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
+            let tab_bar_vertex_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("tab_bar_vertex_buffer"),
+                        contents: bytemuck::cast_slice(&tab_bar_vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
 
-            let tab_bar_index_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("tab_bar_index_buffer"),
-                    contents: bytemuck::cast_slice(&tab_bar_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
+            let tab_bar_index_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("tab_bar_index_buffer"),
+                        contents: bytemuck::cast_slice(&tab_bar_indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
 
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("tab_bar_render_pass"),
@@ -864,21 +883,21 @@ impl Renderer {
                 let (title_vertices, title_indices) = self.build_tab_title_vertices(tab_bar);
 
                 if !title_vertices.is_empty() {
-                    let title_vertex_buffer = self
-                        .device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("tab_title_vertex_buffer"),
-                            contents: bytemuck::cast_slice(&title_vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        });
+                    let title_vertex_buffer =
+                        self.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("tab_title_vertex_buffer"),
+                                contents: bytemuck::cast_slice(&title_vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            });
 
-                    let title_index_buffer = self
-                        .device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("tab_title_index_buffer"),
-                            contents: bytemuck::cast_slice(&title_indices),
-                            usage: wgpu::BufferUsages::INDEX,
-                        });
+                    let title_index_buffer =
+                        self.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("tab_title_index_buffer"),
+                                contents: bytemuck::cast_slice(&title_indices),
+                                usage: wgpu::BufferUsages::INDEX,
+                            });
 
                     let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("tab_title_render_pass"),
@@ -899,7 +918,8 @@ impl Renderer {
                     render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                     render_pass.set_bind_group(1, self.text_renderer.atlas_bind_group(), &[]);
                     render_pass.set_vertex_buffer(0, title_vertex_buffer.slice(..));
-                    render_pass.set_index_buffer(title_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass
+                        .set_index_buffer(title_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     render_pass.draw_indexed(0..title_indices.len() as u32, 0, 0..1);
                 }
             }
@@ -920,21 +940,21 @@ impl Renderer {
         // Render overlays (vim cursor, URL underlines)
         let (overlay_vertices, overlay_indices) = self.build_overlay_vertices(terminal, overlay);
         if !overlay_vertices.is_empty() {
-            let overlay_vertex_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("overlay_vertex_buffer"),
-                    contents: bytemuck::cast_slice(&overlay_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
+            let overlay_vertex_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("overlay_vertex_buffer"),
+                        contents: bytemuck::cast_slice(&overlay_vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
 
-            let overlay_index_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("overlay_index_buffer"),
-                    contents: bytemuck::cast_slice(&overlay_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
+            let overlay_index_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("overlay_index_buffer"),
+                        contents: bytemuck::cast_slice(&overlay_indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
 
             // Overlay render pass
             {
@@ -956,7 +976,8 @@ impl Renderer {
                 render_pass.set_pipeline(self.bg_pipeline.pipeline());
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, overlay_vertex_buffer.slice(..));
-                render_pass.set_index_buffer(overlay_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass
+                    .set_index_buffer(overlay_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..overlay_indices.len() as u32, 0, 0..1);
             }
         }
@@ -964,25 +985,31 @@ impl Renderer {
         // Render vim mode indicator if in copy mode
         if let Some(copy_mode) = overlay.copy_mode {
             if copy_mode.is_active() {
-                let (indicator_vertices, indicator_indices) = self.build_vim_mode_indicator_vertices(copy_mode);
+                let (indicator_vertices, indicator_indices) =
+                    self.build_vim_mode_indicator_vertices(copy_mode);
                 if !indicator_vertices.is_empty() {
                     // Render background quads
-                    let bg_vertices: Vec<_> = indicator_vertices.iter()
+                    let bg_vertices: Vec<_> = indicator_vertices
+                        .iter()
                         .take(4) // First 4 vertices are the background quad
                         .cloned()
                         .collect();
                     let bg_indices: Vec<u32> = vec![0, 1, 2, 0, 2, 3];
 
-                    let indicator_bg_vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("indicator_bg_vb"),
-                        contents: bytemuck::cast_slice(&bg_vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-                    let indicator_bg_ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("indicator_bg_ib"),
-                        contents: bytemuck::cast_slice(&bg_indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
+                    let indicator_bg_vb =
+                        self.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("indicator_bg_vb"),
+                                contents: bytemuck::cast_slice(&bg_vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            });
+                    let indicator_bg_ib =
+                        self.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("indicator_bg_ib"),
+                                contents: bytemuck::cast_slice(&bg_indices),
+                                usage: wgpu::BufferUsages::INDEX,
+                            });
 
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("indicator_bg_pass"),
@@ -1009,22 +1036,27 @@ impl Renderer {
                 // Render text vertices (skip the first 4 background vertices)
                 if indicator_vertices.len() > 4 {
                     let text_vertices: Vec<_> = indicator_vertices.into_iter().skip(4).collect();
-                    let text_indices: Vec<u32> = indicator_indices.into_iter()
+                    let text_indices: Vec<u32> = indicator_indices
+                        .into_iter()
                         .filter(|i| *i >= 4)
                         .map(|i| i - 4)
                         .collect();
 
                     if !text_vertices.is_empty() {
-                        let indicator_text_vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("indicator_text_vb"),
-                            contents: bytemuck::cast_slice(&text_vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        });
-                        let indicator_text_ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("indicator_text_ib"),
-                            contents: bytemuck::cast_slice(&text_indices),
-                            usage: wgpu::BufferUsages::INDEX,
-                        });
+                        let indicator_text_vb =
+                            self.device
+                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some("indicator_text_vb"),
+                                    contents: bytemuck::cast_slice(&text_vertices),
+                                    usage: wgpu::BufferUsages::VERTEX,
+                                });
+                        let indicator_text_ib =
+                            self.device
+                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some("indicator_text_ib"),
+                                    contents: bytemuck::cast_slice(&text_indices),
+                                    usage: wgpu::BufferUsages::INDEX,
+                                });
 
                         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: Some("indicator_text_pass"),
@@ -1148,20 +1180,20 @@ impl Renderer {
         }
 
         if !tab_bar_vertices.is_empty() {
-            let tab_bar_vertex_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("tab_bar_vertex_buffer"),
-                    contents: bytemuck::cast_slice(&tab_bar_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let tab_bar_index_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("tab_bar_index_buffer"),
-                    contents: bytemuck::cast_slice(&tab_bar_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
+            let tab_bar_vertex_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("tab_bar_vertex_buffer"),
+                        contents: bytemuck::cast_slice(&tab_bar_vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+            let tab_bar_index_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("tab_bar_index_buffer"),
+                        contents: bytemuck::cast_slice(&tab_bar_indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
 
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("tab_bar_render_pass"),
@@ -1200,13 +1232,20 @@ impl Renderer {
 
         let any_dirty = sessions.iter().any(|s| s.is_render_dirty());
 
-        let has_cached_native = self.cached_native_bg.is_some() || self.cached_native_text.is_some();
+        let has_cached_native =
+            self.cached_native_bg.is_some() || self.cached_native_text.is_some();
 
         if !any_dirty && has_cached_native {
             self.draw_cached_native_buffers(&mut encoder, &view);
         } else {
             for session in &sessions {
-                self.render_native_session(&mut encoder, &view, session, native_search_matches, native_search_index);
+                self.render_native_session(
+                    &mut encoder,
+                    &view,
+                    session,
+                    native_search_matches,
+                    native_search_index,
+                );
             }
         }
 
@@ -1265,7 +1304,11 @@ impl Renderer {
     }
 
     /// Build background vertex data from terminal state.
-    fn build_background_vertices(&self, terminal: &Terminal, overlay: &OverlayState) -> (Vec<Vertex>, Vec<u32>) {
+    fn build_background_vertices(
+        &self,
+        terminal: &Terminal,
+        overlay: &OverlayState,
+    ) -> (Vec<Vertex>, Vec<u32>) {
         let buffer = terminal.buffer();
         let dims = terminal.dimensions();
         let est_quads = dims.rows as usize * 4;
@@ -1373,10 +1416,30 @@ impl Renderer {
                         let w = rw * self.cell_width;
                         let h = rh * self.cell_height;
                         let base = vertices.len() as u32;
-                        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: c, is_color: 0 });
-                        vertices.push(Vertex { position: [x0 + w, y0], tex_coord: [0.0, 0.0], color: c, is_color: 0 });
-                        vertices.push(Vertex { position: [x0 + w, y0 + h], tex_coord: [0.0, 0.0], color: c, is_color: 0 });
-                        vertices.push(Vertex { position: [x0, y0 + h], tex_coord: [0.0, 0.0], color: c, is_color: 0 });
+                        vertices.push(Vertex {
+                            position: [x0, y0],
+                            tex_coord: [0.0, 0.0],
+                            color: c,
+                            is_color: 0,
+                        });
+                        vertices.push(Vertex {
+                            position: [x0 + w, y0],
+                            tex_coord: [0.0, 0.0],
+                            color: c,
+                            is_color: 0,
+                        });
+                        vertices.push(Vertex {
+                            position: [x0 + w, y0 + h],
+                            tex_coord: [0.0, 0.0],
+                            color: c,
+                            is_color: 0,
+                        });
+                        vertices.push(Vertex {
+                            position: [x0, y0 + h],
+                            tex_coord: [0.0, 0.0],
+                            color: c,
+                            is_color: 0,
+                        });
                         indices.push(base);
                         indices.push(base + 1);
                         indices.push(base + 2);
@@ -1391,8 +1454,8 @@ impl Renderer {
         // Draw cursor
         let cursor = terminal.buffer().grid().cursor();
         // Only draw if visible and (not blinking or blink phase is visible)
-        let should_show_cursor = cursor.visible
-            && (!cursor.blinking || overlay.cursor_blink_visible);
+        let should_show_cursor =
+            cursor.visible && (!cursor.blinking || overlay.cursor_blink_visible);
 
         if should_show_cursor {
             let cursor_color = self.color_scheme.cursor;
@@ -1402,34 +1465,15 @@ impl Renderer {
             match cursor.shape {
                 CursorShape::Block => {
                     // Full cell block cursor
-                    self.emit_quad(
-                        &mut vertices,
-                        &mut indices,
-                        col,
-                        col + 1,
-                        row,
-                        cursor_color,
-                    );
+                    self.emit_quad(&mut vertices, &mut indices, col, col + 1, row, cursor_color);
                 }
                 CursorShape::Underline => {
                     // Thin underline cursor (bottom 2 pixels of cell)
-                    self.emit_cursor_underline(
-                        &mut vertices,
-                        &mut indices,
-                        col,
-                        row,
-                        cursor_color,
-                    );
+                    self.emit_cursor_underline(&mut vertices, &mut indices, col, row, cursor_color);
                 }
                 CursorShape::Bar => {
                     // Thin bar cursor (left 2 pixels of cell)
-                    self.emit_cursor_bar(
-                        &mut vertices,
-                        &mut indices,
-                        col,
-                        row,
-                        cursor_color,
-                    );
+                    self.emit_cursor_bar(&mut vertices, &mut indices, col, row, cursor_color);
                 }
             }
         }
@@ -1498,7 +1542,6 @@ impl Renderer {
     pub fn reset_animation_flags(&mut self) {
         self.has_animations = false;
     }
-
 }
 
 #[cfg(test)]
@@ -1582,9 +1625,21 @@ mod tests {
         let gruvbox_bg = Rgba::from_u8(0x1D, 0x20, 0x21);
         let linear_gruvbox = gruvbox_bg.to_linear();
         // Linear values should be much smaller (< 0.02)
-        assert!(linear_gruvbox.r < 0.02, "Expected r < 0.02, got {}", linear_gruvbox.r);
-        assert!(linear_gruvbox.g < 0.02, "Expected g < 0.02, got {}", linear_gruvbox.g);
-        assert!(linear_gruvbox.b < 0.02, "Expected b < 0.02, got {}", linear_gruvbox.b);
+        assert!(
+            linear_gruvbox.r < 0.02,
+            "Expected r < 0.02, got {}",
+            linear_gruvbox.r
+        );
+        assert!(
+            linear_gruvbox.g < 0.02,
+            "Expected g < 0.02, got {}",
+            linear_gruvbox.g
+        );
+        assert!(
+            linear_gruvbox.b < 0.02,
+            "Expected b < 0.02, got {}",
+            linear_gruvbox.b
+        );
 
         // Alpha should not be affected
         let with_alpha = Rgba::new(0.5, 0.5, 0.5, 0.75);

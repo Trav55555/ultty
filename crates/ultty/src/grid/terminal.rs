@@ -311,8 +311,11 @@ impl Terminal {
                 // Character-wise selection
                 for row_idx in first_row..=last_row {
                     if let Some(row) = buffer.visible_row(row_idx as u16) {
-                        let start_col =
-                            if row_idx == start.row { start.col.max(0) } else { 0 };
+                        let start_col = if row_idx == start.row {
+                            start.col.max(0)
+                        } else {
+                            0
+                        };
                         let end_col = if row_idx == end.row {
                             end.col.min(max_col)
                         } else {
@@ -929,8 +932,7 @@ fn percent_decode(input: &str) -> String {
             let h2 = chars.next();
             if let (Some(h1), Some(h2)) = (h1, h2) {
                 let hex = [h1, h2];
-                if let Ok(decoded) =
-                    u8::from_str_radix(std::str::from_utf8(&hex).unwrap_or(""), 16)
+                if let Ok(decoded) = u8::from_str_radix(std::str::from_utf8(&hex).unwrap_or(""), 16)
                 {
                     bytes.push(decoded);
                     continue;
