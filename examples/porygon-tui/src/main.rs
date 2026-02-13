@@ -640,15 +640,19 @@ impl Application for PorygonTui {
             chat_area.scroll_to(scroll_y);
         }
 
+        let center_content = Column::new()
+            .overflow_y_hidden()
+            .child(chat_area)
+            .child(bottom_bar);
+
         let mut dock = DockLayout::new()
-            .dock_top(self.header_view().flex_shrink(0.0))
-            .dock_bottom(bottom_bar);
+            .dock_top(self.header_view().flex_shrink(0.0));
 
         if self.terminal_width >= 80 {
             dock = dock.dock_right(self.sidebar_view());
         }
 
-        let main_content = dock.center(chat_area);
+        let main_content = dock.center(center_content);
 
         if self.show_approval_modal {
             if let Some(req) = &self.pending_approval {

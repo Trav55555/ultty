@@ -206,6 +206,7 @@ impl View for DockLayout {
                 if let Some(center) = &self.center {
                     let mut center_constraints = center.constraints();
                     center_constraints.width = Dimension::Auto;
+                    center_constraints.height = Dimension::Percent(100.0);
                     center_constraints.flex_grow = 1.0;
                     center_constraints.flex_shrink = 1.0;
                     center_constraints.min_height = Dimension::Cells(0.0);

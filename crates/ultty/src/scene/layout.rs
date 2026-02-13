@@ -1139,4 +1139,236 @@ mod tests {
             status_bottom
         );
     }
+
+    /// Replicate DockLayout structure with center_content wrapping ScrollView + bottom_bar:
+    ///
+    /// Stack (100% x 100%)
+    ///   DockLayout Column (100% x 100%, flex_grow:1, overflow:hidden)
+    ///     Header Row (h:1, flex_shrink:0)
+    ///     Middle Row (flex_grow:1, flex_shrink:1, min_height:0, align_items:Stretch)
+    ///       center_content Column (flex_grow:1, flex_shrink:1, min_height:0, overflow_y:hidden)
+    ///         ScrollView (flex_grow:1, flex_shrink:1, min_height:0, overflow_y:scroll)
+    ///           messages Column (100 items x 3 cells = 300 cells total)
+    ///         bottom_bar Column (flex_shrink:0)
+    ///           Divider (h:1)
+    ///           Input (h:5)
+    ///           Divider (h:1)
+    ///           StatusBar (h:1)
+    #[test]
+    fn layout_docklayout_center_with_scrollview_and_bottombar() {
+        let mut tree = SceneTree::new();
+
+        // Stack root: 66x30
+        let root = tree.get_mut(RegionId::ROOT).unwrap();
+        root.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+
+        // DockLayout Column (id=1)
+        let mut dock = Region::new(RegionId::new(1));
+        dock.parent = Some(RegionId::ROOT);
+        dock.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Percent(100.0),
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            overflow: ProtoOverflow {
+                x: ProtoOverflowAxis::Hidden,
+                y: ProtoOverflowAxis::Hidden,
+            },
+            ..Default::default()
+        };
+        tree.insert(dock);
+
+        // Header (id=2)
+        let mut header = Region::new(RegionId::new(2));
+        header.parent = Some(RegionId::new(1));
+        header.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Row,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Cells(1.0),
+            flex_shrink: 0.0,
+            ..Default::default()
+        };
+        tree.insert(header);
+
+        // Middle Row (id=3)
+        let mut middle = Region::new(RegionId::new(3));
+        middle.parent = Some(RegionId::new(1));
+        middle.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Row,
+            width: ProtoDimension::Percent(100.0),
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            min_height: ProtoDimension::Cells(0.0),
+            align_items: ProtoAlignItems::Stretch,
+            ..Default::default()
+        };
+        tree.insert(middle);
+
+        // center_content Column (id=4) — matches DockLayout center override
+        let mut center = Region::new(RegionId::new(4));
+        center.parent = Some(RegionId::new(3));
+        center.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Auto,
+            height: ProtoDimension::Percent(100.0),
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            min_height: ProtoDimension::Cells(0.0),
+            overflow: ProtoOverflow {
+                x: ProtoOverflowAxis::Visible,
+                y: ProtoOverflowAxis::Hidden,
+            },
+            ..Default::default()
+        };
+        tree.insert(center);
+
+        // ScrollView (id=5)
+        let mut scroll = Region::new(RegionId::new(5));
+        scroll.parent = Some(RegionId::new(4));
+        scroll.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            min_height: ProtoDimension::Cells(0.0),
+            width: ProtoDimension::Percent(100.0),
+            overflow: ProtoOverflow {
+                x: ProtoOverflowAxis::Hidden,
+                y: ProtoOverflowAxis::Scroll,
+            },
+            ..Default::default()
+        };
+        tree.insert(scroll);
+
+        // Messages column (id=6) inside ScrollView
+        let mut msgs = Region::new(RegionId::new(6));
+        msgs.parent = Some(RegionId::new(5));
+        msgs.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(msgs);
+
+        // 100 message items (ids 100..199)
+        for i in 0..100 {
+            let mut msg = Region::new(RegionId::new(100 + i));
+            msg.parent = Some(RegionId::new(6));
+            msg.constraints = Constraints {
+                display: ProtoDisplay::Flex,
+                width: ProtoDimension::Percent(100.0),
+                height: ProtoDimension::Cells(3.0),
+                ..Default::default()
+            };
+            tree.insert(msg);
+        }
+
+        // bottom_bar Column (id=7)
+        let mut bar = Region::new(RegionId::new(7));
+        bar.parent = Some(RegionId::new(4));
+        bar.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            flex_shrink: 0.0,
+            width: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(bar);
+
+        // Divider 1 (id=8)
+        let mut d1 = Region::new(RegionId::new(8));
+        d1.parent = Some(RegionId::new(7));
+        d1.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Cells(1.0),
+            flex_shrink: 1.0,
+            ..Default::default()
+        };
+        tree.insert(d1);
+
+        // Input (id=9)
+        let mut input = Region::new(RegionId::new(9));
+        input.parent = Some(RegionId::new(7));
+        input.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Cells(5.0),
+            ..Default::default()
+        };
+        tree.insert(input);
+
+        // Divider 2 (id=10)
+        let mut d2 = Region::new(RegionId::new(10));
+        d2.parent = Some(RegionId::new(7));
+        d2.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Cells(1.0),
+            flex_shrink: 1.0,
+            ..Default::default()
+        };
+        tree.insert(d2);
+
+        // StatusBar (id=11)
+        let mut status = Region::new(RegionId::new(11));
+        status.parent = Some(RegionId::new(7));
+        status.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Cells(1.0),
+            ..Default::default()
+        };
+        tree.insert(status);
+
+        // Compute
+        let mut engine = LayoutEngine::new();
+        engine.sync(&tree).unwrap();
+        engine.compute(66.0, 30.0).unwrap();
+
+        let _dock_layout = engine.get_layout(RegionId::new(1)).unwrap();
+        let header_layout = engine.get_layout(RegionId::new(2)).unwrap();
+        let middle_layout = engine.get_layout(RegionId::new(3)).unwrap();
+        let center_layout = engine.get_layout(RegionId::new(4)).unwrap();
+        let scroll_layout = engine.get_layout(RegionId::new(5)).unwrap();
+        let bar_layout = engine.get_layout(RegionId::new(7)).unwrap();
+        let _input_layout = engine.get_layout(RegionId::new(9)).unwrap();
+        let _status_layout = engine.get_layout(RegionId::new(11)).unwrap();
+
+        // Header should be 1 cell tall
+        assert_eq!(header_layout.size.height, 1.0, "header height");
+
+        // Middle Row should fill remaining space: 30 - 1 = 29
+        assert_eq!(middle_layout.size.height, 29.0, "middle row height");
+
+        // center_content should stretch to middle height
+        assert_eq!(center_layout.size.height, 29.0, "center height");
+
+        // bottom_bar should be 8 cells (1+5+1+1)
+        assert_eq!(bar_layout.size.height, 8.0, "bottom_bar height");
+
+        // ScrollView should be 29 - 8 = 21
+        assert_eq!(scroll_layout.size.height, 21.0, "scroll height");
+
+        // bottom_bar should be within viewport
+        let bar_abs_y = bar_layout.location.y;
+        assert!(
+            bar_abs_y + bar_layout.size.height <= 29.0,
+            "bar bottom {} exceeds center {}",
+            bar_abs_y + bar_layout.size.height,
+            29.0
+        );
+    }
 }
