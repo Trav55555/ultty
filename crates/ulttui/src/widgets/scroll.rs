@@ -103,7 +103,7 @@ impl ScrollView {
     }
 
     fn line_height(&self) -> f32 {
-        16.0
+        1.0
     }
 
     fn page_size(&self) -> f32 {
@@ -123,7 +123,7 @@ impl ScrollView {
         self.scroll_y = 0.0;
     }
 
-    fn scroll_to_bottom(&mut self) {
+    pub fn scroll_to_bottom(&mut self) {
         let max_scroll = (self.content_height - self.viewport_height).max(0.0);
         self.scroll_y = max_scroll;
     }
@@ -268,6 +268,14 @@ impl View for ScrollView {
             let scroll_info = format!("Scroll: {:.0}/{:.0}", self.scroll_y, max_scroll);
             let paragraph = Paragraph::new(Line::raw(scroll_info));
             frame.render_widget(paragraph, inner);
+        }
+    }
+
+    fn scroll_offset(&self) -> Option<(f32, f32)> {
+        if self.scroll_x != 0.0 || self.scroll_y != 0.0 {
+            Some((self.scroll_x, self.scroll_y))
+        } else {
+            None
         }
     }
 
@@ -657,7 +665,7 @@ mod tests {
         scroll.set_viewport_height(100.0);
 
         scroll.scroll_lines(2);
-        assert_eq!(scroll.scroll_y, 32.0); // 2 * 16.0
+        assert_eq!(scroll.scroll_y, 2.0); // 2 * 1.0
     }
 
     #[test]
@@ -668,7 +676,7 @@ mod tests {
 
         scroll.scroll_to(100.0);
         scroll.scroll_lines(-3);
-        assert_eq!(scroll.scroll_y, 52.0); // 100 - 3*16 = 52
+        assert_eq!(scroll.scroll_y, 97.0); // 100 - 3*1.0 = 97
     }
 
     #[test]
@@ -678,7 +686,7 @@ mod tests {
         scroll.set_viewport_height(100.0);
 
         scroll.scroll_to_line(5);
-        assert_eq!(scroll.scroll_y, 80.0); // 5 * 16.0
+        assert_eq!(scroll.scroll_y, 5.0); // 5 * 1.0
     }
 
     #[test]
@@ -688,8 +696,8 @@ mod tests {
         scroll.set_viewport_height(100.0);
 
         scroll.center_on_line(10);
-        // 10 * 16.0 - 100.0/2 = 160 - 50 = 110
-        assert_eq!(scroll.scroll_y, 110.0);
+        // 10 * 1.0 - 100.0/2 = 10 - 50 = -40, clamped to 0
+        assert_eq!(scroll.scroll_y, 0.0);
     }
 
     #[test]
@@ -779,8 +787,8 @@ mod tests {
         scroll.add_search_match(50);
 
         scroll.goto_next_match();
-        // centers on line 50: 50*16 - 50 = 750
-        assert_eq!(scroll.scroll_y, 750.0);
+        // centers on line 50: 50*1.0 - 50 = 0, clamped to 0
+        assert_eq!(scroll.scroll_y, 0.0);
     }
 
     #[test]
@@ -1068,8 +1076,8 @@ mod tests {
         scroll.scroll_to(200.0);
 
         scroll.handle_vim_command(&VimCommand::motion_with_count(3, VimMotion::Up));
-        // 3 lines up: 200 - 3*16 = 152
-        assert_eq!(scroll.scroll_y, 152.0);
+        // 3 lines up: 200 - 3*1.0 = 197
+        assert_eq!(scroll.scroll_y, 197.0);
     }
 
     #[test]
@@ -1079,8 +1087,8 @@ mod tests {
         scroll.set_viewport_height(100.0);
 
         scroll.handle_vim_command(&VimCommand::motion(VimMotion::Line(10)));
-        // scroll_to_line(10): 10 * 16 = 160, clamped to max 900
-        assert_eq!(scroll.scroll_y, 160.0);
+        // scroll_to_line(10): 10 * 1.0 = 10, clamped to max 900
+        assert_eq!(scroll.scroll_y, 10.0);
     }
 
     #[test]

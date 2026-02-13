@@ -147,6 +147,15 @@ impl NativeBackend {
             })?;
         }
 
+        if let Some((sx, sy)) = view.scroll_offset() {
+            self.send_message(&AppMessage::Scroll {
+                id: region_id,
+                x: sx,
+                y: sy,
+                animate: false,
+            })?;
+        }
+
         let children_count = view.children_count();
         let mut pending_messages: Vec<AppMessage> = Vec::new();
 

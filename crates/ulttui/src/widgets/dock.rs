@@ -102,6 +102,15 @@ impl DockLayout {
             })?;
         }
 
+        if let Some((sx, sy)) = child.scroll_offset() {
+            send_message(&AppMessage::Scroll {
+                id: region_id,
+                x: sx,
+                y: sy,
+                animate: false,
+            })?;
+        }
+
         for i in 0..child.children_count() {
             child.render_child_native(i, send_message, region_id, next_id)?;
         }

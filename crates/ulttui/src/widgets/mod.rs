@@ -104,6 +104,11 @@ pub trait View {
     fn on_event(&mut self, _event: &Event) -> bool {
         false
     }
+
+    /// Return scroll offset (x, y) if this view is a scroll container with non-zero offset.
+    fn scroll_offset(&self) -> Option<(f32, f32)> {
+        None
+    }
 }
 
 pub enum FocusAction {
@@ -149,6 +154,10 @@ impl<T: View> View for &T {
 
     fn is_focusable(&self) -> bool {
         (*self).is_focusable()
+    }
+
+    fn scroll_offset(&self) -> Option<(f32, f32)> {
+        (*self).scroll_offset()
     }
 }
 

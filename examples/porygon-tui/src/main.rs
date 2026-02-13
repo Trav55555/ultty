@@ -264,6 +264,7 @@ impl Default for AgentStatus {
 struct PorygonTui {
     messages: Vec<ChatMessage>,
     input: TextInput,
+    chat_scroll: ScrollView,
     status: AgentStatus,
     daemon_url: String,
     client: reqwest::Client,
@@ -313,6 +314,7 @@ impl PorygonTui {
                 .height(3)
                 .placeholder("Type a message...")
                 .vim(),
+            chat_scroll: ScrollView::new(),
             status: AgentStatus::default(),
             daemon_url,
             client: reqwest::Client::new(),
@@ -381,6 +383,7 @@ impl Application for PorygonTui {
                     content: user_text.clone(),
                     timestamp: format_timestamp(),
                 });
+                self.auto_scroll_chat();
 
                 if !self.connected {
                     self.messages.push(ChatMessage {
@@ -388,6 +391,7 @@ impl Application for PorygonTui {
                         content: "No daemon connected. Messages will be sent once a daemon is available.".into(),
                         timestamp: format_timestamp(),
                     });
+                    self.auto_scroll_chat();
                     return Cmd::none();
                 }
 
@@ -443,6 +447,7 @@ impl Application for PorygonTui {
                     content: response,
                     timestamp: format_timestamp(),
                 });
+                self.auto_scroll_chat();
                 Cmd::none()
             }
             Msg::DaemonError(err) => {
@@ -454,6 +459,7 @@ impl Application for PorygonTui {
                     content: format!("Error: {err}"),
                     timestamp: format_timestamp(),
                 });
+                self.auto_scroll_chat();
                 Cmd::ShowToast(Toast::error(format!("Request failed: {err}")))
             }
             Msg::ConnectionChecked(ok) => {
@@ -468,6 +474,7 @@ impl Application for PorygonTui {
                         content: format!("Daemon connected at `{}`.", self.daemon_url),
                         timestamp: format_timestamp(),
                     });
+                    self.auto_scroll_chat();
                     Cmd::ShowToast(Toast::success("Daemon connected"))
                 } else if !ok && was_connected {
                     self.messages.push(ChatMessage {
@@ -475,6 +482,7 @@ impl Application for PorygonTui {
                         content: "Daemon disconnected.".into(),
                         timestamp: format_timestamp(),
                     });
+                    self.auto_scroll_chat();
                     Cmd::ShowToast(Toast::warning("Daemon disconnected"))
                 } else if !ok && !was_connected && !self.started_connection_msg {
                     self.started_connection_msg = true;
@@ -492,6 +500,7 @@ impl Application for PorygonTui {
                         ),
                         timestamp: format_timestamp(),
                     });
+                    self.auto_scroll_chat();
                     Cmd::none()
                 } else {
                     Cmd::none()
@@ -619,16 +628,21 @@ impl Application for PorygonTui {
             .child(self.input_view())
             .child(Divider::horizontal())
             .child(self.status_bar_view());
-        let chat_area = Column::new()
-            .flex_grow(1.0)
-            .child(
-                ScrollView::new()
-                    .child(self.messages_view()),
-            )
-            .child(bottom_bar);
+        let mut chat_area = ScrollView::new()
+            .child(self.messages_view());
+        // Transfer scroll state from persistent field
+        let (_, scroll_y) = self.chat_scroll.scroll_position();
+        if scroll_y > 0.0 {
+            let estimated_content = self.messages.len() as f32 * 8.0;
+            let viewport = (self.terminal_height as f32 - 7.0).max(1.0);
+            chat_area.set_content_height(estimated_content);
+            chat_area.set_viewport_height(viewport);
+            chat_area.scroll_to(scroll_y);
+        }
 
         let mut dock = DockLayout::new()
-            .dock_top(self.header_view().flex_shrink(0.0));
+            .dock_top(self.header_view().flex_shrink(0.0))
+            .dock_bottom(bottom_bar);
 
         if self.terminal_width >= 80 {
             dock = dock.dock_right(self.sidebar_view());
@@ -655,6 +669,16 @@ impl Application for PorygonTui {
 }
 
 impl PorygonTui {
+    fn auto_scroll_chat(&mut self) {
+        // Estimate content height: each message card ~8 cells (header + content + borders + padding + gap)
+        let estimated_content = self.messages.len() as f32 * 8.0;
+        // Viewport height: terminal minus header(1) + bottom_bar(~6) = ~7 overhead
+        let viewport = (self.terminal_height as f32 - 7.0).max(1.0);
+        self.chat_scroll.set_content_height(estimated_content);
+        self.chat_scroll.set_viewport_height(viewport);
+        self.chat_scroll.scroll_to_bottom();
+    }
+
     fn approval_modal_body(&self, req: &ApprovalRequest) -> String {
         let params_display = serde_json::to_string_pretty(&req.params)
             .unwrap_or_else(|_| format!("{:?}", req.params));
