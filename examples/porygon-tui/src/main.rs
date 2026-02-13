@@ -633,7 +633,7 @@ impl Application for PorygonTui {
         // Transfer scroll state from persistent field
         let (_, scroll_y) = self.chat_scroll.scroll_position();
         if scroll_y > 0.0 {
-            let estimated_content = self.messages.len() as f32 * 8.0;
+            let estimated_content = self.messages.len() as f32 * 4.0 + 4.0;
             let viewport = (self.terminal_height as f32 - 7.0).max(1.0);
             chat_area.set_content_height(estimated_content);
             chat_area.set_viewport_height(viewport);
@@ -670,8 +670,9 @@ impl Application for PorygonTui {
 
 impl PorygonTui {
     fn auto_scroll_chat(&mut self) {
-        // Estimate content height: each message card ~8 cells (header + content + borders + padding + gap)
-        let estimated_content = self.messages.len() as f32 * 8.0;
+        // Conservative content height estimate: ~4 cells per message card + outer padding.
+        // Under-estimating is safer than over-estimating (shows content rather than empty space).
+        let estimated_content = self.messages.len() as f32 * 4.0 + 4.0;
         // Viewport height: terminal minus header(1) + bottom_bar(~6) = ~7 overhead
         let viewport = (self.terminal_height as f32 - 7.0).max(1.0);
         self.chat_scroll.set_content_height(estimated_content);

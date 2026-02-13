@@ -340,7 +340,7 @@ impl NativeBackend {
         Ok(())
     }
 
-    fn convert_input_event(&self, input: InputEvent) -> Option<Event> {
+    fn convert_input_event(&mut self, input: InputEvent) -> Option<Event> {
         match input.event_type {
             InputType::KeyDown { key, modifiers } => Some(Event::Key(crate::event::KeyEvent {
                 key: self.convert_key(key),
@@ -377,6 +377,26 @@ impl NativeBackend {
                     y: input.y as u16,
                     modifiers: crate::event::Modifiers::default(),
                 }))
+            }
+            InputType::TextInput { text } => {
+                // Convert bulk text input into individual key events
+                let mut events = Vec::new();
+                for ch in text.chars() {
+                    events.push(Event::Key(crate::event::KeyEvent {
+                        key: crate::event::Key::Char(ch),
+                        modifiers: crate::event::Modifiers::default(),
+                        focused_id: None,
+                    }));
+                }
+                // Return first event; queue the rest
+                if events.is_empty() {
+                    None
+                } else {
+                    for event in events.drain(1..) {
+                        self.pending_events.push_back(event);
+                    }
+                    events.into_iter().next()
+                }
             }
             _ => None,
         }
