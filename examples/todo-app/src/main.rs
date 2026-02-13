@@ -105,19 +105,27 @@ impl Application for TodoApp {
             .collect();
 
         Column::new()
-            .padding(1.0)
-            .gap(1.0)
-            .child(Text::new("Todo App - ulttui Framework Demo"))
-            .child(List::new().items(items_display))
-            .child(Row::new().gap(2.0).child(Text::new(format!(
-                "Total: {} | Done: {} | Pending: {}",
-                self.items.len(),
-                self.items.iter().filter(|i| i.completed).count(),
-                self.items.iter().filter(|i| !i.completed).count()
-            ))))
-            .child(Text::new(
-                "Keys: j/k to navigate, Enter/Space to toggle, Ctrl+C to quit",
-            ))
+            .flex_grow(1.0)
+            .height(Dimension::Percent(100.0))
+            .justify_center()
+            .align_center()
+            .child(
+                Card::new()
+                    .max_width(50.0)
+                    .child(Row::new().justify_center().child(Title::new("Todo App")))
+                    .child(Divider::horizontal())
+                    .child(List::new().items(items_display))
+                    .child(Divider::horizontal())
+                    .child(Row::new().justify_center().child(Body::new(format!(
+                        "Total: {} | Done: {} | Pending: {}",
+                        self.items.len(),
+                        self.items.iter().filter(|i| i.completed).count(),
+                        self.items.iter().filter(|i| !i.completed).count()
+                    ))))
+                    .child(Row::new().justify_center().child(Muted::new(
+                        "j/k navigate · Enter/Space toggle · Ctrl+C quit",
+                    ))),
+            )
     }
 }
 

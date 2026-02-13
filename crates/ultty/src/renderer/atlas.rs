@@ -27,6 +27,8 @@ pub struct GlyphInfo {
     /// Offset from baseline
     pub left: f32,
     pub top: f32,
+    /// Whether this glyph is a color emoji (true) or monochrome (false)
+    pub is_color: bool,
 }
 
 /// Entry in the glyph cache with LRU tracking.
@@ -86,7 +88,7 @@ impl GlyphAtlas {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -225,6 +227,7 @@ impl GlyphAtlas {
                 height: 0.0,
                 left: image.placement.left as f32,
                 top: image.placement.top as f32,
+                is_color: false,
             };
             self.cache.insert(cache_key, CacheEntry {
                 info,
@@ -237,19 +240,28 @@ impl GlyphAtlas {
         let (x, y) = self.allocate(image.placement.width, image.placement.height)?;
 
         // Convert image data based on content type
-        let data: Vec<u8> = match image.content {
-            SwashContent::Mask => image.data.clone(),
+        let (data, is_color) = match image.content {
+            SwashContent::Mask => {
+                // Expand 1-byte alpha to RGBA: (255, 255, 255, alpha)
+                let rgba: Vec<u8> = image.data.iter()
+                    .flat_map(|&a| [255, 255, 255, a])
+                    .collect();
+                (rgba, false)
+            }
             SwashContent::Color => {
-                // Convert RGBA to grayscale (use alpha channel)
-                image.data.chunks(4).map(|c| c[3]).collect()
+                // Keep full RGBA color data (emoji)
+                (image.data.clone(), true)
             }
             SwashContent::SubpixelMask => {
-                // Use red channel for subpixel
-                image.data.chunks(3).map(|c| c[0]).collect()
+                // Treat as mono, use first subpixel channel as alpha
+                let rgba: Vec<u8> = image.data.chunks(3)
+                    .flat_map(|c| [255, 255, 255, c[0]])
+                    .collect();
+                (rgba, false)
             }
         };
 
-        // Upload to texture
+        // Upload to texture (4 bytes per pixel for Rgba8Unorm)
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.texture,
@@ -260,7 +272,7 @@ impl GlyphAtlas {
             &data,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(image.placement.width),
+                bytes_per_row: Some(image.placement.width * 4),
                 rows_per_image: Some(image.placement.height),
             },
             wgpu::Extent3d {
@@ -283,6 +295,7 @@ impl GlyphAtlas {
             height: image.placement.height as f32,
             left: image.placement.left as f32,
             top: image.placement.top as f32,
+            is_color,
         };
 
         self.cache.insert(cache_key, CacheEntry {
@@ -380,6 +393,7 @@ mod tests {
             height: 20.0,
             left: 1.0,
             top: 15.0,
+            is_color: false,
         };
 
         assert_eq!(info.uv[0], 0.1);

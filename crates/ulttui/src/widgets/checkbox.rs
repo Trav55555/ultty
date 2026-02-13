@@ -94,6 +94,8 @@ impl View for Checkbox {
             }
             Key::Tab if key.modifiers.shift => Some(FocusAction::Previous),
             Key::Tab => Some(FocusAction::Next),
+            Key::Left | Key::Up => Some(FocusAction::Previous),
+            Key::Right | Key::Down => Some(FocusAction::Next),
             _ => None,
         }
     }

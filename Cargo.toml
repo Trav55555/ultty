@@ -55,6 +55,7 @@ thiserror = "1.0"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+pulldown-cmark = "0.12"
 
 # Testing
 insta = { version = "1.34", features = ["json"] }

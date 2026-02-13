@@ -187,9 +187,19 @@ impl TextRenderer {
 
         buffer.set_text(&mut self.font_system, text, attrs, shaping);
 
-        let mut cursor_x = x;
+        // Build a char-index lookup from byte offsets so spaces (which produce
+        // no glyphs in cosmic-text) are accounted for in positioning.
+        let char_indices: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+
         for run in buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
+                // Map byte offset → character index for grid-aligned placement.
+                let char_idx = char_indices
+                    .iter()
+                    .position(|&b| b == glyph.start)
+                    .unwrap_or(0);
+                let glyph_x = x + char_idx as f32 * self.cell_width;
+
                 let physical = glyph.physical((0.0, 0.0), 1.0);
 
                 if let Some(glyph_info) = self
@@ -200,13 +210,11 @@ impl TextRenderer {
                         continue;
                     }
 
-                    let gx = cursor_x + glyph_info.left + physical.x as f32;
-                    let gy = y + (self.cell_height - glyph_info.top) + physical.y as f32;
+                    let gx = (glyph_x + glyph_info.left).round();
+                    let gy = (y + (self.cell_height - glyph_info.top)).round();
 
                     self.emit_glyph_quad(&mut vertices, &mut indices, gx, gy, &glyph_info, fg);
                 }
-
-                cursor_x += glyph.w;
             }
         }
 
@@ -248,10 +256,17 @@ impl TextRenderer {
 
         buffer.set_text(&mut self.font_system, text, attrs, shaping);
 
-        let mut cursor_x = x;
-        let start_x = x;
+        let char_indices: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+        let total_advance = text.chars().count() as f32 * self.cell_width;
+
         for run in buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
+                let char_idx = char_indices
+                    .iter()
+                    .position(|&b| b == glyph.start)
+                    .unwrap_or(0);
+                let glyph_x = x + char_idx as f32 * self.cell_width;
+
                 let physical = glyph.physical((0.0, 0.0), 1.0);
 
                 if let Some(glyph_info) = self
@@ -262,17 +277,15 @@ impl TextRenderer {
                         continue;
                     }
 
-                    let gx = cursor_x + glyph_info.left + physical.x as f32;
-                    let gy = y + (self.cell_height - glyph_info.top) + physical.y as f32;
+                    let gx = (glyph_x + glyph_info.left).round();
+                    let gy = (y + (self.cell_height - glyph_info.top)).round();
 
                     self.emit_glyph_quad(&mut vertices, &mut indices, gx, gy, &glyph_info, fg);
                 }
-
-                cursor_x += glyph.w;
             }
         }
 
-        (vertices, indices, cursor_x - start_x)
+        (vertices, indices, total_advance)
     }
 
     /// Render text from terminal state.
@@ -491,10 +504,11 @@ impl TextRenderer {
                             continue;
                         }
 
-                        let x = col_idx as f32 * cell_width + glyph_info.left + x_offset;
-                        let y = row_idx as f32 * cell_height
+                        let x = (col_idx as f32 * cell_width + glyph_info.left + x_offset).round();
+                        let y = (row_idx as f32 * cell_height
                             + (cell_height - glyph_info.top)
-                            + y_offset;
+                            + y_offset)
+                            .round();
 
                         self.emit_glyph_quad(
                             &mut vertices,
@@ -524,6 +538,7 @@ impl TextRenderer {
     ) {
         let base_idx = vertices.len() as u32;
         let color_arr = color.to_array();
+        let is_color = if glyph.is_color { 1u32 } else { 0u32 };
 
         let x0 = x;
         let y0 = y;
@@ -534,21 +549,25 @@ impl TextRenderer {
             position: [x0, y0],
             tex_coord: [glyph.uv[0], glyph.uv[1]],
             color: color_arr,
+            is_color,
         });
         vertices.push(Vertex {
             position: [x1, y0],
             tex_coord: [glyph.uv[2], glyph.uv[1]],
             color: color_arr,
+            is_color,
         });
         vertices.push(Vertex {
             position: [x1, y1],
             tex_coord: [glyph.uv[2], glyph.uv[3]],
             color: color_arr,
+            is_color,
         });
         vertices.push(Vertex {
             position: [x0, y1],
             tex_coord: [glyph.uv[0], glyph.uv[3]],
             color: color_arr,
+            is_color,
         });
 
         // Two triangles per quad
@@ -617,8 +636,9 @@ impl TextRenderer {
                     .get_glyph(&mut self.font_system, physical.cache_key)
                 {
                     if glyph_info.width > 0.0 && glyph_info.height > 0.0 {
-                        let gx = x + glyph_info.left + physical.x as f32;
-                        let gy = y + (self.cell_height - glyph_info.top) + physical.y as f32;
+                        let gx = (x + glyph_info.left + physical.x as f32).round();
+                        let gy =
+                            (y + (self.cell_height - glyph_info.top) + physical.y as f32).round();
 
                         self.emit_glyph_quad(
                             &mut vertices,

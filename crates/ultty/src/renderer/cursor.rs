@@ -24,10 +24,10 @@ impl Renderer {
         let base_idx = vertices.len() as u32;
         let color_arr = color.to_array();
 
-        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: color_arr });
-        vertices.push(Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color: color_arr });
-        vertices.push(Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color: color_arr });
-        vertices.push(Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color: color_arr });
+        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: color_arr, is_color: 0 });
+        vertices.push(Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color: color_arr, is_color: 0 });
+        vertices.push(Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color: color_arr, is_color: 0 });
+        vertices.push(Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color: color_arr, is_color: 0 });
 
         indices.push(base_idx);
         indices.push(base_idx + 1);
@@ -55,10 +55,10 @@ impl Renderer {
         let base_idx = vertices.len() as u32;
         let color_arr = color.to_array();
 
-        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: color_arr });
-        vertices.push(Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color: color_arr });
-        vertices.push(Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color: color_arr });
-        vertices.push(Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color: color_arr });
+        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: color_arr, is_color: 0 });
+        vertices.push(Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color: color_arr, is_color: 0 });
+        vertices.push(Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color: color_arr, is_color: 0 });
+        vertices.push(Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color: color_arr, is_color: 0 });
 
         indices.push(base_idx);
         indices.push(base_idx + 1);
@@ -86,10 +86,10 @@ impl Renderer {
         let base_idx = vertices.len() as u32;
         let color_arr = color.to_array();
 
-        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: color_arr });
-        vertices.push(Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color: color_arr });
-        vertices.push(Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color: color_arr });
-        vertices.push(Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color: color_arr });
+        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: color_arr, is_color: 0 });
+        vertices.push(Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color: color_arr, is_color: 0 });
+        vertices.push(Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color: color_arr, is_color: 0 });
+        vertices.push(Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color: color_arr, is_color: 0 });
 
         indices.push(base_idx);
         indices.push(base_idx + 1);
@@ -117,10 +117,10 @@ impl Renderer {
         let base_idx = vertices.len() as u32;
         let color_arr = color.to_array();
 
-        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: color_arr });
-        vertices.push(Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color: color_arr });
-        vertices.push(Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color: color_arr });
-        vertices.push(Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color: color_arr });
+        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: color_arr, is_color: 0 });
+        vertices.push(Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color: color_arr, is_color: 0 });
+        vertices.push(Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color: color_arr, is_color: 0 });
+        vertices.push(Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color: color_arr, is_color: 0 });
 
         indices.push(base_idx);
         indices.push(base_idx + 1);

@@ -797,4 +797,346 @@ mod tests {
             LengthPercentage::Length(0.0)
         );
     }
+
+    /// Replicate chat app hierarchy:
+    /// Column (flex, column, flex_grow:1, padding:1, gap:1)
+    ///   Title (flex, width:Cells(10), height:Cells(1))
+    ///   Divider (flex, height:Cells(1))
+    ///   ScrollView (flex, column, flex_grow:1, overflow.y:Scroll)
+    ///     Column (flex, column, flex_grow:1, gap:0.5)
+    ///       RichText (flex, width:Percent(100), height:Cells(1))
+    ///   Divider (flex, height:Cells(1))
+    ///   Text (flex, height:Cells(1))
+    ///   Muted (flex, width:Cells(24), height:Cells(1))
+    #[test]
+    fn layout_chat_scrollview_hierarchy() {
+        let mut tree = SceneTree::new();
+
+        // Root
+        let root = tree.get_mut(RegionId::ROOT).unwrap();
+        root.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Cells(80.0),
+            height: ProtoDimension::Cells(37.0),
+            ..Default::default()
+        };
+
+        // Top-level Column (id=1)
+        let mut col = Region::new(RegionId::new(1));
+        col.parent = Some(RegionId::ROOT);
+        col.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            flex_grow: 1.0,
+            width: ProtoDimension::Percent(100.0),
+            padding: Edges::all(ProtoDimension::Cells(1.0)),
+            gap: ProtoSize {
+                width: ProtoDimension::Auto,
+                height: ProtoDimension::Cells(1.0),
+            },
+            ..Default::default()
+        };
+        tree.insert(col);
+
+        // Title (id=2)
+        let mut title = Region::new(RegionId::new(2));
+        title.parent = Some(RegionId::new(1));
+        title.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Cells(10.0),
+            height: ProtoDimension::Cells(1.0),
+            ..Default::default()
+        };
+        tree.insert(title);
+
+        // Divider 1 (id=3)
+        let mut div1 = Region::new(RegionId::new(3));
+        div1.parent = Some(RegionId::new(1));
+        div1.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Cells(1.0),
+            flex_shrink: 1.0,
+            ..Default::default()
+        };
+        tree.insert(div1);
+
+        // ScrollView (id=4)
+        let mut scroll = Region::new(RegionId::new(4));
+        scroll.parent = Some(RegionId::new(1));
+        scroll.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            flex_grow: 1.0,
+            width: ProtoDimension::Percent(100.0),
+            overflow: ProtoOverflow {
+                x: ProtoOverflowAxis::Visible,
+                y: ProtoOverflowAxis::Scroll,
+            },
+            ..Default::default()
+        };
+        tree.insert(scroll);
+
+        // ScrollView child Column (id=5)
+        let mut scroll_col = Region::new(RegionId::new(5));
+        scroll_col.parent = Some(RegionId::new(4));
+        scroll_col.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            flex_grow: 1.0,
+            width: ProtoDimension::Percent(100.0),
+            gap: ProtoSize {
+                width: ProtoDimension::Auto,
+                height: ProtoDimension::Cells(0.5),
+            },
+            ..Default::default()
+        };
+        tree.insert(scroll_col);
+
+        // RichText inside ScrollView (id=6)
+        let mut richtext = Region::new(RegionId::new(6));
+        richtext.parent = Some(RegionId::new(5));
+        richtext.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Cells(1.0),
+            flex_shrink: 1.0,
+            ..Default::default()
+        };
+        tree.insert(richtext);
+
+        // Divider 2 (id=7)
+        let mut div2 = Region::new(RegionId::new(7));
+        div2.parent = Some(RegionId::new(1));
+        div2.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Cells(1.0),
+            flex_shrink: 1.0,
+            ..Default::default()
+        };
+        tree.insert(div2);
+
+        // Text input (id=8)
+        let mut text_input = Region::new(RegionId::new(8));
+        text_input.parent = Some(RegionId::new(1));
+        text_input.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Cells(1.0),
+            flex_shrink: 1.0,
+            ..Default::default()
+        };
+        tree.insert(text_input);
+
+        // Muted text (id=9)
+        let mut muted = Region::new(RegionId::new(9));
+        muted.parent = Some(RegionId::new(1));
+        muted.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Cells(24.0),
+            height: ProtoDimension::Cells(1.0),
+            ..Default::default()
+        };
+        tree.insert(muted);
+
+        // Compute layout
+        let mut engine = LayoutEngine::new();
+        engine.sync(&tree).unwrap();
+        engine.compute(80.0, 37.0).unwrap();
+
+        for id_val in 1..=9 {
+            let layout = engine.get_layout(RegionId::new(id_val)).unwrap();
+            assert!(layout.size.width > 0.0, "Region {} has zero width", id_val);
+            assert!(
+                layout.size.height > 0.0,
+                "Region {} has zero height",
+                id_val
+            );
+        }
+
+        // Specifically check the RichText inside ScrollView
+        let richtext_layout = engine.get_layout(RegionId::new(6)).unwrap();
+        assert!(
+            richtext_layout.size.width > 0.0,
+            "RichText width is zero: {:?}",
+            richtext_layout
+        );
+        assert_eq!(
+            richtext_layout.size.height, 1.0,
+            "RichText height should be 1.0: {:?}",
+            richtext_layout
+        );
+
+        // Check ScrollView has non-zero size
+        let scroll_layout = engine.get_layout(RegionId::new(4)).unwrap();
+        assert!(
+            scroll_layout.size.height > 1.0,
+            "ScrollView should have significant height: {:?}",
+            scroll_layout
+        );
+    }
+
+    /// Test that a chat layout with many messages keeps the input pinned.
+    ///
+    /// Layout:
+    ///   Column (flex_grow:1, flex_shrink:1, overflow_y:hidden, 80x30)
+    ///     ScrollView (flex_grow:1, flex_shrink:1, min_height:0, overflow_y:scroll)
+    ///       Column (100 items, each 3 cells tall = 300 cells total)
+    ///     Divider (height:1)
+    ///     Input (height:5)
+    ///     Divider (height:1)
+    ///     StatusBar (height:1)
+    #[test]
+    fn layout_chat_input_stays_pinned_with_overflow() {
+        let mut tree = SceneTree::new();
+
+        // Root: 80x30 viewport
+        let root = tree.get_mut(RegionId::ROOT).unwrap();
+        root.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Cells(80.0),
+            height: ProtoDimension::Cells(30.0),
+            ..Default::default()
+        };
+
+        // chat_area Column (id=1)
+        let mut chat_col = Region::new(RegionId::new(1));
+        chat_col.parent = Some(RegionId::ROOT);
+        chat_col.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            width: ProtoDimension::Percent(100.0),
+            overflow: ProtoOverflow {
+                x: ProtoOverflowAxis::Visible,
+                y: ProtoOverflowAxis::Hidden,
+            },
+            ..Default::default()
+        };
+        tree.insert(chat_col);
+
+        // ScrollView (id=2) — flex_grow:1, flex_shrink:1, min_height:0, overflow_y:scroll
+        let mut scroll = Region::new(RegionId::new(2));
+        scroll.parent = Some(RegionId::new(1));
+        scroll.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            min_height: ProtoDimension::Cells(0.0),
+            width: ProtoDimension::Percent(100.0),
+            overflow: ProtoOverflow {
+                x: ProtoOverflowAxis::Hidden,
+                y: ProtoOverflowAxis::Scroll,
+            },
+            ..Default::default()
+        };
+        tree.insert(scroll);
+
+        // ScrollView content: Column with many items (id=3)
+        let mut content_col = Region::new(RegionId::new(3));
+        content_col.parent = Some(RegionId::new(2));
+        content_col.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(content_col);
+
+        // 100 message items, each 3 cells tall (ids 100..199)
+        for i in 0..100 {
+            let mut msg = Region::new(RegionId::new(100 + i));
+            msg.parent = Some(RegionId::new(3));
+            msg.constraints = Constraints {
+                display: ProtoDisplay::Flex,
+                width: ProtoDimension::Percent(100.0),
+                height: ProtoDimension::Cells(3.0),
+                ..Default::default()
+            };
+            tree.insert(msg);
+        }
+
+        // Divider 1 (id=4)
+        let mut div1 = Region::new(RegionId::new(4));
+        div1.parent = Some(RegionId::new(1));
+        div1.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Cells(1.0),
+            ..Default::default()
+        };
+        tree.insert(div1);
+
+        // Input area (id=5)
+        let mut input = Region::new(RegionId::new(5));
+        input.parent = Some(RegionId::new(1));
+        input.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Cells(5.0),
+            ..Default::default()
+        };
+        tree.insert(input);
+
+        // Divider 2 (id=6)
+        let mut div2 = Region::new(RegionId::new(6));
+        div2.parent = Some(RegionId::new(1));
+        div2.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Cells(1.0),
+            ..Default::default()
+        };
+        tree.insert(div2);
+
+        // Status bar (id=7)
+        let mut status = Region::new(RegionId::new(7));
+        status.parent = Some(RegionId::new(1));
+        status.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Cells(1.0),
+            ..Default::default()
+        };
+        tree.insert(status);
+
+        // Compute layout
+        let mut engine = LayoutEngine::new();
+        engine.sync(&tree).unwrap();
+        engine.compute(80.0, 30.0).unwrap();
+
+        let chat_layout = engine.get_layout(RegionId::new(1)).unwrap();
+        let scroll_layout = engine.get_layout(RegionId::new(2)).unwrap();
+        let div1_layout = engine.get_layout(RegionId::new(4)).unwrap();
+        let input_layout = engine.get_layout(RegionId::new(5)).unwrap();
+        let div2_layout = engine.get_layout(RegionId::new(6)).unwrap();
+        let status_layout = engine.get_layout(RegionId::new(7)).unwrap();
+
+        // The chat_area should be 30 cells tall (fills root)
+        assert_eq!(chat_layout.size.height, 30.0, "chat_area height");
+
+        // Fixed items total: 1 + 5 + 1 + 1 = 8 cells
+        // ScrollView should get the remaining: 30 - 8 = 22 cells
+        assert_eq!(scroll_layout.size.height, 22.0, "ScrollView height (30 - 8 fixed)");
+
+        // Input should be at y = scroll_height + div1 = 22 + 1 = 23
+        assert_eq!(div1_layout.location.y, 22.0, "Divider 1 y position");
+        assert_eq!(input_layout.location.y, 23.0, "Input y position");
+        assert_eq!(div2_layout.location.y, 28.0, "Divider 2 y position");
+        assert_eq!(status_layout.location.y, 29.0, "Status bar y position");
+
+        // All items must be within the 30-cell viewport
+        let status_bottom = status_layout.location.y + status_layout.size.height;
+        assert!(
+            status_bottom <= 30.0,
+            "Status bar bottom ({}) exceeds viewport (30)",
+            status_bottom
+        );
+    }
 }

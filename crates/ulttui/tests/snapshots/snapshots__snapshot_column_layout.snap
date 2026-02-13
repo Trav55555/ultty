@@ -1,10 +1,7 @@
 ---
 source: crates/ulttui/tests/snapshots.rs
-assertion_line: 90
 expression: output
 ---
 Header
-
 Content
-
 Footer

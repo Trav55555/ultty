@@ -198,11 +198,10 @@ impl Application for FormApp {
 
 impl FormApp {
     fn form_view(&self) -> Column {
-        let mut col = Column::new().padding(1.0).gap(1.0);
+        let mut col = Column::new().flex_grow(1.0).padding(1.0).gap(1.0);
 
-        // Title
-        col = col.child(RichText::new().span("Form Demo", Style::new().bold().fg(Color::CYAN)));
-        col = col.child(Text::new(
+        col = col.child(Title::new("Form Demo"));
+        col = col.child(Muted::new(
             "Fill in the fields below. Tab/Shift+Tab or Up/Down to navigate.",
         ));
 
@@ -227,13 +226,8 @@ impl FormApp {
             submit_style,
         ));
 
-        // Key hints
-        col = col.child(RichText::new().span(
-            "Tab/Shift+Tab: navigate | Enter: submit | Ctrl+C: quit",
-            Style {
-                dim: true,
-                ..Style::default()
-            },
+        col = col.child(Muted::new(
+            "Tab/Shift+Tab navigate · Enter submit · Ctrl+C quit",
         ));
 
         col
@@ -282,12 +276,11 @@ impl FormApp {
     }
 
     fn summary_view(&self) -> Column {
-        let mut col = Column::new().padding(1.0).gap(1.0);
+        let mut col = Column::new().flex_grow(1.0).padding(1.0).gap(1.0);
 
-        col = col
-            .child(RichText::new().span("Form Submitted!", Style::new().bold().fg(Color::GREEN)));
+        col = col.child(Title::new("Form Submitted!"));
 
-        col = col.child(Text::new("---"));
+        col = col.child(Divider::horizontal());
 
         for field in &self.fields {
             col = col.child(
@@ -297,14 +290,8 @@ impl FormApp {
             );
         }
 
-        col = col.child(Text::new("---"));
-        col = col.child(RichText::new().span(
-            "Press Ctrl+C to quit",
-            Style {
-                dim: true,
-                ..Style::default()
-            },
-        ));
+        col = col.child(Divider::horizontal());
+        col = col.child(Muted::new("Press Ctrl+C to quit"));
 
         col
     }

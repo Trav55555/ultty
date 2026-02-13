@@ -24,9 +24,9 @@ impl Title {
 impl View for Title {
     fn constraints(&self) -> Constraints {
         Constraints {
-            width: Dimension::Percent(100.0),
+            width: Dimension::Cells(self.text.chars().count() as f32),
             height: Dimension::Cells(1.0),
-            flex_shrink: 1.0,
+            flex_shrink: 0.0,
             ..Default::default()
         }
     }
@@ -60,9 +60,9 @@ impl Body {
 impl View for Body {
     fn constraints(&self) -> Constraints {
         Constraints {
-            width: Dimension::Percent(100.0),
+            width: Dimension::Cells(self.text.chars().count() as f32),
             height: Dimension::Cells(1.0),
-            flex_shrink: 1.0,
+            flex_shrink: 0.0,
             ..Default::default()
         }
     }
@@ -94,9 +94,9 @@ impl Muted {
 impl View for Muted {
     fn constraints(&self) -> Constraints {
         Constraints {
-            width: Dimension::Percent(100.0),
+            width: Dimension::Cells(self.text.chars().count() as f32),
             height: Dimension::Cells(1.0),
-            flex_shrink: 1.0,
+            flex_shrink: 0.0,
             ..Default::default()
         }
     }
@@ -128,9 +128,9 @@ impl Accent {
 impl View for Accent {
     fn constraints(&self) -> Constraints {
         Constraints {
-            width: Dimension::Percent(100.0),
+            width: Dimension::Cells(self.text.chars().count() as f32),
             height: Dimension::Cells(1.0),
-            flex_shrink: 1.0,
+            flex_shrink: 0.0,
             ..Default::default()
         }
     }

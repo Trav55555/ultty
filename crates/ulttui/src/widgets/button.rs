@@ -17,6 +17,7 @@ pub struct Button {
     label: String,
     id: Option<String>,
     style: ButtonStyle,
+    flex_grow: f32,
 }
 
 /// Button style variant.
@@ -35,6 +36,7 @@ impl Button {
             label: label.into(),
             id: None,
             style: ButtonStyle::default(),
+            flex_grow: 0.0,
         }
     }
 
@@ -58,6 +60,11 @@ impl Button {
         self
     }
 
+    pub fn flex_grow(mut self, grow: f32) -> Self {
+        self.flex_grow = grow;
+        self
+    }
+
     pub fn widget_id(&self) -> Option<&str> {
         self.id.as_deref()
     }
@@ -73,6 +80,7 @@ impl View for Button {
         ultty_protocol::Constraints {
             width: ultty_protocol::Dimension::Cells(label_width),
             height: ultty_protocol::Dimension::Cells(1.0),
+            flex_grow: self.flex_grow,
             ..Default::default()
         }
     }
@@ -142,6 +150,8 @@ impl View for Button {
             Key::Enter => Some(FocusAction::Consumed),
             Key::Tab if key.modifiers.shift => Some(FocusAction::Previous),
             Key::Tab => Some(FocusAction::Next),
+            Key::Left | Key::Up => Some(FocusAction::Previous),
+            Key::Right | Key::Down => Some(FocusAction::Next),
             _ => None,
         }
     }

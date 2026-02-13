@@ -1,6 +1,6 @@
 //! Native protocol backend for Ultty terminal.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
@@ -28,7 +28,7 @@ pub struct NativeBackend {
     next_frame_id: u32,
     region_layouts: HashMap<RegionId, ComputedRegionLayout>,
     previous_frame_root: Option<RegionId>,
-    pending_events: Vec<Event>,
+    pending_events: VecDeque<Event>,
 }
 
 impl NativeBackend {
@@ -44,7 +44,7 @@ impl NativeBackend {
             next_frame_id: 1,
             region_layouts: HashMap::new(),
             previous_frame_root: None,
-            pending_events: Vec::new(),
+            pending_events: VecDeque::new(),
         }
     }
 
@@ -64,6 +64,11 @@ impl NativeBackend {
             id: self.root_region,
             events: EVENT_KEY | EVENT_MOUSE | EVENT_SCROLL,
         })?;
+
+        self.pending_events.push_back(Event::Resize {
+            width: self.viewport_width,
+            height: self.viewport_height,
+        });
 
         // Keep blocking mode for writes; use short read_timeout for the event poll loop
         if let Some(ref stream) = self.stream {
@@ -113,9 +118,11 @@ impl NativeBackend {
         let mut constraints = view.constraints();
         let mut style = view.style();
         if is_root {
-            // Root view fills the entire viewport
-            constraints.width = ultty_protocol::Dimension::Percent(100.0);
-            constraints.height = ultty_protocol::Dimension::Percent(100.0);
+            // Root view fills the entire viewport — use absolute cells since
+            // the ROOT parent region has height:auto and percentage heights
+            // cannot resolve against an auto-height parent.
+            constraints.width = ultty_protocol::Dimension::Cells(self.viewport_width as f32);
+            constraints.height = ultty_protocol::Dimension::Cells(self.viewport_height as f32);
             // Opaque background so native app covers the PTY terminal content
             if style.bg.is_none() {
                 let theme = crate::theme::Theme::current();
@@ -170,7 +177,7 @@ impl NativeBackend {
     pub fn poll_event(&mut self) -> anyhow::Result<Option<Event>> {
         self.process_pending_messages()?;
 
-        if let Some(event) = self.pending_events.pop() {
+        if let Some(event) = self.pending_events.pop_front() {
             return Ok(Some(event));
         }
 
@@ -296,21 +303,21 @@ impl NativeBackend {
                 TerminalMessage::Resize(resize) => {
                     self.viewport_width = resize.width;
                     self.viewport_height = resize.height;
-                    self.pending_events.push(Event::Resize {
+                    self.pending_events.push_back(Event::Resize {
                         width: resize.width,
                         height: resize.height,
                     });
                 }
                 TerminalMessage::Input(input) => {
                     if let Some(event) = self.convert_input_event(input) {
-                        self.pending_events.push(event);
+                        self.pending_events.push_back(event);
                     }
                 }
                 TerminalMessage::Focus(focus) => {
                     if focus.focused {
-                        self.pending_events.push(Event::FocusGained);
+                        self.pending_events.push_back(Event::FocusGained);
                     } else {
-                        self.pending_events.push(Event::FocusLost);
+                        self.pending_events.push_back(Event::FocusLost);
                     }
                 }
                 TerminalMessage::Scroll(_scroll) => {

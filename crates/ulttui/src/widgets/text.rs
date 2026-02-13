@@ -32,6 +32,7 @@ impl View for Text {
     fn constraints(&self) -> ultty_protocol::Constraints {
         let line_count = self.content.lines().count().max(1);
         ultty_protocol::Constraints {
+            display: ultty_protocol::Display::Flex,
             width: ultty_protocol::Dimension::Percent(100.0),
             height: ultty_protocol::Dimension::Cells(line_count as f32),
             flex_shrink: 1.0,
@@ -53,6 +54,7 @@ impl View for Text {
 #[derive(Debug, Clone, Default)]
 pub struct RichText {
     spans: Vec<(String, ultty_protocol::Style)>,
+    fill_width: bool,
 }
 
 impl RichText {
@@ -69,6 +71,11 @@ impl RichText {
         self.span(text, ultty_protocol::Style::default())
     }
 
+    pub fn fill_width(mut self) -> Self {
+        self.fill_width = true;
+        self
+    }
+
     pub fn spans(&self) -> &[(String, ultty_protocol::Style)] {
         &self.spans
     }
@@ -76,8 +83,16 @@ impl RichText {
 
 impl View for RichText {
     fn constraints(&self) -> ultty_protocol::Constraints {
+        let width = if self.fill_width {
+            ultty_protocol::Dimension::Percent(100.0)
+        } else {
+            let total_chars: usize = self.spans.iter().map(|(t, _)| t.chars().count()).sum();
+            ultty_protocol::Dimension::Cells(total_chars as f32)
+        };
         ultty_protocol::Constraints {
-            width: ultty_protocol::Dimension::Percent(100.0),
+            display: ultty_protocol::Display::Flex,
+            width,
+            max_width: ultty_protocol::Dimension::Percent(100.0),
             height: ultty_protocol::Dimension::Cells(1.0),
             flex_shrink: 1.0,
             ..Default::default()
@@ -167,8 +182,12 @@ pub struct TextInput {
     id: Option<String>,
     placeholder: String,
     multiline: bool,
+    rows: u16,
     cursor: usize,
     selection_start: Option<usize>,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    temp_buffer: String,
     vim_state: VimState,
     vim_config: VimConfig,
 }
@@ -180,8 +199,12 @@ impl Default for TextInput {
             id: None,
             placeholder: String::new(),
             multiline: false,
+            rows: 1,
             cursor: 0,
             selection_start: None,
+            history: Vec::new(),
+            history_index: None,
+            temp_buffer: String::new(),
             vim_state: VimState::new(),
             vim_config: VimConfig::for_text_input(),
         }
@@ -218,12 +241,49 @@ impl TextInput {
         self
     }
 
+    pub fn height(mut self, rows: u16) -> Self {
+        self.rows = rows;
+        self
+    }
+
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+
     pub fn cursor_position(&self) -> usize {
         self.cursor
     }
 
     pub fn current_value(&self) -> &str {
         &self.value
+    }
+
+    pub fn set_value(&mut self, val: impl Into<String>) {
+        self.value = val.into();
+        self.cursor = self.value.chars().count();
+        self.history_index = None;
+        self.temp_buffer.clear();
+    }
+
+    pub fn clear(&mut self) {
+        self.value.clear();
+        self.cursor = 0;
+        self.history_index = None;
+        self.temp_buffer.clear();
+    }
+
+    pub fn submit_value(&mut self) -> String {
+        let submitted = self.value.clone();
+        if !submitted.is_empty() {
+            self.push_history(submitted.clone());
+        }
+        self.clear();
+        submitted
+    }
+
+    pub fn push_history(&mut self, entry: impl Into<String>) {
+        self.history.push(entry.into());
+        self.history_index = None;
     }
 
     pub fn selection(&self) -> Option<(usize, usize)> {
@@ -492,11 +552,73 @@ impl TextInput {
             VimMode::Search => "[/] ",
         }
     }
+
+    fn is_cursor_on_first_line(&self) -> bool {
+        let chars: Vec<char> = self.value.chars().collect();
+        self.find_line_start(&chars, self.cursor) == 0
+    }
+
+    fn is_cursor_on_last_line(&self) -> bool {
+        let chars: Vec<char> = self.value.chars().collect();
+        self.find_line_end(&chars, self.cursor) == chars.len()
+    }
+
+    fn navigate_history_up(&mut self) -> bool {
+        if self.history.is_empty() {
+            return false;
+        }
+
+        let next_index = match self.history_index {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.temp_buffer = self.value.clone();
+                self.history.len() - 1
+            }
+        };
+
+        self.history_index = Some(next_index);
+        self.value = self.history[next_index].clone();
+        self.cursor = self.value.chars().count();
+        true
+    }
+
+    fn navigate_history_down(&mut self) -> bool {
+        let Some(index) = self.history_index else {
+            return false;
+        };
+
+        if index + 1 < self.history.len() {
+            let next_index = index + 1;
+            self.history_index = Some(next_index);
+            self.value = self.history[next_index].clone();
+            self.cursor = self.value.chars().count();
+        } else {
+            self.history_index = None;
+            self.value = self.temp_buffer.clone();
+            self.cursor = self.value.chars().count();
+            self.temp_buffer.clear();
+        }
+        true
+    }
 }
 
 impl View for TextInput {
     fn widget_id(&self) -> Option<&str> {
         TextInput::widget_id(self)
+    }
+
+    fn constraints(&self) -> ultty_protocol::Constraints {
+        ultty_protocol::Constraints {
+            display: ultty_protocol::Display::Flex,
+            width: ultty_protocol::Dimension::Percent(100.0),
+            height: if self.multiline {
+                ultty_protocol::Dimension::Cells(self.rows as f32)
+            } else {
+                ultty_protocol::Dimension::Cells(1.0)
+            },
+            flex_shrink: 1.0,
+            ..Default::default()
+        }
     }
 
     fn content(&self) -> ultty_protocol::Content {
@@ -584,11 +706,25 @@ impl View for TextInput {
                     let after: String = chars[self.cursor..].iter().collect();
                     self.value = format!("{}{}{}", before, c, after);
                     self.cursor += 1;
+                    self.history_index = None;
+                    self.temp_buffer.clear();
                     return Some(super::FocusAction::Consumed);
                 }
                 Key::Backspace if self.cursor > 0 => {
                     self.delete_range(self.cursor - 1, self.cursor);
+                    self.history_index = None;
+                    self.temp_buffer.clear();
                     return Some(super::FocusAction::Consumed);
+                }
+                Key::Up if !self.multiline || self.is_cursor_on_first_line() => {
+                    if self.navigate_history_up() {
+                        return Some(super::FocusAction::Consumed);
+                    }
+                }
+                Key::Down if !self.multiline || self.is_cursor_on_last_line() => {
+                    if self.navigate_history_down() {
+                        return Some(super::FocusAction::Consumed);
+                    }
                 }
                 Key::Tab if key.modifiers.shift => return Some(super::FocusAction::Previous),
                 Key::Tab => return Some(super::FocusAction::Next),
@@ -755,7 +891,7 @@ impl VimHandler for TextInput {
 
 impl VimExt for TextInput {
     fn vim(self) -> Self {
-        self
+        self.vim_with_config(VimConfig::for_text_input())
     }
 
     fn vim_with_config(mut self, config: VimConfig) -> Self {
@@ -770,7 +906,16 @@ impl VimExt for TextInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{Key, KeyEvent, Modifiers};
     use crate::focus::FocusManager;
+
+    fn key_event(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            modifiers: Modifiers::default(),
+            focused_id: None,
+        }
+    }
 
     #[test]
     fn test_cursor_movement() {
@@ -848,6 +993,82 @@ mod tests {
         }
 
         FocusManager::set_current(old);
+    }
+
+    #[test]
+    fn test_history_navigation_up_down() {
+        let mut input = TextInput::new();
+        input.vim_state.mode = VimMode::Insert;
+        input.push_history("first");
+        input.push_history("second");
+        input.set_value("draft");
+
+        assert!(matches!(
+            input.on_key(&key_event(Key::Up)),
+            Some(super::super::FocusAction::Consumed)
+        ));
+        assert_eq!(input.current_value(), "second");
+
+        assert!(matches!(
+            input.on_key(&key_event(Key::Up)),
+            Some(super::super::FocusAction::Consumed)
+        ));
+        assert_eq!(input.current_value(), "first");
+
+        assert!(matches!(
+            input.on_key(&key_event(Key::Down)),
+            Some(super::super::FocusAction::Consumed)
+        ));
+        assert_eq!(input.current_value(), "second");
+
+        assert!(matches!(
+            input.on_key(&key_event(Key::Down)),
+            Some(super::super::FocusAction::Consumed)
+        ));
+        assert_eq!(input.current_value(), "draft");
+    }
+
+    #[test]
+    fn test_submit_value_adds_to_history() {
+        let mut input = TextInput::new().value("echo hello");
+
+        let submitted = input.submit_value();
+
+        assert_eq!(submitted, "echo hello");
+        assert_eq!(input.history, vec!["echo hello"]);
+    }
+
+    #[test]
+    fn test_submit_value_clears_input() {
+        let mut input = TextInput::new().value("echo hello");
+
+        input.submit_value();
+
+        assert_eq!(input.current_value(), "");
+        assert_eq!(input.cursor_position(), 0);
+    }
+
+    #[test]
+    fn test_set_value_moves_cursor_to_end() {
+        let mut input = TextInput::new();
+
+        input.set_value("hello world");
+
+        assert_eq!(input.current_value(), "hello world");
+        assert_eq!(input.cursor_position(), 11);
+    }
+
+    #[test]
+    fn test_height_builder_sets_rows() {
+        let input = TextInput::new().height(4);
+
+        assert_eq!(input.rows(), 4);
+    }
+
+    #[test]
+    fn test_vim_starts_in_insert_mode() {
+        let input = TextInput::new().vim();
+        assert_eq!(input.vim_state.mode, VimMode::Insert);
     }
 
     mod color_conversion {

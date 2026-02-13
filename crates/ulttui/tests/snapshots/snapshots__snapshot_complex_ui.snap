@@ -1,14 +1,16 @@
 ---
 source: crates/ulttui/tests/snapshots.rs
-assertion_line: 157
 expression: output
 ---
 === Application Title ===
-
-
-
 ┌List [4/4]──────────────────┐Welcome!
-│File                        │
-│Edit                        │Select an option from the menu
+│File                        │Select an option from the menu
+│Edit                        │
+│View                        │
+│Help                        │
+│                            │
+│                            │
+│                            │
+│                            │
 └────────────────────────────┘
 Ready | Line 1, Col 1

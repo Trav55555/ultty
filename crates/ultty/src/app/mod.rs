@@ -110,6 +110,8 @@ pub struct App {
     /// Accumulated pixel scroll delta for smooth scrolling on Wayland/HiDPI
     scroll_pixel_accum: f64,
     scroll_line_accum: f64,
+    /// HiDPI scale factor (physical pixels / logical pixels)
+    scale_factor: f32,
 }
 
 impl App {
@@ -128,6 +130,7 @@ impl App {
         let window = Arc::new(window);
 
         let size = window.inner_size();
+        let scale_factor = window.scale_factor() as f32;
 
         // Create wgpu instance
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -146,6 +149,11 @@ impl App {
         }))
         .ok_or_else(|| anyhow::anyhow!("Failed to find suitable GPU adapter"))?;
 
+        // Scale font size to physical pixels so cosmic-text metrics match
+        // the orthographic projection (which uses physical window dimensions).
+        let mut scaled_font = config.font.clone();
+        scaled_font.size *= scale_factor;
+
         // Create renderer with config
         let mut renderer = pollster::block_on(Renderer::with_config(
             &surface,
@@ -153,7 +161,7 @@ impl App {
             size.width,
             size.height,
             &config.colors,
-            &config.font,
+            &scaled_font,
         ))?;
 
         // Set window opacity
@@ -240,6 +248,7 @@ impl App {
             url_hyperlink_map: std::collections::HashMap::new(),
             scroll_pixel_accum: 0.0,
             scroll_line_accum: 0.0,
+            scale_factor,
         })
     }
 

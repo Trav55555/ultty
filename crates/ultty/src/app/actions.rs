@@ -125,7 +125,7 @@ impl App {
 
     /// Reset font size to default.
     pub(super) fn reset_font_size(&mut self) {
-        let default_size = self.config.font.size;
+        let default_size = self.config.font.size * self.scale_factor;
         let new_size = self.renderer.set_font_size(default_size);
 
         tracing::info!("Font size reset to: {:.1}pt", new_size);

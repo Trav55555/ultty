@@ -135,34 +135,36 @@ impl Application for DashboardApp {
             .collect();
 
         Column::new()
+            .flex_grow(1.0)
             .child(
-                // Header
-                Row::new().child(Text::new(format!(
-                    " Dashboard | {} | {} items",
-                    self.elapsed_display(),
-                    ITEMS.len()
-                ))),
-            )
-            .child(
-                // Main content: navigation + detail
                 Row::new()
+                    .gap(2.0)
+                    .child(Title::new("Dashboard"))
+                    .child(Muted::new(format!(
+                        "{} | {} items",
+                        self.elapsed_display(),
+                        ITEMS.len()
+                    ))),
+            )
+            .child(Divider::horizontal())
+            .child(
+                Row::new()
+                    .flex_grow(1.0)
                     .child(
-                        // Left: navigation list
-                        List::new().items(nav_items),
+                        Column::new()
+                            .width(Dimension::Percent(30.0))
+                            .child(List::new().items(nav_items)),
                     )
                     .child(
-                        // Right: detail view
                         Column::new()
+                            .flex_grow(1.0)
                             .padding(1.0)
-                            .child(Text::new(format!("# {}", title)))
-                            .child(Text::new(""))
+                            .child(Title::new(title))
                             .child(Text::new(detail.to_string())),
                     ),
             )
-            .child(
-                // Footer
-                Text::new(" j/k: navigate | g/G: first/last | Ctrl+C: quit | timer: 1s"),
-            )
+            .child(Divider::horizontal())
+            .child(Muted::new("j/k navigate · g/G first/last · Ctrl+C quit"))
     }
 }
 

@@ -4,6 +4,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+use crate::screen::Screen;
+use crate::toast::Toast;
+
 /// A command representing a side effect to execute after update().
 #[derive(Default)]
 pub enum Cmd<M> {
@@ -18,6 +21,9 @@ pub enum Cmd<M> {
     Spawn(Pin<Box<dyn Future<Output = M> + Send + 'static>>),
     /// Dispatch a message after a delay.
     After(Duration, Box<dyn Fn() -> M + Send + 'static>),
+    ShowToast(Toast),
+    PushScreen(Box<dyn Screen>),
+    PopScreen,
 }
 
 impl<M> Cmd<M> {
@@ -61,6 +67,9 @@ impl<M> std::fmt::Debug for Cmd<M> {
             Cmd::Batch(_) => "Cmd::Batch",
             Cmd::Spawn(_) => "Cmd::Spawn",
             Cmd::After(_, _) => "Cmd::After",
+            Cmd::ShowToast(_) => "Cmd::ShowToast",
+            Cmd::PushScreen(_) => "Cmd::PushScreen",
+            Cmd::PopScreen => "Cmd::PopScreen",
         };
         f.write_str(name)
     }

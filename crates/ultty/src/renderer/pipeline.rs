@@ -15,6 +15,7 @@ struct VertexInput {
     @location(0) position: vec2<f32>,
     @location(1) tex_coord: vec2<f32>,
     @location(2) color: vec4<f32>,
+    @location(3) is_color: u32,
 }
 
 struct VertexOutput {
@@ -71,12 +72,14 @@ struct VertexInput {
     @location(0) position: vec2<f32>,
     @location(1) tex_coord: vec2<f32>,
     @location(2) color: vec4<f32>,
+    @location(3) is_color: u32,
 }
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coord: vec2<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) @interpolate(flat) is_color: u32,
 }
 
 // Convert sRGB to linear color space.
@@ -95,19 +98,30 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.clip_position = uniforms.projection * vec4<f32>(in.position, 0.0, 1.0);
     out.tex_coord = in.tex_coord;
     out.color = in.color;
+    out.is_color = in.is_color;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let alpha = textureSample(t_glyph, s_glyph, in.tex_coord).r;
-    // Convert sRGB vertex colors to linear for correct rendering
-    let linear_color = vec3<f32>(
-        srgb_to_linear(in.color.r),
-        srgb_to_linear(in.color.g),
-        srgb_to_linear(in.color.b)
-    );
-    return vec4<f32>(linear_color, in.color.a * alpha);
+    let texel = textureSample(t_glyph, s_glyph, in.tex_coord);
+    if (in.is_color == 1u) {
+        // Color emoji: texel has sRGB RGB + alpha from the RGBA atlas
+        let linear_rgb = vec3<f32>(
+            srgb_to_linear(texel.r),
+            srgb_to_linear(texel.g),
+            srgb_to_linear(texel.b)
+        );
+        return vec4<f32>(linear_rgb, texel.a);
+    } else {
+        // Monochrome glyph: alpha in texel.a (white mask), tint with vertex color
+        let linear_color = vec3<f32>(
+            srgb_to_linear(in.color.r),
+            srgb_to_linear(in.color.g),
+            srgb_to_linear(in.color.b)
+        );
+        return vec4<f32>(linear_color, in.color.a * texel.a);
+    }
 }
 "#;
 

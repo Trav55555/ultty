@@ -91,9 +91,11 @@ impl FocusManager {
     /// After a render frame, validate that focused_id still exists in the registered list.
     /// If it doesn't (widget removed), move to next valid or clear.
     pub fn end_frame(&mut self) {
+        if self.focusable_ids.is_empty() {
+            return;
+        }
         if let Some(ref id) = self.focused_id {
             if !self.focusable_ids.contains(id) {
-                // Focused widget no longer exists, try to keep focus nearby
                 self.focused_id = self.focusable_ids.first().cloned();
             }
         }

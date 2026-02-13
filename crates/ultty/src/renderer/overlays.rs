@@ -103,21 +103,25 @@ impl Renderer {
                         position: [x0, y],
                         tex_coord: [0.0, 0.0],
                         color: color_arr,
+                        is_color: 0,
                     });
                     vertices.push(Vertex {
                         position: [x1, y],
                         tex_coord: [1.0, 0.0],
                         color: color_arr,
+                        is_color: 0,
                     });
                     vertices.push(Vertex {
                         position: [x1, y + underline_height],
                         tex_coord: [1.0, 1.0],
                         color: color_arr,
+                        is_color: 0,
                     });
                     vertices.push(Vertex {
                         position: [x0, y + underline_height],
                         tex_coord: [0.0, 1.0],
                         color: color_arr,
+                        is_color: 0,
                     });
 
                     indices.push(base_idx);
@@ -371,10 +375,10 @@ impl Renderer {
         // Calculate dimensions
         let max_key_width = keybindings.iter().map(|(k, _)| k.len()).max().unwrap_or(10) as f32
             * self.cell_width
-            * 0.6;
+            * 0.9;
         let max_desc_width = keybindings.iter().map(|(_, d)| d.len()).max().unwrap_or(20) as f32
             * self.cell_width
-            * 0.6;
+            * 0.9;
         let content_width = max_key_width + max_desc_width + padding * 2.0 + column_gap;
         let content_height = (keybindings.len() as f32 + 2.0) * line_height + padding * 2.0;
 

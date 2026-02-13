@@ -7,6 +7,86 @@ use super::{DeferredImageRender, Renderer, Vertex};
 use ultty_protocol::BorderType;
 use wgpu::util::DeviceExt;
 
+/// Word-wrap a line to fit within `max_cols` columns.
+/// Breaks at spaces when possible, falls back to hard character breaks.
+fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
+    if max_cols == 0 {
+        return vec![line.to_string()];
+    }
+
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= max_cols {
+        return vec![line.to_string()];
+    }
+
+    let mut result = Vec::new();
+    let mut row_start = 0;
+
+    while row_start < chars.len() {
+        let remaining = chars.len() - row_start;
+        if remaining <= max_cols {
+            result.push(chars[row_start..].iter().collect());
+            break;
+        }
+
+        let end = row_start + max_cols;
+        let break_at = (row_start..end).rev().find(|&i| chars[i] == ' ');
+
+        match break_at {
+            Some(space_idx) => {
+                result.push(chars[row_start..space_idx].iter().collect());
+                row_start = space_idx + 1;
+            }
+            None => {
+                result.push(chars[row_start..end].iter().collect());
+                row_start = end;
+                while row_start < chars.len() && chars[row_start] == ' ' {
+                    row_start += 1;
+                }
+            }
+        }
+    }
+
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_clipped_glyphs(
+    verts: &[Vertex],
+    idxs: &[u32],
+    clip_min_x: f32,
+    clip_min_y: f32,
+    clip_max_x: f32,
+    clip_max_y: f32,
+    out_verts: &mut Vec<Vertex>,
+    out_idxs: &mut Vec<u32>,
+) {
+    for quad in idxs.chunks_exact(6) {
+        let first = quad[0] as usize;
+        let v0 = &verts[first];
+        let v2 = &verts[first + 2];
+        let glyph_left = v0.position[0];
+        let glyph_top = v0.position[1];
+        let glyph_right = v2.position[0];
+        let glyph_bottom = v2.position[1];
+
+        if glyph_right <= clip_min_x
+            || glyph_left >= clip_max_x
+            || glyph_bottom <= clip_min_y
+            || glyph_top >= clip_max_y
+        {
+            continue;
+        }
+
+        let base = out_verts.len() as u32;
+        out_idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        out_verts.extend_from_slice(&verts[first..first + 4]);
+    }
+}
+
 impl Renderer {
     /// Generate border quads for a region's border style.
     ///
@@ -58,21 +138,25 @@ impl Renderer {
                 position: [qx, qy],
                 tex_coord: [0.0, 0.0],
                 color: color_arr,
+                is_color: 0,
             });
             bg_vertices.push(Vertex {
                 position: [qx + qw, qy],
                 tex_coord: [1.0, 0.0],
                 color: color_arr,
+                is_color: 0,
             });
             bg_vertices.push(Vertex {
                 position: [qx + qw, qy + qh],
                 tex_coord: [1.0, 1.0],
                 color: color_arr,
+                is_color: 0,
             });
             bg_vertices.push(Vertex {
                 position: [qx, qy + qh],
                 tex_coord: [0.0, 1.0],
                 color: color_arr,
+                is_color: 0,
             });
             bg_indices.extend_from_slice(&[
                 base_idx,
@@ -151,6 +235,53 @@ impl Renderer {
             .map(|matches| matches.iter().map(|m| m.region_id).collect())
             .unwrap_or_default();
 
+        // Pre-compute inherited clip rects from overflow:hidden/scroll ancestors.
+        // Each entry is (min_x, min_y, max_x, max_y) in pixel coords.
+        let mut clip_rects: std::collections::HashMap<ultty_protocol::RegionId, (f32, f32, f32, f32)> =
+            std::collections::HashMap::new();
+        for region in scene.iter_depth_first() {
+            if region.id == ultty_protocol::RegionId::ROOT {
+                continue;
+            }
+            let layout = &region.computed;
+            let rx = (layout.x * self.cell_width).round();
+            let ry = (layout.y * self.cell_height + self.tab_bar_height).round();
+            let rw = (layout.width * self.cell_width).round();
+            let rh = (layout.height * self.cell_height).round();
+
+            // Start with own bounds
+            let mut clip = (rx, ry, rx + rw, ry + rh);
+
+            // Walk up ancestors, intersecting with any that clip
+            let mut ancestor_id = region.parent;
+            while let Some(aid) = ancestor_id {
+                if let Some(ancestor) = scene.get(aid) {
+                    let ov = &ancestor.constraints.overflow;
+                    let clips_x = matches!(ov.x, ultty_protocol::OverflowAxis::Hidden | ultty_protocol::OverflowAxis::Scroll);
+                    let clips_y = matches!(ov.y, ultty_protocol::OverflowAxis::Hidden | ultty_protocol::OverflowAxis::Scroll);
+                    if clips_x || clips_y {
+                        let al = &ancestor.computed;
+                        let ax = (al.x * self.cell_width).round();
+                        let ay = (al.y * self.cell_height + self.tab_bar_height).round();
+                        let aw = (al.width * self.cell_width).round();
+                        let ah = (al.height * self.cell_height).round();
+                        if clips_x {
+                            clip.0 = clip.0.max(ax);
+                            clip.2 = clip.2.min(ax + aw);
+                        }
+                        if clips_y {
+                            clip.1 = clip.1.max(ay);
+                            clip.3 = clip.3.min(ay + ah);
+                        }
+                    }
+                    ancestor_id = ancestor.parent;
+                } else {
+                    break;
+                }
+            }
+            clip_rects.insert(region.id, clip);
+        }
+
         for region in scene.iter_depth_first() {
             if region.id == ultty_protocol::RegionId::ROOT {
                 continue;
@@ -161,60 +292,81 @@ impl Renderer {
                 continue;
             }
 
-            let x = layout.x * self.cell_width;
-            let y = layout.y * self.cell_height + self.tab_bar_height;
-            let w = layout.width * self.cell_width;
-            let h = layout.height * self.cell_height;
+            let x = (layout.x * self.cell_width).round();
+            let y = (layout.y * self.cell_height + self.tab_bar_height).round();
+            let w = (layout.width * self.cell_width).round();
+            let h = (layout.height * self.cell_height).round();
 
-            let cx = layout.content_x * self.cell_width;
-            let cy = layout.content_y * self.cell_height + self.tab_bar_height;
+            let cx = (layout.content_x * self.cell_width).round();
+            let cy = (layout.content_y * self.cell_height + self.tab_bar_height).round();
             let cw = layout.content_width;
 
-            if let Some(bg_color) = &region.style.bg {
-                let color = self.color_scheme.resolve_protocol_color(bg_color);
-                let base_idx = bg_vertices.len() as u32;
+            // Use inherited clip rect (intersected with overflow ancestors)
+            let (clip_min_x, clip_min_y, clip_max_x, clip_max_y) =
+                clip_rects.get(&region.id).copied().unwrap_or((x, y, x + w, y + h));
 
-                bg_vertices.push(Vertex {
-                    position: [x, y],
-                    tex_coord: [0.0, 0.0],
-                    color: [color.r, color.g, color.b, color.a * region.style.opacity],
-                });
-                bg_vertices.push(Vertex {
-                    position: [x + w, y],
-                    tex_coord: [1.0, 0.0],
-                    color: [color.r, color.g, color.b, color.a * region.style.opacity],
-                });
-                bg_vertices.push(Vertex {
-                    position: [x + w, y + h],
-                    tex_coord: [1.0, 1.0],
-                    color: [color.r, color.g, color.b, color.a * region.style.opacity],
-                });
-                bg_vertices.push(Vertex {
-                    position: [x, y + h],
-                    tex_coord: [0.0, 1.0],
-                    color: [color.r, color.g, color.b, color.a * region.style.opacity],
-                });
-
-                bg_indices.extend_from_slice(&[
-                    base_idx,
-                    base_idx + 1,
-                    base_idx + 2,
-                    base_idx,
-                    base_idx + 2,
-                    base_idx + 3,
-                ]);
+            // Skip entirely clipped regions
+            if clip_min_x >= clip_max_x || clip_min_y >= clip_max_y {
+                continue;
             }
 
-            // Render border quads
+            // Clip bg quad to inherited clip rect
+            let bg_x0 = x.max(clip_min_x);
+            let bg_y0 = y.max(clip_min_y);
+            let bg_x1 = (x + w).min(clip_max_x);
+            let bg_y1 = (y + h).min(clip_max_y);
+
+            if let Some(bg_color) = &region.style.bg {
+                if bg_x0 < bg_x1 && bg_y0 < bg_y1 {
+                    let color = self.color_scheme.resolve_protocol_color(bg_color);
+                    let base_idx = bg_vertices.len() as u32;
+
+                    bg_vertices.push(Vertex {
+                        position: [bg_x0, bg_y0],
+                        tex_coord: [0.0, 0.0],
+                        color: [color.r, color.g, color.b, color.a * region.style.opacity],
+                        is_color: 0,
+                    });
+                    bg_vertices.push(Vertex {
+                        position: [bg_x1, bg_y0],
+                        tex_coord: [1.0, 0.0],
+                        color: [color.r, color.g, color.b, color.a * region.style.opacity],
+                        is_color: 0,
+                    });
+                    bg_vertices.push(Vertex {
+                        position: [bg_x1, bg_y1],
+                        tex_coord: [1.0, 1.0],
+                        color: [color.r, color.g, color.b, color.a * region.style.opacity],
+                        is_color: 0,
+                    });
+                    bg_vertices.push(Vertex {
+                        position: [bg_x0, bg_y1],
+                        tex_coord: [0.0, 1.0],
+                        color: [color.r, color.g, color.b, color.a * region.style.opacity],
+                        is_color: 0,
+                    });
+
+                    bg_indices.extend_from_slice(&[
+                        base_idx,
+                        base_idx + 1,
+                        base_idx + 2,
+                        base_idx,
+                        base_idx + 2,
+                        base_idx + 3,
+                    ]);
+                }
+            }
+
+            // Render border quads (also clipped)
             self.generate_border_quads(
                 &region.style.border,
                 &region.style.border_color,
                 &region.style.fg,
                 region.style.opacity,
-                x,
-                y,
-                w,
-                h,
+                bg_x0,
+                bg_y0,
+                bg_x1 - bg_x0,
+                bg_y1 - bg_y0,
                 &mut bg_vertices,
                 &mut bg_indices,
             );
@@ -234,29 +386,61 @@ impl Renderer {
                         resolved.a * region.style.opacity,
                     );
 
-                    let chars: Vec<char> = text_content.text.chars().collect();
-                    let fill_width = cw as usize;
-                    let render_text = if chars.len() == 1 && fill_width > 1 {
-                        chars[0].to_string().repeat(fill_width)
-                    } else {
-                        text_content.text.clone()
-                    };
+                    let (_, cell_h) = self.text_renderer.cell_dimensions();
+                    let max_cols = cw as usize;
+                    let mut visual_line = 0usize;
 
-                    let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                        &render_text,
-                        cx,
-                        cy,
-                        fg_color,
-                        region.style.bold,
-                        region.style.italic,
-                    );
+                    for line in text_content.text.split('\n') {
+                        let chars: Vec<char> = line.chars().collect();
+                        let fill_width = max_cols;
+                        let render_text = if chars.len() == 1 && fill_width > 1 {
+                            chars[0].to_string().repeat(fill_width)
+                        } else {
+                            line.to_string()
+                        };
 
-                    let base_idx = text_vertices.len() as u32;
-                    text_vertices.extend(verts);
-                    text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                        if render_text.is_empty() {
+                            visual_line += 1;
+                            continue;
+                        }
+
+                        let wrapped = wrap_line(&render_text, max_cols);
+                        for sub_line in &wrapped {
+                            let line_y = cy + visual_line as f32 * cell_h;
+                            if line_y + cell_h <= clip_min_y || line_y >= clip_max_y {
+                                visual_line += 1;
+                                continue;
+                            }
+
+                            let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                                sub_line,
+                                cx,
+                                line_y,
+                                fg_color,
+                                region.style.bold,
+                                region.style.italic,
+                            );
+
+                            append_clipped_glyphs(
+                                &verts,
+                                &idxs,
+                                clip_min_x,
+                                clip_min_y,
+                                clip_max_x,
+                                clip_max_y,
+                                &mut text_vertices,
+                                &mut text_indices,
+                            );
+                            visual_line += 1;
+                        }
+                    }
                 }
                 Content::RichText(rich_text) => {
+                    let (cell_w, cell_h) = self.text_renderer.cell_dimensions();
+                    let max_cols = cw as usize;
                     let mut cursor_x = cx;
+                    let mut line_idx = 0usize;
+
                     for span in &rich_text.spans {
                         let resolved = span
                             .style
@@ -278,19 +462,82 @@ impl Renderer {
                             resolved.a * region.style.opacity,
                         );
 
-                        let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
-                            &span.text,
-                            cursor_x,
-                            cy,
-                            fg_color,
-                            span.style.bold || region.style.bold,
-                            span.style.italic || region.style.italic,
-                        );
+                        let bold = span.style.bold || region.style.bold;
+                        let italic = span.style.italic || region.style.italic;
 
-                        let base_idx = text_vertices.len() as u32;
-                        text_vertices.extend(verts);
-                        text_indices.extend(idxs.iter().map(|i| i + base_idx));
-                        cursor_x += advance;
+                        if max_cols == 0 {
+                            let span_y = cy + line_idx as f32 * cell_h;
+                            let (verts, idxs, advance) =
+                                self.text_renderer.build_styled_text_vertices(
+                                    &span.text, cursor_x, span_y, fg_color, bold, italic,
+                                );
+                            append_clipped_glyphs(
+                                &verts,
+                                &idxs,
+                                clip_min_x,
+                                clip_min_y,
+                                clip_max_x,
+                                clip_max_y,
+                                &mut text_vertices,
+                                &mut text_indices,
+                            );
+                            cursor_x += advance;
+                            continue;
+                        }
+
+                        // Split span text on newlines, render each segment separately
+                        for (seg_idx, segment) in span.text.split('\n').enumerate() {
+                            if seg_idx > 0 {
+                                cursor_x = cx;
+                                line_idx += 1;
+                            }
+
+                            let span_chars: Vec<char> = segment.chars().collect();
+                            let mut char_pos = 0usize;
+
+                            while char_pos < span_chars.len() {
+                                let cols_used =
+                                    ((cursor_x - cx) / cell_w).round() as usize;
+                                let cols_left = max_cols.saturating_sub(cols_used);
+
+                                if cols_left == 0 {
+                                    cursor_x = cx;
+                                    line_idx += 1;
+                                    continue;
+                                }
+
+                                let chars_remaining = span_chars.len() - char_pos;
+                                let chunk_len = chars_remaining.min(cols_left);
+                                let chunk: String = span_chars
+                                    [char_pos..char_pos + chunk_len]
+                                    .iter()
+                                    .collect();
+
+                                let span_y = cy + line_idx as f32 * cell_h;
+                                let (verts, idxs, advance) =
+                                    self.text_renderer.build_styled_text_vertices(
+                                        &chunk, cursor_x, span_y, fg_color, bold,
+                                        italic,
+                                    );
+                                append_clipped_glyphs(
+                                    &verts,
+                                    &idxs,
+                                    clip_min_x,
+                                    clip_min_y,
+                                    clip_max_x,
+                                    clip_max_y,
+                                    &mut text_vertices,
+                                    &mut text_indices,
+                                );
+                                cursor_x += advance;
+                                char_pos += chunk_len;
+
+                                if char_pos < span_chars.len() {
+                                    cursor_x = cx;
+                                    line_idx += 1;
+                                }
+                            }
+                        }
                     }
                 }
                 Content::Widget(widget) => {
@@ -351,21 +598,25 @@ impl Renderer {
                             position: [highlight_x, y],
                             tex_coord: [0.0, 0.0],
                             color: highlight_color,
+                            is_color: 0,
                         });
                         bg_vertices.push(Vertex {
                             position: [highlight_x + highlight_w, y],
                             tex_coord: [1.0, 0.0],
                             color: highlight_color,
+                            is_color: 0,
                         });
                         bg_vertices.push(Vertex {
                             position: [highlight_x + highlight_w, y + h],
                             tex_coord: [1.0, 1.0],
                             color: highlight_color,
+                            is_color: 0,
                         });
                         bg_vertices.push(Vertex {
                             position: [highlight_x, y + h],
                             tex_coord: [0.0, 1.0],
                             color: highlight_color,
+                            is_color: 0,
                         });
                         bg_indices.extend_from_slice(&[
                             base_idx,
@@ -485,21 +736,25 @@ impl Renderer {
                     position: [img_render.x, img_render.y],
                     tex_coord: [0.0, 0.0],
                     color,
+                    is_color: 0,
                 },
                 Vertex {
                     position: [img_render.x + img_render.w, img_render.y],
                     tex_coord: [1.0, 0.0],
                     color,
+                    is_color: 0,
                 },
                 Vertex {
                     position: [img_render.x + img_render.w, img_render.y + img_render.h],
                     tex_coord: [1.0, 1.0],
                     color,
+                    is_color: 0,
                 },
                 Vertex {
                     position: [img_render.x, img_render.y + img_render.h],
                     tex_coord: [0.0, 1.0],
                     color,
+                    is_color: 0,
                 },
             ];
             let indices: Vec<u32> = vec![0, 1, 2, 0, 2, 3];
@@ -621,8 +876,8 @@ impl Renderer {
 
         match widget {
             WidgetContent::Progress(progress) => {
-                let bar_height = h.min(self.cell_height);
-                let bar_y = y + (h - bar_height) / 2.0;
+                let bar_height = h.min(self.cell_height).round();
+                let bar_y = (y + (h - bar_height) / 2.0).round();
 
                 // Compute the effective fill width
                 let target_value = progress.value.clamp(0.0, 1.0);
@@ -683,21 +938,25 @@ impl Renderer {
                     position: [x, bar_y],
                     tex_coord: [0.0, 0.0],
                     color: [bg_color.r, bg_color.g, bg_color.b, 0.5],
+                    is_color: 0,
                 });
                 bg_vertices.push(Vertex {
                     position: [x + w, bar_y],
                     tex_coord: [1.0, 0.0],
                     color: [bg_color.r, bg_color.g, bg_color.b, 0.5],
+                    is_color: 0,
                 });
                 bg_vertices.push(Vertex {
                     position: [x + w, bar_y + bar_height],
                     tex_coord: [1.0, 1.0],
                     color: [bg_color.r, bg_color.g, bg_color.b, 0.5],
+                    is_color: 0,
                 });
                 bg_vertices.push(Vertex {
                     position: [x, bar_y + bar_height],
                     tex_coord: [0.0, 1.0],
                     color: [bg_color.r, bg_color.g, bg_color.b, 0.5],
+                    is_color: 0,
                 });
                 bg_indices.extend_from_slice(&[
                     base_idx,
@@ -718,21 +977,25 @@ impl Renderer {
                         position: [hx, bar_y],
                         tex_coord: [0.0, 0.0],
                         color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                        is_color: 0,
                     });
                     bg_vertices.push(Vertex {
                         position: [hx + highlight_w, bar_y],
                         tex_coord: [1.0, 0.0],
                         color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                        is_color: 0,
                     });
                     bg_vertices.push(Vertex {
                         position: [hx + highlight_w, bar_y + bar_height],
                         tex_coord: [1.0, 1.0],
                         color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                        is_color: 0,
                     });
                     bg_vertices.push(Vertex {
                         position: [hx, bar_y + bar_height],
                         tex_coord: [0.0, 1.0],
                         color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                        is_color: 0,
                     });
                     bg_indices.extend_from_slice(&[
                         base_idx,
@@ -748,21 +1011,25 @@ impl Renderer {
                         position: [x, bar_y],
                         tex_coord: [0.0, 0.0],
                         color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                        is_color: 0,
                     });
                     bg_vertices.push(Vertex {
                         position: [x + filled_width, bar_y],
                         tex_coord: [1.0, 0.0],
                         color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                        is_color: 0,
                     });
                     bg_vertices.push(Vertex {
                         position: [x + filled_width, bar_y + bar_height],
                         tex_coord: [1.0, 1.0],
                         color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                        is_color: 0,
                     });
                     bg_vertices.push(Vertex {
                         position: [x, bar_y + bar_height],
                         tex_coord: [0.0, 1.0],
                         color: [fg_color.r, fg_color.g, fg_color.b, 1.0],
+                        is_color: 0,
                     });
                     bg_indices.extend_from_slice(&[
                         base_idx,
@@ -835,21 +1102,25 @@ impl Renderer {
                     position: [x, y],
                     tex_coord: [0.0, 0.0],
                     color: [border_color.r, border_color.g, border_color.b, 0.3],
+                    is_color: 0,
                 });
                 bg_vertices.push(Vertex {
                     position: [x + w, y],
                     tex_coord: [1.0, 0.0],
                     color: [border_color.r, border_color.g, border_color.b, 0.3],
+                    is_color: 0,
                 });
                 bg_vertices.push(Vertex {
                     position: [x + w, y + h],
                     tex_coord: [1.0, 1.0],
                     color: [border_color.r, border_color.g, border_color.b, 0.3],
+                    is_color: 0,
                 });
                 bg_vertices.push(Vertex {
                     position: [x, y + h],
                     tex_coord: [0.0, 1.0],
                     color: [border_color.r, border_color.g, border_color.b, 0.3],
+                    is_color: 0,
                 });
                 bg_indices.extend_from_slice(&[
                     base_idx,
@@ -878,7 +1149,7 @@ impl Renderer {
 
                 let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
                     display_text,
-                    x + self.cell_width * 0.5,
+                    x,
                     y,
                     text_color,
                     false,
@@ -977,10 +1248,18 @@ impl Renderer {
                     Bs::Default => self.color_scheme.foreground,
                 };
 
-                let label = format!("[ {} ]", button.label);
-                let (verts, idxs, _) = self
-                    .text_renderer
-                    .build_styled_text_vertices(&label, x, y, fg_col, true, false);
+                let label = button.label.clone();
+                let label_px = label.chars().count() as f32 * self.cell_width;
+                let offset_x = ((w - label_px) / 2.0).max(0.0);
+                let offset_y = ((h - self.cell_height) / 2.0).max(0.0);
+                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                    &label,
+                    x + offset_x,
+                    y + offset_y,
+                    fg_col,
+                    true,
+                    false,
+                );
                 let base_idx = text_vertices.len() as u32;
                 text_vertices.extend(verts);
                 text_indices.extend(idxs.iter().map(|i| i + base_idx));
@@ -1046,7 +1325,8 @@ impl Renderer {
 
             // Horizontal rules
             if line == "---" || line == "***" || line == "___" {
-                let rule = "─".repeat(40);
+                let count = (_width / self.cell_width.max(1.0)) as usize;
+                let rule = "─".repeat(count.max(1));
                 let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
                     &rule,
                     x,
@@ -2771,5 +3051,51 @@ mod tests {
         assert!(string_tok.text.starts_with("\"\"\""));
         // Not closed, so should contain the rest of the line
         assert!(string_tok.text.contains("unterminated"));
+    }
+
+    #[test]
+    fn wrap_line_short_text_unchanged() {
+        assert_eq!(wrap_line("hello", 10), vec!["hello"]);
+    }
+
+    #[test]
+    fn wrap_line_exact_fit() {
+        assert_eq!(wrap_line("hello", 5), vec!["hello"]);
+    }
+
+    #[test]
+    fn wrap_line_breaks_at_space() {
+        assert_eq!(wrap_line("hello world", 7), vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn wrap_line_hard_break_no_space() {
+        assert_eq!(wrap_line("abcdefghij", 5), vec!["abcde", "fghij"]);
+    }
+
+    #[test]
+    fn wrap_line_multiple_wraps() {
+        assert_eq!(
+            wrap_line("the quick brown fox", 10),
+            vec!["the quick", "brown fox"]
+        );
+    }
+
+    #[test]
+    fn wrap_line_zero_cols_returns_original() {
+        assert_eq!(wrap_line("hello", 0), vec!["hello"]);
+    }
+
+    #[test]
+    fn wrap_line_empty_string() {
+        assert_eq!(wrap_line("", 10), vec![""]);
+    }
+
+    #[test]
+    fn wrap_line_single_long_word_then_short() {
+        assert_eq!(
+            wrap_line("abcdefghij end", 5),
+            vec!["abcde", "fghij", "end"]
+        );
     }
 }

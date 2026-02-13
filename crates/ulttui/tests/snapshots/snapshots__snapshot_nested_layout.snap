@@ -1,10 +1,10 @@
 ---
 source: crates/ulttui/tests/snapshots.rs
-assertion_line: 114
 expression: output
 ---
 Title
-
 Sidebar             Main Content
+
+
 
 Status

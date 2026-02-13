@@ -96,24 +96,21 @@ impl Application for ChatApp {
 
     fn view(&self) -> impl View {
         Column::new()
+            .flex_grow(1.0)
             .padding(1.0)
             .gap(1.0)
-            .child(RichText::new().span("Chat Demo", Style::new().bold().fg(Color::CYAN)))
+            .child(Title::new("Chat Demo"))
+            .child(Divider::horizontal())
             .child(ScrollView::new().child(self.message_list()))
+            .child(Divider::horizontal())
             .child(Text::new(format!("> {}|", self.input)))
-            .child(RichText::new().span(
-                "Enter: send | Ctrl+C: quit",
-                Style {
-                    dim: true,
-                    ..Style::default()
-                },
-            ))
+            .child(Muted::new("Enter send · Ctrl+C quit"))
     }
 }
 
 impl ChatApp {
     fn message_list(&self) -> Column {
-        let mut col = Column::new().gap(0.5);
+        let mut col = Column::new().flex_grow(1.0).gap(0.5);
         for msg in &self.messages {
             let color = if msg.is_user {
                 Color::GREEN

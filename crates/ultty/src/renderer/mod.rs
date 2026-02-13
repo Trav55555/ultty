@@ -110,13 +110,15 @@ pub struct Vertex {
     pub position: [f32; 2],
     pub tex_coord: [f32; 2],
     pub color: [f32; 4],
+    pub is_color: u32,
 }
 
 impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
+    const ATTRIBS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
         0 => Float32x2,
         1 => Float32x2,
         2 => Float32x4,
+        3 => Uint32,
     ];
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -1233,21 +1235,25 @@ impl Renderer {
             position: [x, y],
             tex_coord: [0.0, 0.0],
             color: color_arr,
+            is_color: 0,
         });
         vertices.push(Vertex {
             position: [x + width, y],
             tex_coord: [1.0, 0.0],
             color: color_arr,
+            is_color: 0,
         });
         vertices.push(Vertex {
             position: [x + width, y + height],
             tex_coord: [1.0, 1.0],
             color: color_arr,
+            is_color: 0,
         });
         vertices.push(Vertex {
             position: [x, y + height],
             tex_coord: [0.0, 1.0],
             color: color_arr,
+            is_color: 0,
         });
 
         indices.push(base_idx);
@@ -1367,10 +1373,10 @@ impl Renderer {
                         let w = rw * self.cell_width;
                         let h = rh * self.cell_height;
                         let base = vertices.len() as u32;
-                        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: c });
-                        vertices.push(Vertex { position: [x0 + w, y0], tex_coord: [0.0, 0.0], color: c });
-                        vertices.push(Vertex { position: [x0 + w, y0 + h], tex_coord: [0.0, 0.0], color: c });
-                        vertices.push(Vertex { position: [x0, y0 + h], tex_coord: [0.0, 0.0], color: c });
+                        vertices.push(Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color: c, is_color: 0 });
+                        vertices.push(Vertex { position: [x0 + w, y0], tex_coord: [0.0, 0.0], color: c, is_color: 0 });
+                        vertices.push(Vertex { position: [x0 + w, y0 + h], tex_coord: [0.0, 0.0], color: c, is_color: 0 });
+                        vertices.push(Vertex { position: [x0, y0 + h], tex_coord: [0.0, 0.0], color: c, is_color: 0 });
                         indices.push(base);
                         indices.push(base + 1);
                         indices.push(base + 2);
@@ -1453,21 +1459,25 @@ impl Renderer {
             position: [x0, y0],
             tex_coord: [0.0, 0.0],
             color: color_arr,
+            is_color: 0,
         });
         vertices.push(Vertex {
             position: [x1, y0],
             tex_coord: [1.0, 0.0],
             color: color_arr,
+            is_color: 0,
         });
         vertices.push(Vertex {
             position: [x1, y1],
             tex_coord: [1.0, 1.0],
             color: color_arr,
+            is_color: 0,
         });
         vertices.push(Vertex {
             position: [x0, y1],
             tex_coord: [0.0, 1.0],
             color: color_arr,
+            is_color: 0,
         });
 
         // Two triangles per quad

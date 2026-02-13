@@ -24,10 +24,7 @@ fn main() {
         })
         .unwrap_or(5);
 
-    let args: Vec<String> = args
-        .into_iter()
-        .filter(|a| a != "--json")
-        .collect();
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--json").collect();
     // Remove --read-timeout and its value
     let args = remove_flag_with_value(args, "--read-timeout");
 
@@ -140,7 +137,7 @@ AUTHENTICATION:
 OTHER:
     ping                    Test connection
     version                 Show version info
-    screenshot [path]       Take screenshot
+    screenshot [path]       Take screenshot (auto-timestamps if no path given)
 
 KEYS:
     Named keys: enter, tab, escape, backspace, delete, insert, home, end,

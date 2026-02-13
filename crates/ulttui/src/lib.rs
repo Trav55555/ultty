@@ -37,7 +37,9 @@ pub mod cmd;
 pub mod event;
 pub mod focus;
 pub mod layout;
+pub mod screen;
 pub mod theme;
+pub mod toast;
 pub mod vim;
 pub mod widgets;
 
@@ -48,12 +50,14 @@ pub mod prelude {
     pub use crate::event::Event;
     pub use crate::focus::FocusManager;
     pub use crate::layout::{Column, Row};
+    pub use crate::screen::{Screen, ScreenAction};
     pub use crate::theme::Theme;
+    pub use crate::toast::{Toast, ToastOverlay, ToastSeverity};
     pub use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
     pub use crate::widgets::{
-        Accent, Badge, BadgeVariant, Body, Button, Card, Divider, Inset, List, Modal, Muted,
-        ProgressBar, ScrollView, Section, Spacer, Spinner, Table, Tabs, Text, TextInput, Title,
-        View,
+        Accent, Badge, BadgeVariant, Body, Button, Card, Divider, DockLayout, Inset, List,
+        MarkdownView, Modal, Muted, ProgressBar, ScrollView, Section, Spacer, Spinner, Table,
+        Tabs, Text, TextInput, Title, View,
     };
 
     // Re-export protocol types

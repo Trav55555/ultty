@@ -213,7 +213,7 @@ ulttyctl wait-for --regex "\\$\\s*$" --timeout 5000
 
 # Screenshot
 ulttyctl screenshot /tmp/screen.png
-ulttyctl screenshot  # Returns bytes to stdout
+ulttyctl screenshot  # Auto-saves with timestamp to ~/Pictures/Screenshots/
 
 # Batch commands (atomic execution)
 ulttyctl --json batch '[{"type":"send_text","text":"ls"},{"type":"send_key","key":"Enter"}]'
@@ -288,6 +288,54 @@ strings /tmp/pty.bin | grep "error"   # Search for text
 | `tmux send-keys` may not work with GPU terminal | `ulttyctl send-text/send-key` works reliably |
 | `tmux capture-pane` captures tmux's view | `ulttyctl text` captures ultty's actual buffer |
 | No screenshot support | `ulttyctl screenshot` captures GPU-rendered output |
+
+### Native App Testing Protocol (MANDATORY)
+
+Native protocol apps (ulttui apps) receive input through the protocol socket, not the PTY. When testing these apps with ulttyctl, follow this protocol exactly to avoid sending input to the wrong process.
+
+#### Start
+
+```bash
+# 1. Kill existing ultty session
+tmux kill-session -t ultty-run 2>/dev/null
+
+# 2. Start ultty fresh
+tmux new-session -d -s ultty-run "./target/release/ultty"
+sleep 2
+
+# 3. Verify ultty is running
+./target/release/ulttyctl ping   # Must return PONG
+
+# 4. Launch the native app
+./target/release/ulttyctl send-text "./target/release/porygon-tui"
+./target/release/ulttyctl send-key enter
+sleep 3
+
+# 5. VERIFY the app is running before sending any more input
+./target/release/ulttyctl screenshot /tmp/verify-launch.png
+# Visually confirm the app rendered, not a shell prompt
+```
+
+#### Restart (after Ctrl+C or crash)
+
+```bash
+# 1. ALWAYS verify what's on screen first
+./target/release/ulttyctl text | head -3
+
+# 2. If shell prompt visible: app is dead, relaunch
+./target/release/ulttyctl send-text "./target/release/porygon-tui"
+./target/release/ulttyctl send-key enter
+sleep 3
+
+# 3. If app is still running: proceed
+# 4. NEVER send input without verifying the target process
+```
+
+#### Why This Matters
+
+`ulttyctl send-key` dispatches to the focused terminal tab. If the native app exited, input goes to the PTY shell instead — `send-key h` types 'h' in bash, not the app. You'll waste time debugging "why events don't arrive" when the app isn't running.
+
+**Rule: Always screenshot or check text before and after launching a native app.**
 
 ## Testing Infrastructure
 

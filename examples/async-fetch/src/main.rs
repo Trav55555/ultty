@@ -114,13 +114,14 @@ impl Application for FetchApp {
 
     fn view(&self) -> impl View {
         Column::new()
+            .flex_grow(1.0)
             .padding(1.0)
             .gap(1.0)
-            .child(Text::new("Async Fetch Demo — Cmd::spawn"))
+            .child(Title::new("Async Fetch Demo"))
             .child(Divider::horizontal())
             .child(self.status_view())
             .child(Divider::horizontal())
-            .child(Text::new("f/Enter: fetch | r: reset | Ctrl+C: quit"))
+            .child(Muted::new("f/Enter fetch · r reset · Ctrl+C quit"))
     }
 }
 

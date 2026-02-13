@@ -58,6 +58,7 @@ impl Application for CounterApp {
 
     fn view(&self) -> impl View {
         Column::new()
+            .flex_grow(1.0)
             .height(Dimension::Percent(100.0))
             .justify_center()
             .align_center()
@@ -68,7 +69,7 @@ impl Application for CounterApp {
                     .child(Divider::horizontal())
                     .child(Row::new().justify_center().child(
                         ulttui::widgets::RichText::new().span(
-                            &format!("{}", self.count),
+                            format!("{}", self.count),
                             Style::new().fg(self.count_color()).bold(),
                         ),
                     ))
@@ -77,9 +78,9 @@ impl Application for CounterApp {
                         Row::new()
                             .gap(2.0)
                             .justify_center()
-                            .child(Button::new("  -1  ").id("dec"))
-                            .child(Button::new("  +1  ").id("inc"))
-                            .child(Button::new(" Reset ").id("reset")),
+                            .child(Button::new("-1").id("dec").flex_grow(1.0))
+                            .child(Button::new("+1").id("inc").flex_grow(1.0))
+                            .child(Button::new("Reset").id("reset").flex_grow(1.0)),
                     )
                     .child(
                         Row::new()

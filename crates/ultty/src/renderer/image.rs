@@ -340,10 +340,10 @@ impl Renderer {
 
             let color = [1.0f32, 1.0, 1.0, 1.0];
             let vertices = vec![
-                Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color },
-                Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color },
-                Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color },
-                Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color },
+                Vertex { position: [x0, y0], tex_coord: [0.0, 0.0], color, is_color: 0 },
+                Vertex { position: [x1, y0], tex_coord: [1.0, 0.0], color, is_color: 0 },
+                Vertex { position: [x1, y1], tex_coord: [1.0, 1.0], color, is_color: 0 },
+                Vertex { position: [x0, y1], tex_coord: [0.0, 1.0], color, is_color: 0 },
             ];
             let indices: Vec<u32> = vec![0, 1, 2, 0, 2, 3];
 

@@ -7,7 +7,7 @@ use ratatui::Frame;
 
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
-use ultty_protocol::{Constraints, Content, Dimension, TextContent};
+use ultty_protocol::{Constraints, Content, Dimension, Display, TextContent};
 
 /// Divider widget for visual separation.
 #[derive(Debug, Clone, Copy)]
@@ -41,14 +41,18 @@ impl View for Divider {
     fn constraints(&self) -> Constraints {
         if self.horizontal {
             Constraints {
+                display: Display::Flex,
                 width: Dimension::Percent(100.0),
-                height: Dimension::cells(1.0),
+                height: Dimension::Cells(1.0),
+                flex_shrink: 1.0,
                 ..Default::default()
             }
         } else {
             Constraints {
-                width: Dimension::cells(1.0),
+                display: Display::Flex,
+                width: Dimension::Cells(1.0),
                 height: Dimension::Percent(100.0),
+                flex_shrink: 1.0,
                 ..Default::default()
             }
         }

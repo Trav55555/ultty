@@ -143,6 +143,7 @@ impl View for Table {
                     parent: region_id,
                     insert_index: -1,
                     constraints: Constraints {
+                        display: Display::Flex,
                         flex_grow: 1.0,
                         ..Default::default()
                     },
@@ -191,6 +192,7 @@ impl View for Table {
                         parent: region_id,
                         insert_index: -1,
                         constraints: Constraints {
+                            display: Display::Flex,
                             flex_grow: 1.0,
                             ..Default::default()
                         },

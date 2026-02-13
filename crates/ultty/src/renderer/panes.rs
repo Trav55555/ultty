@@ -499,33 +499,37 @@ impl Renderer {
                         fg
                     };
                     let c = fg.to_array();
-                    let cx = col_idx as f32 * self.cell_width + self.pane_offset_x;
-                    let cy = row_idx as f32 * self.cell_height + self.pane_offset_y;
+                    let cx = (col_idx as f32 * self.cell_width + self.pane_offset_x).round();
+                    let cy = (row_idx as f32 * self.cell_height + self.pane_offset_y).round();
                     for &(rx, ry, rw, rh) in &rects[..count] {
-                        let x0 = cx + rx * self.cell_width;
-                        let y0 = cy + ry * self.cell_height;
-                        let w = rw * self.cell_width;
-                        let h = rh * self.cell_height;
+                        let x0 = (cx + rx * self.cell_width).round();
+                        let y0 = (cy + ry * self.cell_height).round();
+                        let w = (rw * self.cell_width).round();
+                        let h = (rh * self.cell_height).round();
                         let base = vertices.len() as u32;
                         vertices.push(Vertex {
                             position: [x0, y0],
                             tex_coord: [0.0, 0.0],
                             color: c,
+                            is_color: 0,
                         });
                         vertices.push(Vertex {
                             position: [x0 + w, y0],
                             tex_coord: [0.0, 0.0],
                             color: c,
+                            is_color: 0,
                         });
                         vertices.push(Vertex {
                             position: [x0 + w, y0 + h],
                             tex_coord: [0.0, 0.0],
                             color: c,
+                            is_color: 0,
                         });
                         vertices.push(Vertex {
                             position: [x0, y0 + h],
                             tex_coord: [0.0, 0.0],
                             color: c,
+                            is_color: 0,
                         });
                         indices.push(base);
                         indices.push(base + 1);
@@ -593,10 +597,10 @@ impl Renderer {
         row: u16,
         color: Rgba,
     ) {
-        let x0 = start_col as f32 * self.cell_width + self.pane_offset_x;
-        let x1 = end_col as f32 * self.cell_width + self.pane_offset_x;
-        let y0 = row as f32 * self.cell_height + self.pane_offset_y;
-        let y1 = y0 + self.cell_height;
+        let x0 = (start_col as f32 * self.cell_width + self.pane_offset_x).round();
+        let x1 = (end_col as f32 * self.cell_width + self.pane_offset_x).round();
+        let y0 = (row as f32 * self.cell_height + self.pane_offset_y).round();
+        let y1 = (y0 + self.cell_height).round();
 
         let base_idx = vertices.len() as u32;
         let color_arr = color.to_array();
@@ -605,21 +609,25 @@ impl Renderer {
             position: [x0, y0],
             tex_coord: [0.0, 0.0],
             color: color_arr,
+            is_color: 0,
         });
         vertices.push(Vertex {
             position: [x1, y0],
             tex_coord: [1.0, 0.0],
             color: color_arr,
+            is_color: 0,
         });
         vertices.push(Vertex {
             position: [x1, y1],
             tex_coord: [1.0, 1.0],
             color: color_arr,
+            is_color: 0,
         });
         vertices.push(Vertex {
             position: [x0, y1],
             tex_coord: [0.0, 1.0],
             color: color_arr,
+            is_color: 0,
         });
 
         indices.push(base_idx);
@@ -640,10 +648,10 @@ impl Renderer {
         let mut indices = Vec::new();
 
         let border_width = 2.0;
-        let x = pane.x;
-        let y = pane.y + self.tab_bar_height;
-        let w = pane.width;
-        let h = pane.height;
+        let x = pane.x.round();
+        let y = (pane.y + self.tab_bar_height).round();
+        let w = pane.width.round();
+        let h = pane.height.round();
 
         // Top border
         self.emit_rect(&mut vertices, &mut indices, x, y, w, border_width, color);

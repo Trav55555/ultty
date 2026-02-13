@@ -64,7 +64,10 @@ impl Badge {
 
 impl View for Badge {
     fn constraints(&self) -> Constraints {
+        let width = self.text.chars().count() + 2; // +2 for padding spaces
         Constraints {
+            display: ultty_protocol::Display::Flex,
+            width: Dimension::Cells(width as f32),
             height: Dimension::Cells(1.0),
             ..Default::default()
         }

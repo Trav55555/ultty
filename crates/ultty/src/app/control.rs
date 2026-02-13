@@ -325,12 +325,23 @@ impl App {
                             },
                         }
                     } else {
-                        match self.renderer.capture_screenshot_bytes_with_native(
+                        let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+                        let filename = format!("ultty-screenshot-{}.png", timestamp);
+                        let path = dirs::picture_dir()
+                            .map(|p| p.join("Screenshots").join(&filename))
+                            .unwrap_or_else(|| std::path::PathBuf::from(&filename));
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        match self.renderer.capture_screenshot_with_native(
                             term,
                             &overlay,
+                            &path,
                             &native_sessions,
                         ) {
-                            Ok(data) => ControlResponse::Data(ControlData::ScreenshotData(data)),
+                            Ok(()) => ControlResponse::Data(ControlData::ScreenshotSaved(
+                                path.display().to_string(),
+                            )),
                             Err(e) => ControlResponse::Error {
                                 code: 5,
                                 message: format!("Screenshot failed: {}", e),

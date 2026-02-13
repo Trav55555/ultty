@@ -10,7 +10,7 @@ use super::View;
 use crate::theme::{to_ratatui_color, Theme};
 use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
 use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimState};
-use ultty_protocol::{AppMessage, Constraints, OverflowAxis, RegionId};
+use ultty_protocol::{AppMessage, Constraints, Display, FlexDirection, OverflowAxis, RegionId};
 
 pub struct ScrollView {
     constraints: Constraints,
@@ -37,9 +37,19 @@ impl std::fmt::Debug for ScrollView {
 
 impl Default for ScrollView {
     fn default() -> Self {
-        let mut constraints = Constraints::default();
-        constraints.flex_grow = 1.0;
-        constraints.overflow.y = OverflowAxis::Scroll;
+        let constraints = Constraints {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            min_height: ultty_protocol::Dimension::Cells(0.0),
+            width: ultty_protocol::Dimension::Percent(100.0),
+            overflow: ultty_protocol::Overflow {
+                x: OverflowAxis::Hidden,
+                y: OverflowAxis::Scroll,
+            },
+            ..Default::default()
+        };
         Self {
             constraints,
             child: None,

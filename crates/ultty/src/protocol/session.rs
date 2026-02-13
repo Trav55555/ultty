@@ -787,14 +787,18 @@ impl NativeSession {
                     y: abs_y,
                     width: taffy_layout.size.width,
                     height: taffy_layout.size.height,
-                    content_x: abs_x + taffy_layout.padding.left,
-                    content_y: abs_y + taffy_layout.padding.top,
+                    content_x: abs_x + taffy_layout.padding.left + taffy_layout.border.left,
+                    content_y: abs_y + taffy_layout.padding.top + taffy_layout.border.top,
                     content_width: taffy_layout.size.width
                         - taffy_layout.padding.left
-                        - taffy_layout.padding.right,
+                        - taffy_layout.padding.right
+                        - taffy_layout.border.left
+                        - taffy_layout.border.right,
                     content_height: taffy_layout.size.height
                         - taffy_layout.padding.top
-                        - taffy_layout.padding.bottom,
+                        - taffy_layout.padding.bottom
+                        - taffy_layout.border.top
+                        - taffy_layout.border.bottom,
                     visible: true,
                 };
                 regions.push(computed);
@@ -827,8 +831,10 @@ impl NativeSession {
         self.send_message(&msg)?;
 
         debug!(
-            "Computed layout for {} regions",
-            self.scene.iter_depth_first().count()
+            "Computed layout for {} regions (viewport {}x{})",
+            self.scene.iter_depth_first().count(),
+            self.viewport_width,
+            self.viewport_height,
         );
 
         Ok(())

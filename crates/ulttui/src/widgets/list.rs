@@ -181,7 +181,9 @@ impl<T: std::fmt::Display> View for List<T> {
         };
 
         let constraints = Constraints {
+            display: Display::Flex,
             width: Dimension::Percent(100.0),
+            height: Dimension::Cells(1.0),
             ..Default::default()
         };
 

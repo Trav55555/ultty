@@ -7,9 +7,101 @@ use crate::backend::Backend;
 use crate::cmd::{Cmd, Sub};
 use crate::event::{Event, Key, KeyEvent};
 use crate::focus::FocusManager;
+use crate::screen::{Screen, ScreenAction};
 use crate::theme::Theme;
-use crate::widgets::View;
+use crate::toast::{Toast, ToastSeverity};
+use crate::widgets::{Badge, BadgeVariant, Column, Spacer, View};
 use tokio::runtime::Runtime;
+use ultty_protocol::{AppMessage, RegionId};
+
+struct OverlayView<'a> {
+    base: &'a dyn View,
+    overlay: Option<Column>,
+}
+
+impl<'a> OverlayView<'a> {
+    fn new(base: &'a dyn View, overlay: Option<Column>) -> Self {
+        Self { base, overlay }
+    }
+}
+
+fn render_view_to_native(
+    child: &dyn View,
+    send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+    parent: RegionId,
+    next_id: &mut u32,
+) -> anyhow::Result<RegionId> {
+    let region_id = RegionId::new(*next_id);
+    *next_id += 1;
+
+    send_message(&AppMessage::CreateRegion {
+        id: region_id,
+        parent,
+        insert_index: -1,
+        constraints: child.constraints(),
+        style: child.style(),
+    })?;
+
+    let content = child.content();
+    if content != ultty_protocol::Content::None {
+        send_message(&AppMessage::SetContent {
+            id: region_id,
+            content,
+        })?;
+    }
+
+    for i in 0..child.children_count() {
+        child.render_child_native(i, send_message, region_id, next_id)?;
+    }
+
+    Ok(region_id)
+}
+
+impl View for OverlayView<'_> {
+    fn constraints(&self) -> ultty_protocol::Constraints {
+        self.base.constraints()
+    }
+
+    fn style(&self) -> ultty_protocol::Style {
+        self.base.style()
+    }
+
+    fn content(&self) -> ultty_protocol::Content {
+        self.base.content()
+    }
+
+    fn children_count(&self) -> usize {
+        self.base.children_count() + usize::from(self.overlay.is_some())
+    }
+
+    fn render_child_native(
+        &self,
+        index: usize,
+        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        parent: RegionId,
+        next_id: &mut u32,
+    ) -> anyhow::Result<Option<RegionId>> {
+        let base_count = self.base.children_count();
+        if index < base_count {
+            return self.base.render_child_native(index, send_message, parent, next_id);
+        }
+
+        if index == base_count {
+            if let Some(overlay) = &self.overlay {
+                return Ok(Some(render_view_to_native(overlay, send_message, parent, next_id)?));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn render_ansi(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        self.base.render_ansi(frame, area);
+        if let Some(overlay) = &self.overlay {
+            overlay.render_ansi(frame, area);
+        }
+    }
+}
 
 /// Main application trait.
 pub trait Application: Sized {
@@ -55,6 +147,8 @@ pub struct App<A: Application> {
     subscriptions: Vec<SubState<A::Message>>,
     spawn_handles: Vec<tokio::task::JoinHandle<A::Message>>,
     msg_queue: VecDeque<A::Message>,
+    screen_stack: Vec<Box<dyn Screen>>,
+    active_toasts: Vec<(Toast, Instant)>,
 }
 
 #[allow(dead_code)]
@@ -76,6 +170,8 @@ impl<A: Application> App<A> {
             subscriptions: Vec::new(),
             spawn_handles: Vec::new(),
             msg_queue: VecDeque::new(),
+            screen_stack: Vec::new(),
+            active_toasts: Vec::new(),
         }
     }
 
@@ -105,24 +201,49 @@ impl<A: Application> App<A> {
         loop {
             // 1. Poll backend for events
             if let Some(mut event) = self.backend.poll_event()? {
-                // 2. Normalize events → messages via on_event()
-                if let Event::Key(ref mut key_event) = event {
-                    key_event.focused_id =
-                        self.focus.focused_id().map(str::to_string);
+                if matches!(&event, Event::Quit) {
+                    break;
+                }
 
-                    if self.handle_navigation(key_event) {
-                        // Navigation consumed the event; re-render and continue.
+                if let Event::Key(ref mut key_event) = event {
+                    key_event.focused_id = self.focus.focused_id().map(str::to_string);
+                }
+
+                let mut forward_to_app = true;
+                let mut allow_navigation = true;
+                if !self.screen_stack.is_empty() {
+                    let action = {
+                        let top_screen = self
+                            .screen_stack
+                            .last_mut()
+                            .expect("screen stack checked as non-empty");
+                        top_screen.on_event(&event)
+                    };
+
+                    match action {
+                        ScreenAction::Continue => {}
+                        ScreenAction::Dismiss => {
+                            self.screen_stack.pop();
+                            forward_to_app = false;
+                        }
+                        ScreenAction::Consumed => {
+                            forward_to_app = false;
+                            allow_navigation = false;
+                        }
+                    }
+                }
+
+                if let Event::Key(ref key_event) = event {
+                    if allow_navigation && self.handle_navigation(key_event) {
                         self.render()?;
                         continue;
                     }
                 }
 
-                if matches!(&event, Event::Quit) {
-                    break;
-                }
-
-                if let Some(msg) = self.app.on_event(&event) {
-                    self.msg_queue.push_back(msg);
+                if forward_to_app {
+                    if let Some(msg) = self.app.on_event(&event) {
+                        self.msg_queue.push_back(msg);
+                    }
                 }
             }
 
@@ -137,6 +258,9 @@ impl<A: Application> App<A> {
 
             // 6. Drain message queue again (from subs/spawns)
             self.drain_messages(&rt);
+
+            self.active_toasts
+                .retain(|(toast, created)| created.elapsed() < toast.duration);
 
             // 7. Render view
             self.render()?;
@@ -171,8 +295,20 @@ impl<A: Application> App<A> {
 
         let render_result = (|| -> anyhow::Result<()> {
             FocusManager::with_current_mut(|fm| fm.begin_frame());
-            let view = self.app.view();
-            self.backend.render(&view)?;
+            let overlay = if self.active_toasts.is_empty() {
+                None
+            } else {
+                Some(self.toast_overlay_view())
+            };
+            if let Some(screen) = self.screen_stack.last() {
+                let view = screen.view();
+                let composed = OverlayView::new(&view, overlay);
+                self.backend.render(&composed)?;
+            } else {
+                let view = self.app.view();
+                let composed = OverlayView::new(&view, overlay);
+                self.backend.render(&composed)?;
+            }
             FocusManager::with_current_mut(|fm| fm.end_frame());
             Ok(())
         })();
@@ -198,6 +334,14 @@ impl<A: Application> App<A> {
                 true
             }
             Key::Tab if key_event.modifiers.shift => {
+                self.focus.focus_prev();
+                true
+            }
+            Key::Right | Key::Down => {
+                self.focus.focus_next();
+                true
+            }
+            Key::Left | Key::Up => {
                 self.focus.focus_prev();
                 true
             }
@@ -298,6 +442,16 @@ impl<A: Application> App<A> {
                     });
                     self.spawn_handles.push(handle);
                 }
+                Cmd::ShowToast(toast) => {
+                    self.active_toasts.push((toast, Instant::now()));
+                }
+                Cmd::PushScreen(mut screen) => {
+                    screen.on_mount();
+                    self.screen_stack.push(screen);
+                }
+                Cmd::PopScreen => {
+                    self.screen_stack.pop();
+                }
             }
         }
     }
@@ -315,6 +469,24 @@ impl<A: Application> App<A> {
             }
         }
     }
+
+    fn toast_overlay_view(&self) -> Column {
+        let mut toast_list = Column::new().gap(1.0);
+        for (toast, _) in &self.active_toasts {
+            let variant = match toast.severity {
+                ToastSeverity::Info => BadgeVariant::Primary,
+                ToastSeverity::Success => BadgeVariant::Success,
+                ToastSeverity::Warning => BadgeVariant::Warning,
+                ToastSeverity::Error => BadgeVariant::Error,
+            };
+            toast_list = toast_list.child(Badge::new(&toast.message).variant(variant));
+        }
+
+        Column::new()
+            .flex_grow(1.0)
+            .child(Spacer)
+            .child(toast_list)
+    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -330,6 +502,8 @@ impl<A: Application> App<A> {
             subscriptions: Vec::new(),
             spawn_handles: Vec::new(),
             msg_queue: VecDeque::new(),
+            screen_stack: Vec::new(),
+            active_toasts: Vec::new(),
         }
     }
 }
@@ -337,6 +511,9 @@ impl<A: Application> App<A> {
 #[cfg(test)]
 mod async_tests {
     use super::*;
+    use crate::backend::mock::MockBackend;
+    use crate::screen::{Screen, ScreenAction};
+    use crate::widgets::{Column, Text};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -376,6 +553,80 @@ mod async_tests {
         fn view(&self) -> impl View {
             crate::widgets::Text::new("test")
         }
+    }
+
+    #[derive(Clone)]
+    struct ScreenTestState {
+        main_view_calls: Arc<Mutex<usize>>,
+        app_event_log: Arc<Mutex<Vec<char>>>,
+    }
+
+    impl ScreenTestState {
+        fn new() -> Self {
+            Self {
+                main_view_calls: Arc::new(Mutex::new(0)),
+                app_event_log: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    struct ScreenTestApp {
+        state: ScreenTestState,
+    }
+
+    impl Application for ScreenTestApp {
+        type Message = ();
+
+        fn on_event(&mut self, event: &Event) -> Option<Self::Message> {
+            if let Event::Key(key_event) = event {
+                if let Key::Char(c) = key_event.key {
+                    self.state.app_event_log.lock().unwrap().push(c);
+                }
+            }
+            None
+        }
+
+        fn view(&self) -> impl View {
+            *self.state.main_view_calls.lock().unwrap() += 1;
+            Text::new("main")
+        }
+    }
+
+    struct TestScreen {
+        view_calls: Arc<Mutex<usize>>,
+        mount_calls: Arc<Mutex<usize>>,
+        dismiss_on: Option<char>,
+    }
+
+    impl Screen for TestScreen {
+        fn view(&self) -> Column {
+            *self.view_calls.lock().unwrap() += 1;
+            Column::new().child(Text::new("screen"))
+        }
+
+        fn on_event(&mut self, event: &Event) -> ScreenAction {
+            if let Some(target) = self.dismiss_on {
+                if let Event::Key(key_event) = event {
+                    if key_event.key == Key::Char(target) {
+                        return ScreenAction::Dismiss;
+                    }
+                }
+            }
+            ScreenAction::Continue
+        }
+
+        fn on_mount(&mut self) {
+            *self.mount_calls.lock().unwrap() += 1;
+        }
+    }
+
+    fn make_screen_runner(
+        state: ScreenTestState,
+        events: Vec<Option<Event>>,
+    ) -> App<ScreenTestApp> {
+        let app = ScreenTestApp { state };
+        let backend = Backend::Mock(MockBackend::new(events));
+        App::new_with_backend(app, backend)
     }
 
     fn make_test_app() -> (App<TestApp>, Arc<Mutex<Vec<i32>>>) {
@@ -517,5 +768,117 @@ mod async_tests {
         // only ONE message should be emitted — no burst replay.
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0], 99);
+    }
+
+    #[test]
+    fn test_push_screen_changes_render_target() {
+        let state = ScreenTestState::new();
+        let mut runner = make_screen_runner(state.clone(), vec![]);
+        let rt = Runtime::new().expect("runtime");
+
+        let screen_view_calls = Arc::new(Mutex::new(0));
+        let mount_calls = Arc::new(Mutex::new(0));
+        let screen = TestScreen {
+            view_calls: screen_view_calls.clone(),
+            mount_calls: mount_calls.clone(),
+            dismiss_on: None,
+        };
+
+        runner.render().expect("initial render");
+        assert_eq!(*state.main_view_calls.lock().unwrap(), 1);
+        assert_eq!(*screen_view_calls.lock().unwrap(), 0);
+
+        runner.process_cmd(Cmd::PushScreen(Box::new(screen)), &rt);
+        runner.render().expect("screen render");
+
+        assert_eq!(*state.main_view_calls.lock().unwrap(), 1);
+        assert_eq!(*screen_view_calls.lock().unwrap(), 1);
+        assert_eq!(*mount_calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_pop_screen_restores_main_view() {
+        let state = ScreenTestState::new();
+        let mut runner = make_screen_runner(state.clone(), vec![]);
+        let rt = Runtime::new().expect("runtime");
+
+        let screen = TestScreen {
+            view_calls: Arc::new(Mutex::new(0)),
+            mount_calls: Arc::new(Mutex::new(0)),
+            dismiss_on: None,
+        };
+
+        runner.process_cmd(Cmd::PushScreen(Box::new(screen)), &rt);
+        runner.render().expect("render screen");
+        assert_eq!(*state.main_view_calls.lock().unwrap(), 0);
+
+        runner.process_cmd(Cmd::PopScreen, &rt);
+        runner.render().expect("render main after pop");
+        assert_eq!(*state.main_view_calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_screen_event_dismiss_pops() {
+        let state = ScreenTestState::new();
+        let screen_view_calls = Arc::new(Mutex::new(0));
+        let mount_calls = Arc::new(Mutex::new(0));
+
+        let screen = TestScreen {
+            view_calls: screen_view_calls.clone(),
+            mount_calls: mount_calls.clone(),
+            dismiss_on: Some('x'),
+        };
+
+        let events = vec![
+            Some(Event::Key(KeyEvent {
+                key: Key::Char('x'),
+                modifiers: crate::event::Modifiers::default(),
+                focused_id: None,
+            })),
+            Some(Event::Key(KeyEvent {
+                key: Key::Char('y'),
+                modifiers: crate::event::Modifiers::default(),
+                focused_id: None,
+            })),
+            Some(Event::Quit),
+        ];
+
+        let mut runner = make_screen_runner(state.clone(), events);
+        let rt = Runtime::new().expect("runtime");
+        runner.process_cmd(Cmd::PushScreen(Box::new(screen)), &rt);
+
+        runner.run().expect("run app");
+
+        assert_eq!(*mount_calls.lock().unwrap(), 1);
+        assert!(*screen_view_calls.lock().unwrap() >= 1);
+        assert!(*state.main_view_calls.lock().unwrap() >= 1);
+        assert_eq!(*state.app_event_log.lock().unwrap(), vec!['y']);
+    }
+
+    #[test]
+    fn test_show_toast_adds_to_active() {
+        let (mut runner, _updates) = make_test_app();
+        let rt = Runtime::new().expect("runtime");
+
+        runner.process_cmd(Cmd::ShowToast(Toast::info("Saved")), &rt);
+
+        assert_eq!(runner.active_toasts.len(), 1);
+        assert_eq!(runner.active_toasts[0].0.message, "Saved");
+    }
+
+    #[test]
+    fn test_toast_auto_expires() {
+        let (mut runner, _updates) = make_test_app();
+        runner.active_toasts.push((
+            Toast::info("short").duration(Duration::from_millis(1)),
+            Instant::now(),
+        ));
+
+        std::thread::sleep(Duration::from_millis(10));
+        runner
+            .active_toasts
+            .retain(|(toast, created)| created.elapsed() < toast.duration);
+
+        assert!(runner.active_toasts.is_empty());
     }
 }

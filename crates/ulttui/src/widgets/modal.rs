@@ -159,7 +159,7 @@ impl View for Modal {
                     parent,
                     insert_index: -1,
                     constraints: Constraints {
-                        width: Dimension::Percent(100.0),
+                        display: Display::Flex,
                         ..Default::default()
                     },
                     style: ProtoStyle::default(),
