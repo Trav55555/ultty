@@ -272,6 +272,8 @@ struct PorygonTui {
     error: Option<String>,
     spinner_frame: usize,
     waiting_response: bool,
+    streaming_content: String,
+    stream_token_count: usize,
     started: bool,
     pending_approval: Option<ApprovalRequest>,
     show_approval_modal: bool,
@@ -322,6 +324,8 @@ impl PorygonTui {
             error: None,
             spinner_frame: 0,
             waiting_response: false,
+            streaming_content: String::new(),
+            stream_token_count: 0,
             started: false,
             pending_approval: None,
             show_approval_modal: false,
@@ -354,6 +358,10 @@ enum Msg {
     ApprovalDecision(bool),
     ApprovalSubmitted,
     NoApprovalsPending,
+    StreamToken(String),
+    StreamComplete,
+    StreamError(String),
+    AbortStream,
 }
 
 impl Application for PorygonTui {
@@ -399,16 +407,28 @@ impl Application for PorygonTui {
 
                 self.waiting_response = true;
                 self.error = None;
-                self.status.step = "awaiting daemon response".into();
+                self.status.step = "streaming daemon response".into();
+                self.streaming_content = String::new();
+                self.stream_token_count = 0;
 
-                let url = format!("{}/api/ask", self.daemon_url);
+                self.messages.push(ChatMessage {
+                    role: "assistant".into(),
+                    content: String::new(),
+                    timestamp: format_timestamp(),
+                });
+
+                let ws_url = self
+                    .daemon_url
+                    .replace("http://", "ws://")
+                    .replace("https://", "wss://");
+                let ws_url = format!("{ws_url}/agent/stream");
+                let http_url = format!("{}/api/ask", self.daemon_url);
                 let client = self.client.clone();
-                Cmd::spawn(async move {
-                    match send_to_daemon(&client, &url, &user_text).await {
-                        Ok(response) => Msg::DaemonResponse(response),
-                        Err(err) => Msg::DaemonError(err),
-                    }
-                })
+
+                Cmd::subscribe(
+                    "agent-stream",
+                    stream_from_daemon(ws_url, http_url, client, user_text),
+                )
             }
             Msg::PollConnection => {
                 let url = self.daemon_url.clone();
@@ -444,15 +464,71 @@ impl Application for PorygonTui {
             Msg::DaemonResponse(response) => {
                 self.waiting_response = false;
                 self.status.step = "idle".into();
-                self.messages.push(ChatMessage {
-                    role: "assistant".into(),
-                    content: response,
-                    timestamp: format_timestamp(),
-                });
+                if let Some(last) = self.messages.last_mut() {
+                    if last.role == "assistant" && last.content.is_empty() {
+                        last.content = response;
+                    } else {
+                        self.messages.push(ChatMessage {
+                            role: "assistant".into(),
+                            content: response,
+                            timestamp: format_timestamp(),
+                        });
+                    }
+                } else {
+                    self.messages.push(ChatMessage {
+                        role: "assistant".into(),
+                        content: response,
+                        timestamp: format_timestamp(),
+                    });
+                }
+                self.streaming_content.clear();
+                self.stream_token_count = 0;
                 self.auto_scroll_chat();
                 Cmd::none()
             }
             Msg::DaemonError(err) => {
+                self.waiting_response = false;
+                self.status.step = "idle".into();
+                self.error = Some(err.clone());
+                if self
+                    .messages
+                    .last()
+                    .is_some_and(|msg| msg.role == "assistant" && msg.content.is_empty())
+                {
+                    self.messages.pop();
+                }
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: format!("Error: {err}"),
+                    timestamp: format_timestamp(),
+                });
+                self.streaming_content.clear();
+                self.stream_token_count = 0;
+                self.auto_scroll_chat();
+                Cmd::ShowToast(Toast::error(format!("Request failed: {err}")))
+            }
+            Msg::StreamToken(token) => {
+                self.streaming_content.push_str(&token);
+                self.stream_token_count += 1;
+
+                if let Some(last) = self.messages.last_mut() {
+                    if last.role == "assistant" {
+                        last.content.clone_from(&self.streaming_content);
+                    }
+                }
+
+                self.auto_scroll_chat();
+                Cmd::none()
+            }
+            Msg::StreamComplete => {
+                self.waiting_response = false;
+                self.status.step = "idle".into();
+                self.streaming_content.clear();
+                self.stream_token_count = 0;
+                self.auto_scroll_chat();
+                Cmd::unsubscribe("agent-stream")
+            }
+            Msg::StreamError(err) => {
                 self.waiting_response = false;
                 self.status.step = "idle".into();
                 self.error = Some(err.clone());
@@ -461,8 +537,23 @@ impl Application for PorygonTui {
                     content: format!("Error: {err}"),
                     timestamp: format_timestamp(),
                 });
+                self.streaming_content.clear();
+                self.stream_token_count = 0;
                 self.auto_scroll_chat();
-                Cmd::ShowToast(Toast::error(format!("Request failed: {err}")))
+                Cmd::batch(vec![
+                    Cmd::unsubscribe("agent-stream"),
+                    Cmd::ShowToast(Toast::error(format!("Stream failed: {err}"))),
+                ])
+            }
+            Msg::AbortStream => {
+                self.waiting_response = false;
+                self.status.step = "idle (aborted)".into();
+                self.streaming_content.clear();
+                self.stream_token_count = 0;
+                Cmd::batch(vec![
+                    Cmd::unsubscribe("agent-stream"),
+                    Cmd::ShowToast(Toast::warning("Stream aborted")),
+                ])
             }
             Msg::ConnectionChecked(ok) => {
                 let was_connected = self.connected;
@@ -637,6 +728,9 @@ impl Application for PorygonTui {
                         let vh = self.chat_scroll.viewport_height();
                         self.chat_scroll.scroll_by(vh);
                         return None;
+                    }
+                    Key::Escape if self.waiting_response => {
+                        return Some(Msg::AbortStream);
                     }
                     _ => {}
                 }
@@ -899,7 +993,7 @@ impl PorygonTui {
                 }
 
                 // Add vertical separator lines at even day boundaries
-                let num_days = (n + 23) / 24; // typically 7
+                let num_days = n.div_ceil(24); // typically 7
                 let cols_per_day = chart_width / num_days.max(1);
                 let mut boundary_cols = Vec::new();
                 for day in 1..num_days {
@@ -907,8 +1001,8 @@ impl PorygonTui {
                     if char_col > 0 && char_col < chart_width {
                         boundary_cols.push(char_col);
                         // Add left-column dotted line (bits 0,1,2,6)
-                        for row in 0..chart_rows {
-                            grid[row][char_col] |= 0b0100_0111;
+                        for grid_row in grid.iter_mut().take(chart_rows) {
+                            grid_row[char_col] |= 0b0100_0111;
                         }
                     }
                 }
@@ -930,7 +1024,7 @@ impl PorygonTui {
                     let zero_row = zero_y / 4;
                     let zero_y_in_char = zero_y % 4;
                     // Set dots across all columns for 0°C line
-                    for col in 0..chart_width {
+                    for (col, cell) in grid[zero_row].iter_mut().enumerate().take(chart_width) {
                         if boundary_set.contains(&col) {
                             continue; // don't overwrite boundary lines
                         }
@@ -949,8 +1043,7 @@ impl PorygonTui {
                             3 => 7,
                             _ => unreachable!(),
                         };
-                        grid[zero_row][col] |=
-                            (1 << left_bit) | (1 << right_bit);
+                        *cell |= (1 << left_bit) | (1 << right_bit);
                     }
                 }
 
@@ -1175,7 +1268,7 @@ impl PorygonTui {
         let full_rt = RichText::new()
             .span("🌕 ", Style::new().fg(Color::Rgb(249, 226, 175)))
             .span(
-                format!("{}", moon.full_moon_date),
+                moon.full_moon_date.to_string(),
                 Style::new().fg(coral),
             )
             .span(
@@ -1224,7 +1317,7 @@ impl PorygonTui {
 
     fn messages_view(&self) -> Column {
         let mut col = Column::new().gap(0.5).padding(1.0).width(Dimension::Percent(100.0));
-        for msg in &self.messages {
+        for (i, msg) in self.messages.iter().enumerate() {
             let (prefix, fg_color, bg_color, bdr_color) = match msg.role.as_str() {
                 "user" => (
                     "You",
@@ -1267,7 +1360,11 @@ impl PorygonTui {
                 .overflow_y_hidden()
                 .child(header);
 
-            card = card.child(MarkdownView::new(msg.content.clone()));
+            let is_streaming_msg =
+                self.waiting_response && i + 1 == self.messages.len() && msg.role == "assistant";
+            card = card.child(
+                MarkdownView::new(msg.content.clone()).streaming(is_streaming_msg),
+            );
             col = col.child(card);
         }
 
@@ -1461,6 +1558,12 @@ impl PorygonTui {
             _ => ("?", Color::Rgb(247, 247, 247)),
         };
 
+        let step_text = if self.waiting_response && self.stream_token_count > 0 {
+            format!("streaming: {} tokens", self.stream_token_count)
+        } else {
+            self.status.step.clone()
+        };
+
         Row::new().child(
             RichText::new()
                 .span(
@@ -1468,15 +1571,24 @@ impl PorygonTui {
                     Style::new().fg(pressure_color).bold(),
                 )
                 .span(
-                    format!(" {} ", self.status.step),
+                    format!(" {} ", step_text),
                     Style { dim: true, ..Style::new() },
                 )
                 .span(
-                    " Enter:send PgUp/Dn:scroll Ctrl+C:quit ",
+                    " Enter:send Esc:abort PgUp/Dn:scroll Ctrl+C:quit ",
                     Style { dim: true, ..Style::new() },
                 ),
         )
     }
+}
+
+#[derive(Deserialize)]
+struct StreamResponse {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    content: Option<String>,
+    response: Option<String>,
+    message: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1525,6 +1637,154 @@ async fn send_to_daemon(client: &reqwest::Client, url: &str, message: &str) -> R
         .or(body.content)
         .or(body.message)
         .unwrap_or_else(|| "(empty response)".to_string()))
+}
+
+fn stream_from_daemon(
+    ws_url: String,
+    http_url: String,
+    client: reqwest::Client,
+    message: String,
+) -> impl futures_util::Stream<Item = Msg> + Send + 'static {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    futures_util::stream::unfold(rx, move |mut rx| {
+        let started = started.clone();
+        let tx = tx.clone();
+        let ws_url = ws_url.clone();
+        let http_url = http_url.clone();
+        let client = client.clone();
+        let message = message.clone();
+        async move {
+            if !started.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                tokio::spawn(async move {
+                    if let Err(err) =
+                        run_stream(tx.clone(), &ws_url, &http_url, &client, &message).await
+                    {
+                        let _ = tx.send(Msg::StreamError(err));
+                    }
+                });
+            }
+
+            rx.recv().await.map(|msg| (msg, rx))
+        }
+    })
+}
+
+async fn run_stream(
+    tx: tokio::sync::mpsc::UnboundedSender<Msg>,
+    ws_url: &str,
+    http_url: &str,
+    client: &reqwest::Client,
+    message: &str,
+) -> Result<(), String> {
+    match try_websocket_stream(ws_url, message, &tx).await {
+        Ok(()) => Ok(()),
+        Err(_) => match send_to_daemon(client, http_url, message).await {
+            Ok(response) => {
+                let _ = tx.send(Msg::DaemonResponse(response));
+                Ok(())
+            }
+            Err(err) => {
+                let _ = tx.send(Msg::DaemonError(err));
+                Ok(())
+            }
+        },
+    }
+}
+
+async fn try_websocket_stream(
+    ws_url: &str,
+    message: &str,
+    tx: &tokio::sync::mpsc::UnboundedSender<Msg>,
+) -> Result<(), String> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let payload = serde_json::json!({ "prompt": message });
+    ws.send(WsMessage::Text(payload.to_string()))
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let mut received_payload = false;
+
+    while let Some(next_msg) = ws.next().await {
+        match next_msg {
+            Ok(WsMessage::Close(_)) => {
+                let _ = tx.send(Msg::StreamComplete);
+                return Ok(());
+            }
+            Ok(frame) => {
+                let text = match frame.into_text() {
+                    Ok(text) => text,
+                    Err(_) => continue,
+                };
+
+                if let Ok(parsed) = serde_json::from_str::<StreamResponse>(&text) {
+                    match parsed.kind.as_deref() {
+                        Some("token") => {
+                            let content = parsed
+                                .content
+                                .or(parsed.response)
+                                .or(parsed.message)
+                                .unwrap_or_default();
+                            if !content.is_empty() {
+                                received_payload = true;
+                                if tx.send(Msg::StreamToken(content)).is_err() {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        Some("done") => {
+                            let _ = tx.send(Msg::StreamComplete);
+                            return Ok(());
+                        }
+                        Some("error") => {
+                            let err = parsed.message.unwrap_or_else(|| "stream error".to_string());
+                            let _ = tx.send(Msg::StreamError(err));
+                            return Ok(());
+                        }
+                        _ => {
+                            let content = parsed
+                                .content
+                                .or(parsed.response)
+                                .or(parsed.message)
+                                .unwrap_or_default();
+                            if !content.is_empty() {
+                                received_payload = true;
+                                if tx.send(Msg::StreamToken(content)).is_err() {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    received_payload = true;
+                    if tx.send(Msg::StreamToken(text.to_string())).is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(err) => {
+                if received_payload {
+                    let _ = tx.send(Msg::StreamError(err.to_string()));
+                    return Ok(());
+                }
+                return Err(err.to_string());
+            }
+        }
+    }
+
+    if received_payload {
+        let _ = tx.send(Msg::StreamComplete);
+        Ok(())
+    } else {
+        Err("websocket stream ended without response".to_string())
+    }
 }
 
 async fn check_connection(client: &reqwest::Client, daemon_url: &str) -> bool {

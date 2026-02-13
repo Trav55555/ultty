@@ -1915,6 +1915,9 @@ mod msg_type {
     pub const SET_CONTENT: u16 = 0x0020;
     pub const SET_STYLE: u16 = 0x0021;
     pub const SET_CONSTRAINTS: u16 = 0x0022;
+    pub const APPEND_CONTENT: u16 = 0x0023;
+    pub const STREAM_START: u16 = 0x0024;
+    pub const STREAM_END: u16 = 0x0025;
     pub const DELETE_REGION: u16 = 0x0012;
     pub const REPARENT_REGION: u16 = 0x0013;
     pub const BEGIN_FRAME: u16 = 0x0030;
@@ -1989,6 +1992,21 @@ impl Encode for AppMessage {
                 id.encode(buf);
                 content.encode(buf);
                 msg_type::SET_CONTENT
+            }
+            AppMessage::AppendContent { id, text } => {
+                id.encode(buf);
+                encode_string(text, buf);
+                msg_type::APPEND_CONTENT
+            }
+            AppMessage::StreamStart { id, stream_id } => {
+                id.encode(buf);
+                buf.put_u32_le(*stream_id);
+                msg_type::STREAM_START
+            }
+            AppMessage::StreamEnd { id, stream_id } => {
+                id.encode(buf);
+                buf.put_u32_le(*stream_id);
+                msg_type::STREAM_END
             }
             AppMessage::SetRegionMetadata { id, metadata } => {
                 id.encode(buf);
@@ -2141,6 +2159,33 @@ impl Decode for AppMessage {
                 let id = RegionId::decode(buf)?;
                 let content = Content::decode(buf)?;
                 Ok(AppMessage::SetContent { id, content })
+            }
+            msg_type::APPEND_CONTENT => {
+                let id = RegionId::decode(buf)?;
+                let text = decode_string(buf)?;
+                Ok(AppMessage::AppendContent { id, text })
+            }
+            msg_type::STREAM_START => {
+                let id = RegionId::decode(buf)?;
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
+                let stream_id = buf.get_u32_le();
+                Ok(AppMessage::StreamStart { id, stream_id })
+            }
+            msg_type::STREAM_END => {
+                let id = RegionId::decode(buf)?;
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
+                let stream_id = buf.get_u32_le();
+                Ok(AppMessage::StreamEnd { id, stream_id })
             }
             msg_type::SET_REGION_METADATA => {
                 let id = RegionId::decode(buf)?;
@@ -2560,6 +2605,42 @@ mod tests {
         let mut cursor = bytes.as_ref();
         let decoded = AppMessage::decode(&mut cursor).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn test_roundtrip_append_content() {
+        let msg = AppMessage::AppendContent {
+            id: RegionId(5),
+            text: "streaming chunk".to_string(),
+        };
+        let bytes = msg.encode_to_bytes();
+        let mut cursor = bytes.as_ref();
+        let decoded = AppMessage::decode(&mut cursor).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn test_roundtrip_stream_start() {
+        let msg = AppMessage::StreamStart {
+            id: RegionId(3),
+            stream_id: 42,
+        };
+        let bytes = msg.encode_to_bytes();
+        let mut cursor = bytes.as_ref();
+        let decoded = AppMessage::decode(&mut cursor).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn test_roundtrip_stream_end() {
+        let msg = AppMessage::StreamEnd {
+            id: RegionId(3),
+            stream_id: 42,
+        };
+        let bytes = msg.encode_to_bytes();
+        let mut cursor = bytes.as_ref();
+        let decoded = AppMessage::decode(&mut cursor).unwrap();
+        assert_eq!(decoded, msg);
     }
 
     #[test]

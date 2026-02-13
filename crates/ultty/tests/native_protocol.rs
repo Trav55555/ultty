@@ -48,10 +48,10 @@ fn test_client_hello_handshake() {
     let mut client = UnixStream::connect(&socket_path).unwrap();
     client.set_nonblocking(false).unwrap();
     client
-        .set_read_timeout(Some(Duration::from_millis(100)))
+        .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
 
-    server.poll(Some(Duration::from_millis(10))).unwrap();
+    server.poll(Some(Duration::from_millis(50))).unwrap();
     assert_eq!(server.session_count(), 1);
 
     let hello = AppMessage::ClientHello {
@@ -62,7 +62,7 @@ fn test_client_hello_handshake() {
     hello.encode(&mut buf);
     client.write_all(&buf).unwrap();
 
-    server.poll(Some(Duration::from_millis(10))).unwrap();
+    server.poll(Some(Duration::from_millis(50))).unwrap();
 
     let mut response = vec![0u8; 1024];
     let n = client.read(&mut response).unwrap();

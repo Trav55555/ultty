@@ -21,6 +21,20 @@ pub enum Cmd<M> {
     Spawn(Pin<Box<dyn Future<Output = M> + Send + 'static>>),
     /// Dispatch a message after a delay.
     After(Duration, Box<dyn Fn() -> M + Send + 'static>),
+    /// Subscribe to a long-lived async stream of messages.
+    ///
+    /// Each item yielded by the stream is dispatched through `update()`.
+    /// The stream runs until it completes, errors, or is cancelled via
+    /// `Cmd::Unsubscribe`. If a subscription with the same `id` already
+    /// exists, the old one is cancelled before the new one starts.
+    Subscribe {
+        id: String,
+        stream: Pin<Box<dyn futures_core::Stream<Item = M> + Send + 'static>>,
+    },
+    /// Cancel an active subscription by ID.
+    Unsubscribe {
+        id: String,
+    },
     ShowToast(Toast),
     PushScreen(Box<dyn Screen>),
     PopScreen,
@@ -57,6 +71,33 @@ impl<M> Cmd<M> {
     {
         Cmd::After(duration, Box::new(f))
     }
+
+    /// Subscribe to a long-lived async stream of messages.
+    ///
+    /// The stream will be polled continuously and each item dispatched
+    /// through `update()`. Use `Cmd::unsubscribe(id)` to cancel.
+    ///
+    /// ## Example
+    ///
+    /// ```rust,ignore
+    /// // Create a stream from any async source (WebSocket, SSE, file watcher, etc.)
+    /// let stream = my_websocket_stream.map(|msg| Msg::StreamData(msg));
+    /// Cmd::subscribe("my-stream", stream)
+    /// ```
+    pub fn subscribe<S>(id: impl Into<String>, stream: S) -> Self
+    where
+        S: futures_core::Stream<Item = M> + Send + 'static,
+    {
+        Cmd::Subscribe {
+            id: id.into(),
+            stream: Box::pin(stream),
+        }
+    }
+
+    /// Cancel an active subscription.
+    pub fn unsubscribe(id: impl Into<String>) -> Self {
+        Cmd::Unsubscribe { id: id.into() }
+    }
 }
 
 impl<M> std::fmt::Debug for Cmd<M> {
@@ -67,6 +108,8 @@ impl<M> std::fmt::Debug for Cmd<M> {
             Cmd::Batch(_) => "Cmd::Batch",
             Cmd::Spawn(_) => "Cmd::Spawn",
             Cmd::After(_, _) => "Cmd::After",
+            Cmd::Subscribe { .. } => "Cmd::Subscribe",
+            Cmd::Unsubscribe { .. } => "Cmd::Unsubscribe",
             Cmd::ShowToast(_) => "Cmd::ShowToast",
             Cmd::PushScreen(_) => "Cmd::PushScreen",
             Cmd::PopScreen => "Cmd::PopScreen",
@@ -86,6 +129,12 @@ pub enum Sub<M> {
         interval: Duration,
         f: Box<dyn Fn() -> M + Send + 'static>,
     },
+    /// Subscribe to a WebSocket stream.
+    Stream {
+        id: String,
+        url: String,
+        on_message: Box<dyn Fn(String) -> M + Send + 'static>,
+    },
     /// Multiple subscriptions.
     Batch(Vec<Sub<M>>),
 }
@@ -102,6 +151,18 @@ impl<M> Sub<M> {
         Sub::Every {
             interval,
             f: Box::new(f),
+        }
+    }
+
+    /// Subscribe to a WebSocket stream.
+    pub fn stream<F>(id: impl Into<String>, url: impl Into<String>, on_message: F) -> Self
+    where
+        F: Fn(String) -> M + Send + 'static,
+    {
+        Sub::Stream {
+            id: id.into(),
+            url: url.into(),
+            on_message: Box::new(on_message),
         }
     }
 
@@ -163,6 +224,39 @@ mod tests {
         match sub {
             Sub::Batch(subs) => assert_eq!(subs.len(), 2),
             _ => panic!("expected Sub::Batch"),
+        }
+    }
+
+    #[test]
+    fn cmd_subscribe_stores_id() {
+        let stream = futures_util::stream::iter(vec![1, 2, 3]);
+        let cmd = Cmd::subscribe("test-sub", stream);
+        match cmd {
+            Cmd::Subscribe { id, .. } => assert_eq!(id, "test-sub"),
+            _ => panic!("expected Cmd::Subscribe"),
+        }
+    }
+
+    #[test]
+    fn cmd_unsubscribe_stores_id() {
+        let cmd: Cmd<()> = Cmd::unsubscribe("my-sub");
+        match cmd {
+            Cmd::Unsubscribe { id } => assert_eq!(id, "my-sub"),
+            _ => panic!("expected Cmd::Unsubscribe"),
+        }
+    }
+
+    #[test]
+    fn sub_stream_stores_id_and_url() {
+        let sub: Sub<String> = Sub::stream("ws-sub", "ws://localhost:9090", |msg| {
+            format!("got: {}", msg)
+        });
+        match sub {
+            Sub::Stream { id, url, .. } => {
+                assert_eq!(id, "ws-sub");
+                assert_eq!(url, "ws://localhost:9090");
+            }
+            _ => panic!("expected Sub::Stream"),
         }
     }
 }

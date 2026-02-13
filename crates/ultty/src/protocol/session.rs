@@ -61,6 +61,8 @@ pub struct NativeSession {
     scroll_offsets: HashMap<RegionId, (f32, f32)>,
     /// Animated scroll targets: region_id -> (target_x, target_y).
     scroll_targets: HashMap<RegionId, (f32, f32)>,
+    /// Active content streams: region_id -> stream_id.
+    active_streams: HashMap<RegionId, u32>,
     /// Pending clipboard get request.
     pending_clipboard_get: bool,
     /// Pending clipboard set request.
@@ -139,6 +141,7 @@ impl NativeSession {
             focused_region: None,
             scroll_offsets: HashMap::new(),
             scroll_targets: HashMap::new(),
+            active_streams: HashMap::new(),
             pending_clipboard_get: false,
             pending_clipboard_set: None,
             style_animations: HashMap::new(),
@@ -385,6 +388,29 @@ impl NativeSession {
 
             AppMessage::SetRegionMetadata { id, metadata } => {
                 self.handle_set_region_metadata(id, metadata);
+            }
+
+            AppMessage::AppendContent { id, text } => {
+                self.handle_append_content(id, text);
+            }
+
+            AppMessage::StreamStart { id, stream_id } => {
+                debug!("Stream {} started on region {:?}", stream_id, id);
+                self.active_streams.insert(id, stream_id);
+            }
+
+            AppMessage::StreamEnd { id, stream_id } => {
+                debug!("Stream {} ended on region {:?}", stream_id, id);
+                if let Some(active_id) = self.active_streams.get(&id) {
+                    if *active_id == stream_id {
+                        self.active_streams.remove(&id);
+                    } else {
+                        warn!(
+                            "StreamEnd mismatch for {:?}: active={}, got={}",
+                            id, active_id, stream_id
+                        );
+                    }
+                }
             }
 
             AppMessage::DeleteRegion { id } => {
@@ -634,6 +660,42 @@ impl NativeSession {
             self.render_dirty = true;
         } else {
             warn!("SetContent for unknown region {:?}", id);
+            self.queue_error_message(404, format!("region {} not found", id.0));
+        }
+    }
+
+    /// Handle AppendContent — append text to existing region content.
+    fn handle_append_content(&mut self, id: RegionId, text: String) {
+        if let Some(region) = self.scene.get_mut(id) {
+            match &mut region.content {
+                Content::Text(tc) => {
+                    tc.text.push_str(&text);
+                }
+                Content::Widget(ultty_protocol::WidgetContent::Markdown(md)) => {
+                    md.source.push_str(&text);
+                }
+                Content::None => {
+                    // Initialize as text content
+                    region.content = Content::Text(ultty_protocol::TextContent::new(text));
+                }
+                other => {
+                    warn!(
+                        "AppendContent on non-appendable content type for region {:?}: {:?}",
+                        id,
+                        std::mem::discriminant(other)
+                    );
+                    self.queue_error_message(
+                        400,
+                        format!("cannot append to content type of region {}", id.0),
+                    );
+                    return;
+                }
+            }
+            region.mark_dirty();
+            self.scene_dirty = true;
+            self.render_dirty = true;
+        } else {
+            warn!("AppendContent for unknown region {:?}", id);
             self.queue_error_message(404, format!("region {} not found", id.0));
         }
     }
@@ -1369,6 +1431,95 @@ mod tests {
         let mut session = make_session();
         session.set_viewport(120.0, 40.0);
         // No direct accessor, but shouldn't panic
+    }
+
+    #[test]
+    fn append_content_to_text_region() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        child.content = Content::Text(ultty_protocol::TextContent::new("Hello"));
+        session.scene.insert(child);
+
+        session
+            .handle_message(AppMessage::AppendContent {
+                id,
+                text: " World".to_string(),
+            })
+            .unwrap();
+
+        let region = session.scene.get(id).unwrap();
+        match &region.content {
+            Content::Text(tc) => assert_eq!(tc.text, "Hello World"),
+            other => panic!("Expected Text content, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_content_to_none_initializes_text() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+
+        session
+            .handle_message(AppMessage::AppendContent {
+                id,
+                text: "First chunk".to_string(),
+            })
+            .unwrap();
+
+        let region = session.scene.get(id).unwrap();
+        match &region.content {
+            Content::Text(tc) => assert_eq!(tc.text, "First chunk"),
+            other => panic!("Expected Text content, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stream_start_end_tracking() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+
+        // Start stream
+        session
+            .handle_message(AppMessage::StreamStart { id, stream_id: 42 })
+            .unwrap();
+        assert_eq!(session.active_streams.get(&id), Some(&42));
+
+        // End stream
+        session
+            .handle_message(AppMessage::StreamEnd { id, stream_id: 42 })
+            .unwrap();
+        assert_eq!(session.active_streams.get(&id), None);
+    }
+
+    #[test]
+    fn stream_end_mismatch_ignored() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+
+        session
+            .handle_message(AppMessage::StreamStart { id, stream_id: 42 })
+            .unwrap();
+
+        // End with wrong stream_id — should NOT remove
+        session
+            .handle_message(AppMessage::StreamEnd { id, stream_id: 99 })
+            .unwrap();
+        assert_eq!(session.active_streams.get(&id), Some(&42));
     }
 
     #[test]

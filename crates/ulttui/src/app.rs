@@ -1,6 +1,6 @@
 //! Application trait and runner.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::backend::Backend;
@@ -12,6 +12,7 @@ use crate::theme::Theme;
 use crate::toast::{Toast, ToastSeverity};
 use crate::widgets::{Badge, BadgeVariant, Column, Spacer, View};
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
 use ultty_protocol::{AppMessage, RegionId};
 
 struct OverlayView<'a> {
@@ -146,6 +147,9 @@ pub struct App<A: Application> {
     theme: Theme,
     subscriptions: Vec<SubState<A::Message>>,
     spawn_handles: Vec<tokio::task::JoinHandle<A::Message>>,
+    subscription_handles: HashMap<String, tokio::task::JoinHandle<()>>,
+    subscription_tx: mpsc::UnboundedSender<A::Message>,
+    subscription_rx: mpsc::UnboundedReceiver<A::Message>,
     msg_queue: VecDeque<A::Message>,
     screen_stack: Vec<Box<dyn Screen>>,
     active_toasts: Vec<(Toast, Instant)>,
@@ -161,6 +165,7 @@ struct SubState<M> {
 impl<A: Application> App<A> {
     /// Create a new app runner.
     pub fn new(app: A) -> Self {
+        let (subscription_tx, subscription_rx) = mpsc::unbounded_channel();
         Self {
             app,
             backend: Backend::detect(),
@@ -169,6 +174,9 @@ impl<A: Application> App<A> {
             theme: Theme::dark(),
             subscriptions: Vec::new(),
             spawn_handles: Vec::new(),
+            subscription_handles: HashMap::new(),
+            subscription_tx,
+            subscription_rx,
             msg_queue: VecDeque::new(),
             screen_stack: Vec::new(),
             active_toasts: Vec::new(),
@@ -256,6 +264,9 @@ impl<A: Application> App<A> {
             // 5. Poll spawned tasks → enqueue messages
             self.poll_spawned_tasks(&rt);
 
+            // 5b. Poll subscription streams → enqueue messages
+            self.poll_subscriptions();
+
             // 6. Drain message queue again (from subs/spawns)
             self.drain_messages(&rt);
 
@@ -264,6 +275,11 @@ impl<A: Application> App<A> {
 
             // 7. Render view
             self.render()?;
+        }
+
+        // Clean up active subscriptions
+        for (_, handle) in self.subscription_handles.drain() {
+            handle.abort();
         }
 
         self.backend.shutdown()?;
@@ -430,6 +446,10 @@ impl<A: Application> App<A> {
                 });
                 *index += 1;
             }
+            Sub::Stream { .. } => {
+                // TODO: Stream subscription reconciliation (open new, close removed)
+                // For now, streams are managed via Cmd::Subscribe/Unsubscribe
+            }
             Sub::Batch(subs) => {
                 for sub in subs {
                     self.collect_subscriptions(sub, now, old_states, index, new_states, messages);
@@ -474,6 +494,30 @@ impl<A: Application> App<A> {
                     });
                     self.spawn_handles.push(handle);
                 }
+                Cmd::Subscribe { id, stream } => {
+                    if let Some(handle) = self.subscription_handles.remove(&id) {
+                        handle.abort();
+                    }
+
+                    let tx = self.subscription_tx.clone();
+                    let handle = rt.spawn(async move {
+                        use futures_util::StreamExt;
+
+                        let mut stream = stream;
+                        while let Some(msg) = stream.next().await {
+                            if tx.send(msg).is_err() {
+                                break;
+                            }
+                        }
+                    });
+
+                    self.subscription_handles.insert(id, handle);
+                }
+                Cmd::Unsubscribe { id } => {
+                    if let Some(handle) = self.subscription_handles.remove(&id) {
+                        handle.abort();
+                    }
+                }
                 Cmd::ShowToast(toast) => {
                     self.active_toasts.push((toast, Instant::now()));
                 }
@@ -506,6 +550,13 @@ impl<A: Application> App<A> {
         }
     }
 
+    /// Poll subscription channels for incoming messages.
+    fn poll_subscriptions(&mut self) {
+        while let Ok(msg) = self.subscription_rx.try_recv() {
+            self.msg_queue.push_back(msg);
+        }
+    }
+
     fn toast_overlay_view(&self) -> Column {
         let mut toast_list = Column::new().gap(1.0);
         for (toast, _) in &self.active_toasts {
@@ -529,6 +580,7 @@ impl<A: Application> App<A> {
 impl<A: Application> App<A> {
     /// Create an app with a specific backend (for testing).
     pub fn new_with_backend(app: A, backend: Backend) -> Self {
+        let (subscription_tx, subscription_rx) = mpsc::unbounded_channel();
         Self {
             app,
             backend,
@@ -537,6 +589,9 @@ impl<A: Application> App<A> {
             theme: Theme::dark(),
             subscriptions: Vec::new(),
             spawn_handles: Vec::new(),
+            subscription_handles: HashMap::new(),
+            subscription_tx,
+            subscription_rx,
             msg_queue: VecDeque::new(),
             screen_stack: Vec::new(),
             active_toasts: Vec::new(),
