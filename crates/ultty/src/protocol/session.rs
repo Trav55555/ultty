@@ -1155,6 +1155,7 @@ impl NativeSession {
             event_type: ultty_protocol::InputType::KeyDown { key, modifiers },
             x: 0.0,
             y: 0.0,
+            modifiers,
         })
     }
 
@@ -1172,6 +1173,7 @@ impl NativeSession {
             event_type: ultty_protocol::InputType::KeyUp { key, modifiers },
             x: 0.0,
             y: 0.0,
+            modifiers,
         })
     }
 
@@ -1185,6 +1187,7 @@ impl NativeSession {
             event_type: ultty_protocol::InputType::TextInput { text },
             x: 0.0,
             y: 0.0,
+            modifiers: ultty_protocol::Modifiers::NONE,
         })
     }
 

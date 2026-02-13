@@ -10,6 +10,8 @@ pub struct FocusManager {
     focusable_ids: Vec<String>,
     /// Currently focused widget ID.
     focused_id: Option<String>,
+    /// Index of the last focused widget (for nearest-neighbor fallback on removal).
+    last_focused_index: Option<usize>,
 }
 
 impl FocusManager {
@@ -44,6 +46,7 @@ impl FocusManager {
         }
         match &self.focused_id {
             None => {
+                self.last_focused_index = Some(0);
                 self.focused_id = self.focusable_ids.first().cloned();
             }
             Some(current) => {
@@ -52,6 +55,7 @@ impl FocusManager {
                     Some(i) => (i + 1) % self.focusable_ids.len(),
                     None => 0,
                 };
+                self.last_focused_index = Some(next_idx);
                 self.focused_id = self.focusable_ids.get(next_idx).cloned();
             }
         }
@@ -64,6 +68,8 @@ impl FocusManager {
         }
         match &self.focused_id {
             None => {
+                let last = self.focusable_ids.len() - 1;
+                self.last_focused_index = Some(last);
                 self.focused_id = self.focusable_ids.last().cloned();
             }
             Some(current) => {
@@ -73,6 +79,7 @@ impl FocusManager {
                     Some(i) => i - 1,
                     None => self.focusable_ids.len() - 1,
                 };
+                self.last_focused_index = Some(prev_idx);
                 self.focused_id = self.focusable_ids.get(prev_idx).cloned();
             }
         }
@@ -89,14 +96,20 @@ impl FocusManager {
     }
 
     /// After a render frame, validate that focused_id still exists in the registered list.
-    /// If it doesn't (widget removed), move to next valid or clear.
+    /// If it doesn't (widget removed), pick the nearest neighbor by position rather than
+    /// jumping to the first widget.
     pub fn end_frame(&mut self) {
         if self.focusable_ids.is_empty() {
             return;
         }
         if let Some(ref id) = self.focused_id {
             if !self.focusable_ids.contains(id) {
-                self.focused_id = self.focusable_ids.first().cloned();
+                // Use the previous position hint to find the nearest neighbor.
+                let fallback_idx = self
+                    .last_focused_index
+                    .unwrap_or(0)
+                    .min(self.focusable_ids.len() - 1);
+                self.focused_id = self.focusable_ids.get(fallback_idx).cloned();
             }
         }
     }
@@ -233,7 +246,54 @@ mod tests {
         focus.focus("missing");
         focus.end_frame();
 
+        // No previous position hint, so falls back to index 0 ("a").
         assert_eq!(focus.focused_id(), Some("a"));
+    }
+
+    #[test]
+    fn end_frame_picks_nearest_neighbor_on_removal() {
+        let mut focus = FocusManager::new();
+        // Simulate frame 1: a, b, c, d — user focuses "c" (index 2).
+        focus.register("a".to_string());
+        focus.register("b".to_string());
+        focus.register("c".to_string());
+        focus.register("d".to_string());
+        focus.focus_next(); // a
+        focus.focus_next(); // b
+        focus.focus_next(); // c
+        assert_eq!(focus.focused_id(), Some("c"));
+
+        // Simulate frame 2: "c" removed, only a, b, d remain.
+        focus.begin_frame();
+        focus.register("a".to_string());
+        focus.register("b".to_string());
+        focus.register("d".to_string());
+        focus.end_frame();
+
+        // Should pick index 2 clamped to len-1 = 2, which is "d" (nearest neighbor).
+        assert_eq!(focus.focused_id(), Some("d"));
+    }
+
+    #[test]
+    fn end_frame_clamps_to_last_when_list_shrinks() {
+        let mut focus = FocusManager::new();
+        focus.register("a".to_string());
+        focus.register("b".to_string());
+        focus.register("c".to_string());
+        focus.register("d".to_string());
+        focus.register("e".to_string());
+        // Focus "e" at index 4
+        focus.focus_prev(); // wraps to "e"
+        assert_eq!(focus.focused_id(), Some("e"));
+
+        // Next frame: only 2 items
+        focus.begin_frame();
+        focus.register("a".to_string());
+        focus.register("b".to_string());
+        focus.end_frame();
+
+        // Index 4 clamped to 1 → "b"
+        assert_eq!(focus.focused_id(), Some("b"));
     }
 
     #[test]

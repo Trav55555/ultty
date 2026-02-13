@@ -1735,6 +1735,7 @@ impl Encode for InputEvent {
         self.event_type.encode(buf);
         buf.put_f32_le(self.x);
         buf.put_f32_le(self.y);
+        self.modifiers.encode(buf);
     }
 }
 
@@ -1748,11 +1749,19 @@ impl Decode for InputEvent {
                 have: buf.remaining(),
             });
         }
+        let x = buf.get_f32_le();
+        let y = buf.get_f32_le();
+        let modifiers = if buf.has_remaining() {
+            Modifiers::decode(buf)?
+        } else {
+            Modifiers::NONE
+        };
         Ok(InputEvent {
             region_id,
             event_type,
-            x: buf.get_f32_le(),
-            y: buf.get_f32_le(),
+            x,
+            y,
+            modifiers,
         })
     }
 }

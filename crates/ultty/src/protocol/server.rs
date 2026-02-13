@@ -251,6 +251,7 @@ impl ProtocolServer {
         event_type: ultty_protocol::InputType,
         cell_x: f32,
         cell_y: f32,
+        modifiers: ultty_protocol::Modifiers,
     ) {
         let event_mask = match &event_type {
             ultty_protocol::InputType::MouseScroll { .. } => ultty_protocol::EVENT_SCROLL,
@@ -266,6 +267,7 @@ impl ProtocolServer {
                     event_type: event_type.clone(),
                     x: local_x,
                     y: local_y,
+                    modifiers,
                 };
                 if let Err(e) = session.send_input(input) {
                     tracing::warn!(
@@ -510,6 +512,7 @@ mod tests {
             },
             10.0,
             5.0,
+            ultty_protocol::Modifiers::NONE,
         );
     }
 
@@ -626,6 +629,7 @@ mod tests {
             },
             20.0,
             10.0,
+            ultty_protocol::Modifiers::NONE,
         );
     }
 

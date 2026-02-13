@@ -13,7 +13,7 @@ use ultty_protocol::{
 
 #[derive(Debug, Clone)]
 pub struct MarkdownView {
-    source: String,
+    blocks: Vec<Block>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,19 +85,19 @@ struct ListState {
 
 impl MarkdownView {
     pub fn new(source: impl Into<String>) -> Self {
-        Self {
-            source: source.into(),
-        }
+        let source = source.into();
+        let blocks = Self::parse_blocks(&source);
+        Self { blocks }
     }
 
-    fn parsed_blocks(&self) -> Vec<Block> {
+    fn parse_blocks(source: &str) -> Vec<Block> {
         let mut blocks = Vec::new();
         let mut current: Option<CurrentBlock> = None;
         let mut inline_style_stack: Vec<InlineStyleMarker> = Vec::new();
         let mut list_stack: Vec<ListState> = Vec::new();
         let mut quote_depth = 0usize;
 
-        let parser = Parser::new_ext(&self.source, Options::all());
+        let parser = Parser::new_ext(source, Options::all());
         for event in parser {
             match event {
                 Event::Start(tag) => match tag {
@@ -335,8 +335,7 @@ impl MarkdownView {
     }
 
     fn line_count(&self) -> usize {
-        let blocks = self.parsed_blocks();
-        let total: usize = blocks.iter().map(Block::line_count).sum();
+        let total: usize = self.blocks.iter().map(Block::line_count).sum();
         total.max(1)
     }
 }
@@ -379,7 +378,7 @@ impl View for MarkdownView {
     }
 
     fn children_count(&self) -> usize {
-        self.parsed_blocks().len()
+        self.blocks.len()
     }
 
     fn render_child_native(
@@ -389,7 +388,7 @@ impl View for MarkdownView {
         parent: RegionId,
         next_id: &mut u32,
     ) -> anyhow::Result<Option<RegionId>> {
-        let blocks = self.parsed_blocks();
+        let blocks = &self.blocks;
         let Some(block) = blocks.get(index) else {
             return Ok(None);
         };
@@ -485,7 +484,7 @@ impl View for MarkdownView {
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
-        let blocks = self.parsed_blocks();
+        let blocks = &self.blocks;
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         for block in blocks {
@@ -495,7 +494,7 @@ impl View for MarkdownView {
                     lines.extend(spans_to_lines(
                         &spans,
                         heading_style,
-                        level == HeadingLevel::H1,
+                        *level == HeadingLevel::H1,
                         None,
                     ));
                 }
@@ -525,7 +524,7 @@ impl View for MarkdownView {
                         &spans,
                         Style::new(),
                         false,
-                        Some(format!("{}{}", " ".repeat(indent), prefix)),
+                        Some(format!("{}{}", " ".repeat(*indent), prefix)),
                     ));
                 }
                 Block::HorizontalRule => {

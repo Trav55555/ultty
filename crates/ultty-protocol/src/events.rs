@@ -22,6 +22,8 @@ pub struct InputEvent {
     pub x: f32,
     /// Y position relative to region content area.
     pub y: f32,
+    /// Modifier keys held during this event.
+    pub modifiers: Modifiers,
 }
 
 /// Input event type.

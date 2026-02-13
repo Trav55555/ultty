@@ -212,8 +212,8 @@ impl KeyParser {
             Key::Char('M') => return Some(self.complete_motion(state, VimMotion::ScreenMiddle)),
             Key::Char('L') => return Some(self.complete_motion(state, VimMotion::ScreenBottom)),
 
-            // Find motions
-            Key::Char('f') if !modifiers.ctrl() && !state.has_pending_operator() => {
+            // Find motions — these work both standalone and as motions after operators (e.g. dfe, ct;)
+            Key::Char('f') if !modifiers.ctrl() => {
                 self.pending_find = Some(FindType::Find);
                 return Some(ParseResult::Pending);
             }
@@ -221,7 +221,7 @@ impl KeyParser {
                 self.pending_find = Some(FindType::FindBack);
                 return Some(ParseResult::Pending);
             }
-            Key::Char('t') if !state.has_pending_operator() => {
+            Key::Char('t') => {
                 self.pending_find = Some(FindType::Till);
                 return Some(ParseResult::Pending);
             }

@@ -1243,6 +1243,7 @@ fn test_mouse_event_delivery() {
         },
         5.0,
         3.0,
+        Modifiers::NONE,
     );
 
     // Client reads the input event

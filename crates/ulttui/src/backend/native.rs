@@ -351,19 +351,19 @@ impl NativeBackend {
                 kind: crate::event::MouseEventKind::Down(Self::convert_mouse_button(button)),
                 x: input.x as u16,
                 y: input.y as u16,
-                modifiers: crate::event::Modifiers::default(),
+                modifiers: self.convert_modifiers(input.modifiers),
             })),
             InputType::MouseUp { button } => Some(Event::Mouse(crate::event::MouseEvent {
                 kind: crate::event::MouseEventKind::Up(Self::convert_mouse_button(button)),
                 x: input.x as u16,
                 y: input.y as u16,
-                modifiers: crate::event::Modifiers::default(),
+                modifiers: self.convert_modifiers(input.modifiers),
             })),
             InputType::MouseMove => Some(Event::Mouse(crate::event::MouseEvent {
                 kind: crate::event::MouseEventKind::Moved,
                 x: input.x as u16,
                 y: input.y as u16,
-                modifiers: crate::event::Modifiers::default(),
+                modifiers: self.convert_modifiers(input.modifiers),
             })),
             InputType::MouseScroll { delta_y, .. } => {
                 let kind = if delta_y > 0.0 {
@@ -375,7 +375,7 @@ impl NativeBackend {
                     kind,
                     x: input.x as u16,
                     y: input.y as u16,
-                    modifiers: crate::event::Modifiers::default(),
+                    modifiers: self.convert_modifiers(input.modifiers),
                 }))
             }
             InputType::TextInput { text } => {

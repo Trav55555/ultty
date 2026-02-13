@@ -280,6 +280,11 @@ impl<A: Application> App<A> {
         while let Some(msg) = self.msg_queue.pop_front() {
             iterations += 1;
             if iterations > MAX_ITERATIONS {
+                tracing::warn!(
+                    "drain_messages hit MAX_ITERATIONS ({}); {} messages dropped",
+                    MAX_ITERATIONS,
+                    self.msg_queue.len()
+                );
                 break;
             }
             let cmd = self.app.update(msg);
@@ -288,10 +293,30 @@ impl<A: Application> App<A> {
     }
 
     /// Render the current view, managing focus and theme thread-locals.
+    ///
+    /// Uses an RAII guard so thread-local state is restored even if rendering panics.
     fn render(&mut self) -> anyhow::Result<()> {
+        struct ThreadLocalGuard {
+            old_focus: Option<FocusManager>,
+            old_theme: Option<Theme>,
+        }
+        impl Drop for ThreadLocalGuard {
+            fn drop(&mut self) {
+                if let Some(fm) = self.old_focus.take() {
+                    FocusManager::set_current(fm);
+                }
+                if let Some(theme) = self.old_theme.take() {
+                    Theme::replace_current(theme);
+                }
+            }
+        }
+
         let fm = std::mem::take(&mut self.focus);
         let old_fm = FocusManager::set_current(fm);
-        let old_theme = Theme::replace_current(self.theme.clone());
+        let mut guard = ThreadLocalGuard {
+            old_focus: Some(old_fm),
+            old_theme: Some(Theme::replace_current(self.theme.clone())),
+        };
 
         let render_result = (|| -> anyhow::Result<()> {
             FocusManager::with_current_mut(|fm| fm.begin_frame());
@@ -313,8 +338,11 @@ impl<A: Application> App<A> {
             Ok(())
         })();
 
-        self.focus = FocusManager::set_current(old_fm);
-        self.theme = Theme::replace_current(old_theme);
+        // Normal path: restore before guard drops so we recapture the values.
+        self.focus = FocusManager::set_current(guard.old_focus.take().unwrap());
+        self.theme = Theme::replace_current(guard.old_theme.take().unwrap());
+        // guard drops here as a no-op (both Options are None).
+        // On panic, guard's Drop fires and restores thread-locals automatically.
         render_result?;
 
         if !self.focus_initialized {
@@ -421,6 +449,10 @@ impl<A: Application> App<A> {
                 Cmd::Message(msg) => {
                     iterations += 1;
                     if iterations > MAX_ITERATIONS {
+                        tracing::warn!(
+                            "process_cmd hit MAX_ITERATIONS ({}); recursive Cmd::Message chain truncated",
+                            MAX_ITERATIONS,
+                        );
                         return;
                     }
                     let next_cmd = self.app.update(msg);
@@ -461,8 +493,12 @@ impl<A: Application> App<A> {
         while index < self.spawn_handles.len() {
             if self.spawn_handles[index].is_finished() {
                 let handle = self.spawn_handles.swap_remove(index);
-                if let Ok(msg) = rt.block_on(handle) {
-                    self.msg_queue.push_back(msg);
+                // is_finished() == true guarantees block_on returns immediately.
+                match rt.block_on(handle) {
+                    Ok(msg) => self.msg_queue.push_back(msg),
+                    Err(e) => {
+                        tracing::warn!("Spawned task panicked: {}", e);
+                    }
                 }
             } else {
                 index += 1;

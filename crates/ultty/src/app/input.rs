@@ -105,9 +105,10 @@ impl App {
         cell_x: f32,
         cell_y: f32,
     ) -> bool {
+        let modifiers = self.winit_mods_to_protocol();
         if let Some(ref mut server) = self.protocol_server {
             if server.session_count() > 0 {
-                server.broadcast_mouse(event_type, cell_x, cell_y);
+                server.broadcast_mouse(event_type, cell_x, cell_y, modifiers);
                 return true;
             }
         }

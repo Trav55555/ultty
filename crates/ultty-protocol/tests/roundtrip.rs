@@ -634,6 +634,7 @@ fn arb_input_event() -> impl Strategy<Value = InputEvent> {
             event_type,
             x,
             y,
+            modifiers: Modifiers::NONE,
         })
 }
 
@@ -1112,6 +1113,7 @@ fn all_input_types_roundtrip() {
             event_type,
             x: 10.0,
             y: 20.0,
+            modifiers: Modifiers::NONE,
         });
         let encoded = msg.encode_to_bytes();
         let mut cursor = encoded.as_ref();
@@ -1151,6 +1153,7 @@ fn all_key_types_roundtrip() {
             },
             x: 0.0,
             y: 0.0,
+            modifiers: Modifiers::NONE,
         });
         let encoded = msg.encode_to_bytes();
         let mut cursor = encoded.as_ref();
