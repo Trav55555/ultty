@@ -93,6 +93,15 @@ impl ScrollView {
         self.viewport_height = height;
     }
 
+    pub fn viewport_height(&self) -> f32 {
+        self.viewport_height
+    }
+
+    pub fn is_near_bottom(&self, threshold: f32) -> bool {
+        let max = (self.content_height - self.viewport_height).max(0.0);
+        max - self.scroll_y <= threshold
+    }
+
     pub fn scroll_to(&mut self, y: f32) {
         let max_scroll = (self.content_height - self.viewport_height).max(0.0);
         self.scroll_y = y.clamp(0.0, max_scroll);

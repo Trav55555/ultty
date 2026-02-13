@@ -383,7 +383,9 @@ impl Application for PorygonTui {
                     content: user_text.clone(),
                     timestamp: format_timestamp(),
                 });
-                self.auto_scroll_chat();
+                // Always jump to bottom when user sends a message
+                self.update_scroll_dimensions();
+                self.chat_scroll.scroll_to_bottom();
 
                 if !self.connected {
                     self.messages.push(ChatMessage {
@@ -608,7 +610,36 @@ impl Application for PorygonTui {
                 self.input.set_value(value.clone());
                 None
             }
+            Event::Mouse(mouse) => {
+                match mouse.kind {
+                    ulttui::event::MouseEventKind::ScrollUp => {
+                        self.update_scroll_dimensions();
+                        self.chat_scroll.scroll_by(-3.0);
+                    }
+                    ulttui::event::MouseEventKind::ScrollDown => {
+                        self.update_scroll_dimensions();
+                        self.chat_scroll.scroll_by(3.0);
+                    }
+                    _ => {}
+                }
+                None
+            }
             Event::Key(ke) => {
+                match ke.key {
+                    Key::PageUp => {
+                        self.update_scroll_dimensions();
+                        let vh = self.chat_scroll.viewport_height();
+                        self.chat_scroll.scroll_by(-vh);
+                        return None;
+                    }
+                    Key::PageDown => {
+                        self.update_scroll_dimensions();
+                        let vh = self.chat_scroll.viewport_height();
+                        self.chat_scroll.scroll_by(vh);
+                        return None;
+                    }
+                    _ => {}
+                }
                 if ke.focused_id.as_deref() == Some("chat-input") {
                     if ke.key == Key::Enter {
                         return Some(Msg::SendMessage);
@@ -673,15 +704,18 @@ impl Application for PorygonTui {
 }
 
 impl PorygonTui {
-    fn auto_scroll_chat(&mut self) {
-        // Conservative content height estimate: ~4 cells per message card + outer padding.
-        // Under-estimating is safer than over-estimating (shows content rather than empty space).
+    fn update_scroll_dimensions(&mut self) {
         let estimated_content = self.messages.len() as f32 * 4.0 + 4.0;
-        // Viewport height: terminal minus header(1) + bottom_bar(~6) = ~7 overhead
         let viewport = (self.terminal_height as f32 - 7.0).max(1.0);
         self.chat_scroll.set_content_height(estimated_content);
         self.chat_scroll.set_viewport_height(viewport);
-        self.chat_scroll.scroll_to_bottom();
+    }
+
+    fn auto_scroll_chat(&mut self) {
+        self.update_scroll_dimensions();
+        if self.chat_scroll.is_near_bottom(2.0) {
+            self.chat_scroll.scroll_to_bottom();
+        }
     }
 
     fn approval_modal_body(&self, req: &ApprovalRequest) -> String {
@@ -1438,7 +1472,7 @@ impl PorygonTui {
                     Style { dim: true, ..Style::new() },
                 )
                 .span(
-                    " Enter:send Ctrl+C:quit ",
+                    " Enter:send PgUp/Dn:scroll Ctrl+C:quit ",
                     Style { dim: true, ..Style::new() },
                 ),
         )

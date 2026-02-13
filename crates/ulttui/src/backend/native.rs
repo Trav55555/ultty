@@ -379,24 +379,17 @@ impl NativeBackend {
                 }))
             }
             InputType::TextInput { text } => {
-                // Convert bulk text input into individual key events
-                let mut events = Vec::new();
+                // Convert bulk text input into individual key events.
+                // Queue all into pending_events (not returning the first separately,
+                // which would place it after the rest when the caller pushes it back).
                 for ch in text.chars() {
-                    events.push(Event::Key(crate::event::KeyEvent {
+                    self.pending_events.push_back(Event::Key(crate::event::KeyEvent {
                         key: crate::event::Key::Char(ch),
                         modifiers: crate::event::Modifiers::default(),
                         focused_id: None,
                     }));
                 }
-                // Return first event; queue the rest
-                if events.is_empty() {
-                    None
-                } else {
-                    for event in events.drain(1..) {
-                        self.pending_events.push_back(event);
-                    }
-                    events.into_iter().next()
-                }
+                None
             }
             _ => None,
         }
