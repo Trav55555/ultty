@@ -36,3 +36,12 @@ criterion/
 
 # Logs
 *.log
+
+# Build output
+a.out
+
+# Agent/tool state
+.sisyphus/
+
+# Editor config (project-specific)
+rust-analyzer.toml
