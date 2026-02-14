@@ -431,14 +431,14 @@ impl Renderer {
         text_indices: &mut Vec<u32>,
     ) {
         let mut cursor_x = x;
-        let chars: Vec<char> = text.chars().collect();
+        let chars: Vec<(usize, char)> = text.char_indices().collect();
         let len = chars.len();
         let mut i = 0;
         let mut segment = String::new();
 
         while i < len {
             // **bold**
-            if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            if i + 1 < len && chars[i].1 == '*' && chars[i + 1].1 == '*' {
                 if !segment.is_empty() {
                     cursor_x += self.emit_md_segment(
                         &segment,
@@ -454,8 +454,8 @@ impl Renderer {
                 }
                 i += 2;
                 let mut bold_text = String::new();
-                while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '*') {
-                    bold_text.push(chars[i]);
+                while i + 1 < len && !(chars[i].1 == '*' && chars[i + 1].1 == '*') {
+                    bold_text.push(chars[i].1);
                     i += 1;
                 }
                 if i + 1 < len {
@@ -475,7 +475,7 @@ impl Renderer {
             }
 
             // *italic*
-            if chars[i] == '*' && (i + 1 >= len || chars[i + 1] != '*') {
+            if chars[i].1 == '*' && (i + 1 >= len || chars[i + 1].1 != '*') {
                 if !segment.is_empty() {
                     cursor_x += self.emit_md_segment(
                         &segment,
@@ -491,8 +491,8 @@ impl Renderer {
                 }
                 i += 1;
                 let mut italic_text = String::new();
-                while i < len && chars[i] != '*' {
-                    italic_text.push(chars[i]);
+                while i < len && chars[i].1 != '*' {
+                    italic_text.push(chars[i].1);
                     i += 1;
                 }
                 if i < len {
@@ -512,7 +512,7 @@ impl Renderer {
             }
 
             // ~~strikethrough~~
-            if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
+            if i + 1 < len && chars[i].1 == '~' && chars[i + 1].1 == '~' {
                 if !segment.is_empty() {
                     cursor_x += self.emit_md_segment(
                         &segment,
@@ -528,8 +528,8 @@ impl Renderer {
                 }
                 i += 2;
                 let mut strike_text = String::new();
-                while i + 1 < len && !(chars[i] == '~' && chars[i + 1] == '~') {
-                    strike_text.push(chars[i]);
+                while i + 1 < len && !(chars[i].1 == '~' && chars[i + 1].1 == '~') {
+                    strike_text.push(chars[i].1);
                     i += 1;
                 }
                 if i + 1 < len {
@@ -552,7 +552,7 @@ impl Renderer {
             }
 
             // `inline code`
-            if chars[i] == '`' {
+            if chars[i].1 == '`' {
                 if !segment.is_empty() {
                     cursor_x += self.emit_md_segment(
                         &segment,
@@ -568,8 +568,8 @@ impl Renderer {
                 }
                 i += 1;
                 let mut code_text = String::new();
-                while i < len && chars[i] != '`' {
-                    code_text.push(chars[i]);
+                while i < len && chars[i].1 != '`' {
+                    code_text.push(chars[i].1);
                     i += 1;
                 }
                 if i < len {
@@ -589,17 +589,17 @@ impl Renderer {
             }
 
             // [link text](url) — render text as underlined
-            if chars[i] == '[' {
+            if chars[i].1 == '[' {
                 let mut link_text = String::new();
                 let mut j = i + 1;
-                while j < len && chars[j] != ']' {
-                    link_text.push(chars[j]);
+                while j < len && chars[j].1 != ']' {
+                    link_text.push(chars[j].1);
                     j += 1;
                 }
-                if j + 1 < len && chars[j] == ']' && chars[j + 1] == '(' {
+                if j + 1 < len && chars[j].1 == ']' && chars[j + 1].1 == '(' {
                     // Skip past (url)
                     j += 2;
-                    while j < len && chars[j] != ')' {
+                    while j < len && chars[j].1 != ')' {
                         j += 1;
                     }
                     if j < len {
@@ -635,7 +635,7 @@ impl Renderer {
                 }
             }
 
-            segment.push(chars[i]);
+            segment.push(chars[i].1);
             i += 1;
         }
 

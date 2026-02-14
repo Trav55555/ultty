@@ -3,7 +3,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::Frame;
 
-use super::View;
+use super::{render_view_to_native, View};
 use crate::theme::{to_ratatui_color, Theme};
 use ultty_protocol::{
     AppMessage, Constraints, Content, Dimension, Display, FlexDirection, RegionId,
@@ -11,38 +11,6 @@ use ultty_protocol::{
 };
 
 use super::typography::Title;
-
-fn render_child_to_native(
-    child: &dyn View,
-    send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
-    parent: RegionId,
-    next_id: &mut u32,
-) -> anyhow::Result<RegionId> {
-    let region_id = RegionId::new(*next_id);
-    *next_id += 1;
-
-    send_message(&AppMessage::CreateRegion {
-        id: region_id,
-        parent,
-        insert_index: -1,
-        constraints: child.constraints(),
-        style: child.style(),
-    })?;
-
-    let content = child.content();
-    if content != Content::None {
-        send_message(&AppMessage::SetContent {
-            id: region_id,
-            content,
-        })?;
-    }
-
-    for i in 0..child.children_count() {
-        child.render_child_native(i, send_message, region_id, next_id)?;
-    }
-
-    Ok(region_id)
-}
 
 /// Uniform padding wrapper. Wraps a child with padding from theme tokens.
 pub struct Inset<V: View> {
@@ -182,27 +150,43 @@ impl View for Section {
         parent: RegionId,
         next_id: &mut u32,
     ) -> anyhow::Result<Option<RegionId>> {
-        let title_count = if self.title.is_some() { 1 } else { 0 };
-        if self.title.is_some() && index == 0 {
-            let title = Title::new(self.title.as_ref().unwrap().clone());
-            Ok(Some(render_child_to_native(
-                &title,
-                send_message,
-                parent,
-                next_id,
-            )?))
-        } else {
-            let child_index = index - title_count;
+        if let Some(title_text) = &self.title {
+            if index == 0 {
+                let title = Title::new(title_text.clone());
+                return Ok(Some(render_view_to_native(
+                    &title,
+                    send_message,
+                    parent,
+                    next_id,
+                    None,
+                    false,
+                )?));
+            }
+            // Title occupies index 0; children start at index 1
+            let child_index = index - 1;
             if let Some(child) = self.children.get(child_index) {
-                Ok(Some(render_child_to_native(
+                Ok(Some(render_view_to_native(
                     child.as_ref(),
                     send_message,
                     parent,
                     next_id,
+                    None,
+                    false,
                 )?))
             } else {
                 Ok(None)
             }
+        } else if let Some(child) = self.children.get(index) {
+            Ok(Some(render_view_to_native(
+                child.as_ref(),
+                send_message,
+                parent,
+                next_id,
+                None,
+                false,
+            )?))
+        } else {
+            Ok(None)
         }
     }
 

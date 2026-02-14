@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
-use super::View;
+use super::{render_view_to_native, View};
 use ultty_protocol::{
     AlignItems, AppMessage, Constraints, Dimension, Display, FlexDirection, RegionId,
     Style as ProtoStyle,
@@ -65,59 +65,6 @@ impl DockLayout {
         self.left.is_some() || self.center.is_some() || self.right.is_some()
     }
 
-    fn render_view_to_native(
-        child: &dyn View,
-        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
-        parent: RegionId,
-        next_id: &mut u32,
-    ) -> anyhow::Result<RegionId> {
-        Self::render_view_to_native_with(child, send_message, parent, next_id, None)
-    }
-
-    fn render_view_to_native_with(
-        child: &dyn View,
-        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
-        parent: RegionId,
-        next_id: &mut u32,
-        constraint_overrides: Option<Constraints>,
-    ) -> anyhow::Result<RegionId> {
-        let region_id = RegionId::new(*next_id);
-        *next_id += 1;
-
-        let constraints = constraint_overrides.unwrap_or_else(|| child.constraints());
-
-        send_message(&AppMessage::CreateRegion {
-            id: region_id,
-            parent,
-            insert_index: -1,
-            constraints,
-            style: child.style(),
-        })?;
-
-        let content = child.content();
-        if content != ultty_protocol::Content::None {
-            send_message(&AppMessage::SetContent {
-                id: region_id,
-                content,
-            })?;
-        }
-
-        if let Some((sx, sy)) = child.scroll_offset() {
-            send_message(&AppMessage::Scroll {
-                id: region_id,
-                x: sx,
-                y: sy,
-                animate: false,
-            })?;
-        }
-
-        for i in 0..child.children_count() {
-            child.render_child_native(i, send_message, region_id, next_id)?;
-        }
-
-        Ok(region_id)
-    }
-
     fn dimension_to_cells(d: &Dimension, total: u16, fallback: u16) -> u16 {
         match d {
             Dimension::Cells(v) => (*v as u16).min(total),
@@ -169,11 +116,13 @@ impl View for DockLayout {
 
         if let Some(top) = &self.top {
             if index == current {
-                return Ok(Some(Self::render_view_to_native(
+                return Ok(Some(render_view_to_native(
                     top.as_ref(),
                     send_message,
                     parent,
                     next_id,
+                    None,
+                    true,
                 )?));
             }
             current += 1;
@@ -201,7 +150,14 @@ impl View for DockLayout {
                 })?;
 
                 if let Some(left) = &self.left {
-                    Self::render_view_to_native(left.as_ref(), send_message, middle_id, next_id)?;
+                    render_view_to_native(
+                        left.as_ref(),
+                        send_message,
+                        middle_id,
+                        next_id,
+                        None,
+                        true,
+                    )?;
                 }
                 if let Some(center) = &self.center {
                     let mut center_constraints = center.constraints();
@@ -210,16 +166,24 @@ impl View for DockLayout {
                     center_constraints.flex_grow = 1.0;
                     center_constraints.flex_shrink = 1.0;
                     center_constraints.min_height = Dimension::Cells(0.0);
-                    Self::render_view_to_native_with(
+                    render_view_to_native(
                         center.as_ref(),
                         send_message,
                         middle_id,
                         next_id,
                         Some(center_constraints),
+                        true,
                     )?;
                 }
                 if let Some(right) = &self.right {
-                    Self::render_view_to_native(right.as_ref(), send_message, middle_id, next_id)?;
+                    render_view_to_native(
+                        right.as_ref(),
+                        send_message,
+                        middle_id,
+                        next_id,
+                        None,
+                        true,
+                    )?;
                 }
 
                 return Ok(Some(middle_id));
@@ -229,11 +193,13 @@ impl View for DockLayout {
 
         if let Some(bottom) = &self.bottom {
             if index == current {
-                return Ok(Some(Self::render_view_to_native(
+                return Ok(Some(render_view_to_native(
                     bottom.as_ref(),
                     send_message,
                     parent,
                     next_id,
+                    None,
+                    true,
                 )?));
             }
         }

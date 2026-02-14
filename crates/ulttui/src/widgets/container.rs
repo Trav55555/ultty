@@ -3,7 +3,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::Frame;
 
-use super::View;
+use super::{render_view_to_native, View};
 use crate::theme::to_ratatui_color;
 use ultty_protocol::{
     AppMessage, BorderStyle, BorderType, Color, Constraints, Dimension, Display, Edges,
@@ -70,47 +70,6 @@ fn render_style_block(style: &ProtoStyle, frame: &mut Frame, area: Rect) -> Rect
     let inner = block.inner(area);
     frame.render_widget(block, area);
     inner
-}
-
-fn render_child_to_native(
-    child: &dyn View,
-    send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
-    parent: RegionId,
-    next_id: &mut u32,
-) -> anyhow::Result<RegionId> {
-    let region_id = RegionId::new(*next_id);
-    *next_id += 1;
-
-    send_message(&AppMessage::CreateRegion {
-        id: region_id,
-        parent,
-        insert_index: -1,
-        constraints: child.constraints(),
-        style: child.style(),
-    })?;
-
-    let content = child.content();
-    if content != ultty_protocol::Content::None {
-        send_message(&AppMessage::SetContent {
-            id: region_id,
-            content,
-        })?;
-    }
-
-    if let Some((sx, sy)) = child.scroll_offset() {
-        send_message(&AppMessage::Scroll {
-            id: region_id,
-            x: sx,
-            y: sy,
-            animate: false,
-        })?;
-    }
-
-    for i in 0..child.children_count() {
-        child.render_child_native(i, send_message, region_id, next_id)?;
-    }
-
-    Ok(region_id)
 }
 
 /// Vertical flex container.
@@ -255,11 +214,13 @@ impl View for Column {
         next_id: &mut u32,
     ) -> anyhow::Result<Option<RegionId>> {
         if let Some(child) = self.children.get(index) {
-            Ok(Some(render_child_to_native(
+            Ok(Some(render_view_to_native(
                 child.as_ref(),
                 send_message,
                 parent,
                 next_id,
+                None,
+                true,
             )?))
         } else {
             Ok(None)
@@ -446,11 +407,13 @@ impl View for Row {
         next_id: &mut u32,
     ) -> anyhow::Result<Option<RegionId>> {
         if let Some(child) = self.children.get(index) {
-            Ok(Some(render_child_to_native(
+            Ok(Some(render_view_to_native(
                 child.as_ref(),
                 send_message,
                 parent,
                 next_id,
+                None,
+                true,
             )?))
         } else {
             Ok(None)
@@ -576,11 +539,13 @@ impl View for Stack {
         next_id: &mut u32,
     ) -> anyhow::Result<Option<RegionId>> {
         if let Some(child) = self.children.get(index) {
-            Ok(Some(render_child_to_native(
+            Ok(Some(render_view_to_native(
                 child.as_ref(),
                 send_message,
                 parent,
                 next_id,
+                None,
+                true,
             )?))
         } else {
             Ok(None)

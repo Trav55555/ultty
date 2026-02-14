@@ -10,7 +10,7 @@ use crate::focus::FocusManager;
 use crate::screen::{Screen, ScreenAction};
 use crate::theme::Theme;
 use crate::toast::{Toast, ToastSeverity};
-use crate::widgets::{Badge, BadgeVariant, Column, Spacer, View};
+use crate::widgets::{render_view_to_native, Badge, BadgeVariant, Column, Spacer, View};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use ultty_protocol::{AppMessage, RegionId};
@@ -24,38 +24,6 @@ impl<'a> OverlayView<'a> {
     fn new(base: &'a dyn View, overlay: Option<Column>) -> Self {
         Self { base, overlay }
     }
-}
-
-fn render_view_to_native(
-    child: &dyn View,
-    send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
-    parent: RegionId,
-    next_id: &mut u32,
-) -> anyhow::Result<RegionId> {
-    let region_id = RegionId::new(*next_id);
-    *next_id += 1;
-
-    send_message(&AppMessage::CreateRegion {
-        id: region_id,
-        parent,
-        insert_index: -1,
-        constraints: child.constraints(),
-        style: child.style(),
-    })?;
-
-    let content = child.content();
-    if content != ultty_protocol::Content::None {
-        send_message(&AppMessage::SetContent {
-            id: region_id,
-            content,
-        })?;
-    }
-
-    for i in 0..child.children_count() {
-        child.render_child_native(i, send_message, region_id, next_id)?;
-    }
-
-    Ok(region_id)
 }
 
 impl View for OverlayView<'_> {
@@ -96,6 +64,8 @@ impl View for OverlayView<'_> {
                     send_message,
                     parent,
                     next_id,
+                    None,
+                    false,
                 )?));
             }
         }
@@ -374,8 +344,14 @@ impl<A: Application> App<A> {
         })();
 
         // Normal path: restore before guard drops so we recapture the values.
-        self.focus = FocusManager::set_current(guard.old_focus.take().unwrap());
-        self.theme = Theme::replace_current(guard.old_theme.take().unwrap());
+        self.focus = FocusManager::set_current(
+            guard
+                .old_focus
+                .take()
+                .unwrap_or_default(),
+        );
+        self.theme =
+            Theme::replace_current(guard.old_theme.take().unwrap_or_else(Theme::dark));
         // guard drops here as a no-op (both Options are None).
         // On panic, guard's Drop fires and restores thread-locals automatically.
         render_result?;

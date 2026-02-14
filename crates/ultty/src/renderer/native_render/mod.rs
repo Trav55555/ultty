@@ -4,6 +4,7 @@
 //! for sessions using the ultty-protocol native UI framework.
 
 use super::{DeferredImageRender, Renderer, Vertex};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use wgpu::util::DeviceExt;
 
 mod borders;
@@ -19,23 +20,47 @@ fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
         return vec![line.to_string()];
     }
 
-    let chars: Vec<char> = line.chars().collect();
-    if chars.len() <= max_cols {
+    if line.width() <= max_cols {
         return vec![line.to_string()];
     }
+
+    let chars: Vec<char> = line.chars().collect();
 
     let mut result = Vec::new();
     let mut row_start = 0;
 
     while row_start < chars.len() {
-        let remaining = chars.len() - row_start;
-        if remaining <= max_cols {
+        let mut row_end = row_start;
+        let mut used_cols = 0usize;
+        let mut break_at = None;
+
+        while row_end < chars.len() {
+            let ch = chars[row_end];
+            let ch_width = ch.width().unwrap_or(0);
+            if used_cols + ch_width > max_cols {
+                break;
+            }
+            used_cols += ch_width;
+            if ch == ' ' {
+                break_at = Some(row_end);
+            }
+            row_end += 1;
+        }
+
+        if row_end == chars.len() {
             result.push(chars[row_start..].iter().collect());
             break;
         }
 
-        let end = row_start + max_cols;
-        let break_at = (row_start..end).rev().find(|&i| chars[i] == ' ');
+        if row_end == row_start {
+            let next = row_start + 1;
+            result.push(chars[row_start..next].iter().collect());
+            row_start = next;
+            while row_start < chars.len() && chars[row_start] == ' ' {
+                row_start += 1;
+            }
+            continue;
+        }
 
         match break_at {
             Some(space_idx) => {
@@ -43,8 +68,8 @@ fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
                 row_start = space_idx + 1;
             }
             None => {
-                result.push(chars[row_start..end].iter().collect());
-                row_start = end;
+                result.push(chars[row_start..row_end].iter().collect());
+                row_start = row_end;
                 while row_start < chars.len() && chars[row_start] == ' ' {
                     row_start += 1;
                 }
@@ -333,10 +358,14 @@ impl Renderer {
                     let mut cursor_col = 0usize;
 
                     for line in text_content.text.split('\n') {
-                        let chars: Vec<char> = line.chars().collect();
+                        let mut chars = line.chars();
+                        let single_char = match (chars.next(), chars.next()) {
+                            (Some(ch), None) => Some(ch),
+                            _ => None,
+                        };
                         let fill_width = max_cols;
-                        let render_text = if chars.len() == 1 && fill_width > 1 {
-                            chars[0].to_string().repeat(fill_width)
+                        let render_text = if let Some(ch) = single_char.filter(|_| fill_width > 1) {
+                            ch.to_string().repeat(fill_width)
                         } else {
                             line.to_string()
                         };
@@ -478,10 +507,9 @@ impl Renderer {
                                 line_idx += 1;
                             }
 
-                            let span_chars: Vec<char> = segment.chars().collect();
-                            let mut char_pos = 0usize;
+                            let mut byte_pos = 0usize;
 
-                            while char_pos < span_chars.len() {
+                            while byte_pos < segment.len() {
                                 let cols_used = ((cursor_x - cx) / cell_w).round() as usize;
                                 let cols_left = max_cols.saturating_sub(cols_used);
 
@@ -491,15 +519,24 @@ impl Renderer {
                                     continue;
                                 }
 
-                                let chars_remaining = span_chars.len() - char_pos;
-                                let chunk_len = chars_remaining.min(cols_left);
-                                let chunk: String =
-                                    span_chars[char_pos..char_pos + chunk_len].iter().collect();
+                                let mut chunk_chars = 0usize;
+                                let mut chunk_end = byte_pos;
+                                for (offset, ch) in segment[byte_pos..].char_indices() {
+                                    if chunk_chars == cols_left {
+                                        break;
+                                    }
+                                    chunk_end = byte_pos + offset + ch.len_utf8();
+                                    chunk_chars += 1;
+                                }
+                                if chunk_chars == 0 {
+                                    break;
+                                }
+                                let chunk = &segment[byte_pos..chunk_end];
 
                                 let span_y = cy + line_idx as f32 * cell_h;
                                 let (verts, idxs, advance) =
                                     self.text_renderer.build_styled_text_vertices(
-                                        &chunk, cursor_x, span_y, fg_color, bold, italic,
+                                        chunk, cursor_x, span_y, fg_color, bold, italic,
                                     );
                                 append_clipped_glyphs(
                                     &verts,
@@ -512,9 +549,9 @@ impl Renderer {
                                     &mut text_indices,
                                 );
                                 cursor_x += advance;
-                                char_pos += chunk_len;
+                                byte_pos = chunk_end;
 
-                                if char_pos < span_chars.len() {
+                                if byte_pos < segment.len() {
                                     cursor_x = cx;
                                     line_idx += 1;
                                 }
@@ -887,5 +924,20 @@ mod tests {
             wrap_line("abcdefghij end", 5),
             vec!["abcde", "fghij", "end"]
         );
+    }
+
+    #[test]
+    fn wrap_line_cjk_uses_display_width() {
+        assert_eq!(wrap_line("你好世界", 5), vec!["你好", "世界"]);
+    }
+
+    #[test]
+    fn wrap_line_mixed_ascii_cjk_exact_fit() {
+        assert_eq!(wrap_line("hi你好", 6), vec!["hi你好"]);
+    }
+
+    #[test]
+    fn wrap_line_emoji_uses_display_width() {
+        assert_eq!(wrap_line("🙂🙂🙂", 4), vec!["🙂🙂", "🙂"]);
     }
 }

@@ -59,6 +59,7 @@ anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 pulldown-cmark = "0.12"
+unicode-width = "0.2"
 
 # Testing
 insta = { version = "1.34", features = ["json"] }

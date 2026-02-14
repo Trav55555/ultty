@@ -215,6 +215,9 @@ pub struct Renderer {
     cached_native_bg: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
     /// Cached native session text GPU buffers (vertex, index, index_count)
     cached_native_text: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+    /// Previous frame vertex/index counts for smarter pre-allocation
+    prev_bg_count: (usize, usize),
+    prev_text_count: (usize, usize),
 }
 
 /// Deferred native image render request (collected during widget content rendering).
