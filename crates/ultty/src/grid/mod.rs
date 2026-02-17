@@ -585,7 +585,8 @@ impl Grid {
     /// Move cursor right, stopping at right edge.
     pub fn cursor_right(&mut self, n: u16) {
         self.cursor.wrap_pending = false;
-        self.cursor.position.col = (self.cursor.position.col + n).min(self.dims.cols.saturating_sub(1));
+        self.cursor.position.col =
+            (self.cursor.position.col + n).min(self.dims.cols.saturating_sub(1));
     }
 
     /// Set absolute cursor position (1-based like ANSI).
@@ -700,7 +701,9 @@ impl Grid {
         let bottom = if bottom == 0 { self.dims.rows } else { bottom };
         // Convert from 1-based to 0-based
         let top = top.saturating_sub(1);
-        let bottom = bottom.saturating_sub(1).min(self.dims.rows.saturating_sub(1));
+        let bottom = bottom
+            .saturating_sub(1)
+            .min(self.dims.rows.saturating_sub(1));
 
         if top >= bottom {
             // Invalid region, reset to full screen

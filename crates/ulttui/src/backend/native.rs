@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use ultty_protocol::{
-    AppMessage, ComputedRegionLayout, Content, Decode, Encode, FrameId, InputEvent, InputType, Key,
-    Modifiers, RegionId, TerminalMessage, EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL, FRAME_MAGIC,
-    PROTOCOL_VERSION,
+    AppMessage, ComputedRegionLayout, Constraints, Content, Decode, Encode, FrameId, InputEvent,
+    InputType, Key, Modifiers, RegionId, Style, TerminalMessage, CAP_APPEND_CONTENT,
+    CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL, FRAME_MAGIC,
+    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
 use crate::event::Event;
@@ -19,6 +20,7 @@ use super::detect;
 
 pub struct NativeBackend {
     stream: Option<UnixStream>,
+    negotiated_capabilities: u32,
     session_id: u64,
     root_region: RegionId,
     viewport_width: u16,
@@ -27,14 +29,24 @@ pub struct NativeBackend {
     next_region_id: u32,
     next_frame_id: u32,
     region_layouts: HashMap<RegionId, ComputedRegionLayout>,
-    previous_frame_root: Option<RegionId>,
+    previous_regions: HashMap<RegionId, RegionSnapshot>,
     pending_events: VecDeque<Event>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RegionSnapshot {
+    parent: RegionId,
+    constraints: Constraints,
+    style: Style,
+    content: Content,
+    scroll: Option<(f32, f32, bool)>,
 }
 
 impl NativeBackend {
     pub fn new() -> Self {
         Self {
             stream: None,
+            negotiated_capabilities: 0,
             session_id: 0,
             root_region: RegionId::ROOT,
             viewport_width: 80,
@@ -43,7 +55,7 @@ impl NativeBackend {
             next_region_id: 1,
             next_frame_id: 1,
             region_layouts: HashMap::new(),
-            previous_frame_root: None,
+            previous_regions: HashMap::new(),
             pending_events: VecDeque::new(),
         }
     }
@@ -92,12 +104,20 @@ impl NativeBackend {
 
         self.send_message(&AppMessage::BeginFrame { frame_id })?;
 
-        if let Some(previous_root) = self.previous_frame_root.take() {
-            self.send_message(&AppMessage::DeleteRegion { id: previous_root })?;
-        }
+        self.next_region_id = 1;
+        let mut frame_messages = Vec::new();
+        let _frame_root =
+            self.render_view_tree(view, self.root_region, true, &mut frame_messages)?;
+        let (optimized_messages, next_regions) = Self::optimize_frame_messages(
+            &self.previous_regions,
+            frame_messages,
+            self.supports_capability(CAP_APPEND_CONTENT),
+        );
+        self.previous_regions = next_regions;
 
-        let frame_root = self.render_view_tree(view, self.root_region, true)?;
-        self.previous_frame_root = Some(frame_root);
+        for msg in optimized_messages {
+            self.send_message(&msg)?;
+        }
 
         self.send_message(&AppMessage::EndFrame { frame_id })?;
 
@@ -111,6 +131,7 @@ impl NativeBackend {
         view: &impl View,
         parent: RegionId,
         is_root: bool,
+        frame_messages: &mut Vec<AppMessage>,
     ) -> anyhow::Result<RegionId> {
         let region_id = RegionId::new(self.next_region_id);
         self.next_region_id += 1;
@@ -131,29 +152,29 @@ impl NativeBackend {
             style.opacity = 1.0;
         }
 
-        self.send_message(&AppMessage::CreateRegion {
+        frame_messages.push(AppMessage::CreateRegion {
             id: region_id,
             parent,
             insert_index: -1,
             constraints,
             style,
-        })?;
+        });
 
         let content = view.content();
         if content != Content::None {
-            self.send_message(&AppMessage::SetContent {
+            frame_messages.push(AppMessage::SetContent {
                 id: region_id,
                 content,
-            })?;
+            });
         }
 
         if let Some((sx, sy)) = view.scroll_offset() {
-            self.send_message(&AppMessage::Scroll {
+            frame_messages.push(AppMessage::Scroll {
                 id: region_id,
                 x: sx,
                 y: sy,
                 animate: false,
-            })?;
+            });
         }
 
         let children_count = view.children_count();
@@ -176,11 +197,141 @@ impl NativeBackend {
             pending_messages.extend(captured_messages);
         }
 
-        for msg in pending_messages {
-            self.send_message(&msg)?;
-        }
+        frame_messages.extend(pending_messages);
 
         Ok(region_id)
+    }
+
+    fn optimize_frame_messages(
+        previous_regions: &HashMap<RegionId, RegionSnapshot>,
+        frame_messages: Vec<AppMessage>,
+        allow_append_content: bool,
+    ) -> (Vec<AppMessage>, HashMap<RegionId, RegionSnapshot>) {
+        let mut outgoing = Vec::new();
+        let mut next_regions: HashMap<RegionId, RegionSnapshot> = HashMap::new();
+
+        for msg in frame_messages {
+            match msg {
+                AppMessage::CreateRegion {
+                    id,
+                    parent,
+                    insert_index,
+                    constraints,
+                    style,
+                } => {
+                    let next_snapshot = RegionSnapshot {
+                        parent,
+                        constraints: constraints.clone(),
+                        style: style.clone(),
+                        content: Content::None,
+                        scroll: None,
+                    };
+                    next_regions.insert(id, next_snapshot);
+
+                    if let Some(prev) = previous_regions.get(&id) {
+                        if prev.parent != parent {
+                            outgoing.push(AppMessage::ReparentRegion {
+                                id,
+                                new_parent: parent,
+                                insert_index,
+                            });
+                        }
+                        if prev.constraints != constraints {
+                            outgoing.push(AppMessage::SetConstraints { id, constraints });
+                        }
+                        if prev.style != style {
+                            outgoing.push(AppMessage::SetStyle { id, style });
+                        }
+                    } else {
+                        outgoing.push(AppMessage::CreateRegion {
+                            id,
+                            parent,
+                            insert_index,
+                            constraints,
+                            style,
+                        });
+                    }
+                }
+                AppMessage::SetContent { id, content } => {
+                    if let Some(next) = next_regions.get_mut(&id) {
+                        next.content = content.clone();
+                    } else if let Some(prev) = previous_regions.get(&id) {
+                        next_regions.insert(id, prev.clone());
+                        if let Some(next) = next_regions.get_mut(&id) {
+                            next.content = content.clone();
+                        }
+                    }
+
+                    if let Some(prev) = previous_regions.get(&id) {
+                        if allow_append_content {
+                            if let Some(delta) = Self::append_delta(&prev.content, &content) {
+                                if !delta.is_empty() {
+                                    outgoing.push(AppMessage::AppendContent { id, text: delta });
+                                }
+                            } else if prev.content != content {
+                                outgoing.push(AppMessage::SetContent { id, content });
+                            }
+                        } else if prev.content != content {
+                            outgoing.push(AppMessage::SetContent { id, content });
+                        }
+                    } else {
+                        outgoing.push(AppMessage::SetContent { id, content });
+                    }
+                }
+                AppMessage::Scroll { id, x, y, animate } => {
+                    if let Some(next) = next_regions.get_mut(&id) {
+                        next.scroll = Some((x, y, animate));
+                    }
+
+                    let changed = previous_regions
+                        .get(&id)
+                        .map(|prev| prev.scroll != Some((x, y, animate)))
+                        .unwrap_or(true);
+                    if changed {
+                        outgoing.push(AppMessage::Scroll { id, x, y, animate });
+                    }
+                }
+                other => outgoing.push(other),
+            }
+        }
+
+        for (id, next) in &next_regions {
+            if let Some(prev) = previous_regions.get(id) {
+                if prev.content != Content::None && next.content == Content::None {
+                    outgoing.push(AppMessage::SetContent {
+                        id: *id,
+                        content: Content::None,
+                    });
+                }
+            }
+        }
+
+        for id in previous_regions.keys() {
+            if !next_regions.contains_key(id) {
+                outgoing.push(AppMessage::DeleteRegion { id: *id });
+            }
+        }
+
+        (outgoing, next_regions)
+    }
+
+    fn append_delta(previous: &Content, next: &Content) -> Option<String> {
+        match (previous, next) {
+            (Content::Text(prev), Content::Text(next))
+                if prev.wrap == next.wrap
+                    && prev.align == next.align
+                    && prev.overflow == next.overflow
+                    && next.text.starts_with(&prev.text)
+                    && next.text.len() > prev.text.len() =>
+            {
+                Some(next.text[prev.text.len()..].to_string())
+            }
+            _ => None,
+        }
+    }
+
+    fn supports_capability(&self, capability: u32) -> bool {
+        self.negotiated_capabilities & capability != 0
     }
 
     pub fn poll_event(&mut self) -> anyhow::Result<Option<Event>> {
@@ -196,7 +347,7 @@ impl NativeBackend {
     fn send_client_hello(&mut self) -> anyhow::Result<()> {
         let msg = AppMessage::ClientHello {
             version: PROTOCOL_VERSION,
-            requested_capabilities: 0,
+            requested_capabilities: CLIENT_DEFAULT_CAPABILITIES,
         };
         self.send_message(&msg)
     }
@@ -208,14 +359,18 @@ impl NativeBackend {
 
             while let Some(msg) = self.try_decode_message()? {
                 match msg {
-                    TerminalMessage::ServerHello { version, .. } => {
-                        if version != PROTOCOL_VERSION {
+                    TerminalMessage::ServerHello {
+                        version,
+                        capabilities,
+                    } => {
+                        if version < MIN_PROTOCOL_VERSION {
                             anyhow::bail!(
-                                "Protocol version mismatch: {} vs {}",
+                                "Protocol version mismatch: {} vs minimum {}",
                                 version,
-                                PROTOCOL_VERSION
+                                MIN_PROTOCOL_VERSION
                             );
                         }
+                        self.negotiated_capabilities = capabilities;
                     }
                     TerminalMessage::SessionReady {
                         session_id,
@@ -383,11 +538,12 @@ impl NativeBackend {
                 // Queue all into pending_events (not returning the first separately,
                 // which would place it after the rest when the caller pushes it back).
                 for ch in text.chars() {
-                    self.pending_events.push_back(Event::Key(crate::event::KeyEvent {
-                        key: crate::event::Key::Char(ch),
-                        modifiers: crate::event::Modifiers::default(),
-                        focused_id: None,
-                    }));
+                    self.pending_events
+                        .push_back(Event::Key(crate::event::KeyEvent {
+                            key: crate::event::Key::Char(ch),
+                            modifiers: crate::event::Modifiers::default(),
+                            focused_id: None,
+                        }));
                 }
                 None
             }
@@ -438,5 +594,135 @@ impl NativeBackend {
 impl Default for NativeBackend {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NativeBackend, RegionSnapshot};
+    use std::collections::HashMap;
+    use ultty_protocol::{AppMessage, Constraints, Content, RegionId, Style, TextContent};
+
+    fn snapshot_with_text(text: &str) -> RegionSnapshot {
+        RegionSnapshot {
+            parent: RegionId::ROOT,
+            constraints: Constraints::default(),
+            style: Style::default(),
+            content: Content::Text(TextContent::new(text)),
+            scroll: None,
+        }
+    }
+
+    #[test]
+    fn optimize_converts_text_growth_to_append_content() {
+        let id = RegionId::new(1);
+        let mut previous = HashMap::new();
+        previous.insert(id, snapshot_with_text("hello"));
+
+        let frame = vec![
+            AppMessage::CreateRegion {
+                id,
+                parent: RegionId::ROOT,
+                insert_index: -1,
+                constraints: Constraints::default(),
+                style: Style::default(),
+            },
+            AppMessage::SetContent {
+                id,
+                content: Content::Text(TextContent::new("hello world")),
+            },
+        ];
+
+        let (outgoing, next) = NativeBackend::optimize_frame_messages(&previous, frame, true);
+
+        assert!(outgoing
+            .iter()
+            .any(|m| matches!(m, AppMessage::AppendContent { id: mid, text } if *mid == id && text == " world")));
+        assert!(!outgoing
+            .iter()
+            .any(|m| matches!(m, AppMessage::CreateRegion { id: mid, .. } if *mid == id)));
+        assert!(!outgoing
+            .iter()
+            .any(|m| matches!(m, AppMessage::SetContent { id: mid, .. } if *mid == id)));
+        assert_eq!(
+            next.get(&id).map(|r| &r.content),
+            Some(&Content::Text(TextContent::new("hello world")))
+        );
+    }
+
+    #[test]
+    fn optimize_emits_delete_for_removed_region() {
+        let removed = RegionId::new(9);
+        let mut previous = HashMap::new();
+        previous.insert(removed, snapshot_with_text("gone"));
+
+        let (outgoing, _next) = NativeBackend::optimize_frame_messages(&previous, Vec::new(), true);
+
+        assert!(outgoing
+            .iter()
+            .any(|m| matches!(m, AppMessage::DeleteRegion { id } if *id == removed)));
+    }
+
+    #[test]
+    fn optimize_clears_content_when_region_becomes_container() {
+        let id = RegionId::new(3);
+        let mut previous = HashMap::new();
+        previous.insert(id, snapshot_with_text("stale"));
+
+        let frame = vec![AppMessage::CreateRegion {
+            id,
+            parent: RegionId::ROOT,
+            insert_index: -1,
+            constraints: Constraints::default(),
+            style: Style::default(),
+        }];
+
+        let (outgoing, _next) = NativeBackend::optimize_frame_messages(&previous, frame, true);
+
+        assert!(outgoing.iter().any(|m| {
+            matches!(
+                m,
+                AppMessage::SetContent {
+                    id: mid,
+                    content: Content::None
+                } if *mid == id
+            )
+        }));
+    }
+
+    #[test]
+    fn optimize_falls_back_to_set_content_when_append_not_negotiated() {
+        let id = RegionId::new(1);
+        let mut previous = HashMap::new();
+        previous.insert(id, snapshot_with_text("alpha"));
+
+        let frame = vec![
+            AppMessage::CreateRegion {
+                id,
+                parent: RegionId::ROOT,
+                insert_index: -1,
+                constraints: Constraints::default(),
+                style: Style::default(),
+            },
+            AppMessage::SetContent {
+                id,
+                content: Content::Text(TextContent::new("alpha beta")),
+            },
+        ];
+
+        let (outgoing, _next) = NativeBackend::optimize_frame_messages(&previous, frame, false);
+
+        assert!(!outgoing
+            .iter()
+            .any(|m| matches!(m, AppMessage::AppendContent { id: mid, .. } if *mid == id)));
+        assert!(outgoing.iter().any(|m| {
+            matches!(
+                m,
+                AppMessage::SetContent {
+                    id: mid,
+                    content: Content::Text(_)
+                } if *mid == id
+            )
+        }));
     }
 }

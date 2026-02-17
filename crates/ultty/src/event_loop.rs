@@ -62,8 +62,7 @@ impl EventLoop {
     /// Create a new event loop with a shell.
     pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
         let size = PtySize::new(cols, rows);
-        let child =
-            Child::spawn_shell(size).map_err(io::Error::other)?;
+        let child = Child::spawn_shell(size).map_err(io::Error::other)?;
 
         let terminal = Terminal::new(Dimensions::new(cols, rows));
         let parser = AnsiParser::new();
@@ -91,8 +90,7 @@ impl EventLoop {
     /// Create a new event loop with a shell in a specific working directory.
     pub fn new_with_dir(cols: u16, rows: u16, working_dir: &str) -> io::Result<Self> {
         let size = PtySize::new(cols, rows);
-        let child = Child::spawn_shell_in_dir(size, working_dir)
-            .map_err(io::Error::other)?;
+        let child = Child::spawn_shell_in_dir(size, working_dir).map_err(io::Error::other)?;
 
         let terminal = Terminal::new(Dimensions::new(cols, rows));
         let parser = AnsiParser::new();
@@ -121,8 +119,7 @@ impl EventLoop {
     pub fn with_command(program: &str, args: &[&str], cols: u16, rows: u16) -> io::Result<Self> {
         let size = PtySize::new(cols, rows);
         let working_dir = crate::pty::current_dir();
-        let child = Child::spawn(program, args, &working_dir, size)
-            .map_err(io::Error::other)?;
+        let child = Child::spawn(program, args, &working_dir, size).map_err(io::Error::other)?;
 
         let terminal = Terminal::new(Dimensions::new(cols, rows));
         let parser = AnsiParser::new();
@@ -169,18 +166,14 @@ impl EventLoop {
     /// Resize the terminal.
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
         let size = PtySize::new(cols, rows);
-        self.child
-            .resize(size)
-            .map_err(io::Error::other)?;
+        self.child.resize(size).map_err(io::Error::other)?;
         self.terminal.resize(Dimensions::new(cols, rows));
         Ok(())
     }
 
     /// Send input to the shell.
     pub fn send_input(&mut self, data: &[u8]) -> io::Result<()> {
-        self.child
-            .write_all(data)
-            .map_err(io::Error::other)
+        self.child.write_all(data).map_err(io::Error::other)
     }
 
     /// Send a key press to the shell.
@@ -219,11 +212,7 @@ impl EventLoop {
         }
 
         // Check for child exit AFTER reading all available data
-        if self
-            .child
-            .try_wait()
-            .map_err(io::Error::other)?
-        {
+        if self.child.try_wait().map_err(io::Error::other)? {
             if let Some(status) = self.child.exit_status() {
                 if !self
                     .events

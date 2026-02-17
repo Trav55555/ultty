@@ -13,7 +13,8 @@ fn create_test_config(content: &str) -> (TempDir, PathBuf) {
     let config_path = temp_dir.path().join("config.toml");
 
     let mut file = fs::File::create(&config_path).expect("Failed to create config file");
-    file.write_all(content.as_bytes()).expect("Failed to write config");
+    file.write_all(content.as_bytes())
+        .expect("Failed to write config");
     file.sync_all().expect("Failed to sync file");
 
     (temp_dir, config_path)
@@ -22,7 +23,8 @@ fn create_test_config(content: &str) -> (TempDir, PathBuf) {
 /// Helper to modify a config file.
 fn modify_config(path: &PathBuf, content: &str) {
     let mut file = fs::File::create(path).expect("Failed to open config file");
-    file.write_all(content.as_bytes()).expect("Failed to write config");
+    file.write_all(content.as_bytes())
+        .expect("Failed to write config");
     file.sync_all().expect("Failed to sync file");
 }
 
@@ -138,7 +140,11 @@ opacity = 1.0
     let content = fs::read_to_string(&config_path).expect("Failed to read config");
     let parsed: Result<toml::Value, _> = toml::from_str(&content);
 
-    assert!(parsed.is_ok(), "Config should be valid TOML: {:?}", parsed.err());
+    assert!(
+        parsed.is_ok(),
+        "Config should be valid TOML: {:?}",
+        parsed.err()
+    );
 
     let value = parsed.unwrap();
     assert!(value.get("colors").is_some());
@@ -226,7 +232,10 @@ vim_mode = "escape"
 
     let value = parsed.unwrap();
     let keybindings = value.get("keybindings").unwrap();
-    assert_eq!(keybindings.get("copy").unwrap().as_str(), Some("ctrl+shift+c"));
+    assert_eq!(
+        keybindings.get("copy").unwrap().as_str(),
+        Some("ctrl+shift+c")
+    );
 }
 
 #[test]
@@ -260,7 +269,11 @@ args = ["user@server"]
     let content = fs::read_to_string(&config_path).expect("Failed to read config");
     let parsed: Result<toml::Value, _> = toml::from_str(&content);
 
-    assert!(parsed.is_ok(), "Profile config should be valid TOML: {:?}", parsed.err());
+    assert!(
+        parsed.is_ok(),
+        "Profile config should be valid TOML: {:?}",
+        parsed.err()
+    );
 }
 
 #[test]

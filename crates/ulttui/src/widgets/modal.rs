@@ -17,6 +17,7 @@ use ultty_protocol::{
 pub struct Modal {
     title: String,
     body: String,
+    body_view: Option<Box<dyn View>>,
     buttons: Vec<String>,
     selected_button: usize,
     visible: bool,
@@ -27,6 +28,7 @@ impl Default for Modal {
         Self {
             title: String::new(),
             body: String::new(),
+            body_view: None,
             buttons: vec!["OK".into()],
             selected_button: 0,
             visible: true,
@@ -40,6 +42,7 @@ impl std::fmt::Debug for Modal {
             .field("title", &self.title)
             .field("visible", &self.visible)
             .field("selected_button", &self.selected_button)
+            .field("has_body_view", &self.body_view.is_some())
             .finish()
     }
 }
@@ -66,6 +69,11 @@ impl Modal {
 
     pub fn visible(mut self, visible: bool) -> Self {
         self.visible = visible;
+        self
+    }
+
+    pub fn body_view(mut self, view: impl View + 'static) -> Self {
+        self.body_view = Some(Box::new(view));
         self
     }
 
@@ -153,21 +161,37 @@ impl View for Modal {
 
         match index {
             0 => {
-                // Body text
-                send_message(&AppMessage::CreateRegion {
-                    id: region_id,
-                    parent,
-                    insert_index: -1,
-                    constraints: Constraints {
-                        display: Display::Flex,
-                        ..Default::default()
-                    },
-                    style: ProtoStyle::default(),
-                })?;
-                send_message(&AppMessage::SetContent {
-                    id: region_id,
-                    content: ultty_protocol::Content::Text(TextContent::new(&self.body)),
-                })?;
+                // Body text or body_view
+                if let Some(ref body_view) = self.body_view {
+                    // Create container with body_view's constraints/style
+                    send_message(&AppMessage::CreateRegion {
+                        id: region_id,
+                        parent,
+                        insert_index: -1,
+                        constraints: body_view.constraints(),
+                        style: body_view.style(),
+                    })?;
+                    // Render body_view's children into the container
+                    for i in 0..body_view.children_count() {
+                        body_view.render_child_native(i, send_message, region_id, next_id)?;
+                    }
+                } else {
+                    // Existing text body behavior
+                    send_message(&AppMessage::CreateRegion {
+                        id: region_id,
+                        parent,
+                        insert_index: -1,
+                        constraints: Constraints {
+                            display: Display::Flex,
+                            ..Default::default()
+                        },
+                        style: ProtoStyle::default(),
+                    })?;
+                    send_message(&AppMessage::SetContent {
+                        id: region_id,
+                        content: ultty_protocol::Content::Text(TextContent::new(&self.body)),
+                    })?;
+                }
             }
             1 => {
                 // Button row
@@ -246,7 +270,7 @@ impl View for Modal {
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
 
-        // Body text
+        // Body text or body_view
         if inner.height > 2 {
             let body_area = Rect::new(
                 inner.x,
@@ -254,8 +278,12 @@ impl View for Modal {
                 inner.width,
                 inner.height.saturating_sub(2),
             );
-            let body = Paragraph::new(self.body.as_str()).wrap(Wrap { trim: true });
-            frame.render_widget(body, body_area);
+            if let Some(ref body_view) = self.body_view {
+                body_view.render_ansi(frame, body_area);
+            } else {
+                let body = Paragraph::new(self.body.as_str()).wrap(Wrap { trim: true });
+                frame.render_widget(body, body_area);
+            }
         }
 
         // Buttons at bottom
@@ -606,5 +634,28 @@ mod tests {
         assert_eq!(modal.selected_button_label(), Some("Discard"));
         modal.select_next_button();
         assert_eq!(modal.selected_button_label(), Some("Cancel"));
+    }
+
+    #[test]
+    fn modal_with_body_view_children_count() {
+        use super::super::Text;
+        let modal = Modal::new().body_view(Text::new("Rich content"));
+        assert_eq!(<Modal as View>::children_count(&modal), 2);
+    }
+
+    #[test]
+    fn modal_body_string_and_view_independent() {
+        use super::super::Text;
+        let modal = Modal::new().body("plain text").body_view(Text::new("rich"));
+        assert!(modal.body_view.is_some());
+    }
+
+    #[test]
+    fn modal_debug_with_body_view() {
+        use super::super::Text;
+        let modal = Modal::new().body_view(Text::new("content"));
+        let debug = format!("{:?}", modal);
+        assert!(debug.contains("has_body_view"));
+        assert!(debug.contains("true"));
     }
 }

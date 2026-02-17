@@ -309,10 +309,7 @@ fn osc_st_terminator() {
     // Verify no extra backslash is printed
     assert_eq!(
         parse(b"\x1b]0;Title\x1b\\X"),
-        vec![
-            Action::SetTitle("Title".to_string()),
-            Action::Print('X')
-        ]
+        vec![Action::SetTitle("Title".to_string()), Action::Print('X')]
     );
 }
 
@@ -406,7 +403,10 @@ fn utf8_mixed_with_escape_sequences() {
     // UTF-8 chars mixed with ANSI escapes
     assert_eq!(
         parse(b"\xC3\xA9\x1b[1m"),
-        vec![Action::Print('\u{00E9}'), Action::SetAttribute(Attribute::Bold)]
+        vec![
+            Action::Print('\u{00E9}'),
+            Action::SetAttribute(Attribute::Bold)
+        ]
     );
 }
 
@@ -463,7 +463,7 @@ fn dec_special_graphics_switch_back() {
         parse(b"\x1b(0x\x1b(Bx"),
         vec![
             Action::Print('\u{2502}'), // x in graphics mode = vertical line
-            Action::Print('x'), // x in ASCII mode = x
+            Action::Print('x'),        // x in ASCII mode = x
         ]
     );
 }
@@ -476,7 +476,7 @@ fn dec_special_graphics_g1_charset() {
         parse(b"\x1b)0\x0Ex\x0Fx"),
         vec![
             Action::Print('\u{2502}'), // x after SO with G1=graphics
-            Action::Print('x'), // x after SI with G0=ASCII
+            Action::Print('x'),        // x after SI with G0=ASCII
         ]
     );
 }
@@ -540,10 +540,7 @@ fn cursor_horizontal_absolute() {
         parse(b"\x1b[15G"),
         vec![Action::CursorHorizontalAbsolute(15)]
     );
-    assert_eq!(
-        parse(b"\x1b[G"),
-        vec![Action::CursorHorizontalAbsolute(1)]
-    );
+    assert_eq!(parse(b"\x1b[G"), vec![Action::CursorHorizontalAbsolute(1)]);
 }
 
 #[test]
@@ -687,10 +684,7 @@ fn application_cursor_keys_mode() {
 
 #[test]
 fn mouse_tracking_modes() {
-    assert_eq!(
-        parse(b"\x1b[?9h"),
-        vec![Action::SetMode(Mode::MouseX10)]
-    );
+    assert_eq!(parse(b"\x1b[?9h"), vec![Action::SetMode(Mode::MouseX10)]);
     assert_eq!(
         parse(b"\x1b[?1000h"),
         vec![Action::SetMode(Mode::MouseNormal)]
@@ -703,10 +697,7 @@ fn mouse_tracking_modes() {
         parse(b"\x1b[?1003h"),
         vec![Action::SetMode(Mode::MouseAnyEvent)]
     );
-    assert_eq!(
-        parse(b"\x1b[?1006h"),
-        vec![Action::SetMode(Mode::MouseSgr)]
-    );
+    assert_eq!(parse(b"\x1b[?1006h"), vec![Action::SetMode(Mode::MouseSgr)]);
 }
 
 // ---------------------------------------------------------------
@@ -836,7 +827,11 @@ fn sgr_background_true_color() {
     assert_eq!(
         parse(b"\x1b[48;2;10;20;30m"),
         vec![Action::SetAttribute(Attribute::BackgroundColor(
-            Color::Rgb { r: 10, g: 20, b: 30 }
+            Color::Rgb {
+                r: 10,
+                g: 20,
+                b: 30
+            }
         ))]
     );
 }
@@ -849,7 +844,9 @@ fn sgr_background_true_color() {
 fn sgr_default_foreground() {
     assert_eq!(
         parse(b"\x1b[39m"),
-        vec![Action::SetAttribute(Attribute::ForegroundColor(Color::Default))]
+        vec![Action::SetAttribute(Attribute::ForegroundColor(
+            Color::Default
+        ))]
     );
 }
 
@@ -857,7 +854,9 @@ fn sgr_default_foreground() {
 fn sgr_default_background() {
     assert_eq!(
         parse(b"\x1b[49m"),
-        vec![Action::SetAttribute(Attribute::BackgroundColor(Color::Default))]
+        vec![Action::SetAttribute(Attribute::BackgroundColor(
+            Color::Default
+        ))]
     );
 }
 
@@ -913,9 +912,7 @@ fn sgr_multiple_params() {
         parse(b"\x1b[1;31m"),
         vec![
             Action::SetAttribute(Attribute::Bold),
-            Action::SetAttribute(Attribute::ForegroundColor(
-                Color::Named(NamedColor::Red)
-            )),
+            Action::SetAttribute(Attribute::ForegroundColor(Color::Named(NamedColor::Red))),
         ]
     );
 }
@@ -927,9 +924,7 @@ fn sgr_reset_with_bold_and_color() {
         vec![
             Action::ResetAttributes,
             Action::SetAttribute(Attribute::Bold),
-            Action::SetAttribute(Attribute::ForegroundColor(
-                Color::Named(NamedColor::Green)
-            )),
+            Action::SetAttribute(Attribute::ForegroundColor(Color::Named(NamedColor::Green))),
         ]
     );
 }
@@ -986,18 +981,9 @@ fn osc_clipboard() {
 
 #[test]
 fn osc_query_colors() {
-    assert_eq!(
-        parse(b"\x1b]10;?\x07"),
-        vec![Action::QueryForegroundColor]
-    );
-    assert_eq!(
-        parse(b"\x1b]11;?\x07"),
-        vec![Action::QueryBackgroundColor]
-    );
-    assert_eq!(
-        parse(b"\x1b]12;?\x07"),
-        vec![Action::QueryCursorColor]
-    );
+    assert_eq!(parse(b"\x1b]10;?\x07"), vec![Action::QueryForegroundColor]);
+    assert_eq!(parse(b"\x1b]11;?\x07"), vec![Action::QueryBackgroundColor]);
+    assert_eq!(parse(b"\x1b]12;?\x07"), vec![Action::QueryCursorColor]);
 }
 
 // ---------------------------------------------------------------

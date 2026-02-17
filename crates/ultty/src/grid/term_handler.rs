@@ -51,7 +51,8 @@ impl<'a> TerminalHandler<'a> {
             Action::CursorHorizontalAbsolute(col) => {
                 // CSI G — move to absolute column, leave row unchanged
                 let max_col = self.terminal.grid().dimensions().cols.saturating_sub(1);
-                self.terminal.grid_mut().cursor_mut().position.col = col.saturating_sub(1).min(max_col);
+                self.terminal.grid_mut().cursor_mut().position.col =
+                    col.saturating_sub(1).min(max_col);
                 self.terminal.grid_mut().cursor_mut().wrap_pending = false;
             }
             Action::CursorPosition { row, col } => {
@@ -79,7 +80,8 @@ impl<'a> TerminalHandler<'a> {
                     row
                 };
                 let max_row = self.terminal.grid().dimensions().rows.saturating_sub(1);
-                self.terminal.grid_mut().cursor_mut().position.row = row.saturating_sub(1).min(max_row);
+                self.terminal.grid_mut().cursor_mut().position.row =
+                    row.saturating_sub(1).min(max_row);
                 self.terminal.grid_mut().cursor_mut().wrap_pending = false;
             }
             Action::CursorBackwardTab(n) => {
@@ -121,13 +123,25 @@ impl<'a> TerminalHandler<'a> {
                 let end = col.saturating_add(n).min(cols);
 
                 // Check for orphaned wide char at the start boundary
-                if col > 0 && self.terminal.grid().cell(col, row).is_some_and(|c| c.is_wide_spacer()) {
+                if col > 0
+                    && self
+                        .terminal
+                        .grid()
+                        .cell(col, row)
+                        .is_some_and(|c| c.is_wide_spacer())
+                {
                     if let Some(primary) = self.terminal.grid_mut().cell_mut(col - 1, row) {
                         primary.erase(bg);
                     }
                 }
                 // Check for orphaned wide char spacer at the end boundary
-                if end < cols && self.terminal.grid().cell(end, row).is_some_and(|c| c.is_wide_spacer()) {
+                if end < cols
+                    && self
+                        .terminal
+                        .grid()
+                        .cell(end, row)
+                        .is_some_and(|c| c.is_wide_spacer())
+                {
                     if let Some(spacer) = self.terminal.grid_mut().cell_mut(end, row) {
                         spacer.erase(bg);
                     }
@@ -420,16 +434,79 @@ impl<'a> TerminalHandler<'a> {
                 // Pm: 1=set, 2=reset, 3=permanently set, 4=permanently reset, 0=not recognized
                 let modes = self.terminal.modes();
                 let status = match mode {
-                    1 => if modes.application_cursor_keys { 1 } else { 2 },
-                    7 => if modes.auto_wrap { 1 } else { 2 },
-                    25 => if self.terminal.grid().cursor().visible { 1 } else { 2 },
-                    1000 => if modes.mouse_mode == crate::grid::terminal::MouseMode::Normal { 1 } else { 2 },
-                    1002 => if modes.mouse_mode == crate::grid::terminal::MouseMode::ButtonEvent { 1 } else { 2 },
-                    1003 => if modes.mouse_mode == crate::grid::terminal::MouseMode::AnyEvent { 1 } else { 2 },
-                    1004 => if modes.focus_reporting { 1 } else { 2 },
-                    1006 => if matches!(modes.mouse_encoding, crate::grid::terminal::MouseEncoding::Sgr) { 1 } else { 2 },
-                    2004 => if modes.bracketed_paste { 1 } else { 2 },
-                    2026 => if modes.synchronized_update { 1 } else { 2 },
+                    1 => {
+                        if modes.application_cursor_keys {
+                            1
+                        } else {
+                            2
+                        }
+                    }
+                    7 => {
+                        if modes.auto_wrap {
+                            1
+                        } else {
+                            2
+                        }
+                    }
+                    25 => {
+                        if self.terminal.grid().cursor().visible {
+                            1
+                        } else {
+                            2
+                        }
+                    }
+                    1000 => {
+                        if modes.mouse_mode == crate::grid::terminal::MouseMode::Normal {
+                            1
+                        } else {
+                            2
+                        }
+                    }
+                    1002 => {
+                        if modes.mouse_mode == crate::grid::terminal::MouseMode::ButtonEvent {
+                            1
+                        } else {
+                            2
+                        }
+                    }
+                    1003 => {
+                        if modes.mouse_mode == crate::grid::terminal::MouseMode::AnyEvent {
+                            1
+                        } else {
+                            2
+                        }
+                    }
+                    1004 => {
+                        if modes.focus_reporting {
+                            1
+                        } else {
+                            2
+                        }
+                    }
+                    1006 => {
+                        if matches!(
+                            modes.mouse_encoding,
+                            crate::grid::terminal::MouseEncoding::Sgr
+                        ) {
+                            1
+                        } else {
+                            2
+                        }
+                    }
+                    2004 => {
+                        if modes.bracketed_paste {
+                            1
+                        } else {
+                            2
+                        }
+                    }
+                    2026 => {
+                        if modes.synchronized_update {
+                            1
+                        } else {
+                            2
+                        }
+                    }
                     2027 => 2, // Unicode core spec - not implemented
                     // Mode not recognized
                     _ => 0,

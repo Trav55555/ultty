@@ -128,12 +128,13 @@ impl Application for FetchApp {
 impl FetchApp {
     fn status_view(&self) -> Column {
         match &self.state {
-            FetchState::Idle => {
-                Column::new()
-                    .child(Text::new("Status: Idle"))
-                    .child(Text::new("Press 'f' to start a simulated API fetch"))
-            }
-            FetchState::Loading { spinner_frame, started } => {
+            FetchState::Idle => Column::new()
+                .child(Text::new("Status: Idle"))
+                .child(Text::new("Press 'f' to start a simulated API fetch")),
+            FetchState::Loading {
+                spinner_frame,
+                started,
+            } => {
                 let elapsed = started.elapsed();
                 Column::new()
                     .child(
@@ -144,17 +145,16 @@ impl FetchApp {
                     )
                     .child(Text::new(format!("Elapsed: {:.1}s", elapsed.as_secs_f64())))
             }
-            FetchState::Success { data, elapsed } => {
-                Column::new()
-                    .child(Badge::success("SUCCESS"))
-                    .child(Text::new(format!("Response ({:.0}ms):", elapsed.as_millis())))
-                    .child(Text::new(data.clone()))
-            }
-            FetchState::Error { message } => {
-                Column::new()
-                    .child(Badge::error("ERROR"))
-                    .child(Text::new(message.clone()))
-            }
+            FetchState::Success { data, elapsed } => Column::new()
+                .child(Badge::success("SUCCESS"))
+                .child(Text::new(format!(
+                    "Response ({:.0}ms):",
+                    elapsed.as_millis()
+                )))
+                .child(Text::new(data.clone())),
+            FetchState::Error { message } => Column::new()
+                .child(Badge::error("ERROR"))
+                .child(Text::new(message.clone())),
         }
     }
 }

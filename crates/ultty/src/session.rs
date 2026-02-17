@@ -78,8 +78,7 @@ impl SessionData {
     /// Load session from a file.
     pub fn load(path: &PathBuf) -> io::Result<Self> {
         let json = fs::read_to_string(path)?;
-        serde_json::from_str(&json)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        serde_json::from_str(&json).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Save as the "last" session (auto-save on exit).
@@ -96,8 +95,7 @@ impl SessionData {
 
     /// Load the "last" session if it exists.
     pub fn load_last() -> Option<Self> {
-        Self::last_session_path()
-            .and_then(|path| Self::load(&path).ok())
+        Self::last_session_path().and_then(|path| Self::load(&path).ok())
     }
 
     /// Check if a last session exists.
@@ -374,7 +372,8 @@ mod tests {
 
     #[test]
     fn deserialize_wrong_types_errors() {
-        let json = r#"{"version": "not_a_number", "timestamp": 123, "tabs": [], "active_tab_index": 0}"#;
+        let json =
+            r#"{"version": "not_a_number", "timestamp": 123, "tabs": [], "active_tab_index": 0}"#;
         let result = serde_json::from_str::<SessionData>(json);
         assert!(result.is_err());
     }
@@ -443,7 +442,12 @@ mod tests {
     #[test]
     fn save_creates_parent_directories() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("a").join("b").join("c").join("session.json");
+        let path = tmp
+            .path()
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("session.json");
         let session = SessionData::new();
 
         session.save(&path).unwrap();
@@ -495,7 +499,9 @@ mod tests {
             assert_eq!(orig_tab.split_direction, loaded_tab.split_direction);
             assert_eq!(orig_tab.terminals.len(), loaded_tab.terminals.len());
 
-            for (orig_term, loaded_term) in orig_tab.terminals.iter().zip(loaded_tab.terminals.iter()) {
+            for (orig_term, loaded_term) in
+                orig_tab.terminals.iter().zip(loaded_tab.terminals.iter())
+            {
                 assert_eq!(orig_term.title, loaded_term.title);
                 assert_eq!(orig_term.working_directory, loaded_term.working_directory);
                 assert_eq!(orig_term.is_focused, loaded_term.is_focused);
@@ -610,9 +616,10 @@ mod tests {
 
     #[test]
     fn last_session_path_is_inside_sessions_dir() {
-        if let (Some(dir), Some(path)) =
-            (SessionData::sessions_dir(), SessionData::last_session_path())
-        {
+        if let (Some(dir), Some(path)) = (
+            SessionData::sessions_dir(),
+            SessionData::last_session_path(),
+        ) {
             assert!(
                 path.starts_with(&dir),
                 "last_session_path should be inside sessions_dir"

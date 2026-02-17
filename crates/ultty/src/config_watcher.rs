@@ -51,9 +51,10 @@ impl ConfigWatcher {
             match res {
                 Ok(event) => {
                     // Only react to modify/create events for our config file
-                    let dominated_our_file = event.paths.iter().any(|p| {
-                        p.file_name().map(|n| n == config_filename).unwrap_or(false)
-                    });
+                    let dominated_our_file = event
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().map(|n| n == config_filename).unwrap_or(false));
 
                     if dominated_our_file {
                         use notify::EventKind;
@@ -69,9 +70,12 @@ impl ConfigWatcher {
                     let _ = sender.send(ConfigEvent::Error(e.to_string()));
                 }
             }
-        }).ok()?;
+        })
+        .ok()?;
 
-        watcher.watch(&watch_path, RecursiveMode::NonRecursive).ok()?;
+        watcher
+            .watch(&watch_path, RecursiveMode::NonRecursive)
+            .ok()?;
 
         tracing::info!("Watching config file: {:?}", config_path);
 
@@ -154,8 +158,7 @@ mod tests {
 
         // Simulate a watcher with manual event injection
         let mut watcher_state = ConfigWatcher {
-            _watcher: notify::recommended_watcher(|_: Result<Event, notify::Error>| {})
-                .unwrap(),
+            _watcher: notify::recommended_watcher(|_: Result<Event, notify::Error>| {}).unwrap(),
             receiver: rx,
             last_reload: Instant::now(),
             debounce: Duration::from_millis(500),
@@ -175,14 +178,14 @@ mod tests {
     fn poll_drains_errors_without_reload() {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher_state = ConfigWatcher {
-            _watcher: notify::recommended_watcher(|_: Result<Event, notify::Error>| {})
-                .unwrap(),
+            _watcher: notify::recommended_watcher(|_: Result<Event, notify::Error>| {}).unwrap(),
             receiver: rx,
             last_reload: Instant::now() - Duration::from_secs(10),
             debounce: Duration::from_millis(500),
         };
 
-        tx.send(ConfigEvent::Error("test error".to_string())).unwrap();
+        tx.send(ConfigEvent::Error("test error".to_string()))
+            .unwrap();
         assert!(!watcher_state.poll(), "errors should not trigger reload");
     }
 

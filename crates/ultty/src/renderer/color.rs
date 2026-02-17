@@ -131,8 +131,16 @@ impl ColorScheme {
 
         Self {
             named,
-            foreground: Rgba::from_u8(config.foreground.r, config.foreground.g, config.foreground.b),
-            background: Rgba::from_u8(config.background.r, config.background.g, config.background.b),
+            foreground: Rgba::from_u8(
+                config.foreground.r,
+                config.foreground.g,
+                config.foreground.b,
+            ),
+            background: Rgba::from_u8(
+                config.background.r,
+                config.background.g,
+                config.background.b,
+            ),
             cursor: Rgba::from_u8(config.cursor.r, config.cursor.g, config.cursor.b),
             selection: Rgba::new(sr, sg, sb, sa),
         }

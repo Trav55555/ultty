@@ -1,6 +1,6 @@
 //! Application trait and runner.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::backend::Backend;
@@ -10,8 +10,9 @@ use crate::focus::FocusManager;
 use crate::screen::{Screen, ScreenAction};
 use crate::theme::Theme;
 use crate::toast::{Toast, ToastSeverity};
-use crate::widgets::{Badge, BadgeVariant, Column, Spacer, View};
+use crate::widgets::{render_view_to_native, Badge, BadgeVariant, Column, Spacer, View};
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
 use ultty_protocol::{AppMessage, RegionId};
 
 struct OverlayView<'a> {
@@ -23,38 +24,6 @@ impl<'a> OverlayView<'a> {
     fn new(base: &'a dyn View, overlay: Option<Column>) -> Self {
         Self { base, overlay }
     }
-}
-
-fn render_view_to_native(
-    child: &dyn View,
-    send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
-    parent: RegionId,
-    next_id: &mut u32,
-) -> anyhow::Result<RegionId> {
-    let region_id = RegionId::new(*next_id);
-    *next_id += 1;
-
-    send_message(&AppMessage::CreateRegion {
-        id: region_id,
-        parent,
-        insert_index: -1,
-        constraints: child.constraints(),
-        style: child.style(),
-    })?;
-
-    let content = child.content();
-    if content != ultty_protocol::Content::None {
-        send_message(&AppMessage::SetContent {
-            id: region_id,
-            content,
-        })?;
-    }
-
-    for i in 0..child.children_count() {
-        child.render_child_native(i, send_message, region_id, next_id)?;
-    }
-
-    Ok(region_id)
 }
 
 impl View for OverlayView<'_> {
@@ -83,12 +52,21 @@ impl View for OverlayView<'_> {
     ) -> anyhow::Result<Option<RegionId>> {
         let base_count = self.base.children_count();
         if index < base_count {
-            return self.base.render_child_native(index, send_message, parent, next_id);
+            return self
+                .base
+                .render_child_native(index, send_message, parent, next_id);
         }
 
         if index == base_count {
             if let Some(overlay) = &self.overlay {
-                return Ok(Some(render_view_to_native(overlay, send_message, parent, next_id)?));
+                return Ok(Some(render_view_to_native(
+                    overlay,
+                    send_message,
+                    parent,
+                    next_id,
+                    None,
+                    false,
+                )?));
             }
         }
 
@@ -146,9 +124,15 @@ pub struct App<A: Application> {
     theme: Theme,
     subscriptions: Vec<SubState<A::Message>>,
     spawn_handles: Vec<tokio::task::JoinHandle<A::Message>>,
+    cmd_subscription_handles: HashMap<String, tokio::task::JoinHandle<()>>,
+    stream_subscription_handles: HashMap<String, tokio::task::JoinHandle<()>>,
+    stream_subscription_urls: HashMap<String, String>,
+    subscription_tx: mpsc::UnboundedSender<A::Message>,
+    subscription_rx: mpsc::UnboundedReceiver<A::Message>,
     msg_queue: VecDeque<A::Message>,
     screen_stack: Vec<Box<dyn Screen>>,
     active_toasts: Vec<(Toast, Instant)>,
+    quit_requested: bool,
 }
 
 #[allow(dead_code)]
@@ -158,9 +142,24 @@ struct SubState<M> {
     last_tick: Instant,
 }
 
+struct StreamSubSpec<M> {
+    id: String,
+    url: String,
+    on_message: Box<dyn Fn(String) -> M + Send + 'static>,
+}
+
+struct SubCollectCtx<'a, M> {
+    old_states: &'a [SubState<M>],
+    index: &'a mut usize,
+    new_states: &'a mut Vec<SubState<M>>,
+    stream_specs: &'a mut Vec<StreamSubSpec<M>>,
+    messages: &'a mut Vec<M>,
+}
+
 impl<A: Application> App<A> {
     /// Create a new app runner.
     pub fn new(app: A) -> Self {
+        let (subscription_tx, subscription_rx) = mpsc::unbounded_channel();
         Self {
             app,
             backend: Backend::detect(),
@@ -169,9 +168,15 @@ impl<A: Application> App<A> {
             theme: Theme::dark(),
             subscriptions: Vec::new(),
             spawn_handles: Vec::new(),
+            cmd_subscription_handles: HashMap::new(),
+            stream_subscription_handles: HashMap::new(),
+            stream_subscription_urls: HashMap::new(),
+            subscription_tx,
+            subscription_rx,
             msg_queue: VecDeque::new(),
             screen_stack: Vec::new(),
             active_toasts: Vec::new(),
+            quit_requested: false,
         }
     }
 
@@ -202,6 +207,12 @@ impl<A: Application> App<A> {
             // 1. Poll backend for events
             if let Some(mut event) = self.backend.poll_event()? {
                 if matches!(&event, Event::Quit) {
+                    if let Some(msg) = self.app.on_event(&event) {
+                        self.msg_queue.push_back(msg);
+                    }
+                    self.drain_messages(&rt);
+                    self.poll_spawned_tasks(&rt);
+                    self.drain_messages(&rt);
                     break;
                 }
 
@@ -251,10 +262,13 @@ impl<A: Application> App<A> {
             self.drain_messages(&rt);
 
             // 4. Process subscriptions → enqueue messages
-            self.process_subscriptions();
+            self.process_subscriptions(&rt);
 
             // 5. Poll spawned tasks → enqueue messages
             self.poll_spawned_tasks(&rt);
+
+            // 5b. Poll subscription streams → enqueue messages
+            self.poll_subscriptions();
 
             // 6. Drain message queue again (from subs/spawns)
             self.drain_messages(&rt);
@@ -264,6 +278,18 @@ impl<A: Application> App<A> {
 
             // 7. Render view
             self.render()?;
+
+            if self.quit_requested {
+                break;
+            }
+        }
+
+        // Clean up active subscriptions
+        for (_, handle) in self.cmd_subscription_handles.drain() {
+            handle.abort();
+        }
+        for (_, handle) in self.stream_subscription_handles.drain() {
+            handle.abort();
         }
 
         self.backend.shutdown()?;
@@ -339,8 +365,8 @@ impl<A: Application> App<A> {
         })();
 
         // Normal path: restore before guard drops so we recapture the values.
-        self.focus = FocusManager::set_current(guard.old_focus.take().unwrap());
-        self.theme = Theme::replace_current(guard.old_theme.take().unwrap());
+        self.focus = FocusManager::set_current(guard.old_focus.take().unwrap_or_default());
+        self.theme = Theme::replace_current(guard.old_theme.take().unwrap_or_else(Theme::dark));
         // guard drops here as a no-op (both Options are None).
         // On panic, guard's Drop fires and restores thread-locals automatically.
         render_result?;
@@ -377,23 +403,26 @@ impl<A: Application> App<A> {
         }
     }
 
-    fn process_subscriptions(&mut self) {
+    fn process_subscriptions(&mut self, rt: &Runtime) {
         let now = Instant::now();
         let old_states = std::mem::take(&mut self.subscriptions);
         let mut new_states = Vec::new();
+        let mut stream_specs = Vec::new();
         let mut messages = Vec::new();
         let mut index = 0;
 
-        self.collect_subscriptions(
-            self.app.subscriptions(),
-            now,
-            &old_states,
-            &mut index,
-            &mut new_states,
-            &mut messages,
-        );
+        let mut ctx = SubCollectCtx {
+            old_states: &old_states,
+            index: &mut index,
+            new_states: &mut new_states,
+            stream_specs: &mut stream_specs,
+            messages: &mut messages,
+        };
+
+        self.collect_subscriptions(self.app.subscriptions(), now, &mut ctx);
 
         self.subscriptions = new_states;
+        self.reconcile_stream_subscriptions(rt, stream_specs);
 
         for msg in messages {
             self.msg_queue.push_back(msg);
@@ -404,38 +433,154 @@ impl<A: Application> App<A> {
         &self,
         sub: Sub<A::Message>,
         now: Instant,
-        old_states: &[SubState<A::Message>],
-        index: &mut usize,
-        new_states: &mut Vec<SubState<A::Message>>,
-        messages: &mut Vec<A::Message>,
+        ctx: &mut SubCollectCtx<'_, A::Message>,
     ) {
         match sub {
             Sub::None => {}
             Sub::Every { interval, f } => {
-                let last_tick = old_states
-                    .get(*index)
+                let last_tick = ctx
+                    .old_states
+                    .get(*ctx.index)
                     .map(|state| state.last_tick)
                     .unwrap_or(now);
 
                 let mut next_tick = last_tick;
                 if now.duration_since(last_tick) >= interval {
-                    messages.push(f());
+                    ctx.messages.push(f());
                     next_tick = now;
                 }
 
-                new_states.push(SubState {
+                ctx.new_states.push(SubState {
                     interval,
                     f,
                     last_tick: next_tick,
                 });
-                *index += 1;
+                *ctx.index += 1;
+            }
+            Sub::Stream {
+                id,
+                url,
+                on_message,
+            } => {
+                ctx.stream_specs.push(StreamSubSpec {
+                    id,
+                    url,
+                    on_message,
+                });
             }
             Sub::Batch(subs) => {
                 for sub in subs {
-                    self.collect_subscriptions(sub, now, old_states, index, new_states, messages);
+                    self.collect_subscriptions(sub, now, ctx);
                 }
             }
         }
+    }
+
+    fn reconcile_stream_subscriptions(
+        &mut self,
+        rt: &Runtime,
+        stream_specs: Vec<StreamSubSpec<A::Message>>,
+    ) {
+        let mut desired_by_id: HashMap<String, StreamSubSpec<A::Message>> = HashMap::new();
+        for spec in stream_specs {
+            desired_by_id.insert(spec.id.clone(), spec);
+        }
+
+        let active_ids: Vec<String> = self.stream_subscription_handles.keys().cloned().collect();
+        for id in active_ids {
+            if !desired_by_id.contains_key(&id) {
+                if let Some(handle) = self.stream_subscription_handles.remove(&id) {
+                    handle.abort();
+                }
+                self.stream_subscription_urls.remove(&id);
+            }
+        }
+
+        for (id, spec) in desired_by_id {
+            let handle_is_running = self
+                .stream_subscription_handles
+                .get(&id)
+                .map(|handle| !handle.is_finished())
+                .unwrap_or(false);
+            let should_restart = self
+                .stream_subscription_urls
+                .get(&id)
+                .map(|url| url != &spec.url)
+                .unwrap_or(true)
+                || !handle_is_running;
+
+            if !should_restart {
+                continue;
+            }
+
+            if let Some(handle) = self.stream_subscription_handles.remove(&id) {
+                handle.abort();
+            }
+
+            let handle = Self::spawn_stream_subscription(
+                rt,
+                self.subscription_tx.clone(),
+                id.clone(),
+                spec.url.clone(),
+                spec.on_message,
+            );
+
+            self.stream_subscription_handles.insert(id.clone(), handle);
+            self.stream_subscription_urls.insert(id, spec.url);
+        }
+    }
+
+    fn spawn_stream_subscription(
+        rt: &Runtime,
+        tx: mpsc::UnboundedSender<A::Message>,
+        id: String,
+        url: String,
+        on_message: Box<dyn Fn(String) -> A::Message + Send + 'static>,
+    ) -> tokio::task::JoinHandle<()> {
+        rt.spawn(async move {
+            use futures_util::StreamExt;
+            use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+            let ws = tokio_tungstenite::connect_async(url.as_str()).await;
+            let (mut socket, _) = match ws {
+                Ok(parts) => parts,
+                Err(err) => {
+                    tracing::warn!("stream subscription {} connect failed: {}", id, err);
+                    return;
+                }
+            };
+
+            while let Some(item) = socket.next().await {
+                match item {
+                    Ok(WsMessage::Text(text)) => {
+                        if tx.send(on_message(text.to_string())).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(WsMessage::Binary(bytes)) => match String::from_utf8(bytes.to_vec()) {
+                        Ok(text) => {
+                            if tx.send(on_message(text)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                "stream subscription {} dropped non-utf8 frame: {}",
+                                id,
+                                err
+                            );
+                        }
+                    },
+                    Ok(WsMessage::Close(_)) => break,
+                    Ok(WsMessage::Ping(_)) | Ok(WsMessage::Pong(_)) => {}
+                    Ok(WsMessage::Frame(_)) => {}
+                    Err(err) => {
+                        tracing::warn!("stream subscription {} recv failed: {}", id, err);
+                        break;
+                    }
+                }
+            }
+        })
     }
 
     fn process_cmd(&mut self, cmd: Cmd<A::Message>, rt: &Runtime) {
@@ -474,6 +619,30 @@ impl<A: Application> App<A> {
                     });
                     self.spawn_handles.push(handle);
                 }
+                Cmd::Subscribe { id, stream } => {
+                    if let Some(handle) = self.cmd_subscription_handles.remove(&id) {
+                        handle.abort();
+                    }
+
+                    let tx = self.subscription_tx.clone();
+                    let handle = rt.spawn(async move {
+                        use futures_util::StreamExt;
+
+                        let mut stream = stream;
+                        while let Some(msg) = stream.next().await {
+                            if tx.send(msg).is_err() {
+                                break;
+                            }
+                        }
+                    });
+
+                    self.cmd_subscription_handles.insert(id, handle);
+                }
+                Cmd::Unsubscribe { id } => {
+                    if let Some(handle) = self.cmd_subscription_handles.remove(&id) {
+                        handle.abort();
+                    }
+                }
                 Cmd::ShowToast(toast) => {
                     self.active_toasts.push((toast, Instant::now()));
                 }
@@ -483,6 +652,9 @@ impl<A: Application> App<A> {
                 }
                 Cmd::PopScreen => {
                     self.screen_stack.pop();
+                }
+                Cmd::Quit => {
+                    self.quit_requested = true;
                 }
             }
         }
@@ -506,6 +678,13 @@ impl<A: Application> App<A> {
         }
     }
 
+    /// Poll subscription channels for incoming messages.
+    fn poll_subscriptions(&mut self) {
+        while let Ok(msg) = self.subscription_rx.try_recv() {
+            self.msg_queue.push_back(msg);
+        }
+    }
+
     fn toast_overlay_view(&self) -> Column {
         let mut toast_list = Column::new().gap(1.0);
         for (toast, _) in &self.active_toasts {
@@ -518,10 +697,7 @@ impl<A: Application> App<A> {
             toast_list = toast_list.child(Badge::new(&toast.message).variant(variant));
         }
 
-        Column::new()
-            .flex_grow(1.0)
-            .child(Spacer)
-            .child(toast_list)
+        Column::new().flex_grow(1.0).child(Spacer).child(toast_list)
     }
 }
 
@@ -529,6 +705,7 @@ impl<A: Application> App<A> {
 impl<A: Application> App<A> {
     /// Create an app with a specific backend (for testing).
     pub fn new_with_backend(app: A, backend: Backend) -> Self {
+        let (subscription_tx, subscription_rx) = mpsc::unbounded_channel();
         Self {
             app,
             backend,
@@ -537,9 +714,15 @@ impl<A: Application> App<A> {
             theme: Theme::dark(),
             subscriptions: Vec::new(),
             spawn_handles: Vec::new(),
+            cmd_subscription_handles: HashMap::new(),
+            stream_subscription_handles: HashMap::new(),
+            stream_subscription_urls: HashMap::new(),
+            subscription_tx,
+            subscription_rx,
             msg_queue: VecDeque::new(),
             screen_stack: Vec::new(),
             active_toasts: Vec::new(),
+            quit_requested: false,
         }
     }
 }
@@ -550,6 +733,7 @@ mod async_tests {
     use crate::backend::mock::MockBackend;
     use crate::screen::{Screen, ScreenAction};
     use crate::widgets::{Column, Text};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -787,23 +971,109 @@ mod async_tests {
         }];
 
         let mut new_states = Vec::new();
+        let mut stream_specs = Vec::new();
         let mut messages = Vec::new();
         let mut index = 0;
+        let mut ctx = SubCollectCtx {
+            old_states: &old_states,
+            index: &mut index,
+            new_states: &mut new_states,
+            stream_specs: &mut stream_specs,
+            messages: &mut messages,
+        };
 
         let sub = Sub::every(interval, || 99);
-        runner.collect_subscriptions(
-            sub,
-            Instant::now(),
-            &old_states,
-            &mut index,
-            &mut new_states,
-            &mut messages,
-        );
+        runner.collect_subscriptions(sub, Instant::now(), &mut ctx);
 
         // Even though 10 seconds have passed (100x the interval),
         // only ONE message should be emitted — no burst replay.
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0], 99);
+    }
+
+    struct StreamSubApp {
+        enabled: Arc<AtomicBool>,
+        url: Arc<Mutex<String>>,
+    }
+
+    impl Application for StreamSubApp {
+        type Message = String;
+
+        fn subscriptions(&self) -> Sub<Self::Message> {
+            if self.enabled.load(Ordering::SeqCst) {
+                let url = self.url.lock().unwrap().clone();
+                Sub::stream("ws-sub", url, |msg| msg)
+            } else {
+                Sub::none()
+            }
+        }
+
+        fn view(&self) -> impl View {
+            Text::new("stream-sub-test")
+        }
+    }
+
+    #[test]
+    fn sub_stream_registers_and_unsubscribes() {
+        let enabled = Arc::new(AtomicBool::new(true));
+        let url = Arc::new(Mutex::new("ws://127.0.0.1:0".to_string()));
+        let app = StreamSubApp {
+            enabled: enabled.clone(),
+            url,
+        };
+
+        let mut runner = App::new(app);
+        let rt = Runtime::new().expect("runtime");
+
+        runner.process_subscriptions(&rt);
+        assert!(runner.stream_subscription_handles.contains_key("ws-sub"));
+        assert_eq!(
+            runner
+                .stream_subscription_urls
+                .get("ws-sub")
+                .map(String::as_str),
+            Some("ws://127.0.0.1:0")
+        );
+
+        enabled.store(false, Ordering::SeqCst);
+        runner.process_subscriptions(&rt);
+
+        assert!(runner.stream_subscription_handles.is_empty());
+        assert!(runner.stream_subscription_urls.is_empty());
+    }
+
+    #[test]
+    fn sub_stream_url_change_updates_subscription() {
+        let enabled = Arc::new(AtomicBool::new(true));
+        let url = Arc::new(Mutex::new("ws://127.0.0.1:0".to_string()));
+        let app = StreamSubApp {
+            enabled,
+            url: url.clone(),
+        };
+
+        let mut runner = App::new(app);
+        let rt = Runtime::new().expect("runtime");
+
+        runner.process_subscriptions(&rt);
+        assert_eq!(
+            runner
+                .stream_subscription_urls
+                .get("ws-sub")
+                .map(String::as_str),
+            Some("ws://127.0.0.1:0")
+        );
+
+        *url.lock().unwrap() = "ws://127.0.0.1:1".to_string();
+        runner.process_subscriptions(&rt);
+
+        assert!(runner.stream_subscription_handles.contains_key("ws-sub"));
+        assert_eq!(
+            runner
+                .stream_subscription_urls
+                .get("ws-sub")
+                .map(String::as_str),
+            Some("ws://127.0.0.1:1")
+        );
     }
 
     #[test]

@@ -175,7 +175,9 @@ impl<'a> Handler<'a> {
 
             // Cursor save/restore
             Action::SaveCursorPosition => self.grid.save_cursor(false),
-            Action::RestoreCursorPosition => { self.grid.restore_cursor(); }
+            Action::RestoreCursorPosition => {
+                self.grid.restore_cursor();
+            }
 
             // Full/soft reset and screen alignment (handled by TerminalHandler)
             Action::FullReset | Action::SoftReset | Action::ScreenAlignmentPattern => {}
@@ -611,7 +613,12 @@ mod tests {
         assert_eq!(grid.cell(1, 0).unwrap().bg(), Color::Default);
         // Cells 2+ should have green bg
         for col in 2..10 {
-            assert_eq!(grid.cell(col, 0).unwrap().bg(), Color::Named(2), "col {}", col);
+            assert_eq!(
+                grid.cell(col, 0).unwrap().bg(),
+                Color::Named(2),
+                "col {}",
+                col
+            );
         }
     }
 }

@@ -44,6 +44,19 @@ pub enum AppMessage {
     /// Set region content.
     SetContent { id: RegionId, content: Content },
 
+    /// Append text to existing content of a region (for streaming).
+    AppendContent { id: RegionId, text: String },
+
+    /// Signal the start of a content stream on a region.
+    StreamStart {
+        id: RegionId,
+        /// Stream identifier (for correlating start/end).
+        stream_id: u32,
+    },
+
+    /// Signal the end of a content stream.
+    StreamEnd { id: RegionId, stream_id: u32 },
+
     /// Set metadata on a region (for agent-aware workflows).
     SetRegionMetadata {
         id: RegionId,

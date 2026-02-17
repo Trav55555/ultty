@@ -270,7 +270,9 @@ impl TmuxController {
 
     /// List all windows in current session.
     pub fn list_windows(&mut self) -> io::Result<()> {
-        self.send_command("list-windows -F '#{window_index}:#{window_name}:#{window_active}:#{window_panes}'")
+        self.send_command(
+            "list-windows -F '#{window_index}:#{window_name}:#{window_active}:#{window_panes}'",
+        )
     }
 
     /// List all panes in current window.
@@ -609,8 +611,7 @@ mod tests {
     #[test]
     fn poll_notifications_fifo() {
         let mut c = TmuxController::new();
-        c.notifications
-            .push_back(TmuxNotification::ClientDetached);
+        c.notifications.push_back(TmuxNotification::ClientDetached);
         c.notifications.push_back(TmuxNotification::Exit {
             reason: "done".into(),
         });
@@ -794,8 +795,12 @@ mod tests {
         let data = b"%window-add @1\n%window-add @2\n%exit\n";
         let notifs = c.process_output(data);
         assert_eq!(notifs.len(), 3);
-        assert!(matches!(&notifs[0], TmuxNotification::WindowAdd { window_id } if window_id == "@1"));
-        assert!(matches!(&notifs[1], TmuxNotification::WindowAdd { window_id } if window_id == "@2"));
+        assert!(
+            matches!(&notifs[0], TmuxNotification::WindowAdd { window_id } if window_id == "@1")
+        );
+        assert!(
+            matches!(&notifs[1], TmuxNotification::WindowAdd { window_id } if window_id == "@2")
+        );
         assert!(matches!(&notifs[2], TmuxNotification::Exit { .. }));
     }
 
@@ -1389,6 +1394,8 @@ mod tests {
         let data: &[u8] = &[0xFF, 0xFE, b'\n', b'%', b'e', b'x', b'i', b't', b'\n'];
         let notifs = c.process_output(data);
         // Should parse the %exit line
-        assert!(notifs.iter().any(|n| matches!(n, TmuxNotification::Exit { .. })));
+        assert!(notifs
+            .iter()
+            .any(|n| matches!(n, TmuxNotification::Exit { .. })));
     }
 }

@@ -1,380 +1,155 @@
-# Ultty - Project DNA
+# Ultty — Agent Guide
 
-**Mission**: Build the terminal emulator + TUI framework that makes Claude Code's architecture obsolete.
+GPU-accelerated terminal emulator + TUI framework. Rust workspace, edition 2021, MSRV 1.75.
 
-## Quick Context
-
-```
-ultty/
-├── crates/
-│   ├── ultty/            # The terminal emulator (GPU-rendered)
-│   ├── ulttui/           # The framework (apps link this)
-│   └── ultty-protocol/   # Shared wire protocol
-├── examples/             # Reference implementations (7 apps + porygon-tui)
-├── docs/                 # Specs and guides
-└── tools/                # Dev utilities
-```
-
-## The Two Products
-
-| Crate | What It Is | Who Uses It |
-|-------|-----------|-------------|
-| `ultty` | Terminal emulator binary | End users install this |
-| `ulttui` | TUI framework library | Developers build apps with this |
-| `ultty-protocol` | Wire protocol definitions | Both above depend on this |
-
-## Architecture (30-Second Version)
+## Repository Layout
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    User's Terminal                          │
-│                       (ultty)                               │
-├─────────────────────────────────────────────────────────────┤
-│  Scene Graph ◄── Layout Engine (Taffy) ◄── Protocol Parser │
-│       │                                          ▲          │
-│       ▼                                          │          │
-│  GPU Renderer ──────────────────────── Binary Protocol      │
-│    (wgpu)                              (Unix socket)        │
-└─────────────────────────────────────────────────────────────┘
-                                               ▲
-                                               │
-┌──────────────────────────────────────────────┴─────────────┐
-│                      TUI App                                │
-│                  (built with ulttui)                        │
-├─────────────────────────────────────────────────────────────┤
-│  App State ──► Component Tree ──► Protocol Messages         │
-│                                                             │
-│  When in ultty:          Native binary protocol             │
-│  When in other terminal: ANSI fallback (via ratatui)        │
-└─────────────────────────────────────────────────────────────┘
+crates/
+  ultty/            # Terminal emulator binary (GPU renderer, ANSI parser, native protocol)
+  ulttui/           # TUI framework library (Elm architecture, 22+ widgets, dual-mode)
+  ultty-protocol/   # Wire protocol codec (binary encode/decode, layout types)
+  ultty-client/     # Low-level client SDK (raw protocol access)
+examples/           # 8 example apps (counter, todo, dashboard, chat, porygon-tui, etc.)
+tests/              # Workspace-level integration tests
 ```
 
-## Key Design Decisions
-
-1. **Terminal-side layout**: Apps declare constraints, terminal computes positions
-2. **Retained mode scene graph**: Terminal owns the tree, apps send diffs
-3. **Atomic frames**: `BeginFrame`/`EndFrame` prevents tearing
-4. **Dual-mode framework**: Native protocol when possible, ANSI fallback otherwise
-
-## File Navigation
-
-| Looking for... | Go to... |
-|----------------|----------|
-| Protocol wire format | `docs/spec/PROTOCOL_SPEC.md` |
-| Architecture overview | `docs/architecture/OVERVIEW.md` |
-| Terminal emulator code | `crates/ultty/` |
-| Framework code | `crates/ulttui/` |
-| Example apps | `examples/` |
-
-## Development Commands
+## Build / Test / Lint Commands
 
 ```bash
-# Run terminal emulator
-cargo run -p ultty
-
-# Run examples
-cargo run -p hello-native  # Raw protocol demo (run inside ultty)
-cargo run -p counter-app   # Framework counter app
-cargo run -p todo-app      # Framework todo list app
-cargo run -p porygon-tui   # Porygon AI agent interface (requires porygon daemon)
-
-# Run tests
-cargo test --workspace
-
-# Check all targets
-cargo check --workspace --all-targets
-
-# Format
+# Full workspace
+cargo build --workspace
+cargo test --workspace                # ~1820 tests
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
+cargo fmt --all -- --check            # CI format check
 
-# Lint
-cargo clippy --workspace --all-targets
+# Single crate
+cargo test -p ultty --lib             # Terminal tests (~1005)
+cargo test -p ulttui --lib            # Framework tests (~537)
+cargo test -p ultty-protocol          # Protocol tests
+cargo test -p ulttui --test snapshots # Snapshot tests (25, uses insta)
+
+# Single test by name
+cargo test -p ultty -- test_name
+cargo test -p ulttui -- test_name
+
+# Snapshot review (after changing widget rendering)
+cargo insta review
+
+# Benchmarks
+cargo bench -p ultty
+
+# Run
+cargo run -p ultty                    # Terminal emulator
+cargo run -p counter-app              # Example app
 ```
 
-## Coding Standards
+**CI** (`.github/workflows/ci.yml`): check, test, clippy (`-D warnings`), fmt (`--check`), security audit, coverage (tarpaulin), benchmarks. Tests on Linux, macOS, Windows. **RUSTFLAGS=-Dwarnings** — all warnings are errors.
 
-- **Error handling**: Use `thiserror` for library errors, `anyhow` in binaries/examples
-- **Logging**: Use `tracing` crate, not `println!` or `log`
-- **Unsafe**: Avoid; if required, document why and add `// SAFETY:` comment
-- **Tests**: Unit tests in same file, integration tests in `tests/` directory
-- **Docs**: All public items must have doc comments
+## Architecture
 
-## Current Status
+Apps built with `ulttui` auto-detect environment:
+- **Inside Ultty**: Native binary protocol over Unix socket → terminal-side layout (Taffy) → GPU rendering (wgpu)
+- **Any other terminal**: ANSI fallback via ratatui → character-cell rendering
 
-- [x] Protocol spec drafted
-- [x] Protocol implementation (encode/decode)
-- [x] Terminal: VT100 parser
-- [x] Terminal: GPU renderer
-- [x] Terminal: Native protocol handler
-  - [x] NativeSession with scene tree + layout engine
-  - [x] ProtocolServer (Unix socket listener)
-  - [x] Event forwarding (keyboard, resize)
-  - [x] Content rendering (Text, RichText, Widgets)
-- [x] Framework: NativeBackend
-  - [x] Socket connection + handshake
-  - [x] View reconciliation
-  - [x] Event conversion
-- [x] Framework: Component system
-  - [x] View trait with native rendering support
-  - [x] Text, RichText, TextInput widgets
-  - [x] Button, List, ScrollView widgets
-  - [x] Column, Row, Stack containers
-  - [x] Checkbox, Toggle, Select, Table, Tabs, Modal, Image widgets
-  - [x] ProgressBar, Spinner, Divider, Badge utility widgets
-- [x] Framework: Elm architecture (Cmd/Sub side effects)
-- [x] Framework: Theme system (dark/light presets, thread-local)
-- [x] Framework: Focus management (ID-based, Tab/Shift+Tab navigation)
-- [x] Framework: Semantic event dispatch (focused_id on KeyEvent)
-- [x] Framework: Native protocol content for all widgets
-- [x] Framework: ANSI fallback (via ratatui)
-- [x] Framework: Snapshot tests (25 tests covering all widget types)
-- [x] Framework: Integration tests (MockBackend, headless event loop)
-- [x] Framework: E2E test with ulttyctl automation
-- [x] Examples
-  - [x] hello-native (raw protocol demo)
-  - [x] counter-app (framework counter app with focused_id events)
-  - [x] todo-app (framework todo list app)
-  - [x] dashboard (multi-panel with live updates)
-  - [x] form-app (form with validation)
-  - [x] chat (chat interface)
-   - [x] async-fetch (Cmd::spawn + Spinner + Badge demo)
-   - [x] porygon-tui (Porygon AI agent interface: chat, approval modal, status bar)
-- [x] Terminal Features
-  - [x] Scrollback search (Ctrl+Shift+F)
-  - [x] Split panes (Ctrl+Shift+D/E)
-  - [x] Configurable keybindings (TOML config)
-  - [x] App compatibility tests (htop, nvim, vim, nano, top, tmux, less, claude, opencode)
-  - [x] Property-based tests for parser robustness
-- [x] CLI Automation (ulttyctl)
-  - [x] Unix socket control server
-  - [x] Input injection (send-text, send-key, send-raw)
-  - [x] Tab management (new-tab, switch-tab, close-tab, tabs)
-  - [x] State queries (info, text, selection)
-  - [x] Search with regex support
-  - [x] Wait-for pattern with regex and timeout
-  - [x] Screenshot capture (file or bytes)
-  - [x] Batch command execution
-  - [x] JSON output mode
-   - [x] Token-based authentication
-- [x] Protocol Extensions (Agentic UX)
-  - [x] SetRegionMetadata (tag 0x0014): pane-level key-value metadata
-  - [x] AgentStatusUpdate control message: phase, model, cost pressure, context quality
-  - [x] Region metadata field for runtime pane state
+**Elm architecture**: `Application` trait with `update()` → `view()` → `on_event()`. Side effects via `Cmd::spawn()` (async) and `Sub` (subscriptions).
 
+**Retained scene graph**: Terminal owns a region tree. Apps send diffs (`CreateRegion`, `SetContent`, `DeleteRegion`). Atomic `BeginFrame`/`EndFrame` prevents tearing.
 
-## Dependencies Policy
+## Code Style
 
-- Minimize dependencies
-- Prefer `no_std` compatible crates where possible
-- Audit new dependencies for security
-- Pin versions in workspace
+### Imports
 
-## Performance Targets
-
-| Metric | Target | Measured | Margin |
-|--------|--------|----------|--------|
-| Layout recompute | < 1ms | 27µs | 37x |
-| Frame render | < 5ms | 290µs | 17x |
-| Input latency | < 10ms | ~0.3ms | 33x |
-| Memory (terminal) | < 50MB | ~18MB | 2.8x |
-| Memory (framework) | < 10MB | TBD | - |
-
-## CLI Automation (ulttyctl)
-
-Control ultty from the command line via Unix socket:
-
-```bash
-# Test connection
-ulttyctl ping
-
-# Send input
-ulttyctl send-text "ls -la"
-ulttyctl send-key enter
-ulttyctl send-key c ctrl  # Ctrl+C
-
-# Tab management
-ulttyctl new-tab htop
-ulttyctl tabs
-ulttyctl switch-tab 2
-ulttyctl close-tab
-
-# Query state
-ulttyctl info              # Terminal size, cursor, tab count
-ulttyctl text              # Visible text
-ulttyctl text --scrollback # Include scrollback
-
-# Search (supports regex)
-ulttyctl search "error"
-ulttyctl search --regex "error|warning"
-
-# Wait for pattern (useful for automation)
-ulttyctl wait-for "$ " --timeout 5000
-ulttyctl wait-for --regex "\\$\\s*$" --timeout 5000
-
-# Screenshot
-ulttyctl screenshot /tmp/screen.png
-ulttyctl screenshot  # Auto-saves with timestamp to ~/Pictures/Screenshots/
-
-# Batch commands (atomic execution)
-ulttyctl --json batch '[{"type":"send_text","text":"ls"},{"type":"send_key","key":"Enter"}]'
-
-# JSON output for scripting
-ulttyctl --json info
-ulttyctl --json tabs
-```
-
-**Socket location**: `$XDG_RUNTIME_DIR/ultty-ctl.sock`
-
-## AI Agent Testing with ulttyctl
-
-When testing ultty from an AI agent (like Claude Code), use `ulttyctl` instead of tmux for reliable automation.
-
-### Setup
-
-1. Start ultty in a tmux session (for persistence):
-```bash
-tmux new-session -d -s ultty-test
-tmux send-keys -t ultty-test "ULTTY_PTY_LOG=/tmp/pty.bin ./target/release/ultty" Enter
-```
-
-2. Verify connection:
-```bash
-./target/release/ulttyctl ping  # Should return "PONG"
-```
-
-### Common Workflow
-
-```bash
-# Check terminal state
-./target/release/ulttyctl info
-# Output: 88x35 tab:1/1 cursor:(0,1) focused:true
-
-# Send a command
-./target/release/ulttyctl send-text "claude"
-./target/release/ulttyctl send-key enter
-
-# Wait for app to load
-sleep 5
-
-# Get visible text (for verification)
-./target/release/ulttyctl text
-
-# Take screenshot (for visual debugging)
-./target/release/ulttyctl screenshot /tmp/screenshot.png
-
-# Send keyboard shortcuts
-./target/release/ulttyctl send-key q          # Press 'q'
-./target/release/ulttyctl send-key c ctrl     # Ctrl+C
-./target/release/ulttyctl send-key escape     # Escape
-```
-
-### PTY Capture for Debugging
-
-Enable PTY logging to capture raw terminal data:
-```bash
-ULTTY_PTY_LOG=/tmp/pty.bin ./target/release/ultty
-```
-
-Analyze the capture:
-```bash
-xxd /tmp/pty.bin | head -50           # View hex dump
-strings /tmp/pty.bin | grep "error"   # Search for text
-```
-
-### Key Differences from tmux
-
-| tmux | ulttyctl |
-|------|----------|
-| `tmux send-keys` may not work with GPU terminal | `ulttyctl send-text/send-key` works reliably |
-| `tmux capture-pane` captures tmux's view | `ulttyctl text` captures ultty's actual buffer |
-| No screenshot support | `ulttyctl screenshot` captures GPU-rendered output |
-
-### Native App Testing Protocol (MANDATORY)
-
-Native protocol apps (ulttui apps) receive input through the protocol socket, not the PTY. When testing these apps with ulttyctl, follow this protocol exactly to avoid sending input to the wrong process.
-
-#### Start
-
-```bash
-# 1. Kill existing ultty session
-tmux kill-session -t ultty-run 2>/dev/null
-
-# 2. Start ultty fresh
-tmux new-session -d -s ultty-run "./target/release/ultty"
-sleep 2
-
-# 3. Verify ultty is running
-./target/release/ulttyctl ping   # Must return PONG
-
-# 4. Launch the native app
-./target/release/ulttyctl send-text "./target/release/porygon-tui"
-./target/release/ulttyctl send-key enter
-sleep 3
-
-# 5. VERIFY the app is running before sending any more input
-./target/release/ulttyctl screenshot /tmp/verify-launch.png
-# Visually confirm the app rendered, not a shell prompt
-```
-
-#### Restart (after Ctrl+C or crash)
-
-```bash
-# 1. ALWAYS verify what's on screen first
-./target/release/ulttyctl text | head -3
-
-# 2. If shell prompt visible: app is dead, relaunch
-./target/release/ulttyctl send-text "./target/release/porygon-tui"
-./target/release/ulttyctl send-key enter
-sleep 3
-
-# 3. If app is still running: proceed
-# 4. NEVER send input without verifying the target process
-```
-
-#### Why This Matters
-
-`ulttyctl send-key` dispatches to the focused terminal tab. If the native app exited, input goes to the PTY shell instead — `send-key h` types 'h' in bash, not the app. You'll waste time debugging "why events don't arrive" when the app isn't running.
-
-**Rule: Always screenshot or check text before and after launching a native app.**
-
-## Testing Infrastructure
-
-### Test Layers
-
-| Layer | Type | Framework |
-|-------|------|-----------|
-| Unit | Inline `#[cfg(test)]` | std |
-| Property | Parser robustness | proptest |
-| Reference | Data-driven ANSI tests | Custom |
-| Snapshot | Widget rendering | insta |
-| Integration | App compatibility | TestTerminal |
-| Widget | Ratatui rendering | TestBackend |
-
-### TestTerminal Helper
+Group in order, separated by blank lines: (1) std, (2) external crates, (3) internal crates, (4) crate-local.
 
 ```rust
-use ultty::testing::TestTerminal;
+use ratatui::layout::Rect;
+use ratatui::text::Line;
 
-let mut term = TestTerminal::with_size(80, 24)?;
-term.send("echo hello\r")?;
-term.wait_until_stable(Duration::from_millis(200), Duration::from_secs(5))?;
-
-// Fluent assertions
-term.verify()
-    .assert_contains("hello")
-    .assert_main_screen()
-    .assert_cursor_at(0, 1);
-
-// Snapshot comparison
-let snapshot = term.snapshot();
-assert!(snapshot.has_colors());
+use super::View;
+use crate::theme::Theme;
+use ultty_protocol::vim::{VimAction, VimMode};
 ```
 
-### Running Tests
+Prefer explicit imports over globs. Preludes exist in `ulttui::prelude` for convenience re-exports.
 
-```bash
-cargo test --workspace           # All tests
-cargo test -p ultty              # Terminal tests only
-cargo test -p ulttui             # Framework tests only
-cargo insta review               # Review snapshot changes
+### Error Handling
+
+- **Library crates** (`ultty-protocol`, `ulttui`): `thiserror` with `#[derive(Debug, Error)]` enums. Define crate-local `Result<T>` alias.
+- **Binaries/examples**: `anyhow::Result`, `?` operator throughout.
+- Never `unwrap()` in library code (OK in tests). Never suppress errors with empty catch blocks.
+
+```rust
+// Library pattern (crates/ultty-protocol/src/error.rs)
+#[derive(Debug, Error)]
+pub enum ProtocolError {
+    #[error("invalid magic bytes: expected 0x5554, got {0:#06x}")]
+    InvalidMagic(u16),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+pub type Result<T> = std::result::Result<T, ProtocolError>;
 ```
+
+### Naming
+
+- **Modules**: `snake_case` (`event_loop`, `glyph_cache`)
+- **Types/Traits**: `PascalCase` (`ProtocolError`, `TextContent`)
+- **Functions**: `snake_case` (`render_ansi`, `encode_to_bytes`)
+- **Constants**: `SCREAMING_SNAKE_CASE` (`TRANSITION_ALL`, `EVENT_KEY`)
+- **Builders**: Fluent methods returning `Self` (`Text::new("hi").id("label")`)
+
+### Documentation
+
+- All public items: `///` doc comments. Module-level: `//!` at top of file.
+- Error enum variants: doc comment explaining when each occurs.
+- Key APIs: include `## Example` section.
+
+### Logging & Safety
+
+- `tracing` crate only. Never `println!` or `log` in non-test code.
+- No `unsafe`. If unavoidable, add `// SAFETY:` comment.
+
+### Formatting
+
+Standard `rustfmt` defaults (no config file). `rust-analyzer.toml` sets clippy as check command.
+
+## Testing
+
+- **Unit**: Inline `#[cfg(test)] mod tests { ... }` in same file
+- **Integration**: `tests/` directory at crate or workspace level
+- **Snapshot**: `insta` for widget rendering golden files → `cargo insta review`
+- **Property**: `proptest` for codec roundtrips
+- **Names**: `test_<thing>_<scenario>` (e.g., `test_parse_empty_input`)
+- **Helpers**: `ultty::testing::TestTerminal` (headless terminal), `MockBackend` (framework, `test-utils` feature)
+
+## Key Dependencies
+
+| Crate | Purpose |
+|-------|---------|
+| `wgpu` / `winit` | GPU rendering, window management |
+| `taffy` | Flexbox/grid layout engine |
+| `ratatui` / `crossterm` | ANSI fallback rendering |
+| `tokio` | Async runtime |
+| `thiserror` / `anyhow` | Error handling (library / binary) |
+| `tracing` | Structured logging |
+| `insta` / `proptest` | Snapshot / property testing |
+
+**Policy**: Minimize deps. Prefer `no_std`-compatible. Pin versions in workspace `Cargo.toml`.
+
+## Layout Pitfalls
+
+- `AlignItems::Start` in Row = children keep natural height. Use `Stretch` for fill.
+- Content area = region size minus padding AND border.
+- ScrollView defaults: `flex_grow: 1.0`, `overflow_y: Scroll`, `flex_direction: Column`.
+- Unicode block chars (▁▂▃▄▅▆▇█) render poorly in GPU — use ASCII alternatives.
+
+## Widgets
+
+All implement `View` with `content()` (native) and `render_ansi()` (fallback). Interactive widgets support `.id()` for focus. `Tab`/`Shift+Tab` cycles focus.
+
+**Display**: Text, RichText, Image, ProgressBar, Spinner, Divider, Badge
+**Interactive**: Button, TextInput, Checkbox, Toggle, Select
+**Data**: List, Table, Tabs
+**Containers**: Column, Row, Stack, ScrollView, Modal

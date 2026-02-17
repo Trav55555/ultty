@@ -95,7 +95,9 @@ impl CopyMode {
         if self.cursor_row < self.scroll_offset {
             self.scroll_offset = self.cursor_row;
         } else if self.cursor_row >= self.scroll_offset + viewport_rows {
-            self.scroll_offset = self.cursor_row.saturating_sub(viewport_rows.saturating_sub(1));
+            self.scroll_offset = self
+                .cursor_row
+                .saturating_sub(viewport_rows.saturating_sub(1));
         }
         // Clamp selection anchor if set
         if let Some((ref mut row, ref mut col)) = self.selection_anchor {
@@ -1009,7 +1011,13 @@ mod tests {
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
         let sel = m.selection().unwrap();
-        assert_eq!(sel, Selection::Line { start_row: 76, end_row: 78 });
+        assert_eq!(
+            sel,
+            Selection::Line {
+                start_row: 76,
+                end_row: 78
+            }
+        );
     }
 
     // ---------------------------------------------------------------
@@ -1137,7 +1145,10 @@ mod tests {
         m.handle_key(&Key::Char('v'), Modifiers::NONE);
         m.handle_key(&Key::Char('l'), Modifiers::NONE);
         let r = m.handle_key(&Key::Enter, Modifiers::NONE);
-        assert!(matches!(r, CopyModeResult::CopyAndExit(Some(Selection::Char { .. }))));
+        assert!(matches!(
+            r,
+            CopyModeResult::CopyAndExit(Some(Selection::Char { .. }))
+        ));
         assert!(!m.is_active());
     }
 
@@ -1161,7 +1172,10 @@ mod tests {
         m.handle_key(&Key::Char('l'), Modifiers::NONE);
         m.handle_key(&Key::Char('l'), Modifiers::NONE);
         let r = m.handle_key(&Key::Char('y'), Modifiers::NONE);
-        assert!(matches!(r, CopyModeResult::Copy(Some(Selection::Char { .. }))));
+        assert!(matches!(
+            r,
+            CopyModeResult::Copy(Some(Selection::Char { .. }))
+        ));
         assert_eq!(m.vim_mode(), VimMode::Normal);
         assert!(m.selection().is_none());
         assert!(m.is_active()); // does NOT exit copy mode
@@ -1173,7 +1187,10 @@ mod tests {
         m.handle_key(&Key::Char('V'), Modifiers::NONE);
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
         let r = m.handle_key(&Key::Char('y'), Modifiers::NONE);
-        assert!(matches!(r, CopyModeResult::Copy(Some(Selection::Line { .. }))));
+        assert!(matches!(
+            r,
+            CopyModeResult::Copy(Some(Selection::Line { .. }))
+        ));
     }
 
     #[test]
@@ -1183,7 +1200,10 @@ mod tests {
         m.handle_key(&Key::Char('l'), Modifiers::NONE);
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
         let r = m.handle_key(&Key::Char('y'), Modifiers::NONE);
-        assert!(matches!(r, CopyModeResult::Copy(Some(Selection::Block { .. }))));
+        assert!(matches!(
+            r,
+            CopyModeResult::Copy(Some(Selection::Block { .. }))
+        ));
     }
 
     // ---------------------------------------------------------------
@@ -1511,10 +1531,7 @@ mod tests {
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
         let r = m.handle_key(&Key::Enter, Modifiers::NONE);
         match r {
-            CopyModeResult::CopyAndExit(Some(Selection::Line {
-                start_row,
-                end_row,
-            })) => {
+            CopyModeResult::CopyAndExit(Some(Selection::Line { start_row, end_row })) => {
                 assert_eq!(start_row, 76);
                 assert_eq!(end_row, 78);
             }

@@ -3,7 +3,9 @@
 mod badge;
 mod button;
 mod checkbox;
+mod collapsible;
 mod container;
+mod diff;
 mod divider;
 mod dock;
 mod image;
@@ -20,12 +22,15 @@ mod table;
 mod tabs;
 mod text;
 mod toggle;
+mod tree;
 mod typography;
 
 pub use badge::{Badge, BadgeVariant};
 pub use button::Button;
 pub use checkbox::Checkbox;
+pub use collapsible::Collapsible;
 pub use container::{Column, Row, Stack};
+pub use diff::{parse_unified_diff, DiffKind, DiffLine, DiffMode, DiffView};
 pub use divider::Divider;
 pub use dock::DockLayout;
 pub use image::Image;
@@ -42,12 +47,14 @@ pub use table::Table;
 pub use tabs::Tabs;
 pub use text::{RichText, Text, TextInput};
 pub use toggle::Toggle;
+pub use tree::{Tree, TreeNode};
 pub use typography::{Accent, Body, Muted, Title};
 
 use crate::event::{Event, KeyEvent};
 use crate::focus::FocusManager;
 use ratatui::layout::Rect;
 use ratatui::Frame;
+use ultty_protocol::{AppMessage, Constraints, Content, RegionId};
 
 pub(crate) fn register_and_check_focus(widget_id: Option<&str>) -> bool {
     if let Some(id) = widget_id {
@@ -56,6 +63,51 @@ pub(crate) fn register_and_check_focus(widget_id: Option<&str>) -> bool {
     } else {
         false
     }
+}
+
+pub(crate) fn render_view_to_native(
+    child: &dyn View,
+    send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+    parent: RegionId,
+    next_id: &mut u32,
+    constraint_overrides: Option<Constraints>,
+    include_scroll_offset: bool,
+) -> anyhow::Result<RegionId> {
+    let region_id = RegionId::new(*next_id);
+    *next_id += 1;
+
+    send_message(&AppMessage::CreateRegion {
+        id: region_id,
+        parent,
+        insert_index: -1,
+        constraints: constraint_overrides.unwrap_or_else(|| child.constraints()),
+        style: child.style(),
+    })?;
+
+    let content = child.content();
+    if content != Content::None {
+        send_message(&AppMessage::SetContent {
+            id: region_id,
+            content,
+        })?;
+    }
+
+    if include_scroll_offset {
+        if let Some((sx, sy)) = child.scroll_offset() {
+            send_message(&AppMessage::Scroll {
+                id: region_id,
+                x: sx,
+                y: sy,
+                animate: false,
+            })?;
+        }
+    }
+
+    for i in 0..child.children_count() {
+        child.render_child_native(i, send_message, region_id, next_id)?;
+    }
+
+    Ok(region_id)
 }
 
 /// Trait for renderable views.

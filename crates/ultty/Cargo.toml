@@ -58,7 +58,7 @@ regex = "1.10"
 open = "5.0"
 
 # Unicode
-unicode-width = "0.1"
+unicode-width = { workspace = true }
 
 # Encoding
 base64 = "0.21"

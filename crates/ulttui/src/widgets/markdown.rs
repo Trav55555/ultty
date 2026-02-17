@@ -11,9 +11,13 @@ use ultty_protocol::{
     Display, NamedColor, RegionId, RichText, Style, TextContent,
 };
 
+const STREAMING_CURSOR: &str = "▊";
+
 #[derive(Debug, Clone)]
 pub struct MarkdownView {
+    source: String,
     blocks: Vec<Block>,
+    streaming: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +91,39 @@ impl MarkdownView {
     pub fn new(source: impl Into<String>) -> Self {
         let source = source.into();
         let blocks = Self::parse_blocks(&source);
-        Self { blocks }
+        Self {
+            source,
+            blocks,
+            streaming: false,
+        }
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn append_chunk(&mut self, chunk: impl AsRef<str>) {
+        let chunk = chunk.as_ref();
+        if chunk.is_empty() {
+            return;
+        }
+
+        self.source.push_str(chunk);
+        self.blocks = Self::parse_blocks(&self.source);
+    }
+
+    pub fn with_appended(mut self, chunk: impl AsRef<str>) -> Self {
+        self.append_chunk(chunk);
+        self
+    }
+
+    /// Enable streaming mode.
+    ///
+    /// When `true`, a blinking cursor (▊) is appended to the rendered output
+    /// to indicate content is still arriving. Toggle off to finalize.
+    pub fn streaming(mut self, streaming: bool) -> Self {
+        self.streaming = streaming;
+        self
     }
 
     fn parse_blocks(source: &str) -> Vec<Block> {
@@ -336,6 +372,9 @@ impl MarkdownView {
 
     fn line_count(&self) -> usize {
         let total: usize = self.blocks.iter().map(Block::line_count).sum();
+        if self.streaming && self.blocks.is_empty() {
+            return 1;
+        }
         total.max(1)
     }
 }
@@ -378,7 +417,11 @@ impl View for MarkdownView {
     }
 
     fn children_count(&self) -> usize {
-        self.blocks.len()
+        if self.streaming && self.blocks.is_empty() {
+            1
+        } else {
+            self.blocks.len()
+        }
     }
 
     fn render_child_native(
@@ -389,6 +432,32 @@ impl View for MarkdownView {
         next_id: &mut u32,
     ) -> anyhow::Result<Option<RegionId>> {
         let blocks = &self.blocks;
+        let is_last = index + 1 == self.children_count();
+        let append_cursor = self.streaming && is_last;
+
+        if blocks.is_empty() && self.streaming && index == 0 {
+            let region_id = RegionId::new(*next_id);
+            *next_id += 1;
+            send_message(&AppMessage::CreateRegion {
+                id: region_id,
+                parent,
+                insert_index: -1,
+                constraints: Constraints {
+                    display: Display::Flex,
+                    width: Dimension::Percent(100.0),
+                    height: Dimension::Cells(1.0),
+                    flex_shrink: 1.0,
+                    ..Default::default()
+                },
+                style: Style::new(),
+            })?;
+            send_message(&AppMessage::SetContent {
+                id: region_id,
+                content: Content::Text(TextContent::new(STREAMING_CURSOR)),
+            })?;
+            return Ok(Some(region_id));
+        }
+
         let Some(block) = blocks.get(index) else {
             return Ok(None);
         };
@@ -475,6 +544,12 @@ impl View for MarkdownView {
             }
         };
 
+        let content = if append_cursor {
+            append_cursor_to_content(content)
+        } else {
+            content
+        };
+
         send_message(&AppMessage::SetContent {
             id: region_id,
             content,
@@ -492,14 +567,14 @@ impl View for MarkdownView {
                 Block::Heading { level, spans } => {
                     let heading_style = Style::new().bold();
                     lines.extend(spans_to_lines(
-                        &spans,
+                        spans,
                         heading_style,
                         *level == HeadingLevel::H1,
                         None,
                     ));
                 }
                 Block::Paragraph { spans } => {
-                    lines.extend(spans_to_lines(&spans, Style::new(), false, None));
+                    lines.extend(spans_to_lines(spans, Style::new(), false, None));
                 }
                 Block::CodeBlock { text } => {
                     let mut dim_style = Style::new();
@@ -521,7 +596,7 @@ impl View for MarkdownView {
                     spans,
                 } => {
                     lines.extend(spans_to_lines(
-                        &spans,
+                        spans,
                         Style::new(),
                         false,
                         Some(format!("{}{}", " ".repeat(*indent), prefix)),
@@ -552,7 +627,30 @@ impl View for MarkdownView {
             lines.push(Line::from(""));
         }
 
+        if self.streaming {
+            if let Some(last) = lines.last_mut() {
+                last.spans.push(Span::raw(STREAMING_CURSOR));
+            }
+        }
+
         frame.render_widget(Paragraph::new(lines), area);
+    }
+}
+
+fn append_cursor_to_content(content: Content) -> Content {
+    match content {
+        Content::Text(mut tc) => {
+            tc.text.push_str(STREAMING_CURSOR);
+            Content::Text(tc)
+        }
+        Content::RichText(mut rt) => {
+            rt.spans.push(ultty_protocol::Span {
+                text: STREAMING_CURSOR.to_string(),
+                style: Style::new(),
+            });
+            Content::RichText(rt)
+        }
+        other => other,
     }
 }
 
@@ -681,6 +779,8 @@ fn convert_color(color: &Color) -> ratatui::style::Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     fn collect_native_messages(view: &MarkdownView, index: usize) -> Vec<AppMessage> {
         let mut messages = Vec::new();
@@ -693,6 +793,23 @@ mod tests {
             .render_child_native(index, &mut send, RegionId::new(0), &mut next_id)
             .expect("render child should succeed");
         messages
+    }
+
+    fn render_ansi_text(view: &MarkdownView, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                view.render_ansi(frame, frame.area());
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
     }
 
     #[test]
@@ -842,5 +959,90 @@ mod tests {
         let view = MarkdownView::new("# Title\n\nParagraph\n\n---\n\n> quote\n\n```\ncode\n```");
         assert_eq!(view.children_count(), 5);
         assert_eq!(view.constraints().height, Dimension::Cells(5.0));
+    }
+
+    #[test]
+    fn streaming_empty_renders_cursor() {
+        let view = MarkdownView::new("").streaming(true);
+        assert_eq!(view.children_count(), 1);
+
+        let messages = collect_native_messages(&view, 0);
+        match &messages[1] {
+            AppMessage::SetContent {
+                content: Content::Text(tc),
+                ..
+            } => assert_eq!(tc.text, "▊"),
+            _ => panic!("expected text content with cursor"),
+        }
+    }
+
+    #[test]
+    fn streaming_appends_cursor_to_last_block() {
+        let view = MarkdownView::new("hello").streaming(true);
+        assert_eq!(view.children_count(), 1);
+
+        let messages = collect_native_messages(&view, 0);
+        match &messages[1] {
+            AppMessage::SetContent {
+                content: Content::RichText(rich),
+                ..
+            } => {
+                let last = rich.spans.last().expect("should have spans");
+                assert_eq!(last.text, "▊");
+            }
+            _ => panic!("expected rich text with cursor"),
+        }
+    }
+
+    #[test]
+    fn streaming_false_has_no_cursor() {
+        let view = MarkdownView::new("hello").streaming(false);
+        let messages = collect_native_messages(&view, 0);
+        match &messages[1] {
+            AppMessage::SetContent {
+                content: Content::RichText(rich),
+                ..
+            } => {
+                assert!(rich.spans.iter().all(|s| s.text != "▊"));
+            }
+            _ => panic!("expected rich text without cursor"),
+        }
+    }
+
+    #[test]
+    fn append_chunk_updates_source_and_blocks() {
+        let mut view = MarkdownView::new("hello");
+        view.append_chunk(" world");
+
+        assert_eq!(view.source(), "hello world");
+        assert_eq!(view.children_count(), 1);
+
+        let messages = collect_native_messages(&view, 0);
+        match &messages[1] {
+            AppMessage::SetContent {
+                content: Content::RichText(rich),
+                ..
+            } => {
+                assert_eq!(rich.spans[0].text, "hello world");
+            }
+            _ => panic!("expected rich text content"),
+        }
+    }
+
+    #[test]
+    fn with_appended_returns_updated_view() {
+        let view = MarkdownView::new("first").with_appended(" second");
+
+        assert_eq!(view.source(), "first second");
+        assert_eq!(view.children_count(), 1);
+    }
+
+    #[test]
+    fn append_chunk_updates_ansi_fallback_render() {
+        let mut view = MarkdownView::new("hello");
+        view.append_chunk(" world");
+
+        let ansi = render_ansi_text(&view, 40, 4);
+        assert!(ansi.contains("hello world"));
     }
 }

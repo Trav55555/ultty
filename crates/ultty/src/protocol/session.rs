@@ -10,9 +10,11 @@ use std::os::unix::net::UnixStream;
 use bytes::{Buf, BytesMut};
 use tracing::{debug, error, info, warn};
 use ultty_protocol::{
-    AppMessage, ComputedRegionLayout, Constraints, Content, Decode, Dimension, Display, Encode,
-    FlexDirection, FrameId, LayoutTrigger, RegionId, Style, TerminalMessage, FRAME_MAGIC,
-    PROTOCOL_VERSION,
+    negotiate_capabilities, negotiate_protocol_version, AppMessage, ComputedRegionLayout,
+    Constraints, Content, Decode, Dimension, Display, Encode, FlexDirection, FrameId,
+    LayoutTrigger, RegionId, Style, TerminalMessage, CAP_APPEND_CONTENT, CAP_LAYOUT_FLEXBOX,
+    CAP_REGION_METADATA, CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, FRAME_MAGIC,
+    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
 use crate::scene::layout::LayoutEngine;
@@ -20,7 +22,11 @@ use crate::scene::region::{ComputedLayout, Region};
 use crate::scene::tree::SceneTree;
 
 /// Capabilities supported by this terminal.
-const TERMINAL_CAPABILITIES: u32 = 0x0001 | 0x0010; // LAYOUT_FLEXBOX | WIDGET_SCROLL
+const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
+    | CAP_WIDGET_SCROLL
+    | CAP_APPEND_CONTENT
+    | CAP_STREAM_LIFECYCLE
+    | CAP_REGION_METADATA;
 
 /// Maximum read buffer size (16 MB). Sessions exceeding this are disconnected.
 const MAX_READ_BUF: usize = 16 * 1024 * 1024;
@@ -53,6 +59,8 @@ pub struct NativeSession {
     render_dirty: bool,
     /// Negotiated capabilities.
     capabilities: u32,
+    /// Negotiated protocol version.
+    protocol_version: u16,
     /// Event subscriptions: region_id -> event mask.
     subscriptions: HashMap<RegionId, u32>,
     /// Currently focused region (if any).
@@ -61,6 +69,8 @@ pub struct NativeSession {
     scroll_offsets: HashMap<RegionId, (f32, f32)>,
     /// Animated scroll targets: region_id -> (target_x, target_y).
     scroll_targets: HashMap<RegionId, (f32, f32)>,
+    /// Active content streams: region_id -> stream_id.
+    active_streams: HashMap<RegionId, u32>,
     /// Pending clipboard get request.
     pending_clipboard_get: bool,
     /// Pending clipboard set request.
@@ -135,10 +145,12 @@ impl NativeSession {
             constraints_dirty: false,
             render_dirty: true,
             capabilities: 0,
+            protocol_version: PROTOCOL_VERSION,
             subscriptions: HashMap::new(),
             focused_region: None,
             scroll_offsets: HashMap::new(),
             scroll_targets: HashMap::new(),
+            active_streams: HashMap::new(),
             pending_clipboard_get: false,
             pending_clipboard_set: None,
             style_animations: HashMap::new(),
@@ -384,7 +396,46 @@ impl NativeSession {
             }
 
             AppMessage::SetRegionMetadata { id, metadata } => {
-                self.handle_set_region_metadata(id, metadata);
+                if self.has_capability(CAP_REGION_METADATA) {
+                    self.handle_set_region_metadata(id, metadata);
+                } else {
+                    self.queue_error_message(400, "set_region_metadata not negotiated".to_string());
+                }
+            }
+
+            AppMessage::AppendContent { id, text } => {
+                if self.has_capability(CAP_APPEND_CONTENT) {
+                    self.handle_append_content(id, text);
+                } else {
+                    self.queue_error_message(400, "append_content not negotiated".to_string());
+                }
+            }
+
+            AppMessage::StreamStart { id, stream_id } => {
+                if self.has_capability(CAP_STREAM_LIFECYCLE) {
+                    debug!("Stream {} started on region {:?}", stream_id, id);
+                    self.active_streams.insert(id, stream_id);
+                } else {
+                    self.queue_error_message(400, "stream_start not negotiated".to_string());
+                }
+            }
+
+            AppMessage::StreamEnd { id, stream_id } => {
+                if self.has_capability(CAP_STREAM_LIFECYCLE) {
+                    debug!("Stream {} ended on region {:?}", stream_id, id);
+                    if let Some(active_id) = self.active_streams.get(&id) {
+                        if *active_id == stream_id {
+                            self.active_streams.remove(&id);
+                        } else {
+                            warn!(
+                                "StreamEnd mismatch for {:?}: active={}, got={}",
+                                id, active_id, stream_id
+                            );
+                        }
+                    }
+                } else {
+                    self.queue_error_message(400, "stream_end not negotiated".to_string());
+                }
             }
 
             AppMessage::DeleteRegion { id } => {
@@ -518,13 +569,23 @@ impl NativeSession {
             self.session_id, version, requested
         );
 
-        // Negotiate capabilities
-        self.capabilities = requested & TERMINAL_CAPABILITIES;
+        let Some(negotiated_version) = negotiate_protocol_version(version, PROTOCOL_VERSION) else {
+            self.queue_error_message(
+                426,
+                format!(
+                    "unsupported protocol version {} (min supported {})",
+                    version, MIN_PROTOCOL_VERSION
+                ),
+            );
+            return Ok(());
+        };
 
-        // Send ServerHello
+        self.protocol_version = negotiated_version;
+        self.capabilities = negotiate_capabilities(requested, TERMINAL_CAPABILITIES);
+
         let hello = TerminalMessage::ServerHello {
-            version: PROTOCOL_VERSION,
-            capabilities: TERMINAL_CAPABILITIES,
+            version: negotiated_version,
+            capabilities: self.capabilities,
         };
         self.send_message(&hello)?;
 
@@ -538,6 +599,10 @@ impl NativeSession {
         self.send_message(&ready)?;
 
         Ok(())
+    }
+
+    fn has_capability(&self, capability: u32) -> bool {
+        self.capabilities & capability != 0
     }
 
     /// Handle CreateRegion.
@@ -634,6 +699,42 @@ impl NativeSession {
             self.render_dirty = true;
         } else {
             warn!("SetContent for unknown region {:?}", id);
+            self.queue_error_message(404, format!("region {} not found", id.0));
+        }
+    }
+
+    /// Handle AppendContent — append text to existing region content.
+    fn handle_append_content(&mut self, id: RegionId, text: String) {
+        if let Some(region) = self.scene.get_mut(id) {
+            match &mut region.content {
+                Content::Text(tc) => {
+                    tc.text.push_str(&text);
+                }
+                Content::Widget(ultty_protocol::WidgetContent::Markdown(md)) => {
+                    md.source.push_str(&text);
+                }
+                Content::None => {
+                    // Initialize as text content
+                    region.content = Content::Text(ultty_protocol::TextContent::new(text));
+                }
+                other => {
+                    warn!(
+                        "AppendContent on non-appendable content type for region {:?}: {:?}",
+                        id,
+                        std::mem::discriminant(other)
+                    );
+                    self.queue_error_message(
+                        400,
+                        format!("cannot append to content type of region {}", id.0),
+                    );
+                    return;
+                }
+            }
+            region.mark_dirty();
+            self.scene_dirty = true;
+            self.render_dirty = true;
+        } else {
+            warn!("AppendContent for unknown region {:?}", id);
             self.queue_error_message(404, format!("region {} not found", id.0));
         }
     }
@@ -947,6 +1048,11 @@ impl NativeSession {
         self.scroll_offsets.get(&id).copied().unwrap_or((0.0, 0.0))
     }
 
+    /// Check if a region is currently streaming content.
+    pub fn is_streaming(&self, region_id: ultty_protocol::RegionId) -> bool {
+        self.active_streams.contains_key(&region_id)
+    }
+
     /// Advance animated scroll positions toward their targets.
     /// Returns `true` if any animations are still active (needs another frame).
     pub fn update_scroll_animations(&mut self) -> bool {
@@ -1232,6 +1338,19 @@ mod tests {
         NativeSession::new(s1, 1).unwrap()
     }
 
+    fn negotiate_all_test_capabilities(session: &mut NativeSession) {
+        session
+            .handle_message(AppMessage::ClientHello {
+                version: PROTOCOL_VERSION,
+                requested_capabilities: CAP_LAYOUT_FLEXBOX
+                    | CAP_WIDGET_SCROLL
+                    | CAP_APPEND_CONTENT
+                    | CAP_STREAM_LIFECYCLE
+                    | CAP_REGION_METADATA,
+            })
+            .unwrap();
+    }
+
     #[test]
     fn hit_test_returns_root_when_empty() {
         let session = make_session();
@@ -1372,6 +1491,215 @@ mod tests {
     }
 
     #[test]
+    fn client_hello_negotiates_version_and_capabilities() {
+        let mut session = make_session();
+
+        session
+            .handle_message(AppMessage::ClientHello {
+                version: PROTOCOL_VERSION + 2,
+                requested_capabilities: CAP_APPEND_CONTENT | CAP_WIDGET_SCROLL,
+            })
+            .unwrap();
+
+        assert_eq!(session.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(session.capabilities, CAP_APPEND_CONTENT | CAP_WIDGET_SCROLL);
+    }
+
+    #[test]
+    fn append_content_requires_negotiated_capability() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        child.content = Content::Text(ultty_protocol::TextContent::new("Hello"));
+        session.scene.insert(child);
+
+        session
+            .handle_message(AppMessage::ClientHello {
+                version: PROTOCOL_VERSION,
+                requested_capabilities: CAP_LAYOUT_FLEXBOX,
+            })
+            .unwrap();
+
+        session
+            .handle_message(AppMessage::AppendContent {
+                id,
+                text: " World".to_string(),
+            })
+            .unwrap();
+
+        let region = session.scene.get(id).unwrap();
+        match &region.content {
+            Content::Text(tc) => assert_eq!(tc.text, "Hello"),
+            other => panic!("Expected Text content, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stream_lifecycle_requires_negotiated_capability() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+
+        session
+            .handle_message(AppMessage::ClientHello {
+                version: PROTOCOL_VERSION,
+                requested_capabilities: CAP_LAYOUT_FLEXBOX,
+            })
+            .unwrap();
+
+        session
+            .handle_message(AppMessage::StreamStart { id, stream_id: 7 })
+            .unwrap();
+        session
+            .handle_message(AppMessage::StreamEnd { id, stream_id: 7 })
+            .unwrap();
+
+        assert!(!session.active_streams.contains_key(&id));
+    }
+
+    #[test]
+    fn append_content_to_text_region() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        child.content = Content::Text(ultty_protocol::TextContent::new("Hello"));
+        session.scene.insert(child);
+        negotiate_all_test_capabilities(&mut session);
+
+        session
+            .handle_message(AppMessage::AppendContent {
+                id,
+                text: " World".to_string(),
+            })
+            .unwrap();
+
+        let region = session.scene.get(id).unwrap();
+        match &region.content {
+            Content::Text(tc) => assert_eq!(tc.text, "Hello World"),
+            other => panic!("Expected Text content, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_content_to_none_initializes_text() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+        negotiate_all_test_capabilities(&mut session);
+
+        session
+            .handle_message(AppMessage::AppendContent {
+                id,
+                text: "First chunk".to_string(),
+            })
+            .unwrap();
+
+        let region = session.scene.get(id).unwrap();
+        match &region.content {
+            Content::Text(tc) => assert_eq!(tc.text, "First chunk"),
+            other => panic!("Expected Text content, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stream_start_end_tracking() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+        negotiate_all_test_capabilities(&mut session);
+
+        // Start stream
+        session
+            .handle_message(AppMessage::StreamStart { id, stream_id: 42 })
+            .unwrap();
+        assert_eq!(session.active_streams.get(&id), Some(&42));
+
+        // End stream
+        session
+            .handle_message(AppMessage::StreamEnd { id, stream_id: 42 })
+            .unwrap();
+        assert_eq!(session.active_streams.get(&id), None);
+    }
+
+    #[test]
+    fn stream_end_mismatch_ignored() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+        negotiate_all_test_capabilities(&mut session);
+
+        session
+            .handle_message(AppMessage::StreamStart { id, stream_id: 42 })
+            .unwrap();
+
+        // End with wrong stream_id — should NOT remove
+        session
+            .handle_message(AppMessage::StreamEnd { id, stream_id: 99 })
+            .unwrap();
+        assert_eq!(session.active_streams.get(&id), Some(&42));
+    }
+
+    #[test]
+    fn test_is_streaming_returns_true_during_stream() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+        negotiate_all_test_capabilities(&mut session);
+
+        session
+            .handle_message(AppMessage::StreamStart { id, stream_id: 42 })
+            .unwrap();
+
+        assert!(session.is_streaming(id));
+    }
+
+    #[test]
+    fn test_is_streaming_returns_false_after_stream_end() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+        negotiate_all_test_capabilities(&mut session);
+
+        session
+            .handle_message(AppMessage::StreamStart { id, stream_id: 42 })
+            .unwrap();
+        session
+            .handle_message(AppMessage::StreamEnd { id, stream_id: 42 })
+            .unwrap();
+
+        assert!(!session.is_streaming(id));
+    }
+
+    #[test]
+    fn test_is_streaming_returns_false_for_unknown_region() {
+        let session = make_session();
+
+        assert!(!session.is_streaming(RegionId::new(9999)));
+    }
+
+    #[test]
     fn session_stores_metadata() {
         let mut session = make_session();
         let id = RegionId::new(1);
@@ -1379,6 +1707,7 @@ mod tests {
         let mut child = Region::new(id);
         child.parent = Some(RegionId::ROOT);
         session.scene.insert(child);
+        negotiate_all_test_capabilities(&mut session);
 
         let metadata = vec![
             ("owner".to_string(), "agent".to_string()),

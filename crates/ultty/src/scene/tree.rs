@@ -401,7 +401,12 @@ mod tests {
         let root = tree.get(RegionId::ROOT).unwrap();
         assert_eq!(
             root.children,
-            vec![RegionId::new(1), RegionId::new(4), RegionId::new(2), RegionId::new(3)]
+            vec![
+                RegionId::new(1),
+                RegionId::new(4),
+                RegionId::new(2),
+                RegionId::new(3)
+            ]
         );
     }
 
@@ -501,7 +506,10 @@ mod tests {
         tree.insert(child);
 
         // Verify initial state
-        assert_eq!(tree.get(RegionId::new(1)).unwrap().children, vec![RegionId::new(3)]);
+        assert_eq!(
+            tree.get(RegionId::new(1)).unwrap().children,
+            vec![RegionId::new(3)]
+        );
         assert!(tree.get(RegionId::new(2)).unwrap().children.is_empty());
 
         // Reparent: remove child then re-insert under p2
@@ -512,8 +520,14 @@ mod tests {
         tree.insert(removed);
 
         assert!(tree.get(RegionId::new(1)).unwrap().children.is_empty());
-        assert_eq!(tree.get(RegionId::new(2)).unwrap().children, vec![RegionId::new(3)]);
-        assert_eq!(tree.get(RegionId::new(3)).unwrap().parent, Some(RegionId::new(2)));
+        assert_eq!(
+            tree.get(RegionId::new(2)).unwrap().children,
+            vec![RegionId::new(3)]
+        );
+        assert_eq!(
+            tree.get(RegionId::new(3)).unwrap().parent,
+            Some(RegionId::new(2))
+        );
     }
 
     #[test]

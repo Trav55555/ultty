@@ -1,7 +1,7 @@
 //! CSI (Control Sequence Introducer) sequence handling.
 
-use super::{Action, Mode, State};
 use super::AnsiParser;
+use super::{Action, Mode, State};
 
 impl AnsiParser {
     /// CSI entry - just entered CSI sequence.
@@ -60,8 +60,12 @@ impl AnsiParser {
             // Digit - accumulate parameter
             b'0'..=b'9' => {
                 let digit = (byte - b'0') as u16;
-                self.current_param =
-                    Some(self.current_param.unwrap_or(0).saturating_mul(10).saturating_add(digit));
+                self.current_param = Some(
+                    self.current_param
+                        .unwrap_or(0)
+                        .saturating_mul(10)
+                        .saturating_add(digit),
+                );
             }
             // Semicolon - end current parameter
             b';' => {
@@ -300,7 +304,7 @@ impl AnsiParser {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Action, Attribute, Mode, AnsiParser};
+    use super::super::{Action, AnsiParser, Attribute, Mode};
 
     /// Feed raw bytes through the parser and collect emitted actions.
     fn parse(input: &[u8]) -> Vec<Action> {
@@ -384,10 +388,7 @@ mod tests {
 
     #[test]
     fn cha_default() {
-        assert_eq!(
-            parse(b"\x1b[G"),
-            vec![Action::CursorHorizontalAbsolute(1)]
-        );
+        assert_eq!(parse(b"\x1b[G"), vec![Action::CursorHorizontalAbsolute(1)]);
     }
 
     #[test]
@@ -535,10 +536,7 @@ mod tests {
 
     #[test]
     fn decset_mouse_sgr() {
-        assert_eq!(
-            parse(b"\x1b[?1006h"),
-            vec![Action::SetMode(Mode::MouseSgr)]
-        );
+        assert_eq!(parse(b"\x1b[?1006h"), vec![Action::SetMode(Mode::MouseSgr)]);
     }
 
     #[test]
@@ -559,18 +557,12 @@ mod tests {
 
     #[test]
     fn decset_auto_wrap() {
-        assert_eq!(
-            parse(b"\x1b[?7h"),
-            vec![Action::SetMode(Mode::AutoWrap)]
-        );
+        assert_eq!(parse(b"\x1b[?7h"), vec![Action::SetMode(Mode::AutoWrap)]);
     }
 
     #[test]
     fn decset_origin_mode() {
-        assert_eq!(
-            parse(b"\x1b[?6h"),
-            vec![Action::SetMode(Mode::OriginMode)]
-        );
+        assert_eq!(parse(b"\x1b[?6h"), vec![Action::SetMode(Mode::OriginMode)]);
     }
 
     #[test]
@@ -615,10 +607,7 @@ mod tests {
 
     #[test]
     fn decset_mouse_x10() {
-        assert_eq!(
-            parse(b"\x1b[?9h"),
-            vec![Action::SetMode(Mode::MouseX10)]
-        );
+        assert_eq!(parse(b"\x1b[?9h"), vec![Action::SetMode(Mode::MouseX10)]);
     }
 
     #[test]
