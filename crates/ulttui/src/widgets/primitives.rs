@@ -312,11 +312,13 @@ impl View for Card {
         next_id: &mut u32,
     ) -> anyhow::Result<Option<RegionId>> {
         if let Some(child) = self.children.get(index) {
-            Ok(Some(render_child_to_native(
+            Ok(Some(render_view_to_native(
                 child.as_ref(),
                 send_message,
                 parent,
                 next_id,
+                None,
+                false,
             )?))
         } else {
             Ok(None)

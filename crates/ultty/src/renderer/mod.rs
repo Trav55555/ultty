@@ -373,6 +373,8 @@ impl Renderer {
             has_animations: false,
             cached_native_bg: None,
             cached_native_text: None,
+            prev_bg_count: (0, 0),
+            prev_text_count: (0, 0),
         })
     }
 
@@ -498,6 +500,8 @@ impl Renderer {
             has_animations: false,
             cached_native_bg: None,
             cached_native_text: None,
+            prev_bg_count: (0, 0),
+            prev_text_count: (0, 0),
         })
     }
 
