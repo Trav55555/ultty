@@ -118,6 +118,18 @@ fn append_clipped_glyphs(
 }
 
 impl Renderer {
+    fn next_capacity(prev: usize, estimate: usize, per_region: usize) -> usize {
+        let baseline = estimate.saturating_mul(per_region);
+        if prev == 0 {
+            return baseline;
+        }
+
+        // Grow smoothly from prior usage but avoid carrying over huge transient spikes forever.
+        let growth_target = prev.saturating_add(prev / 4);
+        let max_retained = baseline.saturating_mul(4);
+        growth_target.min(max_retained)
+    }
+
     /// Render a native protocol session's scene tree (backgrounds, text, widgets, images).
     pub fn render_native_session(
         &mut self,
@@ -131,11 +143,15 @@ impl Renderer {
 
         let scene = session.scene();
         let region_count = scene.iter_depth_first().count();
-        let est = region_count * 4;
-        let mut bg_vertices = Vec::with_capacity(est * 4);
-        let mut bg_indices = Vec::with_capacity(est * 6);
-        let mut text_vertices = Vec::with_capacity(est * 4);
-        let mut text_indices = Vec::with_capacity(est * 6);
+        let est = region_count.saturating_mul(4);
+        let bg_vertex_cap = Self::next_capacity(self.prev_bg_count.0, est, 4);
+        let bg_index_cap = Self::next_capacity(self.prev_bg_count.1, est, 6);
+        let text_vertex_cap = Self::next_capacity(self.prev_text_count.0, est, 4);
+        let text_index_cap = Self::next_capacity(self.prev_text_count.1, est, 6);
+        let mut bg_vertices = Vec::with_capacity(bg_vertex_cap);
+        let mut bg_indices = Vec::with_capacity(bg_index_cap);
+        let mut text_vertices = Vec::with_capacity(text_vertex_cap);
+        let mut text_indices = Vec::with_capacity(text_index_cap);
         let mut deferred_images: Vec<DeferredImageRender> = Vec::new();
 
         // Build a set of matched region IDs for quick lookup
@@ -649,6 +665,9 @@ impl Renderer {
                 }
             }
         }
+
+        self.prev_bg_count = (bg_vertices.len(), bg_indices.len());
+        self.prev_text_count = (text_vertices.len(), text_indices.len());
 
         if !bg_vertices.is_empty() {
             let bg_count = bg_indices.len() as u32;

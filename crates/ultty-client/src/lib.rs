@@ -28,8 +28,9 @@ use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use ultty_protocol::{
-    AppMessage, Constraints, Content, Decode, Encode, FrameId, RegionId, Style, TerminalMessage,
-    FRAME_MAGIC, PROTOCOL_VERSION,
+    negotiate_protocol_version, AppMessage, Constraints, Content, Decode, Encode, FrameId,
+    RegionId, Style, TerminalMessage, CLIENT_DEFAULT_CAPABILITIES, FRAME_MAGIC,
+    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
 /// Errors returned by [`UlttyClient`] operations.
@@ -67,6 +68,7 @@ pub struct UlttyClient {
     root_region: RegionId,
     viewport_width: u16,
     viewport_height: u16,
+    negotiated_capabilities: u32,
     next_region_id: u32,
     frame_id: u32,
 }
@@ -89,6 +91,7 @@ impl UlttyClient {
             root_region: RegionId::ROOT,
             viewport_width: 80,
             viewport_height: 24,
+            negotiated_capabilities: 0,
             next_region_id: 1,
             frame_id: 0,
         };
@@ -115,6 +118,11 @@ impl UlttyClient {
     /// The viewport height in cells.
     pub fn viewport_height(&self) -> u16 {
         self.viewport_height
+    }
+
+    /// Returns whether the negotiated session supports a capability bit.
+    pub fn supports_capability(&self, capability: u32) -> bool {
+        self.negotiated_capabilities & capability != 0
     }
 
     /// Send a raw [`AppMessage`] to the terminal.
@@ -267,15 +275,33 @@ impl UlttyClient {
     fn handshake(&mut self) -> Result<(), Error> {
         self.send(&AppMessage::ClientHello {
             version: PROTOCOL_VERSION,
-            requested_capabilities: 0,
+            requested_capabilities: CLIENT_DEFAULT_CAPABILITIES,
         })?;
 
         loop {
             self.read_available()?;
             while let Some(msg) = self.try_decode()? {
                 match msg {
-                    TerminalMessage::ServerHello { version, .. } => {
-                        tracing::info!("Server version: {}", version);
+                    TerminalMessage::ServerHello {
+                        version,
+                        capabilities,
+                    } => {
+                        let Some(negotiated_version) =
+                            negotiate_protocol_version(PROTOCOL_VERSION, version)
+                        else {
+                            return Err(Error::Protocol(format!(
+                                "unsupported server protocol version {} (min {})",
+                                version, MIN_PROTOCOL_VERSION
+                            )));
+                        };
+                        // Only trust capability bits this client knows and requested.
+                        self.negotiated_capabilities = capabilities & CLIENT_DEFAULT_CAPABILITIES;
+                        tracing::info!(
+                            "Server version: {} (negotiated={}), caps=0x{:04x}",
+                            version,
+                            negotiated_version,
+                            capabilities
+                        );
                     }
                     TerminalMessage::SessionReady {
                         session_id,
