@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ulttui::prelude::*;
 use ulttui::theme::{ButtonTheme, ControlTheme, DesignTokens, InputTheme, SelectionTheme, Theme};
@@ -104,6 +104,18 @@ pub(crate) struct PorygonTui {
     pub(crate) session_id: Option<String>,
     pub(crate) suggestions: Vec<(String, String)>,
     pub(crate) tool_calls: Vec<ToolCall>,
+    pub(crate) stream_started_at: Option<Instant>,
+    pub(crate) first_token_at: Option<Instant>,
+    pub(crate) last_token_at: Option<Instant>,
+    pub(crate) append_latencies_ms: Vec<u64>,
+    pub(crate) last_stream_perf: Option<StreamPerfSummary>,
+    pub(crate) stream_ttft_history_ms: Vec<u64>,
+    pub(crate) append_latency_history_ms: Vec<u64>,
+    pub(crate) cancel_visual_stop_history_ms: Vec<u64>,
+    pub(crate) mcp_server_count: usize,
+    pub(crate) mcp_healthy_count: usize,
+    pub(crate) mcp_last_error: Option<String>,
+    pub(crate) model_last_error: Option<String>,
 }
 
 impl PorygonTui {
@@ -160,6 +172,18 @@ impl PorygonTui {
             session_id: None,
             suggestions: Vec::new(),
             tool_calls: Vec::new(),
+            stream_started_at: None,
+            first_token_at: None,
+            last_token_at: None,
+            append_latencies_ms: Vec::new(),
+            last_stream_perf: None,
+            stream_ttft_history_ms: Vec::new(),
+            append_latency_history_ms: Vec::new(),
+            cancel_visual_stop_history_ms: Vec::new(),
+            mcp_server_count: 0,
+            mcp_healthy_count: 0,
+            mcp_last_error: None,
+            model_last_error: None,
         }
     }
 }
@@ -188,19 +212,27 @@ enum Msg {
     StreamComplete,
     StreamError(String),
     AbortStream,
+    StreamAbortAck(Result<(), String>),
     SessionsFetched(Vec<SessionInfo>),
     SessionResumed(Vec<ChatMessage>),
     SessionSaved,
+    SessionForked(String),
+    SessionExported(String),
     SessionError(String),
     MemoryStored,
     MemoryRecalled(Vec<MemoryResult>),
+    MemoryBrowsed(Vec<MemoryResult>),
     MemoryError(String),
     ToolsFetched(Vec<ToolInfo>),
     ToolDetailsFetched(ToolInfo),
     McpStatusFetched(Vec<McpServerInfo>),
     McpToolsFetched(Vec<ToolInfo>),
+    McpError(String),
     ToolsError(String),
-    FileTreeFetched(FileTreeEntry),
+    FileTreeFetched {
+        path: Option<String>,
+        tree: FileTreeEntry,
+    },
     FileTreeError(String),
     ProjectInfoFetched(ProjectInfo),
     ProjectSwitched,
@@ -232,6 +264,8 @@ enum Msg {
     ValidationResultFetched(ValidationResult),
     GymResultFetched(ValidationResult),
     ValidationError(String),
+    VirtualScrollBenchReady(String),
+    DiffBenchReady(String),
     ExitRequested,
 }
 

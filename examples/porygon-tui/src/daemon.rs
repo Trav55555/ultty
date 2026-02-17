@@ -1,8 +1,9 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use ulttui::prelude::*;
 use ulttui::toast::Toast;
+use ulttui::widgets::{parse_unified_diff, DiffKind};
 
 use crate::commands::CommandAction;
 use crate::types::*;
@@ -121,6 +122,24 @@ pub async fn run_stream(
                 Ok(())
             }
         },
+    }
+}
+
+pub async fn abort_daemon_stream(client: &reqwest::Client, url: &str) -> Result<(), String> {
+    let response = client
+        .post(url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+
+    if response.status().is_success()
+        || response.status() == reqwest::StatusCode::NOT_FOUND
+        || response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED
+    {
+        Ok(())
+    } else {
+        Err(format!("abort endpoint returned {}", response.status()))
     }
 }
 
@@ -515,6 +534,57 @@ pub async fn save_session(
     Ok(())
 }
 
+pub async fn fork_session(
+    client: &reqwest::Client,
+    daemon_url: &str,
+    id: Option<&str>,
+) -> Result<String, String> {
+    let url = format!("{daemon_url}/session/fork");
+    let payload = serde_json::json!({ "id": id });
+    let response = client
+        .post(&url)
+        .json(&payload)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("daemon returned {}", response.status()));
+    }
+
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    let new_id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("session_id").and_then(|v| v.as_str()))
+        .or_else(|| body.get("fork_id").and_then(|v| v.as_str()))
+        .unwrap_or("unknown");
+    Ok(new_id.to_string())
+}
+
+pub async fn export_session(
+    client: &reqwest::Client,
+    daemon_url: &str,
+    id: &str,
+) -> Result<String, String> {
+    let primary = format!("{daemon_url}/session/export/{id}");
+    let fallback = format!("{daemon_url}/session/{id}/export");
+
+    for url in [&primary, &fallback] {
+        let response = client
+            .get(url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if response.status().is_success() {
+            return response.text().await.map_err(|e| e.to_string());
+        }
+    }
+
+    Err("failed to export session".to_string())
+}
+
 pub async fn store_memory(
     client: &reqwest::Client,
     daemon_url: &str,
@@ -553,6 +623,24 @@ pub async fn recall_memory(
         return Err(format!("daemon returned {}", response.status()));
     }
     response.json().await.map_err(|e| e.to_string())
+}
+
+pub async fn browse_memory(
+    client: &reqwest::Client,
+    daemon_url: &str,
+) -> Result<Vec<MemoryResult>, String> {
+    let browse_url = format!("{daemon_url}/memory/browse");
+    let browse_response = client
+        .get(&browse_url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if browse_response.status().is_success() {
+        return browse_response.json().await.map_err(|e| e.to_string());
+    }
+
+    recall_memory(client, daemon_url, "").await
 }
 
 pub async fn fetch_models(
@@ -719,12 +807,15 @@ pub async fn fetch_tools(
 pub async fn fetch_file_tree(
     client: &reqwest::Client,
     daemon_url: &str,
+    path: Option<&str>,
 ) -> Result<FileTreeEntry, String> {
-    let resp = client
-        .get(format!("{daemon_url}/project/tree"))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let request = client.get(format!("{daemon_url}/project/tree"));
+    let request = if let Some(path) = path {
+        request.query(&[("path", path)])
+    } else {
+        request
+    };
+    let resp = request.send().await.map_err(|e| e.to_string())?;
     resp.json::<FileTreeEntry>()
         .await
         .map_err(|e| e.to_string())
@@ -988,6 +1079,251 @@ pub async fn fetch_mcp_tools(
 }
 
 impl PorygonTui {
+    const PERF_HISTORY_LIMIT: usize = 512;
+
+    fn push_metric(history: &mut Vec<u64>, value: u64) {
+        history.push(value);
+        if history.len() > Self::PERF_HISTORY_LIMIT {
+            let overflow = history.len() - Self::PERF_HISTORY_LIMIT;
+            history.drain(0..overflow);
+        }
+    }
+
+    fn extend_metrics(history: &mut Vec<u64>, values: &[u64]) {
+        history.extend_from_slice(values);
+        if history.len() > Self::PERF_HISTORY_LIMIT {
+            let overflow = history.len() - Self::PERF_HISTORY_LIMIT;
+            history.drain(0..overflow);
+        }
+    }
+
+    fn percentile(samples: &[u64], q: f64) -> Option<u64> {
+        if samples.is_empty() {
+            return None;
+        }
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let idx = ((sorted.len() - 1) as f64 * q).round() as usize;
+        Some(sorted[idx])
+    }
+
+    fn stream_perf_report(&self) -> String {
+        let ttft_p95 = Self::percentile(&self.stream_ttft_history_ms, 0.95)
+            .map(|v| format!("{v}ms"))
+            .unwrap_or_else(|| "n/a".to_string());
+        let ttft_avg = if self.stream_ttft_history_ms.is_empty() {
+            "n/a".to_string()
+        } else {
+            let total: u64 = self.stream_ttft_history_ms.iter().sum();
+            format!("{}ms", total / self.stream_ttft_history_ms.len() as u64)
+        };
+
+        let append_p95 = Self::percentile(&self.append_latency_history_ms, 0.95)
+            .map(|v| format!("{v}ms"))
+            .unwrap_or_else(|| "n/a".to_string());
+        let append_avg = if self.append_latency_history_ms.is_empty() {
+            "n/a".to_string()
+        } else {
+            let total: u64 = self.append_latency_history_ms.iter().sum();
+            format!("{}ms", total / self.append_latency_history_ms.len() as u64)
+        };
+
+        let cancel_p95 = Self::percentile(&self.cancel_visual_stop_history_ms, 0.95)
+            .map(|v| format!("{v}ms"))
+            .unwrap_or_else(|| "n/a".to_string());
+        let cancel_avg = if self.cancel_visual_stop_history_ms.is_empty() {
+            "n/a".to_string()
+        } else {
+            let total: u64 = self.cancel_visual_stop_history_ms.iter().sum();
+            format!(
+                "{}ms",
+                total / self.cancel_visual_stop_history_ms.len() as u64
+            )
+        };
+
+        let last = self
+            .last_stream_perf
+            .as_ref()
+            .map(|perf| {
+                format!(
+                    "last stream: ttft={}ms total={}ms tokens={} append_p95={} append_avg={} samples={}",
+                    perf.ttft_ms,
+                    perf.total_ms,
+                    perf.token_count,
+                    perf.append_p95_ms
+                        .map(|v| format!("{v}ms"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    perf.append_avg_ms
+                        .map(|v| format!("{v}ms"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    perf.append_sample_count
+                )
+            })
+            .unwrap_or_else(|| "last stream: n/a".to_string());
+
+        format!(
+            "**Streaming Perf Metrics**\n\n\
+             - stream samples: {}\n\
+             - ttft p95: {} (avg {})\n\
+             - append latency samples: {}\n\
+             - append latency p95: {} (avg {})\n\
+             - cancel→visual-stop samples: {}\n\
+             - cancel→visual-stop p95: {} (avg {})\n\
+             - {}\n\n\
+             Targets: ttft p95 < 200ms, append p95 < 50ms, cancel p95 < 150ms.",
+            self.stream_ttft_history_ms.len(),
+            ttft_p95,
+            ttft_avg,
+            self.append_latency_history_ms.len(),
+            append_p95,
+            append_avg,
+            self.cancel_visual_stop_history_ms.len(),
+            cancel_p95,
+            cancel_avg,
+            last
+        )
+    }
+
+    fn benchmark_virtual_scroll(&self) -> String {
+        let counts = [1_000usize, 5_000usize, 10_000usize];
+        let viewport = (self.terminal_height as f32 - 7.0).max(1.0);
+        let mut lines = vec!["**Virtual Scroll Benchmark**".to_string()];
+
+        for &count in &counts {
+            let mut scroll = ScrollView::new().virtual_scroll(true).item_height(4.0);
+            scroll.set_content_height(count as f32 * 4.0 + 4.0);
+            scroll.set_viewport_height(viewport);
+
+            let start = Instant::now();
+            let max_y = (count as f32 * 4.0 - viewport).max(0.0);
+            let mut rendered = 0usize;
+
+            for step in 0..400 {
+                let ratio = step as f32 / 399.0;
+                scroll.scroll_to(max_y * ratio);
+                if let Some((start_idx, end_idx)) = scroll.visible_child_range(count) {
+                    rendered += end_idx.saturating_sub(start_idx);
+                } else {
+                    rendered += count;
+                }
+            }
+
+            let elapsed = start.elapsed().as_millis() as u64;
+            let avg_window = rendered as f64 / 400.0;
+            lines.push(format!(
+                "- n={count}: {elapsed}ms over 400 window computations (avg visible {:.1} items)",
+                avg_window
+            ));
+        }
+
+        lines.push(
+            "Target check: virtual window computation should stay low-latency under 10k items."
+                .to_string(),
+        );
+        lines.join("\n")
+    }
+
+    fn benchmark_diff_widget(&self) -> String {
+        let mut diff = String::from("--- a/file.txt\n+++ b/file.txt\n@@ -1,1000 +1,1000 @@\n");
+        for i in 0..1_000 {
+            if i % 2 == 0 {
+                diff.push_str(&format!("-old line {i}\n+new line {i}\n"));
+            } else {
+                diff.push_str(&format!(" context line {i}\n"));
+            }
+        }
+
+        let parse_start = Instant::now();
+        let lines = parse_unified_diff(&diff);
+        let parse_ms = parse_start.elapsed().as_millis() as u64;
+
+        let style_start = Instant::now();
+        let mut added = 0usize;
+        let mut removed = 0usize;
+        for line in &lines {
+            if line.kind == DiffKind::Added {
+                added += 1;
+            } else if line.kind == DiffKind::Removed {
+                removed += 1;
+            }
+        }
+        let style_ms = style_start.elapsed().as_millis() as u64;
+
+        format!(
+            "**Diff Benchmark (1000 lines)**\n\n- parse: {}ms\n- classify/style prep: {}ms\n- total lines: {}\n- added: {}\n- removed: {}\n\nTarget check: native render path should remain under ~100ms for this scale.",
+            parse_ms,
+            style_ms,
+            lines.len(),
+            added,
+            removed
+        )
+    }
+
+    fn begin_stream_metrics(&mut self) {
+        let now = Instant::now();
+        self.stream_started_at = Some(now);
+        self.first_token_at = None;
+        self.last_token_at = None;
+        self.append_latencies_ms.clear();
+        self.last_stream_perf = None;
+    }
+
+    fn note_stream_token_metric(&mut self) {
+        let now = Instant::now();
+        if self.first_token_at.is_none() {
+            self.first_token_at = Some(now);
+        }
+        if let Some(previous) = self.last_token_at {
+            let delta = now.duration_since(previous).as_millis() as u64;
+            self.append_latencies_ms.push(delta);
+        }
+        self.last_token_at = Some(now);
+    }
+
+    fn finish_stream_metrics(&mut self) -> Option<StreamPerfSummary> {
+        let started = self.stream_started_at.take()?;
+        let finished = Instant::now();
+        let total_ms = finished.duration_since(started).as_millis() as u64;
+        let ttft_ms = self
+            .first_token_at
+            .map(|first| first.duration_since(started).as_millis() as u64)
+            .unwrap_or(total_ms);
+
+        let mut append_latencies = std::mem::take(&mut self.append_latencies_ms);
+        append_latencies.sort_unstable();
+        let append_sample_count = append_latencies.len();
+        let append_p95_ms = if append_latencies.is_empty() {
+            None
+        } else {
+            let idx = ((append_latencies.len() - 1) as f64 * 0.95).round() as usize;
+            Some(append_latencies[idx])
+        };
+        let append_avg_ms = if append_latencies.is_empty() {
+            None
+        } else {
+            let total: u64 = append_latencies.iter().sum();
+            Some(total / append_latencies.len() as u64)
+        };
+
+        let summary = StreamPerfSummary {
+            ttft_ms,
+            total_ms,
+            token_count: self.stream_token_count,
+            append_sample_count,
+            append_p95_ms,
+            append_avg_ms,
+        };
+
+        Self::push_metric(&mut self.stream_ttft_history_ms, ttft_ms);
+        Self::extend_metrics(&mut self.append_latency_history_ms, &append_latencies);
+
+        self.first_token_at = None;
+        self.last_token_at = None;
+        self.last_stream_perf = Some(summary.clone());
+
+        Some(summary)
+    }
+
     pub(crate) fn handle_update(&mut self, msg: Msg) -> Cmd<Msg> {
         match msg {
             Msg::Init => {
@@ -1040,6 +1376,7 @@ impl PorygonTui {
                 self.status.step = "streaming daemon response".into();
                 self.streaming_content = String::new();
                 self.stream_token_count = 0;
+                self.begin_stream_metrics();
 
                 self.messages.push(ChatMessage {
                     role: "assistant".into(),
@@ -1096,6 +1433,7 @@ impl PorygonTui {
                 })
             }
             Msg::DaemonResponse(response) => {
+                let _ = self.finish_stream_metrics();
                 self.waiting_response = false;
                 self.status.step = "idle".into();
                 if let Some(last) = self.messages.last_mut() {
@@ -1121,6 +1459,7 @@ impl PorygonTui {
                 Cmd::none()
             }
             Msg::DaemonError(err) => {
+                let _ = self.finish_stream_metrics();
                 self.waiting_response = false;
                 self.status.step = "idle".into();
                 self.error = Some(err.clone());
@@ -1142,6 +1481,7 @@ impl PorygonTui {
                 Cmd::ShowToast(Toast::error(format!("Request failed: {err}")))
             }
             Msg::StreamToken(token) => {
+                self.note_stream_token_metric();
                 self.streaming_content.push_str(&token);
                 self.stream_token_count += 1;
 
@@ -1155,6 +1495,7 @@ impl PorygonTui {
                 Cmd::none()
             }
             Msg::StreamComplete => {
+                let _ = self.finish_stream_metrics();
                 self.waiting_response = false;
                 self.status.step = "idle".into();
                 self.streaming_content.clear();
@@ -1163,6 +1504,7 @@ impl PorygonTui {
                 Cmd::unsubscribe("agent-stream")
             }
             Msg::StreamError(err) => {
+                let _ = self.finish_stream_metrics();
                 self.waiting_response = false;
                 self.status.step = "idle".into();
                 self.error = Some(err.clone());
@@ -1180,14 +1522,28 @@ impl PorygonTui {
                 ])
             }
             Msg::AbortStream => {
+                let visual_stop_start = Instant::now();
+                let _ = self.finish_stream_metrics();
                 self.waiting_response = false;
                 self.status.step = "idle (aborted)".into();
                 self.streaming_content.clear();
                 self.stream_token_count = 0;
+                let visual_stop_ms = visual_stop_start.elapsed().as_millis() as u64;
+                Self::push_metric(&mut self.cancel_visual_stop_history_ms, visual_stop_ms);
+                let client = self.client.clone();
+                let abort_url = format!("{}/agent/abort", self.daemon_url);
                 Cmd::batch(vec![
                     Cmd::unsubscribe("agent-stream"),
+                    Cmd::spawn(async move {
+                        Msg::StreamAbortAck(abort_daemon_stream(&client, &abort_url).await)
+                    }),
                     Cmd::ShowToast(Toast::warning("Stream aborted")),
                 ])
+            }
+            Msg::StreamAbortAck(Ok(())) => Cmd::none(),
+            Msg::StreamAbortAck(Err(err)) => {
+                self.error = Some(err.clone());
+                Cmd::ShowToast(Toast::warning(format!("Abort request warning: {err}")))
             }
             Msg::ConnectionChecked(ok) => {
                 let was_connected = self.connected;
@@ -1353,6 +1709,24 @@ impl PorygonTui {
                 self.auto_scroll_chat();
                 Cmd::ShowToast(Toast::success("Session saved"))
             }
+            Msg::SessionForked(new_id) => {
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: format!("Session forked successfully. New ID: `{new_id}`"),
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::ShowToast(Toast::success("Session forked"))
+            }
+            Msg::SessionExported(content) => {
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: format!("**Session Export**\n\n```json\n{content}\n```"),
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::ShowToast(Toast::success("Session exported"))
+            }
             Msg::SessionError(err) => {
                 self.messages.push(ChatMessage {
                     role: "system".into(),
@@ -1396,6 +1770,31 @@ impl PorygonTui {
                         timestamp: format_timestamp(),
                     });
                 }
+                self.auto_scroll_chat();
+                Cmd::none()
+            }
+            Msg::MemoryBrowsed(results) => {
+                let mut content = String::from("**Memory Browser**\n\n");
+                if results.is_empty() {
+                    content.push_str("No memory records found.");
+                } else {
+                    for result in results {
+                        let score = result
+                            .score
+                            .map(|v| format!("{v:.2}"))
+                            .unwrap_or_else(|| "n/a".to_string());
+                        let ts = result.timestamp.unwrap_or_else(|| "unknown".to_string());
+                        content.push_str(&format!(
+                            "• {}  \n  score: {}  \n  ts: {}\n\n",
+                            result.content, score, ts
+                        ));
+                    }
+                }
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content,
+                    timestamp: format_timestamp(),
+                });
                 self.auto_scroll_chat();
                 Cmd::none()
             }
@@ -1450,18 +1849,36 @@ impl PorygonTui {
                 Cmd::none()
             }
             Msg::McpStatusFetched(servers) => {
+                self.mcp_server_count = servers.len();
+                self.mcp_healthy_count = servers
+                    .iter()
+                    .filter(|server| {
+                        server
+                            .status
+                            .as_deref()
+                            .map(|status| {
+                                matches!(
+                                    status.to_ascii_lowercase().as_str(),
+                                    "ok" | "healthy" | "connected" | "online"
+                                )
+                            })
+                            .unwrap_or(false)
+                    })
+                    .count();
+                self.mcp_last_error = None;
                 let mut table = String::from("**MCP Server Status:**\n\n");
                 if servers.is_empty() {
                     table.push_str("No MCP servers configured.");
                 } else {
-                    table.push_str("| Server | Status | Tools |\n");
-                    table.push_str("|---|---|---|\n");
-                    for server in servers {
-                        let status = server.status.unwrap_or_else(|| "unknown".to_string());
+                    table.push_str("| Server | Status | Tools | Last Error |\n");
+                    table.push_str("|---|---|---|---|\n");
+                    for server in &servers {
+                        let status = server.status.as_deref().unwrap_or("unknown").to_string();
                         let tools_count = server.tools_count.unwrap_or(0);
+                        let last_error = server.last_error.as_deref().unwrap_or("-");
                         table.push_str(&format!(
-                            "| {} | {} | {} |\n",
-                            server.name, status, tools_count
+                            "| {} | {} | {} | {} |\n",
+                            server.name, status, tools_count, last_error
                         ));
                     }
                 }
@@ -1493,6 +1910,16 @@ impl PorygonTui {
                 self.auto_scroll_chat();
                 Cmd::none()
             }
+            Msg::McpError(err) => {
+                self.mcp_last_error = Some(err.clone());
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: format!("MCP error: {err}"),
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::ShowToast(Toast::warning(format!("MCP error: {err}")))
+            }
             Msg::ToolsError(err) => {
                 self.messages.push(ChatMessage {
                     role: "system".into(),
@@ -1502,8 +1929,12 @@ impl PorygonTui {
                 self.auto_scroll_chat();
                 Cmd::ShowToast(Toast::error(format!("Tools error: {err}")))
             }
-            Msg::FileTreeFetched(tree) => {
-                let mut formatted = String::from("**Project File Tree:**\n\n");
+            Msg::FileTreeFetched { path, tree } => {
+                let mut formatted = if let Some(path) = path {
+                    format!("**Project File Tree: `{path}`**\n\n")
+                } else {
+                    String::from("**Project File Tree:**\n\n")
+                };
                 formatted.push_str(&format_file_tree(&tree, "", true));
                 self.messages.push(ChatMessage {
                     role: "system".into(),
@@ -1747,6 +2178,7 @@ impl PorygonTui {
                 Cmd::none()
             }
             Msg::ModelsFetched(models) => {
+                self.model_last_error = None;
                 let mut content = format!("**Available Models** ({})\n\n", models.len());
                 for model in models {
                     let name = model.name.unwrap_or_else(|| "Unknown".to_string());
@@ -1778,9 +2210,19 @@ impl PorygonTui {
                 Cmd::ShowToast(Toast::success("Model updated."))
             }
             Msg::ModelsError(err) => {
+                self.model_last_error = Some(err.clone());
                 self.messages.push(ChatMessage {
                     role: "system".into(),
                     content: err,
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::none()
+            }
+            Msg::VirtualScrollBenchReady(report) | Msg::DiffBenchReady(report) => {
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: report,
                     timestamp: format_timestamp(),
                 });
                 self.auto_scroll_chat();
@@ -2039,6 +2481,44 @@ impl PorygonTui {
                     }
                 })
             }
+            CommandAction::ForkSession { id } => {
+                if !self.connected {
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: "Not connected to daemon. Cannot fork session.".into(),
+                        timestamp: format_timestamp(),
+                    });
+                    self.auto_scroll_chat();
+                    return Cmd::none();
+                }
+                let daemon_url = self.daemon_url.clone();
+                let client = self.client.clone();
+                Cmd::spawn(async move {
+                    match fork_session(&client, &daemon_url, id.as_deref()).await {
+                        Ok(new_id) => Msg::SessionForked(new_id),
+                        Err(err) => Msg::SessionError(err),
+                    }
+                })
+            }
+            CommandAction::ExportSession { id } => {
+                if !self.connected {
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: "Not connected to daemon. Cannot export session.".into(),
+                        timestamp: format_timestamp(),
+                    });
+                    self.auto_scroll_chat();
+                    return Cmd::none();
+                }
+                let daemon_url = self.daemon_url.clone();
+                let client = self.client.clone();
+                Cmd::spawn(async move {
+                    match export_session(&client, &daemon_url, &id).await {
+                        Ok(content) => Msg::SessionExported(content),
+                        Err(err) => Msg::SessionError(err),
+                    }
+                })
+            }
             CommandAction::StoreMemory { text } => {
                 if !self.connected {
                     self.messages.push(ChatMessage {
@@ -2073,6 +2553,31 @@ impl PorygonTui {
                 Cmd::spawn(async move {
                     match recall_memory(&client, &daemon_url, &query).await {
                         Ok(results) => Msg::MemoryRecalled(results),
+                        Err(err) => Msg::MemoryError(err),
+                    }
+                })
+            }
+            CommandAction::FetchMemoryBrowse => {
+                if !self.connected {
+                    self.messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: "Not connected to daemon. Cannot browse memories.".into(),
+                        timestamp: format_timestamp(),
+                    });
+                    self.auto_scroll_chat();
+                    return Cmd::none();
+                }
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: "Loading memory browser...".into(),
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                let daemon_url = self.daemon_url.clone();
+                let client = self.client.clone();
+                Cmd::spawn(async move {
+                    match browse_memory(&client, &daemon_url).await {
+                        Ok(results) => Msg::MemoryBrowsed(results),
                         Err(err) => Msg::MemoryError(err),
                     }
                 })
@@ -2229,6 +2734,28 @@ impl PorygonTui {
                     }
                 })
             }
+            CommandAction::ShowPerfMetrics => {
+                let report = self.stream_perf_report();
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: report,
+                    timestamp: format_timestamp(),
+                });
+                self.auto_scroll_chat();
+                Cmd::none()
+            }
+            CommandAction::BenchmarkVirtualScroll => Cmd::message(Msg::VirtualScrollBenchReady(
+                self.benchmark_virtual_scroll(),
+            )),
+            CommandAction::BenchmarkDiffWidget => {
+                Cmd::message(Msg::DiffBenchReady(self.benchmark_diff_widget()))
+            }
+            CommandAction::ReconnectRuntime => {
+                let mut cmds = vec![Cmd::message(Msg::PollConnection)];
+                cmds.push(self.handle_command_action(CommandAction::FetchMcpStatus));
+                cmds.push(self.handle_command_action(CommandAction::FetchModels));
+                Cmd::batch(cmds)
+            }
             CommandAction::FetchTools => {
                 if !self.connected {
                     self.messages.push(ChatMessage {
@@ -2282,7 +2809,7 @@ impl PorygonTui {
                 Cmd::spawn(async move {
                     match fetch_mcp_status(&client, &daemon_url).await {
                         Ok(servers) => Msg::McpStatusFetched(servers),
-                        Err(err) => Msg::ToolsError(err),
+                        Err(err) => Msg::McpError(err),
                     }
                 })
             }
@@ -2301,11 +2828,11 @@ impl PorygonTui {
                 Cmd::spawn(async move {
                     match fetch_mcp_tools(&client, &daemon_url).await {
                         Ok(tools) => Msg::McpToolsFetched(tools),
-                        Err(err) => Msg::ToolsError(err),
+                        Err(err) => Msg::McpError(err),
                     }
                 })
             }
-            CommandAction::FetchFileTree => {
+            CommandAction::FetchFileTree { path } => {
                 if !self.connected {
                     self.messages.push(ChatMessage {
                         role: "system".into(),
@@ -2317,9 +2844,13 @@ impl PorygonTui {
                 }
                 let daemon_url = self.daemon_url.clone();
                 let client = self.client.clone();
+                let requested_path = path.clone();
                 Cmd::spawn(async move {
-                    match fetch_file_tree(&client, &daemon_url).await {
-                        Ok(tree) => Msg::FileTreeFetched(tree),
+                    match fetch_file_tree(&client, &daemon_url, requested_path.as_deref()).await {
+                        Ok(tree) => Msg::FileTreeFetched {
+                            path: requested_path,
+                            tree,
+                        },
                         Err(err) => Msg::FileTreeError(err),
                     }
                 })
@@ -2591,5 +3122,52 @@ impl PorygonTui {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PorygonTui;
+
+    fn extract_ms(line: &str) -> Option<u64> {
+        let idx = line.find(": ")?;
+        let rest = &line[idx + 2..];
+        let ms_idx = rest.find("ms")?;
+        rest[..ms_idx].trim().parse::<u64>().ok()
+    }
+
+    #[test]
+    fn benchmark_virtual_scroll_reports_all_sizes() {
+        let app = PorygonTui::new();
+        let report = app.benchmark_virtual_scroll();
+        println!("{report}");
+
+        assert!(report.contains("n=1000"));
+        assert!(report.contains("n=5000"));
+        assert!(report.contains("n=10000"));
+    }
+
+    #[test]
+    fn benchmark_diff_widget_reports_timings() {
+        let app = PorygonTui::new();
+        let report = app.benchmark_diff_widget();
+
+        let mut parse_ms = None;
+        let mut style_ms = None;
+        for line in report.lines() {
+            if line.starts_with("- parse:") {
+                parse_ms = extract_ms(line);
+            }
+            if line.starts_with("- classify/style prep:") {
+                style_ms = extract_ms(line);
+            }
+        }
+
+        let parse_ms = parse_ms.expect("parse timing missing");
+        let style_ms = style_ms.expect("style timing missing");
+        println!("diff benchmark parse={}ms style={}ms", parse_ms, style_ms);
+
+        // Keep this conservative for CI stability while still ensuring no major regressions.
+        assert!(parse_ms + style_ms <= 200);
     }
 }

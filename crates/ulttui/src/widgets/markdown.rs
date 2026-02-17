@@ -15,6 +15,7 @@ const STREAMING_CURSOR: &str = "▊";
 
 #[derive(Debug, Clone)]
 pub struct MarkdownView {
+    source: String,
     blocks: Vec<Block>,
     streaming: bool,
 }
@@ -91,9 +92,29 @@ impl MarkdownView {
         let source = source.into();
         let blocks = Self::parse_blocks(&source);
         Self {
+            source,
             blocks,
             streaming: false,
         }
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn append_chunk(&mut self, chunk: impl AsRef<str>) {
+        let chunk = chunk.as_ref();
+        if chunk.is_empty() {
+            return;
+        }
+
+        self.source.push_str(chunk);
+        self.blocks = Self::parse_blocks(&self.source);
+    }
+
+    pub fn with_appended(mut self, chunk: impl AsRef<str>) -> Self {
+        self.append_chunk(chunk);
+        self
     }
 
     /// Enable streaming mode.
@@ -758,6 +779,8 @@ fn convert_color(color: &Color) -> ratatui::style::Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     fn collect_native_messages(view: &MarkdownView, index: usize) -> Vec<AppMessage> {
         let mut messages = Vec::new();
@@ -770,6 +793,23 @@ mod tests {
             .render_child_native(index, &mut send, RegionId::new(0), &mut next_id)
             .expect("render child should succeed");
         messages
+    }
+
+    fn render_ansi_text(view: &MarkdownView, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                view.render_ansi(frame, frame.area());
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
     }
 
     #[test]
@@ -967,5 +1007,42 @@ mod tests {
             }
             _ => panic!("expected rich text without cursor"),
         }
+    }
+
+    #[test]
+    fn append_chunk_updates_source_and_blocks() {
+        let mut view = MarkdownView::new("hello");
+        view.append_chunk(" world");
+
+        assert_eq!(view.source(), "hello world");
+        assert_eq!(view.children_count(), 1);
+
+        let messages = collect_native_messages(&view, 0);
+        match &messages[1] {
+            AppMessage::SetContent {
+                content: Content::RichText(rich),
+                ..
+            } => {
+                assert_eq!(rich.spans[0].text, "hello world");
+            }
+            _ => panic!("expected rich text content"),
+        }
+    }
+
+    #[test]
+    fn with_appended_returns_updated_view() {
+        let view = MarkdownView::new("first").with_appended(" second");
+
+        assert_eq!(view.source(), "first second");
+        assert_eq!(view.children_count(), 1);
+    }
+
+    #[test]
+    fn append_chunk_updates_ansi_fallback_render() {
+        let mut view = MarkdownView::new("hello");
+        view.append_chunk(" world");
+
+        let ansi = render_ansi_text(&view, 40, 4);
+        assert!(ansi.contains("hello world"));
     }
 }

@@ -78,5 +78,47 @@ impl RegionId {
 /// Protocol version.
 pub const PROTOCOL_VERSION: u16 = 1;
 
+/// Oldest protocol version accepted for handshake negotiation.
+pub const MIN_PROTOCOL_VERSION: u16 = 1;
+
+/// Capability: Flexbox layout semantics.
+pub const CAP_LAYOUT_FLEXBOX: u32 = 0x0001;
+/// Capability: Programmatic/interactive scroll handling.
+pub const CAP_WIDGET_SCROLL: u32 = 0x0010;
+/// Capability: Incremental text append updates.
+pub const CAP_APPEND_CONTENT: u32 = 0x0020;
+/// Capability: Explicit stream lifecycle markers.
+pub const CAP_STREAM_LIFECYCLE: u32 = 0x0040;
+/// Capability: Region metadata transport.
+pub const CAP_REGION_METADATA: u32 = 0x0080;
+
+/// All capabilities known by this protocol version.
+pub const CAP_ALL_KNOWN: u32 = CAP_LAYOUT_FLEXBOX
+    | CAP_WIDGET_SCROLL
+    | CAP_APPEND_CONTENT
+    | CAP_STREAM_LIFECYCLE
+    | CAP_REGION_METADATA;
+
+/// Default capability request for current clients.
+pub const CLIENT_DEFAULT_CAPABILITIES: u32 = CAP_ALL_KNOWN;
+
+/// Negotiate a protocol version for a client/server pair.
+pub const fn negotiate_protocol_version(client_version: u16, server_version: u16) -> Option<u16> {
+    if client_version < MIN_PROTOCOL_VERSION || server_version < MIN_PROTOCOL_VERSION {
+        None
+    } else {
+        Some(if client_version < server_version {
+            client_version
+        } else {
+            server_version
+        })
+    }
+}
+
+/// Negotiate optional feature capabilities for a session.
+pub const fn negotiate_capabilities(requested: u32, supported: u32) -> u32 {
+    requested & supported
+}
+
 /// Magic bytes for frame header.
 pub const FRAME_MAGIC: [u8; 2] = [0x55, 0x54]; // "UT"

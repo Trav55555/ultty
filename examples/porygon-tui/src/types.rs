@@ -34,6 +34,8 @@ pub struct McpServerInfo {
     pub name: String,
     pub status: Option<String>,
     pub tools_count: Option<usize>,
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -223,6 +225,16 @@ pub struct ToolCall {
     pub args: String,
     pub status: ToolStatus,
     pub result: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamPerfSummary {
+    pub ttft_ms: u64,
+    pub total_ms: u64,
+    pub token_count: usize,
+    pub append_sample_count: usize,
+    pub append_p95_ms: Option<u64>,
+    pub append_avg_ms: Option<u64>,
 }
 
 impl Default for AgentStatus {

@@ -200,15 +200,17 @@ pub(crate) fn format_timestamp() -> String {
 
 impl PorygonTui {
     pub(crate) fn update_scroll_dimensions(&mut self) {
-        let estimated_content = self.messages.len() as f32 * 4.0 + 4.0;
+        let estimated_content = (self.messages.len() + self.tool_calls.len()) as f32 * 4.0
+            + if self.waiting_response { 6.0 } else { 4.0 };
         let viewport = (self.terminal_height as f32 - 7.0).max(1.0);
         self.chat_scroll.set_content_height(estimated_content);
         self.chat_scroll.set_viewport_height(viewport);
     }
 
     pub(crate) fn auto_scroll_chat(&mut self) {
+        let should_follow = self.chat_scroll.is_near_bottom(2.0);
         self.update_scroll_dimensions();
-        if self.chat_scroll.is_near_bottom(2.0) {
+        if should_follow {
             self.chat_scroll.scroll_to_bottom();
         }
     }
@@ -305,11 +307,30 @@ impl PorygonTui {
     }
 
     fn messages_view(&self) -> Column {
+        const ESTIMATED_MESSAGE_HEIGHT: f32 = 4.0;
         let mut col = Column::new()
             .gap(0.5)
             .padding(1.0)
             .width(Dimension::Percent(100.0));
-        for (i, msg) in self.messages.iter().enumerate() {
+        let total_messages = self.messages.len();
+        let (start_idx, end_idx) = self
+            .chat_scroll
+            .visible_child_range(total_messages)
+            .unwrap_or((0, total_messages));
+
+        if start_idx > 0 {
+            col = col.child(Column::new().height(Dimension::Cells(
+                start_idx as f32 * ESTIMATED_MESSAGE_HEIGHT,
+            )));
+        }
+
+        for (i, msg) in self
+            .messages
+            .iter()
+            .enumerate()
+            .skip(start_idx)
+            .take(end_idx.saturating_sub(start_idx))
+        {
             let (prefix, fg_color, bg_color, bdr_color) = match msg.role.as_str() {
                 "user" => (
                     "You",
@@ -354,8 +375,18 @@ impl PorygonTui {
 
             let is_streaming_msg =
                 self.waiting_response && i + 1 == self.messages.len() && msg.role == "assistant";
-            card = card.child(MarkdownView::new(msg.content.clone()).streaming(is_streaming_msg));
+            if is_streaming_msg {
+                card = card.child(Text::new(format!("{}▊", msg.content)));
+            } else {
+                card = card.child(MarkdownView::new(msg.content.clone()));
+            }
             col = col.child(card);
+        }
+
+        if end_idx < total_messages {
+            col = col.child(Column::new().height(Dimension::Cells(
+                (total_messages - end_idx) as f32 * ESTIMATED_MESSAGE_HEIGHT,
+            )));
         }
 
         // Tool call cards
@@ -501,27 +532,65 @@ impl PorygonTui {
             self.status.step.clone()
         };
 
-        Row::new().child(
-            RichText::new()
-                .span(
-                    format!(" {} ", pressure_icon),
-                    Style::new().fg(pressure_color).bold(),
-                )
-                .span(
-                    format!(" {} ", step_text),
-                    Style {
-                        dim: true,
-                        ..Style::new()
-                    },
-                )
-                .span(
-                    " Enter:send Esc:abort PgUp/Dn:scroll Ctrl+C:quit ",
-                    Style {
-                        dim: true,
-                        ..Style::new()
-                    },
-                ),
-        )
+        let perf_text = self.last_stream_perf.as_ref().map(|perf| {
+            let p95 = perf
+                .append_p95_ms
+                .map(|v| format!("{v}ms"))
+                .unwrap_or_else(|| "n/a".to_string());
+            let avg = perf
+                .append_avg_ms
+                .map(|v| format!("{v}ms"))
+                .unwrap_or_else(|| "n/a".to_string());
+            format!(
+                "ttft:{}ms p95:{} avg:{} n:{} tok:{} total:{}ms",
+                perf.ttft_ms, p95, avg, perf.append_sample_count, perf.token_count, perf.total_ms
+            )
+        });
+
+        let mut status_line = RichText::new()
+            .span(
+                format!(" {} ", pressure_icon),
+                Style::new().fg(pressure_color).bold(),
+            )
+            .span(
+                format!(" {} ", step_text),
+                Style {
+                    dim: true,
+                    ..Style::new()
+                },
+            );
+
+        if let Some(perf_text) = perf_text {
+            status_line = status_line.span(
+                format!(" {} ", perf_text),
+                Style {
+                    dim: true,
+                    ..Style::new()
+                },
+            );
+        }
+
+        if !self.cancel_visual_stop_history_ms.is_empty() {
+            let mut sorted = self.cancel_visual_stop_history_ms.clone();
+            sorted.sort_unstable();
+            let idx = ((sorted.len() - 1) as f64 * 0.95).round() as usize;
+            let cancel_p95 = sorted[idx];
+            status_line = status_line.span(
+                format!(" cancel_p95:{}ms ", cancel_p95),
+                Style {
+                    dim: true,
+                    ..Style::new()
+                },
+            );
+        }
+
+        Row::new().child(status_line.span(
+            " Enter:send Esc:abort PgUp/Dn:scroll Ctrl+C:quit ",
+            Style {
+                dim: true,
+                ..Style::new()
+            },
+        ))
     }
 
     pub(crate) fn handle_event(&mut self, event: &Event) -> Option<Msg> {
@@ -619,7 +688,10 @@ impl PorygonTui {
             .child(self.input_view())
             .child(Divider::horizontal())
             .child(self.status_bar_view());
-        let mut chat_area = ScrollView::new().child(self.messages_view());
+        let mut chat_area = ScrollView::new()
+            .virtual_scroll(true)
+            .item_height(4.0)
+            .child(self.messages_view());
         // Transfer scroll state from persistent field
         let (_, scroll_y) = self.chat_scroll.scroll_position();
         if scroll_y > 0.0 {

@@ -11,8 +11,9 @@ use ultty_protocol::{
     AppMessage, BorderStyle, BorderType, CodeWidget, Constraints, Content, Decode, Dimension,
     Display, Encode, FlexDirection, FrameId, InputType, InputWidget, Key, MarkdownWidget,
     Modifiers, MouseButton, ProgressWidget, RegionId, RichText, Span, SpinnerWidget, Style,
-    TerminalMessage, TextAlign, TextContent, TextOverflow, TextWrap, WidgetContent, EVENT_FOCUS,
-    EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL, PROTOCOL_VERSION,
+    TerminalMessage, TextAlign, TextContent, TextOverflow, TextWrap, WidgetContent, CAP_ALL_KNOWN,
+    CAP_APPEND_CONTENT, CAP_LAYOUT_FLEXBOX, CAP_WIDGET_SCROLL, EVENT_FOCUS, EVENT_KEY, EVENT_MOUSE,
+    EVENT_SCROLL, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
 fn temp_socket_path() -> PathBuf {
@@ -56,7 +57,7 @@ fn test_client_hello_handshake() {
 
     let hello = AppMessage::ClientHello {
         version: PROTOCOL_VERSION,
-        requested_capabilities: 0x0001,
+        requested_capabilities: CAP_LAYOUT_FLEXBOX,
     };
     let mut buf = BytesMut::new();
     hello.encode(&mut buf);
@@ -77,7 +78,7 @@ fn test_client_hello_handshake() {
             capabilities,
         } => {
             assert_eq!(version, PROTOCOL_VERSION);
-            assert!(capabilities > 0);
+            assert_eq!(capabilities, CAP_LAYOUT_FLEXBOX);
         }
         other => panic!("Expected ServerHello, got {:?}", other),
     }
@@ -100,6 +101,121 @@ fn test_client_hello_handshake() {
 }
 
 #[test]
+fn test_future_client_version_negotiates_to_current_protocol() {
+    let socket_path = temp_socket_path();
+    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+
+    let mut client = UnixStream::connect(&socket_path).unwrap();
+    client.set_nonblocking(false).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+
+    server.poll(Some(Duration::from_millis(50))).unwrap();
+
+    let requested = CAP_LAYOUT_FLEXBOX | CAP_WIDGET_SCROLL | CAP_APPEND_CONTENT;
+    let hello = AppMessage::ClientHello {
+        version: PROTOCOL_VERSION + 1,
+        requested_capabilities: requested,
+    };
+    let mut buf = BytesMut::new();
+    hello.encode(&mut buf);
+    client.write_all(&buf).unwrap();
+
+    server.poll(Some(Duration::from_millis(50))).unwrap();
+
+    let mut response = vec![0u8; 1024];
+    let n = client.read(&mut response).unwrap();
+    let mut cursor = &response[..n];
+
+    let msg1 = TerminalMessage::decode(&mut cursor).unwrap();
+    match msg1 {
+        TerminalMessage::ServerHello {
+            version,
+            capabilities,
+        } => {
+            assert_eq!(version, PROTOCOL_VERSION);
+            assert_eq!(capabilities, requested);
+        }
+        other => panic!("Expected ServerHello, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_unknown_capability_bits_are_masked_during_handshake() {
+    let socket_path = temp_socket_path();
+    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+
+    let mut client = UnixStream::connect(&socket_path).unwrap();
+    client.set_nonblocking(false).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+
+    server.poll(Some(Duration::from_millis(50))).unwrap();
+
+    let unknown = 0x8000_0000;
+    let requested = CAP_ALL_KNOWN | unknown;
+    let hello = AppMessage::ClientHello {
+        version: PROTOCOL_VERSION,
+        requested_capabilities: requested,
+    };
+    let mut buf = BytesMut::new();
+    hello.encode(&mut buf);
+    client.write_all(&buf).unwrap();
+
+    server.poll(Some(Duration::from_millis(50))).unwrap();
+
+    let mut response = vec![0u8; 1024];
+    let n = client.read(&mut response).unwrap();
+    let mut cursor = &response[..n];
+
+    let msg1 = TerminalMessage::decode(&mut cursor).unwrap();
+    match msg1 {
+        TerminalMessage::ServerHello { capabilities, .. } => {
+            assert_eq!(capabilities, CAP_ALL_KNOWN);
+            assert_eq!(capabilities & unknown, 0);
+        }
+        other => panic!("Expected ServerHello, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_legacy_client_version_gets_error_without_panic() {
+    let socket_path = temp_socket_path();
+    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+
+    let mut client = UnixStream::connect(&socket_path).unwrap();
+    client.set_nonblocking(false).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+
+    server.poll(Some(Duration::from_millis(50))).unwrap();
+
+    let too_old = MIN_PROTOCOL_VERSION.saturating_sub(1);
+    let hello = AppMessage::ClientHello {
+        version: too_old,
+        requested_capabilities: CAP_LAYOUT_FLEXBOX,
+    };
+    let mut buf = BytesMut::new();
+    hello.encode(&mut buf);
+    client.write_all(&buf).unwrap();
+
+    server.poll(Some(Duration::from_millis(50))).unwrap();
+
+    let mut response = vec![0u8; 1024];
+    let n = client.read(&mut response).unwrap();
+    let mut cursor = &response[..n];
+
+    let msg = TerminalMessage::decode(&mut cursor).unwrap();
+    match msg {
+        TerminalMessage::Error { code, .. } => assert_eq!(code, 426),
+        other => panic!("Expected Error, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_create_region_and_layout() {
     let socket_path = temp_socket_path();
     let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
@@ -117,7 +233,7 @@ fn test_create_region_and_layout() {
 
     AppMessage::ClientHello {
         version: PROTOCOL_VERSION,
-        requested_capabilities: 0x0001,
+        requested_capabilities: CAP_LAYOUT_FLEXBOX,
     }
     .encode(&mut buf);
     client.write_all(&buf).unwrap();
@@ -249,7 +365,7 @@ fn handshake(
     let mut buf = BytesMut::new();
     AppMessage::ClientHello {
         version: PROTOCOL_VERSION,
-        requested_capabilities: 0x0001,
+        requested_capabilities: CAP_LAYOUT_FLEXBOX,
     }
     .encode(&mut buf);
     client.write_all(&buf).unwrap();

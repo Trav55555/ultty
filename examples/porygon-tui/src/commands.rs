@@ -29,12 +29,18 @@ pub enum CommandAction {
     ResumeSession { id: String },
     /// Save the current session with an optional name.
     SaveSession { name: Option<String> },
+    /// Fork a session (or current session if omitted).
+    ForkSession { id: Option<String> },
+    /// Export a session by ID.
+    ExportSession { id: String },
     /// Clear chat history (local only).
     ClearChat,
     /// Store a memory via the daemon.
     StoreMemory { text: String },
     /// Search memories via the daemon.
     RecallMemory { query: String },
+    /// Browse recent memories via the daemon.
+    FetchMemoryBrowse,
     /// Fetch tool registry from daemon.
     FetchTools,
     /// Fetch details for a specific tool.
@@ -43,8 +49,8 @@ pub enum CommandAction {
     FetchMcpStatus,
     /// Fetch MCP tools list.
     FetchMcpTools,
-    /// Fetch the project file tree from daemon.
-    FetchFileTree,
+    /// Fetch the project file tree from daemon, optionally scoped to a subpath.
+    FetchFileTree { path: Option<String> },
     /// Fetch project metadata from daemon.
     FetchProjectInfo,
     /// Switch to a different project directory.
@@ -89,6 +95,14 @@ pub enum CommandAction {
     ValidateCommand { command: String },
     /// Run the full validation pipeline.
     RunGym,
+    /// Show rolling streaming performance metrics.
+    ShowPerfMetrics,
+    /// Benchmark app-level virtual scrolling windows.
+    BenchmarkVirtualScroll,
+    /// Benchmark diff parsing/render prep for large diffs.
+    BenchmarkDiffWidget,
+    /// Trigger immediate runtime reconnect checks.
+    ReconnectRuntime,
 }
 
 /// Metadata for a registered command.
@@ -133,6 +147,16 @@ impl CommandRegistry {
                     usage: "/resume <id>",
                 },
                 Command {
+                    name: "fork",
+                    description: "Fork a session",
+                    usage: "/fork [id]",
+                },
+                Command {
+                    name: "export",
+                    description: "Export session",
+                    usage: "/export <id>",
+                },
+                Command {
                     name: "remember",
                     description: "Store a memory",
                     usage: "/remember <text>",
@@ -141,6 +165,11 @@ impl CommandRegistry {
                     name: "recall",
                     description: "Search memories",
                     usage: "/recall <query>",
+                },
+                Command {
+                    name: "memory",
+                    description: "Browse recent memories",
+                    usage: "/memory",
                 },
                 Command {
                     name: "model",
@@ -183,6 +212,26 @@ impl CommandRegistry {
                     usage: "/gym",
                 },
                 Command {
+                    name: "perf",
+                    description: "Show stream perf metrics",
+                    usage: "/perf",
+                },
+                Command {
+                    name: "bench-scroll",
+                    description: "Benchmark virtual scroll",
+                    usage: "/bench-scroll",
+                },
+                Command {
+                    name: "bench-diff",
+                    description: "Benchmark diff parsing",
+                    usage: "/bench-diff",
+                },
+                Command {
+                    name: "reconnect",
+                    description: "Reconnect runtime checks",
+                    usage: "/reconnect",
+                },
+                Command {
                     name: "clear",
                     description: "Clear chat history",
                     usage: "/clear",
@@ -210,12 +259,17 @@ impl CommandRegistry {
                 Command {
                     name: "tree",
                     description: "Show project file tree",
-                    usage: "/tree",
+                    usage: "/tree [path]",
                 },
                 Command {
                     name: "scan",
                     description: "Scan project file tree",
-                    usage: "/scan",
+                    usage: "/scan [path]",
+                },
+                Command {
+                    name: "expand",
+                    description: "Expand/load tree path",
+                    usage: "/expand <path>",
                 },
                 Command {
                     name: "project",
@@ -332,6 +386,23 @@ impl CommandRegistry {
                     Some(CommandAction::ResumeSession { id: args.join(" ") })
                 }
             }
+            "fork" => {
+                let id = if args.is_empty() {
+                    None
+                } else {
+                    Some(args.join(" "))
+                };
+                Some(CommandAction::ForkSession { id })
+            }
+            "export" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /export <id>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::ExportSession { id: args.join(" ") })
+                }
+            }
             "remember" => {
                 if args.is_empty() {
                     Some(CommandAction::SystemMessage(
@@ -354,6 +425,7 @@ impl CommandRegistry {
                     })
                 }
             }
+            "memory" => Some(CommandAction::FetchMemoryBrowse),
             "models" => Some(CommandAction::FetchModels),
             "model" => {
                 if args.is_empty() {
@@ -400,6 +472,10 @@ impl CommandRegistry {
                 }
             }
             "gym" => Some(CommandAction::RunGym),
+            "perf" => Some(CommandAction::ShowPerfMetrics),
+            "bench-scroll" => Some(CommandAction::BenchmarkVirtualScroll),
+            "bench-diff" => Some(CommandAction::BenchmarkDiffWidget),
+            "reconnect" => Some(CommandAction::ReconnectRuntime),
             "clear" => Some(CommandAction::ClearChat),
             "tools" => Some(CommandAction::FetchTools),
             "tool" => {
@@ -415,7 +491,25 @@ impl CommandRegistry {
             }
             "mcp" => Some(CommandAction::FetchMcpStatus),
             "mcp-tools" => Some(CommandAction::FetchMcpTools),
-            "tree" | "scan" => Some(CommandAction::FetchFileTree),
+            "tree" | "scan" => {
+                let path = if args.is_empty() {
+                    None
+                } else {
+                    Some(args.join(" "))
+                };
+                Some(CommandAction::FetchFileTree { path })
+            }
+            "expand" => {
+                if args.is_empty() {
+                    Some(CommandAction::SystemMessage(
+                        "Usage: /expand <path>".to_string(),
+                    ))
+                } else {
+                    Some(CommandAction::FetchFileTree {
+                        path: Some(args.join(" ")),
+                    })
+                }
+            }
             "project" => Some(CommandAction::FetchProjectInfo),
             "switch" => {
                 if args.is_empty() {
@@ -538,5 +632,39 @@ impl CommandRegistry {
 impl Default for CommandRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommandAction, CommandRegistry};
+
+    #[test]
+    fn parse_perf_command_returns_show_perf_action() {
+        let registry = CommandRegistry::new();
+        assert!(matches!(
+            registry.parse("/perf"),
+            Some(CommandAction::ShowPerfMetrics)
+        ));
+    }
+
+    #[test]
+    fn parse_tree_with_path_returns_scoped_fetch() {
+        let registry = CommandRegistry::new();
+        assert!(matches!(
+            registry.parse("/tree crates/ulttui/src"),
+            Some(CommandAction::FetchFileTree {
+                path: Some(path)
+            }) if path == "crates/ulttui/src"
+        ));
+    }
+
+    #[test]
+    fn parse_export_requires_id() {
+        let registry = CommandRegistry::new();
+        assert!(matches!(
+            registry.parse("/export abc123"),
+            Some(CommandAction::ExportSession { id }) if id == "abc123"
+        ));
     }
 }

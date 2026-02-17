@@ -108,6 +108,31 @@ impl<T> List<T> {
 }
 
 impl<T: AsRef<str>> List<T> {
+    pub fn append(&mut self, item: T) {
+        let insert_index = self.items.len();
+        let visible = self
+            .filter_query
+            .as_ref()
+            .map(|query| item.as_ref().to_lowercase().contains(query))
+            .unwrap_or(true);
+
+        self.items.push(item);
+        if visible {
+            self.filtered_indices.push(insert_index);
+        }
+
+        if self.filtered_indices.is_empty() {
+            self.selected = 0;
+        } else {
+            self.selected = self.selected.min(self.filtered_indices.len() - 1);
+        }
+    }
+
+    pub fn with_appended(mut self, item: T) -> Self {
+        self.append(item);
+        self
+    }
+
     pub fn filter(&mut self, query: &str) {
         if query.is_empty() {
             self.filter_query = None;
@@ -390,6 +415,25 @@ impl<T> VimExt for List<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn render_ansi_text(list: &List<&str>, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                list.render_ansi(frame, frame.area());
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
 
     #[test]
     fn test_list_navigation() {
@@ -434,5 +478,39 @@ mod tests {
 
         list.handle_vim_command(&VimCommand::motion_with_count(100, VimMotion::Up));
         assert_eq!(list.selected_index(), 0);
+    }
+
+    #[test]
+    fn test_append_without_filter_updates_visible_count() {
+        let mut list = List::new().items(vec!["a", "b"]);
+        list.append("c");
+
+        assert_eq!(list.total_count(), 3);
+        assert_eq!(list.visible_count(), 3);
+        assert_eq!(list.selected_index(), 0);
+    }
+
+    #[test]
+    fn test_append_with_filter_respects_query() {
+        let mut list = List::new().items(vec!["apple", "banana"]);
+        list.filter("ap");
+        assert_eq!(list.visible_count(), 1);
+
+        list.append("apricot");
+        assert_eq!(list.visible_count(), 2);
+
+        list.append("berry");
+        assert_eq!(list.visible_count(), 2);
+        assert_eq!(list.total_count(), 4);
+    }
+
+    #[test]
+    fn test_append_updates_ansi_fallback_render() {
+        let mut list = List::new().items(vec!["apple", "banana"]);
+        list.append("apricot");
+
+        let ansi = render_ansi_text(&list, 40, 8);
+        assert!(ansi.contains("apricot"));
+        assert!(ansi.contains("List [3/3]"));
     }
 }

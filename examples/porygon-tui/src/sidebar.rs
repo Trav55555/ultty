@@ -531,6 +531,19 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
         )
         .child(
             RichText::new()
+                .span("MCP:    ", label_style.clone())
+                .span(
+                    format!("{}/{}", app.mcp_healthy_count, app.mcp_server_count),
+                    Style::new().fg(if app.mcp_server_count > 0 && app.mcp_healthy_count == 0 {
+                        Color::Rgb(255, 93, 110)
+                    } else {
+                        Color::Rgb(166, 227, 161)
+                    }),
+                )
+                .fill_width(),
+        )
+        .child(
+            RichText::new()
                 .span("AGENT:  ", label_style.clone())
                 .span(
                     app.status.agent_name.as_str(),
@@ -635,6 +648,38 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
             RichText::new()
                 .span(
                     format!("ERR: {err_msg}"),
+                    Style::new().fg(Color::Rgb(249, 226, 175)),
+                )
+                .fill_width(),
+        );
+    }
+
+    if let Some(err) = &app.mcp_last_error {
+        let short = if err.len() > 28 {
+            format!("{}...", &err[..25])
+        } else {
+            err.clone()
+        };
+        cassette = cassette.child(
+            RichText::new()
+                .span(
+                    format!("MCP ERR: {short}"),
+                    Style::new().fg(Color::Rgb(249, 226, 175)),
+                )
+                .fill_width(),
+        );
+    }
+
+    if let Some(err) = &app.model_last_error {
+        let short = if err.len() > 28 {
+            format!("{}...", &err[..25])
+        } else {
+            err.clone()
+        };
+        cassette = cassette.child(
+            RichText::new()
+                .span(
+                    format!("MODEL ERR: {short}"),
                     Style::new().fg(Color::Rgb(249, 226, 175)),
                 )
                 .fill_width(),
