@@ -183,6 +183,10 @@ Is ULTTY_TERMINAL env var set?
        └──No───► Initialize ratatui, use ANSI rendering
 ```
 
+## Conventions
+
+- Commit frequently — make small, atomic commits after each logical unit of work
+
 ## Testing
 
 ```bash

@@ -54,6 +54,10 @@ enum TerminalMessage {
 - Fuzz testing for parser robustness
 - Benchmark critical paths (encode/decode)
 
+## Conventions
+
+- Commit frequently — make small, atomic commits after each logical unit of work
+
 ## See Also
 
 - `docs/spec/PROTOCOL_SPEC.md` - Full protocol specification

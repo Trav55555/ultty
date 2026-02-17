@@ -115,6 +115,10 @@ pub type Result<T> = std::result::Result<T, ProtocolError>;
 
 Standard `rustfmt` defaults (no config file). `rust-analyzer.toml` sets clippy as check command.
 
+### Commit Discipline
+
+- Commit frequently — make small, atomic commits after each logical unit of work
+
 ## Testing
 
 - **Unit**: Inline `#[cfg(test)] mod tests { ... }` in same file

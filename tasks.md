@@ -56,7 +56,7 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 
 - [ ] 4.1: Cache `scroll_adjustments` and `clip_rects`
 - [ ] 4.2: Eliminate `Vec<char>` in text rendering
-- [ ] 4.3: Pre-allocate render buffers
+- [x] 4.3: Pre-allocate render buffers
 
 ### TD Phase 5 — Fix Production `unwrap()`
 

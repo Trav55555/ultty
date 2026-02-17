@@ -69,6 +69,10 @@ Scene Graph Changes
 └──────────────┘
 ```
 
+## Conventions
+
+- Commit frequently — make small, atomic commits after each logical unit of work
+
 ## Testing Strategy
 
 - Unit tests for protocol parsing

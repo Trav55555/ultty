@@ -84,6 +84,7 @@ Same binary works in both modes. Widgets implement both `render_child_native()` 
 - **Logging**: `tracing` crate only, never `println!`
 - **Unsafe**: Avoid; if required, add `// SAFETY:` comment
 - **Rust edition**: 2021, MSRV 1.75
+- **Commit frequently**: Make small, atomic commits after each logical unit of work
 
 ## Layout Pitfalls
 

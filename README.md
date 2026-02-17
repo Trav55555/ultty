@@ -171,6 +171,8 @@ examples/
 - [Architecture](docs/ARCHITECTURE.md) — System design and components
 - [Protocol Specification](docs/PROTOCOL_SPEC.md) — Native protocol details
 - [Testing Strategy](docs/TESTING_STRATEGY.md) — How to test
+- [30/60/90 Execution Plan](docs/ROADMAP_30_60_90.md) — Milestones, ticket map, and acceptance criteria
+- [30/60/90 Issue Backlog](docs/ISSUE_BACKLOG_30_60_90.md) — Copy-paste issue templates with dependencies
 
 ## Development
 
