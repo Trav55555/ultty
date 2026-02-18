@@ -50,17 +50,17 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 
 ### TD Phase 3 — Deduplicate
 
-- [ ] 3.1: Extract shared `render_view_to_native` utility
+- [x] 3.1: Extract shared `render_view_to_native` utility
 
 ### TD Phase 4 — Render Allocations
 
-- [ ] 4.1: Cache `scroll_adjustments` and `clip_rects`
-- [ ] 4.2: Eliminate `Vec<char>` in text rendering
+- [x] 4.1: Cache `scroll_adjustments` and `clip_rects`
+- [x] 4.2: Eliminate `Vec<char>` in text rendering
 - [x] 4.3: Pre-allocate render buffers
 
 ### TD Phase 5 — Fix Production `unwrap()`
 
-- [ ] 5.1: App runner RAII guard — `crates/ulttui/src/app.rs`
+- [x] 5.1: App runner RAII guard — `crates/ulttui/src/app.rs`
 - [ ] 5.2: Primitives section title — `crates/ulttui/src/widgets/primitives.rs`
 - [ ] 5.3: Markdown child render — `crates/ulttui/src/widgets/markdown.rs`
 
@@ -80,7 +80,7 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 
 ### TD Phase 9 — Unicode
 
-- [ ] 9.1: Fix `wrap_line` for CJK characters
+- [x] 9.1: Fix `wrap_line` for CJK characters
 
 ---
 
@@ -152,9 +152,9 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 | Track | Total | Done | Remaining | Est. Hours |
 |-------|-------|------|-----------|------------|
 | Visual Parity | 18 | 18 | 0 | 0 |
-| Tech Debt | 21 | 8 | 13 | ~10 |
+| Tech Debt | 21 | 13 | 8 | ~6 |
 | Feature Parity | 38 | 38 | 0 | 0 |
-| **Total** | **77** | **64** | **13** | **~10** |
+| **Total** | **77** | **69** | **8** | **~6** |
 
 ## Recommended Order
 

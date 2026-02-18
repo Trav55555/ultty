@@ -1,5 +1,7 @@
 # Porygon TUI Visual Parity Plan
 
+Status: Historical execution document. Canonical completion status is tracked in `tasks.md` (Visual Parity is complete).
+
 Goal: Close the visual gaps between the Python porygon-ai TUI (Textual) and the Rust porygon-tui (ulttui) to achieve design parity.
 
 Reference screenshots:
@@ -803,4 +805,3 @@ The following items require a terminal width of at least 100 columns to display 
 - [x] **Framework**: Content width fixed (border subtraction), ScrollView overflow fixed.
 
 **All tests passing**: ulttui (537), ultty (1005+), clippy clean.
-

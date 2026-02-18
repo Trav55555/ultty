@@ -1,5 +1,7 @@
 # Native Rendering Execution Plan (Beautiful + Performant)
 
+Status: Historical execution document. Use `tasks.md` as the source of truth for open/closed execution items.
+
 **Goal**: Make ultty native-mode apps visually polished and interaction-correct, while preserving current performance margins.
 
 **Baseline (already true)**:
