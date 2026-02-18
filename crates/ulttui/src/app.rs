@@ -133,6 +133,8 @@ pub struct App<A: Application> {
     screen_stack: Vec<Box<dyn Screen>>,
     active_toasts: Vec<(Toast, Instant)>,
     quit_requested: bool,
+    backend_initialized: bool,
+    backend_shutdown: bool,
 }
 
 #[allow(dead_code)]
@@ -177,6 +179,8 @@ impl<A: Application> App<A> {
             screen_stack: Vec::new(),
             active_toasts: Vec::new(),
             quit_requested: false,
+            backend_initialized: false,
+            backend_shutdown: false,
         }
     }
 
@@ -199,6 +203,7 @@ impl<A: Application> App<A> {
     pub fn run(mut self) -> anyhow::Result<()> {
         let rt = Runtime::new()?;
         self.backend.init()?;
+        self.backend_initialized = true;
 
         // Initial render so UI appears immediately before first poll.
         self.render()?;
@@ -284,15 +289,28 @@ impl<A: Application> App<A> {
             }
         }
 
-        // Clean up active subscriptions
+        self.cleanup_runtime_resources();
+        self.shutdown_backend()?;
+        Ok(())
+    }
+
+    fn cleanup_runtime_resources(&mut self) {
         for (_, handle) in self.cmd_subscription_handles.drain() {
             handle.abort();
         }
         for (_, handle) in self.stream_subscription_handles.drain() {
             handle.abort();
         }
+        for handle in self.spawn_handles.drain(..) {
+            handle.abort();
+        }
+    }
 
-        self.backend.shutdown()?;
+    fn shutdown_backend(&mut self) -> anyhow::Result<()> {
+        if self.backend_initialized && !self.backend_shutdown {
+            self.backend.shutdown()?;
+            self.backend_shutdown = true;
+        }
         Ok(())
     }
 
@@ -701,6 +719,18 @@ impl<A: Application> App<A> {
     }
 }
 
+impl<A: Application> Drop for App<A> {
+    fn drop(&mut self) {
+        self.cleanup_runtime_resources();
+        if self.backend_initialized && !self.backend_shutdown {
+            if let Err(err) = self.backend.shutdown() {
+                tracing::warn!("backend shutdown during drop failed: {err}");
+            }
+            self.backend_shutdown = true;
+        }
+    }
+}
+
 #[cfg(any(test, feature = "test-utils"))]
 impl<A: Application> App<A> {
     /// Create an app with a specific backend (for testing).
@@ -723,6 +753,8 @@ impl<A: Application> App<A> {
             screen_stack: Vec::new(),
             active_toasts: Vec::new(),
             quit_requested: false,
+            backend_initialized: false,
+            backend_shutdown: false,
         }
     }
 }

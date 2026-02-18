@@ -16,6 +16,16 @@ mod widgets;
 /// Word-wrap a line to fit within `max_cols` columns.
 /// Breaks at spaces when possible, falls back to hard character breaks.
 fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
+    fn skip_spaces(line: &str, mut byte_idx: usize) -> usize {
+        while byte_idx < line.len() {
+            match line[byte_idx..].chars().next() {
+                Some(' ') => byte_idx += ' '.len_utf8(),
+                _ => break,
+            }
+        }
+        byte_idx
+    }
+
     if max_cols == 0 {
         return vec![line.to_string()];
     }
@@ -24,55 +34,51 @@ fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
         return vec![line.to_string()];
     }
 
-    let chars: Vec<char> = line.chars().collect();
-
     let mut result = Vec::new();
-    let mut row_start = 0;
+    let mut row_start = 0usize;
 
-    while row_start < chars.len() {
+    while row_start < line.len() {
         let mut row_end = row_start;
         let mut used_cols = 0usize;
         let mut break_at = None;
 
-        while row_end < chars.len() {
-            let ch = chars[row_end];
+        for (rel_idx, ch) in line[row_start..].char_indices() {
+            let ch_start = row_start + rel_idx;
             let ch_width = ch.width().unwrap_or(0);
             if used_cols + ch_width > max_cols {
                 break;
             }
             used_cols += ch_width;
             if ch == ' ' {
-                break_at = Some(row_end);
+                break_at = Some(ch_start);
             }
-            row_end += 1;
+            row_end = ch_start + ch.len_utf8();
         }
 
-        if row_end == chars.len() {
-            result.push(chars[row_start..].iter().collect());
+        if row_end == line.len() {
+            result.push(line[row_start..].to_string());
             break;
         }
 
         if row_end == row_start {
-            let next = row_start + 1;
-            result.push(chars[row_start..next].iter().collect());
-            row_start = next;
-            while row_start < chars.len() && chars[row_start] == ' ' {
-                row_start += 1;
-            }
+            let ch = line[row_start..]
+                .chars()
+                .next()
+                .expect("row_start always within bounds");
+            let next = row_start + ch.len_utf8();
+            result.push(line[row_start..next].to_string());
+            row_start = skip_spaces(line, next);
             continue;
         }
 
         match break_at {
             Some(space_idx) => {
-                result.push(chars[row_start..space_idx].iter().collect());
-                row_start = space_idx + 1;
+                result.push(line[row_start..space_idx].to_string());
+                row_start = skip_spaces(line, space_idx + 1);
             }
             None => {
-                result.push(chars[row_start..row_end].iter().collect());
-                row_start = row_end;
-                while row_start < chars.len() && chars[row_start] == ' ' {
-                    row_start += 1;
-                }
+                result.push(line[row_start..row_end].to_string());
+                row_start = skip_spaces(line, row_end);
             }
         }
     }
@@ -162,10 +168,7 @@ impl Renderer {
         // Pre-compute accumulated scroll adjustments (in cells) for each region.
         // For each region, the adjustment is the sum of scroll offsets from all
         // overflow:Scroll ancestors. The scroll container itself is NOT self-adjusted.
-        let mut scroll_adjustments: std::collections::HashMap<
-            ultty_protocol::RegionId,
-            (f32, f32),
-        > = std::collections::HashMap::new();
+        self.scroll_adjustments_cache.clear();
         for region in scene.iter_depth_first() {
             if region.id == ultty_protocol::RegionId::ROOT {
                 continue;
@@ -189,23 +192,22 @@ impl Renderer {
                 }
             }
             if adj_x != 0.0 || adj_y != 0.0 {
-                scroll_adjustments.insert(region.id, (adj_x, adj_y));
+                self.scroll_adjustments_cache
+                    .insert(region.id, (adj_x, adj_y));
             }
         }
 
         // Pre-compute inherited clip rects from overflow:hidden/scroll ancestors.
         // Each entry is (min_x, min_y, max_x, max_y) in pixel coords.
         // Positions are scroll-adjusted so clipping works correctly.
-        let mut clip_rects: std::collections::HashMap<
-            ultty_protocol::RegionId,
-            (f32, f32, f32, f32),
-        > = std::collections::HashMap::new();
+        self.clip_rects_cache.clear();
         for region in scene.iter_depth_first() {
             if region.id == ultty_protocol::RegionId::ROOT {
                 continue;
             }
             let layout = &region.computed;
-            let (sadj_x, sadj_y) = scroll_adjustments
+            let (sadj_x, sadj_y) = self
+                .scroll_adjustments_cache
                 .get(&region.id)
                 .copied()
                 .unwrap_or((0.0, 0.0));
@@ -234,7 +236,10 @@ impl Renderer {
                         let al = &ancestor.computed;
                         // Ancestor uses its own scroll adjustment (from its own ancestors)
                         let (a_sadj_x, a_sadj_y) =
-                            scroll_adjustments.get(&aid).copied().unwrap_or((0.0, 0.0));
+                            self.scroll_adjustments_cache
+                                .get(&aid)
+                                .copied()
+                                .unwrap_or((0.0, 0.0));
                         let ax = ((al.x - a_sadj_x) * self.cell_width).round();
                         let ay =
                             ((al.y - a_sadj_y) * self.cell_height + self.tab_bar_height).round();
@@ -254,7 +259,7 @@ impl Renderer {
                     break;
                 }
             }
-            clip_rects.insert(region.id, clip);
+            self.clip_rects_cache.insert(region.id, clip);
         }
 
         for region in scene.iter_depth_first() {
@@ -267,7 +272,8 @@ impl Renderer {
                 continue;
             }
 
-            let (sadj_x, sadj_y) = scroll_adjustments
+            let (sadj_x, sadj_y) = self
+                .scroll_adjustments_cache
                 .get(&region.id)
                 .copied()
                 .unwrap_or((0.0, 0.0));
@@ -281,7 +287,8 @@ impl Renderer {
             let cw = layout.content_width;
 
             // Use inherited clip rect (intersected with overflow ancestors)
-            let (clip_min_x, clip_min_y, clip_max_x, clip_max_y) = clip_rects
+            let (clip_min_x, clip_min_y, clip_max_x, clip_max_y) = self
+                .clip_rects_cache
                 .get(&region.id)
                 .copied()
                 .unwrap_or((x, y, x + w, y + h));

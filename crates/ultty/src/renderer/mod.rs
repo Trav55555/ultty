@@ -218,6 +218,10 @@ pub struct Renderer {
     /// Previous frame vertex/index counts for smarter pre-allocation
     prev_bg_count: (usize, usize),
     prev_text_count: (usize, usize),
+    /// Reused per-frame cache for native scroll adjustments.
+    scroll_adjustments_cache: std::collections::HashMap<ultty_protocol::RegionId, (f32, f32)>,
+    /// Reused per-frame cache for native clip rectangles.
+    clip_rects_cache: std::collections::HashMap<ultty_protocol::RegionId, (f32, f32, f32, f32)>,
 }
 
 /// Deferred native image render request (collected during widget content rendering).
@@ -375,6 +379,8 @@ impl Renderer {
             cached_native_text: None,
             prev_bg_count: (0, 0),
             prev_text_count: (0, 0),
+            scroll_adjustments_cache: std::collections::HashMap::new(),
+            clip_rects_cache: std::collections::HashMap::new(),
         })
     }
 
@@ -502,6 +508,8 @@ impl Renderer {
             cached_native_text: None,
             prev_bg_count: (0, 0),
             prev_text_count: (0, 0),
+            scroll_adjustments_cache: std::collections::HashMap::new(),
+            clip_rects_cache: std::collections::HashMap::new(),
         })
     }
 
