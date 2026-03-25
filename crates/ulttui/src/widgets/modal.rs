@@ -21,6 +21,8 @@ pub struct Modal {
     buttons: Vec<String>,
     selected_button: usize,
     visible: bool,
+    /// Width in cells (default 50).
+    width: f32,
 }
 
 impl Default for Modal {
@@ -32,6 +34,7 @@ impl Default for Modal {
             buttons: vec!["OK".into()],
             selected_button: 0,
             visible: true,
+            width: 50.0,
         }
     }
 }
@@ -74,6 +77,12 @@ impl Modal {
 
     pub fn body_view(mut self, view: impl View + 'static) -> Self {
         self.body_view = Some(Box::new(view));
+        self
+    }
+
+    /// Set the modal width in cells (default 50).
+    pub fn width(mut self, cells: f32) -> Self {
+        self.width = cells;
         self
     }
 
@@ -127,7 +136,7 @@ impl View for Modal {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
             align_self: ultty_protocol::AlignSelf::Center,
-            width: Dimension::Cells(50.0),
+            width: Dimension::Cells(self.width),
             height: Dimension::Cells(10.0),
             margin: ultty_protocol::Edges::all(Dimension::Auto),
             ..Default::default()
@@ -252,7 +261,7 @@ impl View for Modal {
         }
 
         // Center the modal in the available area
-        let modal_width = 50u16.min(area.width.saturating_sub(4));
+        let modal_width = (self.width as u16).min(area.width.saturating_sub(4));
         let modal_height = 10u16.min(area.height.saturating_sub(4));
         let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
         let y = area.y + (area.height.saturating_sub(modal_height)) / 2;

@@ -217,6 +217,7 @@ impl<A: Application> App<A> {
                     }
                     self.drain_messages(&rt);
                     self.poll_spawned_tasks(&rt);
+                    self.poll_subscriptions();
                     self.drain_messages(&rt);
                     break;
                 }
@@ -239,7 +240,9 @@ impl<A: Application> App<A> {
                     match action {
                         ScreenAction::Continue => {}
                         ScreenAction::Dismiss => {
-                            self.screen_stack.pop();
+                            if let Some(mut screen) = self.screen_stack.pop() {
+                                screen.on_unmount();
+                            }
                             forward_to_app = false;
                         }
                         ScreenAction::Consumed => {
@@ -319,7 +322,17 @@ impl<A: Application> App<A> {
     /// from recursive `Cmd::Message` chains.
     fn drain_messages(&mut self, rt: &Runtime) {
         const MAX_ITERATIONS: usize = 100;
+        const MAX_QUEUE_SIZE: usize = 10_000;
         let mut iterations = 0;
+
+        if self.msg_queue.len() > MAX_QUEUE_SIZE {
+            tracing::error!(
+                "msg_queue has {} entries (max {}); truncating",
+                self.msg_queue.len(),
+                MAX_QUEUE_SIZE
+            );
+            self.msg_queue.truncate(MAX_QUEUE_SIZE);
+        }
 
         while let Some(msg) = self.msg_queue.pop_front() {
             iterations += 1;
@@ -669,7 +682,9 @@ impl<A: Application> App<A> {
                     self.screen_stack.push(screen);
                 }
                 Cmd::PopScreen => {
-                    self.screen_stack.pop();
+                    if let Some(mut screen) = self.screen_stack.pop() {
+                        screen.on_unmount();
+                    }
                 }
                 Cmd::Quit => {
                     self.quit_requested = true;
