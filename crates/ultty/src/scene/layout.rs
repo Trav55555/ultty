@@ -1374,4 +1374,278 @@ mod tests {
             29.0
         );
     }
+
+    // ── Regression tests for documented layout bugs ─────────────────
+
+    /// Regression: DockLayout middle Row needs AlignItems::Stretch AND children
+    /// need height:Percent(100) to fill the cross-axis. Taffy's align-items:stretch
+    /// alone doesn't give definite cross-axis height to flex container children
+    /// that have no intrinsic content.
+    #[test]
+    fn layout_row_align_items_stretch_fills_cross_axis() {
+        let mut tree = SceneTree::new();
+        let root = tree.get_mut(RegionId::ROOT).unwrap();
+        root.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Cells(80.0),
+            height: ProtoDimension::Cells(24.0),
+            ..Default::default()
+        };
+
+        // Header (fixed)
+        let mut header = Region::new(RegionId::new(1));
+        header.parent = Some(RegionId::ROOT);
+        header.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            height: ProtoDimension::Cells(1.0),
+            width: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(header);
+
+        // Middle Row with AlignItems::Stretch
+        let mut middle = Region::new(RegionId::new(2));
+        middle.parent = Some(RegionId::ROOT);
+        middle.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Row,
+            flex_grow: 1.0,
+            width: ProtoDimension::Percent(100.0),
+            align_items: ProtoAlignItems::Stretch,
+            ..Default::default()
+        };
+        tree.insert(middle);
+
+        // Sidebar with explicit height:100% — stretches to row height
+        let mut sidebar = Region::new(RegionId::new(3));
+        sidebar.parent = Some(RegionId::new(2));
+        sidebar.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Cells(20.0),
+            height: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(sidebar);
+
+        // Main with explicit height:100% + flex_grow — stretches to row height
+        let mut main = Region::new(RegionId::new(4));
+        main.parent = Some(RegionId::new(2));
+        main.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_grow: 1.0,
+            height: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(main);
+
+        let mut engine = LayoutEngine::new();
+        engine.sync(&tree).unwrap();
+        engine.compute(80.0, 24.0).unwrap();
+
+        let middle_layout = engine.get_layout(RegionId::new(2)).unwrap();
+        let sidebar_layout = engine.get_layout(RegionId::new(3)).unwrap();
+        let main_layout = engine.get_layout(RegionId::new(4)).unwrap();
+
+        assert_eq!(middle_layout.size.height, 23.0, "middle row = 24 - 1");
+        assert_eq!(
+            sidebar_layout.size.height, 23.0,
+            "sidebar with height:100% should fill row height"
+        );
+        assert_eq!(
+            main_layout.size.height, 23.0,
+            "main with height:100% should fill row height"
+        );
+
+        // Without height:100%, AlignItems::Start children get zero height
+        let sidebar = tree.get_mut(RegionId::new(3)).unwrap();
+        sidebar.constraints.height = ProtoDimension::Auto;
+        let middle = tree.get_mut(RegionId::new(2)).unwrap();
+        middle.constraints.align_items = ProtoAlignItems::Start;
+        engine.sync(&tree).unwrap();
+        engine.compute(80.0, 24.0).unwrap();
+
+        let sidebar_layout = engine.get_layout(RegionId::new(3)).unwrap();
+        assert_eq!(
+            sidebar_layout.size.height, 0.0,
+            "sidebar with AlignItems::Start and no content should not stretch"
+        );
+    }
+
+    /// Regression: padding + border reduce the content area.
+    #[test]
+    fn layout_padding_reduces_available_space() {
+        let mut tree = SceneTree::new();
+        let root = tree.get_mut(RegionId::ROOT).unwrap();
+        root.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Cells(80.0),
+            height: ProtoDimension::Cells(24.0),
+            padding: Edges {
+                top: ProtoDimension::Cells(2.0),
+                right: ProtoDimension::Cells(2.0),
+                bottom: ProtoDimension::Cells(2.0),
+                left: ProtoDimension::Cells(2.0),
+            },
+            ..Default::default()
+        };
+
+        let mut child = Region::new(RegionId::new(1));
+        child.parent = Some(RegionId::ROOT);
+        child.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            width: ProtoDimension::Percent(100.0),
+            flex_grow: 1.0,
+            ..Default::default()
+        };
+        tree.insert(child);
+
+        let mut engine = LayoutEngine::new();
+        engine.sync(&tree).unwrap();
+        engine.compute(80.0, 24.0).unwrap();
+
+        let child_layout = engine.get_layout(RegionId::new(1)).unwrap();
+        // 80 - 2 - 2 = 76 width, 24 - 2 - 2 = 20 height
+        assert_eq!(child_layout.size.width, 76.0, "child width after padding");
+        assert_eq!(child_layout.size.height, 20.0, "child height after padding");
+        assert_eq!(child_layout.location.x, 2.0, "child x offset from padding");
+        assert_eq!(child_layout.location.y, 2.0, "child y offset from padding");
+    }
+
+    /// Regression: multiple children with different flex_grow should get proportional space.
+    #[test]
+    fn layout_flex_grow_proportional_allocation() {
+        let mut tree = SceneTree::new();
+        let root = tree.get_mut(RegionId::ROOT).unwrap();
+        root.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Cells(80.0),
+            height: ProtoDimension::Cells(30.0),
+            ..Default::default()
+        };
+
+        // Child A: flex_grow: 1
+        let mut a = Region::new(RegionId::new(1));
+        a.parent = Some(RegionId::ROOT);
+        a.constraints = Constraints {
+            flex_grow: 1.0,
+            ..Default::default()
+        };
+        tree.insert(a);
+
+        // Child B: flex_grow: 2
+        let mut b = Region::new(RegionId::new(2));
+        b.parent = Some(RegionId::ROOT);
+        b.constraints = Constraints {
+            flex_grow: 2.0,
+            ..Default::default()
+        };
+        tree.insert(b);
+
+        // Child C: flex_grow: 1
+        let mut c = Region::new(RegionId::new(3));
+        c.parent = Some(RegionId::ROOT);
+        c.constraints = Constraints {
+            flex_grow: 1.0,
+            ..Default::default()
+        };
+        tree.insert(c);
+
+        let mut engine = LayoutEngine::new();
+        engine.sync(&tree).unwrap();
+        engine.compute(80.0, 30.0).unwrap();
+
+        let a_layout = engine.get_layout(RegionId::new(1)).unwrap();
+        let b_layout = engine.get_layout(RegionId::new(2)).unwrap();
+        let c_layout = engine.get_layout(RegionId::new(3)).unwrap();
+
+        // Total flex_grow = 4. Taffy rounds to whole cells.
+        // A≈7.5→8, B≈15, C≈7.5→7 (or similar rounding).
+        let total = a_layout.size.height + b_layout.size.height + c_layout.size.height;
+        assert_eq!(total, 30.0, "children should consume all space");
+        assert!(
+            (b_layout.size.height - 2.0 * a_layout.size.height).abs() <= 2.0,
+            "B (grow:2) should be ~2x A (grow:1): B={}, A={}",
+            b_layout.size.height,
+            a_layout.size.height
+        );
+        assert!(
+            (a_layout.size.height - c_layout.size.height).abs() <= 1.0,
+            "A and C (both grow:1) should be roughly equal: A={}, C={}",
+            a_layout.size.height,
+            c_layout.size.height
+        );
+    }
+
+    /// Regression: nested flex containers — inner flex_grow works relative to parent.
+    #[test]
+    fn layout_nested_flex_grow() {
+        let mut tree = SceneTree::new();
+        let root = tree.get_mut(RegionId::ROOT).unwrap();
+        root.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Cells(80.0),
+            height: ProtoDimension::Cells(40.0),
+            ..Default::default()
+        };
+
+        // Fixed header
+        let mut header = Region::new(RegionId::new(1));
+        header.parent = Some(RegionId::ROOT);
+        header.constraints = Constraints {
+            height: ProtoDimension::Cells(5.0),
+            width: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(header);
+
+        // Body: flex_grow container
+        let mut body = Region::new(RegionId::new(2));
+        body.parent = Some(RegionId::ROOT);
+        body.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Row,
+            flex_grow: 1.0,
+            width: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(body);
+
+        // Body children: sidebar (fixed) + main (flex_grow)
+        let mut sidebar = Region::new(RegionId::new(3));
+        sidebar.parent = Some(RegionId::new(2));
+        sidebar.constraints = Constraints {
+            width: ProtoDimension::Cells(20.0),
+            height: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(sidebar);
+
+        let mut main = Region::new(RegionId::new(4));
+        main.parent = Some(RegionId::new(2));
+        main.constraints = Constraints {
+            flex_grow: 1.0,
+            height: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+        tree.insert(main);
+
+        let mut engine = LayoutEngine::new();
+        engine.sync(&tree).unwrap();
+        engine.compute(80.0, 40.0).unwrap();
+
+        let header_layout = engine.get_layout(RegionId::new(1)).unwrap();
+        let body_layout = engine.get_layout(RegionId::new(2)).unwrap();
+        let sidebar_layout = engine.get_layout(RegionId::new(3)).unwrap();
+        let main_layout = engine.get_layout(RegionId::new(4)).unwrap();
+
+        assert_eq!(header_layout.size.height, 5.0);
+        assert_eq!(body_layout.size.height, 35.0, "body gets remaining 40-5");
+        assert_eq!(sidebar_layout.size.width, 20.0);
+        assert_eq!(main_layout.size.width, 60.0, "main gets remaining 80-20");
+        assert_eq!(main_layout.size.height, 35.0, "main inherits body height");
+    }
 }
