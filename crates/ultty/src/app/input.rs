@@ -7,6 +7,7 @@ use ultty::config::KeybindingConfig;
 use ultty::grid::{
     MouseButton as TerminalMouseButton, MouseModifiers, SelectionMode, SelectionPoint,
 };
+use ultty::terminal_manager::SplitDirection;
 use ultty::url::UrlDetector;
 use ultty::vim::CopyModeResult;
 use ultty_protocol::{Key as ProtocolKey, Modifiers as ProtocolModifiers};
@@ -16,6 +17,13 @@ use winit::keyboard::{Key, NamedKey};
 impl App {
     /// Handle window event. Returns true if should exit.
     pub(super) fn handle_window_event(&mut self, event: WindowEvent) -> bool {
+        // Check for pending close from window control button
+        if self.pending_close {
+            tracing::info!("Close requested");
+            self.save_session();
+            return true;
+        }
+
         match event {
             WindowEvent::CloseRequested => {
                 tracing::info!("Close requested");
@@ -177,6 +185,31 @@ impl App {
             ElementState::Pressed => {
                 // Check for tab bar clicks first
                 if self.tab_bar.visible && y < self.tab_bar.height() {
+                    // Window control buttons
+                    if button == MouseButton::Left {
+                        if let Some(control) = self.tab_bar.window_control_at(x, y) {
+                            use ultty::tabs::WindowControl;
+                            match control {
+                                WindowControl::Close => {
+                                    self.pending_close = true;
+                                }
+                                WindowControl::Maximize => {
+                                    self.window.set_maximized(!self.window.is_maximized());
+                                }
+                                WindowControl::Minimize => {
+                                    self.window.set_minimized(true);
+                                }
+                            }
+                            return;
+                        }
+
+                        // Draggable title bar area
+                        if self.tab_bar.is_drag_area(x, y) {
+                            let _ = self.window.drag_window();
+                            return;
+                        }
+                    }
+
                     // Middle click closes tab
                     if button == MouseButton::Middle {
                         if let Some(tab_idx) = self.tab_bar.tab_at_x(x) {
@@ -209,6 +242,19 @@ impl App {
                         return;
                     }
 
+                    // Click on "+" new tab button
+                    if button == MouseButton::Left && self.tab_bar.is_new_tab_button_at(x, y) {
+                        match self.terminal_manager.create_tab() {
+                            Ok(_) => {
+                                tracing::info!("Created new tab via + button");
+                                self.update_tab_bar();
+                                self.needs_redraw = true;
+                            }
+                            Err(e) => tracing::warn!("Failed to create tab: {}", e),
+                        }
+                        return;
+                    }
+
                     // Click on tab - start drag and switch to it
                     if let Some(tab_idx) = self.tab_bar.tab_at_x(x) {
                         self.tab_bar.start_drag(tab_idx, x);
@@ -221,6 +267,38 @@ impl App {
                 }
 
                 // Not in tab bar - handle normal clicks
+
+                // In multi-pane mode, check for divider drag or pane focus
+                if button == MouseButton::Left && self.terminal_manager.pane_count() > 1 {
+                    let size = self.window.inner_size();
+                    let tab_h = self.tab_bar.height();
+                    let content_y = y - tab_h;
+                    let aw = size.width as f32;
+                    let ah = size.height as f32 - tab_h;
+
+                    // Check if clicking on a divider (4px tolerance)
+                    let dir = self.terminal_manager.split_direction();
+                    let (pos, total) = match dir {
+                        SplitDirection::Horizontal => (x, aw),
+                        SplitDirection::Vertical => (content_y, ah),
+                    };
+                    if let Some(div_idx) =
+                        self.terminal_manager.divider_at_position(pos, total, 4.0)
+                    {
+                        self.divider_dragging = Some((div_idx, pos));
+                        return;
+                    }
+
+                    // Otherwise, focus the clicked pane
+                    if let Some(idx) = self.terminal_manager.pane_at_position(x, content_y, aw, ah)
+                    {
+                        if idx != self.terminal_manager.focused_pane_index() {
+                            self.terminal_manager.focus_pane(idx);
+                            self.needs_redraw = true;
+                        }
+                    }
+                }
+
                 if button != MouseButton::Left {
                     return;
                 }
@@ -301,6 +379,7 @@ impl App {
             ElementState::Released => {
                 self.mouse_pressed = false;
                 self.scrollbar_dragging = false;
+                self.divider_dragging = None;
 
                 // Forward MouseUp to native protocol sessions
                 if let Some(proto_button) = Self::winit_to_protocol_mouse_button(button) {
@@ -349,6 +428,26 @@ impl App {
         // Handle scrollbar dragging
         if self.scrollbar_dragging {
             self.handle_scrollbar_click(self.mouse_pos.y as f32);
+            return;
+        }
+
+        // Handle pane divider dragging
+        if let Some((div_idx, last_pos)) = self.divider_dragging {
+            let size = self.window.inner_size();
+            let tab_h = self.tab_bar.height();
+            let dir = self.terminal_manager.split_direction();
+            let (current_pos, total) = match dir {
+                SplitDirection::Horizontal => (self.mouse_pos.x as f32, size.width as f32),
+                SplitDirection::Vertical => {
+                    (self.mouse_pos.y as f32 - tab_h, size.height as f32 - tab_h)
+                }
+            };
+            let delta = current_pos - last_pos;
+            if delta.abs() > 1.0 {
+                self.terminal_manager.resize_pane(div_idx, delta, total);
+                self.divider_dragging = Some((div_idx, current_pos));
+                self.needs_redraw = true;
+            }
             return;
         }
 
@@ -806,20 +905,35 @@ impl App {
             return;
         }
 
-        // Pane navigation
-        if self.check_keybinding(&event, &self.config.keybindings.focus_pane_right.clone())
-            || self.check_keybinding(&event, &self.config.keybindings.focus_pane_down.clone())
+        // Pane navigation — direction-aware based on split orientation
         {
-            self.terminal_manager.focus_next_pane();
-            self.needs_redraw = true;
-            return;
-        }
-        if self.check_keybinding(&event, &self.config.keybindings.focus_pane_left.clone())
-            || self.check_keybinding(&event, &self.config.keybindings.focus_pane_up.clone())
-        {
-            self.terminal_manager.focus_prev_pane();
-            self.needs_redraw = true;
-            return;
+            let dir = self.terminal_manager.split_direction();
+            let right =
+                self.check_keybinding(&event, &self.config.keybindings.focus_pane_right.clone());
+            let down =
+                self.check_keybinding(&event, &self.config.keybindings.focus_pane_down.clone());
+            let left =
+                self.check_keybinding(&event, &self.config.keybindings.focus_pane_left.clone());
+            let up = self.check_keybinding(&event, &self.config.keybindings.focus_pane_up.clone());
+
+            let next = match dir {
+                SplitDirection::Horizontal => right,
+                SplitDirection::Vertical => down,
+            };
+            let prev = match dir {
+                SplitDirection::Horizontal => left,
+                SplitDirection::Vertical => up,
+            };
+            if next {
+                self.terminal_manager.focus_next_pane();
+                self.needs_redraw = true;
+                return;
+            }
+            if prev {
+                self.terminal_manager.focus_prev_pane();
+                self.needs_redraw = true;
+                return;
+            }
         }
         if self.check_keybinding(&event, &self.config.keybindings.close_pane.clone()) {
             if self.terminal_manager.close_focused_pane() {

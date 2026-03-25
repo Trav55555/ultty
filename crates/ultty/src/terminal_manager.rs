@@ -8,6 +8,150 @@
 use crate::event_loop::{EventLoop as TerminalEventLoop, TerminalEvent};
 use std::io;
 
+// ── Split tree for nested pane layouts ────────────────────────────────────
+
+/// A binary split tree node. Each leaf is a terminal pane; each internal node
+/// splits its area into two children (first/second) along a direction.
+#[derive(Debug, Clone)]
+pub enum SplitNode {
+    /// A leaf containing a single terminal.
+    Leaf(TerminalId),
+    /// An internal split with two children and a ratio (0..1) for the first child.
+    Split {
+        direction: SplitDirection,
+        ratio: f32,
+        first: Box<SplitNode>,
+        second: Box<SplitNode>,
+    },
+}
+
+impl SplitNode {
+    /// Create a leaf node.
+    pub fn leaf(id: TerminalId) -> Self {
+        SplitNode::Leaf(id)
+    }
+
+    /// Collect all terminal IDs in depth-first order.
+    pub fn terminals(&self) -> Vec<TerminalId> {
+        match self {
+            SplitNode::Leaf(id) => vec![*id],
+            SplitNode::Split { first, second, .. } => {
+                let mut v = first.terminals();
+                v.extend(second.terminals());
+                v
+            }
+        }
+    }
+
+    /// Count the number of leaves.
+    pub fn leaf_count(&self) -> usize {
+        match self {
+            SplitNode::Leaf(_) => 1,
+            SplitNode::Split { first, second, .. } => first.leaf_count() + second.leaf_count(),
+        }
+    }
+
+    /// Find the leaf containing `id` and split it, placing a new terminal alongside.
+    /// Returns true if the split was performed.
+    pub fn split_at(
+        &mut self,
+        target: TerminalId,
+        new_id: TerminalId,
+        direction: SplitDirection,
+    ) -> bool {
+        match self {
+            SplitNode::Leaf(id) if *id == target => {
+                let existing = SplitNode::Leaf(*id);
+                *self = SplitNode::Split {
+                    direction,
+                    ratio: 0.5,
+                    first: Box::new(existing),
+                    second: Box::new(SplitNode::Leaf(new_id)),
+                };
+                true
+            }
+            SplitNode::Leaf(_) => false,
+            SplitNode::Split { first, second, .. } => {
+                first.split_at(target, new_id, direction)
+                    || second.split_at(target, new_id, direction)
+            }
+        }
+    }
+
+    /// Remove a terminal by ID. Returns true if removed.
+    /// If removal leaves an internal node with one child, collapses it.
+    pub fn remove(&mut self, target: TerminalId) -> bool {
+        match self {
+            SplitNode::Leaf(id) => *id == target,
+            SplitNode::Split { first, second, .. } => {
+                if first.remove(target) {
+                    // First child was removed — replace self with second
+                    if matches!(**first, SplitNode::Leaf(id) if id == target) {
+                        *self = *second.clone();
+                    }
+                    true
+                } else if second.remove(target) {
+                    if matches!(**second, SplitNode::Leaf(id) if id == target) {
+                        *self = *first.clone();
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Compute layout rectangles for each leaf given a bounding box.
+    /// Returns (TerminalId, x, y, width, height) for each leaf.
+    pub fn layout(&self, x: f32, y: f32, w: f32, h: f32) -> Vec<(TerminalId, f32, f32, f32, f32)> {
+        match self {
+            SplitNode::Leaf(id) => vec![(*id, x, y, w, h)],
+            SplitNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
+                let mut result = Vec::new();
+                match direction {
+                    SplitDirection::Horizontal => {
+                        let w1 = w * ratio;
+                        result.extend(first.layout(x, y, w1, h));
+                        result.extend(second.layout(x + w1, y, w - w1, h));
+                    }
+                    SplitDirection::Vertical => {
+                        let h1 = h * ratio;
+                        result.extend(first.layout(x, y, w, h1));
+                        result.extend(second.layout(x, y + h1, w, h - h1));
+                    }
+                }
+                result
+            }
+        }
+    }
+
+    /// Find the next terminal after `current` in depth-first order.
+    pub fn next_terminal(&self, current: TerminalId) -> Option<TerminalId> {
+        let terminals = self.terminals();
+        let pos = terminals.iter().position(|&id| id == current)?;
+        let next_pos = (pos + 1) % terminals.len();
+        Some(terminals[next_pos])
+    }
+
+    /// Find the previous terminal before `current` in depth-first order.
+    pub fn prev_terminal(&self, current: TerminalId) -> Option<TerminalId> {
+        let terminals = self.terminals();
+        let pos = terminals.iter().position(|&id| id == current)?;
+        let prev_pos = if pos == 0 {
+            terminals.len() - 1
+        } else {
+            pos - 1
+        };
+        Some(terminals[prev_pos])
+    }
+}
+
 /// Direction of pane splits within a tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SplitDirection {
@@ -102,6 +246,12 @@ pub struct Tab {
     pub title: String,
     /// How panes are arranged in this tab
     pub split_direction: SplitDirection,
+    /// Relative size of each pane (normalized to sum to 1.0).
+    /// Length matches `terminals`. Empty means equal distribution.
+    pub pane_ratios: Vec<f32>,
+    /// Binary split tree for nested pane layouts.
+    /// When present, this drives layout instead of the flat `terminals` + `split_direction`.
+    pub split_tree: Option<SplitNode>,
 }
 
 impl Tab {
@@ -113,12 +263,16 @@ impl Tab {
             focused_terminal: terminal_id,
             title: format!("Tab {}", id.0 + 1),
             split_direction: SplitDirection::default(),
+            pane_ratios: Vec::new(),
+            split_tree: None,
         }
     }
 
     /// Add a terminal to this tab (for pane splitting).
     pub fn add_terminal(&mut self, terminal_id: TerminalId) {
         self.terminals.push(terminal_id);
+        // Reset to equal distribution when a pane is added
+        self.pane_ratios.clear();
     }
 
     /// Remove a terminal from this tab.
@@ -629,6 +783,93 @@ impl TerminalManager {
             .unwrap_or(0)
     }
 
+    /// Get the pane ratios for the active tab. If empty, returns equal distribution.
+    pub fn pane_ratios(&self) -> Vec<f32> {
+        let Some(tab) = self.active_tab() else {
+            return vec![1.0];
+        };
+        if tab.pane_ratios.is_empty() {
+            let n = tab.terminals.len().max(1);
+            vec![1.0 / n as f32; n]
+        } else {
+            tab.pane_ratios.clone()
+        }
+    }
+
+    /// Resize a pane divider. `divider_index` is the border between pane[i] and pane[i+1].
+    /// `delta` is the amount to move in pixels; `total_size` is the available dimension.
+    pub fn resize_pane(&mut self, divider_index: usize, delta: f32, total_size: f32) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        let count = tab.terminals.len();
+        if divider_index >= count.saturating_sub(1) || total_size <= 0.0 {
+            return;
+        }
+
+        // Initialize ratios if empty
+        if tab.pane_ratios.is_empty() {
+            tab.pane_ratios = vec![1.0 / count as f32; count];
+        }
+
+        let delta_ratio = delta / total_size;
+        let min_ratio = 0.05; // 5% minimum pane size
+
+        let new_left = (tab.pane_ratios[divider_index] + delta_ratio).max(min_ratio);
+        let new_right = (tab.pane_ratios[divider_index + 1] - delta_ratio).max(min_ratio);
+
+        // Renormalize only the two affected panes
+        let old_sum = tab.pane_ratios[divider_index] + tab.pane_ratios[divider_index + 1];
+        let new_sum = new_left + new_right;
+        tab.pane_ratios[divider_index] = new_left * old_sum / new_sum;
+        tab.pane_ratios[divider_index + 1] = new_right * old_sum / new_sum;
+    }
+
+    /// Given a click position in pixels relative to the content area (below tab bar),
+    /// determine which pane index was clicked. Returns None if only 1 pane or out of bounds.
+    pub fn pane_at_position(
+        &self,
+        x: f32,
+        y: f32,
+        available_width: f32,
+        available_height: f32,
+    ) -> Option<usize> {
+        let tab = self.active_tab()?;
+        let count = tab.terminals.len();
+        if count <= 1 {
+            return None;
+        }
+
+        let ratios = self.pane_ratios();
+        let (pos, total) = match tab.split_direction {
+            SplitDirection::Horizontal => (x, available_width),
+            SplitDirection::Vertical => (y, available_height),
+        };
+
+        let mut cumulative = 0.0;
+        for (i, ratio) in ratios.iter().enumerate() {
+            cumulative += ratio * total;
+            if pos < cumulative {
+                return Some(i);
+            }
+        }
+        Some(count - 1)
+    }
+
+    /// Given a position, find the divider index being hovered (within a tolerance).
+    /// Returns the divider index (border between pane[i] and pane[i+1]).
+    pub fn divider_at_position(&self, pos: f32, total: f32, tolerance: f32) -> Option<usize> {
+        let ratios = self.pane_ratios();
+        let mut cumulative = 0.0;
+        for (i, ratio) in ratios.iter().enumerate() {
+            cumulative += ratio * total;
+            if i < ratios.len() - 1 && (pos - cumulative).abs() < tolerance {
+                return Some(i);
+            }
+        }
+        None
+    }
+
     /// Extract session data from the current state.
     pub fn to_session_data(&self) -> crate::session::SessionData {
         use crate::session::{SessionData, TabData, TerminalData};
@@ -774,6 +1015,8 @@ impl TerminalManager {
                 })?,
                 title: tab_data.title.clone(),
                 split_direction,
+                pane_ratios: Vec::new(),
+                split_tree: None,
             };
 
             manager.tabs.push(tab);
@@ -881,5 +1124,75 @@ mod tests {
 
         manager.switch_to_tab(0);
         assert_eq!(manager.active_tab, first_tab);
+    }
+
+    // ── SplitNode tests ──────────────────────────────────────────────
+
+    #[test]
+    fn split_node_leaf() {
+        let id = TerminalId::new(1);
+        let node = SplitNode::leaf(id);
+        assert_eq!(node.terminals(), vec![id]);
+        assert_eq!(node.leaf_count(), 1);
+    }
+
+    #[test]
+    fn split_node_split_at() {
+        let id1 = TerminalId::new(1);
+        let id2 = TerminalId::new(2);
+        let mut node = SplitNode::leaf(id1);
+        assert!(node.split_at(id1, id2, SplitDirection::Horizontal));
+        assert_eq!(node.leaf_count(), 2);
+        assert_eq!(node.terminals(), vec![id1, id2]);
+    }
+
+    #[test]
+    fn split_node_nested_split() {
+        let id1 = TerminalId::new(1);
+        let id2 = TerminalId::new(2);
+        let id3 = TerminalId::new(3);
+        let mut node = SplitNode::leaf(id1);
+        node.split_at(id1, id2, SplitDirection::Horizontal);
+        node.split_at(id2, id3, SplitDirection::Vertical);
+        assert_eq!(node.leaf_count(), 3);
+        assert_eq!(node.terminals(), vec![id1, id2, id3]);
+    }
+
+    #[test]
+    fn split_node_layout() {
+        let id1 = TerminalId::new(1);
+        let id2 = TerminalId::new(2);
+        let mut node = SplitNode::leaf(id1);
+        node.split_at(id1, id2, SplitDirection::Horizontal);
+        let rects = node.layout(0.0, 0.0, 100.0, 50.0);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0], (id1, 0.0, 0.0, 50.0, 50.0));
+        assert_eq!(rects[1], (id2, 50.0, 0.0, 50.0, 50.0));
+    }
+
+    #[test]
+    fn split_node_remove() {
+        let id1 = TerminalId::new(1);
+        let id2 = TerminalId::new(2);
+        let mut node = SplitNode::leaf(id1);
+        node.split_at(id1, id2, SplitDirection::Horizontal);
+        assert!(node.remove(id2));
+        assert_eq!(node.leaf_count(), 1);
+        assert_eq!(node.terminals(), vec![id1]);
+    }
+
+    #[test]
+    fn split_node_navigation() {
+        let id1 = TerminalId::new(1);
+        let id2 = TerminalId::new(2);
+        let id3 = TerminalId::new(3);
+        let mut node = SplitNode::leaf(id1);
+        node.split_at(id1, id2, SplitDirection::Horizontal);
+        node.split_at(id2, id3, SplitDirection::Vertical);
+
+        assert_eq!(node.next_terminal(id1), Some(id2));
+        assert_eq!(node.next_terminal(id3), Some(id1));
+        assert_eq!(node.prev_terminal(id1), Some(id3));
+        assert_eq!(node.prev_terminal(id2), Some(id1));
     }
 }

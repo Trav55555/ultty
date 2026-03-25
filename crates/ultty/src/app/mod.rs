@@ -51,6 +51,8 @@ pub struct App {
     last_render: Instant,
     /// Whether we need to redraw
     needs_redraw: bool,
+    /// Pending close request (from window control button).
+    pending_close: bool,
     /// Current modifier state
     modifiers: ModifiersState,
     /// Clipboard
@@ -77,6 +79,8 @@ pub struct App {
     bell_active_until: Option<Instant>,
     /// Scrollbar dragging state
     scrollbar_dragging: bool,
+    /// Pane divider dragging state: (divider_index, last_position)
+    divider_dragging: Option<(usize, f32)>,
     /// Keyboard shortcuts overlay visible
     shortcuts_visible: bool,
     /// Cached list of keybindings for display
@@ -126,6 +130,7 @@ impl App {
             .with_title("Ultty")
             .with_inner_size(LogicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT))
             .with_transparent(config.behavior.opacity < 1.0)
+            .with_decorations(false)
             .build(event_loop)?;
         let window = Arc::new(window);
 
@@ -214,6 +219,7 @@ impl App {
             tab_bar,
             last_render: Instant::now(),
             needs_redraw: true,
+            pending_close: false,
             modifiers: ModifiersState::empty(),
             clipboard,
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
@@ -227,6 +233,7 @@ impl App {
             config_watcher,
             bell_active_until: None,
             scrollbar_dragging: false,
+            divider_dragging: None,
             shortcuts_visible: false,
             shortcuts_list,
             cursor_blink_visible: true,
