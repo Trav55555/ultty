@@ -56,6 +56,18 @@ const MAX_METADATA_PAIRS: usize = 1024;
 const MAX_METADATA_TOTAL_BYTES: usize = 1024 * 1024;
 
 // ============================================================================
+// Validation helpers
+// ============================================================================
+
+/// Reject NaN and Infinity values in decoded floats.
+fn validate_f32(v: f32) -> Result<f32> {
+    if v.is_nan() || v.is_infinite() {
+        return Err(ProtocolError::InvalidFloat(v));
+    }
+    Ok(v)
+}
+
+// ============================================================================
 // Traits
 // ============================================================================
 
@@ -139,7 +151,7 @@ fn decode_option_f32(buf: &mut impl Buf) -> Result<Option<f32>> {
                     have: buf.remaining(),
                 });
             }
-            Ok(Some(buf.get_f32_le()))
+            Ok(Some(validate_f32(buf.get_f32_le())?))
         }
         _ => Err(ProtocolError::InvalidData("invalid option tag".into())),
     }
@@ -460,7 +472,7 @@ impl Decode for Style {
             });
         }
         let flags = buf.get_u8();
-        let opacity = buf.get_f32_le();
+        let opacity = validate_f32(buf.get_f32_le())?;
         let transition = if flags & 16 != 0 {
             Some(Transition::decode(buf)?)
         } else {
@@ -566,7 +578,7 @@ impl Decode for Dimension {
                         have: buf.remaining(),
                     });
                 }
-                Ok(Dimension::Cells(buf.get_f32_le()))
+                Ok(Dimension::Cells(validate_f32(buf.get_f32_le())?))
             }
             2 => {
                 if buf.remaining() < 4 {
@@ -575,7 +587,7 @@ impl Decode for Dimension {
                         have: buf.remaining(),
                     });
                 }
-                Ok(Dimension::Percent(buf.get_f32_le()))
+                Ok(Dimension::Percent(validate_f32(buf.get_f32_le())?))
             }
             3 => {
                 if buf.remaining() < 4 {
@@ -584,7 +596,7 @@ impl Decode for Dimension {
                         have: buf.remaining(),
                     });
                 }
-                Ok(Dimension::Fr(buf.get_f32_le()))
+                Ok(Dimension::Fr(validate_f32(buf.get_f32_le())?))
             }
             4 => {
                 if buf.remaining() < 4 {
@@ -593,7 +605,7 @@ impl Decode for Dimension {
                         have: buf.remaining(),
                     });
                 }
-                Ok(Dimension::Vw(buf.get_f32_le()))
+                Ok(Dimension::Vw(validate_f32(buf.get_f32_le())?))
             }
             5 => {
                 if buf.remaining() < 4 {
@@ -602,7 +614,7 @@ impl Decode for Dimension {
                         have: buf.remaining(),
                     });
                 }
-                Ok(Dimension::Vh(buf.get_f32_le()))
+                Ok(Dimension::Vh(validate_f32(buf.get_f32_le())?))
             }
             6 => Ok(Dimension::MinContent),
             7 => Ok(Dimension::MaxContent),
@@ -985,8 +997,8 @@ impl Decode for Constraints {
                 )))
             }
         };
-        let flex_grow = buf.get_f32_le();
-        let flex_shrink = buf.get_f32_le();
+        let flex_grow = validate_f32(buf.get_f32_le())?;
+        let flex_shrink = validate_f32(buf.get_f32_le())?;
         let flex_basis = Dimension::decode(buf)?;
         let width = Dimension::decode(buf)?;
         let height = Dimension::decode(buf)?;
@@ -2844,5 +2856,101 @@ mod tests {
         let mut cursor = buf.freeze();
         let result = AppMessage::decode(&mut cursor);
         assert!(matches!(result, Err(ProtocolError::InvalidMagic(_))));
+    }
+
+    // ── Float validation tests ──────────────────────────────────────
+
+    #[test]
+    fn validate_f32_rejects_nan() {
+        assert!(validate_f32(f32::NAN).is_err());
+    }
+
+    #[test]
+    fn validate_f32_rejects_infinity() {
+        assert!(validate_f32(f32::INFINITY).is_err());
+        assert!(validate_f32(f32::NEG_INFINITY).is_err());
+    }
+
+    #[test]
+    fn validate_f32_accepts_normal_values() {
+        assert_eq!(validate_f32(0.0).unwrap(), 0.0);
+        assert_eq!(validate_f32(1.5).unwrap(), 1.5);
+        assert_eq!(validate_f32(-100.0).unwrap(), -100.0);
+    }
+
+    #[test]
+    fn dimension_decode_rejects_nan() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(1); // Cells variant
+        buf.put_f32_le(f32::NAN);
+        let mut cursor = buf.freeze();
+        assert!(Dimension::decode(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn dimension_decode_rejects_infinity() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(2); // Percent variant
+        buf.put_f32_le(f32::INFINITY);
+        let mut cursor = buf.freeze();
+        assert!(Dimension::decode(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn constraints_decode_rejects_nan_flex_grow() {
+        use crate::Constraints;
+
+        // Verify we can decode valid constraints
+        let mut buf2 = BytesMut::new();
+        Constraints::default().encode(&mut buf2);
+        let mut cursor = buf2.freeze();
+        assert!(Constraints::decode(&mut cursor).is_ok());
+
+        // Now encode with NaN flex_grow via raw construction
+        let mut raw = BytesMut::new();
+        raw.put_u8(1); // display: Flex
+        raw.put_u8(0); // flex_direction: Row
+        raw.put_u8(0); // flex_wrap: NoWrap
+        raw.put_u8(0); // justify_content: Start
+        raw.put_u8(0); // align_items: Start
+        raw.put_u8(0); // align_self: Auto
+        raw.put_u8(0); // align_content: Start
+        raw.put_f32_le(f32::NAN); // flex_grow = NaN
+        raw.put_f32_le(1.0); // flex_shrink
+                             // flex_basis = Auto
+        raw.put_u8(0);
+        // width, height, min_*, max_* = Auto
+        for _ in 0..6 {
+            raw.put_u8(0);
+        }
+        // aspect_ratio = None
+        raw.put_u8(0);
+        // margin edges (4x Auto)
+        for _ in 0..4 {
+            raw.put_u8(0);
+        }
+        // padding edges (4x Auto)
+        for _ in 0..4 {
+            raw.put_u8(0);
+        }
+        // gap (2x Auto)
+        raw.put_u8(0);
+        raw.put_u8(0);
+        // overflow (2x Visible)
+        raw.put_u8(0);
+        raw.put_u8(0);
+        // grid fields
+        raw.put_u32_le(0); // template_columns len
+        raw.put_u32_le(0); // template_rows len
+                           // grid_column placement
+        raw.put_u8(0);
+        raw.put_u8(0);
+        // grid_row placement
+        raw.put_u8(0);
+        raw.put_u8(0);
+
+        let mut cursor = raw.freeze();
+        let result = Constraints::decode(&mut cursor);
+        assert!(result.is_err(), "NaN flex_grow should be rejected");
     }
 }

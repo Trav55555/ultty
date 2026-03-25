@@ -37,6 +37,10 @@ pub enum ProtocolError {
     #[error("region not found: {0:?}")]
     RegionNotFound(crate::RegionId),
 
+    /// Invalid float value (NaN or Infinity).
+    #[error("invalid float value: {0}")]
+    InvalidFloat(f32),
+
     /// Version mismatch.
     #[error("protocol version mismatch: expected {expected}, got {got}")]
     VersionMismatch { expected: u16, got: u16 },
