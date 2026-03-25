@@ -1,0 +1,6 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+expression: output
+---
+My Section
+Body text

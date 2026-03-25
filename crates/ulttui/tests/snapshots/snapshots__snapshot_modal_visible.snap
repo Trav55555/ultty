@@ -1,0 +1,14 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+expression: output
+---
+
+
+     ┌Confirm─────────────────────────────────────────┐
+     │Are you sure?                                   │
+     │                                                │
+     │                                                │
+     │                                                │
+     │                                                │
+     │[ Yes ]  [ No ]                                 │
+     └────────────────────────────────────────────────┘

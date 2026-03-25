@@ -1,0 +1,10 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+expression: output
+---
+┌Table─────────────────────────────────┐
+│Name            Age         City      │
+│                                      │
+│Alice           30          NYC       │
+│Bob             25          LA        │
+└──────────────────────────────────────┘

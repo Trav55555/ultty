@@ -1,0 +1,8 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+expression: output
+---
+TITLE
+Some bold and italic text.
+• Item 1
+• Item 2

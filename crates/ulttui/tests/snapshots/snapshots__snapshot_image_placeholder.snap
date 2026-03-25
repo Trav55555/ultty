@@ -1,0 +1,7 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+expression: output
+---
+┌Image 10x10 (fit)───────────┐
+│10x10 RGBA (400 bytes)      │
+└────────────────────────────┘

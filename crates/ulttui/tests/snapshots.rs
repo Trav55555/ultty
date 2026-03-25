@@ -7,7 +7,9 @@ use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
 use ulttui::widgets::{
-    Badge, Button, Column, Divider, List, ProgressBar, Row, Spinner, Stack, Text, View,
+    Badge, Button, Card, Checkbox, Collapsible, Column, DiffView, Divider, DockLayout, Image,
+    Inset, List, MarkdownView, Modal, ProgressBar, Row, ScrollView, Section, Select, Spacer,
+    Spinner, Stack, Table, Tabs, Text, TextInput, Toggle, Tree, TreeNode, View,
 };
 
 /// Render a widget and return its buffer as a string for snapshot comparison.
@@ -250,4 +252,294 @@ fn snapshot_badge_native_content() {
     let badge = Badge::success("Done");
     let content = badge.content();
     insta::assert_snapshot!(format!("{content:?}"));
+}
+
+// ── Checkbox ──────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_checkbox_unchecked() {
+    let cb = Checkbox::new("Accept terms");
+    let output = render_to_string(&cb, 25, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_checkbox_checked() {
+    let cb = Checkbox::new("Accept terms").checked(true);
+    let output = render_to_string(&cb, 25, 1);
+    insta::assert_snapshot!(output);
+}
+
+// ── Toggle ────────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_toggle_off() {
+    let toggle = Toggle::new("Dark mode");
+    let output = render_to_string(&toggle, 25, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_toggle_on() {
+    let toggle = Toggle::new("Dark mode").on(true);
+    let output = render_to_string(&toggle, 25, 1);
+    insta::assert_snapshot!(output);
+}
+
+// ── Select ────────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_select_collapsed() {
+    let select = Select::new(vec![
+        "Option A".to_string(),
+        "Option B".to_string(),
+        "Option C".to_string(),
+    ]);
+    let output = render_to_string(&select, 30, 1);
+    insta::assert_snapshot!(output);
+}
+
+// ── TextInput ─────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_text_input_empty() {
+    let input = TextInput::new().placeholder("Enter name...");
+    let output = render_to_string(&input, 30, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_text_input_with_value() {
+    let input = TextInput::new().value("Hello world");
+    let output = render_to_string(&input, 30, 1);
+    insta::assert_snapshot!(output);
+}
+
+// ── Table ─────────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_table_basic() {
+    let table = Table::new()
+        .headers(vec!["Name", "Age", "City"])
+        .column_widths(vec![15.0, 5.0, 10.0])
+        .rows(vec![
+            vec!["Alice".to_string(), "30".to_string(), "NYC".to_string()],
+            vec!["Bob".to_string(), "25".to_string(), "LA".to_string()],
+            vec!["Carol".to_string(), "35".to_string(), "Chicago".to_string()],
+        ]);
+    let output = render_to_string(&table, 40, 6);
+    insta::assert_snapshot!(output);
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_tabs_widget() {
+    let tabs = Tabs::new().labels(vec!["Home", "Settings", "About"]);
+    let output = render_to_string(&tabs, 40, 1);
+    insta::assert_snapshot!(output);
+}
+
+// ── Tree ──────────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_tree_expanded() {
+    let tree = Tree::new(
+        TreeNode::with_children(
+            "Root",
+            vec![
+                TreeNode::new("Child A"),
+                TreeNode::with_children("Child B", vec![TreeNode::new("Grandchild")])
+                    .expanded(true),
+            ],
+        )
+        .expanded(true),
+    );
+    let output = render_to_string(&tree, 30, 6);
+    insta::assert_snapshot!(output);
+}
+
+// ── ScrollView ────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_scrollview_basic() {
+    let sv = ScrollView::new().child(
+        Column::new()
+            .child(Text::new("Line 1"))
+            .child(Text::new("Line 2"))
+            .child(Text::new("Line 3")),
+    );
+    let output = render_to_string(&sv, 30, 5);
+    insta::assert_snapshot!(output);
+}
+
+// ── DockLayout ────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_dock_layout() {
+    let dock = DockLayout::new()
+        .dock_top(Text::new("Header"))
+        .dock_bottom(Text::new("Footer"))
+        .center(Text::new("Main content"));
+    let output = render_to_string(&dock, 30, 5);
+    insta::assert_snapshot!(output);
+}
+
+// ── Modal ─────────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_modal_visible() {
+    let modal = Modal::new()
+        .title("Confirm")
+        .body("Are you sure?")
+        .buttons(vec!["Yes", "No"])
+        .visible(true);
+    let output = render_to_string(&modal, 60, 12);
+    insta::assert_snapshot!(output);
+}
+
+// ── Collapsible ───────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_collapsible_expanded() {
+    let widget =
+        Collapsible::new(Text::new("Details"), Text::new("Hidden content here")).expanded(true);
+    let output = render_to_string(&widget, 30, 3);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_collapsible_collapsed() {
+    let widget = Collapsible::new(Text::new("Details"), Text::new("Hidden content here"));
+    let output = render_to_string(&widget, 30, 1);
+    insta::assert_snapshot!(output);
+}
+
+// ── DiffView ──────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_diff_view() {
+    use ulttui::widgets::parse_unified_diff;
+    let diff_text = "--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n unchanged\n-old line\n+new line\n unchanged";
+    let lines = parse_unified_diff(diff_text);
+    let diff = DiffView::new(lines);
+    let output = render_to_string(&diff, 50, 6);
+    insta::assert_snapshot!(output);
+}
+
+// ── MarkdownView ──────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_markdown_basic() {
+    let md = MarkdownView::new("# Title\n\nSome **bold** and *italic* text.\n\n- Item 1\n- Item 2");
+    let output = render_to_string(&md, 40, 8);
+    insta::assert_snapshot!(output);
+}
+
+// ── Image ─────────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_image_placeholder() {
+    let img = Image::new(vec![0u8; 400], 10, 10);
+    let output = render_to_string(&img, 30, 3);
+    insta::assert_snapshot!(output);
+}
+
+// ── Card / Section / Inset ────────────────────────────────────────────
+
+#[test]
+fn snapshot_card() {
+    let card = Card::new().child(Text::new("Card content"));
+    let output = render_to_string(&card, 30, 5);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_section_with_title() {
+    let section = Section::new()
+        .title("My Section")
+        .child(Text::new("Body text"));
+    let output = render_to_string(&section, 30, 4);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_inset() {
+    let inset = Inset::new(Text::new("Padded"), 2.0);
+    let output = render_to_string(&inset, 20, 5);
+    insta::assert_snapshot!(output);
+}
+
+// ── Spacer ────────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_column_with_spacer() {
+    let col = Column::new()
+        .child(Text::new("Top"))
+        .child(Spacer)
+        .child(Text::new("Bottom"));
+    let output = render_to_string(&col, 20, 5);
+    insta::assert_snapshot!(output);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Widget state variant tests
+// ══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn snapshot_progress_bar_zero() {
+    let bar = ProgressBar::new(0.0);
+    let output = render_to_string(&bar, 40, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_progress_bar_full() {
+    let bar = ProgressBar::new(100.0);
+    let output = render_to_string(&bar, 40, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_modal_hidden() {
+    let modal = Modal::new()
+        .title("Hidden")
+        .body("Should not appear")
+        .visible(false);
+    let output = render_to_string(&modal, 60, 12);
+    insta::assert_snapshot!(output);
+}
+
+// ── Layout edge cases ────────────────────────────────────────────────
+
+#[test]
+fn snapshot_narrow_column() {
+    let col = Column::new()
+        .child(Text::new("Hello world"))
+        .child(Button::new("OK"));
+    let output = render_to_string(&col, 5, 3);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_single_cell() {
+    let text = Text::new("X");
+    let output = render_to_string(&text, 1, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_wide_table() {
+    let table = Table::new()
+        .headers(vec!["A", "B", "C", "D", "E"])
+        .column_widths(vec![20.0, 20.0, 20.0, 20.0, 20.0])
+        .rows(vec![vec![
+            "data1".to_string(),
+            "data2".to_string(),
+            "data3".to_string(),
+            "data4".to_string(),
+            "data5".to_string(),
+        ]]);
+    let output = render_to_string(&table, 120, 4);
+    insta::assert_snapshot!(output);
 }
