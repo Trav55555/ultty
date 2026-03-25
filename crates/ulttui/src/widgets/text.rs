@@ -7,7 +7,8 @@ use ratatui::Frame;
 
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
-use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
+use crate::vim::{VimConfig, VimHandler, VimResult};
+use crate::{impl_vim_ext, impl_vim_handler_accessors};
 use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimState};
 
 /// Plain text widget.
@@ -746,13 +747,7 @@ impl View for TextInput {
 }
 
 impl VimHandler for TextInput {
-    fn vim_state(&self) -> &VimState {
-        &self.vim_state
-    }
-
-    fn vim_state_mut(&mut self) -> &mut VimState {
-        &mut self.vim_state
-    }
+    impl_vim_handler_accessors!(TextInput);
 
     fn handle_vim_action(&mut self, action: &VimAction) -> VimResult {
         match action {
@@ -889,25 +884,14 @@ impl VimHandler for TextInput {
     }
 }
 
-impl VimExt for TextInput {
-    fn vim(self) -> Self {
-        self.vim_with_config(VimConfig::for_text_input())
-    }
-
-    fn vim_with_config(mut self, config: VimConfig) -> Self {
-        self.vim_config = config;
-        if self.vim_config.start_in_insert {
-            self.vim_state.mode = VimMode::Insert;
-        }
-        self
-    }
-}
+impl_vim_ext!(TextInput, VimConfig::for_text_input());
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::event::{Key, KeyEvent, Modifiers};
     use crate::focus::FocusManager;
+    use crate::vim::VimExt;
 
     fn key_event(key: Key) -> KeyEvent {
         KeyEvent {

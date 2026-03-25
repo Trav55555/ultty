@@ -8,7 +8,8 @@ use ratatui::Frame;
 
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
-use crate::vim::{VimConfig, VimExt, VimHandler, VimResult};
+use crate::vim::{VimConfig, VimHandler, VimResult};
+use crate::{impl_vim_ext, impl_vim_handler_accessors};
 use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimState};
 use ultty_protocol::{
     AppMessage, BorderStyle, Constraints, Dimension, Display, FlexDirection, RegionId,
@@ -324,13 +325,7 @@ impl<T: std::fmt::Display> View for List<T> {
 }
 
 impl<T> VimHandler for List<T> {
-    fn vim_state(&self) -> &VimState {
-        &self.vim_state
-    }
-
-    fn vim_state_mut(&mut self) -> &mut VimState {
-        &mut self.vim_state
-    }
+    impl_vim_handler_accessors!(List<T>);
 
     fn handle_vim_action(&mut self, action: &VimAction) -> VimResult {
         match action {
@@ -401,16 +396,7 @@ impl<T> VimHandler for List<T> {
     }
 }
 
-impl<T> VimExt for List<T> {
-    fn vim(self) -> Self {
-        self
-    }
-
-    fn vim_with_config(mut self, config: VimConfig) -> Self {
-        self.vim_config = config;
-        self
-    }
-}
+impl_vim_ext!(List<T>, generics: T);
 
 #[cfg(test)]
 mod tests {

@@ -155,6 +155,75 @@ pub trait VimExt: Sized {
     fn vim_with_config(self, config: VimConfig) -> Self;
 }
 
+/// Generates `vim_state()` and `vim_state_mut()` for a `VimHandler` impl.
+///
+/// Usage: `impl_vim_handler_accessors!(MyWidget);`
+/// Assumes the type has `vim_state: VimState` field.
+#[macro_export]
+macro_rules! impl_vim_handler_accessors {
+    ($ty:ty) => {
+        fn vim_state(&self) -> &$crate::vim::VimState {
+            &self.vim_state
+        }
+
+        fn vim_state_mut(&mut self) -> &mut $crate::vim::VimState {
+            &mut self.vim_state
+        }
+    };
+}
+
+/// Generates a `VimExt` impl that sets `vim_config` (and optionally initializes
+/// insert mode when `start_in_insert` is true).
+///
+/// Usage:
+/// - `impl_vim_ext!(MyWidget, VimConfig::for_text_input());` — custom default + insert mode init
+/// - `impl_vim_ext!(MyWidget);` — vim() is a no-op (already enabled by default)
+#[macro_export]
+macro_rules! impl_vim_ext {
+    // With custom default config and insert-mode initialization
+    ($ty:ty, $default_config:expr) => {
+        impl $crate::vim::VimExt for $ty {
+            fn vim(self) -> Self {
+                self.vim_with_config($default_config)
+            }
+
+            fn vim_with_config(mut self, config: $crate::vim::VimConfig) -> Self {
+                self.vim_config = config;
+                if self.vim_config.start_in_insert {
+                    self.vim_state.mode = $crate::vim::VimMode::Insert;
+                }
+                self
+            }
+        }
+    };
+    // Simple: vim() is identity, vim_with_config just sets config
+    ($ty:ty) => {
+        impl $crate::vim::VimExt for $ty {
+            fn vim(self) -> Self {
+                self
+            }
+
+            fn vim_with_config(mut self, config: $crate::vim::VimConfig) -> Self {
+                self.vim_config = config;
+                self
+            }
+        }
+    };
+    // Generic type: impl_vim_ext!(List<T>, generics: T)
+    ($ty:ident < $($gen:ident),+ >, generics: $($g:ident),+) => {
+        impl<$($g),+> $crate::vim::VimExt for $ty<$($gen),+> {
+            fn vim(self) -> Self {
+                self
+            }
+
+            fn vim_with_config(mut self, config: $crate::vim::VimConfig) -> Self {
+                self.vim_config = config;
+                self
+            }
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
