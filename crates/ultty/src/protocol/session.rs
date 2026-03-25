@@ -3,7 +3,7 @@
 //! A session represents a connection from a TUI application to the terminal.
 //! It owns the scene graph and layout engine for that connection.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
@@ -57,6 +57,12 @@ pub struct NativeSession {
     constraints_dirty: bool,
     /// Whether visual state changed (requires vertex buffer rebuild).
     render_dirty: bool,
+    /// Regions whose content/style changed since last render.
+    /// When empty and render_dirty is false, the renderer can skip rebuilding.
+    /// When scene_dirty is true, this set is meaningless (full rebuild needed).
+    dirty_regions: HashSet<RegionId>,
+    /// Whether scroll offsets changed since last render (requires clip/scroll cache rebuild).
+    scroll_dirty: bool,
     /// Negotiated capabilities.
     capabilities: u32,
     /// Negotiated protocol version.
@@ -144,6 +150,8 @@ impl NativeSession {
             scene_dirty: false,
             constraints_dirty: false,
             render_dirty: true,
+            dirty_regions: HashSet::new(),
+            scroll_dirty: true,
             capabilities: 0,
             protocol_version: PROTOCOL_VERSION,
             subscriptions: HashMap::new(),
@@ -175,6 +183,7 @@ impl NativeSession {
             self.scene_dirty = true;
             self.constraints_dirty = true;
             self.render_dirty = true;
+            self.scroll_dirty = true;
         }
     }
 
@@ -485,6 +494,7 @@ impl NativeSession {
                     }
                 }
                 self.scene_dirty = true;
+                self.scroll_dirty = true;
                 debug!(
                     "Scroll set for {:?}: ({}, {}), animate={}",
                     id, x, y, animate
@@ -640,6 +650,8 @@ impl NativeSession {
             self.scene_dirty = true;
             self.constraints_dirty = true;
             self.render_dirty = true;
+            self.scroll_dirty = true;
+            self.dirty_regions.insert(id);
         } else {
             warn!("SetConstraints for unknown region {:?}", id);
             self.queue_error_message(404, format!("region {} not found", id.0));
@@ -676,6 +688,7 @@ impl NativeSession {
             region.mark_dirty();
             self.scene_dirty = true;
             self.render_dirty = true;
+            self.dirty_regions.insert(id);
         } else {
             warn!("SetStyle for unknown region {:?}", id);
             self.queue_error_message(404, format!("region {} not found", id.0));
@@ -697,6 +710,7 @@ impl NativeSession {
             region.mark_dirty();
             self.scene_dirty = true;
             self.render_dirty = true;
+            self.dirty_regions.insert(id);
         } else {
             warn!("SetContent for unknown region {:?}", id);
             self.queue_error_message(404, format!("region {} not found", id.0));
@@ -733,6 +747,7 @@ impl NativeSession {
             region.mark_dirty();
             self.scene_dirty = true;
             self.render_dirty = true;
+            self.dirty_regions.insert(id);
         } else {
             warn!("AppendContent for unknown region {:?}", id);
             self.queue_error_message(404, format!("region {} not found", id.0));
@@ -1032,6 +1047,23 @@ impl NativeSession {
     /// Clear the render dirty flag (call after rebuilding vertex buffers).
     pub fn clear_render_dirty(&mut self) {
         self.render_dirty = false;
+        self.dirty_regions.clear();
+    }
+
+    /// Returns the set of regions that changed since last render.
+    pub fn dirty_regions(&self) -> &HashSet<RegionId> {
+        &self.dirty_regions
+    }
+
+    /// Returns true if scroll offsets or constraints changed since last render,
+    /// meaning the scroll/clip caches need rebuilding.
+    pub fn is_scroll_dirty(&self) -> bool {
+        self.scroll_dirty
+    }
+
+    /// Clear the scroll dirty flag (call after rebuilding scroll/clip caches).
+    pub fn clear_scroll_dirty(&mut self) {
+        self.scroll_dirty = false;
     }
 
     pub fn scene(&self) -> &SceneTree {
@@ -1084,6 +1116,7 @@ impl NativeSession {
         if !self.scroll_targets.is_empty() {
             self.scene_dirty = true;
             self.render_dirty = true;
+            self.scroll_dirty = true;
         }
         !self.scroll_targets.is_empty()
     }
@@ -1731,5 +1764,50 @@ mod tests {
         assert!(!session.scene_dirty);
         assert!(!session.constraints_dirty);
         assert!(!session.render_dirty);
+    }
+
+    #[test]
+    fn dirty_regions_tracks_content_changes() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        // Insert a region directly
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+        session.clear_render_dirty();
+
+        // SetContent should add to dirty_regions
+        session.handle_set_content(
+            id,
+            Content::Text(ultty_protocol::TextContent::new("hello".to_string())),
+        );
+        assert!(session.is_render_dirty());
+        assert!(session.dirty_regions().contains(&id));
+
+        // clear_render_dirty should clear dirty_regions
+        session.clear_render_dirty();
+        assert!(!session.is_render_dirty());
+        assert!(session.dirty_regions().is_empty());
+    }
+
+    #[test]
+    fn dirty_regions_tracks_style_changes() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+        session.clear_render_dirty();
+
+        session.handle_set_style(
+            id,
+            Style {
+                opacity: 0.5,
+                ..Default::default()
+            },
+        );
+        assert!(session.dirty_regions().contains(&id));
     }
 }

@@ -25,6 +25,7 @@ impl App {
                 if let Some(ref mut server) = self.protocol_server {
                     for session in server.sessions_mut() {
                         session.clear_render_dirty();
+                        session.clear_scroll_dirty();
                     }
                 }
             }
@@ -154,44 +155,33 @@ impl App {
         let focused_id = self.terminal_manager.focused_terminal_id();
         let split_direction = self.terminal_manager.split_direction();
 
-        // Calculate pane bounds based on split direction
-        let panes: Vec<(&ultty::grid::Terminal, PaneInfo)> = match split_direction {
-            SplitDirection::Horizontal => {
-                let pane_width = available_width / pane_count as f32;
-                terminals
-                    .iter()
-                    .enumerate()
-                    .map(|(i, managed)| {
-                        let is_focused = Some(managed.id) == focused_id;
-                        let pane = PaneInfo::new(
-                            i as f32 * pane_width,
-                            0.0,
-                            pane_width,
-                            available_height,
-                            is_focused,
-                        );
-                        (managed.event_loop.terminal(), pane)
-                    })
-                    .collect()
-            }
-            SplitDirection::Vertical => {
-                let pane_height = available_height / pane_count as f32;
-                terminals
-                    .iter()
-                    .enumerate()
-                    .map(|(i, managed)| {
-                        let is_focused = Some(managed.id) == focused_id;
-                        let pane = PaneInfo::new(
-                            0.0,
-                            i as f32 * pane_height,
-                            available_width,
-                            pane_height,
-                            is_focused,
-                        );
-                        (managed.event_loop.terminal(), pane)
-                    })
-                    .collect()
-            }
+        // Calculate pane bounds based on split direction and ratios
+        let ratios = self.terminal_manager.pane_ratios();
+        let panes: Vec<(&ultty::grid::Terminal, PaneInfo)> = {
+            let mut offset = 0.0f32;
+            terminals
+                .iter()
+                .enumerate()
+                .map(|(i, managed)| {
+                    let ratio = ratios.get(i).copied().unwrap_or(1.0 / pane_count as f32);
+                    let is_focused = Some(managed.id) == focused_id;
+                    let pane = match split_direction {
+                        SplitDirection::Horizontal => {
+                            let w = available_width * ratio;
+                            let p = PaneInfo::new(offset, 0.0, w, available_height, is_focused);
+                            offset += w;
+                            p
+                        }
+                        SplitDirection::Vertical => {
+                            let h = available_height * ratio;
+                            let p = PaneInfo::new(0.0, offset, available_width, h, is_focused);
+                            offset += h;
+                            p
+                        }
+                    };
+                    (managed.event_loop.terminal(), pane)
+                })
+                .collect()
         };
 
         // Calculate scrollbar state from focused terminal
