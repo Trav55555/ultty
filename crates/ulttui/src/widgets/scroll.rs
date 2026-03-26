@@ -24,9 +24,7 @@ pub struct ScrollView {
     item_height: f32,
     vim_state: VimState,
     vim_config: VimConfig,
-    search_query: Option<String>,
-    search_matches: Vec<usize>,
-    current_match: usize,
+    search: super::scroll_search::ScrollSearch,
 }
 
 impl std::fmt::Debug for ScrollView {
@@ -65,9 +63,7 @@ impl Default for ScrollView {
             item_height: 1.0,
             vim_state: VimState::new(),
             vim_config: VimConfig::for_scroll_view(),
-            search_query: None,
-            search_matches: Vec::new(),
-            current_match: 0,
+            search: Default::default(),
         }
     }
 }
@@ -195,35 +191,23 @@ impl ScrollView {
     }
 
     pub fn search(&mut self, query: &str) {
-        self.search_query = Some(query.to_string());
-        self.search_matches.clear();
-        self.current_match = 0;
+        self.search.search(query);
     }
 
     pub fn add_search_match(&mut self, line: usize) {
-        self.search_matches.push(line);
+        self.search.add_match(line);
     }
 
     fn goto_next_match(&mut self) {
-        if self.search_matches.is_empty() {
-            return;
+        if let Some(line) = self.search.goto_next() {
+            self.center_on_line(line);
         }
-        self.current_match = (self.current_match + 1) % self.search_matches.len();
-        let line = self.search_matches[self.current_match];
-        self.center_on_line(line);
     }
 
     fn goto_prev_match(&mut self) {
-        if self.search_matches.is_empty() {
-            return;
+        if let Some(line) = self.search.goto_prev() {
+            self.center_on_line(line);
         }
-        if self.current_match == 0 {
-            self.current_match = self.search_matches.len() - 1;
-        } else {
-            self.current_match -= 1;
-        }
-        let line = self.search_matches[self.current_match];
-        self.center_on_line(line);
     }
 }
 
@@ -847,11 +831,11 @@ mod tests {
 
         scroll.search("first");
         scroll.add_search_match(10);
-        assert_eq!(scroll.search_matches.len(), 1);
+        assert_eq!(scroll.search.matches.len(), 1);
 
         scroll.search("second");
-        assert_eq!(scroll.search_matches.len(), 0);
-        assert_eq!(scroll.current_match, 0);
+        assert_eq!(scroll.search.matches.len(), 0);
+        assert_eq!(scroll.search.current, 0);
     }
 
     #[test]
@@ -865,10 +849,10 @@ mod tests {
         scroll.add_search_match(20);
 
         scroll.goto_next_match();
-        assert_eq!(scroll.current_match, 1);
+        assert_eq!(scroll.search.current, 1);
 
         scroll.goto_next_match();
-        assert_eq!(scroll.current_match, 0); // wraps
+        assert_eq!(scroll.search.current, 0); // wraps
     }
 
     #[test]
@@ -881,12 +865,12 @@ mod tests {
         scroll.add_search_match(5);
         scroll.add_search_match(20);
 
-        assert_eq!(scroll.current_match, 0);
+        assert_eq!(scroll.search.current, 0);
         scroll.goto_prev_match();
-        assert_eq!(scroll.current_match, 1); // wraps back
+        assert_eq!(scroll.search.current, 1); // wraps back
 
         scroll.goto_prev_match();
-        assert_eq!(scroll.current_match, 0);
+        assert_eq!(scroll.search.current, 0);
     }
 
     #[test]
@@ -894,7 +878,7 @@ mod tests {
         let mut scroll = ScrollView::new();
         scroll.search("nothing");
         scroll.goto_next_match(); // should not panic
-        assert_eq!(scroll.current_match, 0);
+        assert_eq!(scroll.search.current, 0);
     }
 
     #[test]
@@ -902,7 +886,7 @@ mod tests {
         let mut scroll = ScrollView::new();
         scroll.search("nothing");
         scroll.goto_prev_match(); // should not panic
-        assert_eq!(scroll.current_match, 0);
+        assert_eq!(scroll.search.current, 0);
     }
 
     #[test]
@@ -1233,7 +1217,7 @@ mod tests {
         // SearchPrev with forward=true calls goto_prev_match
         scroll.handle_vim_command(&VimCommand::motion(VimMotion::SearchPrev));
         // goes to last match (wraps): line 50
-        assert_eq!(scroll.current_match, 1);
+        assert_eq!(scroll.search.current, 1);
     }
 
     #[test]
