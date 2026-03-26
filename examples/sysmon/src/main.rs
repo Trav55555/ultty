@@ -8,7 +8,7 @@ use std::time::Duration;
 use ulttui::cmd::{Cmd, Sub};
 use ulttui::event::{Event, Key};
 use ulttui::prelude::Application;
-use ulttui::widgets::*;
+use ulttui::widgets::{Column, Divider, View};
 
 use data::{ProcessInfo, SystemCollector, SystemSnapshot};
 
@@ -215,32 +215,26 @@ impl Application for SysMon {
     }
 
     fn view(&self) -> impl View {
-        Inset::new(
-            DockLayout::new()
-                .dock_top(views::header_view(&self.hostname, self.uptime_secs))
-                .dock_top(Divider::horizontal())
-                .dock_bottom(Divider::horizontal())
-                .dock_bottom(views::footer_view(self.net_rx, self.net_tx, &self.disks))
-                .center(
-                    Column::new()
-                        .child(views::cpu_mem_row(
-                            self.cpu_percent,
-                            self.mem_percent,
-                            self.mem_used,
-                            self.mem_total,
-                        ))
-                        .child(views::sparkline_view(&self.cpu_history))
-                        .child(Divider::horizontal())
-                        .child(views::process_table(
-                            &self.processes,
-                            self.selected_process,
-                            &self.sort_column,
-                            self.sort_ascending,
-                        ))
-                        .gap(1.0),
-                ),
-            1.0,
-        )
+        Column::new()
+            .child(views::header_view(&self.hostname, self.uptime_secs))
+            .child(Divider::horizontal())
+            .child(views::cpu_mem_row(
+                self.cpu_percent,
+                self.mem_percent,
+                self.mem_used,
+                self.mem_total,
+            ))
+            .child(views::sparkline_view(&self.cpu_history))
+            .child(Divider::horizontal())
+            .child(views::process_list(
+                &self.processes,
+                self.selected_process,
+                &self.sort_column,
+                self.sort_ascending,
+            ))
+            .child(Divider::horizontal())
+            .child(views::footer_view(self.net_rx, self.net_tx, &self.disks))
+            .padding(1.0)
     }
 }
 

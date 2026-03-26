@@ -1,4 +1,4 @@
-use ulttui::widgets::*;
+use ulttui::widgets::{Column, RichText, Row};
 use ultty_protocol::Color;
 
 use crate::data::{DiskInfo, ProcessInfo};
@@ -94,75 +94,57 @@ pub fn sparkline_view(cpu_history: &[f32]) -> Column {
         .child(RichText::new().span(spark, ultty_protocol::Style::new().fg(CYAN)))
 }
 
-pub fn process_table(
+pub fn process_list(
     processes: &[ProcessInfo],
     selected: usize,
     sort_col: &SortColumn,
     sort_asc: bool,
 ) -> Column {
-    let arrow = if sort_asc { " ^" } else { " v" };
-    let headers: Vec<String> = vec![
-        format!(
-            "PID{}",
-            if matches!(sort_col, SortColumn::Pid) {
-                arrow
-            } else {
-                ""
-            }
-        ),
-        format!(
-            "NAME{}",
-            if matches!(sort_col, SortColumn::Name) {
-                arrow
-            } else {
-                ""
-            }
-        ),
-        format!(
-            "CPU%{}",
-            if matches!(sort_col, SortColumn::Cpu) {
-                arrow
-            } else {
-                ""
-            }
-        ),
-        format!(
-            "MEM{}",
-            if matches!(sort_col, SortColumn::Mem) {
-                arrow
-            } else {
-                ""
-            }
-        ),
-        "STATUS".into(),
-    ];
+    let arrow = if sort_asc { "^" } else { "v" };
+    let si = |this: &SortColumn| {
+        if sort_col == this {
+            arrow
+        } else {
+            " "
+        }
+    };
 
-    let rows: Vec<Vec<String>> = processes
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let indicator = if i == selected { ">" } else { " " };
-            vec![
-                format!("{}{}", indicator, p.pid),
-                truncate_name(&p.name, 20),
-                format!("{:.1}", p.cpu_percent),
-                format_bytes(p.mem_bytes),
-                p.status.clone(),
-            ]
-        })
-        .collect();
+    let header = format!(
+        "  {:<8}{:<22}{:>6} {:>8}  {}",
+        format!("PID{}", si(&SortColumn::Pid)),
+        format!("NAME{}", si(&SortColumn::Name)),
+        format!("CPU%{}", si(&SortColumn::Cpu)),
+        format!("MEM{}", si(&SortColumn::Mem)),
+        "STATUS"
+    );
 
-    let table = Table::new()
-        .headers(headers)
-        .column_widths(vec![8.0, 22.0, 8.0, 10.0, 10.0])
-        .rows(rows);
-
-    Column::new()
+    let mut col = Column::new()
         .child(RichText::new().span(
-            format!(" Processes ({})  [s]ort [r]everse [q]uit ", processes.len()),
+            format!("Processes ({})  [s]ort [r]everse [q]uit", processes.len()),
             ultty_protocol::Style::new().fg(ACCENT).bold(),
         ))
-        .child(table)
+        .child(RichText::new().span(header, ultty_protocol::Style::new().fg(DIM).bold()));
+
+    for (i, p) in processes.iter().take(20).enumerate() {
+        let indicator = if i == selected { ">" } else { " " };
+        let line = format!(
+            "{} {:<8}{:<22}{:>5.1} {:>8}  {}",
+            indicator,
+            p.pid,
+            truncate_name(&p.name, 20),
+            p.cpu_percent,
+            format_bytes(p.mem_bytes),
+            p.status,
+        );
+        let style = if i == selected {
+            ultty_protocol::Style::new().fg(CYAN).bold()
+        } else {
+            ultty_protocol::Style::default()
+        };
+        col = col.child(RichText::new().span(line, style));
+    }
+
+    col
 }
 
 fn truncate_name(name: &str, max: usize) -> String {

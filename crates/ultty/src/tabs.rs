@@ -5,7 +5,7 @@
 use crate::terminal_manager::{Tab, TabId};
 
 /// Height of the tab bar in pixels (at default scale).
-pub const TAB_BAR_HEIGHT: f32 = 22.0;
+pub const TAB_BAR_HEIGHT: f32 = 32.0;
 
 /// Padding inside each tab.
 pub const TAB_PADDING: f32 = 12.0;
