@@ -672,6 +672,24 @@ impl App {
     }
 
     /// Update cursor icon based on URL hover state.
+    fn update_resize_cursor(&mut self) {
+        let size = self.window.inner_size();
+        let x = self.mouse_pos.x as f32;
+        let y = self.mouse_pos.y as f32;
+        let w = size.width as f32;
+        let h = size.height as f32;
+        let edge = 5.0;
+
+        let cursor = match (x < edge, x > w - edge, y < edge, y > h - edge) {
+            (true, _, true, _) | (_, true, _, true) => CursorIcon::NwseResize,
+            (_, true, true, _) | (true, _, _, true) => CursorIcon::NeswResize,
+            (true, _, _, _) | (_, true, _, _) => CursorIcon::EwResize,
+            (_, _, true, _) | (_, _, _, true) => CursorIcon::NsResize,
+            _ => return, // Not near edge, don't override cursor
+        };
+        self.window.set_cursor_icon(cursor);
+    }
+
     fn update_cursor_for_url(&mut self) {
         // Don't change cursor if hovering over tab bar
         if self.tab_bar.visible && (self.mouse_pos.y as f32) < self.tab_bar.height() {

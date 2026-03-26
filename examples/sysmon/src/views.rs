@@ -43,9 +43,15 @@ pub fn header_view(hostname: &str, uptime_secs: u64) -> Row {
         ))
 }
 
-pub fn resource_bars(cpu_percent: f32, mem_percent: f32, mem_used: u64, mem_total: u64) -> Column {
-    let cpu_bar = bar(cpu_percent, 30);
-    let mem_bar = bar(mem_percent, 30);
+pub fn resource_bars(
+    cpu_percent: f32,
+    mem_percent: f32,
+    mem_used: u64,
+    mem_total: u64,
+    bar_width: usize,
+) -> Column {
+    let cpu_bar = bar(cpu_percent, bar_width);
+    let mem_bar = bar(mem_percent, bar_width);
 
     Column::new()
         .child(
@@ -83,8 +89,8 @@ pub fn resource_bars(cpu_percent: f32, mem_percent: f32, mem_used: u64, mem_tota
         )
 }
 
-pub fn cpu_chart(cpu_history: &[f32]) -> Column {
-    let rows = chart(cpu_history, 60, 6);
+pub fn cpu_chart(cpu_history: &[f32], width: usize) -> Column {
+    let rows = chart(cpu_history, width, 6);
     let mut col = Column::new().child(Text::new(""));
     for row in rows {
         col = col.child(RichText::new().span(row, ultty_protocol::Style::new().fg(GREEN)));
@@ -97,6 +103,7 @@ pub fn process_list(
     selected: usize,
     sort_col: &SortColumn,
     sort_asc: bool,
+    max_rows: usize,
 ) -> Column {
     let arrow = if sort_asc { "^" } else { "v" };
     let si = |this: &SortColumn| {
@@ -131,7 +138,7 @@ pub fn process_list(
         )
         .child(RichText::new().span(header, ultty_protocol::Style::new().fg(DIM).bold()));
 
-    for (i, p) in processes.iter().take(20).enumerate() {
+    for (i, p) in processes.iter().take(max_rows).enumerate() {
         let indicator = if i == selected { ">" } else { " " };
         let line = format!(
             "{} {:>7}  {:<18} {:>5.1}%  {:>7}  {}",

@@ -48,6 +48,7 @@ impl App {
                     self.handle_mouse_motion();
                 }
                 self.update_tab_hover();
+                self.update_resize_cursor();
                 self.update_cursor_for_url();
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -183,6 +184,30 @@ impl App {
 
         match state {
             ElementState::Pressed => {
+                // Edge resize for CSD (no native decorations)
+                if button == MouseButton::Left {
+                    use winit::window::ResizeDirection;
+                    let size = self.window.inner_size();
+                    let w = size.width as f32;
+                    let h = size.height as f32;
+                    let edge = 5.0;
+                    let dir = match (x < edge, x > w - edge, y < edge, y > h - edge) {
+                        (true, _, true, _) => Some(ResizeDirection::NorthWest),
+                        (_, true, true, _) => Some(ResizeDirection::NorthEast),
+                        (true, _, _, true) => Some(ResizeDirection::SouthWest),
+                        (_, true, _, true) => Some(ResizeDirection::SouthEast),
+                        (true, _, _, _) => Some(ResizeDirection::West),
+                        (_, true, _, _) => Some(ResizeDirection::East),
+                        (_, _, true, _) => Some(ResizeDirection::North),
+                        (_, _, _, true) => Some(ResizeDirection::South),
+                        _ => None,
+                    };
+                    if let Some(direction) = dir {
+                        let _ = self.window.drag_resize_window(direction);
+                        return;
+                    }
+                }
+
                 // Check for tab bar clicks first
                 if self.tab_bar.visible && y < self.tab_bar.height() {
                     // Window control buttons

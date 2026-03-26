@@ -18,6 +18,7 @@ use data::{ProcessInfo, SystemCollector, SystemSnapshot};
 enum Msg {
     Tick,
     SystemData(SystemSnapshot),
+    Resized(u16),
     SelectUp,
     SelectDown,
     CycleSort,
@@ -64,6 +65,7 @@ struct SysMon {
     net_rx: u64,
     net_tx: u64,
     disks: Vec<data::DiskInfo>,
+    term_width: u16,
 }
 
 impl SysMon {
@@ -86,6 +88,7 @@ impl SysMon {
             net_rx: snap.net_rx_bytes,
             net_tx: snap.net_tx_bytes,
             disks: snap.disks,
+            term_width: 80,
         };
         app.sort_processes();
         app
@@ -192,6 +195,10 @@ impl Application for SysMon {
                 self.sort_processes();
                 Cmd::none()
             }
+            Msg::Resized(w) => {
+                self.term_width = w;
+                Cmd::none()
+            }
             Msg::Quit => Cmd::Quit,
         }
     }
@@ -210,11 +217,17 @@ impl Application for SysMon {
                 Key::Char('r') => Some(Msg::ReverseSort),
                 _ => None,
             },
+            Event::Resize { width, .. } => Some(Msg::Resized(*width)),
             _ => None,
         }
     }
 
     fn view(&self) -> impl View {
+        let w = self.term_width as usize;
+        let bar_width = (w / 2).saturating_sub(15).clamp(10, 50);
+        let chart_width = w.saturating_sub(8).clamp(20, 100);
+        let proc_rows = 20.min(self.processes.len());
+
         Column::new()
             .child(views::header_view(&self.hostname, self.uptime_secs))
             .child(Divider::horizontal())
@@ -223,14 +236,16 @@ impl Application for SysMon {
                 self.mem_percent,
                 self.mem_used,
                 self.mem_total,
+                bar_width,
             ))
-            .child(views::cpu_chart(&self.cpu_history))
+            .child(views::cpu_chart(&self.cpu_history, chart_width))
             .child(Divider::horizontal())
             .child(views::process_list(
                 &self.processes,
                 self.selected_process,
                 &self.sort_column,
                 self.sort_ascending,
+                proc_rows,
             ))
             .child(Divider::horizontal())
             .child(views::footer_view(self.net_rx, self.net_tx, &self.disks))

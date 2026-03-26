@@ -220,10 +220,9 @@ impl Renderer {
         }
 
         let tab_padding = 12.0; // Match TAB_PADDING from tabs.rs
-                                // Center glyphs vertically. Glyph rendering places the baseline at
-                                // y + (cell_height - glyph_top). To visually center, offset upward
-                                // so the glyph midpoint aligns with the bar midpoint.
-        let text_y = (tab_bar.height() - self.cell_height) / 2.0 - self.cell_height * 0.25;
+                                // Center text vertically in the tab bar. Place the cell top so the
+                                // glyph baseline lands roughly in the vertical middle.
+        let text_y = (tab_bar.height() - self.cell_height) / 2.0;
 
         let show_tabs = tab_bar.tabs.len() > 1;
         for tab in &tab_bar.tabs {
