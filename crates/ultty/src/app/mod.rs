@@ -214,7 +214,7 @@ impl App {
             tracing::info!("Running inside tmux, passthrough mode enabled");
         }
 
-        Ok(Self {
+        let mut app = Self {
             window,
             surface,
             renderer,
@@ -259,7 +259,12 @@ impl App {
             scroll_pixel_accum: 0.0,
             scroll_line_accum: 0.0,
             scale_factor,
-        })
+        };
+
+        // Initialize tab bar state so it renders on first frame
+        app.update_tab_bar();
+
+        Ok(app)
     }
 
     fn start_control_server() -> Option<ControlServer> {

@@ -6,6 +6,7 @@ use super::Vertex;
 const BG_SHADER: &str = r#"
 struct Uniforms {
     projection: mat4x4<f32>,
+    window_params: vec4<f32>,  // width, height, corner_radius, unused
 }
 
 @group(0) @binding(0)
@@ -24,13 +25,19 @@ struct VertexOutput {
 }
 
 // Convert sRGB to linear color space.
-// Colors from hex values are in sRGB space; GPU expects linear for sRGB framebuffer.
 fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
         return c / 12.92;
     } else {
         return pow((c + 0.055) / 1.055, 2.4);
     }
+}
+
+// Signed distance from a point to a rounded rectangle.
+// Returns negative inside, positive outside.
+fn rounded_rect_sdf(p: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
+    let q = abs(p) - half_size + vec2<f32>(radius, radius);
+    return length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - radius;
 }
 
 @vertex
@@ -43,13 +50,33 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Convert sRGB vertex colors to linear for correct rendering
     let linear_color = vec4<f32>(
         srgb_to_linear(in.color.r),
         srgb_to_linear(in.color.g),
         srgb_to_linear(in.color.b),
-        in.color.a  // Alpha is not gamma-encoded
+        in.color.a
     );
+
+    // Apply rounded corner clipping
+    let w = uniforms.window_params.x;
+    let h = uniforms.window_params.y;
+    let radius = uniforms.window_params.z;
+
+    if radius > 0.0 {
+        let center = vec2<f32>(w * 0.5, h * 0.5);
+        let half_size = vec2<f32>(w * 0.5, h * 0.5);
+        let pixel = in.clip_position.xy;
+        let d = rounded_rect_sdf(pixel - center, half_size, radius);
+
+        if d > 0.5 {
+            discard;
+        }
+
+        // Anti-alias the edge
+        let alpha = 1.0 - smoothstep(-0.5, 0.5, d);
+        return vec4<f32>(linear_color.rgb * alpha, linear_color.a * alpha);
+    }
+
     return linear_color;
 }
 "#;
@@ -58,6 +85,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 const TEXT_SHADER: &str = r#"
 struct Uniforms {
     projection: mat4x4<f32>,
+    window_params: vec4<f32>,
 }
 
 @group(0) @binding(0)

@@ -142,11 +142,13 @@ impl Vertex {
     }
 }
 
-/// Uniform buffer for projection matrix.
+/// Uniform buffer for projection matrix and window parameters.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Uniforms {
     pub projection: [[f32; 4]; 4],
+    /// Window size (width, height) and corner radius, padding.
+    pub window_params: [f32; 4],
 }
 
 impl Uniforms {
@@ -159,6 +161,7 @@ impl Uniforms {
                 [0.0, 0.0, 1.0, 0.0],
                 [-1.0, 1.0, 0.0, 1.0],
             ],
+            window_params: [width, height, 10.0, 0.0], // width, height, corner_radius, padding
         }
     }
 }
@@ -321,7 +324,7 @@ impl Renderer {
                 label: Some("uniform_bind_group_layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -449,7 +452,7 @@ impl Renderer {
                 label: Some("uniform_bind_group_layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -1312,61 +1315,11 @@ impl Renderer {
         let mut vertices = Vec::with_capacity(est_quads * 4);
         let mut indices = Vec::with_capacity(est_quads * 6);
 
-        // Full-window background with rounded corner border.
+        // Full-window background. Shader SDF handles rounded corner clipping.
         let bg = self.color_scheme.background;
         let w = self.config.width as f32;
         let h = self.config.height as f32;
-        let r = 10.0f32; // corner radius
-        let border = Rgba::new(
-            (bg.r + 0.08).min(1.0),
-            (bg.g + 0.08).min(1.0),
-            (bg.b + 0.08).min(1.0),
-            1.0,
-        );
-
-        // Full background
         self.emit_rect(&mut vertices, &mut indices, 0.0, 0.0, w, h, bg);
-
-        // Corner cutouts: draw border-colored arcs over the bg to simulate rounding.
-        // Each corner: fill the corner square with border color, then fill the
-        // quarter-circle interior back with bg color.
-        for &(cx, cy, flip_x, flip_y) in &[
-            (0.0f32, 0.0f32, 1.0f32, 1.0f32), // top-left
-            (w - r, 0.0, -1.0, 1.0),          // top-right
-            (0.0, h - r, 1.0, -1.0),          // bottom-left
-            (w - r, h - r, -1.0, -1.0),       // bottom-right
-        ] {
-            // Fill corner square with border
-            self.emit_rect(&mut vertices, &mut indices, cx, cy, r, r, border);
-
-            // Fill quarter-circle interior back with bg using stepped rects
-            let steps = 8;
-            for s in 0..steps {
-                let t0 = s as f32 / steps as f32;
-                let t1 = (s + 1) as f32 / steps as f32;
-                // Circle equation: x^2 + y^2 = r^2
-                let y0 = t0 * r;
-                let y1 = t1 * r;
-                let x_at_y0 = (r * r - y0 * y0).sqrt();
-                let x_at_y1 = (r * r - y1 * y1).sqrt();
-                let x_fill = x_at_y1.min(x_at_y0); // conservative inner edge
-
-                let (rx, ry, rw, rh) = if flip_x > 0.0 && flip_y > 0.0 {
-                    // top-left: fill from (r - x_fill) to r, from y0 to y1
-                    (cx + r - x_fill, cy + y0, x_fill, y1 - y0)
-                } else if flip_x < 0.0 && flip_y > 0.0 {
-                    // top-right
-                    (cx, cy + y0, x_fill, y1 - y0)
-                } else if flip_x > 0.0 && flip_y < 0.0 {
-                    // bottom-left
-                    (cx + r - x_fill, cy + r - y1, x_fill, y1 - y0)
-                } else {
-                    // bottom-right
-                    (cx, cy + r - y1, x_fill, y1 - y0)
-                };
-                self.emit_rect(&mut vertices, &mut indices, rx, ry, rw, rh, bg);
-            }
-        }
 
         for row_idx in 0..dims.rows {
             let row = match buffer.visible_row(row_idx) {
