@@ -129,6 +129,7 @@ impl App {
         let window = WindowBuilder::new()
             .with_title("Ultty")
             .with_inner_size(LogicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT))
+            .with_min_inner_size(LogicalSize::new(200.0, 100.0))
             .with_transparent(true)
             .with_decorations(false)
             .build(event_loop)?;
