@@ -1325,8 +1325,12 @@ impl Renderer {
             (bg.b + 0.12).min(1.0),
             1.0,
         );
-        self.emit_rect(&mut vertices, &mut indices, 0.0, 0.0, w, h, border_color);
-        // Inner background (inset by 1px)
+        // Border: top and sides only (1px). Bottom uses separate rect to avoid corner gaps.
+        self.emit_rect(&mut vertices, &mut indices, 0.0, 0.0, w, 1.0, border_color); // top
+        self.emit_rect(&mut vertices, &mut indices, 0.0, 0.0, 1.0, h, border_color); // left
+        self.emit_rect(&mut vertices, &mut indices, w - 1.0, 0.0, 1.0, h, border_color); // right
+        self.emit_rect(&mut vertices, &mut indices, 0.0, h - 1.0, w, 1.0, border_color); // bottom
+        // Inner background
         self.emit_rect(&mut vertices, &mut indices, 1.0, 1.0, w - 2.0, h - 2.0, bg);
 
         for row_idx in 0..dims.rows {
