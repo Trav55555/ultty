@@ -218,7 +218,7 @@ impl Application for SysMon {
         Column::new()
             .child(views::header_view(&self.hostname, self.uptime_secs))
             .child(Divider::horizontal())
-            .child(views::cpu_mem_row(
+            .child(views::resource_bars(
                 self.cpu_percent,
                 self.mem_percent,
                 self.mem_used,
