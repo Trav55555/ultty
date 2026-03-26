@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ultty": {
+      "command": "python3",
+      "args": ["mcp/ultty-mcp-server.py"],
+      "env": {}
+    }
+  }
+}
