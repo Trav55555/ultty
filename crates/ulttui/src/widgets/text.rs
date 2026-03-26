@@ -186,9 +186,7 @@ pub struct TextInput {
     rows: u16,
     cursor: usize,
     selection_start: Option<usize>,
-    history: Vec<String>,
-    history_index: Option<usize>,
-    temp_buffer: String,
+    history: super::input_history::InputHistory,
     vim_state: VimState,
     vim_config: VimConfig,
 }
@@ -203,9 +201,7 @@ impl Default for TextInput {
             rows: 1,
             cursor: 0,
             selection_start: None,
-            history: Vec::new(),
-            history_index: None,
-            temp_buffer: String::new(),
+            history: Default::default(),
             vim_state: VimState::new(),
             vim_config: VimConfig::for_text_input(),
         }
@@ -262,15 +258,13 @@ impl TextInput {
     pub fn set_value(&mut self, val: impl Into<String>) {
         self.value = val.into();
         self.cursor = self.value.chars().count();
-        self.history_index = None;
-        self.temp_buffer.clear();
+        self.history.reset();
     }
 
     pub fn clear(&mut self) {
         self.value.clear();
         self.cursor = 0;
-        self.history_index = None;
-        self.temp_buffer.clear();
+        self.history.reset();
     }
 
     pub fn submit_value(&mut self) -> String {
@@ -283,8 +277,7 @@ impl TextInput {
     }
 
     pub fn push_history(&mut self, entry: impl Into<String>) {
-        self.history.push(entry.into());
-        self.history_index = None;
+        self.history.push(entry);
     }
 
     pub fn selection(&self) -> Option<(usize, usize)> {
@@ -565,41 +558,23 @@ impl TextInput {
     }
 
     fn navigate_history_up(&mut self) -> bool {
-        if self.history.is_empty() {
-            return false;
+        if let Some(val) = self.history.navigate_up(&self.value) {
+            self.value = val.to_string();
+            self.cursor = self.value.chars().count();
+            true
+        } else {
+            false
         }
-
-        let next_index = match self.history_index {
-            Some(index) => index.saturating_sub(1),
-            None => {
-                self.temp_buffer = self.value.clone();
-                self.history.len() - 1
-            }
-        };
-
-        self.history_index = Some(next_index);
-        self.value = self.history[next_index].clone();
-        self.cursor = self.value.chars().count();
-        true
     }
 
     fn navigate_history_down(&mut self) -> bool {
-        let Some(index) = self.history_index else {
-            return false;
-        };
-
-        if index + 1 < self.history.len() {
-            let next_index = index + 1;
-            self.history_index = Some(next_index);
-            self.value = self.history[next_index].clone();
+        if let Some(val) = self.history.navigate_down() {
+            self.value = val.to_string();
             self.cursor = self.value.chars().count();
+            true
         } else {
-            self.history_index = None;
-            self.value = self.temp_buffer.clone();
-            self.cursor = self.value.chars().count();
-            self.temp_buffer.clear();
+            false
         }
-        true
     }
 }
 
@@ -707,14 +682,12 @@ impl View for TextInput {
                     let after: String = chars[self.cursor..].iter().collect();
                     self.value = format!("{}{}{}", before, c, after);
                     self.cursor += 1;
-                    self.history_index = None;
-                    self.temp_buffer.clear();
+                    self.history.reset();
                     return Some(super::FocusAction::Consumed);
                 }
                 Key::Backspace if self.cursor > 0 => {
                     self.delete_range(self.cursor - 1, self.cursor);
-                    self.history_index = None;
-                    self.temp_buffer.clear();
+                    self.history.reset();
                     return Some(super::FocusAction::Consumed);
                 }
                 Key::Up if !self.multiline || self.is_cursor_on_first_line() => {
@@ -1019,7 +992,7 @@ mod tests {
         let submitted = input.submit_value();
 
         assert_eq!(submitted, "echo hello");
-        assert_eq!(input.history, vec!["echo hello"]);
+        assert_eq!(input.history.entries(), &["echo hello"]);
     }
 
     #[test]
