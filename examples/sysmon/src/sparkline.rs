@@ -1,25 +1,57 @@
-/// Render a sparkline from a history of values (0-100).
-/// Uses ASCII characters for GPU-renderer compatibility.
-pub fn sparkline(history: &[f32], width: usize) -> String {
-    const CHARS: [char; 8] = [' ', '.', '_', '-', '=', '~', '^', '*'];
+/// Render a multi-row ASCII chart from a history of values (0-100).
+/// Each column is one time point, each row is a threshold level.
+/// Returns multiple lines to be rendered as separate Text widgets.
+pub fn chart(history: &[f32], width: usize, height: usize) -> Vec<String> {
     let start = if history.len() > width {
         history.len() - width
     } else {
         0
     };
-    let mut result = String::with_capacity(width);
-    for _ in 0..(width.saturating_sub(history.len())) {
-        result.push(' ');
+    let values = &history[start..];
+    let pad = width.saturating_sub(values.len());
+
+    let mut rows = Vec::with_capacity(height);
+    for row in 0..height {
+        // Top row = highest threshold, bottom row = lowest
+        let threshold = 100.0 * (height - row) as f32 / height as f32;
+        let half_threshold = threshold - 100.0 / (2.0 * height as f32);
+
+        let mut line = String::with_capacity(width + 6);
+
+        // Y-axis label
+        if row == 0 {
+            line.push_str(&format!("{:>3}%|", threshold as u32));
+        } else if row == height - 1 {
+            line.push_str("  0%|");
+        } else if row == height / 2 {
+            line.push_str(&format!("{:>3}%|", (threshold) as u32));
+        } else {
+            line.push_str("    |");
+        }
+
+        // Padding for missing history
+        for _ in 0..pad {
+            line.push(' ');
+        }
+
+        // Data columns
+        for &v in values {
+            if v >= threshold {
+                line.push('#');
+            } else if v >= half_threshold {
+                line.push(':');
+            } else {
+                line.push(' ');
+            }
+        }
+
+        rows.push(line);
     }
-    for &v in &history[start..] {
-        let idx = ((v / 100.0) * 7.0).clamp(0.0, 7.0) as usize;
-        result.push(CHARS[idx]);
-    }
-    result
+
+    rows
 }
 
 /// Render a horizontal bar with filled/empty blocks.
-/// Uses ASCII `#` and `-` for terminal compatibility.
 pub fn bar(percent: f32, width: usize) -> String {
     let filled = ((percent / 100.0) * width as f32).round() as usize;
     let empty = width.saturating_sub(filled);

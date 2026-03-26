@@ -224,7 +224,7 @@ impl Application for SysMon {
                 self.mem_used,
                 self.mem_total,
             ))
-            .child(views::sparkline_view(&self.cpu_history))
+            .child(views::cpu_chart(&self.cpu_history))
             .child(Divider::horizontal())
             .child(views::process_list(
                 &self.processes,

@@ -2,7 +2,7 @@ use ulttui::widgets::{Column, RichText, Row};
 use ultty_protocol::Color;
 
 use crate::data::{DiskInfo, ProcessInfo};
-use crate::sparkline::{bar, format_bytes, format_uptime, sparkline};
+use crate::sparkline::{bar, chart, format_bytes, format_uptime};
 use crate::SortColumn;
 
 // ── Colors ────────────────────────────────────────────────────────────
@@ -84,14 +84,16 @@ pub fn cpu_mem_row(cpu_percent: f32, mem_percent: f32, mem_used: u64, mem_total:
         )
 }
 
-pub fn sparkline_view(cpu_history: &[f32]) -> Column {
-    let spark = sparkline(cpu_history, 60);
-    Column::new()
-        .child(RichText::new().span(
-            " CPU History ",
-            ultty_protocol::Style::new().fg(ACCENT).bold(),
-        ))
-        .child(RichText::new().span(spark, ultty_protocol::Style::new().fg(CYAN)))
+pub fn cpu_chart(cpu_history: &[f32]) -> Column {
+    let rows = chart(cpu_history, 50, 6);
+    let mut col = Column::new().child(RichText::new().span(
+        "CPU History",
+        ultty_protocol::Style::new().fg(ACCENT).bold(),
+    ));
+    for row in rows {
+        col = col.child(RichText::new().span(row, ultty_protocol::Style::new().fg(GREEN)));
+    }
+    col
 }
 
 pub fn process_list(
