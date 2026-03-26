@@ -1,6 +1,7 @@
 //! Built-in widgets.
 
 mod badge;
+mod binary_toggle;
 mod button;
 mod checkbox;
 mod collapsible;
@@ -9,12 +10,14 @@ mod diff;
 mod divider;
 mod dock;
 mod image;
+mod input_history;
 mod list;
 mod markdown;
 mod modal;
 mod primitives;
 mod progress;
 mod scroll;
+mod scroll_search;
 mod select;
 mod spinner;
 mod state;

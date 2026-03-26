@@ -1,145 +1,75 @@
 //! Checkbox widget.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
+use super::binary_toggle::BinaryToggle;
 use super::{FocusAction, View};
-use crate::event::{Key, KeyEvent};
-use crate::theme::{to_ratatui_color, Theme};
+use crate::event::KeyEvent;
 
 /// A toggleable checkbox with a label.
 #[derive(Debug)]
-pub struct Checkbox {
-    checked: bool,
-    label: String,
-    id: Option<String>,
-}
+pub struct Checkbox(BinaryToggle);
 
 impl Checkbox {
     /// Create a new unchecked checkbox with the given label.
     pub fn new(label: impl Into<String>) -> Self {
-        Self {
-            checked: false,
-            label: label.into(),
-            id: None,
-        }
+        Self(BinaryToggle::new(label, "[x] ", "[ ] "))
     }
 
     /// Set the initial checked state.
     pub fn checked(mut self, checked: bool) -> Self {
-        self.checked = checked;
+        self.0.state = checked;
         self
     }
 
     pub fn id(mut self, id: impl Into<String>) -> Self {
-        self.id = Some(id.into());
+        self.0.id = Some(id.into());
         self
     }
 
     pub fn widget_id(&self) -> Option<&str> {
-        self.id.as_deref()
+        self.0.id.as_deref()
     }
 
     /// Returns whether the checkbox is currently checked.
     pub fn is_checked(&self) -> bool {
-        self.checked
+        self.0.state
     }
 
     /// Toggle the checked state.
     pub fn toggle(&mut self) {
-        self.checked = !self.checked;
+        self.0.toggle();
     }
 }
 
 impl View for Checkbox {
     fn widget_id(&self) -> Option<&str> {
-        Checkbox::widget_id(self)
+        self.0.widget_id()
     }
-
     fn style(&self) -> ultty_protocol::Style {
-        let theme = Theme::current();
-        let is_focused = super::register_and_check_focus(self.widget_id());
-        let fg = if is_focused {
-            theme.control.indicator
-        } else if self.checked {
-            theme.control.active_fg
-        } else {
-            theme.control.fg
-        };
-        ultty_protocol::Style::new().fg(fg).bold()
+        self.0.style()
     }
-
     fn content(&self) -> ultty_protocol::Content {
-        let prefix = if self.checked { "[x] " } else { "[ ] " };
-        ultty_protocol::Content::Text(ultty_protocol::TextContent {
-            text: format!("{}{}", prefix, self.label),
-            wrap: ultty_protocol::TextWrap::None,
-            align: ultty_protocol::TextAlign::Left,
-            overflow: ultty_protocol::TextOverflow::Clip,
-        })
+        self.0.content()
     }
-
     fn is_focusable(&self) -> bool {
-        true
+        self.0.is_focusable()
     }
-
     fn on_key(&mut self, key: &KeyEvent) -> Option<FocusAction> {
-        match &key.key {
-            Key::Char(' ') | Key::Enter => {
-                self.toggle();
-                Some(FocusAction::Consumed)
-            }
-            Key::Tab if key.modifiers.shift => Some(FocusAction::Previous),
-            Key::Tab => Some(FocusAction::Next),
-            Key::Left | Key::Up => Some(FocusAction::Previous),
-            Key::Right | Key::Down => Some(FocusAction::Next),
-            _ => None,
-        }
+        self.0.on_key(key)
     }
-
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
-        use ratatui::text::Span;
-
-        // Register with focus manager if we have an ID
-        if let Some(id) = self.widget_id() {
-            crate::focus::FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
-        }
-        let is_focused = self
-            .widget_id()
-            .map(|id| crate::focus::FocusManager::with_current(|fm| fm.is_focused(id)))
-            .unwrap_or(false);
-
-        let prefix = if self.checked { "[x] " } else { "[ ] " };
-        let theme = Theme::current();
-        let fg_color = if self.checked {
-            to_ratatui_color(theme.control.active_fg)
-        } else {
-            to_ratatui_color(theme.control.fg)
-        };
-        let label_style = Style::default().fg(fg_color).add_modifier(Modifier::BOLD);
-        let prefix_style = if is_focused {
-            Style::default()
-                .fg(to_ratatui_color(theme.control.indicator))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            label_style
-        };
-        let line = Line::from(vec![
-            Span::styled(prefix, prefix_style),
-            Span::styled(self.label.as_str(), label_style),
-        ]);
-        let paragraph = Paragraph::new(line);
-        frame.render_widget(paragraph, area);
+        self.0.render_ansi(frame, area)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{Key, KeyEvent};
     use crate::focus::FocusManager;
+    use crate::theme::Theme;
 
     #[test]
     fn new_checkbox_is_unchecked() {
