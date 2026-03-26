@@ -572,7 +572,6 @@ impl Renderer {
 
         // Render pass for backgrounds
         {
-            let linear_bg = self.color_scheme.background.to_linear();
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bench_bg_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -580,10 +579,10 @@ impl Renderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: linear_bg.r as f64 * self.opacity as f64,
-                            g: linear_bg.g as f64 * self.opacity as f64,
-                            b: linear_bg.b as f64 * self.opacity as f64,
-                            a: self.opacity as f64,
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -819,7 +818,6 @@ impl Renderer {
         // Render pass
         {
             // Convert sRGB colors to linear space for correct rendering in sRGB framebuffer
-            let linear_bg = self.color_scheme.background.to_linear();
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminal_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -828,10 +826,10 @@ impl Renderer {
                     ops: wgpu::Operations {
                         // Pre-multiplied alpha for transparency support
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: linear_bg.r as f64 * self.opacity as f64,
-                            g: linear_bg.g as f64 * self.opacity as f64,
-                            b: linear_bg.b as f64 * self.opacity as f64,
-                            a: self.opacity as f64,
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -1159,7 +1157,6 @@ impl Renderer {
             });
 
         {
-            let linear_bg = self.color_scheme.background.to_linear();
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminal_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1167,10 +1164,10 @@ impl Renderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: linear_bg.r as f64 * self.opacity as f64,
-                            g: linear_bg.g as f64 * self.opacity as f64,
-                            b: linear_bg.b as f64 * self.opacity as f64,
-                            a: self.opacity as f64,
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -1326,9 +1323,52 @@ impl Renderer {
     ) -> (Vec<Vertex>, Vec<u32>) {
         let buffer = terminal.buffer();
         let dims = terminal.dimensions();
-        let est_quads = dims.rows as usize * 4;
+        let est_quads = dims.rows as usize * 4 + 10;
         let mut vertices = Vec::with_capacity(est_quads * 4);
         let mut indices = Vec::with_capacity(est_quads * 6);
+
+        // Full-window background (needed because clear is transparent for rounded corners)
+        // Pass sRGB color — the BG shader converts to linear internally.
+        let bg = self.color_scheme.background;
+        let w = self.config.width as f32;
+        let h = self.config.height as f32;
+        let r = 8.0f32; // corner radius
+
+        // Main body rects (cross shape to avoid corners)
+        // Horizontal bar (full width, inset top/bottom by radius)
+        self.emit_rect(&mut vertices, &mut indices, 0.0, r, w, h - 2.0 * r, bg);
+        // Top bar (inset left/right by radius)
+        self.emit_rect(&mut vertices, &mut indices, r, 0.0, w - 2.0 * r, r, bg);
+        // Bottom bar (inset left/right by radius)
+        self.emit_rect(&mut vertices, &mut indices, r, h - r, w - 2.0 * r, r, bg);
+
+        // Approximate rounded corners with small rectangles (quarter-circle approximation)
+        // Each corner gets 3 nested rects that step inward
+        let steps = 4;
+        for i in 0..steps {
+            let t = (i as f32 + 1.0) / steps as f32;
+            let ox = r * (1.0 - (1.0 - (1.0 - t) * (1.0 - t)).sqrt());
+            let oy = r * (1.0 - t);
+            let bw = r - ox;
+            let bh = (r * t / steps as f32).max(1.0);
+
+            // Top-left
+            self.emit_rect(&mut vertices, &mut indices, ox, oy, bw, bh, bg);
+            // Top-right
+            self.emit_rect(&mut vertices, &mut indices, w - ox - bw, oy, bw, bh, bg);
+            // Bottom-left
+            self.emit_rect(&mut vertices, &mut indices, ox, h - oy - bh, bw, bh, bg);
+            // Bottom-right
+            self.emit_rect(
+                &mut vertices,
+                &mut indices,
+                w - ox - bw,
+                h - oy - bh,
+                bw,
+                bh,
+                bg,
+            );
+        }
 
         for row_idx in 0..dims.rows {
             let row = match buffer.visible_row(row_idx) {

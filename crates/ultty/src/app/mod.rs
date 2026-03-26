@@ -129,7 +129,7 @@ impl App {
         let window = WindowBuilder::new()
             .with_title("Ultty")
             .with_inner_size(LogicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT))
-            .with_transparent(config.behavior.opacity < 1.0)
+            .with_transparent(true)
             .with_decorations(false)
             .build(event_loop)?;
         let window = Arc::new(window);
@@ -678,7 +678,7 @@ impl App {
         let y = self.mouse_pos.y as f32;
         let w = size.width as f32;
         let h = size.height as f32;
-        let edge = 5.0;
+        let edge = 10.0;
 
         let cursor = match (x < edge, x > w - edge, y < edge, y > h - edge) {
             (true, _, true, _) | (_, true, _, true) => CursorIcon::NwseResize,

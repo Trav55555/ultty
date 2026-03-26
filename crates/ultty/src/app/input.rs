@@ -190,7 +190,7 @@ impl App {
                     let size = self.window.inner_size();
                     let w = size.width as f32;
                     let h = size.height as f32;
-                    let edge = 5.0;
+                    let edge = 10.0;
                     let dir = match (x < edge, x > w - edge, y < edge, y > h - edge) {
                         (true, _, true, _) => Some(ResizeDirection::NorthWest),
                         (_, true, true, _) => Some(ResizeDirection::NorthEast),
