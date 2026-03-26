@@ -578,12 +578,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -825,12 +820,7 @@ impl Renderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         // Pre-multiplied alpha for transparency support
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1163,12 +1153,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1327,47 +1312,60 @@ impl Renderer {
         let mut vertices = Vec::with_capacity(est_quads * 4);
         let mut indices = Vec::with_capacity(est_quads * 6);
 
-        // Full-window background (needed because clear is transparent for rounded corners)
-        // Pass sRGB color — the BG shader converts to linear internally.
+        // Full-window background with rounded corner border.
         let bg = self.color_scheme.background;
         let w = self.config.width as f32;
         let h = self.config.height as f32;
-        let r = 8.0f32; // corner radius
+        let r = 10.0f32; // corner radius
+        let border = Rgba::new(
+            (bg.r + 0.08).min(1.0),
+            (bg.g + 0.08).min(1.0),
+            (bg.b + 0.08).min(1.0),
+            1.0,
+        );
 
-        // Main body rects (cross shape to avoid corners)
-        // Horizontal bar (full width, inset top/bottom by radius)
-        self.emit_rect(&mut vertices, &mut indices, 0.0, r, w, h - 2.0 * r, bg);
-        // Top bar (inset left/right by radius)
-        self.emit_rect(&mut vertices, &mut indices, r, 0.0, w - 2.0 * r, r, bg);
-        // Bottom bar (inset left/right by radius)
-        self.emit_rect(&mut vertices, &mut indices, r, h - r, w - 2.0 * r, r, bg);
+        // Full background
+        self.emit_rect(&mut vertices, &mut indices, 0.0, 0.0, w, h, bg);
 
-        // Approximate rounded corners with small rectangles (quarter-circle approximation)
-        // Each corner gets 3 nested rects that step inward
-        let steps = 4;
-        for i in 0..steps {
-            let t = (i as f32 + 1.0) / steps as f32;
-            let ox = r * (1.0 - (1.0 - (1.0 - t) * (1.0 - t)).sqrt());
-            let oy = r * (1.0 - t);
-            let bw = r - ox;
-            let bh = (r * t / steps as f32).max(1.0);
+        // Corner cutouts: draw border-colored arcs over the bg to simulate rounding.
+        // Each corner: fill the corner square with border color, then fill the
+        // quarter-circle interior back with bg color.
+        for &(cx, cy, flip_x, flip_y) in &[
+            (0.0f32, 0.0f32, 1.0f32, 1.0f32), // top-left
+            (w - r, 0.0, -1.0, 1.0),          // top-right
+            (0.0, h - r, 1.0, -1.0),          // bottom-left
+            (w - r, h - r, -1.0, -1.0),       // bottom-right
+        ] {
+            // Fill corner square with border
+            self.emit_rect(&mut vertices, &mut indices, cx, cy, r, r, border);
 
-            // Top-left
-            self.emit_rect(&mut vertices, &mut indices, ox, oy, bw, bh, bg);
-            // Top-right
-            self.emit_rect(&mut vertices, &mut indices, w - ox - bw, oy, bw, bh, bg);
-            // Bottom-left
-            self.emit_rect(&mut vertices, &mut indices, ox, h - oy - bh, bw, bh, bg);
-            // Bottom-right
-            self.emit_rect(
-                &mut vertices,
-                &mut indices,
-                w - ox - bw,
-                h - oy - bh,
-                bw,
-                bh,
-                bg,
-            );
+            // Fill quarter-circle interior back with bg using stepped rects
+            let steps = 8;
+            for s in 0..steps {
+                let t0 = s as f32 / steps as f32;
+                let t1 = (s + 1) as f32 / steps as f32;
+                // Circle equation: x^2 + y^2 = r^2
+                let y0 = t0 * r;
+                let y1 = t1 * r;
+                let x_at_y0 = (r * r - y0 * y0).sqrt();
+                let x_at_y1 = (r * r - y1 * y1).sqrt();
+                let x_fill = x_at_y1.min(x_at_y0); // conservative inner edge
+
+                let (rx, ry, rw, rh) = if flip_x > 0.0 && flip_y > 0.0 {
+                    // top-left: fill from (r - x_fill) to r, from y0 to y1
+                    (cx + r - x_fill, cy + y0, x_fill, y1 - y0)
+                } else if flip_x < 0.0 && flip_y > 0.0 {
+                    // top-right
+                    (cx, cy + y0, x_fill, y1 - y0)
+                } else if flip_x > 0.0 && flip_y < 0.0 {
+                    // bottom-left
+                    (cx + r - x_fill, cy + r - y1, x_fill, y1 - y0)
+                } else {
+                    // bottom-right
+                    (cx, cy + r - y1, x_fill, y1 - y0)
+                };
+                self.emit_rect(&mut vertices, &mut indices, rx, ry, rw, rh, bg);
+            }
         }
 
         for row_idx in 0..dims.rows {

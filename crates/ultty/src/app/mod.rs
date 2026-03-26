@@ -172,6 +172,9 @@ impl App {
         // Set window opacity
         renderer.set_opacity(config.behavior.opacity);
 
+        // Tab bar is always visible (CSD), set its height before sizing the terminal
+        renderer.set_tab_bar_height(ultty::tabs::TAB_BAR_HEIGHT);
+
         // Get terminal dimensions from renderer
         let (cols, rows) = renderer.terminal_dimensions();
         tracing::info!("Terminal size: {}x{}", cols, rows);
