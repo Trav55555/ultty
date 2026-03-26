@@ -215,29 +215,32 @@ impl Application for SysMon {
     }
 
     fn view(&self) -> impl View {
-        DockLayout::new()
-            .dock_top(views::header_view(&self.hostname, self.uptime_secs))
-            .dock_top(Divider::horizontal())
-            .dock_bottom(Divider::horizontal())
-            .dock_bottom(views::footer_view(self.net_rx, self.net_tx, &self.disks))
-            .center(
-                Column::new()
-                    .child(views::cpu_mem_row(
-                        self.cpu_percent,
-                        self.mem_percent,
-                        self.mem_used,
-                        self.mem_total,
-                    ))
-                    .child(views::sparkline_view(&self.cpu_history))
-                    .child(Divider::horizontal())
-                    .child(views::process_table(
-                        &self.processes,
-                        self.selected_process,
-                        &self.sort_column,
-                        self.sort_ascending,
-                    ))
-                    .gap(0.5),
-            )
+        Inset::new(
+            DockLayout::new()
+                .dock_top(views::header_view(&self.hostname, self.uptime_secs))
+                .dock_top(Divider::horizontal())
+                .dock_bottom(Divider::horizontal())
+                .dock_bottom(views::footer_view(self.net_rx, self.net_tx, &self.disks))
+                .center(
+                    Column::new()
+                        .child(views::cpu_mem_row(
+                            self.cpu_percent,
+                            self.mem_percent,
+                            self.mem_used,
+                            self.mem_total,
+                        ))
+                        .child(views::sparkline_view(&self.cpu_history))
+                        .child(Divider::horizontal())
+                        .child(views::process_table(
+                            &self.processes,
+                            self.selected_process,
+                            &self.sort_column,
+                            self.sort_ascending,
+                        ))
+                        .gap(1.0),
+                ),
+            1.0,
+        )
     }
 }
 

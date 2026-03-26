@@ -8,7 +8,6 @@ pub fn sparkline(history: &[f32], width: usize) -> String {
         0
     };
     let mut result = String::with_capacity(width);
-    // Pad if history is shorter than width
     for _ in 0..(width.saturating_sub(history.len())) {
         result.push(' ');
     }
@@ -19,12 +18,12 @@ pub fn sparkline(history: &[f32], width: usize) -> String {
     result
 }
 
-/// Render a horizontal bar: [====------] with percentage.
+/// Render a horizontal bar with filled/empty blocks.
+/// Uses ASCII `#` and `-` for terminal compatibility.
 pub fn bar(percent: f32, width: usize) -> String {
-    let inner = width.saturating_sub(2); // for [ ]
-    let filled = ((percent / 100.0) * inner as f32).round() as usize;
-    let empty = inner.saturating_sub(filled);
-    format!("[{}{}]", "=".repeat(filled), "-".repeat(empty))
+    let filled = ((percent / 100.0) * width as f32).round() as usize;
+    let empty = width.saturating_sub(filled);
+    format!("{}{}", "#".repeat(filled), "-".repeat(empty))
 }
 
 /// Format bytes to human-readable string.
@@ -33,13 +32,13 @@ pub fn format_bytes(bytes: u64) -> String {
     const MB: u64 = 1024 * 1024;
     const GB: u64 = 1024 * 1024 * 1024;
     if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
+        format!("{:.1}G", bytes as f64 / GB as f64)
     } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
+        format!("{:.1}M", bytes as f64 / MB as f64)
     } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
+        format!("{:.0}K", bytes as f64 / KB as f64)
     } else {
-        format!("{} B", bytes)
+        format!("{}B", bytes)
     }
 }
 
