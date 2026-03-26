@@ -1,0 +1,11 @@
+[package]
+name = "sysmon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ulttui = { workspace = true }
+ultty-protocol = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+sysinfo = "0.33"
