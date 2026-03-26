@@ -1315,11 +1315,19 @@ impl Renderer {
         let mut vertices = Vec::with_capacity(est_quads * 4);
         let mut indices = Vec::with_capacity(est_quads * 6);
 
-        // Full-window background. Shader SDF handles rounded corner clipping.
+        // Window border (1px, slightly lighter than bg)
         let bg = self.color_scheme.background;
         let w = self.config.width as f32;
         let h = self.config.height as f32;
-        self.emit_rect(&mut vertices, &mut indices, 0.0, 0.0, w, h, bg);
+        let border_color = Rgba::new(
+            (bg.r + 0.12).min(1.0),
+            (bg.g + 0.12).min(1.0),
+            (bg.b + 0.12).min(1.0),
+            1.0,
+        );
+        self.emit_rect(&mut vertices, &mut indices, 0.0, 0.0, w, h, border_color);
+        // Inner background (inset by 1px)
+        self.emit_rect(&mut vertices, &mut indices, 1.0, 1.0, w - 2.0, h - 2.0, bg);
 
         for row_idx in 0..dims.rows {
             let row = match buffer.visible_row(row_idx) {
