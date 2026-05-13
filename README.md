@@ -169,6 +169,7 @@ examples/
 
 - [Getting Started](docs/GETTING_STARTED.md) — Installation and first app
 - [Architecture](docs/ARCHITECTURE.md) — System design and components
+- [Architecture Vocabulary](CONTEXT.md) — Stable terms for core seams
 - [Protocol Specification](docs/PROTOCOL_SPEC.md) — Native protocol details
 - [Testing Strategy](docs/TESTING_STRATEGY.md) — How to test
 - [30/60/90 Execution Plan](docs/ROADMAP_30_60_90.md) — Milestones, ticket map, and acceptance criteria

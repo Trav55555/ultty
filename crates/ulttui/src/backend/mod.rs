@@ -5,6 +5,7 @@ mod detect;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
 mod native;
+mod native_diff;
 
 use crate::event::Event;
 use crate::widgets::View;

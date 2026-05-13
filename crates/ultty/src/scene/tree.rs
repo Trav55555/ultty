@@ -103,6 +103,42 @@ impl SceneTree {
         }
     }
 
+    /// Move an existing region under a new parent.
+    ///
+    /// If `index` is out of bounds, appends to the end of the new parent's
+    /// children list. Returns false when the region is the root, the region does
+    /// not exist, or the new parent does not exist.
+    pub fn reparent(&mut self, id: RegionId, new_parent: RegionId, index: usize) -> bool {
+        if id == self.root
+            || !self.regions.contains_key(&id)
+            || !self.regions.contains_key(&new_parent)
+        {
+            return false;
+        }
+
+        let old_parent = self.regions.get(&id).and_then(|region| region.parent);
+
+        if let Some(old_id) = old_parent {
+            if let Some(old) = self.regions.get_mut(&old_id) {
+                old.children.retain(|&child| child != id);
+            }
+        }
+
+        if let Some(region) = self.regions.get_mut(&id) {
+            region.parent = Some(new_parent);
+        }
+
+        if let Some(parent) = self.regions.get_mut(&new_parent) {
+            if index <= parent.children.len() {
+                parent.children.insert(index, id);
+            } else {
+                parent.children.push(id);
+            }
+        }
+
+        true
+    }
+
     /// Get the root region ID.
     pub fn root(&self) -> RegionId {
         self.root
@@ -512,12 +548,7 @@ mod tests {
         );
         assert!(tree.get(RegionId::new(2)).unwrap().children.is_empty());
 
-        // Reparent: remove child then re-insert under p2
-        let mut removed = tree.remove(RegionId::new(3)).unwrap();
-        assert!(tree.get(RegionId::new(1)).unwrap().children.is_empty());
-
-        removed.parent = Some(RegionId::new(2));
-        tree.insert(removed);
+        assert!(tree.reparent(RegionId::new(3), RegionId::new(2), 0));
 
         assert!(tree.get(RegionId::new(1)).unwrap().children.is_empty());
         assert_eq!(
@@ -527,6 +558,55 @@ mod tests {
         assert_eq!(
             tree.get(RegionId::new(3)).unwrap().parent,
             Some(RegionId::new(2))
+        );
+    }
+
+    #[test]
+    fn reparent_region_at_specific_index() {
+        let mut tree = SceneTree::new();
+
+        for id in [1, 2, 3] {
+            let mut region = Region::new(RegionId::new(id));
+            region.parent = Some(RegionId::ROOT);
+            tree.insert(region);
+        }
+
+        let mut child = Region::new(RegionId::new(4));
+        child.parent = Some(RegionId::new(1));
+        tree.insert(child);
+
+        assert!(tree.reparent(RegionId::new(4), RegionId::ROOT, 1));
+
+        assert_eq!(
+            tree.get(RegionId::ROOT).unwrap().children,
+            vec![
+                RegionId::new(1),
+                RegionId::new(4),
+                RegionId::new(2),
+                RegionId::new(3)
+            ]
+        );
+        assert!(tree.get(RegionId::new(1)).unwrap().children.is_empty());
+    }
+
+    #[test]
+    fn reparent_rejects_root_missing_region_and_missing_parent() {
+        let mut tree = SceneTree::new();
+        let mut region = Region::new(RegionId::new(1));
+        region.parent = Some(RegionId::ROOT);
+        tree.insert(region);
+
+        assert!(!tree.reparent(RegionId::ROOT, RegionId::new(1), 0));
+        assert!(!tree.reparent(RegionId::new(99), RegionId::ROOT, 0));
+        assert!(!tree.reparent(RegionId::new(1), RegionId::new(99), 0));
+
+        assert_eq!(
+            tree.get(RegionId::ROOT).unwrap().children,
+            vec![RegionId::new(1)]
+        );
+        assert_eq!(
+            tree.get(RegionId::new(1)).unwrap().parent,
+            Some(RegionId::ROOT)
         );
     }
 

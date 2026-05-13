@@ -780,34 +780,21 @@ impl NativeSession {
 
     /// Handle ReparentRegion.
     fn handle_reparent_region(&mut self, id: RegionId, new_parent: RegionId, insert_index: i32) {
-        // Remove from old parent, add to new parent
-        if let Some(region) = self.scene.get_mut(id) {
-            let old_parent = region.parent;
-            region.parent = Some(new_parent);
-
-            // Remove from old parent's children
-            if let Some(old_id) = old_parent {
-                if let Some(old) = self.scene.get_mut(old_id) {
-                    old.children.retain(|&c| c != id);
-                }
-            }
-
-            // Add to new parent's children at specified index
-            if let Some(new) = self.scene.get_mut(new_parent) {
-                if insert_index >= 0 && (insert_index as usize) <= new.children.len() {
-                    new.children.insert(insert_index as usize, id);
-                } else {
-                    new.children.push(id);
-                }
-            }
-
+        let index = usize::try_from(insert_index).unwrap_or(usize::MAX);
+        if self.scene.reparent(id, new_parent, index) {
             self.scene_dirty = true;
             self.constraints_dirty = true;
             self.render_dirty = true;
             debug!("Reparented region {:?} to {:?}", id, new_parent);
         } else {
-            warn!("ReparentRegion for unknown region {:?}", id);
-            self.queue_error_message(404, format!("region {} not found", id.0));
+            warn!(
+                "ReparentRegion failed for region {:?} to parent {:?}",
+                id, new_parent
+            );
+            self.queue_error_message(
+                404,
+                format!("region {} or parent {} not found", id.0, new_parent.0),
+            );
         }
     }
 
