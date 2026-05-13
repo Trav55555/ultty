@@ -12,15 +12,14 @@ use std::os::unix::net::UnixStream;
 use bytes::{Buf, BytesMut};
 use tracing::{debug, error, info, warn};
 use ultty_protocol::{
-    AppMessage, ComputedRegionLayout, Decode, Dimension, Display, Encode, FlexDirection, FrameId,
-    LayoutTrigger, RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_LAYOUT_FLEXBOX,
-    CAP_REGION_METADATA, CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, FRAME_MAGIC, PROTOCOL_VERSION,
+    AppMessage, Decode, Dimension, Display, Encode, FlexDirection, FrameId, LayoutTrigger,
+    RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_LAYOUT_FLEXBOX, CAP_REGION_METADATA,
+    CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, FRAME_MAGIC, PROTOCOL_VERSION,
 };
 #[cfg(test)]
 use ultty_protocol::{Content, Style};
 
 use crate::scene::layout::LayoutEngine;
-use crate::scene::region::ComputedLayout;
 #[cfg(test)]
 use crate::scene::region::Region;
 use crate::scene::tree::SceneTree;
@@ -432,81 +431,18 @@ impl NativeSession {
         frame_id: Option<FrameId>,
         trigger: LayoutTrigger,
     ) -> io::Result<()> {
-        // Sync scene tree to Taffy
-        if let Err(e) = self.layout.sync(&self.scene) {
-            warn!("Session {} layout sync error: {}", self.session_id, e);
-            self.queue_error_message(500, format!("layout sync failed: {}", e));
-            return Ok(());
-        }
-
-        // Compute layout
-        if let Err(e) = self
-            .layout
-            .compute(self.viewport_width, self.viewport_height)
-        {
-            warn!("Session {} layout compute error: {}", self.session_id, e);
-            self.queue_error_message(500, format!("layout compute failed: {}", e));
-            return Ok(());
-        }
-
-        // Taffy location is parent-relative; accumulate to get absolute positions.
-        let mut absolute_offsets: HashMap<RegionId, (f32, f32)> = HashMap::new();
-        absolute_offsets.insert(RegionId::ROOT, (0.0, 0.0));
-
-        let mut regions = Vec::new();
-        for region in self.scene.iter_depth_first() {
-            if let Some(taffy_layout) = self.layout.get_layout(region.id) {
-                let (parent_abs_x, parent_abs_y) = region
-                    .parent
-                    .and_then(|pid| absolute_offsets.get(&pid))
-                    .copied()
-                    .unwrap_or((0.0, 0.0));
-
-                let abs_x = parent_abs_x + taffy_layout.location.x;
-                let abs_y = parent_abs_y + taffy_layout.location.y;
-
-                absolute_offsets.insert(region.id, (abs_x, abs_y));
-
-                let computed = ComputedRegionLayout {
-                    id: region.id,
-                    x: abs_x,
-                    y: abs_y,
-                    width: taffy_layout.size.width,
-                    height: taffy_layout.size.height,
-                    content_x: abs_x + taffy_layout.padding.left + taffy_layout.border.left,
-                    content_y: abs_y + taffy_layout.padding.top + taffy_layout.border.top,
-                    content_width: taffy_layout.size.width
-                        - taffy_layout.padding.left
-                        - taffy_layout.padding.right
-                        - taffy_layout.border.left
-                        - taffy_layout.border.right,
-                    content_height: taffy_layout.size.height
-                        - taffy_layout.padding.top
-                        - taffy_layout.padding.bottom
-                        - taffy_layout.border.top
-                        - taffy_layout.border.bottom,
-                    visible: true,
-                };
-                regions.push(computed);
+        let regions = match self.layout.compute_scene_layout(
+            &mut self.scene,
+            self.viewport_width,
+            self.viewport_height,
+        ) {
+            Ok(regions) => regions,
+            Err(e) => {
+                warn!("Session {} layout error: {}", self.session_id, e);
+                self.queue_error_message(500, format!("layout failed: {}", e));
+                return Ok(());
             }
-        }
-
-        // Update regions with computed layouts
-        for layout in &regions {
-            if let Some(region) = self.scene.get_mut(layout.id) {
-                region.computed = ComputedLayout {
-                    x: layout.x,
-                    y: layout.y,
-                    width: layout.width,
-                    height: layout.height,
-                    content_x: layout.content_x,
-                    content_y: layout.content_y,
-                    content_width: layout.content_width,
-                    content_height: layout.content_height,
-                };
-                region.dirty = false;
-            }
-        }
+        };
 
         // Send LayoutComputed
         let msg = TerminalMessage::LayoutComputed {

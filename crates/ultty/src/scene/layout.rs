@@ -5,8 +5,9 @@ mod constraints;
 use std::collections::HashMap;
 
 use taffy::prelude::*;
-use ultty_protocol::RegionId;
+use ultty_protocol::{ComputedRegionLayout, RegionId};
 
+use super::region::ComputedLayout;
 use super::tree::SceneTree;
 use constraints::constraints_to_style;
 #[cfg(test)]
@@ -157,6 +158,75 @@ impl LayoutEngine {
         let node_id = self.region_to_node.get(&region_id)?;
         self.taffy.layout(*node_id).ok().cloned()
     }
+
+    /// Sync, compute, and write computed layouts back to the scene tree.
+    pub fn compute_scene_layout(
+        &mut self,
+        scene: &mut SceneTree,
+        width: f32,
+        height: f32,
+    ) -> Result<Vec<ComputedRegionLayout>, LayoutEngineError> {
+        self.sync(scene)?;
+        self.compute(width, height)?;
+
+        let mut absolute_offsets: HashMap<RegionId, (f32, f32)> = HashMap::new();
+        absolute_offsets.insert(RegionId::ROOT, (0.0, 0.0));
+
+        let mut regions = Vec::new();
+        for region in scene.iter_depth_first() {
+            if let Some(taffy_layout) = self.get_layout(region.id) {
+                let (parent_abs_x, parent_abs_y) = region
+                    .parent
+                    .and_then(|pid| absolute_offsets.get(&pid))
+                    .copied()
+                    .unwrap_or((0.0, 0.0));
+
+                let abs_x = parent_abs_x + taffy_layout.location.x;
+                let abs_y = parent_abs_y + taffy_layout.location.y;
+
+                absolute_offsets.insert(region.id, (abs_x, abs_y));
+
+                regions.push(ComputedRegionLayout {
+                    id: region.id,
+                    x: abs_x,
+                    y: abs_y,
+                    width: taffy_layout.size.width,
+                    height: taffy_layout.size.height,
+                    content_x: abs_x + taffy_layout.padding.left + taffy_layout.border.left,
+                    content_y: abs_y + taffy_layout.padding.top + taffy_layout.border.top,
+                    content_width: taffy_layout.size.width
+                        - taffy_layout.padding.left
+                        - taffy_layout.padding.right
+                        - taffy_layout.border.left
+                        - taffy_layout.border.right,
+                    content_height: taffy_layout.size.height
+                        - taffy_layout.padding.top
+                        - taffy_layout.padding.bottom
+                        - taffy_layout.border.top
+                        - taffy_layout.border.bottom,
+                    visible: true,
+                });
+            }
+        }
+
+        for layout in &regions {
+            if let Some(region) = scene.get_mut(layout.id) {
+                region.computed = ComputedLayout {
+                    x: layout.x,
+                    y: layout.y,
+                    width: layout.width,
+                    height: layout.height,
+                    content_x: layout.content_x,
+                    content_y: layout.content_y,
+                    content_width: layout.content_width,
+                    content_height: layout.content_height,
+                };
+                region.dirty = false;
+            }
+        }
+
+        Ok(regions)
+    }
 }
 
 impl Default for LayoutEngine {
@@ -295,6 +365,57 @@ mod tests {
 
         let right_layout = engine.get_layout(RegionId::new(2)).unwrap();
         assert_eq!(right_layout.size.width, 70.0); // 100 - 30
+    }
+
+    #[test]
+    fn compute_scene_layout_returns_absolute_layouts_and_updates_scene() {
+        let mut tree = build_scene();
+
+        let mut nested = Region::new(RegionId::new(3));
+        nested.parent = Some(RegionId::new(2));
+        nested.constraints = Constraints {
+            width: ProtoDimension::Cells(10.0),
+            height: ProtoDimension::Cells(5.0),
+            ..Default::default()
+        };
+        tree.insert(nested);
+
+        let mut engine = LayoutEngine::new();
+        let layouts = engine.compute_scene_layout(&mut tree, 80.0, 24.0).unwrap();
+
+        let body = layouts
+            .iter()
+            .find(|layout| layout.id == RegionId::new(2))
+            .unwrap();
+        assert_eq!(body.y, 3.0);
+        assert_eq!(body.height, 21.0);
+
+        let nested = layouts
+            .iter()
+            .find(|layout| layout.id == RegionId::new(3))
+            .unwrap();
+        assert_eq!(nested.y, 3.0);
+        assert_eq!(nested.width, 10.0);
+        assert_eq!(nested.height, 5.0);
+
+        let nested_region = tree.get(RegionId::new(3)).unwrap();
+        assert_eq!(nested_region.computed.y, 3.0);
+        assert_eq!(nested_region.computed.width, 10.0);
+        assert!(!nested_region.dirty);
+    }
+
+    #[test]
+    fn compute_scene_layout_removes_stale_engine_nodes() {
+        let mut tree = build_scene();
+        let mut engine = LayoutEngine::new();
+        let layouts = engine.compute_scene_layout(&mut tree, 80.0, 24.0).unwrap();
+        assert!(layouts.iter().any(|layout| layout.id == RegionId::new(1)));
+
+        tree.remove(RegionId::new(1));
+        let layouts = engine.compute_scene_layout(&mut tree, 80.0, 24.0).unwrap();
+
+        assert!(layouts.iter().all(|layout| layout.id != RegionId::new(1)));
+        assert!(engine.get_layout(RegionId::new(1)).is_none());
     }
 
     // ── constraints_to_style tests ──────────────────────────────────
