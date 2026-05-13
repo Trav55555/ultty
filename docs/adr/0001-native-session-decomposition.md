@@ -27,3 +27,17 @@ Command application and frame batching can now be tested and changed independent
 Layout output now has one canonical path from scene tree to `ComputedRegionLayout`, which reduces duplicate rules around absolute offsets, content bounds, and dirty-region cleanup.
 
 Future native protocol changes should first decide whether they are frame control, ordinary command application, layout computation, or session I/O before adding code to `session.rs`.
+
+## Testing Strategy
+
+Command application changes should run `cargo test -p ultty --lib protocol::session` and `cargo test -p ultty --test native_protocol` so scene mutation, dirty flags, capability errors, focus, scroll, stream lifecycle, clipboard, pong, and disconnect behavior stay covered through the decoded message path.
+
+Frame batching changes should run `cargo test -p ultty --test native_protocol` for begin/end ordering, mismatched frame errors, queued operation replay, and layout computation at frame end. Broader protocol or layout changes should also run `cargo test -p ultty --lib` or the full workspace gate.
+
+## Implementation
+
+This decision was implemented through:
+
+- #18, which extracted native session command application.
+- #20, which centralized scene-to-computed-layout output in the layout engine.
+- #22, which extracted native session frame batching.
