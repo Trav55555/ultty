@@ -296,15 +296,11 @@ impl TextInput {
 
         for _ in 0..count {
             match motion {
-                VimMotion::Left => {
-                    if self.cursor > 0 {
-                        self.cursor -= 1;
-                    }
+                VimMotion::Left if self.cursor > 0 => {
+                    self.cursor -= 1;
                 }
-                VimMotion::Right => {
-                    if self.cursor < len {
-                        self.cursor += 1;
-                    }
+                VimMotion::Right if self.cursor < len => {
+                    self.cursor += 1;
                 }
                 VimMotion::Word => {
                     self.cursor = self.find_next_word_start(&chars, self.cursor);
@@ -690,15 +686,17 @@ impl View for TextInput {
                     self.history.reset();
                     return Some(super::FocusAction::Consumed);
                 }
-                Key::Up if !self.multiline || self.is_cursor_on_first_line() => {
-                    if self.navigate_history_up() {
-                        return Some(super::FocusAction::Consumed);
-                    }
+                Key::Up
+                    if (!self.multiline || self.is_cursor_on_first_line())
+                        && self.navigate_history_up() =>
+                {
+                    return Some(super::FocusAction::Consumed);
                 }
-                Key::Down if !self.multiline || self.is_cursor_on_last_line() => {
-                    if self.navigate_history_down() {
-                        return Some(super::FocusAction::Consumed);
-                    }
+                Key::Down
+                    if (!self.multiline || self.is_cursor_on_last_line())
+                        && self.navigate_history_down() =>
+                {
+                    return Some(super::FocusAction::Consumed);
                 }
                 Key::Tab if key.modifiers.shift => return Some(super::FocusAction::Previous),
                 Key::Tab => return Some(super::FocusAction::Next),

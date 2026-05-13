@@ -127,7 +127,7 @@ fn weather_view(app: &PorygonTui) -> Column {
             // Downsample with cosine interpolation
             let mut samples = Vec::with_capacity(sample_count);
             for i in 0..sample_count {
-                let t = i as f64 / (sample_count - 1).max(1) as f64 * (n - 1).max(0) as f64;
+                let t = i as f64 / (sample_count - 1).max(1) as f64 * (n - 1) as f64;
                 let idx = t.floor() as usize;
                 let frac = t - idx as f64;
                 let a = w.hourly_temps[idx.min(n - 1)];

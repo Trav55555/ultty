@@ -61,8 +61,8 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 ### TD Phase 5 — Fix Production `unwrap()`
 
 - [x] 5.1: App runner RAII guard — `crates/ulttui/src/app.rs`
-- [ ] 5.2: Primitives section title — `crates/ulttui/src/widgets/primitives.rs`
-- [ ] 5.3: Markdown child render — `crates/ulttui/src/widgets/markdown.rs`
+- [x] 5.2: Primitives section title — `crates/ulttui/src/widgets/primitives.rs`
+- [x] 5.3: Markdown child render — production path propagates errors; remaining `expect` is test-only
 
 ### TD Phase 6 — Dual Markdown Convergence
 
@@ -71,7 +71,7 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 
 ### TD Phase 7 — porygon-tui Modularization
 
-- [ ] 7.1: Split main.rs into modules (theme, splash, approval, weather, status)
+- [x] 7.1: Split main.rs into modules (commands, daemon, sidebar, types, views)
 
 ### TD Phase 8 — Documentation
 
@@ -152,9 +152,9 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 | Track | Total | Done | Remaining | Est. Hours |
 |-------|-------|------|-----------|------------|
 | Visual Parity | 18 | 18 | 0 | 0 |
-| Tech Debt | 21 | 13 | 8 | ~6 |
+| Tech Debt | 21 | 17 | 4 | ~4 |
 | Feature Parity | 38 | 38 | 0 | 0 |
-| **Total** | **77** | **69** | **8** | **~6** |
+| **Total** | **77** | **73** | **4** | **~4** |
 
 ## Recommended Order
 
@@ -167,4 +167,5 @@ Consolidated tracker for all ultty/ulttui/porygon-tui work.
 7. ~~**Feature Parity 5.1-5.4** — Planning & tasks~~ ✅
 8. ~~**Feature Parity 6.1-6.5** — Advanced UX~~ ✅
 9. ~~**Feature Parity 7.1-7.3** — Competitive advantages~~ ✅
-10. **Tech Debt 3.1-9.1** — Remaining tech debt ← **NEXT**
+10. **Tech Debt 6.1-6.2** — Dual Markdown convergence ← **NEXT**
+11. **Tech Debt 8.1-8.2** — Public API documentation

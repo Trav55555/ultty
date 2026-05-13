@@ -73,12 +73,12 @@ impl App {
             WindowEvent::RedrawRequested => {
                 self.needs_redraw = true;
             }
-            WindowEvent::Focused(focused) => {
-                if self.terminal().is_some_and(|t| t.modes().focus_reporting) {
-                    // Send focus in/out escape sequence
-                    let seq = if focused { b"\x1b[I" } else { b"\x1b[O" };
-                    let _ = self.send_input(seq);
-                }
+            WindowEvent::Focused(focused)
+                if self.terminal().is_some_and(|t| t.modes().focus_reporting) =>
+            {
+                // Send focus in/out escape sequence
+                let seq = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                let _ = self.send_input(seq);
             }
             _ => {}
         }

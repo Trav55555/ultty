@@ -97,6 +97,44 @@ impl AppTester {
         Ok(())
     }
 
+    /// Wait until terminal content matches the predicate.
+    pub fn wait_for_content<F>(
+        &mut self,
+        max_wait: Duration,
+        mut predicate: F,
+    ) -> std::io::Result<String>
+    where
+        F: FnMut(&str) -> bool,
+    {
+        let start = std::time::Instant::now();
+        let mut last_content = String::new();
+
+        while start.elapsed() < max_wait {
+            let events = self.event_loop.process()?;
+            let current = self.capture_grid();
+            if predicate(&current) {
+                return Ok(current);
+            }
+            last_content = current;
+
+            for event in &events {
+                if let TerminalEvent::ChildExited { status } = event {
+                    return Err(std::io::Error::other(format!(
+                        "Application exited with status {}",
+                        status
+                    )));
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("Timed out waiting for expected content; last grid:\n{last_content}"),
+        ))
+    }
+
     /// Send input to the application.
     pub fn send(&mut self, data: &str) -> std::io::Result<()> {
         self.event_loop.send_input(data.as_bytes())
@@ -228,9 +266,15 @@ fn test_htop_launches() {
 
     let mut tester = AppTester::new_command("htop", &[], 120, 40).expect("Failed to spawn htop");
 
-    tester
-        .wait_until_stable(Duration::from_millis(500), Duration::from_secs(5))
-        .expect("htop did not stabilize");
+    let grid = tester
+        .wait_for_content(Duration::from_secs(5), |grid| {
+            grid.contains("CPU")
+                || grid.contains("Mem")
+                || grid.contains("%")
+                || grid.contains("Tasks")
+        })
+        .expect("htop should show CPU/Memory info");
+    println!("=== htop grid ===\n{}", grid);
 
     assert!(
         tester.is_alternate_screen(),
@@ -239,17 +283,6 @@ fn test_htop_launches() {
 
     let mouse_enabled = tester.has_mouse_tracking();
     println!("htop mouse tracking: {}", mouse_enabled);
-
-    let grid = tester.capture_grid();
-    println!("=== htop grid ===\n{}", grid);
-
-    assert!(
-        grid.contains("CPU")
-            || grid.contains("Mem")
-            || grid.contains("%")
-            || grid.contains("Tasks"),
-        "htop should show CPU/Memory info"
-    );
 
     tester.send_key("q").expect("Failed to send quit");
     std::thread::sleep(Duration::from_millis(200));

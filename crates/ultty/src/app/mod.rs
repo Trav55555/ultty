@@ -425,7 +425,8 @@ impl App {
 
             match event {
                 Event::WindowEvent { event, .. } => {
-                    if app.handle_window_event(event) {
+                    let should_exit = app.handle_window_event(event);
+                    if should_exit {
                         elwt.exit();
                     }
                 }
