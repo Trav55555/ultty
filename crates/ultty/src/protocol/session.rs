@@ -4,6 +4,7 @@
 //! It owns the scene graph and layout engine for that connection.
 
 mod commands;
+mod frame;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
@@ -344,85 +345,10 @@ impl NativeSession {
     fn handle_message(&mut self, msg: AppMessage) -> io::Result<bool> {
         debug!("Session {} received: {:?}", self.session_id, msg);
 
-        if self.current_frame.is_some() {
-            match msg {
-                AppMessage::EndFrame { frame_id } => {
-                    self.handle_end_frame(frame_id)?;
-                    return Ok(true);
-                }
-                AppMessage::BeginFrame { frame_id } => {
-                    let message = format!(
-                        "begin_frame while frame {:?} in progress (got {:?})",
-                        self.current_frame, frame_id
-                    );
-                    warn!("Session {} {}", self.session_id, message);
-                    self.queue_error_message(400, message);
-                    return Ok(true);
-                }
-                AppMessage::Disconnect => {
-                    info!("Session {} disconnected (explicit)", self.session_id);
-                    return Ok(false);
-                }
-                AppMessage::ClientHello { .. } => {
-                    self.queue_error_message(
-                        400,
-                        "client_hello not valid during frame".to_string(),
-                    );
-                    return Ok(true);
-                }
-                other => {
-                    self.pending_frame_ops.push(other);
-                    return Ok(true);
-                }
-            }
+        match self.handle_frame_message(msg)? {
+            frame::FrameMessageOutcome::Handled(result) => Ok(result),
+            frame::FrameMessageOutcome::Apply(msg) => self.apply_message(msg),
         }
-
-        self.apply_message(msg)
-    }
-
-    /// Handle BeginFrame.
-    fn handle_begin_frame(&mut self, frame_id: FrameId) {
-        self.pending_frame_ops.clear();
-        self.current_frame = Some(frame_id);
-        debug!("Begin frame {:?}", frame_id);
-    }
-
-    /// Handle EndFrame - compute layout and send LayoutComputed.
-    fn handle_end_frame(&mut self, frame_id: FrameId) -> io::Result<()> {
-        debug!("End frame {:?}", frame_id);
-
-        let expected = self.current_frame;
-        if expected != Some(frame_id) {
-            let message = format!(
-                "end_frame mismatch: expected {:?}, got {:?}",
-                expected, frame_id
-            );
-            warn!(
-                "EndFrame mismatch: expected {:?}, got {:?}",
-                expected, frame_id
-            );
-            self.queue_error_message(400, message);
-            return Ok(());
-        }
-
-        self.current_frame = None;
-        let queued_ops = std::mem::take(&mut self.pending_frame_ops);
-        for op in queued_ops {
-            if !self.handle_message(op)? {
-                return Ok(());
-            }
-        }
-
-        // Compute layout if scene changed
-        if self.scene_dirty {
-            if self.constraints_dirty {
-                self.compute_and_send_layout(Some(frame_id), LayoutTrigger::ConstraintChange)?;
-                self.constraints_dirty = false;
-            }
-            self.scene_dirty = false;
-        }
-
-        Ok(())
     }
 
     /// Compute layout and send LayoutComputed to client.

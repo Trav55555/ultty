@@ -100,12 +100,11 @@ impl NativeSession {
                 self.handle_reparent_region(id, new_parent, insert_index);
             }
 
-            AppMessage::BeginFrame { frame_id } => {
-                self.handle_begin_frame(frame_id);
-            }
-
-            AppMessage::EndFrame { frame_id } => {
-                self.handle_end_frame(frame_id)?;
+            AppMessage::BeginFrame { .. } | AppMessage::EndFrame { .. } => {
+                self.queue_error_message(
+                    400,
+                    "frame control message reached command application".to_string(),
+                );
             }
 
             AppMessage::Subscribe { id, events } => {
