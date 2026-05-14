@@ -1232,10 +1232,7 @@ impl Renderer {
 
         let any_dirty = sessions.iter().any(|s| s.is_render_dirty());
 
-        let has_cached_native =
-            self.cached_native_bg.is_some() || self.cached_native_text.is_some();
-
-        if !any_dirty && has_cached_native {
+        if !any_dirty && self.has_cached_native_buffers() {
             self.draw_cached_native_buffers(&mut encoder, &view);
         } else {
             for session in &sessions {
