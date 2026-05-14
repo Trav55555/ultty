@@ -3,10 +3,37 @@
 //! Measures time from receiving PTY output to completing grid updates.
 //! The actual PTY round-trip depends on the shell and is not controllable.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 use ultty::grid::TerminalHandler;
 use ultty::grid::{Dimensions, Terminal};
 use ultty::protocol::ansi::AnsiParser;
+
+fn feed_payload(terminal: &mut Terminal, parser: &mut AnsiParser, payload: &[u8]) {
+    let mut handler = TerminalHandler::new(terminal);
+    parser.feed(black_box(payload), |action| {
+        handler.handle(action);
+    });
+}
+
+fn long_lines_payload(line_count: usize, line_len: usize) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(line_count * (line_len + 1));
+    let line = vec![b'x'; line_len];
+    for _ in 0..line_count {
+        payload.extend_from_slice(&line);
+        payload.push(b'\n');
+    }
+    payload
+}
+
+fn fixed_width_lines_payload(line_count: usize, line_len: usize) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(line_count * (line_len + 1));
+    let line = vec![b'x'; line_len];
+    for _ in 0..line_count {
+        payload.extend_from_slice(&line);
+        payload.push(b'\n');
+    }
+    payload
+}
 
 fn bench_keystroke_echo(c: &mut Criterion) {
     let mut group = c.benchmark_group("input_latency");
@@ -119,5 +146,58 @@ fn bench_full_refresh(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_keystroke_echo, bench_full_refresh);
+fn bench_wrap_and_reflow(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wrap_hot_path");
+    group.sample_size(10);
+
+    let long_wrapped_lines = long_lines_payload(500, 4000);
+    let short_hard_lines = fixed_width_lines_payload(25_000, 80);
+
+    group.bench_function("500_lines_4000_cols_soft_wrap", |b| {
+        b.iter_batched(
+            || (Terminal::new(Dimensions::new(80, 34)), AnsiParser::new()),
+            |(mut terminal, mut parser)| {
+                feed_payload(&mut terminal, &mut parser, black_box(&long_wrapped_lines));
+                black_box(terminal.grid().cursor().position);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("25000_lines_80_cols_hard_breaks", |b| {
+        b.iter_batched(
+            || (Terminal::new(Dimensions::new(80, 34)), AnsiParser::new()),
+            |(mut terminal, mut parser)| {
+                feed_payload(&mut terminal, &mut parser, black_box(&short_hard_lines));
+                black_box(terminal.grid().cursor().position);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("resize_reflow_500_wrapped_lines_80_to_120", |b| {
+        b.iter_batched(
+            || {
+                let mut terminal = Terminal::new(Dimensions::new(80, 34));
+                let mut parser = AnsiParser::new();
+                feed_payload(&mut terminal, &mut parser, &long_wrapped_lines);
+                terminal
+            },
+            |mut terminal| {
+                terminal.resize(Dimensions::new(120, 34));
+                black_box(terminal.grid().dimensions());
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_keystroke_echo,
+    bench_full_refresh,
+    bench_wrap_and_reflow
+);
 criterion_main!(benches);
