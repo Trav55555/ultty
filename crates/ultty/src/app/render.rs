@@ -2,12 +2,14 @@
 
 use std::time::Instant;
 
+use super::update::pipeline_trace_enabled;
 use super::App;
 use ultty::renderer::{OverlayState, ScrollbarState};
 
 impl App {
     /// Render the terminal.
     pub(super) fn render(&mut self) {
+        let trace_start = pipeline_trace_enabled().then(Instant::now);
         let pane_count = self.terminal_manager.pane_count();
 
         let result = if pane_count > 1 {
@@ -39,6 +41,15 @@ impl App {
             Err(e) => {
                 tracing::warn!("Render error: {}", e);
             }
+        }
+
+        if let Some(start) = trace_start {
+            tracing::info!(
+                target: "ultty::perf",
+                pane_count,
+                elapsed_us = start.elapsed().as_micros(),
+                "pipeline_render_frame"
+            );
         }
 
         // Handle auto-dump countdown

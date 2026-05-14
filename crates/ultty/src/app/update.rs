@@ -227,6 +227,14 @@ impl App {
         let frame_elapsed = now.duration_since(self.last_render);
 
         if should_render(self.needs_redraw, frame_elapsed, sync_active) {
+            if pipeline_trace_enabled() {
+                tracing::info!(
+                    target: "ultty::perf",
+                    frame_elapsed_us = frame_elapsed.as_micros(),
+                    sync_active,
+                    "pipeline_render_scheduled"
+                );
+            }
             self.render();
             self.last_render = now;
             self.needs_redraw = false;
@@ -250,6 +258,18 @@ fn should_render(
     sync_active: bool,
 ) -> bool {
     needs_redraw && frame_elapsed >= render_delay_for_sync_state(sync_active)
+}
+
+pub(super) fn pipeline_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("ULTTY_TRACE_PIPELINE").is_ok_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+    })
 }
 
 #[cfg(test)]

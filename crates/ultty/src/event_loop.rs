@@ -11,7 +11,8 @@ use crate::protocol::ansi::AnsiParser;
 use crate::pty::{Child, PtySize};
 use polling::{Event, Events, Poller};
 use std::io;
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// Events produced by the terminal event loop.
 #[derive(Debug, Clone)]
@@ -186,6 +187,10 @@ impl EventLoop {
     /// Returns events that occurred during processing.
     pub fn process(&mut self) -> io::Result<Vec<TerminalEvent>> {
         self.events.clear();
+        let trace = pipeline_trace_enabled();
+        let process_start = trace.then(Instant::now);
+        let mut read_batches = 0usize;
+        let mut read_bytes = 0usize;
 
         // Read available data from PTY FIRST (before checking child exit)
         // This ensures we don't miss output from fast-exiting processes like `echo`
@@ -193,6 +198,8 @@ impl EventLoop {
             match self.child.read(&mut self.read_buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    read_batches += 1;
+                    read_bytes += n;
                     let buf = std::mem::take(&mut self.read_buf);
                     self.process_bytes(&buf[..n]);
                     self.read_buf = buf;
@@ -208,6 +215,18 @@ impl EventLoop {
                 Err(e) => {
                     return Err(io::Error::other(e));
                 }
+            }
+        }
+
+        if let Some(start) = process_start {
+            if read_bytes > 0 {
+                tracing::info!(
+                    target: "ultty::perf",
+                    read_batches,
+                    read_bytes,
+                    elapsed_us = start.elapsed().as_micros(),
+                    "pipeline_pty_drain"
+                );
             }
         }
 
@@ -256,8 +275,18 @@ impl EventLoop {
 
         let mut handler = TerminalHandler::new(&mut self.terminal);
         let events = &mut self.events;
+        let trace = pipeline_trace_enabled();
+        let start = trace.then(Instant::now);
+        let mut actions = 0usize;
+        let mut print_actions = 0usize;
 
         self.parser.feed(data, |action| {
+            if trace {
+                actions += 1;
+                if matches!(action, Action::Print(_)) {
+                    print_actions += 1;
+                }
+            }
             // Check for actions that produce events before handling
             match &action {
                 Action::Bell => {
@@ -282,6 +311,17 @@ impl EventLoop {
             }
             handler.handle(action);
         });
+
+        if let Some(start) = start {
+            tracing::info!(
+                target: "ultty::perf",
+                bytes = data.len(),
+                actions,
+                print_actions,
+                elapsed_us = start.elapsed().as_micros(),
+                "pipeline_parse_grid"
+            );
+        }
 
         // Send any pending responses back to the PTY
         self.send_pending_responses();
@@ -319,6 +359,18 @@ impl EventLoop {
             }
         }
     }
+}
+
+fn pipeline_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("ULTTY_TRACE_PIPELINE").is_ok_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+    })
 }
 
 #[cfg(test)]
