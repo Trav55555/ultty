@@ -257,11 +257,11 @@ fn parse_request(data: &[u8]) -> Option<ControlRequest> {
             })
         }
         "switch-tab" => {
-            let index = parts.next()?.parse().ok()?;
+            let index = parse_display_tab_index(parts.next()?)?;
             Some(ControlRequest::SwitchTab { index })
         }
         "close-tab" => {
-            let index = parts.next().and_then(|s| s.parse().ok());
+            let index = parts.next().and_then(parse_display_tab_index);
             Some(ControlRequest::CloseTab { index })
         }
         "focus" => Some(ControlRequest::FocusWindow),
@@ -364,6 +364,10 @@ fn parse_key(s: &str) -> Option<ultty_protocol::Key> {
         s if s.len() == 1 => Some(ultty_protocol::Key::Char(s.chars().next()?)),
         _ => None,
     }
+}
+
+fn parse_display_tab_index(s: &str) -> Option<usize> {
+    s.parse::<usize>().ok()?.checked_sub(1)
 }
 
 fn parse_modifiers(s: &str) -> ultty_protocol::Modifiers {
@@ -556,6 +560,23 @@ mod tests {
                 include_scrollback: true,
             })
         );
+    }
+
+    #[test]
+    fn parse_tab_commands_use_display_indices() {
+        assert_eq!(
+            parse_request(b"switch-tab 2"),
+            Some(ControlRequest::SwitchTab { index: 1 })
+        );
+        assert_eq!(
+            parse_request(b"close-tab 2"),
+            Some(ControlRequest::CloseTab { index: Some(1) })
+        );
+        assert_eq!(
+            parse_request(b"close-tab"),
+            Some(ControlRequest::CloseTab { index: None })
+        );
+        assert_eq!(parse_request(b"switch-tab 0"), None);
     }
 
     #[test]
