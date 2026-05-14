@@ -1,5 +1,6 @@
 use super::super::{Renderer, Vertex};
 use super::markdown_blocks::{plan_markdown_blocks, MarkdownBlock};
+use super::markdown_inline::{plan_markdown_inline_spans, MarkdownInlineColor};
 
 impl Renderer {
     pub(super) fn render_markdown_content(
@@ -305,222 +306,20 @@ impl Renderer {
         text_indices: &mut Vec<u32>,
     ) {
         let mut cursor_x = x;
-        let chars: Vec<(usize, char)> = text.char_indices().collect();
-        let len = chars.len();
-        let mut i = 0;
-        let mut segment = String::new();
-
-        while i < len {
-            // **bold**
-            if i + 1 < len && chars[i].1 == '*' && chars[i + 1].1 == '*' {
-                if !segment.is_empty() {
-                    cursor_x += self.emit_md_segment(
-                        &segment,
-                        cursor_x,
-                        y,
-                        line_bold,
-                        false,
-                        line_color,
-                        text_vertices,
-                        text_indices,
-                    );
-                    segment.clear();
-                }
-                i += 2;
-                let mut bold_text = String::new();
-                while i + 1 < len && !(chars[i].1 == '*' && chars[i + 1].1 == '*') {
-                    bold_text.push(chars[i].1);
-                    i += 1;
-                }
-                if i + 1 < len {
-                    i += 2;
-                } // skip closing **
-                cursor_x += self.emit_md_segment(
-                    &bold_text,
-                    cursor_x,
-                    y,
-                    true,
-                    false,
-                    line_color,
-                    text_vertices,
-                    text_indices,
-                );
-                continue;
-            }
-
-            // *italic*
-            if chars[i].1 == '*' && (i + 1 >= len || chars[i + 1].1 != '*') {
-                if !segment.is_empty() {
-                    cursor_x += self.emit_md_segment(
-                        &segment,
-                        cursor_x,
-                        y,
-                        line_bold,
-                        false,
-                        line_color,
-                        text_vertices,
-                        text_indices,
-                    );
-                    segment.clear();
-                }
-                i += 1;
-                let mut italic_text = String::new();
-                while i < len && chars[i].1 != '*' {
-                    italic_text.push(chars[i].1);
-                    i += 1;
-                }
-                if i < len {
-                    i += 1;
-                } // skip closing *
-                cursor_x += self.emit_md_segment(
-                    &italic_text,
-                    cursor_x,
-                    y,
-                    line_bold,
-                    true,
-                    line_color,
-                    text_vertices,
-                    text_indices,
-                );
-                continue;
-            }
-
-            // ~~strikethrough~~
-            if i + 1 < len && chars[i].1 == '~' && chars[i + 1].1 == '~' {
-                if !segment.is_empty() {
-                    cursor_x += self.emit_md_segment(
-                        &segment,
-                        cursor_x,
-                        y,
-                        line_bold,
-                        false,
-                        line_color,
-                        text_vertices,
-                        text_indices,
-                    );
-                    segment.clear();
-                }
-                i += 2;
-                let mut strike_text = String::new();
-                while i + 1 < len && !(chars[i].1 == '~' && chars[i + 1].1 == '~') {
-                    strike_text.push(chars[i].1);
-                    i += 1;
-                }
-                if i + 1 < len {
-                    i += 2;
-                } // skip closing ~~
-                  // Render strikethrough text with dim color and strikethrough decoration
-                  // Since we don't have actual text decoration support, render with dim + overstrike
-                let strike_color = self.color_scheme.named[8]; // dim
-                cursor_x += self.emit_md_segment(
-                    &strike_text,
-                    cursor_x,
-                    y,
-                    false,
-                    false,
-                    strike_color,
-                    text_vertices,
-                    text_indices,
-                );
-                continue;
-            }
-
-            // `inline code`
-            if chars[i].1 == '`' {
-                if !segment.is_empty() {
-                    cursor_x += self.emit_md_segment(
-                        &segment,
-                        cursor_x,
-                        y,
-                        line_bold,
-                        false,
-                        line_color,
-                        text_vertices,
-                        text_indices,
-                    );
-                    segment.clear();
-                }
-                i += 1;
-                let mut code_text = String::new();
-                while i < len && chars[i].1 != '`' {
-                    code_text.push(chars[i].1);
-                    i += 1;
-                }
-                if i < len {
-                    i += 1;
-                } // skip closing `
-                cursor_x += self.emit_md_segment(
-                    &code_text,
-                    cursor_x,
-                    y,
-                    false,
-                    false,
-                    self.color_scheme.named[7],
-                    text_vertices,
-                    text_indices,
-                );
-                continue;
-            }
-
-            // [link text](url) — render text as underlined
-            if chars[i].1 == '[' {
-                let mut link_text = String::new();
-                let mut j = i + 1;
-                while j < len && chars[j].1 != ']' {
-                    link_text.push(chars[j].1);
-                    j += 1;
-                }
-                if j + 1 < len && chars[j].1 == ']' && chars[j + 1].1 == '(' {
-                    // Skip past (url)
-                    j += 2;
-                    while j < len && chars[j].1 != ')' {
-                        j += 1;
-                    }
-                    if j < len {
-                        j += 1;
-                    }
-
-                    if !segment.is_empty() {
-                        cursor_x += self.emit_md_segment(
-                            &segment,
-                            cursor_x,
-                            y,
-                            line_bold,
-                            false,
-                            line_color,
-                            text_vertices,
-                            text_indices,
-                        );
-                        segment.clear();
-                    }
-                    // Render link text in blue/cyan
-                    cursor_x += self.emit_md_segment(
-                        &link_text,
-                        cursor_x,
-                        y,
-                        false,
-                        false,
-                        self.color_scheme.named[6],
-                        text_vertices,
-                        text_indices,
-                    );
-                    i = j;
-                    continue;
-                }
-            }
-
-            segment.push(chars[i].1);
-            i += 1;
-        }
-
-        if !segment.is_empty() {
-            self.emit_md_segment(
-                &segment,
+        for span in plan_markdown_inline_spans(text, line_bold) {
+            let color = match span.color {
+                MarkdownInlineColor::Line => line_color,
+                MarkdownInlineColor::Code => self.color_scheme.named[7],
+                MarkdownInlineColor::Link => self.color_scheme.named[6],
+                MarkdownInlineColor::Dim => self.color_scheme.named[8],
+            };
+            cursor_x += self.emit_md_segment(
+                &span.text,
                 cursor_x,
                 y,
-                line_bold,
-                false,
-                line_color,
+                span.bold,
+                span.italic,
+                color,
                 text_vertices,
                 text_indices,
             );

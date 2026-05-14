@@ -14,6 +14,7 @@ mod geometry;
 mod images;
 mod markdown;
 mod markdown_blocks;
+mod markdown_inline;
 pub(super) mod syntax;
 mod widgets;
 
