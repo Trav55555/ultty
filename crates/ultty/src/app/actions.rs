@@ -523,6 +523,38 @@ fn format_duration(duration: std::time::Duration) -> String {
 mod tests {
     use super::*;
 
+    use ultty::renderer::ScrollbarState;
+    use ultty::tabs::TabBarState;
+
+    #[test]
+    fn screenshot_overlay_snapshot_exposes_owned_chrome_state() {
+        let mut tab_bar = TabBarState::new();
+        tab_bar.total_width = 800.0;
+
+        let snapshot = ScreenshotOverlayState {
+            copy_mode: None,
+            urls: Vec::new(),
+            tab_bar: Some(tab_bar),
+            scrollbar: Some(ScrollbarState::new(100, 24, 0)),
+            bell_active: true,
+            shortcuts_visible: true,
+            keybindings: vec![("ctrl+s".to_string(), "Screenshot".to_string())],
+            cursor_blink_visible: false,
+        };
+
+        let overlay = snapshot.as_overlay();
+
+        assert!(overlay.tab_bar.is_some());
+        assert!(overlay.scrollbar.is_some());
+        assert!(overlay.bell_active);
+        assert!(overlay.shortcuts_visible);
+        assert_eq!(
+            overlay.keybindings.unwrap(),
+            &[("ctrl+s".to_string(), "Screenshot".to_string())]
+        );
+        assert!(!overlay.cursor_blink_visible);
+    }
+
     #[test]
     fn protocol_status_rows_cover_disabled_server() {
         let rows = App::format_protocol_status_rows(None);
