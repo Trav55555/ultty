@@ -36,6 +36,13 @@ fn fixed_width_lines_payload(line_count: usize, line_len: usize) -> Vec<u8> {
     payload
 }
 
+fn alternate_screen_payload(inner: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(inner.len() + 16);
+    payload.extend_from_slice(b"\x1b[?1049h");
+    payload.extend_from_slice(inner);
+    payload
+}
+
 fn ascii_width_candidate(c: char) -> u16 {
     let codepoint = c as u32;
     if (0x20..=0x7e).contains(&codepoint) {
@@ -241,11 +248,60 @@ fn bench_char_width(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_scroll_history(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scroll_history");
+    group.sample_size(10);
+
+    let hard_lines = fixed_width_lines_payload(25_000, 80);
+    let hard_lines_no_history = alternate_screen_payload(&hard_lines);
+    let short_lines = fixed_width_lines_payload(25_000, 12);
+
+    group.bench_function("25000_lines_80_cols_main_scrollback", |b| {
+        b.iter_batched(
+            || (Terminal::new(Dimensions::new(80, 34)), AnsiParser::new()),
+            |(mut terminal, mut parser)| {
+                feed_payload(&mut terminal, &mut parser, black_box(&hard_lines));
+                black_box(terminal.grid().cursor().position);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("25000_lines_80_cols_alt_no_scrollback", |b| {
+        b.iter_batched(
+            || (Terminal::new(Dimensions::new(80, 34)), AnsiParser::new()),
+            |(mut terminal, mut parser)| {
+                feed_payload(
+                    &mut terminal,
+                    &mut parser,
+                    black_box(&hard_lines_no_history),
+                );
+                black_box(terminal.grid().cursor().position);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("25000_lines_12_cols_main_scrollback", |b| {
+        b.iter_batched(
+            || (Terminal::new(Dimensions::new(80, 34)), AnsiParser::new()),
+            |(mut terminal, mut parser)| {
+                feed_payload(&mut terminal, &mut parser, black_box(&short_lines));
+                black_box(terminal.grid().cursor().position);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_keystroke_echo,
     bench_full_refresh,
     bench_wrap_and_reflow,
-    bench_char_width
+    bench_char_width,
+    bench_scroll_history
 );
 criterion_main!(benches);
