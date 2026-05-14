@@ -4,7 +4,25 @@
 //! active tab indicators, and tab title text.
 
 use super::{Renderer, Rgba, Vertex};
-use crate::tabs::TabBarState;
+use crate::tabs::{TabBarState, TAB_ROW_HEIGHT, TITLE_BAR_HEIGHT};
+
+fn lighten(color: Rgba, amount: f32) -> Rgba {
+    Rgba::new(
+        (color.r + amount).min(1.0),
+        (color.g + amount).min(1.0),
+        (color.b + amount).min(1.0),
+        color.a,
+    )
+}
+
+fn dim(color: Rgba, amount: f32) -> Rgba {
+    Rgba::new(
+        (color.r * amount).min(1.0),
+        (color.g * amount).min(1.0),
+        (color.b * amount).min(1.0),
+        color.a,
+    )
+}
 
 impl Renderer {
     /// Build tab bar vertex data.
@@ -17,76 +35,90 @@ impl Renderer {
         }
 
         let height = tab_bar.height();
+        let show_tabs = tab_bar.shows_tab_row();
+        let bg = self.color_scheme.background;
+        let title_bg = lighten(bg, 0.012);
+        let tab_row_bg = lighten(bg, 0.035);
+        let rail_line = lighten(bg, 0.075);
+        let active_tab_bg = lighten(bg, 0.012);
+        let inactive_tab_bg = lighten(bg, 0.02);
+        let inactive_hover_bg = lighten(bg, 0.055);
+        let accent_color = dim(self.color_scheme.cursor, 0.85);
+        let control_hover_bg = lighten(bg, 0.07);
+        let destructive_hover_bg = Rgba::new(0.55, 0.16, 0.14, 1.0);
 
-        // Tab bar background - slightly lighter than terminal background
-        let bar_bg = Rgba::new(
-            (self.color_scheme.background.r + 0.05).min(1.0),
-            (self.color_scheme.background.g + 0.05).min(1.0),
-            (self.color_scheme.background.b + 0.05).min(1.0),
-            1.0,
-        );
-
-        // Draw full tab bar background
         self.emit_rect(
             &mut vertices,
             &mut indices,
             0.0,
             0.0,
             self.config.width as f32,
-            height,
-            bar_bg,
+            TITLE_BAR_HEIGHT,
+            title_bg,
+        );
+
+        if show_tabs {
+            self.emit_rect(
+                &mut vertices,
+                &mut indices,
+                0.0,
+                TITLE_BAR_HEIGHT,
+                self.config.width as f32,
+                TAB_ROW_HEIGHT,
+                tab_row_bg,
+            );
+        }
+
+        // The rail/content divider is drawn before tabs so the selected tab can
+        // bridge over it and feel attached to the terminal surface.
+        self.emit_rect(
+            &mut vertices,
+            &mut indices,
+            0.0,
+            height - 1.0,
+            self.config.width as f32,
+            1.0,
+            rail_line,
         );
 
         // Draw individual tabs (only when 2+ tabs)
-        let show_tabs = tab_bar.tabs.len() > 1;
         for tab in &tab_bar.tabs {
             if !show_tabs {
                 continue;
             }
             let tab_bg = if tab.is_active {
-                // Active tab - same as terminal background (appears "connected")
-                self.color_scheme.background
+                active_tab_bg
             } else if tab.is_hovered {
-                // Hovered tab - slightly brighter
-                Rgba::new(
-                    (self.color_scheme.background.r + 0.1).min(1.0),
-                    (self.color_scheme.background.g + 0.1).min(1.0),
-                    (self.color_scheme.background.b + 0.1).min(1.0),
-                    1.0,
-                )
+                inactive_hover_bg
             } else {
-                // Inactive tab - slightly darker
-                Rgba::new(
-                    (self.color_scheme.background.r - 0.02).max(0.0),
-                    (self.color_scheme.background.g - 0.02).max(0.0),
-                    (self.color_scheme.background.b - 0.02).max(0.0),
-                    1.0,
-                )
+                inactive_tab_bg
             };
 
-            // Tab background with small margin
-            let margin = 2.0;
-            let tab_height = height - margin * 2.0;
+            let margin_x = 1.0;
+            let tab_y = TITLE_BAR_HEIGHT + if tab.is_active { 1.0 } else { 3.0 };
+            let tab_height = if tab.is_active {
+                height - tab_y
+            } else {
+                height - tab_y - 1.0
+            };
             self.emit_rect(
                 &mut vertices,
                 &mut indices,
-                tab.x + margin,
-                margin,
-                tab.width - margin * 2.0,
+                tab.x + margin_x,
+                tab_y,
+                tab.width - margin_x * 2.0,
                 tab_height,
                 tab_bg,
             );
 
-            // Active tab indicator (bottom border)
             if tab.is_active {
-                let accent_color = Rgba::new(0.3, 0.5, 0.8, 1.0); // Blue accent
                 self.emit_rect(
                     &mut vertices,
                     &mut indices,
-                    tab.x + margin,
-                    height - 3.0,
-                    tab.width - margin * 2.0,
-                    3.0,
+                    tab.x + margin_x,
+                    tab_y,
+                    tab.width - margin_x * 2.0,
+                    2.0,
                     accent_color,
                 );
             }
@@ -99,18 +131,17 @@ impl Renderer {
                 .unwrap_or(0);
             if tab_bar.hovered_close_button == Some(tab_idx) {
                 let close_x = tab.x + tab.width - 12.0 - 12.0;
-                let circle_size = 14.0;
-                let cx = close_x + 6.0 - circle_size / 2.0;
-                let cy = (height - circle_size) / 2.0;
-                let hover_bg = Rgba::new(0.7, 0.2, 0.2, 1.0);
+                let target_size = 18.0;
+                let cx = close_x + 6.0 - target_size / 2.0;
+                let cy = TITLE_BAR_HEIGHT + (TAB_ROW_HEIGHT - target_size) / 2.0;
                 self.emit_rect(
                     &mut vertices,
                     &mut indices,
                     cx,
                     cy,
-                    circle_size,
-                    circle_size,
-                    hover_bg,
+                    target_size,
+                    target_size,
+                    destructive_hover_bg,
                 );
             }
         }
@@ -120,31 +151,22 @@ impl Renderer {
             use crate::tabs::TabBarState;
             let btn_x = tab_bar.new_tab_button_x;
             let btn_w = TabBarState::NEW_TAB_BUTTON_WIDTH;
-            let margin = 2.0;
-            let btn_bg = if tab_bar.new_tab_button_hovered {
-                Rgba::new(
-                    (self.color_scheme.background.r + 0.15).min(1.0),
-                    (self.color_scheme.background.g + 0.15).min(1.0),
-                    (self.color_scheme.background.b + 0.15).min(1.0),
-                    1.0,
-                )
-            } else {
-                Rgba::new(
-                    (self.color_scheme.background.r + 0.05).min(1.0),
-                    (self.color_scheme.background.g + 0.05).min(1.0),
-                    (self.color_scheme.background.b + 0.05).min(1.0),
-                    0.0, // Transparent when not hovered
-                )
-            };
+            let margin = 3.0;
             if tab_bar.new_tab_button_hovered {
+                let btn_y = if show_tabs { TITLE_BAR_HEIGHT } else { 0.0 };
+                let btn_height = if show_tabs {
+                    TAB_ROW_HEIGHT
+                } else {
+                    TITLE_BAR_HEIGHT
+                };
                 self.emit_rect(
                     &mut vertices,
                     &mut indices,
                     btn_x + margin,
-                    margin,
+                    btn_y + margin,
                     btn_w - margin * 2.0,
-                    height - margin * 2.0,
-                    btn_bg,
+                    btn_height - margin * 2.0,
+                    control_hover_bg,
                 );
             }
         }
@@ -154,8 +176,8 @@ impl Renderer {
             use crate::tabs::{WindowControl, WINDOW_BUTTON_WIDTH, WINDOW_CONTROLS_WIDTH};
             let controls_start = tab_bar.total_width - WINDOW_CONTROLS_WIDTH;
             let padding = (WINDOW_CONTROLS_WIDTH - WINDOW_BUTTON_WIDTH * 3.0) / 2.0;
-            let margin = 2.0;
-            let btn_h = height - margin * 2.0;
+            let margin = 3.0;
+            let btn_h = TITLE_BAR_HEIGHT - margin * 2.0;
 
             for (i, control) in [
                 WindowControl::Minimize,
@@ -170,14 +192,9 @@ impl Renderer {
 
                 if is_hovered {
                     let hover_bg = if *control == WindowControl::Close {
-                        Rgba::new(0.8, 0.2, 0.2, 1.0) // Red for close
+                        destructive_hover_bg
                     } else {
-                        Rgba::new(
-                            (self.color_scheme.background.r + 0.15).min(1.0),
-                            (self.color_scheme.background.g + 0.15).min(1.0),
-                            (self.color_scheme.background.b + 0.15).min(1.0),
-                            1.0,
-                        )
+                        control_hover_bg
                     };
                     self.emit_rect(
                         &mut vertices,
@@ -191,18 +208,6 @@ impl Renderer {
                 }
             }
         }
-
-        // Separator line at bottom of tab bar
-        let separator_color = Rgba::new(0.2, 0.2, 0.2, 1.0);
-        self.emit_rect(
-            &mut vertices,
-            &mut indices,
-            0.0,
-            height - 1.0,
-            self.config.width as f32,
-            1.0,
-            separator_color,
-        );
 
         (vertices, indices)
     }
@@ -222,23 +227,23 @@ impl Renderer {
         let tab_padding = 12.0; // Match TAB_PADDING from tabs.rs
                                 // Center text vertically in the tab bar. Place the cell top so the
                                 // glyph baseline lands roughly in the vertical middle.
-        let text_y = (tab_bar.height() - self.cell_height) / 2.0;
+        let tab_text_y = TITLE_BAR_HEIGHT + (TAB_ROW_HEIGHT - self.cell_height) / 2.0;
+        let control_text_y = (TITLE_BAR_HEIGHT - self.cell_height) / 2.0;
+        let plus_text_y = if tab_bar.shows_tab_row() {
+            tab_text_y
+        } else {
+            control_text_y
+        };
 
-        let show_tabs = tab_bar.tabs.len() > 1;
+        let show_tabs = tab_bar.shows_tab_row();
         for tab in &tab_bar.tabs {
             if !show_tabs {
                 continue;
             }
-            // Text color: brighter for active tab
             let text_color = if tab.is_active {
                 self.color_scheme.foreground
             } else {
-                Rgba::new(
-                    self.color_scheme.foreground.r * 0.7,
-                    self.color_scheme.foreground.g * 0.7,
-                    self.color_scheme.foreground.b * 0.7,
-                    1.0,
-                )
+                dim(self.color_scheme.foreground, 0.62)
             };
 
             // Calculate text position and max width
@@ -248,7 +253,7 @@ impl Renderer {
             let (vertices, indices) = self.text_renderer.build_label_vertices(
                 &tab.title,
                 text_x,
-                text_y,
+                tab_text_y,
                 max_text_width,
                 text_color,
             );
@@ -265,19 +270,14 @@ impl Renderer {
             let close_center_x = close_x + 6.0 - self.cell_width / 2.0;
 
             let close_color = if is_close_hovered {
-                Rgba::new(1.0, 1.0, 1.0, 1.0)
+                lighten(self.color_scheme.foreground, 0.08)
             } else {
-                Rgba::new(
-                    self.color_scheme.foreground.r * 0.4,
-                    self.color_scheme.foreground.g * 0.4,
-                    self.color_scheme.foreground.b * 0.4,
-                    1.0,
-                )
+                dim(self.color_scheme.foreground, 0.36)
             };
             let (v, idx) = self.text_renderer.build_label_vertices(
-                "x",
+                "×",
                 close_center_x,
-                text_y,
+                tab_text_y,
                 12.0,
                 close_color,
             );
@@ -292,20 +292,15 @@ impl Renderer {
             let controls_start = tab_bar.total_width - WINDOW_CONTROLS_WIDTH;
             let padding = (WINDOW_CONTROLS_WIDTH - WINDOW_BUTTON_WIDTH * 3.0) / 2.0;
 
-            let ctrl_color = Rgba::new(
-                self.color_scheme.foreground.r * 0.5,
-                self.color_scheme.foreground.g * 0.5,
-                self.color_scheme.foreground.b * 0.5,
-                1.0,
-            );
+            let ctrl_color = dim(self.color_scheme.foreground, 0.46);
 
-            for (i, symbol) in ["_", "[]", "x"].iter().enumerate() {
+            for (i, symbol) in ["−", "□", "×"].iter().enumerate() {
                 let btn_x = controls_start + padding + i as f32 * WINDOW_BUTTON_WIDTH;
                 let center_x = btn_x + WINDOW_BUTTON_WIDTH / 2.0 - self.cell_width / 2.0;
                 let (v, idx) = self.text_renderer.build_label_vertices(
                     symbol,
                     center_x,
-                    text_y,
+                    control_text_y,
                     WINDOW_BUTTON_WIDTH,
                     ctrl_color,
                 );
@@ -322,16 +317,15 @@ impl Renderer {
             let btn_w = TabBarState::NEW_TAB_BUTTON_WIDTH;
             let center_x = btn_x + btn_w / 2.0 - self.cell_width / 2.0;
 
-            let plus_color = Rgba::new(
-                self.color_scheme.foreground.r * 0.6,
-                self.color_scheme.foreground.g * 0.6,
-                self.color_scheme.foreground.b * 0.6,
-                1.0,
-            );
+            let plus_color = dim(self.color_scheme.foreground, 0.58);
 
-            let (vertices, indices) = self
-                .text_renderer
-                .build_label_vertices("+", center_x, text_y, btn_w, plus_color);
+            let (vertices, indices) = self.text_renderer.build_label_vertices(
+                "+",
+                center_x,
+                plus_text_y,
+                btn_w,
+                plus_color,
+            );
             let base_idx = all_vertices.len() as u32;
             all_vertices.extend(vertices);
             all_indices.extend(indices.iter().map(|i| i + base_idx));

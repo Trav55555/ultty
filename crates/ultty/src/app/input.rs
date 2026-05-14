@@ -7,6 +7,7 @@ use ultty::config::KeybindingConfig;
 use ultty::grid::{
     MouseButton as TerminalMouseButton, MouseModifiers, SelectionMode, SelectionPoint,
 };
+use ultty::tabs::TITLE_BAR_HEIGHT;
 use ultty::terminal_manager::SplitDirection;
 use ultty::url::UrlDetector;
 use ultty::vim::CopyModeResult;
@@ -236,8 +237,10 @@ impl App {
                         }
                     }
 
+                    let is_tab_row = self.tab_bar.shows_tab_row() && y >= TITLE_BAR_HEIGHT;
+
                     // Middle click closes tab
-                    if button == MouseButton::Middle {
+                    if button == MouseButton::Middle && is_tab_row {
                         if let Some(tab_idx) = self.tab_bar.tab_at_x(x) {
                             if self.terminal_manager.tab_count() > 1 {
                                 let tabs = self.terminal_manager.tabs();
@@ -282,12 +285,14 @@ impl App {
                     }
 
                     // Click on tab - start drag and switch to it
-                    if let Some(tab_idx) = self.tab_bar.tab_at_x(x) {
-                        self.tab_bar.start_drag(tab_idx, x);
-                        self.terminal_manager.switch_to_tab(tab_idx);
-                        self.update_tab_bar();
-                        self.needs_redraw = true;
-                        tracing::debug!("Started drag on tab {}", tab_idx);
+                    if is_tab_row {
+                        if let Some(tab_idx) = self.tab_bar.tab_at_x(x) {
+                            self.tab_bar.start_drag(tab_idx, x);
+                            self.terminal_manager.switch_to_tab(tab_idx);
+                            self.update_tab_bar();
+                            self.needs_redraw = true;
+                            tracing::debug!("Started drag on tab {}", tab_idx);
+                        }
                     }
                     return;
                 }

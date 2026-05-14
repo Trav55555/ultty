@@ -4,8 +4,14 @@
 
 use crate::terminal_manager::{Tab, TabId};
 
-/// Height of the tab bar in pixels (at default scale).
-pub const TAB_BAR_HEIGHT: f32 = 32.0;
+/// Height of the window control band in pixels (at default scale).
+pub const TITLE_BAR_HEIGHT: f32 = 28.0;
+
+/// Height of the tab row in pixels (at default scale).
+pub const TAB_ROW_HEIGHT: f32 = 28.0;
+
+/// Height of the complete chrome area in pixels (at default scale).
+pub const TAB_BAR_HEIGHT: f32 = TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT;
 
 /// Padding inside each tab.
 pub const TAB_PADDING: f32 = 12.0;
@@ -90,7 +96,7 @@ impl TabBarState {
             return;
         }
 
-        // Tab bar is always visible (acts as title bar with CSD).
+        // Chrome is always visible (CSD title band plus tab row).
         // Individual tab entries only render when there are 2+ tabs.
         self.visible = true;
 
@@ -126,6 +132,11 @@ impl TabBarState {
     /// Width of the new-tab "+" button.
     pub const NEW_TAB_BUTTON_WIDTH: f32 = 28.0;
 
+    /// Whether the lower tab row should be visible.
+    pub fn shows_tab_row(&self) -> bool {
+        self.tabs.len() > 1
+    }
+
     /// Get the tab at a given x position.
     pub fn tab_at_x(&self, x: f32) -> Option<usize> {
         for (index, tab) in self.tabs.iter().enumerate() {
@@ -138,15 +149,27 @@ impl TabBarState {
 
     /// Check if a click at (x, y) is on the new tab "+" button.
     pub fn is_new_tab_button_at(&self, x: f32, y: f32) -> bool {
+        let row_top = if self.shows_tab_row() {
+            TITLE_BAR_HEIGHT
+        } else {
+            0.0
+        };
+        let row_bottom = if self.shows_tab_row() {
+            TAB_BAR_HEIGHT
+        } else {
+            TITLE_BAR_HEIGHT
+        };
+
         self.visible
-            && y <= TAB_BAR_HEIGHT
+            && y >= row_top
+            && y <= row_bottom
             && x >= self.new_tab_button_x
             && x < self.new_tab_button_x + Self::NEW_TAB_BUTTON_WIDTH
     }
 
     /// Check if a click at (x, y) is on a window control button.
     pub fn window_control_at(&self, x: f32, y: f32) -> Option<WindowControl> {
-        if !self.visible || y > TAB_BAR_HEIGHT {
+        if !self.visible || y > TITLE_BAR_HEIGHT {
             return None;
         }
         let controls_start = self.total_width - WINDOW_CONTROLS_WIDTH;
@@ -171,19 +194,22 @@ impl TabBarState {
 
     /// Check if position is in the draggable title bar area (not on a tab, button, or control).
     pub fn is_drag_area(&self, x: f32, y: f32) -> bool {
-        if !self.visible || y > TAB_BAR_HEIGHT {
+        if !self.visible || y > self.height() {
+            return false;
+        }
+        // Not on window controls
+        if self.window_control_at(x, y).is_some() {
             return false;
         }
         // Not on "+" button
         if self.is_new_tab_button_at(x, y) {
             return false;
         }
+        if y < TITLE_BAR_HEIGHT || !self.shows_tab_row() {
+            return true;
+        }
         // Not on a tab
         if self.tab_at_x(x).is_some() {
-            return false;
-        }
-        // Not on window controls
-        if self.window_control_at(x, y).is_some() {
             return false;
         }
         true
@@ -191,7 +217,7 @@ impl TabBarState {
 
     /// Set the hovered tab based on mouse position.
     pub fn set_hover(&mut self, x: f32, y: f32) {
-        if !self.visible || y > TAB_BAR_HEIGHT {
+        if !self.visible || y > self.height() {
             self.hovered_tab = None;
             self.new_tab_button_hovered = false;
             self.hovered_window_control = None;
@@ -199,7 +225,11 @@ impl TabBarState {
             return;
         }
 
-        self.hovered_tab = self.tab_at_x(x);
+        self.hovered_tab = if self.shows_tab_row() && y >= TITLE_BAR_HEIGHT {
+            self.tab_at_x(x)
+        } else {
+            None
+        };
         self.new_tab_button_hovered = self.is_new_tab_button_at(x, y);
         self.hovered_window_control = self.window_control_at(x, y);
         self.hovered_close_button = self.close_button_at(x, y);
@@ -212,7 +242,10 @@ impl TabBarState {
 
     /// Check if a click at (x, y) is on the close button of a tab.
     pub fn close_button_at(&self, x: f32, y: f32) -> Option<usize> {
-        if !self.visible || y > TAB_BAR_HEIGHT {
+        if !self.visible
+            || !self.shows_tab_row()
+            || !(TITLE_BAR_HEIGHT..=TAB_BAR_HEIGHT).contains(&y)
+        {
             return None;
         }
 
@@ -228,10 +261,12 @@ impl TabBarState {
 
     /// Get the height of the tab bar (0 if not visible).
     pub fn height(&self) -> f32 {
-        if self.visible {
+        if !self.visible {
+            0.0
+        } else if self.shows_tab_row() {
             TAB_BAR_HEIGHT
         } else {
-            0.0
+            TITLE_BAR_HEIGHT
         }
     }
 
@@ -315,12 +350,15 @@ pub struct TabState {
 impl TabState {
     /// Get the bounds of this tab.
     pub fn bounds(&self) -> (f32, f32, f32, f32) {
-        (self.x, 0.0, self.width, TAB_BAR_HEIGHT)
+        (self.x, TITLE_BAR_HEIGHT, self.width, TAB_ROW_HEIGHT)
     }
 
     /// Get the text rendering position.
     pub fn text_position(&self) -> (f32, f32) {
-        (self.x + TAB_PADDING, TAB_BAR_HEIGHT / 2.0 - 6.0)
+        (
+            self.x + TAB_PADDING,
+            TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT / 2.0 - 6.0,
+        )
     }
 
     /// Get the maximum text width.
@@ -433,13 +471,19 @@ mod tests {
     #[test]
     fn height_always_nonzero() {
         let state = bar_with(1, 0, 800.0);
-        assert_eq!(state.height(), TAB_BAR_HEIGHT); // CSD: always visible
+        assert_eq!(state.height(), TITLE_BAR_HEIGHT); // CSD title band stays visible
     }
 
     #[test]
     fn height_nonzero_when_visible() {
         let state = bar_with(3, 0, 800.0);
         assert_eq!(state.height(), TAB_BAR_HEIGHT);
+    }
+
+    #[test]
+    fn tab_row_only_shows_for_multiple_tabs() {
+        assert!(!bar_with(1, 0, 800.0).shows_tab_row());
+        assert!(bar_with(2, 0, 800.0).shows_tab_row());
     }
 
     // ---------------------------------------------------------------
@@ -603,7 +647,7 @@ mod tests {
     #[test]
     fn hover_sets_correct_tab() {
         let mut state = bar_with(3, 0, 600.0);
-        state.set_hover(250.0, 10.0);
+        state.set_hover(250.0, TITLE_BAR_HEIGHT + 10.0);
         assert_eq!(state.hovered_tab, Some(1));
         assert!(state.tabs[1].is_hovered);
         assert!(!state.tabs[0].is_hovered);
@@ -611,9 +655,17 @@ mod tests {
     }
 
     #[test]
+    fn hover_title_band_does_not_hover_tabs() {
+        let mut state = bar_with(3, 0, 600.0);
+        state.set_hover(250.0, 10.0);
+        assert_eq!(state.hovered_tab, None);
+        assert!(state.tabs.iter().all(|tab| !tab.is_hovered));
+    }
+
+    #[test]
     fn hover_below_bar_clears() {
         let mut state = bar_with(3, 0, 600.0);
-        state.set_hover(100.0, 10.0);
+        state.set_hover(100.0, TITLE_BAR_HEIGHT + 10.0);
         assert!(state.hovered_tab.is_some());
 
         // y > TAB_BAR_HEIGHT => no hover
@@ -625,17 +677,17 @@ mod tests {
     fn hover_single_tab_visible() {
         let mut state = bar_with(1, 0, 800.0);
         assert!(state.visible);
-        // Single tab exists; hovering over it should find it
+        // Single-tab chrome has no tab rail to hover.
         let tab_x = state.tabs[0].x + 5.0;
         state.set_hover(tab_x, 10.0);
-        assert_eq!(state.hovered_tab, Some(0));
+        assert_eq!(state.hovered_tab, None);
     }
 
     #[test]
     fn hover_updates_all_tab_flags() {
         let mut state = bar_with(4, 0, 800.0);
         // Hover over tab 2
-        state.set_hover(state.tabs[2].x + 5.0, 5.0);
+        state.set_hover(state.tabs[2].x + 5.0, TITLE_BAR_HEIGHT + 5.0);
         for (i, tab) in state.tabs.iter().enumerate() {
             assert_eq!(tab.is_hovered, i == 2, "tab {} is_hovered mismatch", i);
         }
@@ -655,6 +707,32 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
+    // chrome hit testing
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn single_tab_plus_is_clickable_in_title_band() {
+        let state = bar_with(1, 0, 800.0);
+        assert!(state.is_new_tab_button_at(5.0, 10.0));
+        assert!(!state.is_drag_area(5.0, 10.0));
+    }
+
+    #[test]
+    fn multi_tab_plus_is_clickable_in_tab_row() {
+        let state = bar_with(2, 0, 800.0);
+        assert!(!state.is_new_tab_button_at(5.0, 10.0));
+        assert!(state.is_new_tab_button_at(5.0, TITLE_BAR_HEIGHT + 10.0));
+        assert!(!state.is_drag_area(5.0, TITLE_BAR_HEIGHT + 10.0));
+    }
+
+    #[test]
+    fn title_band_between_controls_is_draggable() {
+        let state = bar_with(2, 0, 800.0);
+        assert!(state.is_drag_area(400.0, 10.0));
+        assert!(!state.is_drag_area(790.0, 10.0));
+    }
+
+    // ---------------------------------------------------------------
     // close_button_at
     // ---------------------------------------------------------------
 
@@ -666,7 +744,10 @@ mod tests {
         let close_x = tab.x + tab.width - TAB_PADDING - 12.0;
 
         // Hit the close button region
-        assert_eq!(state.close_button_at(close_x + 5.0, 10.0), Some(1));
+        assert_eq!(
+            state.close_button_at(close_x + 5.0, TITLE_BAR_HEIGHT + 10.0),
+            Some(1)
+        );
     }
 
     #[test]
@@ -675,7 +756,10 @@ mod tests {
         let tab = &state.tabs[0];
         let close_x = tab.x + tab.width - TAB_PADDING - 12.0;
         // Just left of the close button
-        assert_eq!(state.close_button_at(close_x - 1.0, 10.0), None);
+        assert_eq!(
+            state.close_button_at(close_x - 1.0, TITLE_BAR_HEIGHT + 10.0),
+            None
+        );
     }
 
     #[test]
@@ -684,7 +768,10 @@ mod tests {
         let tab = &state.tabs[0];
         let close_x = tab.x + tab.width - TAB_PADDING - 12.0;
         // Just right of the close button
-        assert_eq!(state.close_button_at(close_x + 12.0, 10.0), None);
+        assert_eq!(
+            state.close_button_at(close_x + 12.0, TITLE_BAR_HEIGHT + 10.0),
+            None
+        );
     }
 
     #[test]
@@ -696,13 +783,12 @@ mod tests {
     }
 
     #[test]
-    fn close_button_single_tab_has_close() {
+    fn close_button_single_tab_hidden_with_tab_row() {
         let state = bar_with(1, 0, 800.0);
         assert!(state.visible);
-        // Single tab close button should be findable
         let tab = &state.tabs[0];
         let close_x = tab.x + tab.width - TAB_PADDING - 12.0;
-        assert_eq!(state.close_button_at(close_x + 6.0, 10.0), Some(0));
+        assert_eq!(state.close_button_at(close_x + 6.0, 10.0), None);
     }
 
     #[test]
@@ -711,7 +797,7 @@ mod tests {
         for (i, tab) in state.tabs.iter().enumerate() {
             let close_x = tab.x + tab.width - TAB_PADDING - 12.0;
             assert_eq!(
-                state.close_button_at(close_x + 6.0, 10.0),
+                state.close_button_at(close_x + 6.0, TITLE_BAR_HEIGHT + 10.0),
                 Some(i),
                 "close button for tab {}",
                 i,
@@ -848,9 +934,9 @@ mod tests {
         let tab = &state.tabs[1];
         let (x, y, w, h) = tab.bounds();
         assert_eq!(x, tab.x);
-        assert_eq!(y, 0.0);
+        assert_eq!(y, TITLE_BAR_HEIGHT);
         assert_eq!(w, tab.width);
-        assert_eq!(h, TAB_BAR_HEIGHT);
+        assert_eq!(h, TAB_ROW_HEIGHT);
     }
 
     #[test]
@@ -859,7 +945,7 @@ mod tests {
         let tab = &state.tabs[0];
         let (tx, ty) = tab.text_position();
         assert_eq!(tx, tab.x + TAB_PADDING);
-        assert_eq!(ty, TAB_BAR_HEIGHT / 2.0 - 6.0);
+        assert_eq!(ty, TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT / 2.0 - 6.0);
     }
 
     #[test]
