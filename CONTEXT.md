@@ -5,13 +5,16 @@ This file names the core seams in the Ultty workspace. Keep it factual and close
 ## Terms
 
 **Ultty terminal**
-The GPU-accelerated terminal emulator in `crates/ultty`. It runs ordinary ANSI terminal applications and hosts native protocol sessions from Ulttui apps.
+The primary product: a GPU-accelerated terminal emulator that runs ordinary ANSI terminal applications and hosts native protocol sessions.
 
 **Ulttui framework**
-The application framework in `crates/ulttui`. It owns the `Application` trait, Elm-style update loop, widgets, focus, themes, commands, subscriptions, and dual native/ANSI rendering.
+The companion application framework that proves and exercises Ultty's native app runtime.
 
 **Native protocol**
 The binary app-to-terminal wire protocol defined in `crates/ultty-protocol`. Apps send structured messages such as `CreateRegion`, `SetContent`, `SetConstraints`, `BeginFrame`, and `EndFrame`.
+
+**Native app runtime**
+The terminal-hosted runtime that lets structured applications communicate with Ultty through the native protocol instead of ANSI escape sequences.
 
 **Native protocol session**
 The terminal-side state for one native app connection. It owns protocol negotiation, socket buffers, the retained scene graph, layout engine state, subscriptions, focus, scroll state, dirty flags, streams, clipboard requests, and keepalive state.
@@ -39,3 +42,10 @@ One pass through the Ulttui runner: poll backend events, route screen/app events
 
 **Command scheduling**
 The Ulttui runtime behavior that interprets `Cmd` values from `Application::update`, including immediate messages, batches, spawned futures, delayed messages, subscriptions, toasts, screen stack changes, and quit requests.
+
+## Relationships
+
+- The **Ultty terminal** is the product center of the workspace.
+- The **Native app runtime** belongs to the **Ultty terminal**.
+- The **Native protocol** is the boundary between the **Native app runtime** and native applications.
+- The **Ulttui framework** is a companion framework for building applications that exercise the **Native app runtime**.
