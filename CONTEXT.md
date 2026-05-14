@@ -37,6 +37,12 @@ The observable state of a native protocol session, including connection, focus, 
 **Render causality**
 The observable explanation for why Ultty last redrew or skipped redrawing terminal and native app content.
 
+**Idle efficiency**
+The performance expectation that Ultty consumes minimal CPU and GPU when terminal and native app state are unchanged.
+
+**Interaction responsiveness**
+The performance expectation that input, PTY output, scrolling, search, copy, and native app updates become visible promptly.
+
 **Append-oriented stream**
 Streaming content that grows forward over time, such as agent output, chat messages, logs, and tool output.
 
@@ -86,6 +92,7 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - A **Native app** uses **Keyboard-first interaction**.
 - **Terminal correctness** takes priority over **Native runtime observability**, which takes priority over visual richness.
 - **Native runtime observability** starts with **Session health** and **Render causality**.
+- Ultty performance prioritizes **Idle efficiency** and **Interaction responsiveness** before microbenchmark speed.
 - Streaming content is first optimized for **Append-oriented streams**.
 - A **Markdown stream** uses **Block-level diff** in the **Ulttui framework**.
 - The **Native app runtime** is a **Unix-first runtime**.
@@ -96,6 +103,7 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - "Native protocol" does not mean a generic remote GUI or drawing protocol; it means semantic terminal UI communication.
 - "Native app" does not mean an embedded desktop GUI; it means a terminal-hosted application with semantic structure.
 - "Keyboard-first" does not mean keyboard-only; mouse input is valid when it accelerates a complete keyboard workflow.
+- "Performance" does not mean microbenchmark speed alone; user-visible responsiveness and idle behavior are primary.
 - "Streaming content" does not mean collaborative document editing or arbitrary rich-document mutation in the first architecture.
 - "Markdown stream" does not mean the Ultty terminal owns markdown parsing policy; Ulttui owns markdown semantics.
 - "Cross-platform" does not currently include Windows runtime support; Windows requires a future platform boundary.
