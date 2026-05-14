@@ -162,19 +162,22 @@ decomposition decision and testing strategy.
 
 ## Performance Characteristics
 
-| Operation | Target | Achieved |
-|-----------|--------|----------|
-| Layout compute | < 1ms | ~27µs |
-| Frame render | < 5ms | ~290µs |
-| Input latency | < 10ms | ~0.3ms |
-| Memory (terminal) | < 50MB | ~18MB |
+Ultty performance is judged first by idle efficiency and user-visible interaction responsiveness. Exact measured values should be published only with a reproducible baseline artifact.
+
+| Operation | Target |
+|-----------|--------|
+| Idle CPU/GPU work | near-zero when terminal and native app state are unchanged |
+| Layout compute | < 1ms |
+| Frame render | < 5ms |
+| Input latency | < 10ms |
+| Memory (terminal) | < 50MB |
 
 ## Key Design Decisions
 
 1. **Terminal-side layout**: Apps declare constraints, terminal computes positions
 2. **Retained mode scene graph**: Terminal owns the tree, apps send diffs
 3. **Atomic frames**: BeginFrame/EndFrame prevents tearing
-4. **Dual-mode framework**: Native when possible, ANSI fallback otherwise
+4. **Dual-mode framework**: ANSI mode and Ultty-native mode are both product commitments; native mode adds capability uplift
 5. **Native session decomposition**: command application, frame batching, and layout output have named seams behind `NativeSession`
 
 ## File Organization

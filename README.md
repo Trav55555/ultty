@@ -117,17 +117,19 @@ fn main() -> anyhow::Result<()> {
 
 Widgets: `Text`, `Button`, `List`, `TextInput`, `ScrollView`, `Column`, `Row`, `Stack`
 
-All widgets implement both native protocol rendering and ANSI fallback.
+All widgets target both Ultty-native mode and ANSI mode.
 
 ## Performance
 
-| Metric | Target | Measured | Margin |
-|--------|--------|----------|--------|
-| Layout recompute | < 1ms | 27µs | 37x |
-| Frame render (typical) | < 5ms | 290µs | 17x |
-| Frame render (empty) | < 5ms | 102µs | 49x |
-| Input latency (internal) | < 10ms | ~0.3ms | 33x |
-| Memory (terminal) | < 50MB | ~18MB | 2.8x |
+Ultty performance is defined first by idle efficiency and interaction responsiveness. Until #41 adds a committed reproducible baseline, these are targets rather than audited published measurements:
+
+| Metric | Target |
+|--------|--------|
+| Idle CPU/GPU work | near-zero when terminal and native app state are unchanged |
+| Layout recompute | < 1ms |
+| Frame render | < 5ms |
+| Input latency | < 10ms |
+| Memory (terminal) | < 50MB |
 
 Run benchmarks: `cargo bench -p ultty`
 
