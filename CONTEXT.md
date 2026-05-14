@@ -49,6 +49,12 @@ An interaction model where every important native app workflow is usable by keyb
 **Terminal correctness**
 The baseline product obligation that ordinary terminal applications behave reliably before native app features are optimized.
 
+**Terminal workflow**
+A real interactive command-line session used to prove that ordinary terminal behavior remains reliable.
+
+**Replayable trace**
+A captured terminal interaction that can reproduce a terminal correctness behavior or regression.
+
 **Native runtime observability**
 The ability to inspect native app runtime state from inside Ultty without relying only on external logs.
 
@@ -116,6 +122,7 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - A **Native app** runs inside the **Native app runtime**.
 - A **Native app** uses **Keyboard-first interaction**.
 - **Terminal correctness** takes priority over **Native runtime observability**, which takes priority over visual richness.
+- **Terminal correctness** is proven through **Terminal workflows** and **Replayable traces**.
 - **Native runtime observability** starts with **Session health** and **Render causality**.
 - Ultty performance prioritizes **Idle efficiency** and **Interaction responsiveness** before microbenchmark speed.
 - Streaming content is first optimized for **Append-oriented streams**.
@@ -132,6 +139,7 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - "Protocol compatibility" does not mean frozen wire compatibility before 1.0; it means explicit capability negotiation and clear failure or degradation.
 - "Native app" does not mean an embedded desktop GUI; it means a terminal-hosted application with semantic structure.
 - "Keyboard-first" does not mean keyboard-only; mouse input is valid when it accelerates a complete keyboard workflow.
+- "Terminal correctness" does not mean parser unit tests alone; it means ordinary interactive terminal workflows remain reliable.
 - "Performance" does not mean microbenchmark speed alone; user-visible responsiveness and idle behavior are primary.
 - "Streaming content" does not mean collaborative document editing or arbitrary rich-document mutation in the first architecture.
 - "Markdown stream" does not mean the Ultty terminal owns markdown parsing policy; Ulttui owns markdown semantics.
