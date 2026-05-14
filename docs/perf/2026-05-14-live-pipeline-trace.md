@@ -26,6 +26,24 @@ and `ULTTY_TRACE_PIPELINE=1`, waits for the control socket, runs
 | Trace log | `/tmp/ultty-live-pipeline-trace/pipeline.log` |
 | Stress report | `/tmp/ultty-live-pipeline-trace/stress-report.md` |
 | Summary | `/tmp/ultty-live-pipeline-trace/pipeline-summary.md` |
+| JSON summary | `/tmp/ultty-live-pipeline-trace/pipeline-summary.json` |
+| Gate report | `/tmp/ultty-live-pipeline-trace/pipeline-gate.md` |
+
+## Gate Thresholds
+
+The script is also the local pre-merge live performance gate. It fails if the
+captured totals exceed these defaults:
+
+| Environment variable | Default |
+|----------------------|---------|
+| `ULTTY_TRACE_MAX_PARSE_MS` | 900 ms |
+| `ULTTY_TRACE_MAX_DRAIN_MS` | 1000 ms |
+| `ULTTY_TRACE_MAX_RENDER_TOTAL_MS` | 200 ms |
+| `ULTTY_TRACE_MAX_RENDER_FRAME_MS` | 50 ms |
+
+Override those variables when intentionally refreshing baselines or testing on a
+slower machine. The Markdown gate report is meant for humans; the JSON summary
+is meant for scripts and future CI wiring.
 
 ## Stress Summary
 
@@ -56,6 +74,21 @@ Run from `/tmp/ultty-live-pipeline-trace-2`:
 | Max render frame | 10.566 ms |
 
 Dominant cost: parser/grid and PTY drain.
+
+## Gate Baseline
+
+Run from `/tmp/ultty-live-pipeline-gate-2026-05-14-pass` after the parser span
+and row-rotation production optimisations:
+
+| Metric | Value | Limit |
+|--------|-------|-------|
+| Parser/grid time | 456.657 ms | 900 ms |
+| PTY drain time | 517.896 ms | 1000 ms |
+| Render frame time | 107.855 ms | 200 ms |
+| Max render frame | 12.088 ms | 50 ms |
+
+Status: PASS. The JSON summary for this run reported
+`dominant_cost: parser/grid and PTY drain`.
 
 ## Interpretation
 

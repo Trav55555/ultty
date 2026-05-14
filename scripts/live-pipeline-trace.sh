@@ -17,6 +17,12 @@ mkdir -p "$OUT_DIR"
 TRACE_LOG="$OUT_DIR/pipeline.log"
 STRESS_REPORT="$OUT_DIR/stress-report.md"
 SUMMARY="$OUT_DIR/pipeline-summary.md"
+SUMMARY_JSON="$OUT_DIR/pipeline-summary.json"
+GATE_REPORT="$OUT_DIR/pipeline-gate.md"
+MAX_PARSE_MS="${ULTTY_TRACE_MAX_PARSE_MS:-900}"
+MAX_DRAIN_MS="${ULTTY_TRACE_MAX_DRAIN_MS:-1000}"
+MAX_RENDER_TOTAL_MS="${ULTTY_TRACE_MAX_RENDER_TOTAL_MS:-200}"
+MAX_RENDER_FRAME_MS="${ULTTY_TRACE_MAX_RENDER_FRAME_MS:-50}"
 
 if "$ULTTYCTL" ping >/dev/null 2>&1; then
   echo "A live Ultty control socket is already running." >&2
@@ -70,7 +76,13 @@ if ! grep -q "pipeline_render_frame" "$TRACE_LOG"; then
   exit 1
 fi
 
-awk '
+awk \
+  -v json="$SUMMARY_JSON" \
+  -v gate="$GATE_REPORT" \
+  -v max_parse_ms="$MAX_PARSE_MS" \
+  -v max_drain_ms="$MAX_DRAIN_MS" \
+  -v max_render_total_ms="$MAX_RENDER_TOTAL_MS" \
+  -v max_render_frame_ms="$MAX_RENDER_FRAME_MS" '
   /pipeline_parse_grid/ {
     for (i = 1; i <= NF; i++) {
       if ($i ~ /^bytes=/) { split($i, a, "="); parse_bytes += a[2] }
@@ -98,6 +110,24 @@ awk '
     }
   }
   END {
+    parse_ms = parse_us / 1000
+    drain_ms = drain_us / 1000
+    render_ms = render_us / 1000
+    max_render_ms = max_render_us / 1000
+    if (parse_us > render_us * 4) {
+      dominant = "parser/grid and PTY drain"
+    } else if (render_us > parse_us) {
+      dominant = "rendering"
+    } else {
+      dominant = "mixed"
+    }
+
+    failed = 0
+    if (parse_ms > max_parse_ms) failed = 1
+    if (drain_ms > max_drain_ms) failed = 1
+    if (render_ms > max_render_total_ms) failed = 1
+    if (max_render_ms > max_render_frame_ms) failed = 1
+
     print "# Ultty Live Pipeline Trace Summary"
     print ""
     print "| Metric | Value |"
@@ -106,22 +136,55 @@ awk '
     printf "| Parser/grid bytes | %d |\n", parse_bytes
     printf "| Parser/grid actions | %d |\n", actions
     printf "| Parser/grid print actions | %d |\n", print_actions
-    printf "| Parser/grid time | %.3f ms |\n", parse_us / 1000
+    printf "| Parser/grid time | %.3f ms |\n", parse_ms
     printf "| PTY drain entries | %d |\n", drain_entries
     printf "| PTY read batches | %d |\n", read_batches
     printf "| PTY drain bytes | %d |\n", read_bytes
-    printf "| PTY drain time | %.3f ms |\n", drain_us / 1000
+    printf "| PTY drain time | %.3f ms |\n", drain_ms
     printf "| Render scheduled | %d |\n", render_scheduled
     printf "| Render frames | %d |\n", render_frames
-    printf "| Render frame time | %.3f ms |\n", render_us / 1000
-    printf "| Max render frame | %.3f ms |\n", max_render_us / 1000
+    printf "| Render frame time | %.3f ms |\n", render_ms
+    printf "| Max render frame | %.3f ms |\n", max_render_ms
     print ""
-    if (parse_us > render_us * 4) {
-      print "Dominant cost: parser/grid and PTY drain."
-    } else if (render_us > parse_us) {
-      print "Dominant cost: rendering."
-    } else {
-      print "Dominant cost: mixed; inspect the trace log."
+    printf "Dominant cost: %s.\n", dominant
+
+    print "# Ultty Live Pipeline Gate" > gate
+    print "" >> gate
+    printf "Status: %s\n\n", failed ? "FAIL" : "PASS" >> gate
+    print "| Metric | Value | Limit |" >> gate
+    print "|--------|-------|-------|" >> gate
+    printf "| Parser/grid time | %.3f ms | %.3f ms |\n", parse_ms, max_parse_ms >> gate
+    printf "| PTY drain time | %.3f ms | %.3f ms |\n", drain_ms, max_drain_ms >> gate
+    printf "| Render frame time | %.3f ms | %.3f ms |\n", render_ms, max_render_total_ms >> gate
+    printf "| Max render frame | %.3f ms | %.3f ms |\n", max_render_ms, max_render_frame_ms >> gate
+
+    print "{" > json
+    printf "  \"status\": \"%s\",\n", failed ? "fail" : "pass" >> json
+    printf "  \"dominant_cost\": \"%s\",\n", dominant >> json
+    printf "  \"parser_grid_entries\": %d,\n", parse_entries >> json
+    printf "  \"parser_grid_bytes\": %d,\n", parse_bytes >> json
+    printf "  \"parser_grid_actions\": %d,\n", actions >> json
+    printf "  \"parser_grid_print_actions\": %d,\n", print_actions >> json
+    printf "  \"parser_grid_ms\": %.3f,\n", parse_ms >> json
+    printf "  \"pty_drain_entries\": %d,\n", drain_entries >> json
+    printf "  \"pty_read_batches\": %d,\n", read_batches >> json
+    printf "  \"pty_drain_bytes\": %d,\n", read_bytes >> json
+    printf "  \"pty_drain_ms\": %.3f,\n", drain_ms >> json
+    printf "  \"render_scheduled\": %d,\n", render_scheduled >> json
+    printf "  \"render_frames\": %d,\n", render_frames >> json
+    printf "  \"render_frame_ms\": %.3f,\n", render_ms >> json
+    printf "  \"max_render_frame_ms\": %.3f,\n", max_render_ms >> json
+    print "  \"thresholds\": {" >> json
+    printf "    \"parser_grid_ms\": %.3f,\n", max_parse_ms >> json
+    printf "    \"pty_drain_ms\": %.3f,\n", max_drain_ms >> json
+    printf "    \"render_frame_ms\": %.3f,\n", max_render_total_ms >> json
+    printf "    \"max_render_frame_ms\": %.3f\n", max_render_frame_ms >> json
+    print "  }" >> json
+    print "}" >> json
+
+    if (failed) {
+      print "live pipeline gate failed: " gate > "/dev/stderr"
+      exit 2
     }
   }
 ' "$TRACE_LOG" > "$SUMMARY"
@@ -130,3 +193,5 @@ echo "live pipeline trace captured:"
 echo "  trace:  $TRACE_LOG"
 echo "  stress: $STRESS_REPORT"
 echo "  summary: $SUMMARY"
+echo "  json:   $SUMMARY_JSON"
+echo "  gate:   $GATE_REPORT"
