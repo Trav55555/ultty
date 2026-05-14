@@ -41,6 +41,8 @@ cargo run -p ultty
 
 This opens Ultty as a GPU-accelerated terminal emulator. It runs any existing terminal application (vim, htop, tmux, etc.) through full VT100/xterm ANSI compatibility.
 
+Platform status: Ultty is Unix-first today. Linux and macOS are the supported runtime targets; Windows support is future work that requires a native transport and PTY platform boundary.
+
 ### Run native apps inside Ultty
 
 From within an Ultty terminal:

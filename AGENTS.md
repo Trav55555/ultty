@@ -45,7 +45,7 @@ cargo run -p ultty                    # Terminal emulator
 cargo run -p counter-app              # Example app
 ```
 
-**CI** (`.github/workflows/ci.yml`): check, test, clippy (`-D warnings`), fmt (`--check`), security audit, coverage (tarpaulin), benchmarks. Tests on Linux, macOS, Windows. **RUSTFLAGS=-Dwarnings** — all warnings are errors.
+**CI** (`.github/workflows/ci.yml`): check, test, clippy (`-D warnings`), fmt (`--check`), security audit, coverage (tarpaulin), benchmarks. The runtime is Unix-first: Linux/macOS are supported targets; Windows requires future named-pipe/ConPTY platform work. **RUSTFLAGS=-Dwarnings** — all warnings are errors.
 
 ## Architecture
 

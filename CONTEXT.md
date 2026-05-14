@@ -22,6 +22,9 @@ The terminal-hosted runtime that lets structured applications communicate with U
 **Native app**
 A terminal-hosted application that communicates through semantic UI primitives while remaining keyboard-first, inspectable, resize-resilient, and usable without pointer precision.
 
+**Unix-first runtime**
+The current platform contract: Linux and macOS are supported runtime targets, while Windows is a future platform.
+
 **Native protocol session**
 The terminal-side state for one native app connection. It owns protocol negotiation, socket buffers, the retained scene graph, layout engine state, subscriptions, focus, scroll state, dirty flags, streams, clipboard requests, and keepalive state.
 
@@ -56,9 +59,11 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - The **Native protocol** is the boundary between the **Native app runtime** and native applications.
 - The **Native protocol** carries **Semantic UI primitives**, not arbitrary remote drawing commands.
 - A **Native app** runs inside the **Native app runtime**.
+- The **Native app runtime** is a **Unix-first runtime**.
 - The **Ulttui framework** is a companion framework for building applications that exercise the **Native app runtime**.
 
 ## Flagged ambiguities
 
 - "Native protocol" does not mean a generic remote GUI or drawing protocol; it means semantic terminal UI communication.
 - "Native app" does not mean an embedded desktop GUI; it means a terminal-hosted application with semantic structure.
+- "Cross-platform" does not currently include Windows runtime support; Windows requires a future platform boundary.
