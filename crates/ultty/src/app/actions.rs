@@ -3,10 +3,79 @@
 
 use super::App;
 use ultty::config::Config;
+use ultty::grid::Terminal;
 use ultty::protocol::ProtocolServer;
-use ultty::renderer::OverlayState;
+use ultty::renderer::{OverlayState, ScrollbarState};
+use ultty::tabs::TabBarState;
+use ultty::url::DetectedUrl;
+use ultty::vim::CopyMode;
+
+pub(super) struct ScreenshotOverlayState {
+    copy_mode: Option<CopyMode>,
+    urls: Vec<DetectedUrl>,
+    tab_bar: Option<TabBarState>,
+    scrollbar: Option<ScrollbarState>,
+    bell_active: bool,
+    shortcuts_visible: bool,
+    keybindings: Vec<(String, String)>,
+    cursor_blink_visible: bool,
+}
+
+impl ScreenshotOverlayState {
+    pub(super) fn as_overlay(&self) -> OverlayState<'_> {
+        OverlayState {
+            copy_mode: self.copy_mode.as_ref(),
+            urls: &self.urls,
+            ctrl_held: false,
+            tab_bar: self.tab_bar.as_ref(),
+            scrollbar: self.scrollbar,
+            bell_active: self.bell_active,
+            shortcuts_visible: self.shortcuts_visible,
+            keybindings: self
+                .shortcuts_visible
+                .then_some(self.keybindings.as_slice()),
+            protocol_status: None,
+            cursor_blink_visible: self.cursor_blink_visible,
+        }
+    }
+}
 
 impl App {
+    pub(super) fn build_screenshot_overlay_state(
+        &self,
+        terminal: &Terminal,
+    ) -> ScreenshotOverlayState {
+        let buffer = terminal.buffer();
+        let dims = terminal.dimensions();
+        let scrollbar = ScrollbarState::new(
+            buffer.total_lines(),
+            dims.rows as usize,
+            buffer.scroll_offset(),
+        );
+
+        ScreenshotOverlayState {
+            copy_mode: if self.copy_mode.is_active() {
+                Some(self.copy_mode.clone())
+            } else {
+                None
+            },
+            urls: self.url_detector.urls().to_vec(),
+            tab_bar: if self.tab_bar.visible {
+                Some(self.tab_bar.clone())
+            } else {
+                None
+            },
+            scrollbar: scrollbar.is_visible().then_some(scrollbar),
+            bell_active: self
+                .bell_active_until
+                .map(|until| std::time::Instant::now() < until)
+                .unwrap_or(false),
+            shortcuts_visible: self.shortcuts_visible,
+            keybindings: self.shortcuts_list.clone(),
+            cursor_blink_visible: self.cursor_blink_visible,
+        }
+    }
+
     /// Build the list of keyboard shortcuts for display.
     pub(super) fn build_shortcuts_list(
         keybindings: &ultty::config::KeybindingConfig,
@@ -254,8 +323,8 @@ impl App {
             return;
         };
 
-        // Use default overlay state for clean screenshot
-        let overlay = OverlayState::default();
+        let overlay_state = self.build_screenshot_overlay_state(terminal);
+        let overlay = overlay_state.as_overlay();
 
         let native_sessions: Vec<&ultty::protocol::NativeSession> = self
             .protocol_server

@@ -9,7 +9,18 @@
 
 use super::{OverlayState, Renderer};
 use crate::grid::Terminal;
+use crate::renderer::Vertex;
 use wgpu::util::DeviceExt;
+
+struct ScreenshotGeometry<'a> {
+    vertices: &'a [Vertex],
+    indices: &'a [u32],
+}
+
+enum ScreenshotPipeline<'a> {
+    Color,
+    Text(&'a wgpu::BindGroup),
+}
 
 /// Compute the row stride (in bytes) after aligning to `alignment`.
 ///
@@ -67,6 +78,120 @@ pub(crate) fn encode_rgba_png(pixels: &[u8], width: u32, height: u32) -> anyhow:
 }
 
 impl Renderer {
+    fn render_screenshot_vertices(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        label: &'static str,
+        geometry: ScreenshotGeometry<'_>,
+        pipeline: ScreenshotPipeline<'_>,
+    ) {
+        if geometry.vertices.is_empty() || geometry.indices.is_empty() {
+            return;
+        }
+
+        let vertex_label = format!("{label}_vb");
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&vertex_label),
+                contents: bytemuck::cast_slice(geometry.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+        let index_label = format!("{label}_ib");
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&index_label),
+                contents: bytemuck::cast_slice(geometry.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        match pipeline {
+            ScreenshotPipeline::Color => {
+                render_pass.set_pipeline(self.bg_pipeline.pipeline());
+            }
+            ScreenshotPipeline::Text(atlas_bind_group) => {
+                render_pass.set_pipeline(self.text_renderer.pipeline());
+                render_pass.set_bind_group(1, atlas_bind_group, &[]);
+            }
+        }
+        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        render_pass.draw_indexed(0..geometry.indices.len() as u32, 0, 0..1);
+    }
+
+    fn render_screenshot_chrome(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        overlay: &OverlayState,
+    ) {
+        if let Some(tab_bar) = overlay.tab_bar {
+            let (tab_vertices, tab_indices) = self.build_tab_bar_vertices(tab_bar);
+            self.render_screenshot_vertices(
+                encoder,
+                view,
+                "screenshot_tab_bar_pass",
+                ScreenshotGeometry {
+                    vertices: &tab_vertices,
+                    indices: &tab_indices,
+                },
+                ScreenshotPipeline::Color,
+            );
+
+            let (title_vertices, title_indices) = self.build_tab_title_vertices(tab_bar);
+            let atlas = self.text_renderer.atlas_bind_group();
+            self.render_screenshot_vertices(
+                encoder,
+                view,
+                "screenshot_tab_title_pass",
+                ScreenshotGeometry {
+                    vertices: &title_vertices,
+                    indices: &title_indices,
+                },
+                ScreenshotPipeline::Text(atlas),
+            );
+        }
+    }
+
+    fn render_screenshot_overlays(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        terminal: &Terminal,
+        overlay: &OverlayState,
+    ) {
+        let (overlay_vertices, overlay_indices) = self.build_overlay_vertices(terminal, overlay);
+        self.render_screenshot_vertices(
+            encoder,
+            view,
+            "screenshot_overlay_pass",
+            ScreenshotGeometry {
+                vertices: &overlay_vertices,
+                indices: &overlay_indices,
+            },
+            ScreenshotPipeline::Color,
+        );
+    }
+
     /// Capture a screenshot of the terminal to a PNG file.
     ///
     /// This renders the terminal to an offscreen texture and saves it as PNG.
@@ -169,7 +294,11 @@ impl Renderer {
             render_pass.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
         }
 
+        self.render_screenshot_chrome(&mut encoder, &view, overlay);
+
         // Render text
+        self.render_screenshot_chrome(&mut encoder, &view, overlay);
+
         let _ = self.text_renderer.render(
             &mut encoder,
             &view,
@@ -184,6 +313,8 @@ impl Renderer {
         for session in native_sessions {
             self.render_native_session(&mut encoder, &view, session, None, 0);
         }
+
+        self.render_screenshot_overlays(&mut encoder, &view, terminal, overlay);
 
         // Calculate buffer size with proper alignment
         let bytes_per_pixel = 4u32; // RGBA or BGRA
@@ -352,6 +483,8 @@ impl Renderer {
         for session in native_sessions {
             self.render_native_session(&mut encoder, &view, session, None, 0);
         }
+
+        self.render_screenshot_overlays(&mut encoder, &view, terminal, overlay);
 
         let bytes_per_pixel = 4u32;
         let padded_row =

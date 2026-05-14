@@ -3,7 +3,6 @@
 //! Processes CLI automation requests from ulttyctl and other tools.
 
 use super::App;
-use ultty::renderer::OverlayState;
 use winit::dpi::PhysicalSize;
 
 impl App {
@@ -297,7 +296,8 @@ impl App {
             ControlRequest::Screenshot { path } => {
                 if let Some(terminal) = self.terminal_manager.focused_terminal() {
                     let term = terminal.event_loop.terminal();
-                    let overlay = OverlayState::default();
+                    let overlay_state = self.build_screenshot_overlay_state(term);
+                    let overlay = overlay_state.as_overlay();
 
                     let native_sessions: Vec<&ultty::protocol::NativeSession> = self
                         .protocol_server

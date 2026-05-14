@@ -17,7 +17,7 @@ use ultty_protocol::vim::{VimMode, VimState};
 use ultty_protocol::{Key, Modifiers};
 
 /// Terminal copy mode state.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CopyMode {
     active: bool,
     vim_state: VimState,
