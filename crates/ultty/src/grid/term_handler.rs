@@ -787,6 +787,19 @@ impl<'a> TerminalHandler<'a> {
         // Add the image to the terminal
         self.terminal.add_image(image);
     }
+
+    /// Write a contiguous printable ASCII span to the active terminal buffer.
+    pub fn handle_ascii_span(&mut self, bytes: &[u8]) {
+        if !self.terminal.is_alternate_screen() {
+            for &byte in bytes {
+                self.terminal.buffer_mut().write_char(byte as char);
+            }
+        } else {
+            for &byte in bytes {
+                self.terminal.grid_mut().write_char(byte as char);
+            }
+        }
+    }
 }
 
 /// Convert an ANSI parser color to a grid color.

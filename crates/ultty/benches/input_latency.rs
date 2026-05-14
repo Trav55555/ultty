@@ -6,7 +6,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 use ultty::grid::TerminalHandler;
 use ultty::grid::{Dimensions, Terminal};
-use ultty::protocol::ansi::AnsiParser;
+use ultty::protocol::ansi::{AnsiOutput, AnsiParser};
 use unicode_width::UnicodeWidthChar;
 
 fn feed_payload(terminal: &mut Terminal, parser: &mut AnsiParser, payload: &[u8]) {
@@ -16,33 +16,12 @@ fn feed_payload(terminal: &mut Terminal, parser: &mut AnsiParser, payload: &[u8]
     });
 }
 
-fn feed_ascii_span_candidate(terminal: &mut Terminal, parser: &mut AnsiParser, payload: &[u8]) {
-    let mut index = 0;
-    while index < payload.len() {
-        if payload[index].is_ascii_graphic() || payload[index] == b' ' {
-            let start = index;
-            index += 1;
-            while index < payload.len()
-                && (payload[index].is_ascii_graphic() || payload[index] == b' ')
-            {
-                index += 1;
-            }
-
-            for byte in &payload[start..index] {
-                if !terminal.is_alternate_screen() {
-                    terminal.buffer_mut().write_char(*byte as char);
-                } else {
-                    terminal.grid_mut().write_char(*byte as char);
-                }
-            }
-        } else {
-            let mut handler = TerminalHandler::new(terminal);
-            parser.feed(&payload[index..index + 1], |action| {
-                handler.handle(action);
-            });
-            index += 1;
-        }
-    }
+fn feed_ascii_spans(terminal: &mut Terminal, parser: &mut AnsiParser, payload: &[u8]) {
+    let mut handler = TerminalHandler::new(terminal);
+    parser.feed_with_ascii_spans(black_box(payload), |output| match output {
+        AnsiOutput::Action(action) => handler.handle(action),
+        AnsiOutput::PrintAscii(bytes) => handler.handle_ascii_span(bytes),
+    });
 }
 
 fn long_lines_payload(line_count: usize, line_len: usize) -> Vec<u8> {
@@ -343,11 +322,11 @@ fn bench_ascii_span(c: &mut Criterion) {
         )
     });
 
-    group.bench_function("candidate_4m_ascii_span", |b| {
+    group.bench_function("production_4m_ascii_span", |b| {
         b.iter_batched(
             || (Terminal::new(Dimensions::new(80, 34)), AnsiParser::new()),
             |(mut terminal, mut parser)| {
-                feed_ascii_span_candidate(&mut terminal, &mut parser, black_box(&ascii_throughput));
+                feed_ascii_spans(&mut terminal, &mut parser, black_box(&ascii_throughput));
                 black_box(terminal.grid().cursor().position);
             },
             BatchSize::SmallInput,
@@ -365,11 +344,11 @@ fn bench_ascii_span(c: &mut Criterion) {
         )
     });
 
-    group.bench_function("candidate_25k_hard_lines", |b| {
+    group.bench_function("production_25k_hard_lines", |b| {
         b.iter_batched(
             || (Terminal::new(Dimensions::new(80, 34)), AnsiParser::new()),
             |(mut terminal, mut parser)| {
-                feed_ascii_span_candidate(&mut terminal, &mut parser, black_box(&hard_lines));
+                feed_ascii_spans(&mut terminal, &mut parser, black_box(&hard_lines));
                 black_box(terminal.grid().cursor().position);
             },
             BatchSize::SmallInput,

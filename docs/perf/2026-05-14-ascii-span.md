@@ -35,6 +35,31 @@ the grid layer.
 | `ascii_span/current_parser_25k_hard_lines` | 135.48 ms to 150.17 ms |
 | `ascii_span/candidate_25k_hard_lines` | 137.10 ms to 150.12 ms |
 
+## Production Follow-Up
+
+The production slice added a parser-owned borrowed ASCII span path:
+`AnsiParser::feed_with_ascii_spans`. The regular `feed` API remains unchanged.
+The terminal event loop now uses the span-aware path for PTY input, and the span
+benchmark compares the unchanged per-action path against the production path.
+
+Command:
+
+```bash
+timeout 900s cargo bench -p ultty --bench input_latency -- ascii_span --noplot
+```
+
+| Benchmark | Result |
+|-----------|--------|
+| `ascii_span/current_parser_4m_ascii` | 151.93 ms to 155.31 ms |
+| `ascii_span/production_4m_ascii_span` | 144.22 ms to 146.90 ms |
+| `ascii_span/current_parser_25k_hard_lines` | 108.18 ms to 111.21 ms |
+| `ascii_span/production_25k_hard_lines` | 103.56 ms to 105.96 ms |
+
+The production path improves the same-run 4 MiB ASCII benchmark by roughly 5%
+at the midpoint. The 25k hard-line guardrail also improves slightly, which means
+the borrowed parser span dispatch does not introduce the scroll-heavy regression
+risk seen in the benchmark-only shortcut caveats.
+
 ## Interpretation
 
 The span candidate improves the pure ASCII throughput shape by roughly 8-10% at

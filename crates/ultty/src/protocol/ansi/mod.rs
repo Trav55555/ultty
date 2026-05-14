@@ -271,6 +271,20 @@ pub enum Action {
     NormalKeypadMode,
 }
 
+/// Output produced by the ANSI parser's span-aware feed path.
+///
+/// `Action` preserves the existing per-operation parser contract, while
+/// `PrintAscii` borrows a contiguous printable ASCII run from the input buffer.
+/// The span form is only emitted from the ground state with the normal ASCII
+/// character set active.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnsiOutput<'a> {
+    /// A regular parser action.
+    Action(Action),
+    /// A contiguous run of printable ASCII bytes.
+    PrintAscii(&'a [u8]),
+}
+
 /// Text attributes settable via SGR sequences.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "attr", content = "value")]
@@ -485,6 +499,41 @@ impl AnsiParser {
         for &byte in data {
             self.process_byte(byte, &mut callback);
         }
+    }
+
+    /// Feed bytes into the parser, batching ground-state printable ASCII spans.
+    ///
+    /// This preserves the same semantics as [`Self::feed`] for controls,
+    /// escapes, UTF-8, and character-set translations, but emits contiguous
+    /// printable ASCII runs as borrowed spans to reduce callback dispatch on
+    /// large plain-text PTY output.
+    pub fn feed_with_ascii_spans<'a, F>(&mut self, data: &'a [u8], mut callback: F)
+    where
+        F: FnMut(AnsiOutput<'a>),
+    {
+        let mut index = 0;
+        while index < data.len() {
+            if self.can_emit_ascii_span() && is_printable_ascii(data[index]) {
+                let start = index;
+                index += 1;
+                while index < data.len() && is_printable_ascii(data[index]) {
+                    index += 1;
+                }
+                callback(AnsiOutput::PrintAscii(&data[start..index]));
+                continue;
+            }
+
+            self.process_byte(data[index], &mut |action| {
+                callback(AnsiOutput::Action(action));
+            });
+            index += 1;
+        }
+    }
+
+    fn can_emit_ascii_span(&self) -> bool {
+        self.state == State::Ground
+            && self.utf8_remaining == 0
+            && !self.is_graphics_charset_active()
     }
 
     /// Process a single byte.
@@ -864,6 +913,10 @@ impl Default for AnsiParser {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn is_printable_ascii(byte: u8) -> bool {
+    (0x20..=0x7E).contains(&byte)
 }
 
 #[cfg(test)]

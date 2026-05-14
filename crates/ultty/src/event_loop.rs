@@ -271,7 +271,7 @@ impl EventLoop {
 
     /// Process a chunk of bytes from the PTY.
     fn process_bytes(&mut self, data: &[u8]) {
-        use crate::protocol::ansi::Action;
+        use crate::protocol::ansi::{Action, AnsiOutput};
 
         let mut handler = TerminalHandler::new(&mut self.terminal);
         let events = &mut self.events;
@@ -280,37 +280,47 @@ impl EventLoop {
         let mut actions = 0usize;
         let mut print_actions = 0usize;
 
-        self.parser.feed(data, |action| {
-            if trace {
-                actions += 1;
-                if matches!(action, Action::Print(_)) {
-                    print_actions += 1;
+        self.parser
+            .feed_with_ascii_spans(data, |output| match output {
+                AnsiOutput::Action(action) => {
+                    if trace {
+                        actions += 1;
+                        if matches!(action, Action::Print(_)) {
+                            print_actions += 1;
+                        }
+                    }
+                    // Check for actions that produce events before handling
+                    match &action {
+                        Action::Bell => {
+                            events.push(TerminalEvent::Bell);
+                        }
+                        Action::SetTitle(title) => {
+                            events.push(TerminalEvent::TitleChanged(title.clone()));
+                        }
+                        Action::SetClipboard { clipboard, data } => {
+                            events.push(TerminalEvent::SetClipboard {
+                                clipboard: *clipboard,
+                                data: data.clone(),
+                            });
+                        }
+                        Action::Notification { title, body } => {
+                            events.push(TerminalEvent::Notification {
+                                title: title.clone(),
+                                body: body.clone(),
+                            });
+                        }
+                        _ => {}
+                    }
+                    handler.handle(action);
                 }
-            }
-            // Check for actions that produce events before handling
-            match &action {
-                Action::Bell => {
-                    events.push(TerminalEvent::Bell);
+                AnsiOutput::PrintAscii(bytes) => {
+                    if trace {
+                        actions += 1;
+                        print_actions += bytes.len();
+                    }
+                    handler.handle_ascii_span(bytes);
                 }
-                Action::SetTitle(title) => {
-                    events.push(TerminalEvent::TitleChanged(title.clone()));
-                }
-                Action::SetClipboard { clipboard, data } => {
-                    events.push(TerminalEvent::SetClipboard {
-                        clipboard: *clipboard,
-                        data: data.clone(),
-                    });
-                }
-                Action::Notification { title, body } => {
-                    events.push(TerminalEvent::Notification {
-                        title: title.clone(),
-                        body: body.clone(),
-                    });
-                }
-                _ => {}
-            }
-            handler.handle(action);
-        });
+            });
 
         if let Some(start) = start {
             tracing::info!(

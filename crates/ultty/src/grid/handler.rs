@@ -312,6 +312,13 @@ impl<'a> Handler<'a> {
             | Mode::SynchronizedUpdate => {}
         }
     }
+
+    /// Write a contiguous printable ASCII span to the grid.
+    pub fn handle_ascii_span(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.grid.write_char(byte as char);
+        }
+    }
 }
 
 /// Convert an ANSI parser color to a grid color.

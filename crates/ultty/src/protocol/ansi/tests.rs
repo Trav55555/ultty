@@ -7,6 +7,13 @@ fn parse(input: &[u8]) -> Vec<Action> {
     actions
 }
 
+fn parse_spans<'a>(input: &'a [u8]) -> Vec<AnsiOutput<'a>> {
+    let mut parser = AnsiParser::new();
+    let mut output = Vec::new();
+    parser.feed_with_ascii_spans(input, |item| output.push(item));
+    output
+}
+
 #[test]
 fn cursor_up() {
     assert_eq!(parse(b"\x1b[5A"), vec![Action::CursorUp(5)]);
@@ -101,6 +108,47 @@ fn save_restore() {
 #[test]
 fn print_chars() {
     assert_eq!(parse(b"Hi"), vec![Action::Print('H'), Action::Print('i')]);
+}
+
+#[test]
+fn ascii_span_feed_batches_ground_printables() {
+    assert_eq!(
+        parse_spans(b"Hello, World!"),
+        vec![AnsiOutput::PrintAscii(b"Hello, World!")]
+    );
+}
+
+#[test]
+fn ascii_span_feed_splits_controls_and_escapes() {
+    assert_eq!(
+        parse_spans(b"ab\ncd\x1b[1mef"),
+        vec![
+            AnsiOutput::PrintAscii(b"ab"),
+            AnsiOutput::Action(Action::Newline),
+            AnsiOutput::PrintAscii(b"cd"),
+            AnsiOutput::Action(Action::SetAttribute(Attribute::Bold)),
+            AnsiOutput::PrintAscii(b"ef"),
+        ]
+    );
+}
+
+#[test]
+fn ascii_span_feed_preserves_utf8_and_graphics_charset() {
+    assert_eq!(
+        parse_spans(b"caf\xC3\xA9"),
+        vec![
+            AnsiOutput::PrintAscii(b"caf"),
+            AnsiOutput::Action(Action::Print('\u{00E9}')),
+        ]
+    );
+
+    assert_eq!(
+        parse_spans(b"\x1b(0x\x1b(Bx"),
+        vec![
+            AnsiOutput::Action(Action::Print('\u{2502}')),
+            AnsiOutput::PrintAscii(b"x"),
+        ]
+    );
 }
 
 #[test]
