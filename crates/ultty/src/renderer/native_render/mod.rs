@@ -9,6 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 mod borders;
 mod cache;
 mod code;
+mod code_spans;
 mod geometry;
 mod images;
 mod markdown;
