@@ -30,19 +30,31 @@ if [[ ! -s "$OUT" ]]; then
   exit 1
 fi
 
-if ! grep -q "| \`1. throughput-4MiB\` |" "$OUT"; then
-  echo "perf smoke failed: throughput row missing from $OUT" >&2
-  exit 1
-fi
+IFS=',' read -r -a requested_tests <<< "$TESTS"
+for test_num in "${requested_tests[@]}"; do
+  case "$test_num" in
+    1)
+      row='| `1. throughput-4MiB` |'
+      label="throughput"
+      ;;
+    6)
+      row='| `6. 500-lines-4000-cols` |'
+      label="wrap"
+      ;;
+    8)
+      row='| `8. 20k-scrollback-lines` |'
+      label="scrollback"
+      ;;
+    *)
+      row=""
+      label=""
+      ;;
+  esac
 
-if ! grep -q "| \`6. 500-lines-4000-cols\` |" "$OUT"; then
-  echo "perf smoke failed: wrap row missing from $OUT" >&2
-  exit 1
-fi
-
-if ! grep -q "| \`8. 20k-scrollback-lines\` |" "$OUT"; then
-  echo "perf smoke failed: scrollback row missing from $OUT" >&2
-  exit 1
-fi
+  if [[ -n "$row" ]] && ! grep -Fq "$row" "$OUT"; then
+    echo "perf smoke failed: $label row missing from $OUT" >&2
+    exit 1
+  fi
+done
 
 echo "perf smoke passed: $OUT"

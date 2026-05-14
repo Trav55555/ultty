@@ -148,6 +148,37 @@ eligible to render. This gives the PTY more opportunities to drain between
 render deadlines without increasing the 60 fps render cadence. It reduced
 `500-lines-4000-cols` from 2067.5 ms to 1809.0 ms in the two-run live repeat.
 
+## Soft-Wrap PTY Probe
+
+Run from `/tmp/ultty-softwrap-pty-probe-issue-59-rerun` with only workload 6:
+
+```bash
+scripts/softwrap-pty-probe.sh /tmp/ultty-softwrap-pty-probe-issue-59-rerun
+```
+
+| Field | Value |
+|-------|-------|
+| Runs | 2 |
+| Generator-only mean | 109.0 ms |
+| Live child mean | 1671.0 ms |
+| Live minus generator estimate | 1562.0 ms |
+
+The same run produced this app-side pipeline mean per run:
+
+| Component | Mean |
+|-----------|------|
+| Parser/grid | 17.0 ms |
+| PTY drain | 23.5 ms |
+| Render frames | 112.4 ms |
+| Combined measured app-side work | 152.9 ms |
+| Live minus measured app-side estimate | 1518.1 ms |
+
+The gate passed with parser/grid 33.929 ms, PTY drain 47.032 ms, render frame
+time 224.880 ms, and max render frame 11.302 ms across both runs. The probe
+therefore confirms that the remaining long-line wall-clock cost is primarily
+outside direct parser/grid/render execution time. It is child-side blocking
+while the PTY is filled and repeatedly drained.
+
 ## Interpretation
 
 The original live stress gap was dominated by parser/grid and PTY drain time.
