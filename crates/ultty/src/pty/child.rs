@@ -70,6 +70,11 @@ impl Child {
         &self.pty
     }
 
+    /// Get the PTY master file descriptor.
+    pub fn pty_fd(&self) -> std::os::fd::RawFd {
+        self.pty.as_raw_fd()
+    }
+
     /// Get mutable access to the PTY.
     pub fn pty_mut(&mut self) -> &mut Pty {
         &mut self.pty

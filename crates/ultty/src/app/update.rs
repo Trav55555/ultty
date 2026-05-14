@@ -43,6 +43,8 @@ impl App {
 
     /// Process terminal events and render. Returns true if should exit.
     pub(super) fn update(&mut self) -> bool {
+        self.refresh_pty_wakeup_fds();
+
         // Check for config file changes (hot-reload)
         if let Some(ref mut watcher) = self.config_watcher {
             if watcher.poll() {

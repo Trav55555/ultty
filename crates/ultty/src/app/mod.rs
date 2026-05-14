@@ -5,6 +5,7 @@ mod control;
 mod input;
 mod render;
 mod update;
+mod wakeup;
 use anyhow::Result;
 use arboard::Clipboard;
 use std::sync::Arc;
@@ -21,7 +22,7 @@ use ultty::url::UrlDetector;
 use ultty::vim::{CopyMode, Selection as VimSelection};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::Event;
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowBuilder};
 
@@ -46,6 +47,13 @@ const MAINTENANCE_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Faster PTY polling while a frame is dirty but not ready to render.
 const PTY_CATCHUP_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// User events sent to the winit application loop.
+#[derive(Debug, Clone, Copy)]
+enum AppEvent {
+    /// At least one PTY fd is readable and should be drained on the UI thread.
+    PtyReadable,
+}
 
 /// Terminal application.
 pub struct App {
@@ -111,6 +119,8 @@ pub struct App {
     protocol_server: Option<ProtocolServer>,
     /// Control server for CLI automation (ulttyctl)
     control_server: Option<ControlServer>,
+    /// Cross-thread wakeups from PTY readiness into winit.
+    pty_wakeup: wakeup::PtyWakeup,
     /// Search matches for native protocol regions
     native_search_matches: Vec<ultty::scene::SearchMatch>,
     /// Whether native search overlay is active
@@ -134,7 +144,10 @@ pub struct App {
 
 impl App {
     /// Create a new application with window.
-    pub fn new(event_loop: &EventLoop<()>) -> Result<Self> {
+    fn new(
+        event_loop: &EventLoop<AppEvent>,
+        event_proxy: EventLoopProxy<AppEvent>,
+    ) -> Result<Self> {
         // Load configuration
         let config = Config::load();
         tracing::info!("Loaded configuration");
@@ -201,6 +214,7 @@ impl App {
 
         // Create terminal manager - with launch profile if configured
         let terminal_manager = Self::create_terminal_manager(&config, cols, rows)?;
+        let pty_wakeup = wakeup::PtyWakeup::new(event_proxy);
 
         // Try to create clipboard
         let clipboard = Clipboard::new().ok();
@@ -265,6 +279,7 @@ impl App {
                 .unwrap_or(0),
             protocol_server,
             control_server,
+            pty_wakeup,
             native_search_matches: Vec::new(),
             native_search_active: false,
             native_search_query: String::new(),
@@ -279,6 +294,7 @@ impl App {
 
         // Initialize tab bar state so it renders on first frame
         app.update_tab_bar();
+        app.refresh_pty_wakeup_fds();
 
         Ok(app)
     }
@@ -428,9 +444,10 @@ impl App {
 
     /// Run the application.
     pub fn run() -> Result<()> {
-        let event_loop = EventLoop::new()?;
+        let event_loop = EventLoopBuilder::<AppEvent>::with_user_event().build()?;
+        let event_proxy = event_loop.create_proxy();
 
-        let mut app = App::new(&event_loop)?;
+        let mut app = App::new(&event_loop, event_proxy)?;
 
         // Initialize tab bar state
         app.update_tab_bar();
@@ -446,6 +463,14 @@ impl App {
                     if should_exit {
                         elwt.exit();
                     }
+                }
+                Event::UserEvent(AppEvent::PtyReadable) => {
+                    if app.update() {
+                        elwt.exit();
+                    }
+                    elwt.set_control_flow(ControlFlow::WaitUntil(
+                        app.next_update_deadline(Instant::now()),
+                    ));
                 }
                 Event::AboutToWait => {
                     if app.update() {
@@ -510,6 +535,12 @@ impl App {
                 tracing::warn!("Failed to resize terminals after tab bar change: {}", e);
             }
         }
+
+        self.refresh_pty_wakeup_fds();
+    }
+
+    fn refresh_pty_wakeup_fds(&mut self) {
+        self.pty_wakeup.set_fds(self.terminal_manager.pty_fds());
     }
 
     /// Extract text from a vim selection.

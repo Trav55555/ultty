@@ -179,6 +179,40 @@ therefore confirms that the remaining long-line wall-clock cost is primarily
 outside direct parser/grid/render execution time. It is child-side blocking
 while the PTY is filled and repeatedly drained.
 
+## PTY Readiness Wakeups
+
+Run from `/tmp/ultty-softwrap-pty-probe-issue-58-committed` after bridging PTY
+readiness into winit with a user event:
+
+```bash
+scripts/softwrap-pty-probe.sh /tmp/ultty-softwrap-pty-probe-issue-58-committed
+```
+
+| Field | Value |
+|-------|-------|
+| Runs | 2 |
+| Generator-only mean | 112.5 ms |
+| Live child mean | 168.5 ms |
+| Live minus generator estimate | 56.0 ms |
+
+The same run produced this app-side pipeline mean per run:
+
+| Component | Mean |
+|-----------|------|
+| Parser/grid | 19.9 ms |
+| PTY drain | 25.1 ms |
+| Render frames | 24.5 ms |
+| Combined measured app-side work | 69.5 ms |
+| Live minus measured app-side estimate | 99.0 ms |
+
+The gate passed with parser/grid 39.797 ms, PTY drain 50.274 ms, render frame
+time 49.012 ms, and max render frame 11.445 ms across both runs.
+
+This changed the long soft-wrap workload from a child-blocking workload back to
+one bounded mostly by generator time plus small app-side work. The readiness
+bridge keeps terminal state mutation and rendering on the UI thread; the helper
+thread only watches PTY fds and sends a winit user event.
+
 ## Interpretation
 
 The original live stress gap was dominated by parser/grid and PTY drain time.

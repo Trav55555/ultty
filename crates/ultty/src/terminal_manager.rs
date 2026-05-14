@@ -7,6 +7,7 @@
 
 use crate::event_loop::{EventLoop as TerminalEventLoop, TerminalEvent};
 use std::io;
+use std::os::fd::RawFd;
 
 // ── Split tree for nested pane layouts ────────────────────────────────────
 
@@ -508,6 +509,15 @@ impl TerminalManager {
         }
 
         Ok(all_events)
+    }
+
+    /// Return PTY master file descriptors for all live terminals.
+    pub fn pty_fds(&self) -> Vec<RawFd> {
+        self.terminals
+            .iter()
+            .filter(|terminal| !terminal.has_exited())
+            .map(|terminal| terminal.event_loop.pty_fd())
+            .collect()
     }
 
     /// Remove exited terminals and their empty tabs.

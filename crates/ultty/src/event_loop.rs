@@ -11,6 +11,7 @@ use crate::protocol::ansi::AnsiParser;
 use crate::pty::{Child, PtySize};
 use polling::{Event, Events, Poller};
 use std::io;
+use std::os::fd::RawFd;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -157,6 +158,11 @@ impl EventLoop {
     /// Check if the child process has exited.
     pub fn has_exited(&self) -> bool {
         self.child.has_exited()
+    }
+
+    /// Get the PTY master file descriptor for readiness wakeups.
+    pub fn pty_fd(&self) -> RawFd {
+        self.child.pty_fd()
     }
 
     /// Get exit status if child has exited.
