@@ -752,18 +752,14 @@ impl Grid {
             return;
         }
 
-        // Shift rows up within the region
-        for row_idx in (region.top as usize)..=(region.bottom as usize - n) {
-            let src_row = row_idx + n;
-            self.rows[row_idx] = self.rows[src_row].clone();
-        }
+        let start = region.top as usize;
+        let end = region.bottom as usize + 1;
+        self.rows[start..end].rotate_left(n);
 
         // Erase the bottom n rows of the region with current bg
         for i in 0..n {
             let row_idx = region.bottom as usize - i;
-            let mut row = Row::new(self.dims.cols);
-            row.erase(bg);
-            self.rows[row_idx] = row;
+            self.rows[row_idx].erase(bg);
         }
 
         // Mark affected rows dirty
@@ -793,18 +789,14 @@ impl Grid {
             return;
         }
 
-        // Shift rows down within the region (reverse to avoid overwriting)
-        for row_idx in ((region.top as usize + n)..=region.bottom as usize).rev() {
-            let src_row = row_idx - n;
-            self.rows[row_idx] = self.rows[src_row].clone();
-        }
+        let start = region.top as usize;
+        let end = region.bottom as usize + 1;
+        self.rows[start..end].rotate_right(n);
 
         // Erase the top n rows of the region with current bg
         for i in 0..n {
             let row_idx = region.top as usize + i;
-            let mut row = Row::new(self.dims.cols);
-            row.erase(bg);
-            self.rows[row_idx] = row;
+            self.rows[row_idx].erase(bg);
         }
 
         // Mark affected rows dirty

@@ -24,6 +24,29 @@ timeout 900s cargo bench -p ultty --bench input_latency -- scroll_history --nopl
 | `25000_lines_80_cols_alt_no_scrollback` | 89.644 ms to 91.347 ms |
 | `25000_lines_12_cols_main_scrollback` | 49.605 ms to 51.583 ms |
 
+## Production Follow-Up
+
+The production slice replaced clone-based visible-row shifting in
+`Grid::scroll_up` and `Grid::scroll_down` with slice rotation and erasure of the
+recycled rows. This keeps the same scrollback capture behavior in `Buffer`, but
+avoids repeatedly cloning every visible row when a hard-line workload scrolls.
+
+Command:
+
+```bash
+timeout 900s cargo bench -p ultty --bench input_latency -- scroll_history --noplot
+```
+
+| Workload | Result |
+|----------|--------|
+| `25000_lines_80_cols_main_scrollback` | 56.385 ms to 58.216 ms |
+| `25000_lines_80_cols_alt_no_scrollback` | 40.123 ms to 41.770 ms |
+| `25000_lines_12_cols_main_scrollback` | 17.722 ms to 18.596 ms |
+
+This removes roughly 45% of the main scrollback benchmark time compared with
+the prior criterion baseline, and it narrows the remaining main-vs-alternate
+gap to the actual history append cost instead of visible-row clone churn.
+
 ## Interpretation
 
 The same 25k hard-line payload is roughly 15 ms slower on the main screen than
