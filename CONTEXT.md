@@ -28,6 +28,12 @@ The Ulttui runtime mode where an application communicates with Ultty through the
 **ANSI mode**
 The Ulttui runtime mode where an application renders through ordinary terminal escape-sequence behavior.
 
+**Behavioral parity**
+The dual-mode rule that core workflows behave consistently in ANSI mode and Ultty-native mode.
+
+**Capability uplift**
+The dual-mode rule that Ultty-native mode may add richer rendering, stronger observability, lower churn, or structured semantics beyond ANSI mode.
+
 **Native app**
 A terminal-hosted application that communicates through semantic UI primitives while remaining keyboard-first, inspectable, resize-resilient, and usable without pointer precision.
 
@@ -111,6 +117,7 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - The **Native app runtime** is a **Unix-first runtime**.
 - The **Ulttui framework** builds **Dual-mode apps** with **ANSI mode** and **Ultty-native mode** as product commitments.
 - **Ultty-native mode** is the premium path, but **ANSI mode** is not an afterthought.
+- **Dual-mode apps** follow **Behavioral parity** with **Capability uplift**.
 
 ## Flagged ambiguities
 
@@ -121,4 +128,5 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - "Streaming content" does not mean collaborative document editing or arbitrary rich-document mutation in the first architecture.
 - "Markdown stream" does not mean the Ultty terminal owns markdown parsing policy; Ulttui owns markdown semantics.
 - "ANSI fallback" does not mean best-effort demo support; it means the **ANSI mode** of a **Dual-mode app**.
+- "Dual-mode" does not mean native and ANSI must have identical capabilities; core behavior matches while native mode can add capability.
 - "Cross-platform" does not currently include Windows runtime support; Windows requires a future platform boundary.
