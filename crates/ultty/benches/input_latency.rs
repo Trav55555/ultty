@@ -16,6 +16,35 @@ fn feed_payload(terminal: &mut Terminal, parser: &mut AnsiParser, payload: &[u8]
     });
 }
 
+fn feed_ascii_span_candidate(terminal: &mut Terminal, parser: &mut AnsiParser, payload: &[u8]) {
+    let mut index = 0;
+    while index < payload.len() {
+        if payload[index].is_ascii_graphic() || payload[index] == b' ' {
+            let start = index;
+            index += 1;
+            while index < payload.len()
+                && (payload[index].is_ascii_graphic() || payload[index] == b' ')
+            {
+                index += 1;
+            }
+
+            for byte in &payload[start..index] {
+                if !terminal.is_alternate_screen() {
+                    terminal.buffer_mut().write_char(*byte as char);
+                } else {
+                    terminal.grid_mut().write_char(*byte as char);
+                }
+            }
+        } else {
+            let mut handler = TerminalHandler::new(terminal);
+            parser.feed(&payload[index..index + 1], |action| {
+                handler.handle(action);
+            });
+            index += 1;
+        }
+    }
+}
+
 fn long_lines_payload(line_count: usize, line_len: usize) -> Vec<u8> {
     let mut payload = Vec::with_capacity(line_count * (line_len + 1));
     let line = vec![b'x'; line_len];
@@ -296,12 +325,67 @@ fn bench_scroll_history(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_ascii_span(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ascii_span");
+    group.sample_size(10);
+
+    let ascii_throughput = long_lines_payload(1024, 4096);
+    let hard_lines = fixed_width_lines_payload(25_000, 80);
+
+    group.bench_function("current_parser_4m_ascii", |b| {
+        b.iter_batched(
+            || (Terminal::new(Dimensions::new(80, 34)), AnsiParser::new()),
+            |(mut terminal, mut parser)| {
+                feed_payload(&mut terminal, &mut parser, black_box(&ascii_throughput));
+                black_box(terminal.grid().cursor().position);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("candidate_4m_ascii_span", |b| {
+        b.iter_batched(
+            || (Terminal::new(Dimensions::new(80, 34)), AnsiParser::new()),
+            |(mut terminal, mut parser)| {
+                feed_ascii_span_candidate(&mut terminal, &mut parser, black_box(&ascii_throughput));
+                black_box(terminal.grid().cursor().position);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("current_parser_25k_hard_lines", |b| {
+        b.iter_batched(
+            || (Terminal::new(Dimensions::new(80, 34)), AnsiParser::new()),
+            |(mut terminal, mut parser)| {
+                feed_payload(&mut terminal, &mut parser, black_box(&hard_lines));
+                black_box(terminal.grid().cursor().position);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("candidate_25k_hard_lines", |b| {
+        b.iter_batched(
+            || (Terminal::new(Dimensions::new(80, 34)), AnsiParser::new()),
+            |(mut terminal, mut parser)| {
+                feed_ascii_span_candidate(&mut terminal, &mut parser, black_box(&hard_lines));
+                black_box(terminal.grid().cursor().position);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_keystroke_echo,
     bench_full_refresh,
     bench_wrap_and_reflow,
     bench_char_width,
-    bench_scroll_history
+    bench_scroll_history,
+    bench_ascii_span
 );
 criterion_main!(benches);
