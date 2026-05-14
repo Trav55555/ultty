@@ -9,9 +9,37 @@ supports, and preserve enough raw detail for later comparison.
 | Type | Use for | Example |
 |------|---------|---------|
 | Baseline | Repeatable Criterion or benchmark-suite runs that support README or release claims. | [`2026-05-14-baseline.md`](./2026-05-14-baseline.md) |
-| Live stress | End-to-end terminal runs through a real tab, PTY, parser, grid, and compositor. | [`2026-05-14-live-stress.md`](./2026-05-14-live-stress.md) |
+| Live stress | End-to-end terminal runs through a real tab, PTY, parser, grid, and compositor. | [`2026-05-14-live-pipeline-trace.md`](./2026-05-14-live-pipeline-trace.md) |
 | Investigation | A targeted hot-path note with evidence, hypotheses, and a recommendation. | `YYYY-MM-DD-<topic>.md` |
 | Design note | A performance-sensitive design decision that is not yet benchmarked. | [`styled-native-text.md`](./styled-native-text.md) |
+
+## Current Release Gates
+
+Use these gates before publishing performance or chrome claims:
+
+```bash
+cargo fmt --all -- --check
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+scripts/live-pipeline-trace.sh /tmp/ultty-live-pipeline-trace
+scripts/softwrap-pty-probe.sh /tmp/ultty-softwrap-pty-probe
+scripts/screenshot-smoke.sh /tmp/ultty-screenshot-smoke
+```
+
+The live pipeline and soft-wrap probes require a GUI-capable Ultty run. The
+screenshot smoke also requires a running Ultty control socket and captures
+renderer output through `ulttyctl screenshot`; see
+[`../visual-regression.md`](../visual-regression.md).
+
+The current dated evidence set is:
+
+- [`2026-05-14-baseline.md`](./2026-05-14-baseline.md) for repeatable benchmark
+  baselines.
+- [`2026-05-14-ascii-span.md`](./2026-05-14-ascii-span.md) for parser/grid
+  hot-path changes.
+- [`2026-05-14-live-pipeline-trace.md`](./2026-05-14-live-pipeline-trace.md)
+  for live PTY, parser/grid, render, and readiness wakeup evidence.
 
 ## Required Sections
 

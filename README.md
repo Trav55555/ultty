@@ -126,7 +126,14 @@ All widgets target both Ultty-native mode and ANSI mode.
 
 ## Performance
 
-Ultty performance is defined first by idle efficiency and interaction responsiveness. The latest reproducible workstation baseline is [docs/perf/2026-05-14-baseline.md](docs/perf/2026-05-14-baseline.md).
+Ultty performance is defined first by idle efficiency and interaction responsiveness. Microbenchmarks are supporting evidence; live PTY, parser/grid, render, and screenshot gates are the release guardrails.
+
+Current dated reports:
+
+- [Baseline benchmarks](docs/perf/2026-05-14-baseline.md)
+- [ASCII span and grid write path](docs/perf/2026-05-14-ascii-span.md)
+- [Live pipeline trace and PTY readiness wakeups](docs/perf/2026-05-14-live-pipeline-trace.md)
+- [Visual regression smoke](docs/visual-regression.md)
 
 | Metric | Target |
 |--------|--------|
@@ -143,6 +150,20 @@ timeout 900s cargo bench -p ultty --bench layout -- --noplot
 timeout 900s cargo bench -p ultty --bench input_latency -- --noplot
 timeout 900s cargo bench -p ultty --bench render -- --noplot
 timeout 900s cargo bench -p ultty --bench memory -- --noplot
+```
+
+Run live gates when a GUI environment is available:
+
+```bash
+scripts/live-pipeline-trace.sh /tmp/ultty-live-pipeline-trace
+scripts/softwrap-pty-probe.sh /tmp/ultty-softwrap-pty-probe
+```
+
+Run the renderer screenshot smoke against a running Ultty instance:
+
+```bash
+cargo run -p ultty --bin ultty
+scripts/screenshot-smoke.sh /tmp/ultty-screenshot-smoke
 ```
 
 ## Architecture
@@ -187,6 +208,8 @@ examples/
 - [Architecture](docs/ARCHITECTURE.md) — System design and components
 - [Architecture Vocabulary](CONTEXT.md) — Stable terms for core seams
 - [Protocol Specification](docs/PROTOCOL_SPEC.md) — Native protocol details
+- [Performance Reports](docs/perf/README.md) — Dated benchmark and live-gate evidence
+- [Visual Regression](docs/visual-regression.md) — Renderer screenshot smoke path
 - [Testing Strategy](docs/TESTING_STRATEGY.md) — How to test
 - [30/60/90 Execution Plan](docs/ROADMAP_30_60_90.md) — Milestones, ticket map, and acceptance criteria
 - [30/60/90 Issue Backlog](docs/ISSUE_BACKLOG_30_60_90.md) — Copy-paste issue templates with dependencies
@@ -194,10 +217,10 @@ examples/
 ## Development
 
 ```bash
-cargo test --workspace      # Run all tests
-cargo check --workspace     # Type check
-cargo clippy --workspace    # Lint
-cargo fmt --all             # Format
+cargo fmt --all -- --check
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ## License
