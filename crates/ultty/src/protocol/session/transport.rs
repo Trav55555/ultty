@@ -6,6 +6,7 @@ use bytes::Buf;
 use tracing::{debug, warn};
 use ultty_protocol::{AppMessage, Decode, Encode, TerminalMessage, FRAME_MAGIC};
 
+use super::errors::NativeProtocolError;
 use super::{NativeSession, MAX_READ_BUF};
 
 impl NativeSession {
@@ -61,12 +62,11 @@ impl NativeSession {
                 Ok(Some(msg))
             }
             Err(e) => {
-                let message = format!("decode error: skipped {} byte message: {}", total_len, e);
                 warn!(
                     "Session {} decode error (skipping {} byte message): {}",
                     self.session_id, total_len, e
                 );
-                self.queue_error_message(400, message);
+                self.queue_protocol_error(NativeProtocolError::decode_failure(total_len, e));
                 self.read_buf.advance(total_len);
                 Ok(None)
             }

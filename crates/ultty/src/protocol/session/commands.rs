@@ -6,9 +6,10 @@ use tracing::{debug, info, warn};
 use ultty_protocol::{
     negotiate_capabilities, negotiate_protocol_version, AppMessage, Constraints, Content, RegionId,
     Style, TerminalMessage, CAP_APPEND_CONTENT, CAP_REGION_METADATA, CAP_STREAM_LIFECYCLE,
-    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
 };
 
+use super::errors::NativeProtocolError;
 use super::{NativeSession, StyleAnimation, TERMINAL_CAPABILITIES};
 use crate::scene::region::Region;
 
@@ -49,7 +50,9 @@ impl NativeSession {
                 if self.has_capability(CAP_REGION_METADATA) {
                     self.handle_set_region_metadata(id, metadata);
                 } else {
-                    self.queue_error_message(400, "set_region_metadata not negotiated".to_string());
+                    self.queue_protocol_error(NativeProtocolError::missing_capability(
+                        "set_region_metadata",
+                    ));
                 }
             }
 
@@ -57,7 +60,9 @@ impl NativeSession {
                 if self.has_capability(CAP_APPEND_CONTENT) {
                     self.handle_append_content(id, text);
                 } else {
-                    self.queue_error_message(400, "append_content not negotiated".to_string());
+                    self.queue_protocol_error(NativeProtocolError::missing_capability(
+                        "append_content",
+                    ));
                 }
             }
 
@@ -66,7 +71,9 @@ impl NativeSession {
                     debug!("Stream {} started on region {:?}", stream_id, id);
                     self.active_streams.insert(id, stream_id);
                 } else {
-                    self.queue_error_message(400, "stream_start not negotiated".to_string());
+                    self.queue_protocol_error(NativeProtocolError::missing_capability(
+                        "stream_start",
+                    ));
                 }
             }
 
@@ -84,7 +91,9 @@ impl NativeSession {
                         }
                     }
                 } else {
-                    self.queue_error_message(400, "stream_end not negotiated".to_string());
+                    self.queue_protocol_error(NativeProtocolError::missing_capability(
+                        "stream_end",
+                    ));
                 }
             }
 
@@ -101,10 +110,9 @@ impl NativeSession {
             }
 
             AppMessage::BeginFrame { .. } | AppMessage::EndFrame { .. } => {
-                self.queue_error_message(
-                    400,
-                    "frame control message reached command application".to_string(),
-                );
+                self.queue_protocol_error(NativeProtocolError::bad_request(
+                    "frame control message reached command application",
+                ));
             }
 
             AppMessage::Subscribe { id, events } => {
@@ -216,13 +224,7 @@ impl NativeSession {
         );
 
         let Some(negotiated_version) = negotiate_protocol_version(version, PROTOCOL_VERSION) else {
-            self.queue_error_message(
-                426,
-                format!(
-                    "unsupported protocol version {} (min supported {})",
-                    version, MIN_PROTOCOL_VERSION
-                ),
-            );
+            self.queue_protocol_error(NativeProtocolError::unsupported_version(version));
             return Ok(());
         };
 
@@ -288,7 +290,7 @@ impl NativeSession {
             self.dirty_regions.insert(id);
         } else {
             warn!("SetConstraints for unknown region {:?}", id);
-            self.queue_error_message(404, format!("region {} not found", id.0));
+            self.queue_protocol_error(NativeProtocolError::region_not_found(id));
         }
     }
 
@@ -322,7 +324,7 @@ impl NativeSession {
             self.dirty_regions.insert(id);
         } else {
             warn!("SetStyle for unknown region {:?}", id);
-            self.queue_error_message(404, format!("region {} not found", id.0));
+            self.queue_protocol_error(NativeProtocolError::region_not_found(id));
         }
     }
 
@@ -344,7 +346,7 @@ impl NativeSession {
             self.dirty_regions.insert(id);
         } else {
             warn!("SetContent for unknown region {:?}", id);
-            self.queue_error_message(404, format!("region {} not found", id.0));
+            self.queue_protocol_error(NativeProtocolError::region_not_found(id));
         }
     }
 
@@ -367,10 +369,10 @@ impl NativeSession {
                         id,
                         std::mem::discriminant(other)
                     );
-                    self.queue_error_message(
-                        400,
-                        format!("cannot append to content type of region {}", id.0),
-                    );
+                    self.queue_protocol_error(NativeProtocolError::bad_request(format!(
+                        "cannot append to content type of region {}",
+                        id.0
+                    )));
                     return;
                 }
             }
@@ -380,7 +382,7 @@ impl NativeSession {
             self.dirty_regions.insert(id);
         } else {
             warn!("AppendContent for unknown region {:?}", id);
-            self.queue_error_message(404, format!("region {} not found", id.0));
+            self.queue_protocol_error(NativeProtocolError::region_not_found(id));
         }
     }
 
@@ -390,7 +392,7 @@ impl NativeSession {
             region.metadata = metadata;
         } else {
             warn!("SetRegionMetadata for unknown region {:?}", id);
-            self.queue_error_message(404, format!("region {} not found", id.0));
+            self.queue_protocol_error(NativeProtocolError::region_not_found(id));
         }
     }
 
@@ -404,7 +406,7 @@ impl NativeSession {
             debug!("Deleted region {:?}", id);
         } else {
             warn!("DeleteRegion for unknown region {:?}", id);
-            self.queue_error_message(404, format!("region {} not found", id.0));
+            self.queue_protocol_error(NativeProtocolError::region_not_found(id));
         }
     }
 
@@ -421,10 +423,9 @@ impl NativeSession {
                 "ReparentRegion failed for region {:?} to parent {:?}",
                 id, new_parent
             );
-            self.queue_error_message(
-                404,
-                format!("region {} or parent {} not found", id.0, new_parent.0),
-            );
+            self.queue_protocol_error(NativeProtocolError::region_or_parent_not_found(
+                id, new_parent,
+            ));
         }
     }
 }

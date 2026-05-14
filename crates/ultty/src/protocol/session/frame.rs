@@ -5,6 +5,7 @@ use std::io;
 use tracing::{debug, info, warn};
 use ultty_protocol::{AppMessage, FrameId, LayoutTrigger};
 
+use super::errors::NativeProtocolError;
 use super::NativeSession;
 
 /// Result of frame-gate handling for one app message.
@@ -50,7 +51,7 @@ impl NativeSession {
                     self.current_frame, frame_id
                 );
                 warn!("Session {} {}", self.session_id, message);
-                self.queue_error_message(400, message);
+                self.queue_protocol_error(NativeProtocolError::bad_request(message));
                 Ok(FrameMessageOutcome::Handled(true))
             }
             AppMessage::Disconnect => {
@@ -58,7 +59,9 @@ impl NativeSession {
                 Ok(FrameMessageOutcome::Handled(false))
             }
             AppMessage::ClientHello { .. } => {
-                self.queue_error_message(400, "client_hello not valid during frame".to_string());
+                self.queue_protocol_error(NativeProtocolError::bad_request(
+                    "client_hello not valid during frame",
+                ));
                 Ok(FrameMessageOutcome::Handled(true))
             }
             other => {
@@ -89,7 +92,7 @@ impl NativeSession {
                 "EndFrame mismatch: expected {:?}, got {:?}",
                 expected, frame_id
             );
-            self.queue_error_message(400, message);
+            self.queue_protocol_error(NativeProtocolError::bad_request(message));
             return Ok(());
         }
 

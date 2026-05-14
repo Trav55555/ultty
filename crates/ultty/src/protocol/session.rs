@@ -4,6 +4,7 @@
 //! It owns the scene graph and layout engine for that connection.
 
 mod commands;
+mod errors;
 mod frame;
 mod transport;
 
@@ -117,18 +118,6 @@ struct StyleAnimation {
 }
 
 impl NativeSession {
-    fn queue_error_message(&mut self, code: u16, message: String) {
-        if let Err(e) = self.send_message(&TerminalMessage::Error {
-            code,
-            message: message.clone(),
-        }) {
-            warn!(
-                "Session {} failed to queue error message '{}': {}",
-                self.session_id, message, e
-            );
-        }
-    }
-
     /// Create a new session from an accepted socket connection.
     pub fn new(stream: UnixStream, session_id: u64) -> io::Result<Self> {
         stream.set_nonblocking(true)?;
@@ -259,7 +248,7 @@ impl NativeSession {
             Ok(regions) => regions,
             Err(e) => {
                 warn!("Session {} layout error: {}", self.session_id, e);
-                self.queue_error_message(500, format!("layout failed: {}", e));
+                self.queue_protocol_error(errors::NativeProtocolError::layout_failed(e));
                 return Ok(());
             }
         };
