@@ -1,0 +1,57 @@
+# Performance Artifact Conventions
+
+Use this directory for measurements that support Ultty performance work. Every
+artifact should make the result reproducible, say what kind of claim the data
+supports, and preserve enough raw detail for later comparison.
+
+## Artifact Types
+
+| Type | Use for | Example |
+|------|---------|---------|
+| Baseline | Repeatable Criterion or benchmark-suite runs that support README or release claims. | [`2026-05-14-baseline.md`](./2026-05-14-baseline.md) |
+| Live stress | End-to-end terminal runs through a real tab, PTY, parser, grid, and compositor. | [`2026-05-14-live-stress.md`](./2026-05-14-live-stress.md) |
+| Investigation | A targeted hot-path note with evidence, hypotheses, and a recommendation. | `YYYY-MM-DD-<topic>.md` |
+| Design note | A performance-sensitive design decision that is not yet benchmarked. | [`styled-native-text.md`](./styled-native-text.md) |
+
+## Required Sections
+
+New measurement artifacts should include these sections:
+
+1. **Environment**: date, commit, OS, CPU, relevant GPU/window state when known,
+   terminal size for live runs, and any benchmark backend details.
+2. **Commands**: exact commands run from the repository root.
+3. **Summary**: a compact table with the headline numbers.
+4. **Detail**: raw benchmark names, timing ranges, repeat counts, variance, or
+   the exact workload shape.
+5. **Interpretation**: what the result means for the current performance
+   question, including whether the measurement supports a release claim, a
+   regression gate, or only a local investigation.
+6. **Caveats**: scheduler noise, window focus or occlusion, generated input
+   overhead, missing GPU instrumentation, benchmark shortcuts, and anything
+   else that could move the number.
+
+## Naming
+
+Use date-prefixed filenames for time-bound measurements:
+
+```text
+docs/perf/YYYY-MM-DD-<short-topic>.md
+```
+
+Keep durable design notes under descriptive names without dates when the file is
+expected to evolve with the design.
+
+## Release Claims
+
+Only baseline artifacts should be used directly for README or release claims.
+Live stress and investigation notes are useful for localising work and catching
+regressions, but they include scheduler, PTY, compositor, and window-manager
+noise. Promote a live number to a release claim only after documenting repeat
+runs, variance, and the exact hardware/window conditions.
+
+## Raw Output
+
+Prefer preserving raw output inside the artifact when it is short. For longer
+runs, store the generated log in `/tmp` during collection and summarise the
+stable values in the artifact. Do not commit machine-local Criterion output,
+flamegraphs, or temporary logs unless the file is intentionally curated.
