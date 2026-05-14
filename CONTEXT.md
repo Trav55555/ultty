@@ -16,6 +16,12 @@ The semantic app-to-terminal boundary for retained regions, terminal-side layout
 **Semantic UI primitive**
 A terminal-understandable UI concept that preserves intent across the native app boundary.
 
+**Protocol evolution**
+The pre-1.0 policy that native protocol changes may break compatibility when they improve the semantic model.
+
+**Capability negotiation**
+The protocol behavior where native apps and Ultty agree on supported protocol features before depending on them.
+
 **Native app runtime**
 The terminal-hosted runtime that lets structured applications communicate with Ultty through the native protocol instead of ANSI escape sequences.
 
@@ -106,6 +112,7 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - The **Native app runtime** belongs to the **Ultty terminal**.
 - The **Native protocol** is the boundary between the **Native app runtime** and native applications.
 - The **Native protocol** carries **Semantic UI primitives**, not arbitrary remote drawing commands.
+- **Protocol evolution** requires **Capability negotiation**.
 - A **Native app** runs inside the **Native app runtime**.
 - A **Native app** uses **Keyboard-first interaction**.
 - **Terminal correctness** takes priority over **Native runtime observability**, which takes priority over visual richness.
@@ -122,6 +129,7 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 ## Flagged ambiguities
 
 - "Native protocol" does not mean a generic remote GUI or drawing protocol; it means semantic terminal UI communication.
+- "Protocol compatibility" does not mean frozen wire compatibility before 1.0; it means explicit capability negotiation and clear failure or degradation.
 - "Native app" does not mean an embedded desktop GUI; it means a terminal-hosted application with semantic structure.
 - "Keyboard-first" does not mean keyboard-only; mouse input is valid when it accelerates a complete keyboard workflow.
 - "Performance" does not mean microbenchmark speed alone; user-visible responsiveness and idle behavior are primary.
