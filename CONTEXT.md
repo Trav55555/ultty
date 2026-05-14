@@ -40,6 +40,12 @@ The observable explanation for why Ultty last redrew or skipped redrawing termin
 **Append-oriented stream**
 Streaming content that grows forward over time, such as agent output, chat messages, logs, and tool output.
 
+**Markdown stream**
+An append-oriented stream whose markdown semantics are parsed by Ulttui and carried to Ultty as semantic content updates.
+
+**Block-level diff**
+The Ulttui behavior that turns markdown changes into incremental updates for changed blocks or leaves instead of resending the whole document.
+
 **Unix-first runtime**
 The current platform contract: Linux and macOS are supported runtime targets, while Windows is a future platform.
 
@@ -81,6 +87,7 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - **Terminal correctness** takes priority over **Native runtime observability**, which takes priority over visual richness.
 - **Native runtime observability** starts with **Session health** and **Render causality**.
 - Streaming content is first optimized for **Append-oriented streams**.
+- A **Markdown stream** uses **Block-level diff** in the **Ulttui framework**.
 - The **Native app runtime** is a **Unix-first runtime**.
 - The **Ulttui framework** is a companion framework for building applications that exercise the **Native app runtime**.
 
@@ -90,4 +97,5 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - "Native app" does not mean an embedded desktop GUI; it means a terminal-hosted application with semantic structure.
 - "Keyboard-first" does not mean keyboard-only; mouse input is valid when it accelerates a complete keyboard workflow.
 - "Streaming content" does not mean collaborative document editing or arbitrary rich-document mutation in the first architecture.
+- "Markdown stream" does not mean the Ultty terminal owns markdown parsing policy; Ulttui owns markdown semantics.
 - "Cross-platform" does not currently include Windows runtime support; Windows requires a future platform boundary.
