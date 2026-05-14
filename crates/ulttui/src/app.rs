@@ -856,6 +856,10 @@ mod async_tests {
         (runner, updates)
     }
 
+    fn test_runtime() -> Runtime {
+        Runtime::new().expect("runtime")
+    }
+
     fn mock_render_count<A: Application>(runner: &App<A>) -> usize {
         match &runner.backend {
             Backend::Mock(backend) => backend.render_count(),
@@ -877,7 +881,7 @@ mod async_tests {
             focused_id: None,
         }))]));
         let mut runner = App::new_with_backend(app, backend);
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
 
         let should_continue = runner.run_tick(&rt).expect("tick succeeds");
 
@@ -897,7 +901,7 @@ mod async_tests {
         };
         let backend = Backend::Mock(MockBackend::new(vec![Some(Event::Quit)]));
         let mut runner = App::new_with_backend(app, backend);
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
 
         let should_continue = runner.run_tick(&rt).expect("tick succeeds");
 
@@ -909,7 +913,7 @@ mod async_tests {
 
     #[test]
     fn cmd_spawn_produces_message() {
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
         let handle = rt.spawn(async { 42 });
         let result = rt.block_on(handle).expect("join");
         assert_eq!(result, 42);
@@ -917,7 +921,7 @@ mod async_tests {
 
     #[test]
     fn cmd_after_produces_message_after_delay() {
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
         let start = Instant::now();
         let handle = rt.spawn(async {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -931,7 +935,7 @@ mod async_tests {
     #[test]
     fn cmd_batch_processes_all_sub_commands() {
         let (mut runner, updates) = make_test_app();
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
 
         let cmd = Cmd::batch(vec![Cmd::message(1), Cmd::message(2), Cmd::message(3)]);
         runner.process_cmd(cmd, &rt);
@@ -943,7 +947,7 @@ mod async_tests {
     #[test]
     fn cmd_nested_batch_flattens_correctly() {
         let (mut runner, updates) = make_test_app();
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
 
         let inner = Cmd::batch(vec![Cmd::message(2), Cmd::message(3)]);
         let cmd = Cmd::batch(vec![Cmd::message(1), inner, Cmd::message(4)]);
@@ -956,7 +960,7 @@ mod async_tests {
     #[test]
     fn cmd_message_dispatches_immediately_and_feeds_back() {
         let (mut runner, updates) = make_recursive_app();
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
 
         let cmd = Cmd::message(3);
         runner.process_cmd(cmd, &rt);
@@ -986,7 +990,7 @@ mod async_tests {
             updates: updates.clone(),
         };
         let mut runner = App::new(app);
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
 
         runner.process_cmd(Cmd::message(0), &rt);
 
@@ -1063,7 +1067,7 @@ mod async_tests {
         };
 
         let mut runner = App::new(app);
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
 
         runner.process_subscriptions(&rt);
         assert!(runner.stream_subscription_handles.contains_key("ws-sub"));
@@ -1092,7 +1096,7 @@ mod async_tests {
         };
 
         let mut runner = App::new(app);
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
 
         runner.process_subscriptions(&rt);
         assert_eq!(
@@ -1117,10 +1121,10 @@ mod async_tests {
     }
 
     #[test]
-    fn test_push_screen_changes_render_target() {
+    fn screen_stack_push_changes_render_target() {
         let state = ScreenTestState::new();
         let mut runner = make_screen_runner(state.clone(), vec![]);
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
 
         let screen_view_calls = Arc::new(Mutex::new(0));
         let mount_calls = Arc::new(Mutex::new(0));
@@ -1143,10 +1147,10 @@ mod async_tests {
     }
 
     #[test]
-    fn test_pop_screen_restores_main_view() {
+    fn screen_stack_pop_restores_main_view() {
         let state = ScreenTestState::new();
         let mut runner = make_screen_runner(state.clone(), vec![]);
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
 
         let screen = TestScreen {
             view_calls: Arc::new(Mutex::new(0)),
@@ -1164,7 +1168,7 @@ mod async_tests {
     }
 
     #[test]
-    fn test_screen_event_dismiss_pops() {
+    fn screen_stack_event_dismiss_pops() {
         let state = ScreenTestState::new();
         let screen_view_calls = Arc::new(Mutex::new(0));
         let mount_calls = Arc::new(Mutex::new(0));
@@ -1190,7 +1194,7 @@ mod async_tests {
         ];
 
         let mut runner = make_screen_runner(state.clone(), events);
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
         runner.process_cmd(Cmd::PushScreen(Box::new(screen)), &rt);
 
         runner.run().expect("run app");
@@ -1202,9 +1206,9 @@ mod async_tests {
     }
 
     #[test]
-    fn test_show_toast_adds_to_active() {
+    fn toast_show_command_adds_to_active() {
         let (mut runner, _updates) = make_test_app();
-        let rt = Runtime::new().expect("runtime");
+        let rt = test_runtime();
 
         runner.process_cmd(Cmd::ShowToast(Toast::info("Saved")), &rt);
 
@@ -1213,7 +1217,7 @@ mod async_tests {
     }
 
     #[test]
-    fn test_toast_auto_expires() {
+    fn toast_auto_expires() {
         let (mut runner, _updates) = make_test_app();
         runner.active_toasts.push((
             Toast::info("short").duration(Duration::from_millis(1)),
