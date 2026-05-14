@@ -12,7 +12,7 @@ pub(super) enum FrameMessageOutcome {
     /// The frame gate handled the message and produced the session keepalive result.
     Handled(bool),
     /// The message is outside frame control and should be applied normally.
-    Apply(AppMessage),
+    Apply(Box<AppMessage>),
 }
 
 impl NativeSession {
@@ -34,7 +34,7 @@ impl NativeSession {
                 self.handle_end_frame(frame_id)?;
                 Ok(FrameMessageOutcome::Handled(true))
             }
-            other => Ok(FrameMessageOutcome::Apply(other)),
+            other => Ok(FrameMessageOutcome::Apply(Box::new(other))),
         }
     }
 

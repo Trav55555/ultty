@@ -347,7 +347,7 @@ impl NativeSession {
 
         match self.handle_frame_message(msg)? {
             frame::FrameMessageOutcome::Handled(result) => Ok(result),
-            frame::FrameMessageOutcome::Apply(msg) => self.apply_message(msg),
+            frame::FrameMessageOutcome::Apply(msg) => self.apply_message(*msg),
         }
     }
 
