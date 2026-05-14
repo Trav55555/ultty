@@ -9,6 +9,7 @@ use wgpu::util::DeviceExt;
 
 mod borders;
 mod code;
+mod geometry;
 mod markdown;
 pub(super) mod syntax;
 mod widgets;
@@ -165,111 +166,20 @@ impl Renderer {
             .map(|matches| matches.iter().map(|m| m.region_id).collect())
             .unwrap_or_default();
 
-        // Pre-compute accumulated scroll adjustments and clip rects only when
-        // scroll offsets or constraints changed.
         let needs_scroll_rebuild =
             session.is_scroll_dirty() || self.scroll_adjustments_cache.is_empty();
 
         if needs_scroll_rebuild {
-            // Pre-compute accumulated scroll adjustments (in cells) for each region.
-            // For each region, the adjustment is the sum of scroll offsets from all
-            // overflow:Scroll ancestors. The scroll container itself is NOT self-adjusted.
-            self.scroll_adjustments_cache.clear();
-            for region in scene.iter_depth_first() {
-                if region.id == ultty_protocol::RegionId::ROOT {
-                    continue;
-                }
-                let mut adj_x = 0.0f32;
-                let mut adj_y = 0.0f32;
-                let mut ancestor_id = region.parent;
-                while let Some(aid) = ancestor_id {
-                    if let Some(ancestor) = scene.get(aid) {
-                        let ov = &ancestor.constraints.overflow;
-                        let (sx, sy) = session.scroll_offset(aid);
-                        if matches!(ov.x, ultty_protocol::OverflowAxis::Scroll) {
-                            adj_x += sx;
-                        }
-                        if matches!(ov.y, ultty_protocol::OverflowAxis::Scroll) {
-                            adj_y += sy;
-                        }
-                        ancestor_id = ancestor.parent;
-                    } else {
-                        break;
-                    }
-                }
-                if adj_x != 0.0 || adj_y != 0.0 {
-                    self.scroll_adjustments_cache
-                        .insert(region.id, (adj_x, adj_y));
-                }
-            }
-
-            // Pre-compute inherited clip rects from overflow:hidden/scroll ancestors.
-            // Each entry is (min_x, min_y, max_x, max_y) in pixel coords.
-            // Positions are scroll-adjusted so clipping works correctly.
-            self.clip_rects_cache.clear();
-            for region in scene.iter_depth_first() {
-                if region.id == ultty_protocol::RegionId::ROOT {
-                    continue;
-                }
-                let layout = &region.computed;
-                let (sadj_x, sadj_y) = self
-                    .scroll_adjustments_cache
-                    .get(&region.id)
-                    .copied()
-                    .unwrap_or((0.0, 0.0));
-                let rx = ((layout.x - sadj_x) * self.cell_width).round();
-                let ry = ((layout.y - sadj_y) * self.cell_height + self.tab_bar_height).round();
-                let rw = (layout.width * self.cell_width).round();
-                let rh = (layout.height * self.cell_height).round();
-
-                // Start with own bounds (scroll-adjusted)
-                let mut clip = (rx, ry, rx + rw, ry + rh);
-
-                // Walk up ancestors, intersecting with any that clip
-                let mut ancestor_id = region.parent;
-                while let Some(aid) = ancestor_id {
-                    if let Some(ancestor) = scene.get(aid) {
-                        let ov = &ancestor.constraints.overflow;
-                        let clips_x = matches!(
-                            ov.x,
-                            ultty_protocol::OverflowAxis::Hidden
-                                | ultty_protocol::OverflowAxis::Scroll
-                        );
-                        let clips_y = matches!(
-                            ov.y,
-                            ultty_protocol::OverflowAxis::Hidden
-                                | ultty_protocol::OverflowAxis::Scroll
-                        );
-                        if clips_x || clips_y {
-                            let al = &ancestor.computed;
-                            // Ancestor uses its own scroll adjustment (from its own ancestors)
-                            let (a_sadj_x, a_sadj_y) = self
-                                .scroll_adjustments_cache
-                                .get(&aid)
-                                .copied()
-                                .unwrap_or((0.0, 0.0));
-                            let ax = ((al.x - a_sadj_x) * self.cell_width).round();
-                            let ay = ((al.y - a_sadj_y) * self.cell_height + self.tab_bar_height)
-                                .round();
-                            let aw = (al.width * self.cell_width).round();
-                            let ah = (al.height * self.cell_height).round();
-                            if clips_x {
-                                clip.0 = clip.0.max(ax);
-                                clip.2 = clip.2.min(ax + aw);
-                            }
-                            if clips_y {
-                                clip.1 = clip.1.max(ay);
-                                clip.3 = clip.3.min(ay + ah);
-                            }
-                        }
-                        ancestor_id = ancestor.parent;
-                    } else {
-                        break;
-                    }
-                }
-                self.clip_rects_cache.insert(region.id, clip);
-            }
-        } // end needs_scroll_rebuild
+            geometry::rebuild_scroll_geometry(
+                scene,
+                |id| session.scroll_offset(id),
+                self.cell_width,
+                self.cell_height,
+                self.tab_bar_height,
+                &mut self.scroll_adjustments_cache,
+                &mut self.clip_rects_cache,
+            );
+        }
 
         for region in scene.iter_depth_first() {
             if region.id == ultty_protocol::RegionId::ROOT {
