@@ -41,11 +41,18 @@ repeatable.
 
 ## Results
 
+Non-quick Criterion run:
+
 | Benchmark | Result |
 |-----------|--------|
-| `char_width/ascii_candidate_fast_path` | 36.485 ns to 36.588 ns |
-| `char_width/ascii_unicode_width_direct` | 24.254 ns to 24.531 ns |
-| `char_width/mixed_fallback_path` | 39.821 ns to 40.232 ns |
+| `char_width/ascii_candidate_fast_path` | 36.430 ns to 36.625 ns |
+| `char_width/ascii_unicode_width_direct` | 24.618 ns to 25.391 ns |
+| `char_width/mixed_fallback_path` | 39.902 ns to 40.132 ns |
+
+Quick smoke run:
+
+| Benchmark | Result |
+|-----------|--------|
 | `input_latency/single_char_echo` | 32.752 ns to 32.923 ns |
 
 ## Interpretation

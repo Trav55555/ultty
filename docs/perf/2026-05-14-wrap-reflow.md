@@ -19,12 +19,14 @@ scripts/stress-repeat.sh --runs 3 --out docs/perf/2026-05-14-live-stress-repeat.
 
 ## Summary
 
+Non-quick Criterion run:
+
 | Workload | Result |
 |----------|--------|
 | Live tab `500-lines-4000-cols` | mean 214.0 ms, stddev 18.2 ms |
-| Internal parser/grid `500_lines_4000_cols_soft_wrap` | 75.611 ms to 77.149 ms |
-| Internal parser/grid `25000_lines_80_cols_hard_breaks` | 108.84 ms to 109.16 ms |
-| Resize `80 -> 120` after 500 wrapped lines | 9.6816 ms to 10.072 ms |
+| Internal parser/grid `500_lines_4000_cols_soft_wrap` | 75.428 ms to 76.217 ms |
+| Internal parser/grid `25000_lines_80_cols_hard_breaks` | 105.47 ms to 106.18 ms |
+| Resize `80 -> 120` after 500 wrapped lines | 5.4385 ms to 6.8974 ms |
 
 ## Detail
 
@@ -40,11 +42,11 @@ same payload inside the parser/grid path:
 
 ```text
 wrap_hot_path/500_lines_4000_cols_soft_wrap
-                        time:   [75.611 ms 76.841 ms 77.149 ms]
+                        time:   [75.428 ms 75.923 ms 76.217 ms]
 wrap_hot_path/25000_lines_80_cols_hard_breaks
-                        time:   [108.84 ms 108.90 ms 109.16 ms]
+                        time:   [105.47 ms 105.82 ms 106.18 ms]
 wrap_hot_path/resize_reflow_500_wrapped_lines_80_to_120
-                        time:   [9.6816 ms 9.7596 ms 10.072 ms]
+                        time:   [5.4385 ms 6.4770 ms 6.8974 ms]
 ```
 
 ## Interpretation
