@@ -917,6 +917,34 @@ mod tests {
     }
 
     #[test]
+    fn append_content_to_rich_text_region_extends_last_span() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        child.content = Content::RichText(ultty_protocol::RichText::new().text("Hello"));
+        session.scene.insert(child);
+        negotiate_all_test_capabilities(&mut session);
+
+        session
+            .handle_message(AppMessage::AppendContent {
+                id,
+                text: " World".to_string(),
+            })
+            .unwrap();
+
+        let region = session.scene.get(id).unwrap();
+        match &region.content {
+            Content::RichText(rich) => {
+                assert_eq!(rich.spans.len(), 1);
+                assert_eq!(rich.spans[0].text, "Hello World");
+            }
+            other => panic!("Expected RichText content, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn append_content_to_none_initializes_text() {
         let mut session = make_session();
         let id = RegionId::new(1);

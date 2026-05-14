@@ -346,6 +346,16 @@ impl NativeSession {
                 Content::Text(tc) => {
                     tc.text.push_str(&text);
                 }
+                Content::RichText(rich) => {
+                    if let Some(last) = rich.spans.last_mut() {
+                        last.text.push_str(&text);
+                    } else {
+                        rich.spans.push(ultty_protocol::Span {
+                            text,
+                            style: ultty_protocol::Style::new(),
+                        });
+                    }
+                }
                 Content::Widget(ultty_protocol::WidgetContent::Markdown(md)) => {
                     md.source.push_str(&text);
                 }

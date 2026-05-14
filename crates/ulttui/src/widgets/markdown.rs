@@ -108,8 +108,11 @@ impl MarkdownView {
             return;
         }
 
+        let was_in_open_code_block = Self::is_in_open_fenced_code_block(&self.source);
         self.source.push_str(chunk);
-        self.blocks = Self::parse_blocks(&self.source);
+        if !self.try_append_chunk_incrementally(chunk, was_in_open_code_block) {
+            self.blocks = Self::parse_blocks(&self.source);
+        }
     }
 
     pub fn with_appended(mut self, chunk: impl AsRef<str>) -> Self {
@@ -256,6 +259,57 @@ impl MarkdownView {
         }
 
         blocks
+    }
+
+    fn try_append_chunk_incrementally(
+        &mut self,
+        chunk: &str,
+        was_in_open_code_block: bool,
+    ) -> bool {
+        if was_in_open_code_block {
+            if Self::chunk_closes_fenced_code_block(chunk) {
+                return false;
+            }
+            if let Some(Block::CodeBlock { text }) = self.blocks.last_mut() {
+                text.push_str(chunk);
+                return true;
+            }
+        }
+
+        if Self::is_plain_paragraph_append(chunk) {
+            if let Some(Block::Paragraph { spans }) = self.blocks.last_mut() {
+                append_plain_text_span(spans, chunk);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn is_plain_paragraph_append(chunk: &str) -> bool {
+        !chunk.is_empty()
+            && !chunk.contains('\n')
+            && !chunk.chars().any(|ch| {
+                matches!(
+                    ch,
+                    '*' | '_' | '`' | '[' | ']' | '<' | '>' | '#' | '!' | '|'
+                )
+            })
+    }
+
+    fn is_in_open_fenced_code_block(source: &str) -> bool {
+        source
+            .lines()
+            .filter(|line| line.trim_start().starts_with("```"))
+            .count()
+            % 2
+            == 1
+    }
+
+    fn chunk_closes_fenced_code_block(chunk: &str) -> bool {
+        chunk
+            .lines()
+            .any(|line| line.trim_start().starts_with("```"))
     }
 
     fn pop_inline_style(stack: &mut Vec<InlineStyleMarker>, marker: InlineStyleMarker) {
@@ -674,6 +728,21 @@ fn spans_to_plain_text(spans: &[StyledSpan]) -> String {
     out
 }
 
+fn append_plain_text_span(spans: &mut Vec<StyledSpan>, chunk: &str) {
+    let default_style = Style::new();
+    if let Some(last) = spans.last_mut() {
+        if last.style == default_style {
+            last.text.push_str(chunk);
+            return;
+        }
+    }
+
+    spans.push(StyledSpan {
+        text: chunk.to_string(),
+        style: default_style,
+    });
+}
+
 fn spans_to_lines(
     spans: &[StyledSpan],
     base_style: Style,
@@ -1026,6 +1095,65 @@ mod tests {
                 assert_eq!(rich.spans[0].text, "hello world");
             }
             _ => panic!("expected rich text content"),
+        }
+    }
+
+    #[test]
+    fn append_chunk_incrementally_extends_plain_paragraph() {
+        let mut view = MarkdownView::new("hello");
+
+        assert!(view.try_append_chunk_incrementally(" world", false));
+
+        match view.blocks.last().expect("paragraph should exist") {
+            Block::Paragraph { spans } => {
+                assert_eq!(spans_to_plain_text(spans), "hello world");
+            }
+            other => panic!("expected paragraph, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_chunk_incrementally_extends_open_code_block() {
+        let mut view = MarkdownView::new("```rust\nlet x = 1;");
+
+        assert!(view.try_append_chunk_incrementally("\nlet y = 2;", true));
+
+        match view.blocks.last().expect("code block should exist") {
+            Block::CodeBlock { text } => {
+                assert!(text.contains("let x = 1;"));
+                assert!(text.contains("let y = 2;"));
+            }
+            other => panic!("expected code block, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_chunk_reparses_when_closing_code_fence_arrives() {
+        let mut view = MarkdownView::new("```rust\nlet x = 1;");
+        view.append_chunk("\n```");
+
+        assert_eq!(view.children_count(), 1);
+        match view.blocks.last().expect("code block should exist") {
+            Block::CodeBlock { text } => {
+                assert_eq!(text.trim(), "let x = 1;");
+                assert!(!text.contains("```"));
+            }
+            other => panic!("expected code block, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_chunk_reparses_split_inline_markdown_boundary() {
+        let mut view = MarkdownView::new("**bo");
+        view.append_chunk("ld**");
+
+        match view.blocks.last().expect("paragraph should exist") {
+            Block::Paragraph { spans } => {
+                assert!(spans
+                    .iter()
+                    .any(|span| span.text == "bold" && span.style.bold));
+            }
+            other => panic!("expected paragraph, got {:?}", other),
         }
     }
 

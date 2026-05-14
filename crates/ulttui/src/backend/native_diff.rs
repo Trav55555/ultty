@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use ultty_protocol::{AppMessage, Constraints, Content, RegionId, Style};
+use ultty_protocol::{AppMessage, Constraints, Content, RegionId, RichText, Style};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct RegionSnapshot {
@@ -137,7 +137,38 @@ fn append_delta(previous: &Content, next: &Content) -> Option<String> {
         {
             Some(next.text[prev.text.len()..].to_string())
         }
+        (Content::RichText(prev), Content::RichText(next)) => rich_text_append_delta(prev, next),
         _ => None,
+    }
+}
+
+fn rich_text_append_delta(previous: &RichText, next: &RichText) -> Option<String> {
+    if previous.spans.is_empty()
+        || previous.spans.len() != next.spans.len()
+        || previous.spans.len() > next.spans.len()
+    {
+        return None;
+    }
+
+    let last_index = previous.spans.len() - 1;
+    for (prev, next) in previous.spans[..last_index]
+        .iter()
+        .zip(&next.spans[..last_index])
+    {
+        if prev != next {
+            return None;
+        }
+    }
+
+    let prev_last = &previous.spans[last_index];
+    let next_last = &next.spans[last_index];
+    if prev_last.style == next_last.style
+        && next_last.text.starts_with(&prev_last.text)
+        && next_last.text.len() > prev_last.text.len()
+    {
+        Some(next_last.text[prev_last.text.len()..].to_string())
+    } else {
+        None
     }
 }
 
@@ -145,7 +176,9 @@ fn append_delta(previous: &Content, next: &Content) -> Option<String> {
 mod tests {
     use super::{optimize_frame_messages, RegionSnapshot};
     use std::collections::HashMap;
-    use ultty_protocol::{AppMessage, Constraints, Content, RegionId, Style, TextContent};
+    use ultty_protocol::{
+        AppMessage, Constraints, Content, RegionId, RichText, Style, TextContent,
+    };
 
     fn snapshot_with_text(text: &str) -> RegionSnapshot {
         RegionSnapshot {
@@ -191,6 +224,49 @@ mod tests {
         assert_eq!(
             next.get(&id).map(|r| &r.content),
             Some(&Content::Text(TextContent::new("hello world")))
+        );
+    }
+
+    #[test]
+    fn optimize_converts_rich_text_last_span_growth_to_append_content() {
+        let id = RegionId::new(1);
+        let mut previous = HashMap::new();
+        previous.insert(
+            id,
+            RegionSnapshot {
+                parent: RegionId::ROOT,
+                constraints: Constraints::default(),
+                style: Style::default(),
+                content: Content::RichText(RichText::new().text("hello")),
+                scroll: None,
+            },
+        );
+
+        let frame = vec![
+            AppMessage::CreateRegion {
+                id,
+                parent: RegionId::ROOT,
+                insert_index: -1,
+                constraints: Constraints::default(),
+                style: Style::default(),
+            },
+            AppMessage::SetContent {
+                id,
+                content: Content::RichText(RichText::new().text("hello world")),
+            },
+        ];
+
+        let (outgoing, next) = optimize_frame_messages(&previous, frame, true);
+
+        assert!(outgoing.iter().any(|m| {
+            matches!(m, AppMessage::AppendContent { id: mid, text } if *mid == id && text == " world")
+        }));
+        assert!(!outgoing
+            .iter()
+            .any(|m| matches!(m, AppMessage::SetContent { id: mid, .. } if *mid == id)));
+        assert_eq!(
+            next.get(&id).map(|r| &r.content),
+            Some(&Content::RichText(RichText::new().text("hello world")))
         );
     }
 
