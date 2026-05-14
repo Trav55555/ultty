@@ -30,9 +30,6 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
     steps:
       - uses: actions/checkout@v4
 
@@ -62,8 +59,6 @@ jobs:
           cd target/${{ matrix.target }}/release
           if [ "${{ matrix.archive }}" = "tar.gz" ]; then
             tar czf ../../../ultty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz ultty ulttyctl
-          elif [ "${{ matrix.archive }}" = "zip" ]; then
-            7z a ../../../ultty-${{ github.ref_name }}-${{ matrix.target }}.zip ultty.exe ulttyctl.exe
           fi
 
       - name: Upload artifact

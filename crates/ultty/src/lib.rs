@@ -32,6 +32,11 @@
 //! - Headless terminal testing
 //! - Custom terminal implementations
 
+#[cfg(not(unix))]
+compile_error!(
+    "ultty is currently a Unix-first runtime. Windows support requires future ConPTY and native transport work."
+);
+
 pub mod config;
 pub mod config_watcher;
 pub mod control;

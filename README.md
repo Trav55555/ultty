@@ -54,7 +54,7 @@ cargo run -p todo-app       # Todo list with vim navigation
 cargo run -p dashboard      # Multi-panel dashboard with live updates
 ```
 
-Native apps auto-detect whether they're running inside Ultty. Inside Ultty, they use the native protocol for zero-overhead rendering. Outside Ultty, they fall back to ANSI rendering via ratatui — the same binary works in any terminal.
+Native apps auto-detect whether they're running inside Ultty. Inside Ultty, they use the native protocol for zero-overhead rendering. Outside Ultty, they use ANSI mode via ratatui on supported Unix terminals.
 
 ## ANSI Compatibility
 
@@ -140,7 +140,7 @@ crates/
 ├── ultty/            Terminal emulator — GPU renderer (wgpu), ANSI parser,
 │                     native protocol handler, scene graph, tabs/splits
 ├── ulttui/           TUI framework — Application trait, widgets, Elm architecture,
-│                     dual-mode rendering (native + ANSI fallback)
+│                     dual-mode rendering (Ultty-native + ANSI mode)
 └── ultty-protocol/   Wire protocol — Message definitions, layout types,
                       content types, shared between terminal and apps
 examples/
@@ -157,7 +157,7 @@ examples/
 - GPU-accelerated rendering via wgpu
 - Full VT100/xterm ANSI compatibility
 - Framework with Elm architecture and widget system
-- Dual-mode apps (native inside Ultty, ANSI fallback elsewhere)
+- Dual-mode apps (Ultty-native mode inside Ultty, ANSI mode on supported Unix terminals)
 - Flexbox and grid layout (via Taffy)
 - Protocol hardening (bounds checks, size limits)
 - Tabs, splits, vim-style copy mode

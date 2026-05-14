@@ -30,8 +30,7 @@ src/
 └── platform/           # Platform-specific code
     ├── mod.rs
     ├── linux.rs        # Linux-specific (pty, etc)
-    ├── macos.rs        # macOS-specific
-    └── windows.rs      # Windows-specific
+    └── macos.rs        # macOS-specific
 ```
 
 ## Key Responsibilities

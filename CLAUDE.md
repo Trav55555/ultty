@@ -56,7 +56,7 @@ examples/*                ←─depends─  ulttui
 
 Apps built with `ulttui` auto-detect their environment:
 - **Inside Ultty**: Native binary protocol over Unix socket → terminal-side layout → GPU rendering
-- **Any other terminal**: ANSI fallback via ratatui → traditional character-cell rendering
+- **Any supported Unix terminal**: ANSI mode via ratatui → traditional character-cell rendering
 
 Same binary works in both modes. Widgets implement both `render_child_native()` and `render_ansi()`.
 

@@ -45,13 +45,13 @@ cargo run -p ultty                    # Terminal emulator
 cargo run -p counter-app              # Example app
 ```
 
-**CI** (`.github/workflows/ci.yml`): check, test, clippy (`-D warnings`), fmt (`--check`), security audit, coverage (tarpaulin), benchmarks. The runtime is Unix-first: Linux/macOS are supported targets; Windows requires future named-pipe/ConPTY platform work. **RUSTFLAGS=-Dwarnings** — all warnings are errors.
+**CI** (`.github/workflows/ci.yml`): check, test, clippy (`-D warnings`), fmt (`--check`), security audit, coverage (tarpaulin), benchmarks. The runtime is Unix-first: CI validates Linux and macOS; Windows requires future named-pipe/ConPTY platform work. **RUSTFLAGS=-Dwarnings** — all warnings are errors.
 
 ## Architecture
 
 Apps built with `ulttui` auto-detect environment:
 - **Inside Ultty**: Native binary protocol over Unix socket → terminal-side layout (Taffy) → GPU rendering (wgpu)
-- **Any other terminal**: ANSI fallback via ratatui → character-cell rendering
+- **Any supported Unix terminal**: ANSI mode via ratatui → character-cell rendering
 
 **Elm architecture**: `Application` trait with `update()` → `view()` → `on_event()`. Side effects via `Cmd::spawn()` (async) and `Sub` (subscriptions).
 

@@ -25,11 +25,16 @@
 //!
 //! ## Features
 //!
-//! - **Dual-mode rendering**: Native protocol in Ultty, ANSI fallback elsewhere
+//! - **Dual-mode rendering**: Ultty-native mode in Ultty, ANSI mode on supported Unix terminals
 //! - **Declarative UI**: Build UIs as functions of state
 //! - **Elm architecture**: Message → Update → View
 //! - **Flexible layouts**: Flexbox and Grid via Taffy
 //! - **Built-in widgets**: Text, Input, Button, ScrollView, etc.
+
+#[cfg(not(unix))]
+compile_error!(
+    "ulttui currently targets Unix terminals. Windows support requires a cfg-gated ANSI/native backend split."
+);
 
 pub mod app;
 pub mod backend;

@@ -22,6 +22,11 @@
 //! # Ok::<(), ultty_client::Error>(())
 //! ```
 
+#[cfg(not(unix))]
+compile_error!(
+    "ultty-client currently uses Unix sockets. Windows support requires a named-pipe native transport."
+);
+
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;

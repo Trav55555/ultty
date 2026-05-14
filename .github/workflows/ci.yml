@@ -23,7 +23,10 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -31,16 +34,21 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
+        if: runner.os == 'Linux'
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
+        if: runner.os == 'Linux'
       - run: cargo test --workspace
       - name: Protocol roundtrip property tests
         run: cargo test -p ultty-protocol --test roundtrip -- --ignored
