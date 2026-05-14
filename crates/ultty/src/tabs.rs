@@ -55,7 +55,7 @@ pub struct TabBarState {
     pub drag_start_x: f32,
     /// Current drag X offset
     pub drag_offset_x: f32,
-    /// X position of the "+" new tab button (right of last tab).
+    /// X position of the "+" new tab button in the title/control band.
     pub new_tab_button_x: f32,
     /// Whether the "+" button is hovered.
     pub new_tab_button_hovered: bool,
@@ -100,9 +100,10 @@ impl TabBarState {
         // Individual tab entries only render when there are 2+ tabs.
         self.visible = true;
 
-        // Layout: [+][tabs...][  drag area  ][minimize][maximize][close]
-        let tabs_start_x = Self::NEW_TAB_BUTTON_WIDTH;
-        let usable_width = total_width - tabs_start_x - WINDOW_CONTROLS_WIDTH;
+        // Layout: title/control band contains [+][drag area][minimize][maximize][close].
+        // The lower tab row contains only tabs plus trailing drag area.
+        let tabs_start_x = 0.0;
+        let usable_width = total_width;
         let ideal_width = usable_width / tab_count as f32;
         let tab_width = ideal_width.clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH);
 
@@ -149,20 +150,8 @@ impl TabBarState {
 
     /// Check if a click at (x, y) is on the new tab "+" button.
     pub fn is_new_tab_button_at(&self, x: f32, y: f32) -> bool {
-        let row_top = if self.shows_tab_row() {
-            TITLE_BAR_HEIGHT
-        } else {
-            0.0
-        };
-        let row_bottom = if self.shows_tab_row() {
-            TAB_BAR_HEIGHT
-        } else {
-            TITLE_BAR_HEIGHT
-        };
-
         self.visible
-            && y >= row_top
-            && y <= row_bottom
+            && (0.0..=TITLE_BAR_HEIGHT).contains(&y)
             && x >= self.new_tab_button_x
             && x < self.new_tab_button_x + Self::NEW_TAB_BUTTON_WIDTH
     }
@@ -510,9 +499,9 @@ mod tests {
 
     #[test]
     fn tab_width_in_range_not_clamped() {
-        // 5 tabs in 750px => usable = 750 - 28 - 100 = 622 => ideal 124.4 => between 80 and 200
+        // 5 tabs in 750px => ideal 150 => between 80 and 200
         let state = bar_with(5, 0, 750.0);
-        let usable = 750.0 - TabBarState::NEW_TAB_BUTTON_WIDTH - WINDOW_CONTROLS_WIDTH;
+        let usable = 750.0;
         let expected = usable / 5.0;
         for tab in &state.tabs {
             assert!(
@@ -532,7 +521,7 @@ mod tests {
     fn tab_x_positions_are_sequential() {
         let state = bar_with(4, 0, 600.0);
         let w = state.tabs[0].width;
-        let offset = TabBarState::NEW_TAB_BUTTON_WIDTH;
+        let offset = 0.0;
         for (i, tab) in state.tabs.iter().enumerate() {
             let expected_x = offset + i as f32 * w;
             assert!(
@@ -546,9 +535,9 @@ mod tests {
     }
 
     #[test]
-    fn first_tab_starts_after_plus_button() {
+    fn first_tab_starts_at_tab_rail_edge() {
         let state = bar_with(3, 0, 900.0);
-        assert_eq!(state.tabs[0].x, TabBarState::NEW_TAB_BUTTON_WIDTH);
+        assert_eq!(state.tabs[0].x, 0.0);
     }
 
     // ---------------------------------------------------------------
@@ -612,7 +601,7 @@ mod tests {
     fn tab_at_x_exact_boundaries() {
         let state = bar_with(3, 0, 600.0);
         let w = state.tabs[0].width;
-        let offset = TabBarState::NEW_TAB_BUTTON_WIDTH;
+        let offset = 0.0;
 
         // Left edge of first tab
         assert_eq!(state.tab_at_x(offset), Some(0));
@@ -624,8 +613,8 @@ mod tests {
         assert_eq!(state.tab_at_x(offset + 2.0 * w), Some(2));
         // Past all tabs
         assert_eq!(state.tab_at_x(offset + 3.0 * w), None);
-        // Before tabs (in "+" button area)
-        assert_eq!(state.tab_at_x(0.0), None);
+        // Before tabs
+        assert_eq!(state.tab_at_x(-0.001), None);
     }
 
     #[test]
@@ -718,10 +707,12 @@ mod tests {
     }
 
     #[test]
-    fn multi_tab_plus_is_clickable_in_tab_row() {
+    fn multi_tab_plus_is_clickable_in_title_band() {
         let state = bar_with(2, 0, 800.0);
-        assert!(!state.is_new_tab_button_at(5.0, 10.0));
-        assert!(state.is_new_tab_button_at(5.0, TITLE_BAR_HEIGHT + 10.0));
+        assert!(state.is_new_tab_button_at(5.0, 10.0));
+        assert!(!state.is_new_tab_button_at(5.0, TITLE_BAR_HEIGHT + 10.0));
+        assert!(!state.is_drag_area(5.0, 10.0));
+        assert_eq!(state.tab_at_x(5.0), Some(0));
         assert!(!state.is_drag_area(5.0, TITLE_BAR_HEIGHT + 10.0));
     }
 

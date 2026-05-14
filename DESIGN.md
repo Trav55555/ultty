@@ -16,12 +16,11 @@ native terminal first.
 The top chrome has two possible bands:
 
 1. Title/control band: always visible when client-side decoration is enabled.
-   It owns window controls, window dragging, and the single-tab new-tab button.
+   It owns window controls, window dragging, and the new-tab button.
 2. Tab rail: visible only when two or more tabs exist.
 
 Single-tab state must not show an empty tab rail. It should preserve vertical
-space for terminal content and keep the new-tab affordance in the title/control
-band.
+space for terminal content.
 
 Multi-tab state shows the tab rail below the title/control band. Tabs must not
 share the same visual row as window controls. The active tab should connect to
@@ -29,6 +28,8 @@ the terminal surface; inactive tabs should be visible but quiet.
 
 Window controls stay in the upper band. Tab hit testing, tab hover, tab close,
 middle-click close, and drag-to-reorder apply only in the lower tab rail.
+The new-tab button stays in the upper band in both single-tab and multi-tab
+states.
 
 ## Terminal Surface
 
@@ -73,7 +74,8 @@ regions exactly:
 - title band empty space drags the window
 - tab rail tabs switch and drag tabs
 - tab close targets exist only when the rail is visible
-- new-tab target remains available in both single-tab and multi-tab states
+- new-tab target remains in the title band in both single-tab and multi-tab
+  states
 
 Hover and pressed states should be stable in size. No hover state should shift
 layout.

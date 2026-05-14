@@ -153,19 +153,13 @@ impl Renderer {
             let btn_w = TabBarState::NEW_TAB_BUTTON_WIDTH;
             let margin = 3.0;
             if tab_bar.new_tab_button_hovered {
-                let btn_y = if show_tabs { TITLE_BAR_HEIGHT } else { 0.0 };
-                let btn_height = if show_tabs {
-                    TAB_ROW_HEIGHT
-                } else {
-                    TITLE_BAR_HEIGHT
-                };
                 self.emit_rect(
                     &mut vertices,
                     &mut indices,
                     btn_x + margin,
-                    btn_y + margin,
+                    margin,
                     btn_w - margin * 2.0,
-                    btn_height - margin * 2.0,
+                    TITLE_BAR_HEIGHT - margin * 2.0,
                     control_hover_bg,
                 );
             }
@@ -229,11 +223,6 @@ impl Renderer {
                                 // glyph baseline lands roughly in the vertical middle.
         let tab_text_y = TITLE_BAR_HEIGHT + (TAB_ROW_HEIGHT - self.cell_height) / 2.0;
         let control_text_y = (TITLE_BAR_HEIGHT - self.cell_height) / 2.0;
-        let plus_text_y = if tab_bar.shows_tab_row() {
-            tab_text_y
-        } else {
-            control_text_y
-        };
 
         let show_tabs = tab_bar.shows_tab_row();
         for tab in &tab_bar.tabs {
@@ -322,7 +311,7 @@ impl Renderer {
             let (vertices, indices) = self.text_renderer.build_label_vertices(
                 "+",
                 center_x,
-                plus_text_y,
+                control_text_y,
                 btn_w,
                 plus_color,
             );
