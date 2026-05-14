@@ -31,6 +31,12 @@ The baseline product obligation that ordinary terminal applications behave relia
 **Native runtime observability**
 The ability to inspect native app runtime state from inside Ultty without relying only on external logs.
 
+**Session health**
+The observable state of a native protocol session, including connection, focus, dirty, streaming, blocked, and error conditions.
+
+**Render causality**
+The observable explanation for why Ultty last redrew or skipped redrawing terminal and native app content.
+
 **Unix-first runtime**
 The current platform contract: Linux and macOS are supported runtime targets, while Windows is a future platform.
 
@@ -70,6 +76,7 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - A **Native app** runs inside the **Native app runtime**.
 - A **Native app** uses **Keyboard-first interaction**.
 - **Terminal correctness** takes priority over **Native runtime observability**, which takes priority over visual richness.
+- **Native runtime observability** starts with **Session health** and **Render causality**.
 - The **Native app runtime** is a **Unix-first runtime**.
 - The **Ulttui framework** is a companion framework for building applications that exercise the **Native app runtime**.
 
