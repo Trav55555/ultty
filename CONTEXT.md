@@ -25,6 +25,12 @@ A terminal-hosted application that communicates through semantic UI primitives w
 **Keyboard-first interaction**
 An interaction model where every important native app workflow is usable by keyboard, with mouse input allowed as an accelerator.
 
+**Terminal correctness**
+The baseline product obligation that ordinary terminal applications behave reliably before native app features are optimized.
+
+**Native runtime observability**
+The ability to inspect native app runtime state from inside Ultty without relying only on external logs.
+
 **Unix-first runtime**
 The current platform contract: Linux and macOS are supported runtime targets, while Windows is a future platform.
 
@@ -63,6 +69,7 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - The **Native protocol** carries **Semantic UI primitives**, not arbitrary remote drawing commands.
 - A **Native app** runs inside the **Native app runtime**.
 - A **Native app** uses **Keyboard-first interaction**.
+- **Terminal correctness** takes priority over **Native runtime observability**, which takes priority over visual richness.
 - The **Native app runtime** is a **Unix-first runtime**.
 - The **Ulttui framework** is a companion framework for building applications that exercise the **Native app runtime**.
 
