@@ -2,6 +2,10 @@
 
 ## Overview
 
+For the canonical project vocabulary used in architecture work, see
+[`CONTEXT.md`](../CONTEXT.md). For accepted design decisions, see
+[`docs/adr/`](adr/).
+
 Ultty is composed of three main crates:
 
 | Crate | Purpose | Users |
@@ -136,6 +140,17 @@ App                                   Terminal
  │                                        │
 ```
 
+### Native Session Split
+
+The terminal-side native protocol session keeps socket I/O, keepalive, and
+session orchestration in `crates/ultty/src/protocol/session.rs`. Message-specific
+state changes live in `protocol::session::commands`, frame batching lives in
+`protocol::session::frame`, and scene-to-layout output lives behind
+`scene::layout::LayoutEngine::compute_scene_layout`.
+
+See [ADR 0001](adr/0001-native-session-decomposition.md) for the native session
+decomposition decision and testing strategy.
+
 ### Wire Format
 
 ```
@@ -160,6 +175,7 @@ App                                   Terminal
 2. **Retained mode scene graph**: Terminal owns the tree, apps send diffs
 3. **Atomic frames**: BeginFrame/EndFrame prevents tearing
 4. **Dual-mode framework**: Native when possible, ANSI fallback otherwise
+5. **Native session decomposition**: command application, frame batching, and layout output have named seams behind `NativeSession`
 
 ## File Organization
 
