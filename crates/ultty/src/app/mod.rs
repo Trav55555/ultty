@@ -44,6 +44,9 @@ const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(200);
 /// Maintenance wakeup while PTY and control sockets are not wired into winit wakeups.
 const MAINTENANCE_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
+/// Faster PTY polling while a frame is dirty but not ready to render.
+const PTY_CATCHUP_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
 /// Terminal application.
 pub struct App {
     /// Window

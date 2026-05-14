@@ -118,25 +118,61 @@ The long soft-wrap workload is now a distinct follow-up: wall-clock time remains
 high even though parser/grid time, PTY drain time, and max-frame time are all
 healthy in the trace.
 
+## Soft-Wrap Catch-Up Polling
+
+Run from `/tmp/ultty-live-pipeline-softwrap-catchup` after adding dirty-frame
+PTY catch-up polling:
+
+| Metric | Value | Limit |
+|--------|-------|-------|
+| Parser/grid time | 122.150 ms | 900 ms |
+| PTY drain time | 185.503 ms | 1000 ms |
+| Render frame time | 232.775 ms | 400 ms |
+| Max render frame | 12.402 ms | 50 ms |
+
+Status: PASS. The selected live stress workloads from the same run were:
+
+| Workload | Runs | Mean | Stddev | Min | Max |
+|----------|------|------|--------|-----|-----|
+| `1. throughput-4MiB` | 2 | 79.5 ms | 31.8 ms | 57 ms | 102 ms |
+| `6. 500-lines-4000-cols` | 2 | 1809.0 ms | 62.2 ms | 1765 ms | 1853 ms |
+| `8. 20k-scrollback-lines` | 2 | 67.5 ms | 16.3 ms | 56 ms | 79 ms |
+
+A redirected generator-only run of `scripts/stress.sh 6` reported 116 ms, and
+the equivalent inline `awk` generator took about 112 ms. That puts the remaining
+live soft-wrap gap outside the text generator, parser/grid, measured PTY drain,
+and individual render-frame costs.
+
+The catch-up change wakes the app every 1 ms while a frame is dirty but not yet
+eligible to render. This gives the PTY more opportunities to drain between
+render deadlines without increasing the 60 fps render cadence. It reduced
+`500-lines-4000-cols` from 2067.5 ms to 1809.0 ms in the two-run live repeat.
+
 ## Interpretation
 
-The live stress gap is not dominated by GPU render time in this workload. Render
-frames accounted for roughly 27 ms total, while parser/grid work accounted for
-roughly 715 ms and total PTY drain accounted for roughly 742 ms.
+The original live stress gap was dominated by parser/grid and PTY drain time.
+After parser-owned ASCII spans and grid/buffer ASCII span writes, the long
+soft-wrap workload became a different shape: the app-side trace is healthy, but
+the child process still spends most of its wall-clock time blocked behind PTY
+throughput and scheduling.
 
-The trace also shows frame pacing doing the right broad thing: thousands of PTY
-read batches and parse/grid chunks are coalesced into 17 rendered frames. That
-is why live wall-clock time remains much higher than isolated parser
-microbenchmarks without implying the renderer is the main bottleneck.
+The current trace coalesces 12,768 PTY read batches into 229 rendered frames,
+with a worst frame of 12.402 ms. That rules out GPU jank as the reason the
+soft-wrap workload still takes seconds. The remaining cost is consistent with
+PTY backpressure during very long line writes, where the child can only make
+progress as the terminal side repeatedly drains the master.
 
 ## Recommendation
 
-Prioritise parser/grid throughput before renderer work:
+Keep the current parser/grid optimisations and live trace gate as the baseline.
+Further soft-wrap work should focus on PTY wakeup strategy rather than renderer
+micro-optimisation:
 
-1. Add a production parser-owned ASCII span action or callback, using
-   [`2026-05-14-ascii-span.md`](./2026-05-14-ascii-span.md) as the proof target.
-2. Optimise main-screen scrollback append and row movement, using
-   [`2026-05-14-scroll-history.md`](./2026-05-14-scroll-history.md) as the probe.
+1. Prototype event-loop wakeups driven by real PTY readiness instead of periodic
+   winit timers.
+2. If keeping timer-based catch-up, test whether bounded immediate polling after
+   a successful PTY drain improves long-line throughput without unacceptable CPU
+   spin.
 3. Keep `scripts/live-pipeline-trace.sh` as the end-to-end guardrail after each
    internal optimisation.
 

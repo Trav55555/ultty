@@ -14,6 +14,11 @@ impl App {
             let render_deadline =
                 self.last_render + self.render_delay_for_sync_state(self.sync_update_active());
             deadline = deadline.min(render_deadline);
+            if let Some(catchup_deadline) =
+                catchup_poll_deadline(now, render_deadline, self.needs_redraw)
+            {
+                deadline = deadline.min(catchup_deadline);
+            }
         }
 
         deadline = deadline.min(self.last_cursor_blink + super::CURSOR_BLINK_INTERVAL);
@@ -260,6 +265,18 @@ fn should_render(
     needs_redraw && frame_elapsed >= render_delay_for_sync_state(sync_active)
 }
 
+fn catchup_poll_deadline(
+    now: Instant,
+    render_deadline: Instant,
+    needs_redraw: bool,
+) -> Option<Instant> {
+    if needs_redraw && render_deadline > now {
+        Some(now + super::PTY_CATCHUP_POLL_INTERVAL)
+    } else {
+        None
+    }
+}
+
 pub(super) fn pipeline_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -276,7 +293,7 @@ pub(super) fn pipeline_trace_enabled() -> bool {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{render_delay_for_sync_state, should_render};
+    use super::{catchup_poll_deadline, render_delay_for_sync_state, should_render};
 
     #[test]
     fn should_render_when_dirty_and_frame_interval_elapsed() {
@@ -308,6 +325,25 @@ mod tests {
             render_delay_for_sync_state(true),
             Duration::from_millis(200)
         );
+    }
+
+    #[test]
+    fn catchup_poll_deadline_wakes_before_next_render() {
+        let now = Instant::now();
+        assert_eq!(
+            catchup_poll_deadline(now, now + Duration::from_millis(16), true),
+            Some(now + Duration::from_millis(1))
+        );
+    }
+
+    #[test]
+    fn catchup_poll_deadline_ignores_clean_or_due_frames() {
+        let now = Instant::now();
+        assert_eq!(
+            catchup_poll_deadline(now, now + Duration::from_millis(16), false),
+            None
+        );
+        assert_eq!(catchup_poll_deadline(now, now, true), None);
     }
 
     #[test]
