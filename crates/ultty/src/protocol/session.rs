@@ -4,6 +4,7 @@
 //! It owns the scene graph and layout engine for that connection.
 
 mod commands;
+mod dirty;
 mod errors;
 mod frame;
 mod transport;
@@ -174,10 +175,7 @@ impl NativeSession {
                 root.constraints.display = Display::Flex;
                 root.constraints.flex_direction = FlexDirection::Column;
             }
-            self.scene_dirty = true;
-            self.constraints_dirty = true;
-            self.render_dirty = true;
-            self.scroll_dirty = true;
+            self.mark_full_scene_scroll_rebuild();
         }
     }
 
@@ -399,9 +397,7 @@ impl NativeSession {
             let _ = self.send_scroll_event(id, sx, sy);
         }
         if !self.scroll_targets.is_empty() {
-            self.scene_dirty = true;
-            self.render_dirty = true;
-            self.scroll_dirty = true;
+            self.mark_scroll_animation_changed();
         }
         !self.scroll_targets.is_empty()
     }
@@ -481,8 +477,7 @@ impl NativeSession {
 
         let active = !self.style_animations.is_empty();
         if active {
-            self.scene_dirty = true;
-            self.render_dirty = true;
+            self.mark_animation_visual_changed();
         }
         active
     }
@@ -809,6 +804,22 @@ mod tests {
     }
 
     #[test]
+    fn viewport_resize_marks_full_scene_and_scroll_dirty() {
+        let mut session = make_session();
+        session.scene_dirty = false;
+        session.constraints_dirty = false;
+        session.render_dirty = false;
+        session.scroll_dirty = false;
+
+        session.set_viewport(120.0, 40.0);
+
+        assert!(session.scene_dirty);
+        assert!(session.constraints_dirty);
+        assert!(session.render_dirty);
+        assert!(session.scroll_dirty);
+    }
+
+    #[test]
     fn client_hello_negotiates_version_and_capabilities() {
         let mut session = make_session();
 
@@ -1076,6 +1087,37 @@ mod tests {
         session.clear_render_dirty();
         assert!(!session.is_render_dirty());
         assert!(session.dirty_regions().is_empty());
+    }
+
+    #[test]
+    fn set_constraints_marks_constraint_and_scroll_dirty() {
+        let mut session = make_session();
+        let id = RegionId::new(1);
+
+        let mut child = Region::new(id);
+        child.parent = Some(RegionId::ROOT);
+        session.scene.insert(child);
+        session.scene_dirty = false;
+        session.constraints_dirty = false;
+        session.render_dirty = false;
+        session.scroll_dirty = false;
+        session.dirty_regions.clear();
+
+        session
+            .handle_message(AppMessage::SetConstraints {
+                id,
+                constraints: ultty_protocol::Constraints {
+                    width: Dimension::Cells(20.0),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+
+        assert!(session.scene_dirty);
+        assert!(session.constraints_dirty);
+        assert!(session.render_dirty);
+        assert!(session.scroll_dirty);
+        assert!(session.dirty_regions().contains(&id));
     }
 
     #[test]

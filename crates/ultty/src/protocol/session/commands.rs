@@ -139,8 +139,7 @@ impl NativeSession {
                         let _ = self.send_scroll_event(id, x, y);
                     }
                 }
-                self.scene_dirty = true;
-                self.scroll_dirty = true;
+                self.mark_scroll_position_changed();
                 debug!(
                     "Scroll set for {:?}: ({}, {}), animate={}",
                     id, x, y, animate
@@ -272,9 +271,7 @@ impl NativeSession {
             self.scene.insert(region);
         }
 
-        self.scene_dirty = true;
-        self.constraints_dirty = true;
-        self.render_dirty = true;
+        self.mark_full_scene_rebuild();
         debug!("Created region {:?} under {:?}", id, parent);
     }
 
@@ -283,11 +280,7 @@ impl NativeSession {
         if let Some(region) = self.scene.get_mut(id) {
             region.constraints = constraints;
             region.mark_dirty();
-            self.scene_dirty = true;
-            self.constraints_dirty = true;
-            self.render_dirty = true;
-            self.scroll_dirty = true;
-            self.dirty_regions.insert(id);
+            self.mark_region_constraints_changed(id);
         } else {
             warn!("SetConstraints for unknown region {:?}", id);
             self.queue_protocol_error(NativeProtocolError::region_not_found(id));
@@ -319,9 +312,7 @@ impl NativeSession {
                 region.style = style;
             }
             region.mark_dirty();
-            self.scene_dirty = true;
-            self.render_dirty = true;
-            self.dirty_regions.insert(id);
+            self.mark_region_visual_changed(id);
         } else {
             warn!("SetStyle for unknown region {:?}", id);
             self.queue_protocol_error(NativeProtocolError::region_not_found(id));
@@ -341,9 +332,7 @@ impl NativeSession {
         if let Some(region) = self.scene.get_mut(id) {
             region.content = content;
             region.mark_dirty();
-            self.scene_dirty = true;
-            self.render_dirty = true;
-            self.dirty_regions.insert(id);
+            self.mark_region_visual_changed(id);
         } else {
             warn!("SetContent for unknown region {:?}", id);
             self.queue_protocol_error(NativeProtocolError::region_not_found(id));
@@ -377,9 +366,7 @@ impl NativeSession {
                 }
             }
             region.mark_dirty();
-            self.scene_dirty = true;
-            self.render_dirty = true;
-            self.dirty_regions.insert(id);
+            self.mark_region_visual_changed(id);
         } else {
             warn!("AppendContent for unknown region {:?}", id);
             self.queue_protocol_error(NativeProtocolError::region_not_found(id));
@@ -399,9 +386,7 @@ impl NativeSession {
     /// Handle DeleteRegion.
     fn handle_delete_region(&mut self, id: RegionId) {
         if self.scene.remove(id).is_some() {
-            self.scene_dirty = true;
-            self.constraints_dirty = true;
-            self.render_dirty = true;
+            self.mark_full_scene_rebuild();
             self.subscriptions.remove(&id);
             debug!("Deleted region {:?}", id);
         } else {
@@ -414,9 +399,7 @@ impl NativeSession {
     fn handle_reparent_region(&mut self, id: RegionId, new_parent: RegionId, insert_index: i32) {
         let index = usize::try_from(insert_index).unwrap_or(usize::MAX);
         if self.scene.reparent(id, new_parent, index) {
-            self.scene_dirty = true;
-            self.constraints_dirty = true;
-            self.render_dirty = true;
+            self.mark_full_scene_rebuild();
             debug!("Reparented region {:?} to {:?}", id, new_parent);
         } else {
             warn!(

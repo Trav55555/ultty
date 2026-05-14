@@ -107,9 +107,8 @@ impl NativeSession {
         if self.scene_dirty {
             if self.constraints_dirty {
                 self.compute_and_send_layout(Some(frame_id), LayoutTrigger::ConstraintChange)?;
-                self.constraints_dirty = false;
             }
-            self.scene_dirty = false;
+            self.mark_scene_layout_clean();
         }
 
         Ok(())
