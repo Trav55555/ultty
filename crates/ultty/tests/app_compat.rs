@@ -218,6 +218,31 @@ impl AppTester {
         self.terminal().is_alternate_screen()
     }
 
+    /// Wait until the application enters alternate screen mode.
+    pub fn wait_for_alternate_screen(&mut self, max_wait: Duration) -> std::io::Result<bool> {
+        let start = std::time::Instant::now();
+
+        while start.elapsed() < max_wait {
+            let events = self.event_loop.process()?;
+            if self.is_alternate_screen() {
+                return Ok(true);
+            }
+
+            for event in &events {
+                if let TerminalEvent::ChildExited { status } = event {
+                    return Err(std::io::Error::other(format!(
+                        "Application exited with status {}",
+                        status
+                    )));
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        Ok(self.is_alternate_screen())
+    }
+
     /// Check if mouse tracking is enabled.
     pub fn has_mouse_tracking(&self) -> bool {
         self.terminal().mouse_tracking_enabled()
@@ -308,9 +333,10 @@ fn test_nvim_launches() {
         .wait_until_stable(Duration::from_millis(500), Duration::from_secs(5))
         .expect("nvim did not stabilize");
 
-    // nvim should switch to alternate screen
     assert!(
-        tester.is_alternate_screen(),
+        tester
+            .wait_for_alternate_screen(Duration::from_secs(5))
+            .expect("nvim alternate screen check failed"),
         "nvim should use alternate screen"
     );
 
@@ -352,7 +378,9 @@ fn test_vim_launches() {
         .expect("vim did not stabilize");
 
     assert!(
-        tester.is_alternate_screen(),
+        tester
+            .wait_for_alternate_screen(Duration::from_secs(5))
+            .expect("vim alternate screen check failed"),
         "vim should use alternate screen"
     );
 
