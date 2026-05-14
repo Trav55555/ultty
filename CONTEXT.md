@@ -11,7 +11,10 @@ The primary product: a GPU-accelerated terminal emulator that runs ordinary ANSI
 The companion application framework that proves and exercises Ultty's native app runtime.
 
 **Native protocol**
-The binary app-to-terminal wire protocol defined in `crates/ultty-protocol`. Apps send structured messages such as `CreateRegion`, `SetContent`, `SetConstraints`, `BeginFrame`, and `EndFrame`.
+The semantic app-to-terminal boundary for retained regions, terminal-side layout, structured content, focus, events, and incremental updates.
+
+**Semantic UI primitive**
+A terminal-understandable UI concept that preserves intent across the native app boundary.
 
 **Native app runtime**
 The terminal-hosted runtime that lets structured applications communicate with Ultty through the native protocol instead of ANSI escape sequences.
@@ -48,4 +51,9 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - The **Ultty terminal** is the product center of the workspace.
 - The **Native app runtime** belongs to the **Ultty terminal**.
 - The **Native protocol** is the boundary between the **Native app runtime** and native applications.
+- The **Native protocol** carries **Semantic UI primitives**, not arbitrary remote drawing commands.
 - The **Ulttui framework** is a companion framework for building applications that exercise the **Native app runtime**.
+
+## Flagged ambiguities
+
+- "Native protocol" does not mean a generic remote GUI or drawing protocol; it means semantic terminal UI communication.
