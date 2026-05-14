@@ -34,17 +34,16 @@ impl Renderer {
                 MarkdownBlock::Rule => {
                     let count = (_width / self.cell_width.max(1.0)) as usize;
                     let rule = "─".repeat(count.max(1));
-                    let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                    self.text_renderer.append_styled_text_vertices(
                         &rule,
                         x,
                         cursor_y,
                         self.color_scheme.named[8],
                         false,
                         false,
+                        text_vertices,
+                        text_indices,
                     );
-                    let base_idx = text_vertices.len() as u32;
-                    text_vertices.extend(verts);
-                    text_indices.extend(idxs.iter().map(|i| i + base_idx));
                 }
                 MarkdownBlock::Table(lines) => {
                     self.render_markdown_table(&lines, x, cursor_y, text_vertices, text_indices);
@@ -100,12 +99,16 @@ impl Renderer {
                     } else {
                         self.color_scheme.named[8]
                     };
-                    let (verts, idxs, advance) = self
-                        .text_renderer
-                        .build_styled_text_vertices(checkbox, x, cursor_y, color, false, false);
-                    let base_idx = text_vertices.len() as u32;
-                    text_vertices.extend(verts);
-                    text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                    let advance = self.text_renderer.append_styled_text_vertices(
+                        checkbox,
+                        x,
+                        cursor_y,
+                        color,
+                        false,
+                        false,
+                        text_vertices,
+                        text_indices,
+                    );
                     self.render_markdown_inline(
                         text,
                         x + advance,
@@ -122,17 +125,16 @@ impl Renderer {
                     for depth in 0..depth {
                         let bar_x = x + self.cell_width * 2.0 * depth as f32;
                         let bar = "│";
-                        let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                        self.text_renderer.append_styled_text_vertices(
                             bar,
                             bar_x,
                             cursor_y,
                             self.color_scheme.named[8],
                             false,
                             false,
+                            text_vertices,
+                            text_indices,
                         );
-                        let base_idx = text_vertices.len() as u32;
-                        text_vertices.extend(verts);
-                        text_indices.extend(idxs.iter().map(|i| i + base_idx));
                     }
                     if !text.is_empty() {
                         self.render_markdown_inline(
@@ -147,17 +149,16 @@ impl Renderer {
                     }
                 }
                 MarkdownBlock::OrderedList { prefix, text } => {
-                    let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
+                    let advance = self.text_renderer.append_styled_text_vertices(
                         &prefix,
                         x,
                         cursor_y,
                         self.color_scheme.named[8],
                         false,
                         false,
+                        text_vertices,
+                        text_indices,
                     );
-                    let base_idx = text_vertices.len() as u32;
-                    text_vertices.extend(verts);
-                    text_indices.extend(idxs.iter().map(|i| i + base_idx));
                     self.render_markdown_inline(
                         text,
                         x + advance,
@@ -169,17 +170,16 @@ impl Renderer {
                     );
                 }
                 MarkdownBlock::UnorderedList { text } => {
-                    let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
+                    let advance = self.text_renderer.append_styled_text_vertices(
                         "• ",
                         x,
                         cursor_y,
                         self.color_scheme.named[8],
                         false,
                         false,
+                        text_vertices,
+                        text_indices,
                     );
-                    let base_idx = text_vertices.len() as u32;
-                    text_vertices.extend(verts);
-                    text_indices.extend(idxs.iter().map(|i| i + base_idx));
                     self.render_markdown_inline(
                         text,
                         x + advance,
@@ -252,17 +252,16 @@ impl Renderer {
             if trimmed.contains("---") && !trimmed.chars().any(|c| c.is_alphanumeric()) {
                 let total_chars: usize = col_widths.iter().map(|w| w + 3).sum::<usize>() + 1;
                 let rule = "─".repeat(total_chars);
-                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                self.text_renderer.append_styled_text_vertices(
                     &rule,
                     x,
                     cursor_y,
                     self.color_scheme.named[8],
                     false,
                     false,
+                    text_vertices,
+                    text_indices,
                 );
-                let base_idx = text_vertices.len() as u32;
-                text_vertices.extend(verts);
-                text_indices.extend(idxs.iter().map(|i| i + base_idx));
                 cursor_y += line_height;
                 continue;
             }
@@ -281,12 +280,16 @@ impl Renderer {
                     self.color_scheme.foreground
                 };
 
-                let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
-                    &padded, cursor_x, cursor_y, color, is_header, false,
+                let advance = self.text_renderer.append_styled_text_vertices(
+                    &padded,
+                    cursor_x,
+                    cursor_y,
+                    color,
+                    is_header,
+                    false,
+                    text_vertices,
+                    text_indices,
                 );
-                let base_idx = text_vertices.len() as u32;
-                text_vertices.extend(verts);
-                text_indices.extend(idxs.iter().map(|i| i + base_idx));
                 cursor_x += advance;
             }
             cursor_y += line_height;
@@ -339,12 +342,15 @@ impl Renderer {
         text_vertices: &mut Vec<Vertex>,
         text_indices: &mut Vec<u32>,
     ) -> f32 {
-        let (verts, idxs, advance) = self
-            .text_renderer
-            .build_styled_text_vertices(text, x, y, color, bold, italic);
-        let base_idx = text_vertices.len() as u32;
-        text_vertices.extend(verts);
-        text_indices.extend(idxs.iter().map(|i| i + base_idx));
-        advance
+        self.text_renderer.append_styled_text_vertices(
+            text,
+            x,
+            y,
+            color,
+            bold,
+            italic,
+            text_vertices,
+            text_indices,
+        )
     }
 }

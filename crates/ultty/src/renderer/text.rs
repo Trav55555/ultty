@@ -23,6 +23,8 @@ pub struct TextRenderer {
     font_family: String,
     ligatures: bool,
     shaping_cache: HashMap<ShapingCacheKey, CacheKey>,
+    styled_text_buffer: Buffer,
+    byte_to_char_offsets: Vec<usize>,
 }
 
 impl TextRenderer {
@@ -57,6 +59,8 @@ impl TextRenderer {
             atlas.bind_group_layout(),
         )?;
 
+        let styled_text_buffer = Buffer::new(&mut font_system, metrics);
+
         Ok(Self {
             font_system,
             atlas,
@@ -68,6 +72,8 @@ impl TextRenderer {
             font_family,
             ligatures: font_config.ligatures,
             shaping_cache: HashMap::with_capacity(256),
+            styled_text_buffer,
+            byte_to_char_offsets: Vec::with_capacity(256),
         })
     }
 
@@ -213,7 +219,7 @@ impl TextRenderer {
                     let gx = (glyph_x + glyph_info.left).round();
                     let gy = (y + (self.cell_height - glyph_info.top)).round();
 
-                    self.emit_glyph_quad(&mut vertices, &mut indices, gx, gy, &glyph_info, fg);
+                    Self::emit_glyph_quad(&mut vertices, &mut indices, gx, gy, &glyph_info, fg);
                 }
             }
         }
@@ -232,15 +238,47 @@ impl TextRenderer {
         bold: bool,
         italic: bool,
     ) -> (Vec<Vertex>, Vec<u32>, f32) {
-        use cosmic_text::{Style as CosmicStyle, Weight};
-
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
+        let advance = self.append_styled_text_vertices(
+            text,
+            x,
+            y,
+            fg,
+            bold,
+            italic,
+            &mut vertices,
+            &mut indices,
+        );
+        (vertices, indices, advance)
+    }
 
-        let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
-        buffer.set_size(&mut self.font_system, 10000.0, self.cell_height * 2.0);
+    /// Append vertices for styled text into caller-owned buffers.
+    ///
+    /// This path reuses the renderer's shaping buffer and byte-offset scratch
+    /// map, and emits indices directly into the destination buffers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_styled_text_vertices(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        fg: Rgba,
+        bold: bool,
+        italic: bool,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+    ) -> f32 {
+        use cosmic_text::{Style as CosmicStyle, Weight};
 
-        let shaping = self.get_shaping();
+        self.styled_text_buffer
+            .set_size(&mut self.font_system, 10000.0, self.cell_height * 2.0);
+
+        let shaping = if self.ligatures {
+            Shaping::Advanced
+        } else {
+            Shaping::Basic
+        };
         let mut attrs = if self.font_family.is_empty() {
             Attrs::new().family(Family::Monospace)
         } else {
@@ -254,17 +292,15 @@ impl TextRenderer {
             attrs = attrs.style(CosmicStyle::Italic);
         }
 
-        buffer.set_text(&mut self.font_system, text, attrs, shaping);
+        self.styled_text_buffer
+            .set_text(&mut self.font_system, text, attrs, shaping);
 
-        let char_indices: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
-        let total_advance = text.chars().count() as f32 * self.cell_width;
+        fill_byte_to_char_offsets(text, &mut self.byte_to_char_offsets);
+        let total_advance = self.byte_to_char_offsets.len() as f32 * self.cell_width;
 
-        for run in buffer.layout_runs() {
+        for run in self.styled_text_buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
-                let char_idx = char_indices
-                    .iter()
-                    .position(|&b| b == glyph.start)
-                    .unwrap_or(0);
+                let char_idx = byte_offset_to_char_index(&self.byte_to_char_offsets, glyph.start);
                 let glyph_x = x + char_idx as f32 * self.cell_width;
 
                 let physical = glyph.physical((0.0, 0.0), 1.0);
@@ -280,12 +316,12 @@ impl TextRenderer {
                     let gx = (glyph_x + glyph_info.left).round();
                     let gy = (y + (self.cell_height - glyph_info.top)).round();
 
-                    self.emit_glyph_quad(&mut vertices, &mut indices, gx, gy, &glyph_info, fg);
+                    Self::emit_glyph_quad(vertices, indices, gx, gy, &glyph_info, fg);
                 }
             }
         }
 
-        (vertices, indices, total_advance)
+        total_advance
     }
 
     /// Render text from terminal state.
@@ -510,7 +546,7 @@ impl TextRenderer {
                             + y_offset)
                             .round();
 
-                        self.emit_glyph_quad(
+                        Self::emit_glyph_quad(
                             &mut vertices,
                             &mut indices,
                             x,
@@ -528,7 +564,6 @@ impl TextRenderer {
 
     /// Emit a quad for a glyph.
     fn emit_glyph_quad(
-        &self,
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
         x: f32,
@@ -640,7 +675,7 @@ impl TextRenderer {
                         let gy =
                             (y + (self.cell_height - glyph_info.top) + physical.y as f32).round();
 
-                        self.emit_glyph_quad(
+                        Self::emit_glyph_quad(
                             &mut vertices,
                             &mut indices,
                             gx,
@@ -695,7 +730,7 @@ impl TextRenderer {
                         let gx = x + glyph_info.left + physical.x as f32;
                         let gy = y + (self.cell_height - glyph_info.top) + physical.y as f32;
 
-                        self.emit_glyph_quad(vertices, indices, gx, gy, &glyph_info, color);
+                        Self::emit_glyph_quad(vertices, indices, gx, gy, &glyph_info, color);
                     }
                 }
             }
@@ -727,6 +762,18 @@ fn is_block_char(ch: char) -> bool {
     matches!(ch, '\u{2580}'..='\u{259F}')
 }
 
+fn fill_byte_to_char_offsets(text: &str, offsets: &mut Vec<usize>) {
+    offsets.clear();
+    offsets.extend(text.char_indices().map(|(byte_offset, _)| byte_offset));
+}
+
+fn byte_offset_to_char_index(offsets: &[usize], byte_offset: usize) -> usize {
+    match offsets.binary_search(&byte_offset) {
+        Ok(index) => index,
+        Err(index) => index.saturating_sub(1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -736,6 +783,28 @@ mod tests {
         let metrics = Metrics::new(14.0, 18.0);
         assert_eq!(metrics.font_size, 14.0);
         assert_eq!(metrics.line_height, 18.0);
+    }
+
+    #[test]
+    fn byte_offset_lookup_maps_utf8_offsets_to_char_indices() {
+        let mut offsets = Vec::new();
+        fill_byte_to_char_offsets("aé🙂z", &mut offsets);
+
+        assert_eq!(offsets, vec![0, 1, 3, 7]);
+        assert_eq!(byte_offset_to_char_index(&offsets, 0), 0);
+        assert_eq!(byte_offset_to_char_index(&offsets, 1), 1);
+        assert_eq!(byte_offset_to_char_index(&offsets, 3), 2);
+        assert_eq!(byte_offset_to_char_index(&offsets, 7), 3);
+    }
+
+    #[test]
+    fn byte_offset_lookup_uses_previous_char_for_inside_grapheme_offsets() {
+        let mut offsets = Vec::new();
+        fill_byte_to_char_offsets("aé🙂z", &mut offsets);
+
+        assert_eq!(byte_offset_to_char_index(&offsets, 2), 1);
+        assert_eq!(byte_offset_to_char_index(&offsets, 6), 2);
+        assert_eq!(byte_offset_to_char_index(&offsets, 99), 3);
     }
 
     /// This test verifies that cosmic-text Buffer requires set_size before layout_runs

@@ -52,17 +52,16 @@ impl Renderer {
                 CodeColor::Operator => operator_color,
                 CodeColor::Plain => code_color,
             };
-            let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
+            let advance = self.text_renderer.append_styled_text_vertices(
                 &span.text,
                 cursor_x,
                 y,
                 color,
                 span.bold,
                 span.italic,
+                text_vertices,
+                text_indices,
             );
-            let base_idx = text_vertices.len() as u32;
-            text_vertices.extend(verts);
-            text_indices.extend(idxs.iter().map(|i| i + base_idx));
             cursor_x += advance;
         }
     }
