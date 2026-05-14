@@ -71,7 +71,8 @@ impl App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                self.needs_redraw = true;
+                // Redraw requests are delivery events, not state changes. Dirty state is
+                // set by input, PTY output, native protocol updates, timers, and resize.
             }
             WindowEvent::Focused(focused)
                 if self.terminal().is_some_and(|t| t.modes().focus_reporting) =>

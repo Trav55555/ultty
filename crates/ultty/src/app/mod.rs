@@ -35,6 +35,15 @@ pub(super) const CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 /// Cursor blink interval (how long cursor stays on/off).
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
+/// Minimum spacing between rendered frames.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Maximum time to suppress drawing during synchronized update mode.
+const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Maintenance wakeup while PTY and control sockets are not wired into winit wakeups.
+const MAINTENANCE_POLL_INTERVAL: Duration = Duration::from_millis(16);
+
 /// Terminal application.
 pub struct App {
     /// Window
@@ -421,7 +430,9 @@ impl App {
         app.update_tab_bar();
 
         event_loop.run(move |event, elwt| {
-            elwt.set_control_flow(ControlFlow::Poll);
+            elwt.set_control_flow(ControlFlow::WaitUntil(
+                app.next_update_deadline(Instant::now()),
+            ));
 
             match event {
                 Event::WindowEvent { event, .. } => {
@@ -434,7 +445,9 @@ impl App {
                     if app.update() {
                         elwt.exit();
                     }
-                    app.window.request_redraw();
+                    elwt.set_control_flow(ControlFlow::WaitUntil(
+                        app.next_update_deadline(Instant::now()),
+                    ));
                 }
                 _ => {}
             }

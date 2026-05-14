@@ -7,6 +7,35 @@ use ultty::event_loop::TerminalEvent;
 use ultty::tmux::TmuxController;
 
 impl App {
+    pub(super) fn next_update_deadline(&self, now: Instant) -> Instant {
+        let mut deadline = now + super::MAINTENANCE_POLL_INTERVAL;
+
+        if self.needs_redraw {
+            let render_deadline =
+                self.last_render + self.render_delay_for_sync_state(self.sync_update_active());
+            deadline = deadline.min(render_deadline);
+        }
+
+        deadline = deadline.min(self.last_cursor_blink + super::CURSOR_BLINK_INTERVAL);
+
+        if let Some(until) = self.bell_active_until {
+            deadline = deadline.min(until);
+        }
+
+        deadline.max(now)
+    }
+
+    fn render_delay_for_sync_state(&self, sync_active: bool) -> std::time::Duration {
+        render_delay_for_sync_state(sync_active)
+    }
+
+    fn sync_update_active(&self) -> bool {
+        self.terminal_manager
+            .focused_terminal()
+            .map(|t| t.event_loop.terminal().modes().synchronized_update)
+            .unwrap_or(false)
+    }
+
     /// Process terminal events and render. Returns true if should exit.
     pub(super) fn update(&mut self) -> bool {
         // Check for config file changes (hot-reload)
@@ -194,22 +223,77 @@ impl App {
         // partial frames, but enforce a 200ms safety timeout to avoid indefinite
         // suppression if the app never sends ESU.
         let now = Instant::now();
-        let sync_active = self
-            .terminal_manager
-            .focused_terminal()
-            .map(|t| t.event_loop.terminal().modes().synchronized_update)
-            .unwrap_or(false);
+        let sync_active = self.sync_update_active();
         let frame_elapsed = now.duration_since(self.last_render);
 
-        if self.needs_redraw
-            && frame_elapsed >= Duration::from_millis(16)
-            && (!sync_active || frame_elapsed >= Duration::from_millis(200))
-        {
+        if should_render(self.needs_redraw, frame_elapsed, sync_active) {
             self.render();
             self.last_render = now;
             self.needs_redraw = false;
         }
 
         false
+    }
+}
+
+fn render_delay_for_sync_state(sync_active: bool) -> std::time::Duration {
+    if sync_active {
+        super::SYNC_UPDATE_TIMEOUT
+    } else {
+        super::FRAME_INTERVAL
+    }
+}
+
+fn should_render(
+    needs_redraw: bool,
+    frame_elapsed: std::time::Duration,
+    sync_active: bool,
+) -> bool {
+    needs_redraw && frame_elapsed >= render_delay_for_sync_state(sync_active)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::{render_delay_for_sync_state, should_render};
+
+    #[test]
+    fn should_render_when_dirty_and_frame_interval_elapsed() {
+        assert!(should_render(true, Duration::from_millis(16), false));
+    }
+
+    #[test]
+    fn should_not_render_when_redraw_is_not_dirty() {
+        assert!(!should_render(false, Duration::from_secs(1), false));
+    }
+
+    #[test]
+    fn should_hold_synchronized_update_until_timeout() {
+        assert!(!should_render(true, Duration::from_millis(199), true));
+        assert!(should_render(true, Duration::from_millis(200), true));
+    }
+
+    #[test]
+    fn render_delay_uses_frame_interval_without_sync() {
+        assert_eq!(
+            render_delay_for_sync_state(false),
+            Duration::from_millis(16)
+        );
+    }
+
+    #[test]
+    fn render_delay_uses_sync_timeout_with_sync() {
+        assert_eq!(
+            render_delay_for_sync_state(true),
+            Duration::from_millis(200)
+        );
+    }
+
+    #[test]
+    fn instant_min_deadline_does_not_move_back_before_now() {
+        let now = Instant::now();
+        let earlier = now - Duration::from_millis(1);
+        assert_eq!(earlier.max(now), now);
     }
 }
