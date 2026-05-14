@@ -27,17 +27,29 @@ assert_png() {
   fi
 }
 
+tab_count() {
+  "$ULTTYCTL" tabs | awk '/^[* ]*[0-9]+:/ { count++ } END { print count + 0 }'
+}
+
+while [[ "$(tab_count)" -gt 1 ]]; do
+  "$ULTTYCTL" close-tab >/dev/null
+done
+
 "$ULTTYCTL" screenshot "$OUT_DIR/single-tab.png" >/dev/null
 assert_png "$OUT_DIR/single-tab.png"
 
 "$ULTTYCTL" new-tab >/dev/null
 cleanup() {
-  "$ULTTYCTL" close-tab 2 >/dev/null 2>&1 || true
+  "$ULTTYCTL" close-tab >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 "$ULTTYCTL" screenshot "$OUT_DIR/multi-tab.png" >/dev/null
 assert_png "$OUT_DIR/multi-tab.png"
+
+scripts/analyze-chrome-screenshots.py \
+  --single "$OUT_DIR/single-tab.png" \
+  --multi "$OUT_DIR/multi-tab.png"
 
 echo "screenshot smoke passed:"
 echo "  $OUT_DIR/single-tab.png"
