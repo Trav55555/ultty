@@ -7,6 +7,7 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion
 use ultty::grid::TerminalHandler;
 use ultty::grid::{Dimensions, Terminal};
 use ultty::protocol::ansi::AnsiParser;
+use unicode_width::UnicodeWidthChar;
 
 fn feed_payload(terminal: &mut Terminal, parser: &mut AnsiParser, payload: &[u8]) {
     let mut handler = TerminalHandler::new(terminal);
@@ -33,6 +34,17 @@ fn fixed_width_lines_payload(line_count: usize, line_len: usize) -> Vec<u8> {
         payload.push(b'\n');
     }
     payload
+}
+
+fn ascii_width_candidate(c: char) -> u16 {
+    let codepoint = c as u32;
+    if (0x20..=0x7e).contains(&codepoint) {
+        1
+    } else if codepoint < 0x20 || codepoint == 0x7f {
+        0
+    } else {
+        c.width().unwrap_or(0) as u16
+    }
 }
 
 fn bench_keystroke_echo(c: &mut Criterion) {
@@ -194,10 +206,46 @@ fn bench_wrap_and_reflow(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_char_width(c: &mut Criterion) {
+    let mut group = c.benchmark_group("char_width");
+    let ascii = "the quick brown fox jumps over the lazy dog 0123456789 ABCDEF";
+    let mixed = "日本語テスト 🚀🎨🔥 αβγδε é̃";
+
+    group.bench_function("ascii_candidate_fast_path", |b| {
+        b.iter(|| {
+            ascii
+                .chars()
+                .map(|c| ascii_width_candidate(black_box(c)) as usize)
+                .sum::<usize>()
+        })
+    });
+
+    group.bench_function("ascii_unicode_width_direct", |b| {
+        b.iter(|| {
+            ascii
+                .chars()
+                .map(|c| UnicodeWidthChar::width(black_box(c)).unwrap_or(0))
+                .sum::<usize>()
+        })
+    });
+
+    group.bench_function("mixed_fallback_path", |b| {
+        b.iter(|| {
+            mixed
+                .chars()
+                .map(|c| ascii_width_candidate(black_box(c)) as usize)
+                .sum::<usize>()
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_keystroke_echo,
     bench_full_refresh,
-    bench_wrap_and_reflow
+    bench_wrap_and_reflow,
+    bench_char_width
 );
 criterion_main!(benches);
