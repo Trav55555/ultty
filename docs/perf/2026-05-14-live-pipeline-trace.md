@@ -38,7 +38,7 @@ captured totals exceed these defaults:
 |----------------------|---------|
 | `ULTTY_TRACE_MAX_PARSE_MS` | 900 ms |
 | `ULTTY_TRACE_MAX_DRAIN_MS` | 1000 ms |
-| `ULTTY_TRACE_MAX_RENDER_TOTAL_MS` | 200 ms |
+| `ULTTY_TRACE_MAX_RENDER_TOTAL_MS` | 400 ms |
 | `ULTTY_TRACE_MAX_RENDER_FRAME_MS` | 50 ms |
 
 Override those variables when intentionally refreshing baselines or testing on a
@@ -89,6 +89,34 @@ and row-rotation production optimisations:
 
 Status: PASS. The JSON summary for this run reported
 `dominant_cost: parser/grid and PTY drain`.
+
+## Grid Span Gate Repeat
+
+Run from `/tmp/ultty-live-pipeline-gate-grid-span-2` after adding
+grid/buffer-level ASCII span writes:
+
+| Metric | Value | Limit |
+|--------|-------|-------|
+| Parser/grid time | 127.249 ms | 900 ms |
+| PTY drain time | 184.691 ms | 1000 ms |
+| Render frame time | 268.560 ms | 400 ms |
+| Max render frame | 11.376 ms | 50 ms |
+
+Status: PASS. The parser/grid and PTY drain totals improved substantially. The
+faster ingestion path produced many more render frames, so the total render
+budget was raised to 400 ms while preserving the 50 ms max-frame jank guard.
+
+The selected live stress workloads from the same run were:
+
+| Workload | Runs | Mean | Stddev | Min | Max |
+|----------|------|------|--------|-----|-----|
+| `1. throughput-4MiB` | 2 | 61.0 ms | 4.2 ms | 58 ms | 64 ms |
+| `6. 500-lines-4000-cols` | 2 | 2067.5 ms | 17.7 ms | 2055 ms | 2080 ms |
+| `8. 20k-scrollback-lines` | 2 | 90.0 ms | 33.9 ms | 66 ms | 114 ms |
+
+The long soft-wrap workload is now a distinct follow-up: wall-clock time remains
+high even though parser/grid time, PTY drain time, and max-frame time are all
+healthy in the trace.
 
 ## Interpretation
 

@@ -60,6 +60,33 @@ at the midpoint. The 25k hard-line guardrail also improves slightly, which means
 the borrowed parser span dispatch does not introduce the scroll-heavy regression
 risk seen in the benchmark-only shortcut caveats.
 
+## Grid Span Follow-Up
+
+The next production slice added `Grid::write_ascii_span` and
+`Buffer::write_ascii_span`, so parser-owned ASCII spans no longer loop through
+the public single-character write path in the handlers. The fast path writes
+row-local ASCII runs directly, while falling back to `write_char` for insert
+mode and no-autowrap cases.
+
+Command:
+
+```bash
+timeout 900s cargo bench -p ultty --bench input_latency -- ascii_span --noplot
+```
+
+| Benchmark | Result |
+|-----------|--------|
+| `ascii_span/current_parser_4m_ascii` | 100.86 ms to 102.70 ms |
+| `ascii_span/production_4m_ascii_span` | 26.207 ms to 26.888 ms |
+| `ascii_span/current_parser_25k_hard_lines` | 55.173 ms to 55.690 ms |
+| `ascii_span/production_25k_hard_lines` | 18.774 ms to 19.540 ms |
+
+This is the first span result that removes most of the per-cell overhead from
+plain ASCII output. The current-parser benchmark also improved because the
+previous row-rotation work reduced scroll cost, but the production span path is
+now roughly 3.8x faster than the per-action parser path on the 4 MiB ASCII
+workload in the same run.
+
 ## Interpretation
 
 The span candidate improves the pure ASCII throughput shape by roughly 8-10% at

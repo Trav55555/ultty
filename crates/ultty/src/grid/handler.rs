@@ -315,9 +315,7 @@ impl<'a> Handler<'a> {
 
     /// Write a contiguous printable ASCII span to the grid.
     pub fn handle_ascii_span(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.grid.write_char(byte as char);
-        }
+        self.grid.write_ascii_span(bytes);
     }
 }
 

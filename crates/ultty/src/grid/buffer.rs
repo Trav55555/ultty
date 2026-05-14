@@ -461,6 +461,47 @@ impl Buffer {
         self.grid.write_char(c);
     }
 
+    /// Write a contiguous printable ASCII span, saving scrolled rows to history.
+    pub fn write_ascii_span(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+
+        if self.grid.insert_mode() || !self.grid.auto_wrap() {
+            for &byte in bytes {
+                self.write_char(byte as char);
+            }
+            return;
+        }
+
+        self.scroll_offset = 0;
+        let mut remaining = bytes;
+        while !remaining.is_empty() {
+            if self.grid.cursor().wrap_pending && self.grid.scroll_region().is_none() {
+                let scroll_bottom = self.grid.dimensions().rows.saturating_sub(1);
+                if self.grid.cursor().position.row >= scroll_bottom {
+                    if let Some(row) = self.grid.row(0).cloned() {
+                        self.push_to_history(vec![row]);
+                    }
+                }
+            }
+
+            let cols = self.grid.dimensions().cols;
+            if cols == 0 {
+                return;
+            }
+
+            let col = self.grid.cursor().position.col;
+            let chunk_len = if self.grid.cursor().wrap_pending {
+                1
+            } else {
+                (cols.saturating_sub(col).max(1) as usize).min(remaining.len())
+            };
+            self.grid.write_ascii_span(&remaining[..chunk_len]);
+            remaining = &remaining[chunk_len..];
+        }
+    }
+
     /// Scroll grid up, moving top line to history.
     pub fn scroll_grid_up(&mut self, n: u16) {
         let n_usize = n as usize;
@@ -562,6 +603,21 @@ mod tests {
         }
 
         assert_eq!(buf.history_len(), 100);
+    }
+
+    #[test]
+    fn write_ascii_span_saves_to_history_on_scroll() {
+        let mut buf = Buffer::new(Dimensions::new(5, 2));
+        buf.grid_mut().row_mut(0).unwrap()[0].set_char('A');
+        buf.grid_mut().row_mut(1).unwrap()[0].set_char('B');
+        buf.grid_mut().set_cursor_position(2, 1);
+
+        buf.write_ascii_span(b"abcdef");
+
+        assert_eq!(buf.history_len(), 1);
+        assert_eq!(buf.history[0][0].char(), 'A');
+        assert_eq!(buf.grid().row(0).unwrap().text(), "abcde");
+        assert_eq!(buf.grid().row(1).unwrap().text_trimmed(), "f");
     }
 
     #[test]

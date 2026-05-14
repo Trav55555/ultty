@@ -791,13 +791,9 @@ impl<'a> TerminalHandler<'a> {
     /// Write a contiguous printable ASCII span to the active terminal buffer.
     pub fn handle_ascii_span(&mut self, bytes: &[u8]) {
         if !self.terminal.is_alternate_screen() {
-            for &byte in bytes {
-                self.terminal.buffer_mut().write_char(byte as char);
-            }
+            self.terminal.buffer_mut().write_ascii_span(bytes);
         } else {
-            for &byte in bytes {
-                self.terminal.grid_mut().write_char(byte as char);
-            }
+            self.terminal.grid_mut().write_ascii_span(bytes);
         }
     }
 }

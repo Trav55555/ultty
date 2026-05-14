@@ -273,6 +273,11 @@ impl Grid {
         self.insert_mode = enabled;
     }
 
+    /// Get insert/replace mode (IRM).
+    pub fn insert_mode(&self) -> bool {
+        self.insert_mode
+    }
+
     /// Get auto-wrap mode (DECAWM).
     pub fn auto_wrap(&self) -> bool {
         self.auto_wrap
@@ -361,6 +366,20 @@ impl Grid {
     fn clear_combining_rows(&mut self, start_row: u16, end_row: u16) {
         self.combining
             .retain(|&(row, _), _| row < start_row || row > end_row);
+    }
+
+    /// Clear combining characters for a range of cells in one row.
+    fn clear_combining_range(&mut self, row: u16, start_col: u16, end_col: u16) {
+        self.combining
+            .retain(|&(r, c), _| r != row || c < start_col || c >= end_col);
+        if let Some(row_cells) = self.rows.get_mut(row as usize) {
+            for col in start_col..end_col {
+                if let Some(cell) = row_cells.get_mut(col) {
+                    cell.unset_flag(CellFlags::HAS_COMBINING);
+                }
+            }
+        }
+        self.mark_dirty(row);
     }
 
     /// Get a row by index.
@@ -544,6 +563,122 @@ impl Grid {
             // when off, subsequent chars overwrite the last column
             if self.auto_wrap {
                 self.cursor.wrap_pending = true;
+            }
+        }
+    }
+
+    /// Write a contiguous printable ASCII span at the cursor position.
+    pub fn write_ascii_span(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+
+        if self.insert_mode || !self.auto_wrap {
+            for &byte in bytes {
+                self.write_char(byte as char);
+            }
+            return;
+        }
+
+        let mut remaining = bytes;
+        while !remaining.is_empty() {
+            if self.cursor.wrap_pending {
+                self.wrap_pending_cursor();
+            }
+
+            let row = self.cursor.position.row;
+            let col = self.cursor.position.col;
+            if row >= self.dims.rows || self.dims.cols == 0 {
+                return;
+            }
+
+            let available = self.dims.cols.saturating_sub(col).max(1) as usize;
+            let write_len = available.min(remaining.len());
+            let end_col = col + write_len as u16;
+            let attrs = self.attrs;
+
+            self.clear_combining_range(row, col, end_col);
+            self.clear_wide_orphans_for_ascii_span(row, col, end_col);
+
+            if let Some(row_cells) = self.rows.get_mut(row as usize) {
+                for (offset, &byte) in remaining[..write_len].iter().enumerate() {
+                    if let Some(cell) = row_cells.get_mut(col + offset as u16) {
+                        cell.set_char(byte as char);
+                        cell.copy_attrs_from(&attrs);
+                        cell.unset_flag(CellFlags::HAS_COMBINING);
+                        cell.unset_flag(CellFlags::WIDE_CHAR);
+                        cell.unset_flag(CellFlags::WIDE_CHAR_SPACER);
+                    }
+                }
+            }
+            self.mark_dirty(row);
+
+            self.last_char = remaining[write_len - 1] as char;
+            remaining = &remaining[write_len..];
+
+            if end_col >= self.dims.cols {
+                self.cursor.position.col = self.dims.cols.saturating_sub(1);
+                self.cursor.wrap_pending = true;
+            } else {
+                self.cursor.position.col = end_col;
+            }
+        }
+    }
+
+    fn wrap_pending_cursor(&mut self) {
+        let row = self.cursor.position.row;
+        if let Some(r) = self.rows.get_mut(row as usize) {
+            r.set_wrapped(true);
+        }
+
+        let bottom = self
+            .scroll_region
+            .map(|r| r.bottom)
+            .unwrap_or(self.dims.rows.saturating_sub(1));
+        self.cursor.position.col = 0;
+        self.cursor.position.row += 1;
+        if self.cursor.position.row > bottom {
+            self.scroll_up(1);
+            self.cursor.position.row = bottom;
+        }
+        self.cursor.wrap_pending = false;
+    }
+
+    fn clear_wide_orphans_for_ascii_span(&mut self, row: u16, start_col: u16, end_col: u16) {
+        if start_col > 0
+            && self
+                .cell(start_col, row)
+                .is_some_and(|cell| cell.is_wide_spacer())
+        {
+            if let Some(primary) = self.cell_mut(start_col - 1, row) {
+                primary.clear();
+            }
+        }
+
+        if end_col < self.dims.cols
+            && self
+                .cell(end_col, row)
+                .is_some_and(|cell| cell.is_wide_spacer())
+        {
+            if let Some(spacer) = self.cell_mut(end_col, row) {
+                spacer.clear();
+            }
+        }
+
+        for col in start_col..end_col {
+            let is_wide = self.cell(col, row).is_some_and(|cell| cell.is_wide());
+            let is_spacer = self
+                .cell(col, row)
+                .is_some_and(|cell| cell.is_wide_spacer());
+            if is_wide && col + 1 < self.dims.cols {
+                if let Some(spacer) = self.cell_mut(col + 1, row) {
+                    spacer.clear();
+                }
+            }
+            if is_spacer && col > 0 {
+                if let Some(primary) = self.cell_mut(col - 1, row) {
+                    primary.clear();
+                }
             }
         }
     }
@@ -1340,6 +1475,39 @@ mod tests {
         grid.write_char('H');
         grid.write_char('i');
         assert_eq!(grid.cursor().position.col, 2);
+    }
+
+    #[test]
+    fn write_ascii_span_advances_cursor() {
+        let mut grid = Grid::new(Dimensions::new(80, 24));
+        grid.write_ascii_span(b"Hello");
+
+        assert_eq!(grid.row(0).unwrap().text_trimmed(), "Hello");
+        assert_eq!(grid.cursor().position.col, 5);
+    }
+
+    #[test]
+    fn write_ascii_span_wraps_across_rows() {
+        let mut grid = Grid::new(Dimensions::new(5, 3));
+        grid.write_ascii_span(b"abcdef");
+
+        assert_eq!(grid.row(0).unwrap().text(), "abcde");
+        assert!(grid.row(0).unwrap().is_wrapped());
+        assert_eq!(grid.row(1).unwrap().text_trimmed(), "f");
+        assert_eq!(grid.cursor().position.row, 1);
+        assert_eq!(grid.cursor().position.col, 1);
+    }
+
+    #[test]
+    fn write_ascii_span_insert_mode_falls_back_to_character_semantics() {
+        let mut grid = Grid::new(Dimensions::new(6, 2));
+        grid.write_ascii_span(b"ABC");
+        grid.set_cursor_position(1, 1);
+        grid.set_insert_mode(true);
+
+        grid.write_ascii_span(b"XY");
+
+        assert_eq!(grid.row(0).unwrap().text(), "XYABC ");
     }
 
     #[test]
