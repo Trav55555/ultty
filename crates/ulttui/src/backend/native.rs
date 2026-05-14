@@ -1,15 +1,16 @@
 //! Native protocol backend for Ultty terminal.
 
+mod transport;
+
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use bytes::{Buf, BytesMut};
+use bytes::BytesMut;
 use ultty_protocol::{
-    AppMessage, ComputedRegionLayout, Content, Decode, Encode, FrameId, InputEvent, InputType, Key,
-    Modifiers, RegionId, TerminalMessage, CAP_APPEND_CONTENT, CLIENT_DEFAULT_CAPABILITIES,
-    EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL, FRAME_MAGIC, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    AppMessage, ComputedRegionLayout, Content, FrameId, InputEvent, InputType, Key, Modifiers,
+    RegionId, TerminalMessage, CAP_APPEND_CONTENT, CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY,
+    EVENT_MOUSE, EVENT_SCROLL, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
 use crate::event::Event;
@@ -256,65 +257,6 @@ impl NativeBackend {
         }
 
         anyhow::bail!("Timeout waiting for SessionReady")
-    }
-
-    fn send_message(&mut self, msg: &AppMessage) -> anyhow::Result<()> {
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
-        let bytes = msg.encode_to_bytes();
-        stream.write_all(&bytes)?;
-        Ok(())
-    }
-
-    fn read_available(&mut self) -> anyhow::Result<()> {
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
-
-        let mut buf = [0u8; 4096];
-        loop {
-            match stream.read(&mut buf) {
-                Ok(0) => return Err(anyhow::anyhow!("Connection closed")),
-                Ok(n) => {
-                    self.read_buf.extend_from_slice(&buf[..n]);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e.into()),
-            }
-        }
-        Ok(())
-    }
-
-    fn try_decode_message(&mut self) -> anyhow::Result<Option<TerminalMessage>> {
-        if self.read_buf.len() < 8 {
-            return Ok(None);
-        }
-
-        let magic = u16::from_le_bytes([self.read_buf[0], self.read_buf[1]]);
-        if magic != u16::from_le_bytes(FRAME_MAGIC) {
-            anyhow::bail!("Invalid magic: {:04x}", magic);
-        }
-
-        let payload_len = u32::from_le_bytes([
-            self.read_buf[4],
-            self.read_buf[5],
-            self.read_buf[6],
-            self.read_buf[7],
-        ]) as usize;
-
-        let total_len = 8 + payload_len;
-        if self.read_buf.len() < total_len {
-            return Ok(None);
-        }
-
-        let msg = TerminalMessage::decode(&mut self.read_buf.as_ref())?;
-        self.read_buf.advance(total_len);
-
-        Ok(Some(msg))
     }
 
     fn process_pending_messages(&mut self) -> anyhow::Result<()> {
