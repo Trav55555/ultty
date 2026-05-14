@@ -46,6 +46,9 @@ The performance expectation that input, PTY output, scrolling, search, copy, and
 **Append-oriented stream**
 Streaming content that grows forward over time, such as agent output, chat messages, logs, and tool output.
 
+**Agent/workshop console**
+The flagship native app scenario: a keyboard-first console for agent output, tool activity, status, panes, commands, forms, logs, and long-running work.
+
 **Markdown stream**
 An append-oriented stream whose markdown semantics are parsed by Ulttui and carried to Ultty as semantic content updates.
 
@@ -94,6 +97,7 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - **Native runtime observability** starts with **Session health** and **Render causality**.
 - Ultty performance prioritizes **Idle efficiency** and **Interaction responsiveness** before microbenchmark speed.
 - Streaming content is first optimized for **Append-oriented streams**.
+- The **Agent/workshop console** is the flagship scenario for proving native app runtime depth.
 - A **Markdown stream** uses **Block-level diff** in the **Ulttui framework**.
 - The **Native app runtime** is a **Unix-first runtime**.
 - The **Ulttui framework** is a companion framework for building applications that exercise the **Native app runtime**.
