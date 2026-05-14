@@ -1,4 +1,5 @@
 use super::super::{Renderer, Vertex};
+use super::markdown_blocks::{plan_markdown_blocks, MarkdownBlock};
 
 impl Renderer {
     pub(super) fn render_markdown_content(
@@ -12,209 +13,29 @@ impl Renderer {
     ) {
         let mut cursor_y = y;
         let line_height = self.cell_height;
-        let mut in_code_block = false;
-        let mut fence_language = "";
-        let mut fence_start_idx = 0usize;
-        let lines: Vec<&str> = source.lines().collect();
-        let mut line_idx = 0;
-
-        while line_idx < lines.len() {
-            let line = lines[line_idx];
-
-            // Fenced code blocks
-            if line.starts_with("```") {
-                if !in_code_block {
-                    // Opening fence: extract language
-                    fence_language = line.trim_start_matches('`').trim();
-                    fence_start_idx = line_idx;
-                    in_code_block = true;
-                    line_idx += 1;
-                    continue;
-                } else {
-                    // Closing fence: render accumulated code lines
-                    let code_lines = &lines[fence_start_idx + 1..line_idx];
-                    if !code_lines.is_empty() {
-                        let code_source = code_lines.join("\n");
+        for block in plan_markdown_blocks(source) {
+            let line_count = block.line_count();
+            match block {
+                MarkdownBlock::CodeBlock { language, lines } => {
+                    if !lines.is_empty() {
+                        let code_source = lines.join("\n");
                         self.render_code_content(
                             &code_source,
-                            fence_language,
+                            language,
                             false,
                             x + self.cell_width,
                             cursor_y,
                             text_vertices,
                             text_indices,
                         );
-                        cursor_y += code_lines.len() as f32 * line_height;
                     }
-                    in_code_block = false;
-                    line_idx += 1;
-                    continue;
                 }
-            }
-            if in_code_block {
-                // Lines inside a fenced code block are handled on close
-                line_idx += 1;
-                continue;
-            }
-
-            // Horizontal rules
-            if line == "---" || line == "***" || line == "___" {
-                let count = (_width / self.cell_width.max(1.0)) as usize;
-                let rule = "─".repeat(count.max(1));
-                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                    &rule,
-                    x,
-                    cursor_y,
-                    self.color_scheme.named[8],
-                    false,
-                    false,
-                );
-                let base_idx = text_vertices.len() as u32;
-                text_vertices.extend(verts);
-                text_indices.extend(idxs.iter().map(|i| i + base_idx));
-                cursor_y += line_height;
-                line_idx += 1;
-                continue;
-            }
-
-            // Tables: detect lines starting with | and containing at least one more |
-            if line.starts_with('|') && line.matches('|').count() >= 2 {
-                // Collect all consecutive table lines
-                let _table_start = line_idx;
-                let mut table_lines = Vec::new();
-                while line_idx < lines.len() && lines[line_idx].starts_with('|') {
-                    table_lines.push(lines[line_idx]);
-                    line_idx += 1;
-                }
-                self.render_markdown_table(&table_lines, x, cursor_y, text_vertices, text_indices);
-                cursor_y += line_height * table_lines.len() as f32;
-                continue;
-            }
-
-            // Headers
-            if let Some(stripped) = line.strip_prefix("### ") {
-                self.render_markdown_inline(
-                    stripped,
-                    x,
-                    cursor_y,
-                    true,
-                    self.color_scheme.named[6],
-                    text_vertices,
-                    text_indices,
-                );
-                cursor_y += line_height;
-                line_idx += 1;
-                continue;
-            }
-            if let Some(stripped) = line.strip_prefix("## ") {
-                self.render_markdown_inline(
-                    stripped,
-                    x,
-                    cursor_y,
-                    true,
-                    self.color_scheme.named[5],
-                    text_vertices,
-                    text_indices,
-                );
-                cursor_y += line_height;
-                line_idx += 1;
-                continue;
-            }
-            if let Some(stripped) = line.strip_prefix("# ") {
-                self.render_markdown_inline(
-                    stripped,
-                    x,
-                    cursor_y,
-                    true,
-                    self.color_scheme.named[4],
-                    text_vertices,
-                    text_indices,
-                );
-                cursor_y += line_height;
-                line_idx += 1;
-                continue;
-            }
-
-            // Task lists: - [ ] or - [x]
-            if let Some(rest) = line.strip_prefix("- [ ] ") {
-                let checkbox = "☐ ";
-                let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
-                    checkbox,
-                    x,
-                    cursor_y,
-                    self.color_scheme.named[8],
-                    false,
-                    false,
-                );
-                let base_idx = text_vertices.len() as u32;
-                text_vertices.extend(verts);
-                text_indices.extend(idxs.iter().map(|i| i + base_idx));
-                self.render_markdown_inline(
-                    rest,
-                    x + advance,
-                    cursor_y,
-                    false,
-                    self.color_scheme.foreground,
-                    text_vertices,
-                    text_indices,
-                );
-                cursor_y += line_height;
-                line_idx += 1;
-                continue;
-            }
-            if let Some(rest) = line
-                .strip_prefix("- [x] ")
-                .or_else(|| line.strip_prefix("- [X] "))
-            {
-                let checkbox = "☑ ";
-                let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
-                    checkbox,
-                    x,
-                    cursor_y,
-                    self.color_scheme.named[2],
-                    false,
-                    false,
-                );
-                let base_idx = text_vertices.len() as u32;
-                text_vertices.extend(verts);
-                text_indices.extend(idxs.iter().map(|i| i + base_idx));
-                self.render_markdown_inline(
-                    rest,
-                    x + advance,
-                    cursor_y,
-                    false,
-                    self.color_scheme.foreground,
-                    text_vertices,
-                    text_indices,
-                );
-                cursor_y += line_height;
-                line_idx += 1;
-                continue;
-            }
-
-            // Nested blockquotes: count leading > characters
-            let trimmed = line;
-            let mut quote_depth = 0u32;
-            let mut rest = trimmed;
-            while let Some(inner) = rest.strip_prefix("> ") {
-                quote_depth += 1;
-                rest = inner;
-            }
-            // Also handle > without trailing space at line end
-            if rest == ">" {
-                quote_depth += 1;
-                rest = "";
-            }
-
-            if quote_depth > 0 {
-                let indent = self.cell_width * 2.0 * quote_depth as f32;
-                // Render blockquote bars
-                for depth in 0..quote_depth {
-                    let bar_x = x + self.cell_width * 2.0 * depth as f32;
-                    let bar = "│";
+                MarkdownBlock::Rule => {
+                    let count = (_width / self.cell_width.max(1.0)) as usize;
+                    let rule = "─".repeat(count.max(1));
                     let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                        bar,
-                        bar_x,
+                        &rule,
+                        x,
                         cursor_y,
                         self.color_scheme.named[8],
                         false,
@@ -224,10 +45,69 @@ impl Renderer {
                     text_vertices.extend(verts);
                     text_indices.extend(idxs.iter().map(|i| i + base_idx));
                 }
-                if !rest.is_empty() {
+                MarkdownBlock::Table(lines) => {
+                    self.render_markdown_table(&lines, x, cursor_y, text_vertices, text_indices);
+                }
+                MarkdownBlock::Header { level: 3, text } => {
                     self.render_markdown_inline(
-                        rest,
-                        x + indent,
+                        text,
+                        x,
+                        cursor_y,
+                        true,
+                        self.color_scheme.named[6],
+                        text_vertices,
+                        text_indices,
+                    );
+                }
+                MarkdownBlock::Header { level: 2, text } => {
+                    self.render_markdown_inline(
+                        text,
+                        x,
+                        cursor_y,
+                        true,
+                        self.color_scheme.named[5],
+                        text_vertices,
+                        text_indices,
+                    );
+                }
+                MarkdownBlock::Header { level: 1, text } => {
+                    self.render_markdown_inline(
+                        text,
+                        x,
+                        cursor_y,
+                        true,
+                        self.color_scheme.named[4],
+                        text_vertices,
+                        text_indices,
+                    );
+                }
+                MarkdownBlock::Header { level: _, text } => {
+                    self.render_markdown_inline(
+                        text,
+                        x,
+                        cursor_y,
+                        true,
+                        self.color_scheme.named[4],
+                        text_vertices,
+                        text_indices,
+                    );
+                }
+                MarkdownBlock::Task { checked, text } => {
+                    let checkbox = if checked { "☑ " } else { "☐ " };
+                    let color = if checked {
+                        self.color_scheme.named[2]
+                    } else {
+                        self.color_scheme.named[8]
+                    };
+                    let (verts, idxs, advance) = self
+                        .text_renderer
+                        .build_styled_text_vertices(checkbox, x, cursor_y, color, false, false);
+                    let base_idx = text_vertices.len() as u32;
+                    text_vertices.extend(verts);
+                    text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                    self.render_markdown_inline(
+                        text,
+                        x + advance,
                         cursor_y,
                         false,
                         self.color_scheme.foreground,
@@ -235,28 +115,15 @@ impl Renderer {
                         text_indices,
                     );
                 }
-                cursor_y += line_height;
-                line_idx += 1;
-                continue;
-            }
-
-            // Unordered list items
-            let (prefix, content) =
-                if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-                    ("• ", rest)
-                } else {
-                    ("", line)
-                };
-
-            // Numbered list items (1. 2. etc.)
-            let (prefix, content) = if prefix.is_empty() {
-                if let Some(dot_pos) = content.find(". ") {
-                    if dot_pos <= 3 && content[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
-                        let num_prefix = format!("{}. ", &content[..dot_pos]);
-                        // Render number prefix then inline content
-                        let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
-                            &num_prefix,
-                            x,
+                MarkdownBlock::BlockQuote { depth, text } => {
+                    let indent = self.cell_width * 2.0 * depth as f32;
+                    // Render blockquote bars
+                    for depth in 0..depth {
+                        let bar_x = x + self.cell_width * 2.0 * depth as f32;
+                        let bar = "│";
+                        let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                            bar,
+                            bar_x,
                             cursor_y,
                             self.color_scheme.named[8],
                             false,
@@ -265,69 +132,76 @@ impl Renderer {
                         let base_idx = text_vertices.len() as u32;
                         text_vertices.extend(verts);
                         text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                    }
+                    if !text.is_empty() {
                         self.render_markdown_inline(
-                            &content[dot_pos + 2..],
-                            x + advance,
+                            text,
+                            x + indent,
                             cursor_y,
                             false,
                             self.color_scheme.foreground,
                             text_vertices,
                             text_indices,
                         );
-                        cursor_y += line_height;
-                        line_idx += 1;
-                        continue;
                     }
                 }
-                ("", content)
-            } else {
-                (prefix, content)
-            };
-
-            let mut cursor_x = x;
-            if !prefix.is_empty() {
-                let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
-                    prefix,
-                    cursor_x,
-                    cursor_y,
-                    self.color_scheme.named[8],
-                    false,
-                    false,
-                );
-                let base_idx = text_vertices.len() as u32;
-                text_vertices.extend(verts);
-                text_indices.extend(idxs.iter().map(|i| i + base_idx));
-                cursor_x += advance;
+                MarkdownBlock::OrderedList { prefix, text } => {
+                    let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
+                        &prefix,
+                        x,
+                        cursor_y,
+                        self.color_scheme.named[8],
+                        false,
+                        false,
+                    );
+                    let base_idx = text_vertices.len() as u32;
+                    text_vertices.extend(verts);
+                    text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                    self.render_markdown_inline(
+                        text,
+                        x + advance,
+                        cursor_y,
+                        false,
+                        self.color_scheme.foreground,
+                        text_vertices,
+                        text_indices,
+                    );
+                }
+                MarkdownBlock::UnorderedList { text } => {
+                    let (verts, idxs, advance) = self.text_renderer.build_styled_text_vertices(
+                        "• ",
+                        x,
+                        cursor_y,
+                        self.color_scheme.named[8],
+                        false,
+                        false,
+                    );
+                    let base_idx = text_vertices.len() as u32;
+                    text_vertices.extend(verts);
+                    text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                    self.render_markdown_inline(
+                        text,
+                        x + advance,
+                        cursor_y,
+                        false,
+                        self.color_scheme.foreground,
+                        text_vertices,
+                        text_indices,
+                    );
+                }
+                MarkdownBlock::Plain(text) => {
+                    self.render_markdown_inline(
+                        text,
+                        x,
+                        cursor_y,
+                        false,
+                        self.color_scheme.foreground,
+                        text_vertices,
+                        text_indices,
+                    );
+                }
             }
-
-            self.render_markdown_inline(
-                content,
-                cursor_x,
-                cursor_y,
-                false,
-                self.color_scheme.foreground,
-                text_vertices,
-                text_indices,
-            );
-            cursor_y += line_height;
-            line_idx += 1;
-        }
-
-        // Handle unclosed fenced code block: render remaining lines as code
-        if in_code_block {
-            let code_lines = &lines[fence_start_idx + 1..];
-            if !code_lines.is_empty() {
-                let code_source = code_lines.join("\n");
-                self.render_code_content(
-                    &code_source,
-                    fence_language,
-                    false,
-                    x + self.cell_width,
-                    cursor_y,
-                    text_vertices,
-                    text_indices,
-                );
-            }
+            cursor_y += line_height * line_count as f32;
         }
     }
 

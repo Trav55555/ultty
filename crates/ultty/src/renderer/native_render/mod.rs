@@ -12,6 +12,7 @@ mod code;
 mod geometry;
 mod images;
 mod markdown;
+mod markdown_blocks;
 pub(super) mod syntax;
 mod widgets;
 
