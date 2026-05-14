@@ -4,6 +4,7 @@ use super::syntax::{is_line_comment, tokenize_code_line, TokenKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CodeColor {
+    LineNumber,
     Keyword,
     String,
     Comment,
@@ -19,6 +20,38 @@ pub(super) struct CodeSpan {
     pub(super) color: CodeColor,
     pub(super) bold: bool,
     pub(super) italic: bool,
+}
+
+pub(super) fn plan_code_content_spans(
+    source: &str,
+    language: &str,
+    line_numbers: bool,
+) -> Vec<Vec<CodeSpan>> {
+    let keywords = super::syntax::code_keywords(language);
+    let mut in_block_comment = false;
+
+    source
+        .lines()
+        .enumerate()
+        .map(|(idx, line)| {
+            let mut spans = Vec::new();
+            if line_numbers {
+                spans.push(code_span(
+                    format!("{:4} ", idx + 1),
+                    CodeColor::LineNumber,
+                    false,
+                    false,
+                ));
+            }
+            spans.extend(plan_code_line_spans(
+                line,
+                language,
+                &keywords,
+                &mut in_block_comment,
+            ));
+            spans
+        })
+        .collect()
 }
 
 pub(super) fn plan_code_line_spans(
@@ -79,11 +112,15 @@ fn span_for_token(text: String, kind: TokenKind) -> CodeSpan {
 }
 
 fn comment_span(text: &str) -> CodeSpan {
+    code_span(text.to_string(), CodeColor::Comment, false, true)
+}
+
+fn code_span(text: String, color: CodeColor, bold: bool, italic: bool) -> CodeSpan {
     CodeSpan {
-        text: text.to_string(),
-        color: CodeColor::Comment,
-        bold: false,
-        italic: true,
+        text,
+        color,
+        bold,
+        italic,
     }
 }
 
@@ -114,6 +151,38 @@ mod tests {
         );
         assert_eq!(spans.last().map(|span| span.italic), Some(true));
         assert!(!in_block_comment);
+    }
+
+    #[test]
+    fn plans_content_line_numbers_without_changing_code_spans() {
+        let lines = super::plan_code_content_spans("let x = 1", "rust", true);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0][0].text, "   1 ");
+        assert_eq!(lines[0][0].color, CodeColor::LineNumber);
+        assert!(lines[0]
+            .iter()
+            .any(|span| span.text == "let" && span.color == CodeColor::Keyword));
+    }
+
+    #[test]
+    fn plans_markdown_fenced_code_with_shared_code_spans() {
+        let blocks = super::super::markdown_blocks::plan_markdown_blocks("```rust\nlet x = 1\n```");
+        let (language, lines) = match &blocks[0] {
+            super::super::markdown_blocks::MarkdownBlock::CodeBlock { language, lines } => {
+                (*language, lines)
+            }
+            _ => panic!("expected fenced code block"),
+        };
+
+        let source = lines.join("\n");
+        let planned_lines = super::plan_code_content_spans(&source, language, false);
+
+        assert_eq!(planned_lines.len(), 1);
+        assert_ne!(planned_lines[0][0].color, CodeColor::LineNumber);
+        assert!(planned_lines[0]
+            .iter()
+            .any(|span| span.text == "let" && span.color == CodeColor::Keyword));
     }
 
     #[test]
