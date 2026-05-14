@@ -121,7 +121,7 @@ All widgets target both Ultty-native mode and ANSI mode.
 
 ## Performance
 
-Ultty performance is defined first by idle efficiency and interaction responsiveness. Until #41 adds a committed reproducible baseline, these are targets rather than audited published measurements:
+Ultty performance is defined first by idle efficiency and interaction responsiveness. The latest reproducible workstation baseline is [docs/perf/2026-05-14-baseline.md](docs/perf/2026-05-14-baseline.md).
 
 | Metric | Target |
 |--------|--------|
@@ -131,7 +131,14 @@ Ultty performance is defined first by idle efficiency and interaction responsive
 | Input latency | < 10ms |
 | Memory (terminal) | < 50MB |
 
-Run benchmarks: `cargo bench -p ultty`
+Run the published benchmark set:
+
+```bash
+timeout 900s cargo bench -p ultty --bench layout -- --noplot
+timeout 900s cargo bench -p ultty --bench input_latency -- --noplot
+timeout 900s cargo bench -p ultty --bench render -- --noplot
+timeout 900s cargo bench -p ultty --bench memory -- --noplot
+```
 
 ## Architecture
 

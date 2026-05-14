@@ -162,7 +162,7 @@ decomposition decision and testing strategy.
 
 ## Performance Characteristics
 
-Ultty performance is judged first by idle efficiency and user-visible interaction responsiveness. Exact measured values should be published only with a reproducible baseline artifact.
+Ultty performance is judged first by idle efficiency and user-visible interaction responsiveness. The current reproducible workstation baseline is [docs/perf/2026-05-14-baseline.md](perf/2026-05-14-baseline.md); release claims should link to a dated artifact like that baseline rather than uncited local measurements.
 
 | Operation | Target |
 |-----------|--------|
