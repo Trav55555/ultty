@@ -5,12 +5,12 @@
 
 use super::{DeferredImageRender, Renderer, Vertex};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use wgpu::util::DeviceExt;
 
 mod borders;
 mod cache;
 mod code;
 mod geometry;
+mod images;
 mod markdown;
 pub(super) mod syntax;
 mod widgets;
@@ -602,82 +602,7 @@ impl Renderer {
             &text_indices,
         );
 
-        // Render deferred native images using the image pipeline
-        for img_render in &deferred_images {
-            let Some(cached) = self.native_image_cache.get(&img_render.region_id) else {
-                continue;
-            };
-
-            let color = [1.0f32, 1.0, 1.0, 1.0];
-            let vertices = vec![
-                Vertex {
-                    position: [img_render.x, img_render.y],
-                    tex_coord: [0.0, 0.0],
-                    color,
-                    is_color: 0,
-                },
-                Vertex {
-                    position: [img_render.x + img_render.w, img_render.y],
-                    tex_coord: [1.0, 0.0],
-                    color,
-                    is_color: 0,
-                },
-                Vertex {
-                    position: [img_render.x + img_render.w, img_render.y + img_render.h],
-                    tex_coord: [1.0, 1.0],
-                    color,
-                    is_color: 0,
-                },
-                Vertex {
-                    position: [img_render.x, img_render.y + img_render.h],
-                    tex_coord: [0.0, 1.0],
-                    color,
-                    is_color: 0,
-                },
-            ];
-            let indices: Vec<u32> = vec![0, 1, 2, 0, 2, 3];
-
-            let vb = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("native_image_vb"),
-                    contents: bytemuck::cast_slice(&vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let ib = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("native_image_ib"),
-                    contents: bytemuck::cast_slice(&indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
-            {
-                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("native_image_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-
-                if let Some(img_pipeline) = self.image_pipeline.as_ref() {
-                    rp.set_pipeline(&img_pipeline.pipeline);
-                    rp.set_bind_group(0, &self.uniform_bind_group, &[]);
-                    rp.set_bind_group(1, &cached.bind_group, &[]);
-                    rp.set_vertex_buffer(0, vb.slice(..));
-                    rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                    rp.draw_indexed(0..indices.len() as u32, 0, 0..1);
-                }
-            }
-        }
+        self.render_deferred_native_images(encoder, view, &deferred_images);
     }
 }
 
