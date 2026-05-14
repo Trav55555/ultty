@@ -214,10 +214,8 @@ pub struct Renderer {
     animated_progress: std::collections::HashMap<ultty_protocol::RegionId, f32>,
     /// Whether active animations exist (spinners, animated progress)
     has_animations: bool,
-    /// Cached native session background GPU buffers (vertex, index, index_count)
-    cached_native_bg: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
-    /// Cached native session text GPU buffers (vertex, index, index_count)
-    cached_native_text: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+    /// Cached native session GPU buffers.
+    cached_native_buffers: NativeBufferCache<NativeBufferSet>,
     /// Previous frame vertex/index counts for smarter pre-allocation
     prev_bg_count: (usize, usize),
     prev_text_count: (usize, usize),
@@ -225,6 +223,41 @@ pub struct Renderer {
     scroll_adjustments_cache: std::collections::HashMap<ultty_protocol::RegionId, (f32, f32)>,
     /// Reused per-frame cache for native clip rectangles.
     clip_rects_cache: std::collections::HashMap<ultty_protocol::RegionId, (f32, f32, f32, f32)>,
+}
+
+type NativeBufferSet = (wgpu::Buffer, wgpu::Buffer, u32);
+
+struct NativeBufferCache<T> {
+    bg: Vec<T>,
+    text: Vec<T>,
+}
+
+impl<T> Default for NativeBufferCache<T> {
+    fn default() -> Self {
+        Self {
+            bg: Vec::new(),
+            text: Vec::new(),
+        }
+    }
+}
+
+impl<T> NativeBufferCache<T> {
+    fn is_empty(&self) -> bool {
+        self.bg.is_empty() && self.text.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.bg.clear();
+        self.text.clear();
+    }
+
+    fn push_bg(&mut self, buffer_set: T) {
+        self.bg.push(buffer_set);
+    }
+
+    fn push_text(&mut self, buffer_set: T) {
+        self.text.push(buffer_set);
+    }
 }
 
 /// Deferred native image render request (collected during widget content rendering).
@@ -378,8 +411,7 @@ impl Renderer {
             native_image_cache: std::collections::HashMap::new(),
             animated_progress: std::collections::HashMap::new(),
             has_animations: false,
-            cached_native_bg: None,
-            cached_native_text: None,
+            cached_native_buffers: NativeBufferCache::default(),
             prev_bg_count: (0, 0),
             prev_text_count: (0, 0),
             scroll_adjustments_cache: std::collections::HashMap::new(),
@@ -507,8 +539,7 @@ impl Renderer {
             native_image_cache: std::collections::HashMap::new(),
             animated_progress: std::collections::HashMap::new(),
             has_animations: false,
-            cached_native_bg: None,
-            cached_native_text: None,
+            cached_native_buffers: NativeBufferCache::default(),
             prev_bg_count: (0, 0),
             prev_text_count: (0, 0),
             scroll_adjustments_cache: std::collections::HashMap::new(),
@@ -1235,6 +1266,7 @@ impl Renderer {
         if !any_dirty && self.has_cached_native_buffers() {
             self.draw_cached_native_buffers(&mut encoder, &view);
         } else {
+            self.clear_cached_native_buffers();
             for session in &sessions {
                 self.render_native_session(
                     &mut encoder,
@@ -1578,6 +1610,31 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_buffer_cache_accumulates_multiple_sessions() {
+        let mut cache = NativeBufferCache::default();
+
+        cache.push_bg("session-1-bg");
+        cache.push_text("session-1-text");
+        cache.push_bg("session-2-bg");
+        cache.push_text("session-2-text");
+
+        assert_eq!(cache.bg, vec!["session-1-bg", "session-2-bg"]);
+        assert_eq!(cache.text, vec!["session-1-text", "session-2-text"]);
+        assert!(!cache.is_empty());
+    }
+
+    #[test]
+    fn native_buffer_cache_clear_drops_all_sessions() {
+        let mut cache = NativeBufferCache::default();
+        cache.push_bg("session-1-bg");
+        cache.push_text("session-2-text");
+
+        cache.clear();
+
+        assert!(cache.is_empty());
+    }
 
     #[test]
     fn color_scheme_resolves_colors() {

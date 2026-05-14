@@ -7,7 +7,11 @@ use crate::renderer::Vertex;
 
 impl Renderer {
     pub(crate) fn has_cached_native_buffers(&self) -> bool {
-        self.cached_native_bg.is_some() || self.cached_native_text.is_some()
+        !self.cached_native_buffers.is_empty()
+    }
+
+    pub(crate) fn clear_cached_native_buffers(&mut self) {
+        self.cached_native_buffers.clear();
     }
 
     pub(super) fn upload_draw_and_cache_native_buffers(
@@ -22,10 +26,16 @@ impl Renderer {
         self.prev_bg_count = (bg_vertices.len(), bg_indices.len());
         self.prev_text_count = (text_vertices.len(), text_indices.len());
 
-        self.cached_native_bg =
-            self.upload_and_draw_native_bg(encoder, view, bg_vertices, bg_indices);
-        self.cached_native_text =
-            self.upload_and_draw_native_text(encoder, view, text_vertices, text_indices);
+        if let Some(buffer_set) =
+            self.upload_and_draw_native_bg(encoder, view, bg_vertices, bg_indices)
+        {
+            self.cached_native_buffers.push_bg(buffer_set);
+        }
+        if let Some(buffer_set) =
+            self.upload_and_draw_native_text(encoder, view, text_vertices, text_indices)
+        {
+            self.cached_native_buffers.push_text(buffer_set);
+        }
     }
 
     fn upload_and_draw_native_bg(
@@ -112,24 +122,24 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
     ) {
-        if let Some((ref vertex_buffer, ref index_buffer, index_count)) = self.cached_native_bg {
+        for (vertex_buffer, index_buffer, index_count) in &self.cached_native_buffers.bg {
             self.draw_native_bg_buffers(
                 encoder,
                 view,
                 vertex_buffer,
                 index_buffer,
-                index_count,
+                *index_count,
                 "native_bg_pass_cached",
             );
         }
 
-        if let Some((ref vertex_buffer, ref index_buffer, index_count)) = self.cached_native_text {
+        for (vertex_buffer, index_buffer, index_count) in &self.cached_native_buffers.text {
             self.draw_native_text_buffers(
                 encoder,
                 view,
                 vertex_buffer,
                 index_buffer,
-                index_count,
+                *index_count,
                 "native_text_pass_cached",
             );
         }
