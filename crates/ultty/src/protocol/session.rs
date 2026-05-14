@@ -9,7 +9,7 @@ mod errors;
 mod frame;
 mod transport;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::os::unix::net::UnixStream;
 
@@ -37,6 +37,7 @@ const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
 
 /// Maximum read buffer size (16 MB). Sessions exceeding this are disconnected.
 const MAX_READ_BUF: usize = 16 * 1024 * 1024;
+const MAX_RECENT_PROTOCOL_ERRORS: usize = 5;
 
 /// A native protocol session with a TUI application.
 pub struct NativeSession {
@@ -96,6 +97,10 @@ pub struct NativeSession {
     last_ping_sent: Option<std::time::Instant>,
     /// Whether we're waiting for a pong reply.
     awaiting_pong: bool,
+    /// Most recent protocol errors sent to the client.
+    recent_protocol_errors: VecDeque<String>,
+    /// Last successful layout computation duration.
+    last_layout_duration: Option<std::time::Duration>,
 }
 
 /// Tracks an in-progress style transition for a region.
@@ -160,6 +165,8 @@ impl NativeSession {
             last_activity: std::time::Instant::now(),
             last_ping_sent: None,
             awaiting_pong: false,
+            recent_protocol_errors: VecDeque::with_capacity(MAX_RECENT_PROTOCOL_ERRORS),
+            last_layout_duration: None,
         })
     }
 
@@ -185,6 +192,28 @@ impl NativeSession {
 
     pub fn viewport(&self) -> (f32, f32) {
         (self.viewport_width, self.viewport_height)
+    }
+
+    /// Return the negotiated protocol version.
+    pub fn protocol_version(&self) -> u16 {
+        self.protocol_version
+    }
+
+    /// Return the negotiated capability bitset.
+    pub fn capabilities(&self) -> u32 {
+        self.capabilities
+    }
+
+    /// Return the most recent successful layout computation duration.
+    pub fn last_layout_duration(&self) -> Option<std::time::Duration> {
+        self.last_layout_duration
+    }
+
+    /// Return recent protocol errors sent to the client.
+    pub fn recent_protocol_errors(&self) -> impl Iterator<Item = &str> {
+        self.recent_protocol_errors
+            .iter()
+            .map(std::string::String::as_str)
     }
 
     /// Read and process incoming messages.
@@ -238,6 +267,7 @@ impl NativeSession {
         frame_id: Option<FrameId>,
         trigger: LayoutTrigger,
     ) -> io::Result<()> {
+        let layout_start = std::time::Instant::now();
         let regions = match self.layout.compute_scene_layout(
             &mut self.scene,
             self.viewport_width,
@@ -250,6 +280,7 @@ impl NativeSession {
                 return Ok(());
             }
         };
+        self.last_layout_duration = Some(layout_start.elapsed());
 
         // Send LayoutComputed
         let msg = TerminalMessage::LayoutComputed {

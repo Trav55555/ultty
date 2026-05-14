@@ -3,6 +3,7 @@
 
 use super::App;
 use ultty::config::Config;
+use ultty::protocol::ProtocolServer;
 use ultty::renderer::OverlayState;
 
 impl App {
@@ -55,6 +56,10 @@ impl App {
                 "Show/hide shortcuts".to_string(),
             ),
             (
+                keybindings.protocol_status.clone(),
+                "Show/hide protocol status".to_string(),
+            ),
+            (
                 keybindings.cycle_theme.clone(),
                 "Cycle color theme".to_string(),
             ),
@@ -76,6 +81,90 @@ impl App {
             ),
             (keybindings.debug_dump.clone(), "Debug dump".to_string()),
         ]
+    }
+
+    /// Build native protocol status rows for the in-terminal status overlay.
+    pub(super) fn build_protocol_status_rows(&self) -> Vec<(String, String)> {
+        Self::format_protocol_status_rows(self.protocol_server.as_ref())
+    }
+
+    pub(super) fn format_protocol_status_rows(
+        server: Option<&ProtocolServer>,
+    ) -> Vec<(String, String)> {
+        let Some(server) = server else {
+            return vec![
+                ("Socket".to_string(), "disabled".to_string()),
+                ("Sessions".to_string(), "0 connected".to_string()),
+                ("Recent errors".to_string(), "none".to_string()),
+            ];
+        };
+
+        let mut rows = vec![
+            (
+                "Socket".to_string(),
+                server.socket_path().display().to_string(),
+            ),
+            (
+                "Sessions".to_string(),
+                format!("{} connected", server.session_count()),
+            ),
+        ];
+
+        if server.session_count() == 0 {
+            rows.push(("Native state".to_string(), "no active sessions".to_string()));
+            rows.push(("Recent errors".to_string(), "none".to_string()));
+            return rows;
+        }
+
+        for session in server.sessions() {
+            let (viewport_w, viewport_h) = session.viewport();
+            let region_count = session.scene().iter_depth_first().count();
+            let focused = session
+                .focused_region()
+                .map(|id| id.0.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            let layout = session
+                .last_layout_duration()
+                .map(format_duration)
+                .unwrap_or_else(|| "not computed".to_string());
+            let recent_errors = {
+                let errors = session.recent_protocol_errors().collect::<Vec<_>>();
+                if errors.is_empty() {
+                    "none".to_string()
+                } else {
+                    errors.join(" | ")
+                }
+            };
+
+            rows.push((
+                format!("Session {}", session.session_id()),
+                format!(
+                    "v{} caps=0x{:08x} viewport={:.0}x{:.0} regions={}",
+                    session.protocol_version(),
+                    session.capabilities(),
+                    viewport_w,
+                    viewport_h,
+                    region_count
+                ),
+            ));
+            rows.push((
+                format!("Focused {}", session.session_id()),
+                format!("region {}", focused),
+            ));
+            rows.push((
+                format!("Dirty {}", session.session_id()),
+                format!(
+                    "render={} scroll={} dirty_regions={}",
+                    session.is_render_dirty(),
+                    session.is_scroll_dirty(),
+                    session.dirty_regions().len()
+                ),
+            ));
+            rows.push((format!("Layout {}", session.session_id()), layout));
+            rows.push((format!("Errors {}", session.session_id()), recent_errors));
+        }
+
+        rows
     }
 
     /// Reload configuration from disk.
@@ -349,5 +438,76 @@ impl App {
 
         let title = if title.is_empty() { "Ultty" } else { title };
         let _ = sender.send((title.to_string(), body.to_string()));
+    }
+}
+
+fn format_duration(duration: std::time::Duration) -> String {
+    let micros = duration.as_micros();
+    if micros >= 1_000 {
+        format!("{:.2} ms", duration.as_secs_f64() * 1_000.0)
+    } else {
+        format!("{} us", micros)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_status_rows_cover_disabled_server() {
+        let rows = App::format_protocol_status_rows(None);
+
+        assert!(rows
+            .iter()
+            .any(|(key, value)| key == "Socket" && value == "disabled"));
+        assert!(rows
+            .iter()
+            .any(|(key, value)| key == "Sessions" && value == "0 connected"));
+    }
+
+    #[test]
+    fn protocol_status_rows_cover_empty_server() {
+        let path = std::env::temp_dir().join(format!(
+            "ultty-status-overlay-test-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let server = ProtocolServer::new(&path).expect("server should start");
+
+        let rows = App::format_protocol_status_rows(Some(&server));
+
+        assert!(rows
+            .iter()
+            .any(|(key, value)| key == "Sessions" && value == "0 connected"));
+        assert!(rows
+            .iter()
+            .any(|(key, value)| key == "Native state" && value == "no active sessions"));
+    }
+
+    #[test]
+    fn protocol_status_rows_cover_connected_session() {
+        let path = std::env::temp_dir().join(format!(
+            "ultty-status-overlay-session-test-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut server = ProtocolServer::new(&path).expect("server should start");
+        let _client = std::os::unix::net::UnixStream::connect(&path).expect("client connects");
+
+        server
+            .poll(Some(std::time::Duration::from_millis(0)))
+            .expect("server accepts client");
+        let rows = App::format_protocol_status_rows(Some(&server));
+
+        assert!(rows
+            .iter()
+            .any(|(key, value)| key == "Sessions" && value == "1 connected"));
+        assert!(rows.iter().any(|(key, value)| {
+            key.starts_with("Session ") && value.contains("caps=0x") && value.contains("regions=")
+        }));
+        assert!(rows
+            .iter()
+            .any(|(key, value)| key.starts_with("Dirty ") && value.contains("render=")));
     }
 }

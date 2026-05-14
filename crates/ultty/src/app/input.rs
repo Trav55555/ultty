@@ -976,6 +976,18 @@ impl App {
 
         if self.check_keybinding(&event, &self.config.keybindings.show_shortcuts.clone()) {
             self.shortcuts_visible = !self.shortcuts_visible;
+            if self.shortcuts_visible {
+                self.protocol_status_visible = false;
+            }
+            self.needs_redraw = true;
+            return;
+        }
+
+        if self.check_keybinding(&event, &self.config.keybindings.protocol_status.clone()) {
+            self.protocol_status_visible = !self.protocol_status_visible;
+            if self.protocol_status_visible {
+                self.shortcuts_visible = false;
+            }
             self.needs_redraw = true;
             return;
         }
@@ -1011,14 +1023,15 @@ impl App {
             return;
         }
 
-        // Close shortcuts overlay with Escape
-        if self.shortcuts_visible {
+        // Close modal overlays with Escape
+        if self.shortcuts_visible || self.protocol_status_visible {
             if let Key::Named(NamedKey::Escape) = &event.logical_key {
                 self.shortcuts_visible = false;
+                self.protocol_status_visible = false;
                 self.needs_redraw = true;
                 return;
             }
-            // Block other keys while shortcuts overlay is visible
+            // Block other keys while a modal overlay is visible.
             return;
         }
 

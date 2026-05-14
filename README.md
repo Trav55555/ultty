@@ -43,6 +43,11 @@ This opens Ultty as a GPU-accelerated terminal emulator. It runs any existing te
 
 Platform status: Ultty is Unix-first today. Linux and macOS are the supported runtime targets; Windows support is future work that requires a native transport and PTY platform boundary.
 
+Useful runtime overlays:
+
+- `Ctrl+Shift+?` opens the keyboard shortcuts overlay.
+- `Ctrl+Shift+I` opens the native protocol status overlay with socket, session, dirty-state, layout, and recent-error details.
+
 ### Run native apps inside Ultty
 
 From within an Ultty terminal:

@@ -56,6 +56,8 @@ pub struct OverlayState<'a> {
     pub shortcuts_visible: bool,
     /// Keybindings to display in shortcuts overlay
     pub keybindings: Option<&'a [(String, String)]>,
+    /// Protocol status rows to display in the status overlay
+    pub protocol_status: Option<&'a [(String, String)]>,
     /// Whether cursor should be visible in current blink phase
     pub cursor_blink_visible: bool,
 }
@@ -71,6 +73,7 @@ impl<'a> Default for OverlayState<'a> {
             bell_active: false,
             shortcuts_visible: false,
             keybindings: None,
+            protocol_status: None,
             cursor_blink_visible: true, // Default visible
         }
     }
@@ -1127,6 +1130,9 @@ impl Renderer {
                 self.render_shortcuts_overlay(&mut encoder, &view, keybindings);
             }
         }
+        if let Some(rows) = overlay.protocol_status {
+            self.render_protocol_status_overlay(&mut encoder, &view, rows);
+        }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
@@ -1276,6 +1282,15 @@ impl Renderer {
                     native_search_index,
                 );
             }
+        }
+
+        if overlay.shortcuts_visible {
+            if let Some(keybindings) = overlay.keybindings {
+                self.render_shortcuts_overlay(&mut encoder, &view, keybindings);
+            }
+        }
+        if let Some(rows) = overlay.protocol_status {
+            self.render_protocol_status_overlay(&mut encoder, &view, rows);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

@@ -76,6 +76,12 @@ impl App {
             .map(|until| Instant::now() < until)
             .unwrap_or(false);
 
+        let protocol_status_rows = if self.protocol_status_visible {
+            Some(self.build_protocol_status_rows())
+        } else {
+            None
+        };
+
         let overlay = OverlayState {
             copy_mode: if self.copy_mode.is_active() {
                 Some(&self.copy_mode)
@@ -101,6 +107,7 @@ impl App {
             } else {
                 None
             },
+            protocol_status: protocol_status_rows.as_deref(),
             cursor_blink_visible: self.cursor_blink_visible,
         };
 
@@ -202,6 +209,12 @@ impl App {
             .map(|until| Instant::now() < until)
             .unwrap_or(false);
 
+        let protocol_status_rows = if self.protocol_status_visible {
+            Some(self.build_protocol_status_rows())
+        } else {
+            None
+        };
+
         let overlay = OverlayState {
             copy_mode: if self.copy_mode.is_active() {
                 Some(&self.copy_mode)
@@ -223,6 +236,7 @@ impl App {
             } else {
                 None
             },
+            protocol_status: protocol_status_rows.as_deref(),
             cursor_blink_visible: self.cursor_blink_visible,
         };
 

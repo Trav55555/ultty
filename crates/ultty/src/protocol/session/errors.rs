@@ -80,6 +80,12 @@ impl NativeSession {
     /// Queue a native protocol error response for the client.
     pub(super) fn queue_protocol_error(&mut self, error: NativeProtocolError) {
         let NativeProtocolError { code, message } = error;
+        if self.recent_protocol_errors.len() == super::MAX_RECENT_PROTOCOL_ERRORS {
+            self.recent_protocol_errors.pop_back();
+        }
+        self.recent_protocol_errors
+            .push_front(format!("{} {}", code, message));
+
         if let Err(e) = self.send_message(&TerminalMessage::Error {
             code,
             message: message.clone(),

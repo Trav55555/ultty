@@ -533,6 +533,8 @@ pub struct KeybindingConfig {
     pub reload_config: String,
     /// Show keyboard shortcuts overlay
     pub show_shortcuts: String,
+    /// Show native protocol status overlay
+    pub protocol_status: String,
     /// Cycle through color themes
     pub cycle_theme: String,
     /// Increase font size
@@ -570,6 +572,7 @@ impl Default for KeybindingConfig {
             find: "ctrl+shift+f".to_string(),
             reload_config: "ctrl+shift+r".to_string(),
             show_shortcuts: "ctrl+shift+?".to_string(),
+            protocol_status: "ctrl+shift+i".to_string(),
             cycle_theme: "ctrl+shift+n".to_string(),
             font_increase: "ctrl+=".to_string(),
             font_decrease: "ctrl+-".to_string(),
@@ -635,6 +638,7 @@ impl KeybindingConfig {
             ("find".to_string(), self.find.clone()),
             ("reload_config".to_string(), self.reload_config.clone()),
             ("show_shortcuts".to_string(), self.show_shortcuts.clone()),
+            ("protocol_status".to_string(), self.protocol_status.clone()),
             ("cycle_theme".to_string(), self.cycle_theme.clone()),
             ("font_increase".to_string(), self.font_increase.clone()),
             ("font_decrease".to_string(), self.font_decrease.clone()),

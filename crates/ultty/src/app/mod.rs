@@ -92,6 +92,8 @@ pub struct App {
     divider_dragging: Option<(usize, f32)>,
     /// Keyboard shortcuts overlay visible
     shortcuts_visible: bool,
+    /// Native protocol status overlay visible
+    protocol_status_visible: bool,
     /// Cached list of keybindings for display
     shortcuts_list: Vec<(String, String)>,
     /// Whether cursor is currently visible in blink cycle
@@ -248,6 +250,7 @@ impl App {
             scrollbar_dragging: false,
             divider_dragging: None,
             shortcuts_visible: false,
+            protocol_status_visible: false,
             shortcuts_list,
             cursor_blink_visible: true,
             last_cursor_blink: Instant::now(),

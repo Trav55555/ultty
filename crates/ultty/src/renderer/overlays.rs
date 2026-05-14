@@ -350,11 +350,12 @@ impl Renderer {
         (vertices, indices)
     }
 
-    /// Build keyboard shortcuts overlay vertices.
-    /// Displays a centered modal with all available keybindings.
-    pub(super) fn build_shortcuts_overlay_vertices(
+    /// Build a centered two-column modal overlay.
+    pub(super) fn build_rows_overlay_vertices(
         &mut self,
-        keybindings: &[(String, String)],
+        title: &str,
+        rows: &[(String, String)],
+        footer: &str,
     ) -> (Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>) {
         let mut bg_vertices = Vec::new();
         let mut bg_indices = Vec::new();
@@ -370,17 +371,14 @@ impl Renderer {
         let padding = 20.0;
         let column_gap = 36.0;
         let line_height = self.cell_height * 1.5;
-        let title = "Keyboard Shortcuts";
 
         // Calculate dimensions
-        let max_key_width = keybindings.iter().map(|(k, _)| k.len()).max().unwrap_or(10) as f32
-            * self.cell_width
-            * 0.9;
-        let max_desc_width = keybindings.iter().map(|(_, d)| d.len()).max().unwrap_or(20) as f32
-            * self.cell_width
-            * 0.9;
+        let max_key_width =
+            rows.iter().map(|(k, _)| k.len()).max().unwrap_or(10) as f32 * self.cell_width * 0.9;
+        let max_desc_width =
+            rows.iter().map(|(_, d)| d.len()).max().unwrap_or(20) as f32 * self.cell_width * 0.9;
         let content_width = max_key_width + max_desc_width + padding * 2.0 + column_gap;
-        let content_height = (keybindings.len() as f32 + 2.0) * line_height + padding * 2.0;
+        let content_height = (rows.len() as f32 + 2.0) * line_height + padding * 2.0;
 
         // Center the modal
         let modal_width = content_width.max(300.0);
@@ -484,7 +482,7 @@ impl Renderer {
         let desc_color = Rgba::new(0.8, 0.8, 0.8, 1.0); // Light gray for descriptions
 
         let start_y = sep_y + line_height * 0.5;
-        for (i, (key, desc)) in keybindings.iter().enumerate() {
+        for (i, (key, desc)) in rows.iter().enumerate() {
             let y = start_y + (i as f32 + 1.0) * line_height;
             if y + line_height > modal_y + modal_height - padding {
                 break; // Don't overflow the modal
@@ -512,7 +510,6 @@ impl Renderer {
         }
 
         // Draw footer hint
-        let footer = "Press Esc or F1 to close";
         let footer_color = Rgba::new(0.5, 0.5, 0.5, 1.0);
         let (footer_vertices, footer_indices) = self.text_renderer.build_label_vertices(
             footer,
@@ -524,6 +521,23 @@ impl Renderer {
         append_text(footer_vertices, footer_indices);
 
         (bg_vertices, bg_indices, text_vertices, text_indices)
+    }
+
+    /// Build keyboard shortcuts overlay vertices.
+    /// Displays a centered modal with all available keybindings.
+    pub(super) fn build_shortcuts_overlay_vertices(
+        &mut self,
+        keybindings: &[(String, String)],
+    ) -> (Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>) {
+        self.build_rows_overlay_vertices("Keyboard Shortcuts", keybindings, "Press Esc to close")
+    }
+
+    /// Build native protocol status overlay vertices.
+    pub(super) fn build_protocol_status_overlay_vertices(
+        &mut self,
+        rows: &[(String, String)],
+    ) -> (Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>) {
+        self.build_rows_overlay_vertices("Native Protocol Status", rows, "Press Esc to close")
     }
 
     /// Render the keyboard shortcuts overlay.
@@ -595,6 +609,97 @@ impl Renderer {
 
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shortcuts_text_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            rp.set_pipeline(self.text_renderer.pipeline());
+            rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+            rp.set_bind_group(1, self.text_renderer.atlas_bind_group(), &[]);
+            rp.set_vertex_buffer(0, vb.slice(..));
+            rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..text_indices.len() as u32, 0, 0..1);
+        }
+    }
+
+    /// Render the native protocol status overlay.
+    pub(super) fn render_protocol_status_overlay(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        rows: &[(String, String)],
+    ) {
+        let (bg_vertices, bg_indices, text_vertices, text_indices) =
+            self.build_protocol_status_overlay_vertices(rows);
+        if bg_vertices.is_empty() && text_vertices.is_empty() {
+            return;
+        }
+
+        if !bg_vertices.is_empty() && !bg_indices.is_empty() {
+            let vb = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("protocol_status_bg_vb"),
+                    contents: bytemuck::cast_slice(&bg_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let ib = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("protocol_status_bg_ib"),
+                    contents: bytemuck::cast_slice(&bg_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("protocol_status_bg_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            rp.set_pipeline(self.bg_pipeline.pipeline());
+            rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+            rp.set_vertex_buffer(0, vb.slice(..));
+            rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
+        }
+
+        if !text_vertices.is_empty() && !text_indices.is_empty() {
+            let vb = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("protocol_status_text_vb"),
+                    contents: bytemuck::cast_slice(&text_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let ib = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("protocol_status_text_ib"),
+                    contents: bytemuck::cast_slice(&text_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("protocol_status_text_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,

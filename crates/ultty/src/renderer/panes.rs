@@ -393,6 +393,9 @@ impl Renderer {
                 self.render_shortcuts_overlay(&mut encoder, &view, keybindings);
             }
         }
+        if let Some(rows) = overlay.protocol_status {
+            self.render_protocol_status_overlay(&mut encoder, &view, rows);
+        }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
