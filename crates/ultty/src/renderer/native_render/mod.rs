@@ -94,6 +94,40 @@ fn wrap_line(line: &str, max_cols: usize) -> Vec<String> {
     result
 }
 
+fn next_display_width_chunk_end(segment: &str, byte_pos: usize, cols_left: usize) -> Option<usize> {
+    if cols_left == 0 || byte_pos >= segment.len() {
+        return None;
+    }
+
+    let mut chunk_end = byte_pos;
+    let mut used_cols = 0usize;
+    let mut previous_was_joiner = false;
+
+    for (offset, ch) in segment[byte_pos..].char_indices() {
+        let ch_end = byte_pos + offset + ch.len_utf8();
+        let ch_width = ch.width().unwrap_or(0);
+        let force_include = chunk_end == byte_pos
+            || previous_was_joiner
+            || ch_width == 0
+            || ch == '\u{200d}'
+            || is_variation_selector(ch);
+
+        if used_cols + ch_width > cols_left && !force_include {
+            break;
+        }
+
+        used_cols += ch_width;
+        chunk_end = ch_end;
+        previous_was_joiner = ch == '\u{200d}';
+    }
+
+    (chunk_end > byte_pos).then_some(chunk_end)
+}
+
+fn is_variation_selector(ch: char) -> bool {
+    matches!(ch, '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}')
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_clipped_glyphs(
     verts: &[Vertex],
@@ -465,18 +499,11 @@ impl Renderer {
                                     continue;
                                 }
 
-                                let mut chunk_chars = 0usize;
-                                let mut chunk_end = byte_pos;
-                                for (offset, ch) in segment[byte_pos..].char_indices() {
-                                    if chunk_chars == cols_left {
-                                        break;
-                                    }
-                                    chunk_end = byte_pos + offset + ch.len_utf8();
-                                    chunk_chars += 1;
-                                }
-                                if chunk_chars == 0 {
+                                let Some(chunk_end) =
+                                    next_display_width_chunk_end(segment, byte_pos, cols_left)
+                                else {
                                     break;
-                                }
+                                };
                                 let chunk = &segment[byte_pos..chunk_end];
 
                                 let span_y = cy + line_idx as f32 * cell_h;
@@ -672,5 +699,41 @@ mod tests {
     #[test]
     fn wrap_line_emoji_uses_display_width() {
         assert_eq!(wrap_line("🙂🙂🙂", 4), vec!["🙂🙂", "🙂"]);
+    }
+
+    #[test]
+    fn rich_text_chunk_uses_cjk_display_width() {
+        let text = "你好世界";
+        let end = next_display_width_chunk_end(text, 0, 5).unwrap();
+
+        assert_eq!(&text[..end], "你好");
+    }
+
+    #[test]
+    fn rich_text_chunk_uses_emoji_display_width() {
+        let text = "🙂🙂🙂";
+        let end = next_display_width_chunk_end(text, 0, 4).unwrap();
+
+        assert_eq!(&text[..end], "🙂🙂");
+    }
+
+    #[test]
+    fn rich_text_chunk_keeps_joined_emoji_together() {
+        let family = "👨‍👩‍👧‍👦";
+        let text = format!("{family}x");
+        let end = next_display_width_chunk_end(&text, 0, 2).unwrap();
+
+        assert_eq!(&text[..end], family);
+    }
+
+    #[test]
+    fn rich_text_chunk_respects_remaining_columns_after_span_boundary() {
+        let text = "a你b";
+        let first = next_display_width_chunk_end(text, 0, 3).unwrap();
+
+        assert_eq!(&text[..first], "a你");
+
+        let second = next_display_width_chunk_end(text, first, 1).unwrap();
+        assert_eq!(&text[first..second], "b");
     }
 }
