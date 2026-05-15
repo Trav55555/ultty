@@ -4,7 +4,9 @@
 //! active tab indicators, and tab title text.
 
 use super::{Renderer, Rgba, Vertex};
-use crate::tabs::{TabBarState, TAB_ROW_HEIGHT, TITLE_BAR_HEIGHT};
+use crate::tabs::{
+    TabBarState, TAB_CLOSE_BUTTON_SIZE, TAB_PADDING, TAB_ROW_HEIGHT, TITLE_BAR_HEIGHT,
+};
 
 fn lighten(color: Rgba, amount: f32) -> Rgba {
     Rgba::new(
@@ -82,7 +84,7 @@ impl Renderer {
         );
 
         // Draw individual tabs (only when 2+ tabs)
-        for tab in &tab_bar.tabs {
+        for (tab_idx, tab) in tab_bar.tabs.iter().enumerate() {
             if !show_tabs {
                 continue;
             }
@@ -124,16 +126,8 @@ impl Renderer {
             }
 
             // Close button hover background
-            let tab_idx = tab_bar
-                .tabs
-                .iter()
-                .position(|t| (t.x - tab.x).abs() < 0.1)
-                .unwrap_or(0);
             if tab_bar.hovered_close_button == Some(tab_idx) {
-                let close_x = tab.x + tab.width - 12.0 - 12.0;
-                let target_size = 18.0;
-                let cx = close_x + 6.0 - target_size / 2.0;
-                let cy = TITLE_BAR_HEIGHT + (TAB_ROW_HEIGHT - target_size) / 2.0;
+                let (cx, cy, target_size, _) = tab.close_hover_bounds();
                 self.emit_rect(
                     &mut vertices,
                     &mut indices,
@@ -218,14 +212,13 @@ impl Renderer {
             return (all_vertices, all_indices);
         }
 
-        let tab_padding = 12.0; // Match TAB_PADDING from tabs.rs
-                                // Center text vertically in the tab bar. Place the cell top so the
-                                // glyph baseline lands roughly in the vertical middle.
+        // Center text vertically in the tab bar. Place the cell top so the
+        // glyph baseline lands roughly in the vertical middle.
         let tab_text_y = TITLE_BAR_HEIGHT + (TAB_ROW_HEIGHT - self.cell_height) / 2.0;
         let control_text_y = (TITLE_BAR_HEIGHT - self.cell_height) / 2.0;
 
         let show_tabs = tab_bar.shows_tab_row();
-        for tab in &tab_bar.tabs {
+        for (tab_idx, tab) in tab_bar.tabs.iter().enumerate() {
             if !show_tabs {
                 continue;
             }
@@ -236,8 +229,8 @@ impl Renderer {
             };
 
             // Calculate text position and max width
-            let text_x = tab.x + tab_padding;
-            let max_text_width = tab.width - tab_padding * 2.0 - 16.0; // Leave room for close button
+            let text_x = tab.x + TAB_PADDING;
+            let max_text_width = tab.max_text_width();
 
             let (vertices, indices) = self.text_renderer.build_label_vertices(
                 &tab.title,
@@ -253,10 +246,9 @@ impl Renderer {
             all_indices.extend(indices.iter().map(|i| i + base_idx));
 
             // Close button "x" on the right side of the tab
-            let tab_idx = tab_bar.tabs.iter().position(|t| t.x == tab.x).unwrap_or(0);
             let is_close_hovered = tab_bar.hovered_close_button == Some(tab_idx);
-            let close_x = tab.x + tab.width - tab_padding - 12.0;
-            let close_center_x = close_x + 6.0 - self.cell_width / 2.0;
+            let close_center_x =
+                tab.close_button_x() + TAB_CLOSE_BUTTON_SIZE / 2.0 - self.cell_width / 2.0;
 
             let close_color = if is_close_hovered {
                 lighten(self.color_scheme.foreground, 0.08)

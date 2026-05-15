@@ -16,6 +16,12 @@ pub const TAB_BAR_HEIGHT: f32 = TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT;
 /// Padding inside each tab.
 pub const TAB_PADDING: f32 = 12.0;
 
+/// Width and height of a tab close target.
+pub const TAB_CLOSE_BUTTON_SIZE: f32 = 12.0;
+
+/// Width and height of the visible close-hover affordance.
+pub const TAB_CLOSE_HOVER_SIZE: f32 = 18.0;
+
 /// Minimum tab width.
 pub const MIN_TAB_WIDTH: f32 = 80.0;
 
@@ -151,14 +157,14 @@ impl TabBarState {
     /// Check if a click at (x, y) is on the new tab "+" button.
     pub fn is_new_tab_button_at(&self, x: f32, y: f32) -> bool {
         self.visible
-            && (0.0..=TITLE_BAR_HEIGHT).contains(&y)
+            && (0.0..TITLE_BAR_HEIGHT).contains(&y)
             && x >= self.new_tab_button_x
             && x < self.new_tab_button_x + Self::NEW_TAB_BUTTON_WIDTH
     }
 
     /// Check if a click at (x, y) is on a window control button.
     pub fn window_control_at(&self, x: f32, y: f32) -> Option<WindowControl> {
-        if !self.visible || y > TITLE_BAR_HEIGHT {
+        if !self.visible || !(0.0..TITLE_BAR_HEIGHT).contains(&y) {
             return None;
         }
         let controls_start = self.total_width - WINDOW_CONTROLS_WIDTH;
@@ -183,7 +189,7 @@ impl TabBarState {
 
     /// Check if position is in the draggable title bar area (not on a tab, button, or control).
     pub fn is_drag_area(&self, x: f32, y: f32) -> bool {
-        if !self.visible || y > self.height() {
+        if !self.visible || !(0.0..self.height()).contains(&y) {
             return false;
         }
         // Not on window controls
@@ -233,15 +239,14 @@ impl TabBarState {
     pub fn close_button_at(&self, x: f32, y: f32) -> Option<usize> {
         if !self.visible
             || !self.shows_tab_row()
-            || !(TITLE_BAR_HEIGHT..=TAB_BAR_HEIGHT).contains(&y)
+            || !(TITLE_BAR_HEIGHT..TAB_BAR_HEIGHT).contains(&y)
         {
             return None;
         }
 
         for (index, tab) in self.tabs.iter().enumerate() {
-            // Close button is on the right side of the tab
-            let close_x = tab.x + tab.width - TAB_PADDING - 12.0;
-            if x >= close_x && x < close_x + 12.0 {
+            let close_x = tab.close_button_x();
+            if x >= close_x && x < close_x + TAB_CLOSE_BUTTON_SIZE {
                 return Some(index);
             }
         }
@@ -353,7 +358,24 @@ impl TabState {
     /// Get the maximum text width.
     pub fn max_text_width(&self) -> f32 {
         // Leave space for close button
-        self.width - TAB_PADDING * 2.0 - 16.0
+        self.width - TAB_PADDING * 2.0 - TAB_CLOSE_BUTTON_SIZE - 4.0
+    }
+
+    /// Get the close button's left edge.
+    pub fn close_button_x(&self) -> f32 {
+        self.x + self.width - TAB_PADDING - TAB_CLOSE_BUTTON_SIZE
+    }
+
+    /// Get the close hover affordance bounds.
+    pub fn close_hover_bounds(&self) -> (f32, f32, f32, f32) {
+        let center_x = self.close_button_x() + TAB_CLOSE_BUTTON_SIZE / 2.0;
+        let center_y = TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT / 2.0;
+        (
+            center_x - TAB_CLOSE_HOVER_SIZE / 2.0,
+            center_y - TAB_CLOSE_HOVER_SIZE / 2.0,
+            TAB_CLOSE_HOVER_SIZE,
+            TAB_CLOSE_HOVER_SIZE,
+        )
     }
 }
 
@@ -704,6 +726,8 @@ mod tests {
         let state = bar_with(1, 0, 800.0);
         assert!(state.is_new_tab_button_at(5.0, 10.0));
         assert!(!state.is_drag_area(5.0, 10.0));
+        assert!(!state.is_new_tab_button_at(5.0, -1.0));
+        assert!(!state.is_new_tab_button_at(5.0, TITLE_BAR_HEIGHT));
     }
 
     #[test]
@@ -720,7 +744,21 @@ mod tests {
     fn title_band_between_controls_is_draggable() {
         let state = bar_with(2, 0, 800.0);
         assert!(state.is_drag_area(400.0, 10.0));
+        assert!(!state.is_drag_area(400.0, -1.0));
+        assert!(!state.is_drag_area(400.0, TAB_BAR_HEIGHT));
         assert!(!state.is_drag_area(790.0, 10.0));
+    }
+
+    #[test]
+    fn window_controls_are_only_in_title_band() {
+        let state = bar_with(2, 0, 800.0);
+        assert_eq!(
+            state.window_control_at(720.0, 10.0),
+            Some(WindowControl::Minimize)
+        );
+        assert_eq!(state.window_control_at(720.0, -1.0), None);
+        assert_eq!(state.window_control_at(720.0, TITLE_BAR_HEIGHT), None);
+        assert_eq!(state.window_control_at(720.0, TITLE_BAR_HEIGHT + 1.0), None);
     }
 
     // ---------------------------------------------------------------
@@ -730,9 +768,8 @@ mod tests {
     #[test]
     fn close_button_hit() {
         let state = bar_with(3, 0, 600.0);
-        // Close button is at: tab.x + tab.width - TAB_PADDING - 12.0
         let tab = &state.tabs[1];
-        let close_x = tab.x + tab.width - TAB_PADDING - 12.0;
+        let close_x = tab.close_button_x();
 
         // Hit the close button region
         assert_eq!(
@@ -745,7 +782,7 @@ mod tests {
     fn close_button_miss_left() {
         let state = bar_with(3, 0, 600.0);
         let tab = &state.tabs[0];
-        let close_x = tab.x + tab.width - TAB_PADDING - 12.0;
+        let close_x = tab.close_button_x();
         // Just left of the close button
         assert_eq!(
             state.close_button_at(close_x - 1.0, TITLE_BAR_HEIGHT + 10.0),
@@ -757,10 +794,10 @@ mod tests {
     fn close_button_miss_right() {
         let state = bar_with(3, 0, 600.0);
         let tab = &state.tabs[0];
-        let close_x = tab.x + tab.width - TAB_PADDING - 12.0;
+        let close_x = tab.close_button_x();
         // Just right of the close button
         assert_eq!(
-            state.close_button_at(close_x + 12.0, TITLE_BAR_HEIGHT + 10.0),
+            state.close_button_at(close_x + TAB_CLOSE_BUTTON_SIZE, TITLE_BAR_HEIGHT + 10.0),
             None
         );
     }
@@ -769,8 +806,9 @@ mod tests {
     fn close_button_below_bar_returns_none() {
         let state = bar_with(3, 0, 600.0);
         let tab = &state.tabs[0];
-        let close_x = tab.x + tab.width - TAB_PADDING - 6.0;
+        let close_x = tab.close_button_x() + TAB_CLOSE_BUTTON_SIZE / 2.0;
         assert_eq!(state.close_button_at(close_x, TAB_BAR_HEIGHT + 1.0), None);
+        assert_eq!(state.close_button_at(close_x, TAB_BAR_HEIGHT), None);
     }
 
     #[test]
@@ -778,17 +816,23 @@ mod tests {
         let state = bar_with(1, 0, 800.0);
         assert!(state.visible);
         let tab = &state.tabs[0];
-        let close_x = tab.x + tab.width - TAB_PADDING - 12.0;
-        assert_eq!(state.close_button_at(close_x + 6.0, 10.0), None);
+        let close_x = tab.close_button_x();
+        assert_eq!(
+            state.close_button_at(close_x + TAB_CLOSE_BUTTON_SIZE / 2.0, 10.0),
+            None
+        );
     }
 
     #[test]
     fn close_button_for_each_tab() {
         let state = bar_with(3, 0, 600.0);
         for (i, tab) in state.tabs.iter().enumerate() {
-            let close_x = tab.x + tab.width - TAB_PADDING - 12.0;
+            let close_x = tab.close_button_x();
             assert_eq!(
-                state.close_button_at(close_x + 6.0, TITLE_BAR_HEIGHT + 10.0),
+                state.close_button_at(
+                    close_x + TAB_CLOSE_BUTTON_SIZE / 2.0,
+                    TITLE_BAR_HEIGHT + 10.0
+                ),
                 Some(i),
                 "close button for tab {}",
                 i,
@@ -943,9 +987,25 @@ mod tests {
     fn tab_state_max_text_width() {
         let state = bar_with(4, 0, 800.0);
         let tab = &state.tabs[0];
-        let expected = tab.width - TAB_PADDING * 2.0 - 16.0;
+        let expected = tab.width - TAB_PADDING * 2.0 - TAB_CLOSE_BUTTON_SIZE - 4.0;
         assert_eq!(tab.max_text_width(), expected);
         assert!(tab.max_text_width() > 0.0);
+    }
+
+    #[test]
+    fn tab_state_close_geometry() {
+        let state = bar_with(2, 0, 800.0);
+        let tab = &state.tabs[0];
+        assert_eq!(
+            tab.close_button_x(),
+            tab.x + tab.width - TAB_PADDING - TAB_CLOSE_BUTTON_SIZE
+        );
+        let (x, y, w, h) = tab.close_hover_bounds();
+        assert_eq!(w, TAB_CLOSE_HOVER_SIZE);
+        assert_eq!(h, TAB_CLOSE_HOVER_SIZE);
+        assert!(x < tab.close_button_x());
+        assert!(y > TITLE_BAR_HEIGHT);
+        assert!(y + h < TAB_BAR_HEIGHT);
     }
 
     #[test]
