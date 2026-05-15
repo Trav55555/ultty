@@ -1402,6 +1402,7 @@ impl Renderer {
             // Track runs of same background color
             let mut run_start = 0u16;
             let mut run_color: Option<Rgba> = None;
+            let selection_bg = self.color_scheme.selection_background();
 
             for col_idx in 0..dims.cols {
                 let cell = match row.get(col_idx) {
@@ -1411,7 +1412,7 @@ impl Renderer {
 
                 let is_selected = terminal.is_selected(col_idx, row_idx);
                 let bg_color = if is_selected {
-                    self.color_scheme.selection
+                    selection_bg
                 } else if cell.has_flag(CellFlags::REVERSE) {
                     self.color_scheme.resolve(cell.fg(), true)
                 } else {

@@ -89,6 +89,19 @@ impl Default for ColorScheme {
 }
 
 impl ColorScheme {
+    /// Selection background used for terminal-grid selections.
+    ///
+    /// User themes control the hue, while the renderer keeps opacity inside a
+    /// legible range so selected text is neither faint nor fully obscured.
+    pub fn selection_background(&self) -> Rgba {
+        Rgba::new(
+            self.selection.r,
+            self.selection.g,
+            self.selection.b,
+            self.selection.a.clamp(0.55, 0.72),
+        )
+    }
+
     /// Dark color scheme (similar to many terminal defaults).
     pub fn dark() -> Self {
         Self {
@@ -256,6 +269,36 @@ mod tests {
         assert!(approx(arr[1], 0.2));
         assert!(approx(arr[2], 0.3));
         assert!(approx(arr[3], 0.4));
+    }
+
+    #[test]
+    fn selection_background_raises_faint_alpha() {
+        let mut scheme = ColorScheme::dark();
+        scheme.selection = Rgba::new(0.2, 0.3, 0.4, 0.1);
+
+        assert_eq!(
+            scheme.selection_background(),
+            Rgba::new(0.2, 0.3, 0.4, 0.55)
+        );
+    }
+
+    #[test]
+    fn selection_background_caps_opaque_alpha() {
+        let mut scheme = ColorScheme::dark();
+        scheme.selection = Rgba::new(0.2, 0.3, 0.4, 1.0);
+
+        assert_eq!(
+            scheme.selection_background(),
+            Rgba::new(0.2, 0.3, 0.4, 0.72)
+        );
+    }
+
+    #[test]
+    fn selection_background_preserves_midrange_alpha_and_hue() {
+        let mut scheme = ColorScheme::dark();
+        scheme.selection = Rgba::new(0.2, 0.3, 0.4, 0.6);
+
+        assert_eq!(scheme.selection_background(), Rgba::new(0.2, 0.3, 0.4, 0.6));
     }
 
     #[test]

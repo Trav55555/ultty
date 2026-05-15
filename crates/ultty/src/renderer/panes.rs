@@ -411,6 +411,7 @@ impl Renderer {
     ) -> (Vec<Vertex>, Vec<u32>) {
         let buffer = terminal.buffer();
         let dims = terminal.dimensions();
+        let selection_bg = self.color_scheme.selection_background();
         // Pre-allocate based on terminal size: ~1 bg run per row on average = rows quads
         let est_quads = dims.rows as usize * 4;
         let mut vertices = Vec::with_capacity(est_quads * 4);
@@ -433,7 +434,7 @@ impl Renderer {
 
                 let is_selected = terminal.is_selected(col_idx, row_idx);
                 let bg_color = if is_selected {
-                    self.color_scheme.selection
+                    selection_bg
                 } else if cell.has_flag(CellFlags::REVERSE) {
                     self.color_scheme.resolve(cell.fg(), true)
                 } else {
