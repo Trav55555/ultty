@@ -29,3 +29,6 @@ The smoke also runs `scripts/analyze-chrome-screenshots.py` to check that:
 The script normalizes the live app to one tab before the first capture, creates
 a second tab for the multi-tab capture, creates additional tabs for the dense
 capture, and closes the extra tabs on exit.
+
+For pointer and resize behavior around the same chrome surfaces, use
+[`chrome-pointer-audit.md`](chrome-pointer-audit.md).
