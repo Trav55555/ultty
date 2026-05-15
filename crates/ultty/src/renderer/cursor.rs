@@ -5,6 +5,18 @@
 
 use super::{Renderer, Rgba, Vertex};
 
+const MIN_CURSOR_STROKE: f32 = 2.0;
+const MAX_CURSOR_STROKE: f32 = 3.0;
+const CURSOR_STROKE_RATIO: f32 = 0.16;
+
+fn cursor_stroke(size: f32) -> f32 {
+    if size <= 0.0 {
+        return 0.0;
+    }
+
+    (size * CURSOR_STROKE_RATIO).clamp(MIN_CURSOR_STROKE, MAX_CURSOR_STROKE)
+}
+
 impl Renderer {
     /// Emit a thin underline cursor at the bottom of a cell.
     pub(super) fn emit_cursor_underline(
@@ -17,7 +29,7 @@ impl Renderer {
     ) {
         let x0 = col as f32 * self.cell_width;
         let x1 = (col + 1) as f32 * self.cell_width;
-        let underline_height = 2.0f32.min(self.cell_height * 0.15);
+        let underline_height = cursor_stroke(self.cell_height);
         let y0 = (row + 1) as f32 * self.cell_height + self.tab_bar_height - underline_height;
         let y1 = (row + 1) as f32 * self.cell_height + self.tab_bar_height;
 
@@ -66,7 +78,7 @@ impl Renderer {
         row: u16,
         color: Rgba,
     ) {
-        let bar_width = 2.0f32.min(self.cell_width * 0.15);
+        let bar_width = cursor_stroke(self.cell_width);
         let x0 = col as f32 * self.cell_width;
         let x1 = x0 + bar_width;
         let y0 = row as f32 * self.cell_height + self.tab_bar_height;
@@ -119,7 +131,7 @@ impl Renderer {
     ) {
         let x0 = col as f32 * self.cell_width + self.pane_offset_x;
         let x1 = (col + 1) as f32 * self.cell_width + self.pane_offset_x;
-        let underline_height = 2.0f32.min(self.cell_height * 0.15);
+        let underline_height = cursor_stroke(self.cell_height);
         let y0 = (row + 1) as f32 * self.cell_height + self.pane_offset_y - underline_height;
         let y1 = (row + 1) as f32 * self.cell_height + self.pane_offset_y;
 
@@ -168,7 +180,7 @@ impl Renderer {
         row: u16,
         color: Rgba,
     ) {
-        let bar_width = 2.0f32.min(self.cell_width * 0.15);
+        let bar_width = cursor_stroke(self.cell_width);
         let x0 = col as f32 * self.cell_width + self.pane_offset_x;
         let x1 = x0 + bar_width;
         let y0 = row as f32 * self.cell_height + self.pane_offset_y;
@@ -218,6 +230,8 @@ mod tests {
     //! The Renderer methods above require a GPU context so we test the
     //! pure arithmetic that computes cursor geometry directly.
 
+    use super::cursor_stroke;
+
     /// Replicate underline cursor geometry math from `emit_cursor_underline`.
     fn underline_geometry(
         col: u16,
@@ -228,7 +242,7 @@ mod tests {
     ) -> (f32, f32, f32, f32) {
         let x0 = col as f32 * cell_width;
         let x1 = (col + 1) as f32 * cell_width;
-        let underline_height = 2.0f32.min(cell_height * 0.15);
+        let underline_height = cursor_stroke(cell_height);
         let y0 = (row + 1) as f32 * cell_height + tab_bar_height - underline_height;
         let y1 = (row + 1) as f32 * cell_height + tab_bar_height;
         (x0, y0, x1, y1)
@@ -242,7 +256,7 @@ mod tests {
         cell_height: f32,
         tab_bar_height: f32,
     ) -> (f32, f32, f32, f32) {
-        let bar_width = 2.0f32.min(cell_width * 0.15);
+        let bar_width = cursor_stroke(cell_width);
         let x0 = col as f32 * cell_width;
         let x1 = x0 + bar_width;
         let y0 = row as f32 * cell_height + tab_bar_height;
@@ -261,7 +275,7 @@ mod tests {
     ) -> (f32, f32, f32, f32) {
         let x0 = col as f32 * cell_width + pane_offset_x;
         let x1 = (col + 1) as f32 * cell_width + pane_offset_x;
-        let underline_height = 2.0f32.min(cell_height * 0.15);
+        let underline_height = cursor_stroke(cell_height);
         let y0 = (row + 1) as f32 * cell_height + pane_offset_y - underline_height;
         let y1 = (row + 1) as f32 * cell_height + pane_offset_y;
         (x0, y0, x1, y1)
@@ -276,7 +290,7 @@ mod tests {
         pane_offset_x: f32,
         pane_offset_y: f32,
     ) -> (f32, f32, f32, f32) {
-        let bar_width = 2.0f32.min(cell_width * 0.15);
+        let bar_width = cursor_stroke(cell_width);
         let x0 = col as f32 * cell_width + pane_offset_x;
         let x1 = x0 + bar_width;
         let y0 = row as f32 * cell_height + pane_offset_y;
@@ -289,9 +303,9 @@ mod tests {
         let (x0, y0, x1, y1) = underline_geometry(0, 0, 10.0, 20.0, 0.0);
         assert_eq!(x0, 0.0);
         assert_eq!(x1, 10.0);
-        // Underline at bottom of cell row 0: y1 = 20, height = min(2, 3) = 2
+        // Underline at bottom of cell row 0: y1 = 20, height = 3.
         assert_eq!(y1, 20.0);
-        assert_eq!(y0, 18.0);
+        assert_eq!(y0, 17.0);
     }
 
     #[test]
@@ -299,7 +313,7 @@ mod tests {
         let (_, y0, _, y1) = underline_geometry(0, 0, 10.0, 20.0, 30.0);
         // Bottom of row 0 with 30px tab bar = 20 + 30 = 50
         assert_eq!(y1, 50.0);
-        assert_eq!(y0, 48.0);
+        assert_eq!(y0, 47.0);
     }
 
     #[test]
@@ -311,17 +325,15 @@ mod tests {
     }
 
     #[test]
-    fn underline_height_clamped_to_2() {
-        // With large cells (cell_height=100, 0.15*100=15 > 2), height should be 2
+    fn underline_height_clamped_to_max() {
         let (_, y0, _, y1) = underline_geometry(0, 0, 10.0, 100.0, 0.0);
-        assert!((y1 - y0 - 2.0).abs() < 1e-5);
+        assert!((y1 - y0 - 3.0).abs() < 1e-5);
     }
 
     #[test]
-    fn underline_height_proportional_for_small_cells() {
-        // With small cells (cell_height=10, 0.15*10=1.5 < 2), height should be 1.5
+    fn underline_height_keeps_minimum_for_small_cells() {
         let (_, y0, _, y1) = underline_geometry(0, 0, 10.0, 10.0, 0.0);
-        assert!((y1 - y0 - 1.5).abs() < 1e-5);
+        assert!((y1 - y0 - 2.0).abs() < 1e-5);
     }
 
     #[test]
@@ -330,15 +342,21 @@ mod tests {
         assert_eq!(x0, 0.0);
         assert_eq!(y0, 0.0);
         assert_eq!(y1, 20.0);
-        // bar_width = min(2, 10*0.15=1.5) = 1.5
-        assert!((x1 - 1.5).abs() < 1e-5);
+        assert!((x1 - 2.0).abs() < 1e-5);
     }
 
     #[test]
-    fn bar_width_clamped_to_2() {
-        // With large cells (cell_width=100, 0.15*100=15 > 2), bar width should be 2
+    fn bar_width_clamped_to_max() {
         let (x0, _, x1, _) = bar_geometry(0, 0, 100.0, 20.0, 0.0);
-        assert!((x1 - x0 - 2.0).abs() < 1e-5);
+        assert!((x1 - x0 - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn cursor_stroke_scales_between_minimum_and_maximum() {
+        assert_eq!(cursor_stroke(0.0), 0.0);
+        assert_eq!(cursor_stroke(8.0), 2.0);
+        assert!((cursor_stroke(16.0) - 2.56).abs() < 1e-5);
+        assert_eq!(cursor_stroke(100.0), 3.0);
     }
 
     #[test]
