@@ -3127,6 +3127,17 @@ impl PorygonTui {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
     use ulttui::cmd::Cmd;
     use ulttui::event::Event;
     use ulttui::prelude::Application;
@@ -3134,7 +3145,104 @@ mod tests {
     use crate::types::ChatMessage;
     use crate::Msg;
 
-    use super::PorygonTui;
+    use super::{abort_daemon_stream, stream_from_daemon, PorygonTui};
+
+    struct FakeWsDaemon {
+        url: String,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    struct FakeHttpDaemon {
+        url: String,
+        abort_seen: Arc<AtomicBool>,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    async fn spawn_fake_ws_daemon(slow: bool) -> FakeWsDaemon {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake websocket daemon");
+        let addr = listener.local_addr().expect("fake websocket local addr");
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept websocket client");
+            let mut ws = accept_async(stream)
+                .await
+                .expect("accept websocket handshake");
+            let _ = ws.next().await.expect("prompt frame should arrive");
+
+            ws.send(WsMessage::Text(
+                serde_json::json!({"type": "token", "content": "hello"}).to_string(),
+            ))
+            .await
+            .expect("send first token");
+
+            if slow {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                return;
+            }
+
+            ws.send(WsMessage::Text(
+                serde_json::json!({"type": "token", "content": " world"}).to_string(),
+            ))
+            .await
+            .expect("send second token");
+            ws.send(WsMessage::Text(
+                serde_json::json!({"type": "done"}).to_string(),
+            ))
+            .await
+            .expect("send done");
+        });
+
+        FakeWsDaemon {
+            url: format!("ws://{addr}/agent/stream"),
+            handle,
+        }
+    }
+
+    async fn spawn_fake_http_daemon() -> FakeHttpDaemon {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake http daemon");
+        let addr = listener.local_addr().expect("fake http local addr");
+        let abort_seen = Arc::new(AtomicBool::new(false));
+        let abort_seen_for_task = abort_seen.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let abort_seen = abort_seen_for_task.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = stream.read(&mut buf).await.expect("read fake http request");
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let body = if request.starts_with("POST /api/ask") {
+                        r#"{"response":"fallback response"}"#
+                    } else {
+                        if request.starts_with("POST /agent/abort") {
+                            abort_seen.store(true, Ordering::SeqCst);
+                        }
+                        "{}"
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write fake http response");
+                });
+            }
+        });
+
+        FakeHttpDaemon {
+            url: format!("http://{addr}"),
+            abort_seen,
+            handle,
+        }
+    }
 
     fn extract_ms(line: &str) -> Option<u64> {
         let idx = line.find(": ")?;
@@ -3297,5 +3405,107 @@ mod tests {
         app.stream_token_count = 4;
 
         assert_eq!(app.status_step_text(), "streaming: 4 tokens");
+    }
+
+    #[test]
+    fn porygon_stream_smoke_fake_daemon_tokens_complete_and_update_loop() {
+        let rt = tokio::runtime::Runtime::new().expect("test runtime");
+        rt.block_on(async {
+            let fake_ws = spawn_fake_ws_daemon(false).await;
+            let fake_http = spawn_fake_http_daemon().await;
+            let client = reqwest::Client::new();
+            let mut stream = Box::pin(stream_from_daemon(
+                fake_ws.url.clone(),
+                format!("{}/api/ask", fake_http.url),
+                client,
+                "stream please".to_string(),
+            ));
+            let mut app = PorygonTui::new();
+            app.waiting_response = true;
+            app.messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: String::new(),
+                timestamp: "now".to_string(),
+            });
+
+            while let Some(msg) = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .expect("stream message timeout")
+            {
+                let done = matches!(msg, Msg::StreamComplete);
+                let cmd = app.update(msg);
+                if done {
+                    assert!(matches!(cmd, Cmd::Unsubscribe { id } if id == "agent-stream"));
+                    break;
+                }
+            }
+
+            assert!(!app.waiting_response);
+            assert_eq!(app.stream_token_count, 0);
+            assert_eq!(
+                app.messages.last().map(|message| message.content.as_str()),
+                Some("hello world")
+            );
+
+            fake_ws.handle.await.expect("fake websocket task");
+            fake_http.handle.abort();
+        });
+    }
+
+    #[test]
+    fn porygon_stream_smoke_fake_daemon_slow_stream_abort() {
+        let rt = tokio::runtime::Runtime::new().expect("test runtime");
+        rt.block_on(async {
+            let fake_ws = spawn_fake_ws_daemon(true).await;
+            let fake_http = spawn_fake_http_daemon().await;
+            let client = reqwest::Client::new();
+            let mut stream = Box::pin(stream_from_daemon(
+                fake_ws.url.clone(),
+                format!("{}/api/ask", fake_http.url),
+                client.clone(),
+                "slow stream please".to_string(),
+            ));
+            let mut app = PorygonTui::new();
+            app.daemon_url = fake_http.url.clone();
+            app.client = client.clone();
+            app.waiting_response = true;
+            app.messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: String::new(),
+                timestamp: "now".to_string(),
+            });
+
+            let first_msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .expect("first stream token timeout")
+                .expect("stream should yield first token");
+            assert!(matches!(first_msg, Msg::StreamToken(_)));
+            let _ = app.update(first_msg);
+
+            let cmd = app.update(Msg::AbortStream);
+            match cmd {
+                Cmd::Batch(cmds) => {
+                    assert!(cmds
+                        .into_iter()
+                        .any(|cmd| matches!(cmd, Cmd::Unsubscribe { id } if id == "agent-stream")));
+                }
+                _ => panic!("expected abort to return a batch command"),
+            }
+
+            abort_daemon_stream(&client, &format!("{}/agent/abort", fake_http.url))
+                .await
+                .expect("fake abort endpoint should accept abort");
+
+            assert!(!app.waiting_response);
+            assert_eq!(app.status.step, "idle (aborted)");
+            assert_eq!(
+                app.messages.last().map(|message| message.content.as_str()),
+                Some("hello")
+            );
+            assert!(fake_http.abort_seen.load(Ordering::SeqCst));
+
+            fake_ws.handle.abort();
+            fake_http.handle.abort();
+        });
     }
 }

@@ -36,3 +36,17 @@ This note summarizes the workflow commands and runtime visibility added for mile
 - `/bench-diff`: runs 1000-line diff parse/classification benchmark.
 
 Status bar includes stream summary and `cancel_p95` once cancel samples exist.
+
+## Streaming Smoke
+
+Run the fake-daemon streaming smoke from the repository root:
+
+```bash
+scripts/porygon-stream-smoke.sh
+```
+
+The smoke is a focused `porygon-tui` test path. It starts local fake
+WebSocket/HTTP daemons inside the test process, drives the real stream client,
+feeds token/completion messages through the app update handlers, and verifies
+abort behavior through a fake `/agent/abort` endpoint. It does not require a
+real Porygon daemon or external network service.
