@@ -14,6 +14,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 scripts/terminal-surface-smoke.sh /tmp/ultty-terminal-surface-smoke
 scripts/native-richtext-smoke.sh /tmp/ultty-native-richtext-smoke
+scripts/append-content-smoke.sh /tmp/ultty-append-content-smoke
 scripts/screenshot-smoke.sh /tmp/ultty-screenshot-smoke
 ```
 
@@ -24,6 +25,7 @@ Result:
 - Terminal surface smoke passed and produced prompt, scrollback, cursor, and
   resize artifacts.
 - Native rich text smoke passed and produced `hello-native.png`.
+- AppendContent smoke passed and produced before/after append screenshots.
 - Chrome screenshot smoke passed for single-tab, multi-tab, and dense-tabs
   screenshots.
 
@@ -122,3 +124,28 @@ review for detailed copy or syntax-highlighting claims.
 
 For pointer and resize behavior around the same chrome surfaces, use
 [`chrome-pointer-audit.md`](chrome-pointer-audit.md).
+
+## AppendContent Smoke
+
+Start Ultty, then run:
+
+```bash
+scripts/append-content-smoke.sh /tmp/ultty-append-content-smoke
+```
+
+Use this smoke when changing `AppendContent`, native protocol session handling,
+or append-oriented streaming paths. It opens a small native protocol app in a
+separate tab, captures a screenshot before the append, waits for the app to
+send `AppendContent`, captures another screenshot, and validates that the
+renderer output changed below the title band.
+
+Artifacts:
+
+| Artifact | Purpose |
+|----------|---------|
+| `before-append.png` | Captures the initial native text before append. |
+| `after-append.png` | Captures the native text after `AppendContent` arrives. |
+
+The smoke runs `scripts/analyze-append-content-screenshots.py` to check that
+the two screenshots are valid PNGs, share dimensions, avoid the old magenta
+edge artifact, and differ in the rendered content area.

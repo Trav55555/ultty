@@ -196,6 +196,14 @@ impl UlttyClient {
         self.send(&AppMessage::SetContent { id, content })
     }
 
+    /// Append text to an existing region without replacing its content.
+    pub fn append_content(&mut self, id: RegionId, text: impl Into<String>) -> Result<(), Error> {
+        self.send(&AppMessage::AppendContent {
+            id,
+            text: text.into(),
+        })
+    }
+
     /// Update region constraints.
     pub fn set_constraints(&mut self, id: RegionId, constraints: Constraints) -> Result<(), Error> {
         self.send(&AppMessage::SetConstraints { id, constraints })
