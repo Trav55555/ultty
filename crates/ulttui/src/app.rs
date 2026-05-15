@@ -2,7 +2,7 @@
 
 mod runtime;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::backend::Backend;
@@ -150,6 +150,14 @@ struct StreamSubSpec<M> {
     id: String,
     url: String,
     on_message: Box<dyn Fn(String) -> M + Send + 'static>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StreamSubscriptionAction {
+    Unchanged { id: String },
+    Start { id: String },
+    Restart { id: String },
+    Remove { id: String },
 }
 
 struct SubCollectCtx<'a, M> {
@@ -526,47 +534,46 @@ impl<A: Application> App<A> {
             desired_by_id.insert(spec.id.clone(), spec);
         }
 
-        let active_ids: Vec<String> = self.stream_subscription_handles.keys().cloned().collect();
-        for id in active_ids {
-            if !desired_by_id.contains_key(&id) {
-                if let Some(handle) = self.stream_subscription_handles.remove(&id) {
-                    handle.abort();
+        let active_urls = self.stream_subscription_urls.clone();
+        let running_by_id = self
+            .stream_subscription_handles
+            .iter()
+            .map(|(id, handle)| (id.clone(), !handle.is_finished()))
+            .collect::<HashMap<_, _>>();
+        let desired_urls = desired_by_id
+            .iter()
+            .map(|(id, spec)| (id.clone(), spec.url.clone()))
+            .collect::<HashMap<_, _>>();
+
+        for action in stream_subscription_actions(&active_urls, &running_by_id, &desired_urls) {
+            match action {
+                StreamSubscriptionAction::Unchanged { .. } => {}
+                StreamSubscriptionAction::Remove { id } => {
+                    if let Some(handle) = self.stream_subscription_handles.remove(&id) {
+                        handle.abort();
+                    }
+                    self.stream_subscription_urls.remove(&id);
                 }
-                self.stream_subscription_urls.remove(&id);
+                StreamSubscriptionAction::Start { id }
+                | StreamSubscriptionAction::Restart { id } => {
+                    if let Some(handle) = self.stream_subscription_handles.remove(&id) {
+                        handle.abort();
+                    }
+                    let spec = desired_by_id
+                        .remove(&id)
+                        .expect("start/restart action should have a desired spec");
+                    let handle = Self::spawn_stream_subscription(
+                        rt,
+                        self.subscription_tx.clone(),
+                        id.clone(),
+                        spec.url.clone(),
+                        spec.on_message,
+                    );
+
+                    self.stream_subscription_handles.insert(id.clone(), handle);
+                    self.stream_subscription_urls.insert(id, spec.url);
+                }
             }
-        }
-
-        for (id, spec) in desired_by_id {
-            let handle_is_running = self
-                .stream_subscription_handles
-                .get(&id)
-                .map(|handle| !handle.is_finished())
-                .unwrap_or(false);
-            let should_restart = self
-                .stream_subscription_urls
-                .get(&id)
-                .map(|url| url != &spec.url)
-                .unwrap_or(true)
-                || !handle_is_running;
-
-            if !should_restart {
-                continue;
-            }
-
-            if let Some(handle) = self.stream_subscription_handles.remove(&id) {
-                handle.abort();
-            }
-
-            let handle = Self::spawn_stream_subscription(
-                rt,
-                self.subscription_tx.clone(),
-                id.clone(),
-                spec.url.clone(),
-                spec.on_message,
-            );
-
-            self.stream_subscription_handles.insert(id.clone(), handle);
-            self.stream_subscription_urls.insert(id, spec.url);
         }
     }
 
@@ -644,6 +651,31 @@ impl<A: Application> App<A> {
 
         Column::new().flex_grow(1.0).child(Spacer).child(toast_list)
     }
+}
+
+fn stream_subscription_actions(
+    active_urls: &HashMap<String, String>,
+    running_by_id: &HashMap<String, bool>,
+    desired_urls: &HashMap<String, String>,
+) -> Vec<StreamSubscriptionAction> {
+    let mut ids = BTreeSet::new();
+    ids.extend(active_urls.keys().cloned());
+    ids.extend(desired_urls.keys().cloned());
+
+    ids.into_iter()
+        .map(|id| match (active_urls.get(&id), desired_urls.get(&id)) {
+            (Some(_), None) => StreamSubscriptionAction::Remove { id },
+            (None, Some(_)) => StreamSubscriptionAction::Start { id },
+            (Some(active_url), Some(desired_url))
+                if active_url == desired_url
+                    && running_by_id.get(&id).copied().unwrap_or(false) =>
+            {
+                StreamSubscriptionAction::Unchanged { id }
+            }
+            (Some(_), Some(_)) => StreamSubscriptionAction::Restart { id },
+            (None, None) => unreachable!("id comes from active or desired stream maps"),
+        })
+        .collect()
 }
 
 impl<A: Application> Drop for App<A> {
@@ -1117,6 +1149,51 @@ mod async_tests {
                 .get("ws-sub")
                 .map(String::as_str),
             Some("ws://127.0.0.1:1")
+        );
+    }
+
+    #[test]
+    fn stream_subscription_actions_distinguish_lifecycle_changes() {
+        let active_urls = HashMap::from([
+            ("b-unchanged".to_string(), "ws://same".to_string()),
+            ("c-restart-url".to_string(), "ws://old".to_string()),
+            ("d-restart-finished".to_string(), "ws://same".to_string()),
+            ("e-remove".to_string(), "ws://stale".to_string()),
+        ]);
+        let running_by_id = HashMap::from([
+            ("b-unchanged".to_string(), true),
+            ("c-restart-url".to_string(), true),
+            ("d-restart-finished".to_string(), false),
+            ("e-remove".to_string(), true),
+        ]);
+        let desired_urls = HashMap::from([
+            ("a-start".to_string(), "ws://new".to_string()),
+            ("b-unchanged".to_string(), "ws://same".to_string()),
+            ("c-restart-url".to_string(), "ws://new".to_string()),
+            ("d-restart-finished".to_string(), "ws://same".to_string()),
+        ]);
+
+        let actions = stream_subscription_actions(&active_urls, &running_by_id, &desired_urls);
+
+        assert_eq!(
+            actions,
+            vec![
+                StreamSubscriptionAction::Start {
+                    id: "a-start".to_string(),
+                },
+                StreamSubscriptionAction::Unchanged {
+                    id: "b-unchanged".to_string(),
+                },
+                StreamSubscriptionAction::Restart {
+                    id: "c-restart-url".to_string(),
+                },
+                StreamSubscriptionAction::Restart {
+                    id: "d-restart-finished".to_string(),
+                },
+                StreamSubscriptionAction::Remove {
+                    id: "e-remove".to_string(),
+                },
+            ]
         );
     }
 
