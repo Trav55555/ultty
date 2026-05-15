@@ -70,11 +70,11 @@ impl NativeBackend {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
     use bytes::BytesMut;
-    use ultty_protocol::{Encode, TerminalMessage};
+    use ultty_protocol::{AppMessage, Decode, Encode, RegionId, TerminalMessage};
 
     use super::NativeBackend;
 
@@ -130,5 +130,23 @@ mod tests {
             backend.try_decode_message().unwrap(),
             Some(TerminalMessage::Ping)
         ));
+    }
+
+    #[test]
+    fn append_content_serializes_append_message() {
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        let mut backend = NativeBackend::new();
+        backend.stream = Some(writer);
+        let expected = AppMessage::AppendContent {
+            id: RegionId::new(7),
+            text: " tail".to_string(),
+        };
+        let mut bytes = vec![0; expected.encode_to_bytes().len()];
+
+        backend.append_content(RegionId::new(7), " tail").unwrap();
+        reader.read_exact(&mut bytes).unwrap();
+
+        let decoded = AppMessage::decode(&mut &bytes[..]).unwrap();
+        assert_eq!(decoded, expected);
     }
 }

@@ -90,6 +90,18 @@ impl NativeBackend {
         Ok(())
     }
 
+    /// Append text to an existing native region without rebuilding a full frame.
+    pub fn append_content(
+        &mut self,
+        region_id: RegionId,
+        text: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        self.send_message(&AppMessage::AppendContent {
+            id: region_id,
+            text: text.into(),
+        })
+    }
+
     pub fn render(&mut self, view: &impl View) -> anyhow::Result<()> {
         let frame_id = FrameId(self.next_frame_id);
         self.next_frame_id += 1;

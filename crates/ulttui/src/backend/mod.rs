@@ -10,10 +10,13 @@ mod native_diff;
 use crate::event::Event;
 use crate::widgets::View;
 
+/// Native Ultty protocol backend.
+pub use native::NativeBackend;
+
 /// Backend for rendering.
 pub enum Backend {
     /// Native protocol (Ultty).
-    Native(native::NativeBackend),
+    Native(NativeBackend),
     /// ANSI fallback (any terminal).
     Ansi(ansi::AnsiBackend),
     /// Mock backend (tests only).
