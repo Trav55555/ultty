@@ -436,6 +436,13 @@ fn snapshot_markdown_basic() {
     insta::assert_snapshot!(output);
 }
 
+#[test]
+fn snapshot_markdown_streaming() {
+    let md = MarkdownView::new("Partial **markdown** response").streaming(true);
+    let output = render_to_string(&md, 40, 3);
+    insta::assert_snapshot!(output);
+}
+
 // ── Image ─────────────────────────────────────────────────────────────
 
 #[test]

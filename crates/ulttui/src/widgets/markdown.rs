@@ -11,7 +11,7 @@ use ultty_protocol::{
     Display, NamedColor, RegionId, RichText, Style, TextContent,
 };
 
-const STREAMING_CURSOR: &str = "▊";
+const STREAMING_CURSOR: &str = "|";
 
 #[derive(Debug, Clone)]
 pub struct MarkdownView {
@@ -122,7 +122,7 @@ impl MarkdownView {
 
     /// Enable streaming mode.
     ///
-    /// When `true`, a blinking cursor (▊) is appended to the rendered output
+    /// When `true`, a cursor is appended to the rendered output
     /// to indicate content is still arriving. Toggle off to finalize.
     pub fn streaming(mut self, streaming: bool) -> Self {
         self.streaming = streaming;
@@ -1040,7 +1040,7 @@ mod tests {
             AppMessage::SetContent {
                 content: Content::Text(tc),
                 ..
-            } => assert_eq!(tc.text, "▊"),
+            } => assert_eq!(tc.text, "|"),
             _ => panic!("expected text content with cursor"),
         }
     }
@@ -1057,7 +1057,7 @@ mod tests {
                 ..
             } => {
                 let last = rich.spans.last().expect("should have spans");
-                assert_eq!(last.text, "▊");
+                assert_eq!(last.text, "|");
             }
             _ => panic!("expected rich text with cursor"),
         }
@@ -1072,7 +1072,7 @@ mod tests {
                 content: Content::RichText(rich),
                 ..
             } => {
-                assert!(rich.spans.iter().all(|s| s.text != "▊"));
+                assert!(rich.spans.iter().all(|s| s.text != "|"));
             }
             _ => panic!("expected rich text without cursor"),
         }
