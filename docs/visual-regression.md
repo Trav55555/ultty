@@ -54,6 +54,13 @@ the window chrome. It captures:
 Selection screenshots still require pointer-driven selection setup; the control
 protocol can query the current selection but does not synthesize mouse drags.
 
+The resize command uses winit's advisory `request_inner_size` path. Some
+desktop sessions or window managers may acknowledge the request without
+delivering a matching `WindowEvent::Resized` to Ultty. When that happens,
+renderer screenshots continue to use the last configured surface size. Treat
+`resize-evidence.txt` as the source of truth for whether the resize actually
+affected the live renderer in that run.
+
 ## Native Rich Text Smoke
 
 Start Ultty, then run:
