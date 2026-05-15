@@ -5,6 +5,24 @@
 
 use super::{Renderer, Rgba, Vertex};
 
+fn mix_color(a: Rgba, b: Rgba, amount: f32, alpha: f32) -> Rgba {
+    let amount = amount.clamp(0.0, 1.0);
+    Rgba::new(
+        a.r + (b.r - a.r) * amount,
+        a.g + (b.g - a.g) * amount,
+        a.b + (b.b - a.b) * amount,
+        alpha,
+    )
+}
+
+fn scrollbar_colors(background: Rgba, foreground: Rgba, scroll_offset: usize) -> (Rgba, Rgba) {
+    let track = mix_color(background, foreground, 0.10, 0.42);
+    let thumb_mix = if scroll_offset > 0 { 0.34 } else { 0.24 };
+    let thumb_alpha = if scroll_offset > 0 { 0.74 } else { 0.58 };
+    let thumb = mix_color(background, foreground, thumb_mix, thumb_alpha);
+    (track, thumb)
+}
+
 /// Scrollbar state for rendering.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ScrollbarState {
@@ -77,8 +95,12 @@ impl Renderer {
         let track_y = self.tab_bar_height + scrollbar_margin;
         let track_height = terminal_height - scrollbar_margin * 2.0;
 
-        // Draw track (darker background)
-        let track_color = Rgba::new(0.15, 0.15, 0.15, 0.6);
+        let (track_color, thumb_color) = scrollbar_colors(
+            self.color_scheme.background,
+            self.color_scheme.foreground,
+            scrollbar.scroll_offset,
+        );
+
         self.emit_rect(
             vertices,
             indices,
@@ -93,13 +115,6 @@ impl Renderer {
         let (thumb_pos, thumb_size) = scrollbar.thumb_geometry();
         let thumb_y = track_y + thumb_pos * track_height;
         let thumb_height = (thumb_size * track_height).max(20.0); // Minimum thumb size
-
-        // Draw thumb (brighter)
-        let thumb_color = if scrollbar.scroll_offset > 0 {
-            Rgba::new(0.5, 0.5, 0.5, 0.8) // Active scroll position
-        } else {
-            Rgba::new(0.35, 0.35, 0.35, 0.6) // At bottom
-        };
 
         self.emit_rect(
             vertices,
@@ -195,5 +210,26 @@ mod tests {
         assert_eq!(sb.viewport_lines, 0);
         assert_eq!(sb.scroll_offset, 0);
         assert!(!sb.is_visible());
+    }
+
+    #[test]
+    fn scrollbar_colors_are_theme_derived() {
+        let bg = Rgba::new(0.1, 0.2, 0.3, 1.0);
+        let fg = Rgba::new(0.9, 0.8, 0.7, 1.0);
+        let (track, thumb) = scrollbar_colors(bg, fg, 0);
+
+        assert_eq!(track, Rgba::new(0.18, 0.26, 0.34, 0.42));
+        assert_eq!(thumb, Rgba::new(0.292, 0.344, 0.396, 0.58));
+    }
+
+    #[test]
+    fn scrollbar_thumb_gets_clearer_when_scrolled() {
+        let bg = Rgba::new(0.1, 0.2, 0.3, 1.0);
+        let fg = Rgba::new(0.9, 0.8, 0.7, 1.0);
+        let (_, at_bottom) = scrollbar_colors(bg, fg, 0);
+        let (_, away_from_bottom) = scrollbar_colors(bg, fg, 1);
+
+        assert!(away_from_bottom.a > at_bottom.a);
+        assert!(away_from_bottom.r > at_bottom.r);
     }
 }
