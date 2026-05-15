@@ -42,10 +42,11 @@ impl Renderer {
         let title_bg = lighten(bg, 0.012);
         let tab_row_bg = lighten(bg, 0.035);
         let rail_line = lighten(bg, 0.075);
-        let active_tab_bg = lighten(bg, 0.012);
+        let active_tab_bg = lighten(bg, 0.058);
         let inactive_tab_bg = lighten(bg, 0.02);
         let inactive_hover_bg = lighten(bg, 0.055);
-        let accent_color = dim(self.color_scheme.cursor, 0.85);
+        let accent_color = dim(self.color_scheme.cursor, 0.92);
+        let active_edge = dim(self.color_scheme.foreground, 0.18);
         let control_hover_bg = lighten(bg, 0.07);
         let destructive_hover_bg = Rgba::new(0.55, 0.16, 0.14, 1.0);
 
@@ -120,8 +121,26 @@ impl Renderer {
                     tab.x + margin_x,
                     tab_y,
                     tab.width - margin_x * 2.0,
-                    2.0,
+                    3.0,
                     accent_color,
+                );
+                self.emit_rect(
+                    &mut vertices,
+                    &mut indices,
+                    tab.x + margin_x,
+                    tab_y,
+                    1.0,
+                    tab_height,
+                    active_edge,
+                );
+                self.emit_rect(
+                    &mut vertices,
+                    &mut indices,
+                    tab.x + tab.width - margin_x - 1.0,
+                    tab_y,
+                    1.0,
+                    tab_height,
+                    active_edge,
                 );
             }
 
