@@ -526,11 +526,7 @@ impl PorygonTui {
             _ => ("?", Color::Rgb(247, 247, 247)),
         };
 
-        let step_text = if self.waiting_response && self.stream_token_count > 0 {
-            format!("streaming: {} tokens", self.stream_token_count)
-        } else {
-            self.status.step.clone()
-        };
+        let step_text = self.status_step_text();
 
         let perf_text = self.last_stream_perf.as_ref().map(|perf| {
             let p95 = perf
@@ -584,13 +580,27 @@ impl PorygonTui {
             );
         }
 
+        let key_hint = if self.waiting_response {
+            " Enter:send Esc/Ctrl+C:abort PgUp/Dn:scroll "
+        } else {
+            " Enter:send Esc:abort PgUp/Dn:scroll Ctrl+C:quit "
+        };
+
         Row::new().child(status_line.span(
-            " Enter:send Esc:abort PgUp/Dn:scroll Ctrl+C:quit ",
+            key_hint,
             Style {
                 dim: true,
                 ..Style::new()
             },
         ))
+    }
+
+    pub(crate) fn status_step_text(&self) -> String {
+        if self.waiting_response && self.stream_token_count > 0 {
+            format!("streaming: {} tokens", self.stream_token_count)
+        } else {
+            self.status.step.clone()
+        }
     }
 
     pub(crate) fn handle_event(&mut self, event: &Event) -> Option<Msg> {
@@ -606,6 +616,7 @@ impl PorygonTui {
         }
 
         match event {
+            Event::Quit if self.waiting_response => Some(Msg::AbortStream),
             Event::Quit => Some(Msg::ExitRequested),
             Event::Resize { width, height } => {
                 self.terminal_width = *width;

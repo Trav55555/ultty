@@ -3128,6 +3128,7 @@ impl PorygonTui {
 #[cfg(test)]
 mod tests {
     use ulttui::cmd::Cmd;
+    use ulttui::event::Event;
     use ulttui::prelude::Application;
 
     use crate::types::ChatMessage;
@@ -3244,5 +3245,57 @@ mod tests {
             app.messages.last().map(|message| message.content.as_str()),
             Some("fallback answer")
         );
+    }
+
+    #[test]
+    fn ctrl_c_quit_event_aborts_active_stream() {
+        let mut app = PorygonTui::new();
+        app.waiting_response = true;
+
+        assert!(matches!(
+            app.handle_event(&Event::Quit),
+            Some(Msg::AbortStream)
+        ));
+    }
+
+    #[test]
+    fn abort_stream_unsubscribes_and_preserves_partial_transcript() {
+        let mut app = PorygonTui::new();
+        app.waiting_response = true;
+        app.streaming_content = "partial answer".to_string();
+        app.stream_token_count = 2;
+        app.messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: "partial answer".to_string(),
+            timestamp: "now".to_string(),
+        });
+
+        let cmd = app.update(Msg::AbortStream);
+
+        assert!(!app.waiting_response);
+        assert_eq!(app.status.step, "idle (aborted)");
+        assert!(app.streaming_content.is_empty());
+        assert_eq!(app.stream_token_count, 0);
+        assert_eq!(
+            app.messages.last().map(|message| message.content.as_str()),
+            Some("partial answer")
+        );
+        match cmd {
+            Cmd::Batch(cmds) => {
+                assert!(cmds
+                    .into_iter()
+                    .any(|cmd| matches!(cmd, Cmd::Unsubscribe { id } if id == "agent-stream")));
+            }
+            _ => panic!("expected abort to return a batch command"),
+        }
+    }
+
+    #[test]
+    fn status_step_text_reports_active_stream_token_count() {
+        let mut app = PorygonTui::new();
+        app.waiting_response = true;
+        app.stream_token_count = 4;
+
+        assert_eq!(app.status_step_text(), "streaming: 4 tokens");
     }
 }
