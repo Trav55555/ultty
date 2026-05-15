@@ -376,7 +376,7 @@ impl PorygonTui {
             let is_streaming_msg =
                 self.waiting_response && i + 1 == self.messages.len() && msg.role == "assistant";
             if is_streaming_msg {
-                card = card.child(Text::new(format!("{}▊", msg.content)));
+                card = card.child(MarkdownView::new(msg.content.clone()).streaming(true));
             } else {
                 card = card.child(MarkdownView::new(msg.content.clone()));
             }

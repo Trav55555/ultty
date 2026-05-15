@@ -3127,6 +3127,12 @@ impl PorygonTui {
 
 #[cfg(test)]
 mod tests {
+    use ulttui::cmd::Cmd;
+    use ulttui::prelude::Application;
+
+    use crate::types::ChatMessage;
+    use crate::Msg;
+
     use super::PorygonTui;
 
     fn extract_ms(line: &str) -> Option<u64> {
@@ -3169,5 +3175,74 @@ mod tests {
 
         // Keep this conservative for CI stability while still ensuring no major regressions.
         assert!(parse_ms + style_ms <= 200);
+    }
+
+    #[test]
+    fn stream_token_appends_to_active_assistant_message() {
+        let mut app = PorygonTui::new();
+        app.waiting_response = true;
+        app.messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: String::new(),
+            timestamp: "now".to_string(),
+        });
+
+        let cmd = app.update(Msg::StreamToken("hello".to_string()));
+
+        assert!(matches!(cmd, Cmd::None));
+        assert_eq!(app.stream_token_count, 1);
+        assert_eq!(app.streaming_content, "hello");
+        assert_eq!(
+            app.messages.last().map(|message| message.content.as_str()),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn stream_complete_unsubscribes_and_preserves_partial_response() {
+        let mut app = PorygonTui::new();
+        app.waiting_response = true;
+        app.streaming_content = "partial".to_string();
+        app.stream_token_count = 1;
+        app.messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: "partial".to_string(),
+            timestamp: "now".to_string(),
+        });
+
+        let cmd = app.update(Msg::StreamComplete);
+
+        assert!(!app.waiting_response);
+        assert_eq!(app.status.step, "idle");
+        assert!(app.streaming_content.is_empty());
+        assert_eq!(app.stream_token_count, 0);
+        assert_eq!(
+            app.messages.last().map(|message| message.content.as_str()),
+            Some("partial")
+        );
+        match cmd {
+            Cmd::Unsubscribe { id } => assert_eq!(id, "agent-stream"),
+            _ => panic!("expected stream unsubscribe command"),
+        }
+    }
+
+    #[test]
+    fn daemon_response_fallback_fills_empty_stream_placeholder() {
+        let mut app = PorygonTui::new();
+        app.waiting_response = true;
+        app.messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: String::new(),
+            timestamp: "now".to_string(),
+        });
+
+        let cmd = app.update(Msg::DaemonResponse("fallback answer".to_string()));
+
+        assert!(matches!(cmd, Cmd::None));
+        assert!(!app.waiting_response);
+        assert_eq!(
+            app.messages.last().map(|message| message.content.as_str()),
+            Some("fallback answer")
+        );
     }
 }
