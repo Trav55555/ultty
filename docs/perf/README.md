@@ -25,11 +25,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 scripts/live-pipeline-trace.sh /tmp/ultty-live-pipeline-trace
 scripts/softwrap-pty-probe.sh /tmp/ultty-softwrap-pty-probe
 scripts/screenshot-smoke.sh /tmp/ultty-screenshot-smoke
+scripts/native-richtext-smoke.sh /tmp/ultty-native-richtext-smoke
+scripts/append-content-smoke.sh /tmp/ultty-append-content-smoke
 ```
 
 The live pipeline and soft-wrap probes require a GUI-capable Ultty run. The
-screenshot smoke also requires a running Ultty control socket and captures
-renderer output through `ulttyctl screenshot`; see
+renderer screenshot smokes also require a running Ultty control socket and
+capture renderer output through `ulttyctl screenshot`; see
 [`../visual-regression.md`](../visual-regression.md).
 
 The current dated evidence set is:

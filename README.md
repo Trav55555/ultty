@@ -27,7 +27,7 @@ App declares constraints ──→ Binary protocol ──→ Terminal computes l
 
 **Retained scene graph** — The terminal owns a tree of regions. Apps create, update, and delete regions. Only diffs cross the wire.
 
-**Binary protocol** — Structured messages, no parsing overhead. `CreateRegion`, `SetContent`, `SetConstraints` instead of escape sequences.
+**Binary protocol** — Structured messages, no parsing overhead. `CreateRegion`, `SetContent`, `AppendContent`, `SetConstraints` instead of escape sequences.
 
 **Atomic frames** — `BeginFrame`/`EndFrame` batching prevents tearing. The terminal renders nothing until the frame is complete.
 
@@ -88,11 +88,12 @@ enum Msg { Inc, Dec }
 impl Application for App {
     type Message = Msg;
 
-    fn update(&mut self, msg: Msg) {
+    fn update(&mut self, msg: Msg) -> Cmd<Msg> {
         match msg {
             Msg::Inc => self.count += 1,
             Msg::Dec => self.count -= 1,
         }
+        Cmd::none()
     }
 
     fn on_event(&mut self, event: &Event) -> Option<Msg> {
@@ -120,9 +121,14 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-Widgets: `Text`, `Button`, `List`, `TextInput`, `ScrollView`, `Column`, `Row`, `Stack`
+Widgets: `Text`, `RichText`, `MarkdownView`, `Button`, `List`, `TextInput`, `ScrollView`, `Column`, `Row`, `Stack`
 
 All widgets target both Ultty-native mode and ANSI mode.
+
+Markdown streaming is available through `MarkdownView::streaming(true)`. In
+native mode, append-shaped text growth can use `AppendContent` rather than
+replacing the full region; structural markdown changes still fall back to
+normal content updates.
 
 ## Performance
 
@@ -164,7 +170,12 @@ Run the renderer screenshot smoke against a running Ultty instance:
 ```bash
 cargo run -p ultty --bin ultty
 scripts/screenshot-smoke.sh /tmp/ultty-screenshot-smoke
+scripts/native-richtext-smoke.sh /tmp/ultty-native-richtext-smoke
+scripts/append-content-smoke.sh /tmp/ultty-append-content-smoke
 ```
+
+See [Visual Regression](docs/visual-regression.md) for the canonical screenshot
+smoke commands and artifact meanings.
 
 ## Architecture
 
@@ -187,9 +198,11 @@ examples/
 
 **Working:**
 - Native binary protocol with retained scene graph
+- Append-oriented native protocol updates for streaming text
 - GPU-accelerated rendering via wgpu
 - Full VT100/xterm ANSI compatibility
 - Framework with Elm architecture and widget system
+- Markdown streaming affordance for partial assistant responses
 - Dual-mode apps (Ultty-native mode inside Ultty, ANSI mode on supported Unix terminals)
 - Flexbox and grid layout (via Taffy)
 - Protocol hardening (bounds checks, size limits)

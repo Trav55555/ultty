@@ -187,6 +187,22 @@ fn subscriptions(&self) -> Sub<Msg> {
 }
 ```
 
+## Streaming Content
+
+For assistant-style partial responses, render the active message with
+`MarkdownView::streaming(true)` and turn it off when the response completes:
+
+```rust
+fn view(&self) -> impl View {
+    MarkdownView::new(self.response.clone()).streaming(self.waiting_for_response)
+}
+```
+
+In Ultty-native mode, append-shaped text growth can travel over the
+`AppendContent` protocol path. Keep full `SetContent` updates for structural
+changes such as replacing a whole markdown block or reparsing completed
+markdown.
+
 ## Widget IDs and Events
 
 Interactive widgets can have IDs for targeted event handling:
@@ -253,6 +269,7 @@ cargo run -p dashboard      # Dashboard with live timer (Sub::every)
 cargo run -p form-app       # Form with text inputs and checkboxes
 cargo run -p chat           # Chat interface with message history
 cargo run -p hello-native   # Raw protocol demo (run inside ultty)
+cargo run -p hello-native --bin append-content-smoke  # AppendContent smoke app
 ```
 
 ## Architecture
@@ -282,5 +299,5 @@ cargo run -p hello-native   # Raw protocol demo (run inside ultty)
 ## Next Steps
 
 - [Widget Reference](WIDGET_REFERENCE.md) — All built-in widgets and their APIs
-- [Protocol Specification](spec/PROTOCOL_SPEC.md) — Native protocol for advanced use
+- [Protocol Specification](PROTOCOL_SPEC.md) — Native protocol for advanced use
 - Explore `examples/` for real-world patterns
