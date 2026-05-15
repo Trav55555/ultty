@@ -9,6 +9,8 @@ use crate::sidebar::sidebar_view;
 use crate::types::{ApprovalRequest, FileTreeEntry, ToolStatus};
 use crate::{Msg, PorygonTui};
 
+const SIDEBAR_MIN_TERMINAL_WIDTH: u16 = 100;
+
 #[derive(Debug, Clone)]
 pub(crate) struct SplashScreen {
     boot_log: Vec<String>,
@@ -605,6 +607,10 @@ impl PorygonTui {
         }
     }
 
+    pub(crate) fn should_show_sidebar(&self) -> bool {
+        self.terminal_width >= SIDEBAR_MIN_TERMINAL_WIDTH
+    }
+
     pub(crate) fn handle_event(&mut self, event: &Event) -> Option<Msg> {
         if self.show_approval_modal {
             return match event {
@@ -722,7 +728,7 @@ impl PorygonTui {
 
         let mut dock = DockLayout::new().dock_top(self.header_view().flex_shrink(0.0));
 
-        if self.terminal_width >= 80 {
+        if self.should_show_sidebar() {
             dock = dock.dock_right(sidebar_view(self));
         }
 

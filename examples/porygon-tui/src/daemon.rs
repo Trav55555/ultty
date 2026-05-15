@@ -3429,6 +3429,22 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_hides_on_narrow_terminal_width() {
+        let mut app = PorygonTui::new();
+        app.terminal_width = 83;
+
+        assert!(!app.should_show_sidebar());
+    }
+
+    #[test]
+    fn sidebar_shows_when_chat_keeps_readable_width() {
+        let mut app = PorygonTui::new();
+        app.terminal_width = 100;
+
+        assert!(app.should_show_sidebar());
+    }
+
+    #[test]
     fn porygon_stream_smoke_fake_daemon_tokens_complete_and_update_loop() {
         let rt = tokio::runtime::Runtime::new().expect("test runtime");
         rt.block_on(async {
