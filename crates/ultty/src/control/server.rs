@@ -32,8 +32,10 @@ struct ClientState {
 
 impl ControlServer {
     pub fn new() -> io::Result<Self> {
-        let socket_path = control_socket_path();
+        Self::new_at(control_socket_path())
+    }
 
+    fn new_at(socket_path: PathBuf) -> io::Result<Self> {
         if socket_path.exists() {
             fs::remove_file(&socket_path)?;
         }
@@ -478,6 +480,37 @@ fn format_response(response: &ControlResponse, format: OutputFormat) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    fn test_socket_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ultty-control-server-{}-{}-{}.sock",
+            name,
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ))
+    }
+
+    fn test_server(name: &str) -> ControlServer {
+        ControlServer::new_at(test_socket_path(name)).unwrap()
+    }
+
+    fn poll_until_pending(server: &mut ControlServer) -> Vec<(usize, ControlRequest)> {
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        loop {
+            server.poll(Some(Duration::from_millis(10))).unwrap();
+            let pending = server.take_pending_requests();
+            if !pending.is_empty() {
+                return pending;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for pending control request"
+            );
+        }
+    }
 
     #[test]
     fn hex_decode_valid() {
@@ -612,5 +645,51 @@ mod tests {
         let response = ControlResponse::Data(ControlData::Pong);
         let json = format_response(&response, OutputFormat::Json);
         assert!(json.contains("Pong") || json.contains("pong"));
+    }
+
+    #[test]
+    fn send_response_removes_one_shot_client() {
+        let mut server = test_server("remove-client");
+        let mut client = UnixStream::connect(server.socket_path()).unwrap();
+
+        client.write_all(b"ping").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let pending = poll_until_pending(&mut server);
+        assert_eq!(pending.len(), 1);
+        let (client_key, request) = pending[0].clone();
+        assert_eq!(request, ControlRequest::Ping);
+        assert!(server.clients.contains_key(&client_key));
+
+        server.send_response(client_key, &ControlResponse::Data(ControlData::Pong));
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+
+        assert_eq!(response, "PONG\n");
+        assert!(!server.clients.contains_key(&client_key));
+    }
+
+    #[test]
+    fn repeated_one_shot_clients_do_not_accumulate() {
+        let mut server = test_server("repeated-clients");
+
+        for _ in 0..3 {
+            let mut client = UnixStream::connect(server.socket_path()).unwrap();
+            client.write_all(b"ping").unwrap();
+            client.shutdown(std::net::Shutdown::Write).unwrap();
+
+            let pending = poll_until_pending(&mut server);
+            assert_eq!(pending.len(), 1);
+            let (client_key, request) = pending[0].clone();
+            assert_eq!(request, ControlRequest::Ping);
+
+            server.send_response(client_key, &ControlResponse::Data(ControlData::Pong));
+
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            assert_eq!(response, "PONG\n");
+            assert!(server.clients.is_empty());
+        }
     }
 }
