@@ -99,6 +99,13 @@ send_line "printf '\\033[1 q'"
 capture_resize_evidence 900 640
 capture_png "resize-900x640.png"
 
+scripts/analyze-terminal-surface-screenshots.py \
+  --prompt "$OUT_DIR/prompt.png" \
+  --scrollback "$OUT_DIR/scrollback.png" \
+  --cursor-underline "$OUT_DIR/cursor-underline.png" \
+  --cursor-bar "$OUT_DIR/cursor-bar.png" \
+  --resize "$OUT_DIR/resize-900x640.png"
+
 echo "terminal surface smoke passed:"
 echo "  $OUT_DIR/prompt.png"
 echo "  $OUT_DIR/scrollback.png"

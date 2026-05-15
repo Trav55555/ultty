@@ -61,6 +61,11 @@ renderer screenshots continue to use the last configured surface size. Treat
 `resize-evidence.txt` as the source of truth for whether the resize actually
 affected the live renderer in that run.
 
+The smoke runs `scripts/analyze-terminal-surface-screenshots.py` to check that
+the captured terminal surface is nonblank, does not contain the old magenta
+edge artifact, and that the scrollback capture includes visible terminal
+content plus right-edge scrollbar activity.
+
 ## Native Rich Text Smoke
 
 Start Ultty, then run:
