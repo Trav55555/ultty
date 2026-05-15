@@ -3408,6 +3408,27 @@ mod tests {
     }
 
     #[test]
+    fn status_key_hint_omits_abort_when_idle() {
+        let app = PorygonTui::new();
+
+        assert_eq!(
+            app.status_key_hint(),
+            " Enter:send PgUp/Dn:scroll Ctrl+C:quit "
+        );
+    }
+
+    #[test]
+    fn status_key_hint_shows_abort_when_streaming() {
+        let mut app = PorygonTui::new();
+        app.waiting_response = true;
+
+        assert_eq!(
+            app.status_key_hint(),
+            " Enter:send Esc/Ctrl+C:abort PgUp/Dn:scroll "
+        );
+    }
+
+    #[test]
     fn porygon_stream_smoke_fake_daemon_tokens_complete_and_update_loop() {
         let rt = tokio::runtime::Runtime::new().expect("test runtime");
         rt.block_on(async {

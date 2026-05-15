@@ -580,14 +580,8 @@ impl PorygonTui {
             );
         }
 
-        let key_hint = if self.waiting_response {
-            " Enter:send Esc/Ctrl+C:abort PgUp/Dn:scroll "
-        } else {
-            " Enter:send Esc:abort PgUp/Dn:scroll Ctrl+C:quit "
-        };
-
         Row::new().child(status_line.span(
-            key_hint,
+            self.status_key_hint(),
             Style {
                 dim: true,
                 ..Style::new()
@@ -600,6 +594,14 @@ impl PorygonTui {
             format!("streaming: {} tokens", self.stream_token_count)
         } else {
             self.status.step.clone()
+        }
+    }
+
+    pub(crate) fn status_key_hint(&self) -> &'static str {
+        if self.waiting_response {
+            " Enter:send Esc/Ctrl+C:abort PgUp/Dn:scroll "
+        } else {
+            " Enter:send PgUp/Dn:scroll Ctrl+C:quit "
         }
     }
 
