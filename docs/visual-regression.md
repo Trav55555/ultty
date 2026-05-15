@@ -54,5 +54,25 @@ the window chrome. It captures:
 Selection screenshots still require pointer-driven selection setup; the control
 protocol can query the current selection but does not synthesize mouse drags.
 
+## Native Rich Text Smoke
+
+Start Ultty, then run:
+
+```bash
+scripts/native-richtext-smoke.sh /tmp/ultty-native-richtext-smoke
+```
+
+Use this smoke when native protocol text, markdown, code, or widget rendering
+changes. It opens the `hello-native` example in a separate tab, waits for the
+native UI to report that it rendered, and captures:
+
+| Artifact | Purpose |
+|----------|---------|
+| `hello-native.png` | Verifies native Text, Markdown, Code, Progress, and Spinner content through the real protocol path. |
+
+This complements renderer/unit coverage for wrapping and clipping. If the
+screenshot reveals a visual defect, reduce it to a focused renderer or widget
+test before changing broad native rendering behavior.
+
 For pointer and resize behavior around the same chrome surfaces, use
 [`chrome-pointer-audit.md`](chrome-pointer-audit.md).

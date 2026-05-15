@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ultty_protocol::control::control_socket_path;
 
@@ -81,12 +81,39 @@ fn send_command(command: &str, timeout_secs: u64) -> Result<String, String> {
         .shutdown(std::net::Shutdown::Write)
         .map_err(|e| format!("failed to shutdown write: {}", e))?;
 
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|e| format!("failed to read response: {}", e))?;
+    read_response(&mut stream, timeout_secs)
+}
 
-    Ok(response)
+fn read_response(stream: &mut UnixStream, timeout_secs: u64) -> Result<String, String> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut response = Vec::new();
+    let mut buf = [0_u8; 4096];
+
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && !response.is_empty() =>
+            {
+                break;
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(format!("failed to read response: {}", e)),
+        }
+    }
+
+    String::from_utf8(response).map_err(|e| format!("response was not valid UTF-8: {}", e))
 }
 
 fn print_help() {
@@ -160,4 +187,46 @@ EXAMPLES:
     ulttyctl --json info
 "#
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_response;
+
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn read_response_retries_until_delayed_writer_closes() {
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            writer.write_all(b"OK\n").unwrap();
+        });
+
+        let response = read_response(&mut reader, 1).unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(response, "OK\n");
+    }
+
+    #[test]
+    fn read_response_returns_without_waiting_for_writer_to_close() {
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+
+        let handle = thread::spawn(move || {
+            writer.write_all(b"PONG\n").unwrap();
+            thread::sleep(Duration::from_millis(200));
+        });
+
+        let response = read_response(&mut reader, 1).unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(response, "PONG\n");
+    }
 }

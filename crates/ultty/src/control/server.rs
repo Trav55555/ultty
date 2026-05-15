@@ -174,11 +174,12 @@ impl ControlServer {
     }
 
     pub fn send_response(&mut self, client_key: usize, response: &ControlResponse) {
-        if let Some(client) = self.clients.get_mut(&client_key) {
+        if let Some(mut client) = self.clients.remove(&client_key) {
             let text = format_response(response, client.output_format);
             if let Err(e) = client.stream.write_all(text.as_bytes()) {
                 warn!("Failed to send response to client {}: {}", client_key, e);
             }
+            let _ = self.poller.delete(&client.stream);
         }
     }
 

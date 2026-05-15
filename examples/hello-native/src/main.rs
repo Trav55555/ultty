@@ -31,8 +31,7 @@ fn main() -> anyhow::Result<()> {
             ..Default::default()
         },
         Style {
-            bg: Some(Color::Named(NamedColor::Blue)),
-            opacity: 0.3,
+            bg: Some(Color::Named(NamedColor::Black)),
             ..Default::default()
         },
     )?;
