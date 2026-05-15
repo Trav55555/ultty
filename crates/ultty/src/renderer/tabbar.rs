@@ -3,6 +3,8 @@
 //! Builds vertex data for the tab bar background, individual tab backgrounds,
 //! active tab indicators, and tab title text.
 
+use std::borrow::Cow;
+
 use super::{Renderer, Rgba, Vertex};
 use crate::tabs::{
     TabBarState, TAB_CLOSE_BUTTON_SIZE, TAB_PADDING, TAB_ROW_HEIGHT, TITLE_BAR_HEIGHT,
@@ -24,6 +26,31 @@ fn dim(color: Rgba, amount: f32) -> Rgba {
         (color.b * amount).min(1.0),
         color.a,
     )
+}
+
+fn truncate_tab_title(title: &str, max_width: f32, cell_width: f32) -> Cow<'_, str> {
+    if title.is_empty() || max_width <= 0.0 || cell_width <= 0.0 {
+        return Cow::Borrowed("");
+    }
+
+    let max_cells = (max_width / cell_width).floor() as usize;
+    if max_cells == 0 {
+        return Cow::Borrowed("");
+    }
+
+    let char_count = title.chars().count();
+    if char_count <= max_cells {
+        return Cow::Borrowed(title);
+    }
+
+    if max_cells == 1 {
+        return Cow::Borrowed("…");
+    }
+
+    let mut truncated = String::with_capacity(title.len().min(max_cells));
+    truncated.extend(title.chars().take(max_cells - 1));
+    truncated.push('…');
+    Cow::Owned(truncated)
 }
 
 impl Renderer {
@@ -250,9 +277,10 @@ impl Renderer {
             // Calculate text position and max width
             let text_x = tab.x + TAB_PADDING;
             let max_text_width = tab.max_text_width();
+            let title = truncate_tab_title(&tab.title, max_text_width, self.cell_width);
 
             let (vertices, indices) = self.text_renderer.build_label_vertices(
-                &tab.title,
+                &title,
                 text_x,
                 tab_text_y,
                 max_text_width,
@@ -332,5 +360,34 @@ impl Renderer {
         }
 
         (all_vertices, all_indices)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_tab_title;
+
+    #[test]
+    fn truncate_tab_title_keeps_short_titles() {
+        assert_eq!(truncate_tab_title("Tab 1", 80.0, 10.0).as_ref(), "Tab 1");
+    }
+
+    #[test]
+    fn truncate_tab_title_adds_ellipsis_before_width_limit() {
+        assert_eq!(
+            truncate_tab_title("long-terminal-session", 50.0, 10.0).as_ref(),
+            "long…"
+        );
+    }
+
+    #[test]
+    fn truncate_tab_title_handles_one_cell() {
+        assert_eq!(truncate_tab_title("long", 10.0, 10.0).as_ref(), "…");
+    }
+
+    #[test]
+    fn truncate_tab_title_handles_no_space() {
+        assert_eq!(truncate_tab_title("long", 0.0, 10.0).as_ref(), "");
+        assert_eq!(truncate_tab_title("long", 10.0, 0.0).as_ref(), "");
     }
 }
