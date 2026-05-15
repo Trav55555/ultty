@@ -40,17 +40,28 @@ assert_png "$OUT_DIR/single-tab.png"
 
 "$ULTTYCTL" new-tab >/dev/null
 cleanup() {
-  "$ULTTYCTL" close-tab >/dev/null 2>&1 || true
+  while [[ "$(tab_count)" -gt 1 ]]; do
+    "$ULTTYCTL" close-tab >/dev/null 2>&1 || break
+  done
 }
 trap cleanup EXIT
 
 "$ULTTYCTL" screenshot "$OUT_DIR/multi-tab.png" >/dev/null
 assert_png "$OUT_DIR/multi-tab.png"
 
+while [[ "$(tab_count)" -lt 8 ]]; do
+  "$ULTTYCTL" new-tab >/dev/null
+done
+
+"$ULTTYCTL" screenshot "$OUT_DIR/dense-tabs.png" >/dev/null
+assert_png "$OUT_DIR/dense-tabs.png"
+
 scripts/analyze-chrome-screenshots.py \
   --single "$OUT_DIR/single-tab.png" \
-  --multi "$OUT_DIR/multi-tab.png"
+  --multi "$OUT_DIR/multi-tab.png" \
+  --dense "$OUT_DIR/dense-tabs.png"
 
 echo "screenshot smoke passed:"
 echo "  $OUT_DIR/single-tab.png"
 echo "  $OUT_DIR/multi-tab.png"
+echo "  $OUT_DIR/dense-tabs.png"

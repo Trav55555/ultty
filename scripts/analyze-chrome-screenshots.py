@@ -145,7 +145,7 @@ def validate_single_tab(path: Path) -> list[str]:
     return errors
 
 
-def validate_multi_tab(path: Path) -> list[str]:
+def validate_tab_rail(path: Path, label: str) -> list[str]:
     _, height, rows = parse_png(path)
     title = row_average(rows, TITLE_BAR_HEIGHT // 2)
     rail = row_average(rows, TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT // 2)
@@ -153,11 +153,11 @@ def validate_multi_tab(path: Path) -> list[str]:
     errors = []
 
     if distance(rail, terminal) < 6:
-        errors.append("multi-tab screenshot does not show a lower tab rail")
+        errors.append(f"{label} screenshot does not show a lower tab rail")
     if distance(title, rail) < 2:
-        errors.append("multi-tab title/control band and tab rail are not visually distinct")
+        errors.append(f"{label} title/control band and tab rail are not visually distinct")
     if magenta_edge_ratio(rows) > 0.001:
-        errors.append("multi-tab screenshot contains magenta edge artifact")
+        errors.append(f"{label} screenshot contains magenta edge artifact")
 
     return errors
 
@@ -166,11 +166,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--single", required=True, type=Path)
     parser.add_argument("--multi", required=True, type=Path)
+    parser.add_argument("--dense", required=True, type=Path)
     args = parser.parse_args()
 
     errors = []
     errors.extend(f"{args.single}: {error}" for error in validate_single_tab(args.single))
-    errors.extend(f"{args.multi}: {error}" for error in validate_multi_tab(args.multi))
+    errors.extend(f"{args.multi}: {error}" for error in validate_tab_rail(args.multi, "multi-tab"))
+    errors.extend(f"{args.dense}: {error}" for error in validate_tab_rail(args.dense, "dense-tab"))
 
     if errors:
         for error in errors:
@@ -180,6 +182,7 @@ def main() -> int:
     print("chrome screenshot analysis passed:")
     print(f"  {args.single}")
     print(f"  {args.multi}")
+    print(f"  {args.dense}")
     return 0
 
 
