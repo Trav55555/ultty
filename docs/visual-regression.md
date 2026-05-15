@@ -86,5 +86,11 @@ This complements renderer/unit coverage for wrapping and clipping. If the
 screenshot reveals a visual defect, reduce it to a focused renderer or widget
 test before changing broad native rendering behavior.
 
+The smoke runs `scripts/analyze-native-richtext-screenshot.py` to check that
+the native screenshot is nonblank, has distinct native content bands, avoids
+the old magenta edge artifact, and keeps the body background dark enough for
+readable markdown/code text. It is a structural check, not OCR; keep manual
+review for detailed copy or syntax-highlighting claims.
+
 For pointer and resize behavior around the same chrome surfaces, use
 [`chrome-pointer-audit.md`](chrome-pointer-audit.md).
