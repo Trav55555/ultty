@@ -268,6 +268,11 @@ impl NativeSession {
         trigger: LayoutTrigger,
     ) -> io::Result<()> {
         let layout_start = std::time::Instant::now();
+        if self.constraints_dirty {
+            // Taffy panics on stale SlotMap keys, so structural frames rebuild
+            // from the authoritative scene tree instead of reusing old nodes.
+            self.layout = LayoutEngine::new();
+        }
         let regions = match self.layout.compute_scene_layout(
             &mut self.scene,
             self.viewport_width,

@@ -314,6 +314,71 @@ mod tests {
     }
 
     #[test]
+    fn layout_keeps_reparented_child_when_old_parent_is_removed() {
+        let mut scene = SceneTree::new();
+
+        let mut parent = Region::new(RegionId::new(1));
+        parent.parent = Some(RegionId::ROOT);
+        scene.insert(parent);
+
+        let mut child = Region::new(RegionId::new(2));
+        child.parent = Some(RegionId::new(1));
+        scene.insert(child);
+
+        let mut engine = LayoutEngine::new();
+        engine.sync(&scene).unwrap();
+
+        assert!(scene.reparent(RegionId::new(2), RegionId::ROOT, 0));
+        scene.remove(RegionId::new(1));
+
+        engine.sync(&scene).unwrap();
+
+        assert!(engine.get_layout(RegionId::new(1)).is_none());
+        assert!(engine.get_layout(RegionId::new(2)).is_some());
+    }
+
+    #[test]
+    fn layout_tolerates_duplicate_child_references() {
+        let mut scene = SceneTree::new();
+
+        let mut first_child = Region::new(RegionId::new(1));
+        first_child.parent = Some(RegionId::ROOT);
+        scene.insert(first_child);
+
+        let mut second_child = Region::new(RegionId::new(1));
+        second_child.parent = Some(RegionId::ROOT);
+        scene.insert(second_child);
+
+        let mut engine = LayoutEngine::new();
+        engine.sync(&scene).unwrap();
+        engine.compute(80.0, 24.0).unwrap();
+
+        assert!(engine.get_layout(RegionId::new(1)).is_some());
+    }
+
+    #[test]
+    fn layout_removes_stale_parent_and_child_nodes() {
+        let mut scene = SceneTree::new();
+
+        let mut parent = Region::new(RegionId::new(1));
+        parent.parent = Some(RegionId::ROOT);
+        scene.insert(parent);
+
+        let mut child = Region::new(RegionId::new(2));
+        child.parent = Some(RegionId::new(1));
+        scene.insert(child);
+
+        let mut engine = LayoutEngine::new();
+        engine.sync(&scene).unwrap();
+
+        scene.remove(RegionId::new(1));
+        engine.sync(&scene).unwrap();
+
+        assert!(engine.get_layout(RegionId::new(1)).is_none());
+        assert!(engine.get_layout(RegionId::new(2)).is_none());
+    }
+
+    #[test]
     fn layout_empty_tree() {
         let scene = SceneTree::new();
         let mut engine = LayoutEngine::new();
