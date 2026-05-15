@@ -30,5 +30,29 @@ The script normalizes the live app to one tab before the first capture, creates
 a second tab for the multi-tab capture, creates additional tabs for the dense
 capture, and closes the extra tabs on exit.
 
+## Terminal Surface Smoke
+
+Start Ultty, then run:
+
+```bash
+scripts/terminal-surface-smoke.sh /tmp/ultty-terminal-surface-smoke
+```
+
+Use this smoke when a change affects the terminal content area rather than only
+the window chrome. It captures:
+
+| Artifact | Purpose |
+|----------|---------|
+| `prompt.png` | Verifies the empty prompt and terminal background render. |
+| `scrollback.png` | Verifies scrollback content and the terminal scrollbar render together. |
+| `cursor-underline.png` | Verifies DECSCUSR underline cursor rendering. |
+| `cursor-bar.png` | Verifies DECSCUSR bar cursor rendering. |
+| `selection.txt` | Records the control protocol selection query result for the run. |
+| `resize-evidence.txt` | Records control and compositor state around resize setup. |
+| `resize-900x640.png` | Verifies terminal content rendering after a control-protocol resize. |
+
+Selection screenshots still require pointer-driven selection setup; the control
+protocol can query the current selection but does not synthesize mouse drags.
+
 For pointer and resize behavior around the same chrome surfaces, use
 [`chrome-pointer-audit.md`](chrome-pointer-audit.md).
