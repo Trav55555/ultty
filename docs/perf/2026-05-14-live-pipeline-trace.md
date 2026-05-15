@@ -213,33 +213,59 @@ one bounded mostly by generator time plus small app-side work. The readiness
 bridge keeps terminal state mutation and rendering on the UI thread; the helper
 thread only watches PTY fds and sends a winit user event.
 
+## Soft-Wrap Follow-Up Confirmation
+
+Run from `/tmp/ultty-softwrap-pty-probe-issue-78` on current `main`:
+
+```bash
+scripts/softwrap-pty-probe.sh /tmp/ultty-softwrap-pty-probe-issue-78
+```
+
+| Field | Value |
+|-------|-------|
+| Runs | 2 |
+| Generator-only mean | 112.0 ms |
+| Live child mean | 141.0 ms |
+| Live minus generator estimate | 29.0 ms |
+
+The same run produced this app-side pipeline mean per run:
+
+| Component | Mean |
+|-----------|------|
+| Parser/grid | 18.5 ms |
+| PTY drain | 23.6 ms |
+| Render frames | 18.0 ms |
+| Combined measured app-side work | 60.1 ms |
+| Live minus measured app-side estimate | 80.9 ms |
+
+The gate passed with parser/grid 37.056 ms, PTY drain 47.168 ms, render frame
+time 36.070 ms, and max render frame 12.387 ms across both runs. The stress
+report measured `500-lines-4000-cols` at 141.0 ms mean with a 130-152 ms range.
+
+This confirms the earlier PTY readiness wakeup fix held on current `main`.
+The remaining live soft-wrap cost is close to generator time plus normal
+scheduler/compositor overhead, so there is no current evidence for another
+renderer or parser optimization in this path.
+
 ## Interpretation
 
 The original live stress gap was dominated by parser/grid and PTY drain time.
 After parser-owned ASCII spans and grid/buffer ASCII span writes, the long
-soft-wrap workload became a different shape: the app-side trace is healthy, but
-the child process still spends most of its wall-clock time blocked behind PTY
-throughput and scheduling.
+soft-wrap workload became a different shape: the app-side trace is healthy and,
+after PTY readiness wakeups, the live child wall-clock time is close to the
+redirected generator lower bound.
 
-The current trace coalesces 12,768 PTY read batches into 229 rendered frames,
-with a worst frame of 12.402 ms. That rules out GPU jank as the reason the
-soft-wrap workload still takes seconds. The remaining cost is consistent with
-PTY backpressure during very long line writes, where the child can only make
-progress as the terminal side repeatedly drains the master.
+The latest focused trace coalesces 1,020 PTY read batches into 22 rendered
+frames, with a worst frame of 12.387 ms. That rules out GPU jank and parser/grid
+work as current soft-wrap bottlenecks.
 
 ## Recommendation
 
-Keep the current parser/grid optimisations and live trace gate as the baseline.
-Further soft-wrap work should focus on PTY wakeup strategy rather than renderer
-micro-optimisation:
-
-1. Prototype event-loop wakeups driven by real PTY readiness instead of periodic
-   winit timers.
-2. If keeping timer-based catch-up, test whether bounded immediate polling after
-   a successful PTY drain improves long-line throughput without unacceptable CPU
-   spin.
-3. Keep `scripts/live-pipeline-trace.sh` as the end-to-end guardrail after each
-   internal optimisation.
+Keep the current parser/grid optimisations, PTY readiness wakeups, and live
+trace gate as the baseline. Do not pursue another soft-wrap optimization until a
+fresh `scripts/softwrap-pty-probe.sh` run shows the live child mean drifting far
+above generator time again. Keep `scripts/live-pipeline-trace.sh` as the
+end-to-end guardrail after internal performance changes.
 
 ## Caveats
 
