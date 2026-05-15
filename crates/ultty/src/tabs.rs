@@ -1009,6 +1009,47 @@ mod tests {
     }
 
     #[test]
+    fn min_width_tab_preserves_close_target() {
+        let state = bar_with(20, 0, 800.0);
+        let tab = &state.tabs[0];
+        assert_eq!(tab.width, MIN_TAB_WIDTH);
+
+        let close_x = tab.close_button_x();
+        assert!(close_x > tab.x);
+        assert!(close_x + TAB_CLOSE_BUTTON_SIZE < tab.x + tab.width);
+        assert_eq!(
+            state.close_button_at(
+                close_x + TAB_CLOSE_BUTTON_SIZE / 2.0,
+                TITLE_BAR_HEIGHT + 10.0
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn min_width_tab_hover_affordance_stays_inside_tab() {
+        let state = bar_with(20, 0, 800.0);
+        let tab = &state.tabs[0];
+        let (x, y, w, h) = tab.close_hover_bounds();
+
+        assert!(x >= tab.x);
+        assert!(x + w <= tab.x + tab.width);
+        assert!(y > TITLE_BAR_HEIGHT);
+        assert!(y + h < TAB_BAR_HEIGHT);
+    }
+
+    #[test]
+    fn min_width_tab_text_budget_stops_before_close_target() {
+        let state = bar_with(20, 0, 800.0);
+        let tab = &state.tabs[0];
+        let text_start = tab.x + TAB_PADDING;
+        let text_end = text_start + tab.max_text_width();
+
+        assert!(tab.max_text_width() > 0.0);
+        assert!(text_end < tab.close_button_x());
+    }
+
+    #[test]
     fn tab_bounds_are_contiguous() {
         let state = bar_with(4, 0, 800.0);
         for i in 0..state.tabs.len().saturating_sub(1) {
