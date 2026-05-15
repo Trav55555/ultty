@@ -3,6 +3,34 @@
 Ultty's canonical visual regression path is renderer capture through
 `ulttyctl screenshot`, not compositor screenshots.
 
+## Latest Verified Baseline
+
+Verified on 2026-05-15 at commit `b50bdef`.
+
+Commands:
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+scripts/terminal-surface-smoke.sh /tmp/ultty-terminal-surface-smoke
+scripts/native-richtext-smoke.sh /tmp/ultty-native-richtext-smoke
+scripts/screenshot-smoke.sh /tmp/ultty-screenshot-smoke
+```
+
+Result:
+
+- `cargo test --workspace` passed.
+- `cargo clippy --workspace --all-targets -- -D warnings` passed.
+- Terminal surface smoke passed and produced prompt, scrollback, cursor, and
+  resize artifacts.
+- Native rich text smoke passed and produced `hello-native.png`.
+- Chrome screenshot smoke passed for single-tab, multi-tab, and dense-tabs
+  screenshots.
+
+Manual screenshot review did not find a new chrome or renderer defect. The
+top control band, lower tab rail, tab-rail hidden state, dense-tab state, and
+old magenta-border regression all matched the expected visual model.
+
 ## Chrome Smoke
 
 Start Ultty, then run:
