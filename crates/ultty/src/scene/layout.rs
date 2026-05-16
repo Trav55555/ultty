@@ -1429,6 +1429,96 @@ mod tests {
         );
     }
 
+    #[test]
+    fn layout_scrollview_auto_height_children_stay_at_top() {
+        let mut tree = SceneTree::new();
+
+        let root = tree.get_mut(RegionId::ROOT).unwrap();
+        root.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Percent(100.0),
+            height: ProtoDimension::Percent(100.0),
+            ..Default::default()
+        };
+
+        let mut scroll = Region::new(RegionId::new(1));
+        scroll.parent = Some(RegionId::ROOT);
+        scroll.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            min_height: ProtoDimension::Cells(0.0),
+            width: ProtoDimension::Percent(100.0),
+            overflow: ProtoOverflow {
+                x: ProtoOverflowAxis::Hidden,
+                y: ProtoOverflowAxis::Scroll,
+            },
+            ..Default::default()
+        };
+        tree.insert(scroll);
+
+        let mut messages = Region::new(RegionId::new(2));
+        messages.parent = Some(RegionId::new(1));
+        messages.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Percent(100.0),
+            padding: Edges {
+                top: ProtoDimension::Cells(1.0),
+                right: ProtoDimension::Cells(1.0),
+                bottom: ProtoDimension::Cells(1.0),
+                left: ProtoDimension::Cells(1.0),
+            },
+            gap: ProtoSize {
+                width: ProtoDimension::Cells(0.0),
+                height: ProtoDimension::Cells(0.5),
+            },
+            ..Default::default()
+        };
+        tree.insert(messages);
+
+        for i in 0..2 {
+            let mut msg = Region::new(RegionId::new(10 + i));
+            msg.parent = Some(RegionId::new(2));
+            msg.constraints = Constraints {
+                display: ProtoDisplay::Flex,
+                flex_direction: ProtoFlexDirection::Column,
+                width: ProtoDimension::Percent(100.0),
+                min_height: ProtoDimension::Cells(4.0),
+                padding: Edges {
+                    top: ProtoDimension::Cells(1.0),
+                    right: ProtoDimension::Cells(1.0),
+                    bottom: ProtoDimension::Cells(1.0),
+                    left: ProtoDimension::Cells(1.0),
+                },
+                ..Default::default()
+            };
+            tree.insert(msg);
+        }
+
+        let mut engine = LayoutEngine::new();
+        engine.sync(&tree).unwrap();
+        engine.compute(120.0, 40.0).unwrap();
+
+        let scroll_layout = engine.get_layout(RegionId::new(1)).unwrap();
+        let first_message_layout = engine.get_layout(RegionId::new(10)).unwrap();
+        let second_message_layout = engine.get_layout(RegionId::new(11)).unwrap();
+
+        assert_eq!(scroll_layout.location.y, 0.0, "scroll starts at root");
+        assert_eq!(
+            first_message_layout.location.y, 1.0,
+            "first message should sit below container padding; first={:?} second={:?}",
+            first_message_layout, second_message_layout
+        );
+        assert!(
+            second_message_layout.location.y <= 6.0,
+            "second message should follow the first without a viewport-sized gap: {:?}",
+            second_message_layout
+        );
+    }
+
     // ── Regression tests for documented layout bugs ─────────────────
 
     /// Regression: DockLayout middle Row needs AlignItems::Stretch AND children

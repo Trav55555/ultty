@@ -313,6 +313,9 @@ impl PorygonTui {
         let mut col = Column::new()
             .gap(0.5)
             .padding(1.0)
+            .justify_start()
+            .align_content_start()
+            .height(Dimension::Percent(100.0))
             .width(Dimension::Percent(100.0));
         let total_messages = self.messages.len();
         let (start_idx, end_idx) = self
@@ -365,12 +368,16 @@ impl PorygonTui {
                     Style::new().fg(fg_color).bold(),
                 )
                 .fill_width();
+            let content_line_count = msg.content.lines().count().max(1) as f32;
+            let card_height = 1.0 + content_line_count + 2.0;
             let mut card = Column::new()
                 .bg(bg_color)
                 .border(BorderStyle::thin())
                 .border_color(bdr_color)
                 .padding(1.0)
                 .gap(0.0)
+                .height(Dimension::Cells(card_height))
+                .flex_shrink(0.0)
                 .width(Dimension::Percent(100.0))
                 .overflow_y_hidden()
                 .child(header);
@@ -473,6 +480,10 @@ impl PorygonTui {
                     .child(Spinner::new().frame(self.spinner_frame))
                     .child(Text::new("Thinking...")),
             );
+        }
+
+        if end_idx >= total_messages {
+            col = col.child(Spacer);
         }
 
         col

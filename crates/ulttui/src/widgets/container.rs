@@ -128,6 +128,11 @@ impl Column {
         self
     }
 
+    pub fn justify_start(mut self) -> Self {
+        self.constraints.justify_content = ultty_protocol::JustifyContent::Start;
+        self
+    }
+
     pub fn justify_center(mut self) -> Self {
         self.constraints.justify_content = ultty_protocol::JustifyContent::Center;
         self
@@ -145,6 +150,11 @@ impl Column {
 
     pub fn align_stretch(mut self) -> Self {
         self.constraints.align_items = ultty_protocol::AlignItems::Stretch;
+        self
+    }
+
+    pub fn align_content_start(mut self) -> Self {
+        self.constraints.align_content = ultty_protocol::AlignContent::Start;
         self
     }
 
