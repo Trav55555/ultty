@@ -276,10 +276,13 @@ impl App {
             }
 
             ControlRequest::Resize { width, height } => {
-                let _ = self
-                    .window
-                    .request_inner_size(PhysicalSize::new(width, height));
-                ControlResponse::Ok
+                let requested = PhysicalSize::new(width, height);
+                let result = self.window.request_inner_size(requested);
+                let response = resize_control_response(result, requested, self.window.inner_size());
+                if matches!(response, ControlResponse::Ok) {
+                    self.handle_resize(requested);
+                }
+                response
             }
 
             ControlRequest::SetOpacity { opacity } => {
@@ -602,6 +605,32 @@ impl App {
     }
 }
 
+fn resize_control_response(
+    result: Option<PhysicalSize<u32>>,
+    requested: PhysicalSize<u32>,
+    current: PhysicalSize<u32>,
+) -> ultty_protocol::control::ControlResponse {
+    match (result, current == requested) {
+        (Some(_), true) => ultty_protocol::control::ControlResponse::Ok,
+        (Some(accepted), false) => ultty_protocol::control::ControlResponse::Error {
+            code: 8,
+            message: format!(
+                "Window resize request not applied by platform/compositor: requested {}x{}, accepted {}x{}, current {}x{}",
+                requested.width,
+                requested.height,
+                accepted.width,
+                accepted.height,
+                current.width,
+                current.height
+            ),
+        },
+        (None, _) => ultty_protocol::control::ControlResponse::Error {
+            code: 8,
+            message: "Window resize is not supported by this platform/compositor".to_string(),
+        },
+    }
+}
+
 /// Convert a protocol key (with modifier flags) to the byte sequence expected by a PTY.
 ///
 /// `app_cursor` controls whether application cursor key mode (DECCKM) sequences
@@ -703,6 +732,7 @@ fn build_command_line(command: &str, args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ultty_protocol::control::ControlResponse;
     use ultty_protocol::Key;
 
     // ---------------------------------------------------------------
@@ -714,6 +744,71 @@ mod tests {
         assert_eq!(key_to_bytes(&Key::Char('a'), false, false, false), b"a");
         assert_eq!(key_to_bytes(&Key::Char('Z'), false, false, false), b"Z");
         assert_eq!(key_to_bytes(&Key::Char('5'), false, false, false), b"5");
+    }
+
+    #[test]
+    fn resize_control_response_reports_unsupported_platform() {
+        let response = resize_control_response(
+            None,
+            PhysicalSize::new(800, 600),
+            PhysicalSize::new(800, 600),
+        );
+
+        assert!(matches!(
+            response,
+            ControlResponse::Error {
+                code: 8,
+                ref message
+            } if message.contains("not supported")
+        ));
+    }
+
+    #[test]
+    fn resize_control_response_reports_ok_when_platform_accepts_request() {
+        let response = resize_control_response(
+            Some(PhysicalSize::new(800, 600)),
+            PhysicalSize::new(800, 600),
+            PhysicalSize::new(800, 600),
+        );
+
+        assert!(matches!(response, ControlResponse::Ok));
+    }
+
+    #[test]
+    fn resize_control_response_reports_adjusted_size() {
+        let response = resize_control_response(
+            Some(PhysicalSize::new(968, 709)),
+            PhysicalSize::new(1280, 720),
+            PhysicalSize::new(968, 709),
+        );
+
+        assert!(matches!(
+            response,
+            ControlResponse::Error {
+                code: 8,
+                ref message
+            } if message.contains("not applied")
+                && message.contains("1280x720")
+                && message.contains("968x709")
+        ));
+    }
+
+    #[test]
+    fn resize_control_response_reports_unapplied_even_when_platform_echoes_request() {
+        let response = resize_control_response(
+            Some(PhysicalSize::new(1280, 720)),
+            PhysicalSize::new(1280, 720),
+            PhysicalSize::new(800, 600),
+        );
+
+        assert!(matches!(
+            response,
+            ControlResponse::Error {
+                code: 8,
+                ref message
+            } if message.contains("not applied")
+                && message.contains("current 800x600")
+        ));
     }
 
     #[test]

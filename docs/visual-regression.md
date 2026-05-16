@@ -60,6 +60,12 @@ software rendering, waits for `ulttyctl ping`, runs one smoke at a time, and
 uploads `/tmp/ultty-*` artifacts on failure. Do not mix these with performance
 thresholds until the runner variance is measured.
 
+`ulttyctl resize` is platform/compositor dependent. On platforms where Winit
+does not accept programmatic resize requests, the control command must return a
+clear unsupported error rather than reporting success. Width-based visual
+reviews should confirm `ulttyctl info` and screenshot dimensions changed before
+treating captures as narrow/mid/wide evidence.
+
 ## Chrome Smoke
 
 Start Ultty, then run:
