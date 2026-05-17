@@ -4,6 +4,7 @@ use ratatui::style::{Modifier, Style as RStyle};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
+use unicode_width::UnicodeWidthChar;
 
 use super::View;
 use ultty_protocol::{
@@ -18,6 +19,7 @@ pub struct MarkdownView {
     source: String,
     blocks: Vec<Block>,
     streaming: bool,
+    wrap_width_cols: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +97,7 @@ impl MarkdownView {
             source,
             blocks,
             streaming: false,
+            wrap_width_cols: None,
         }
     }
 
@@ -126,6 +129,12 @@ impl MarkdownView {
     /// to indicate content is still arriving. Toggle off to finalize.
     pub fn streaming(mut self, streaming: bool) -> Self {
         self.streaming = streaming;
+        self
+    }
+
+    /// Set the width, in terminal cells, used to estimate native wrapped height.
+    pub fn wrap_width_cols(mut self, cols: usize) -> Self {
+        self.wrap_width_cols = Some(cols.max(1));
         self
     }
 
@@ -425,7 +434,11 @@ impl MarkdownView {
     }
 
     fn line_count(&self) -> usize {
-        let total: usize = self.blocks.iter().map(Block::line_count).sum();
+        let total: usize = self
+            .blocks
+            .iter()
+            .map(|block| block.line_count(self.wrap_width_cols))
+            .sum();
         if self.streaming && self.blocks.is_empty() {
             return 1;
         }
@@ -434,10 +447,10 @@ impl MarkdownView {
 }
 
 impl Block {
-    fn line_count(&self) -> usize {
+    fn line_count(&self, wrap_width_cols: Option<usize>) -> usize {
         match self {
             Block::Heading { spans, .. } | Block::Paragraph { spans } => {
-                count_lines_from_spans(spans)
+                count_lines_from_spans(spans, wrap_width_cols)
             }
             Block::CodeBlock { text } | Block::BlockQuote { text } => count_lines(text),
             Block::ListItem {
@@ -448,7 +461,7 @@ impl Block {
                 let mut text = " ".repeat(*indent);
                 text.push_str(prefix);
                 text.push_str(&spans_to_plain_text(spans));
-                count_lines(&text)
+                count_lines_wrapped(&text, wrap_width_cols)
             }
             Block::HorizontalRule => 1,
         }
@@ -541,7 +554,7 @@ impl View for MarkdownView {
             constraints: Constraints {
                 display: Display::Flex,
                 width: Dimension::Percent(100.0),
-                height: Dimension::Cells(block.line_count() as f32),
+                height: Dimension::Cells(block.line_count(self.wrap_width_cols) as f32),
                 flex_shrink: 1.0,
                 ..Default::default()
             },
@@ -716,8 +729,49 @@ fn count_lines(text: &str) -> usize {
     }
 }
 
-fn count_lines_from_spans(spans: &[StyledSpan]) -> usize {
-    count_lines(&spans_to_plain_text(spans))
+fn count_lines_from_spans(spans: &[StyledSpan], wrap_width_cols: Option<usize>) -> usize {
+    count_lines_wrapped(&spans_to_plain_text(spans), wrap_width_cols)
+}
+
+fn count_lines_wrapped(text: &str, wrap_width_cols: Option<usize>) -> usize {
+    let Some(max_cols) = wrap_width_cols else {
+        return count_lines(text);
+    };
+    wrapped_line_count(text, max_cols)
+}
+
+fn wrapped_line_count(text: &str, max_cols: usize) -> usize {
+    if max_cols == 0 {
+        return count_lines(text);
+    }
+
+    let mut count = 0usize;
+    for line in text.split('\n') {
+        count += line_wrapped_count(line, max_cols);
+    }
+    count.max(1)
+}
+
+fn line_wrapped_count(line: &str, max_cols: usize) -> usize {
+    if line.is_empty() {
+        return 1;
+    }
+
+    let mut lines = 1usize;
+    let mut cols = 0usize;
+    for ch in line.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        if cols > 0 && cols + width > max_cols {
+            lines += 1;
+            cols = 0;
+        }
+        cols += width;
+        while cols > max_cols {
+            lines += 1;
+            cols -= max_cols;
+        }
+    }
+    lines
 }
 
 fn spans_to_plain_text(spans: &[StyledSpan]) -> String {
@@ -906,6 +960,26 @@ mod tests {
             }
             _ => panic!("expected rich text content"),
         }
+    }
+
+    #[test]
+    fn wrap_width_cols_increases_native_paragraph_height() {
+        let view = MarkdownView::new("abcdefghijkl").wrap_width_cols(5);
+        assert_eq!(view.constraints().height, Dimension::Cells(3.0));
+
+        let messages = collect_native_messages(&view, 0);
+        match &messages[0] {
+            AppMessage::CreateRegion { constraints, .. } => {
+                assert_eq!(constraints.height, Dimension::Cells(3.0));
+            }
+            _ => panic!("expected create region message"),
+        }
+    }
+
+    #[test]
+    fn wrap_width_cols_preserves_unwrapped_code_block_height() {
+        let view = MarkdownView::new("```\nabcdefghijkl\n```").wrap_width_cols(5);
+        assert_eq!(view.constraints().height, Dimension::Cells(1.0));
     }
 
     #[test]

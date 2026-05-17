@@ -689,6 +689,8 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
     Column::new()
         .width(Dimension::Cells(34.0))
         .flex_shrink(0.0)
+        .justify_start()
+        .align_content_start()
         .bg(Color::Rgb(37, 37, 40))
         .padding(1.0)
         .border(BorderStyle {
@@ -707,4 +709,20 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
         .child(cassette)
         .child(weather_view(app))
         .child(moon_view(app))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ultty_protocol::{AlignContent, JustifyContent};
+
+    #[test]
+    fn sidebar_root_keeps_panels_top_aligned_when_stretched() {
+        let app = PorygonTui::new();
+        let sidebar = sidebar_view(&app);
+        let constraints = sidebar.constraints();
+
+        assert_eq!(constraints.justify_content, JustifyContent::Start);
+        assert_eq!(constraints.align_content, AlignContent::Start);
+    }
 }

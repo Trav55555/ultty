@@ -4,12 +4,15 @@ use ulttui::event::{Event, Key};
 use ulttui::prelude::*;
 use ulttui::widgets::{parse_unified_diff, DiffKind, RichText, Stack};
 use ultty_protocol::{BorderStyle, Color, Dimension};
+use unicode_width::UnicodeWidthChar;
 
 use crate::sidebar::sidebar_view;
 use crate::types::{ApprovalRequest, FileTreeEntry, ToolStatus};
 use crate::{Msg, PorygonTui};
 
 const SIDEBAR_MIN_TERMINAL_WIDTH: u16 = 100;
+const SIDEBAR_WIDTH_CELLS: u16 = 34;
+const MESSAGE_CHROME_CELLS: u16 = 6;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SplashScreen {
@@ -201,6 +204,23 @@ pub(crate) fn format_timestamp() -> String {
 }
 
 impl PorygonTui {
+    fn message_content_width_cols(&self) -> usize {
+        let sidebar_width = if self.should_show_sidebar() {
+            SIDEBAR_WIDTH_CELLS
+        } else {
+            0
+        };
+        self.terminal_width
+            .saturating_sub(sidebar_width)
+            .saturating_sub(MESSAGE_CHROME_CELLS)
+            .max(1) as usize
+    }
+
+    fn estimated_message_card_height(&self, content: &str) -> f32 {
+        let content_lines = wrapped_line_count(content, self.message_content_width_cols());
+        1.0 + content_lines as f32 + 3.0
+    }
+
     pub(crate) fn update_scroll_dimensions(&mut self) {
         let estimated_content = (self.messages.len() + self.tool_calls.len()) as f32 * 4.0
             + if self.waiting_response { 6.0 } else { 4.0 };
@@ -368,14 +388,15 @@ impl PorygonTui {
                     Style::new().fg(fg_color).bold(),
                 )
                 .fill_width();
-            let content_line_count = msg.content.lines().count().max(1) as f32;
-            let card_height = 1.0 + content_line_count + 2.0;
+            let card_height = self.estimated_message_card_height(&msg.content);
             let mut card = Column::new()
                 .bg(bg_color)
                 .border(BorderStyle::thin())
                 .border_color(bdr_color)
                 .padding(1.0)
                 .gap(0.0)
+                .justify_start()
+                .align_content_start()
                 .height(Dimension::Cells(card_height))
                 .flex_shrink(0.0)
                 .width(Dimension::Percent(100.0))
@@ -385,9 +406,16 @@ impl PorygonTui {
             let is_streaming_msg =
                 self.waiting_response && i + 1 == self.messages.len() && msg.role == "assistant";
             if is_streaming_msg {
-                card = card.child(MarkdownView::new(msg.content.clone()).streaming(true));
+                card = card.child(
+                    MarkdownView::new(msg.content.clone())
+                        .wrap_width_cols(self.message_content_width_cols())
+                        .streaming(true),
+                );
             } else {
-                card = card.child(MarkdownView::new(msg.content.clone()));
+                card = card.child(
+                    MarkdownView::new(msg.content.clone())
+                        .wrap_width_cols(self.message_content_width_cols()),
+                );
             }
             col = col.child(card);
         }
@@ -760,5 +788,81 @@ impl PorygonTui {
         Stack::new()
             .child(main_content)
             .child(Modal::new().visible(false))
+    }
+}
+
+fn wrapped_line_count(text: &str, max_cols: usize) -> usize {
+    if max_cols == 0 {
+        return text.lines().count().max(1);
+    }
+
+    let mut count = 0usize;
+    for line in text.split('\n') {
+        count += line_wrapped_count(line, max_cols);
+    }
+    count.max(1)
+}
+
+fn line_wrapped_count(line: &str, max_cols: usize) -> usize {
+    if line.is_empty() {
+        return 1;
+    }
+
+    let mut lines = 1usize;
+    let mut cols = 0usize;
+    for ch in line.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        if cols > 0 && cols + width > max_cols {
+            lines += 1;
+            cols = 0;
+        }
+        cols += width;
+        while cols > max_cols {
+            lines += 1;
+            cols -= max_cols;
+        }
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrapped_line_count_accounts_for_long_words() {
+        assert_eq!(wrapped_line_count("abcdefghijkl", 5), 3);
+    }
+
+    #[test]
+    fn wrapped_line_count_preserves_explicit_blank_lines() {
+        assert_eq!(wrapped_line_count("alpha\n\nbeta", 20), 3);
+    }
+
+    #[test]
+    fn message_card_height_grows_for_narrow_transcript_lines() {
+        let mut app = PorygonTui::new();
+        app.terminal_width = 75;
+
+        let short = app.estimated_message_card_height("short line");
+        let long = app.estimated_message_card_height(
+            "- **Project DNA:** AGENTS.md found at /home/travers/projects/tui-terminal/AGENTS.md",
+        );
+
+        assert!(long > short, "long={long} short={short}");
+    }
+
+    #[test]
+    fn message_content_width_reserves_sidebar_when_visible() {
+        let mut app = PorygonTui::new();
+        app.terminal_width = 99;
+        let narrow = app.message_content_width_cols();
+        app.terminal_width = 100;
+        let with_sidebar = app.message_content_width_cols();
+
+        assert!(
+            with_sidebar < narrow,
+            "with_sidebar={with_sidebar} narrow={narrow}"
+        );
     }
 }

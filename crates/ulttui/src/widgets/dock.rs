@@ -72,6 +72,14 @@ impl DockLayout {
             _ => fallback.min(total),
         }
     }
+
+    fn middle_side_constraints(view: &dyn View) -> Constraints {
+        let mut constraints = view.constraints();
+        constraints.height = Dimension::Percent(100.0);
+        constraints.flex_shrink = 0.0;
+        constraints.min_height = Dimension::Cells(0.0);
+        constraints
+    }
 }
 
 impl View for DockLayout {
@@ -150,12 +158,13 @@ impl View for DockLayout {
                 })?;
 
                 if let Some(left) = &self.left {
+                    let left_constraints = Self::middle_side_constraints(left.as_ref());
                     render_view_to_native(
                         left.as_ref(),
                         send_message,
                         middle_id,
                         next_id,
-                        None,
+                        Some(left_constraints),
                         true,
                     )?;
                 }
@@ -176,12 +185,13 @@ impl View for DockLayout {
                     )?;
                 }
                 if let Some(right) = &self.right {
+                    let right_constraints = Self::middle_side_constraints(right.as_ref());
                     render_view_to_native(
                         right.as_ref(),
                         send_message,
                         middle_id,
                         next_id,
-                        None,
+                        Some(right_constraints),
                         true,
                     )?;
                 }
@@ -288,7 +298,7 @@ impl View for DockLayout {
 mod tests {
     use super::DockLayout;
     use crate::widgets::{Text, View};
-    use ultty_protocol::{Dimension, Display, FlexDirection};
+    use ultty_protocol::{AppMessage, Dimension, Display, FlexDirection, RegionId};
 
     #[test]
     fn dock_empty_has_no_children() {
@@ -338,5 +348,37 @@ mod tests {
             .center(Text::new("center"))
             .dock_right(Text::new("right"));
         assert_eq!(<DockLayout as View>::children_count(&dock), 1);
+    }
+
+    #[test]
+    fn dock_native_side_regions_fill_middle_height() {
+        let dock = DockLayout::new()
+            .dock_left(Text::new("left"))
+            .center(Text::new("center"))
+            .dock_right(Text::new("right"));
+        let mut messages = Vec::new();
+        let mut send = |msg: &AppMessage| -> anyhow::Result<()> {
+            messages.push(msg.clone());
+            Ok(())
+        };
+        let mut next_id = 1;
+
+        dock.render_child_native(0, &mut send, RegionId::new(0), &mut next_id)
+            .expect("dock middle should render");
+
+        let side_heights: Vec<_> = messages
+            .iter()
+            .filter_map(|msg| match msg {
+                AppMessage::CreateRegion {
+                    id, constraints, ..
+                } if *id == RegionId::new(2) || *id == RegionId::new(4) => Some(constraints.height),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            side_heights,
+            vec![Dimension::Percent(100.0), Dimension::Percent(100.0)]
+        );
     }
 }

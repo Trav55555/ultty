@@ -13,4 +13,5 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+unicode-width = { workspace = true }
 libc = "0.2"
