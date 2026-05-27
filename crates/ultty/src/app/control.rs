@@ -3,7 +3,21 @@
 //! Processes CLI automation requests from ulttyctl and other tools.
 
 use super::App;
+use regex::Regex;
+use std::time::{Duration, Instant};
 use winit::dpi::PhysicalSize;
+
+pub(super) struct PendingControlWait {
+    client_key: usize,
+    matcher: WaitMatcher,
+    start: Instant,
+    timeout: Duration,
+}
+
+enum WaitMatcher {
+    Plain { pattern_lower: String },
+    Regex(Regex),
+}
 
 impl App {
     pub(super) fn handle_control_requests(&mut self) {
@@ -19,6 +33,15 @@ impl App {
         let mut responses: Vec<(usize, ControlResponse)> = Vec::new();
 
         for (client_key, request) in requests {
+            if let Some(response) = self.defer_wait_for_request(client_key, &request) {
+                responses.push((client_key, response));
+                continue;
+            }
+
+            if self.is_wait_for_request(&request) {
+                continue;
+            }
+
             let response = self.process_control_request(client_key, request);
             responses.push((client_key, response));
         }
@@ -28,6 +51,96 @@ impl App {
                 server.send_response(client_key, &response);
             }
         }
+    }
+
+    pub(super) fn complete_pending_control_waits(&mut self) {
+        let mut still_pending = Vec::new();
+        let mut responses = Vec::new();
+        let pending = std::mem::take(&mut self.pending_control_waits);
+
+        for wait in pending {
+            if let Some(response) = self.pending_wait_response(&wait) {
+                responses.push((wait.client_key, response));
+            } else {
+                still_pending.push(wait);
+            }
+        }
+
+        self.pending_control_waits = still_pending;
+
+        if let Some(ref mut server) = self.control_server {
+            for (client_key, response) in responses {
+                server.send_response(client_key, &response);
+            }
+        }
+    }
+
+    fn is_wait_for_request(&self, request: &ultty_protocol::control::ControlRequest) -> bool {
+        matches!(
+            request,
+            ultty_protocol::control::ControlRequest::WaitFor { .. }
+        )
+    }
+
+    fn defer_wait_for_request(
+        &mut self,
+        client_key: usize,
+        request: &ultty_protocol::control::ControlRequest,
+    ) -> Option<ultty_protocol::control::ControlResponse> {
+        use ultty_protocol::control::{ControlData, ControlRequest, ControlResponse};
+
+        let ControlRequest::WaitFor {
+            pattern,
+            regex: use_regex,
+            timeout_ms,
+        } = request
+        else {
+            return None;
+        };
+
+        if let Some(response) = self.auth_error_for_request(client_key, request) {
+            return Some(response);
+        }
+
+        let matcher = match WaitMatcher::new(pattern, *use_regex) {
+            Ok(matcher) => matcher,
+            Err(message) => return Some(ControlResponse::Error { code: 4, message }),
+        };
+
+        if let Some((line, col)) = self.find_wait_match(&matcher) {
+            return Some(ControlResponse::Data(ControlData::WaitMatched {
+                line,
+                col,
+            }));
+        }
+
+        self.pending_control_waits.push(PendingControlWait {
+            client_key,
+            matcher,
+            start: Instant::now(),
+            timeout: Duration::from_millis(*timeout_ms),
+        });
+        None
+    }
+
+    fn pending_wait_response(
+        &self,
+        wait: &PendingControlWait,
+    ) -> Option<ultty_protocol::control::ControlResponse> {
+        use ultty_protocol::control::{ControlData, ControlResponse};
+
+        if let Some((line, col)) = self.find_wait_match(&wait.matcher) {
+            return Some(ControlResponse::Data(ControlData::WaitMatched {
+                line,
+                col,
+            }));
+        }
+
+        if wait.start.elapsed() >= wait.timeout {
+            return Some(ControlResponse::Data(ControlData::WaitTimeout));
+        }
+
+        None
     }
 
     /// Process a single control request and return the response.
@@ -41,6 +154,10 @@ impl App {
             ControlData, ControlRequest, ControlResponse, SearchMatch, TabInfo, TerminalInfo,
             VersionInfo,
         };
+
+        if let Some(response) = self.auth_error_for_request(client_key, &request) {
+            return response;
+        }
 
         match request {
             ControlRequest::Ping => ControlResponse::Data(ControlData::Pong),
@@ -481,73 +598,13 @@ impl App {
             }
 
             ControlRequest::WaitFor {
-                pattern,
-                regex: use_regex,
-                timeout_ms,
-            } => {
-                let compiled_regex = if use_regex {
-                    let regex_pattern = format!("(?i){}", pattern);
-                    match regex::Regex::new(&regex_pattern) {
-                        Ok(re) => Some(re),
-                        Err(e) => {
-                            return ControlResponse::Error {
-                                code: 4,
-                                message: format!("Invalid regex: {}", e),
-                            };
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                if let Some(terminal) = self.terminal_manager.focused_terminal() {
-                    let start = std::time::Instant::now();
-                    let timeout = std::time::Duration::from_millis(timeout_ms);
-                    let pattern_lower = pattern.to_lowercase();
-
-                    let mut found: Option<(usize, usize)> = None;
-
-                    while start.elapsed() < timeout && found.is_none() {
-                        let buffer = terminal.event_loop.terminal().buffer();
-                        let total_lines = buffer.total_lines();
-
-                        for row in 0..total_lines {
-                            if let Some(grid_row) = buffer.row_at(row) {
-                                let text = grid_row.text_trimmed();
-
-                                if let Some(ref re) = compiled_regex {
-                                    if let Some(m) = re.find(&text) {
-                                        found = Some((row, m.start()));
-                                        break;
-                                    }
-                                } else {
-                                    let text_lower = text.to_lowercase();
-                                    if let Some(col) = text_lower.find(&pattern_lower) {
-                                        found = Some((row, col));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        if found.is_none() {
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                        }
-                    }
-
-                    match found {
-                        Some((line, col)) => {
-                            ControlResponse::Data(ControlData::WaitMatched { line, col })
-                        }
-                        None => ControlResponse::Data(ControlData::WaitTimeout),
-                    }
-                } else {
-                    ControlResponse::Error {
-                        code: 1,
-                        message: "No active terminal".to_string(),
-                    }
-                }
-            }
+                pattern: _,
+                regex: _,
+                timeout_ms: _,
+            } => ControlResponse::Error {
+                code: 5,
+                message: "wait-for cannot be used inside batch requests".to_string(),
+            },
 
             ControlRequest::Batch { commands } => {
                 let results: Vec<ControlResponse> = commands
@@ -602,6 +659,114 @@ impl App {
         if !bytes.is_empty() {
             let _ = terminal.event_loop.send_input(&bytes);
         }
+    }
+
+    fn auth_error_for_request(
+        &self,
+        client_key: usize,
+        request: &ultty_protocol::control::ControlRequest,
+    ) -> Option<ultty_protocol::control::ControlResponse> {
+        use ultty_protocol::control::{ControlRequest, ControlResponse};
+
+        if matches!(request, ControlRequest::Authenticate { .. }) || !control_auth_token_exists() {
+            return None;
+        }
+
+        if !control_request_requires_auth(request) {
+            return None;
+        }
+
+        let authenticated = self
+            .control_server
+            .as_ref()
+            .is_some_and(|server| server.is_client_authenticated(client_key));
+
+        if authenticated {
+            None
+        } else {
+            Some(ControlResponse::Error {
+                code: 403,
+                message: "Authentication required".to_string(),
+            })
+        }
+    }
+
+    fn find_wait_match(&self, matcher: &WaitMatcher) -> Option<(usize, usize)> {
+        let terminal = self.terminal_manager.focused_terminal()?;
+        let buffer = terminal.event_loop.terminal().buffer();
+        let total_lines = buffer.total_lines();
+
+        for row in 0..total_lines {
+            let Some(grid_row) = buffer.row_at(row) else {
+                continue;
+            };
+            let text = grid_row.text_trimmed();
+
+            match matcher {
+                WaitMatcher::Plain { pattern_lower } => {
+                    let text_lower = text.to_lowercase();
+                    if let Some(col) = text_lower.find(pattern_lower) {
+                        return Some((row, col));
+                    }
+                }
+                WaitMatcher::Regex(re) => {
+                    if let Some(m) = re.find(&text) {
+                        return Some((row, m.start()));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+}
+
+impl WaitMatcher {
+    fn new(pattern: &str, use_regex: bool) -> Result<Self, String> {
+        if use_regex {
+            let regex_pattern = format!("(?i){}", pattern);
+            Regex::new(&regex_pattern)
+                .map(WaitMatcher::Regex)
+                .map_err(|e| format!("Invalid regex: {}", e))
+        } else {
+            Ok(WaitMatcher::Plain {
+                pattern_lower: pattern.to_lowercase(),
+            })
+        }
+    }
+}
+
+fn control_auth_token_exists() -> bool {
+    ultty_protocol::control::auth_token_path().is_file()
+}
+
+fn control_request_requires_auth(request: &ultty_protocol::control::ControlRequest) -> bool {
+    use ultty_protocol::control::ControlRequest;
+
+    match request {
+        ControlRequest::Ping
+        | ControlRequest::Version
+        | ControlRequest::GetInfo
+        | ControlRequest::ListTabs
+        | ControlRequest::GetText { .. }
+        | ControlRequest::GetSelection
+        | ControlRequest::Search { .. }
+        | ControlRequest::WaitFor { .. }
+        | ControlRequest::Authenticate { .. } => false,
+        ControlRequest::Batch { .. } => false,
+        ControlRequest::SendText { .. }
+        | ControlRequest::SendKey { .. }
+        | ControlRequest::SendRaw { .. }
+        | ControlRequest::NewTab { .. }
+        | ControlRequest::SwitchTab { .. }
+        | ControlRequest::CloseTab { .. }
+        | ControlRequest::RunCommand { .. }
+        | ControlRequest::FocusWindow
+        | ControlRequest::ToggleFullscreen
+        | ControlRequest::Resize { .. }
+        | ControlRequest::SetOpacity { .. }
+        | ControlRequest::SetAgentStatus { .. }
+        | ControlRequest::Screenshot { .. } => true,
     }
 }
 
@@ -732,12 +897,46 @@ fn build_command_line(command: &str, args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ultty_protocol::control::ControlResponse;
+    use ultty_protocol::control::{ControlRequest, ControlResponse};
     use ultty_protocol::Key;
 
     // ---------------------------------------------------------------
     // key_to_bytes: simple keys (no modifiers, no app-cursor)
     // ---------------------------------------------------------------
+
+    #[test]
+    fn mutating_control_requests_require_auth_when_token_exists() {
+        assert!(control_request_requires_auth(&ControlRequest::SendText {
+            text: "hello".to_string(),
+        }));
+        assert!(control_request_requires_auth(&ControlRequest::NewTab {
+            title: None,
+            command: None,
+            args: Vec::new(),
+            working_dir: None,
+        }));
+        assert!(control_request_requires_auth(&ControlRequest::RunCommand {
+            command: "make".to_string(),
+            args: vec!["test".to_string()],
+        }));
+    }
+
+    #[test]
+    fn read_only_control_requests_do_not_require_auth() {
+        assert!(!control_request_requires_auth(&ControlRequest::Ping));
+        assert!(!control_request_requires_auth(&ControlRequest::GetInfo));
+        assert!(!control_request_requires_auth(&ControlRequest::Search {
+            pattern: "needle".to_string(),
+            regex: false,
+            case_sensitive: false,
+            include_scrollback: true,
+        }));
+        assert!(!control_request_requires_auth(&ControlRequest::WaitFor {
+            pattern: "ready".to_string(),
+            regex: false,
+            timeout_ms: 100,
+        }));
+    }
 
     #[test]
     fn key_char_plain_ascii() {

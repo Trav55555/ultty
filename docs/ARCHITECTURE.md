@@ -154,10 +154,10 @@ decomposition decision and testing strategy.
 ### Wire Format
 
 ```
-┌────────────┬────────────┬──────────────────┐
-│  Magic (2) │ Length (4) │  Payload (var)   │
-│   "UT"     │  u32 LE    │  MessagePack     │
-└────────────┴────────────┴──────────────────┘
+┌────────────┬──────────┬────────────┬──────────────────┐
+│  Magic (2) │ Type (2) │ Length (4) │  Payload (var)   │
+│   "UT"     │  u16 LE  │  u32 LE    │  Binary codec    │
+└────────────┴──────────┴────────────┴──────────────────┘
 ```
 
 ## Performance Characteristics

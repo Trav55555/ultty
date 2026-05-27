@@ -37,7 +37,7 @@ impl ControlServer {
 
     fn new_at(socket_path: PathBuf) -> io::Result<Self> {
         if socket_path.exists() {
-            fs::remove_file(&socket_path)?;
+            remove_stale_socket(&socket_path)?;
         }
 
         if let Some(parent) = socket_path.parent() {
@@ -209,6 +209,19 @@ impl Drop for ControlServer {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.socket_path);
         info!("Control server shut down");
+    }
+}
+
+fn remove_stale_socket(socket_path: &Path) -> io::Result<()> {
+    match UnixStream::connect(socket_path) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "socket already has an active listener: {}",
+                socket_path.display()
+            ),
+        )),
+        Err(_) => fs::remove_file(socket_path),
     }
 }
 

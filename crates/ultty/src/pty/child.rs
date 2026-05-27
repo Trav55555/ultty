@@ -4,8 +4,10 @@ use super::{current_dir, default_shell, Pty, PtyError, PtySize, Result, SlavePty
 use nix::libc;
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::{close, dup2, execvp, fork, setsid, ForkResult, Pid};
+use nix::unistd::{fork, setsid, ForkResult, Pid};
 use std::ffi::CString;
+use std::os::raw::c_char;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 /// A child process running in a PTY.
@@ -39,11 +41,10 @@ impl Child {
     /// Spawn a command in a PTY.
     pub fn spawn(program: &str, args: &[&str], working_dir: &Path, size: PtySize) -> Result<Self> {
         let (pty, slave) = Pty::open_with_size(size)?;
+        let exec_plan = ChildExec::new(program, args, working_dir)?;
 
-        // SAFETY: fork() is safe to call here because:
-        // - We're single-threaded at this point (no other threads holding locks)
-        // - The PTY file descriptors are set up correctly before fork
-        // - The child process will exec immediately, avoiding post-fork issues
+        // SAFETY: the child path only performs session/fd setup and execve with
+        // argv/env/cwd prepared before fork. It must not allocate or take locks.
         match unsafe { fork() }.map_err(PtyError::ForkFailed)? {
             ForkResult::Parent { child } => {
                 // Parent process - we're the terminal emulator
@@ -60,7 +61,7 @@ impl Child {
             ForkResult::Child => {
                 // Child process - will become the shell
                 // This function does not return on success
-                setup_child(slave, program, args, working_dir);
+                setup_child(slave, &exec_plan);
             }
         }
     }
@@ -224,13 +225,95 @@ impl Drop for Child {
     }
 }
 
+struct ChildExec {
+    program: CString,
+    _args: Vec<CString>,
+    argv: Vec<*const c_char>,
+    _env: Vec<CString>,
+    envp: Vec<*const c_char>,
+    working_dir: CString,
+}
+
+impl ChildExec {
+    fn new(program: &str, args: &[&str], working_dir: &Path) -> Result<Self> {
+        let program = cstring_from_bytes(resolve_program_path(program).as_bytes())?;
+        let working_dir = cstring_from_bytes(working_dir.as_os_str().as_bytes())?;
+
+        let mut arg_strings = if args.is_empty() {
+            vec![cstring_from_bytes(program.as_bytes())?]
+        } else {
+            args.iter()
+                .map(|arg| cstring_from_bytes(arg.as_bytes()))
+                .collect::<Result<Vec<_>>>()?
+        };
+        if arg_strings.is_empty() {
+            arg_strings.push(cstring_from_bytes(program.as_bytes())?);
+        }
+
+        let mut env = Vec::new();
+        for (key, value) in std::env::vars_os() {
+            if key == "TERM" || key == "COLORTERM" {
+                continue;
+            }
+            let mut entry = Vec::new();
+            entry.extend_from_slice(key.as_os_str().as_bytes());
+            entry.push(b'=');
+            entry.extend_from_slice(value.as_os_str().as_bytes());
+            env.push(cstring_from_bytes(&entry)?);
+        }
+        env.push(cstring_from_bytes(b"TERM=xterm-256color")?);
+        env.push(cstring_from_bytes(b"COLORTERM=truecolor")?);
+
+        let mut argv = arg_strings
+            .iter()
+            .map(|arg| arg.as_ptr())
+            .collect::<Vec<_>>();
+        argv.push(std::ptr::null());
+
+        let mut envp = env.iter().map(|entry| entry.as_ptr()).collect::<Vec<_>>();
+        envp.push(std::ptr::null());
+
+        Ok(Self {
+            program,
+            _args: arg_strings,
+            argv,
+            _env: env,
+            envp,
+            working_dir,
+        })
+    }
+}
+
+fn cstring_from_bytes(bytes: &[u8]) -> Result<CString> {
+    CString::new(bytes).map_err(|_| PtyError::ExecFailed(nix::Error::EINVAL))
+}
+
+fn resolve_program_path(program: &str) -> std::borrow::Cow<'_, str> {
+    if program.contains('/') {
+        return std::borrow::Cow::Borrowed(program);
+    }
+
+    let Some(paths) = std::env::var_os("PATH") else {
+        return std::borrow::Cow::Borrowed(program);
+    };
+
+    for dir in std::env::split_paths(&paths) {
+        let candidate = dir.join(program);
+        if candidate.is_file() {
+            return std::borrow::Cow::Owned(candidate.to_string_lossy().into_owned());
+        }
+    }
+
+    std::borrow::Cow::Borrowed(program)
+}
+
 /// Set up the child process (runs in child after fork).
 ///
 /// This function does not return on success - it calls exec.
-fn setup_child(slave: SlavePty, program: &str, args: &[&str], working_dir: &Path) -> ! {
+fn setup_child(slave: SlavePty, exec_plan: &ChildExec) -> ! {
     // Create a new session and set controlling terminal
     if setsid().is_err() {
-        std::process::exit(1);
+        exit_child(1);
     }
 
     let slave_fd = slave.into_raw_fd();
@@ -241,47 +324,49 @@ fn setup_child(slave: SlavePty, program: &str, args: &[&str], working_dir: &Path
     // The third argument (0) means don't steal the terminal from another session.
     unsafe {
         if libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) < 0 {
-            std::process::exit(1);
+            exit_child(1);
         }
     }
 
     // Redirect stdin, stdout, stderr to the slave
-    if dup2(slave_fd, libc::STDIN_FILENO).is_err() {
-        std::process::exit(1);
-    }
-    if dup2(slave_fd, libc::STDOUT_FILENO).is_err() {
-        std::process::exit(1);
-    }
-    if dup2(slave_fd, libc::STDERR_FILENO).is_err() {
-        std::process::exit(1);
+    unsafe {
+        if libc::dup2(slave_fd, libc::STDIN_FILENO) < 0 {
+            exit_child(1);
+        }
+        if libc::dup2(slave_fd, libc::STDOUT_FILENO) < 0 {
+            exit_child(1);
+        }
+        if libc::dup2(slave_fd, libc::STDERR_FILENO) < 0 {
+            exit_child(1);
+        }
     }
 
     // Close the original slave fd if it's not one of the standard fds
     if slave_fd > libc::STDERR_FILENO {
-        close(slave_fd).ok();
+        unsafe {
+            libc::close(slave_fd);
+        }
     }
 
     // Change to working directory
-    std::env::set_current_dir(working_dir).ok();
-
-    // Set up environment
-    std::env::set_var("TERM", "xterm-256color");
-    std::env::set_var("COLORTERM", "truecolor");
-
-    // Convert args to CStrings
-    let program_cstr = CString::new(program).unwrap_or_else(|_| CString::new("/bin/sh").unwrap());
-    let args_cstr: Vec<CString> = args
-        .iter()
-        .map(|s| CString::new(*s).unwrap_or_else(|_| CString::new("").unwrap()))
-        .collect();
+    unsafe {
+        libc::chdir(exec_plan.working_dir.as_ptr());
+    }
 
     // Execute the program
-    match execvp(&program_cstr, &args_cstr) {
-        Ok(_) => unreachable!(), // execvp never returns on success
-        Err(e) => {
-            eprintln!("Failed to exec {}: {}", program, e);
-            std::process::exit(127);
-        }
+    unsafe {
+        libc::execve(
+            exec_plan.program.as_ptr(),
+            exec_plan.argv.as_ptr(),
+            exec_plan.envp.as_ptr(),
+        );
+    }
+    exit_child(127);
+}
+
+fn exit_child(code: i32) -> ! {
+    unsafe {
+        libc::_exit(code);
     }
 }
 

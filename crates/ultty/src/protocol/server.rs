@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -34,7 +34,7 @@ impl ProtocolServer {
         let socket_path = socket_path.as_ref().to_path_buf();
 
         if socket_path.exists() {
-            fs::remove_file(&socket_path)?;
+            remove_stale_socket(&socket_path)?;
         }
 
         if let Some(parent) = socket_path.parent() {
@@ -337,9 +337,12 @@ impl ProtocolServer {
     /// Check keepalive state for all sessions. Removes timed-out sessions.
     pub fn check_keepalives(&mut self) {
         let mut to_remove = Vec::new();
+        let mut queued_writes = false;
         for (&key, session) in &mut self.sessions {
             match session.check_keepalive() {
-                Ok(true) => {}
+                Ok(true) => {
+                    queued_writes |= session.has_pending_writes();
+                }
                 Ok(false) => {
                     info!("Session {} timed out", session.session_id());
                     to_remove.push(key);
@@ -354,6 +357,9 @@ impl ProtocolServer {
             if let Some(session) = self.sessions.remove(&key) {
                 let _ = self.poller.delete(session.stream_fd());
             }
+        }
+        if queued_writes {
+            self.flush();
         }
     }
 
@@ -381,6 +387,19 @@ impl ProtocolServer {
             }
         }
         self.flush();
+    }
+}
+
+fn remove_stale_socket(socket_path: &Path) -> io::Result<()> {
+    match UnixStream::connect(socket_path) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "socket already has an active listener: {}",
+                socket_path.display()
+            ),
+        )),
+        Err(_) => fs::remove_file(socket_path),
     }
 }
 
@@ -656,16 +675,24 @@ mod tests {
         let path = temp_socket_path();
         let _cleanup = Cleanup(path.clone());
 
-        // Create a first server (creates the socket file).
-        let server1 = ProtocolServer::new(&path).unwrap();
-        // Intentionally leak (don't drop) so socket file persists by
-        // just forgetting the Drop.
-        std::mem::forget(server1);
+        fs::write(&path, b"stale").expect("create stale socket placeholder");
 
-        // A second server on the same path should succeed because
-        // new() removes the stale file.
         let _server2 = ProtocolServer::new(&path)
             .expect("should be able to create server on path with stale socket");
+    }
+
+    #[test]
+    fn new_does_not_remove_active_socket() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+        let _server = ProtocolServer::new(&path).unwrap();
+
+        let err = match ProtocolServer::new(&path) {
+            Ok(_) => panic!("active socket should not be unlinked"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
     }
 
     // ---------------------------------------------------------------

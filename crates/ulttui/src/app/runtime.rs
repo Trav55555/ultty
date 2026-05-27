@@ -85,14 +85,18 @@ impl<A: Application> App<A> {
         }
     }
 
-    pub(super) fn poll_spawned_tasks(&mut self, rt: &Runtime) {
+    pub(super) fn poll_spawned_tasks(&mut self, rt: &Runtime) -> bool {
+        let mut produced_messages = false;
         let mut index = 0;
         while index < self.spawn_handles.len() {
             if self.spawn_handles[index].is_finished() {
                 let handle = self.spawn_handles.swap_remove(index);
                 // is_finished() == true guarantees block_on returns immediately.
                 match rt.block_on(handle) {
-                    Ok(msg) => self.msg_queue.push_back(msg),
+                    Ok(msg) => {
+                        self.msg_queue.push_back(msg);
+                        produced_messages = true;
+                    }
                     Err(e) => {
                         tracing::warn!("Spawned task panicked: {}", e);
                     }
@@ -101,5 +105,6 @@ impl<A: Application> App<A> {
                 index += 1;
             }
         }
+        produced_messages
     }
 }

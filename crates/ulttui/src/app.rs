@@ -137,6 +137,7 @@ pub struct App<A: Application> {
     quit_requested: bool,
     backend_initialized: bool,
     backend_shutdown: bool,
+    needs_render: bool,
 }
 
 #[allow(dead_code)]
@@ -191,6 +192,7 @@ impl<A: Application> App<A> {
             quit_requested: false,
             backend_initialized: false,
             backend_shutdown: false,
+            needs_render: true,
         }
     }
 
@@ -252,6 +254,7 @@ impl<A: Application> App<A> {
 
             let mut forward_to_app = true;
             let mut allow_navigation = true;
+            let mut event_changed_state = false;
             if !self.screen_stack.is_empty() {
                 let action = {
                     let top_screen = self
@@ -260,6 +263,7 @@ impl<A: Application> App<A> {
                         .expect("screen stack checked as non-empty");
                     top_screen.on_event(&event)
                 };
+                event_changed_state = true;
 
                 match action {
                     ScreenAction::Continue => {}
@@ -268,6 +272,7 @@ impl<A: Application> App<A> {
                             screen.on_unmount();
                         }
                         forward_to_app = false;
+                        event_changed_state = true;
                     }
                     ScreenAction::Consumed => {
                         forward_to_app = false;
@@ -278,38 +283,60 @@ impl<A: Application> App<A> {
 
             if let Event::Key(ref key_event) = event {
                 if allow_navigation && self.handle_navigation(key_event) {
-                    self.render()?;
+                    self.needs_render = true;
                     return Ok(true);
                 }
             }
 
             if forward_to_app {
+                event_changed_state = true;
                 if let Some(msg) = self.app.on_event(&event) {
                     self.msg_queue.push_back(msg);
                 }
             }
+
+            if event_changed_state {
+                self.needs_render = true;
+            }
         }
 
         // 3. Drain message queue (update → Cmd scheduling)
-        self.drain_messages(rt);
+        if self.drain_messages(rt) {
+            self.needs_render = true;
+        }
 
         // 4. Process subscriptions → enqueue messages
-        self.process_subscriptions(rt);
+        if self.process_subscriptions(rt) {
+            self.needs_render = true;
+        }
 
         // 5. Poll spawned tasks → enqueue messages
-        self.poll_spawned_tasks(rt);
+        if self.poll_spawned_tasks(rt) {
+            self.needs_render = true;
+        }
 
         // 5b. Poll subscription streams → enqueue messages
-        self.poll_subscriptions();
+        if self.poll_subscriptions() {
+            self.needs_render = true;
+        }
 
         // 6. Drain message queue again (from subs/spawns)
-        self.drain_messages(rt);
+        if self.drain_messages(rt) {
+            self.needs_render = true;
+        }
 
+        let old_toast_count = self.active_toasts.len();
         self.active_toasts
             .retain(|(toast, created)| created.elapsed() < toast.duration);
+        if self.active_toasts.len() != old_toast_count {
+            self.needs_render = true;
+        }
 
         // 7. Render view
-        self.render()?;
+        if self.needs_render {
+            self.render()?;
+            self.needs_render = false;
+        }
 
         Ok(!self.quit_requested)
     }
@@ -337,7 +364,7 @@ impl<A: Application> App<A> {
     /// Drain the message queue, calling update for each message and scheduling
     /// any resulting commands. Includes a safety limit to prevent infinite loops
     /// from recursive `Cmd::Message` chains.
-    fn drain_messages(&mut self, rt: &Runtime) {
+    fn drain_messages(&mut self, rt: &Runtime) -> bool {
         const MAX_ITERATIONS: usize = 100;
         const MAX_QUEUE_SIZE: usize = 10_000;
         let mut iterations = 0;
@@ -351,7 +378,9 @@ impl<A: Application> App<A> {
             self.msg_queue.truncate(MAX_QUEUE_SIZE);
         }
 
+        let mut processed_any = false;
         while let Some(msg) = self.msg_queue.pop_front() {
+            processed_any = true;
             iterations += 1;
             if iterations > MAX_ITERATIONS {
                 tracing::warn!(
@@ -359,11 +388,12 @@ impl<A: Application> App<A> {
                     MAX_ITERATIONS,
                     self.msg_queue.len()
                 );
-                break;
+                return true;
             }
             let cmd = self.app.update(msg);
             self.process_cmd(cmd, rt);
         }
+        processed_any
     }
 
     /// Render the current view, managing focus and theme thread-locals.
@@ -439,19 +469,11 @@ impl<A: Application> App<A> {
                 self.focus.focus_prev();
                 true
             }
-            Key::Right | Key::Down => {
-                self.focus.focus_next();
-                true
-            }
-            Key::Left | Key::Up => {
-                self.focus.focus_prev();
-                true
-            }
             _ => false,
         }
     }
 
-    fn process_subscriptions(&mut self, rt: &Runtime) {
+    fn process_subscriptions(&mut self, rt: &Runtime) -> bool {
         let now = Instant::now();
         let old_states = std::mem::take(&mut self.subscriptions);
         let mut new_states = Vec::new();
@@ -472,9 +494,11 @@ impl<A: Application> App<A> {
         self.subscriptions = new_states;
         self.reconcile_stream_subscriptions(rt, stream_specs);
 
+        let produced_messages = !messages.is_empty();
         for msg in messages {
             self.msg_queue.push_back(msg);
         }
+        produced_messages
     }
 
     fn collect_subscriptions(
@@ -631,10 +655,13 @@ impl<A: Application> App<A> {
     }
 
     /// Poll subscription channels for incoming messages.
-    fn poll_subscriptions(&mut self) {
+    fn poll_subscriptions(&mut self) -> bool {
+        let mut received_any = false;
         while let Ok(msg) = self.subscription_rx.try_recv() {
             self.msg_queue.push_back(msg);
+            received_any = true;
         }
+        received_any
     }
 
     fn toast_overlay_view(&self) -> Column {
@@ -714,6 +741,7 @@ impl<A: Application> App<A> {
             quit_requested: false,
             backend_initialized: false,
             backend_shutdown: false,
+            needs_render: true,
         }
     }
 }
@@ -921,6 +949,70 @@ mod async_tests {
         assert_eq!(*updates.lock().unwrap(), vec!['a']);
         assert_eq!(*view_calls.lock().unwrap(), 1);
         assert_eq!(mock_render_count(&runner), 1);
+    }
+
+    #[test]
+    fn runtime_tick_forwards_arrow_keys_to_app() {
+        let updates = Arc::new(Mutex::new(Vec::new()));
+
+        struct ArrowApp {
+            updates: Arc<Mutex<Vec<Key>>>,
+        }
+
+        impl Application for ArrowApp {
+            type Message = Key;
+
+            fn update(&mut self, msg: Key) -> Cmd<Key> {
+                self.updates.lock().unwrap().push(msg);
+                Cmd::none()
+            }
+
+            fn on_event(&mut self, event: &Event) -> Option<Self::Message> {
+                match event {
+                    Event::Key(key_event) => Some(key_event.key.clone()),
+                    _ => None,
+                }
+            }
+
+            fn view(&self) -> impl View {
+                Text::new("arrows")
+            }
+        }
+
+        let backend = Backend::Mock(MockBackend::new(vec![Some(Event::Key(KeyEvent {
+            key: Key::Down,
+            modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
+        }))]));
+        let app = ArrowApp {
+            updates: updates.clone(),
+        };
+        let mut runner = App::new_with_backend(app, backend);
+        runner.needs_render = false;
+        let rt = test_runtime();
+
+        let should_continue = runner.run_tick(&rt).expect("tick succeeds");
+
+        assert!(should_continue);
+        assert_eq!(*updates.lock().unwrap(), vec![Key::Down]);
+        assert_eq!(mock_render_count(&runner), 1);
+    }
+
+    #[test]
+    fn runtime_tick_without_changes_does_not_render() {
+        let app = TickApp {
+            updates: Arc::new(Mutex::new(Vec::new())),
+            view_calls: Arc::new(Mutex::new(0)),
+        };
+        let backend = Backend::Mock(MockBackend::new(vec![None]));
+        let mut runner = App::new_with_backend(app, backend);
+        runner.needs_render = false;
+        let rt = test_runtime();
+
+        let should_continue = runner.run_tick(&rt).expect("tick succeeds");
+
+        assert!(should_continue);
+        assert_eq!(mock_render_count(&runner), 0);
     }
 
     #[test]

@@ -214,6 +214,8 @@ impl App {
             }
         }
 
+        self.complete_pending_control_waits();
+
         // Check if bell animation needs to continue
         if let Some(until) = self.bell_active_until {
             if Instant::now() < until {

@@ -119,6 +119,8 @@ pub struct App {
     protocol_server: Option<ProtocolServer>,
     /// Control server for CLI automation (ulttyctl)
     control_server: Option<ControlServer>,
+    /// Control wait requests that are checked after terminal output is drained.
+    pending_control_waits: Vec<control::PendingControlWait>,
     /// Cross-thread wakeups from PTY readiness into winit.
     pty_wakeup: wakeup::PtyWakeup,
     /// Search matches for native protocol regions
@@ -279,6 +281,7 @@ impl App {
                 .unwrap_or(0),
             protocol_server,
             control_server,
+            pending_control_waits: Vec::new(),
             pty_wakeup,
             native_search_matches: Vec::new(),
             native_search_active: false,
@@ -435,10 +438,11 @@ impl App {
     }
 
     fn default_socket_path() -> std::path::PathBuf {
+        let socket_name = format!("ultty-{}.sock", std::process::id());
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            std::path::PathBuf::from(runtime_dir).join("ultty.sock")
+            std::path::PathBuf::from(runtime_dir).join(socket_name)
         } else {
-            std::path::PathBuf::from(format!("/tmp/ultty-{}.sock", std::process::id()))
+            std::path::PathBuf::from("/tmp").join(socket_name)
         }
     }
 

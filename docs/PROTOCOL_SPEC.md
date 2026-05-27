@@ -44,11 +44,11 @@ The Ultimate Terminal Protocol (UTP) is a binary protocol for communication betw
      │                                        │
      │  ──── Connect (Unix Socket) ────────►  │
      │                                        │
-     │  ◄──── ServerHello ─────────────────  │
-     │        { version, capabilities }       │
-     │                                        │
      │  ──── ClientHello ──────────────────►  │
      │       { version, requested_features }  │
+     │                                        │
+     │  ◄──── ServerHello ─────────────────  │
+     │        { version, capabilities }       │
      │                                        │
      │  ◄──── SessionReady ────────────────  │
      │        { session_id, root_region }     │
@@ -89,13 +89,13 @@ All messages are framed:
 ┌─────────────────────────────────────────────────────────────┐
 │  0       1       2       3       4       5       6     ... │
 ├─────────────────────────────────────────────────────────────┤
-│  Magic (2)  │  Length (4)   │  Type (2) │  Payload (N)     │
+│  Magic (2)  │  Type (2)     │  Length (4) │  Payload (N)   │
 │   0x55 0x54 │  Little-end   │           │                  │
 └─────────────────────────────────────────────────────────────┘
 
 Magic:   0x55 0x54 ("UT")
-Length:  u32, payload length (not including header)
 Type:    u16, message type
+Length:  u32, payload length (not including header)
 Payload: Variable, type-specific
 ```
 
