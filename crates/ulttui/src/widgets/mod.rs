@@ -152,10 +152,20 @@ pub trait View {
         false
     }
 
+    /// Apply a key to app-owned widget state.
+    ///
+    /// The Ulttui runner does not dispatch this through the rendered view tree:
+    /// views are output generated from `Application::view()`. Use this helper
+    /// from application state or specialized screens that own a widget value.
+    /// App-level event handling receives the focused widget ID on `KeyEvent`.
     fn on_key(&mut self, _key: &KeyEvent) -> Option<FocusAction> {
         None
     }
 
+    /// Apply an event to app-owned widget state.
+    ///
+    /// Like `on_key`, this is a helper for owners of persistent widget values,
+    /// not an automatic runner dispatch hook.
     fn on_event(&mut self, _event: &Event) -> bool {
         false
     }

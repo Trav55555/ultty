@@ -6,6 +6,8 @@
 //! - Length: 4 bytes (u32 little-endian, payload length)
 //! - Payload: variable
 
+mod frame;
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{
@@ -24,8 +26,10 @@ use crate::{
     },
     messages::{ComputedRegionLayout, FrameId, LayoutTrigger},
     style::{BorderEdges, BorderStyle, BorderType, Color, Easing, NamedColor, Style, Transition},
-    AppMessage, ProtocolError, RegionId, Result, TerminalMessage, FRAME_MAGIC,
+    AppMessage, ProtocolError, RegionId, Result, TerminalMessage,
 };
+
+use frame::{begin_frame, decode_frame_header, finish_frame};
 
 // ============================================================================
 // Constants
@@ -1959,13 +1963,7 @@ mod msg_type {
 
 impl Encode for AppMessage {
     fn encode(&self, buf: &mut BytesMut) {
-        // Reserve space for header
-        let header_pos = buf.len();
-        buf.put_slice(&FRAME_MAGIC);
-        buf.put_u16_le(0); // type placeholder
-        buf.put_u32_le(0); // length placeholder
-
-        let payload_start = buf.len();
+        let frame = begin_frame(buf);
 
         let type_code = match self {
             AppMessage::ClientHello {
@@ -2082,49 +2080,16 @@ impl Encode for AppMessage {
             AppMessage::Pong => msg_type::PONG,
         };
 
-        let payload_len = (buf.len() - payload_start) as u32;
-
-        // Go back and fill in header
-        let header = &mut buf[header_pos..payload_start];
-        header[2..4].copy_from_slice(&type_code.to_le_bytes());
-        header[4..8].copy_from_slice(&payload_len.to_le_bytes());
+        finish_frame(buf, frame, type_code);
     }
 }
 
 impl Decode for AppMessage {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 8 {
-            return Err(ProtocolError::UnexpectedEof {
-                needed: 8,
-                have: buf.remaining(),
-            });
-        }
+        let header = decode_frame_header(buf, MAX_PAYLOAD_LEN)?;
+        let expected_remaining = buf.remaining() - header.payload_len;
 
-        let magic = buf.get_u16_le();
-        if magic != u16::from_le_bytes(FRAME_MAGIC) {
-            return Err(ProtocolError::InvalidMagic(magic));
-        }
-
-        let type_code = buf.get_u16_le();
-        let payload_len = buf.get_u32_le() as usize;
-
-        if payload_len > MAX_PAYLOAD_LEN {
-            return Err(ProtocolError::InvalidData(format!(
-                "payload length {} exceeds maximum {}",
-                payload_len, MAX_PAYLOAD_LEN
-            )));
-        }
-
-        if buf.remaining() < payload_len {
-            return Err(ProtocolError::UnexpectedEof {
-                needed: payload_len,
-                have: buf.remaining(),
-            });
-        }
-
-        let expected_remaining = buf.remaining() - payload_len;
-
-        let result = match type_code {
+        let result = match header.type_code {
             msg_type::CLIENT_HELLO => {
                 if buf.remaining() < 6 {
                     return Err(ProtocolError::UnexpectedEof {
@@ -2305,7 +2270,7 @@ impl Decode for AppMessage {
             }
             msg_type::DISCONNECT => Ok(AppMessage::Disconnect),
             msg_type::PONG => Ok(AppMessage::Pong),
-            _ => Err(ProtocolError::UnknownMessageType(type_code)),
+            _ => Err(ProtocolError::UnknownMessageType(header.type_code)),
         };
 
         // Verify we consumed exactly the declared payload length
@@ -2316,7 +2281,7 @@ impl Decode for AppMessage {
                 let over_read = expected_remaining - actual_remaining;
                 return Err(ProtocolError::InvalidData(format!(
                     "payload overrun: consumed {} bytes beyond declared length {}",
-                    over_read, payload_len
+                    over_read, header.payload_len
                 )));
             } else if actual_remaining > expected_remaining {
                 // Consumed less than declared - skip remaining bytes to stay in sync
@@ -2331,12 +2296,7 @@ impl Decode for AppMessage {
 
 impl Encode for TerminalMessage {
     fn encode(&self, buf: &mut BytesMut) {
-        let header_pos = buf.len();
-        buf.put_slice(&FRAME_MAGIC);
-        buf.put_u16_le(0);
-        buf.put_u32_le(0);
-
-        let payload_start = buf.len();
+        let frame = begin_frame(buf);
 
         let type_code = match self {
             TerminalMessage::ServerHello {
@@ -2406,47 +2366,16 @@ impl Encode for TerminalMessage {
             }
         };
 
-        let payload_len = (buf.len() - payload_start) as u32;
-        let header = &mut buf[header_pos..payload_start];
-        header[2..4].copy_from_slice(&type_code.to_le_bytes());
-        header[4..8].copy_from_slice(&payload_len.to_le_bytes());
+        finish_frame(buf, frame, type_code);
     }
 }
 
 impl Decode for TerminalMessage {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
-        if buf.remaining() < 8 {
-            return Err(ProtocolError::UnexpectedEof {
-                needed: 8,
-                have: buf.remaining(),
-            });
-        }
+        let header = decode_frame_header(buf, MAX_PAYLOAD_LEN)?;
+        let expected_remaining = buf.remaining() - header.payload_len;
 
-        let magic = buf.get_u16_le();
-        if magic != u16::from_le_bytes(FRAME_MAGIC) {
-            return Err(ProtocolError::InvalidMagic(magic));
-        }
-
-        let type_code = buf.get_u16_le();
-        let payload_len = buf.get_u32_le() as usize;
-
-        if payload_len > MAX_PAYLOAD_LEN {
-            return Err(ProtocolError::InvalidData(format!(
-                "payload length {} exceeds maximum {}",
-                payload_len, MAX_PAYLOAD_LEN
-            )));
-        }
-
-        if buf.remaining() < payload_len {
-            return Err(ProtocolError::UnexpectedEof {
-                needed: payload_len,
-                have: buf.remaining(),
-            });
-        }
-
-        let expected_remaining = buf.remaining() - payload_len;
-
-        let result = match type_code {
+        let result = match header.type_code {
             msg_type::SERVER_HELLO => {
                 if buf.remaining() < 6 {
                     return Err(ProtocolError::UnexpectedEof {
@@ -2533,7 +2462,7 @@ impl Decode for TerminalMessage {
                 let message = decode_string(buf)?;
                 Ok(TerminalMessage::Error { code, message })
             }
-            _ => Err(ProtocolError::UnknownMessageType(type_code)),
+            _ => Err(ProtocolError::UnknownMessageType(header.type_code)),
         };
 
         // Verify we consumed exactly the declared payload length
@@ -2544,7 +2473,7 @@ impl Decode for TerminalMessage {
                 let over_read = expected_remaining - actual_remaining;
                 return Err(ProtocolError::InvalidData(format!(
                     "payload overrun: consumed {} bytes beyond declared length {}",
-                    over_read, payload_len
+                    over_read, header.payload_len
                 )));
             } else if actual_remaining > expected_remaining {
                 // Consumed less than declared - skip remaining bytes to stay in sync
@@ -2560,6 +2489,7 @@ impl Decode for TerminalMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FRAME_MAGIC;
 
     #[test]
     fn test_roundtrip_disconnect() {
@@ -2568,6 +2498,37 @@ mod tests {
         let mut cursor = bytes.as_ref();
         let decoded = AppMessage::decode(&mut cursor).unwrap();
         assert_eq!(decoded, AppMessage::Disconnect);
+    }
+
+    #[test]
+    fn app_disconnect_has_golden_frame_bytes() {
+        let bytes = AppMessage::Disconnect.encode_to_bytes();
+        assert_eq!(&bytes[..], &[0x55, 0x54, 0xff, 0x00, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn terminal_ping_has_golden_frame_bytes() {
+        let bytes = TerminalMessage::Ping.encode_to_bytes();
+        assert_eq!(&bytes[..], &[0x55, 0x54, 0x70, 0x00, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn client_hello_has_golden_frame_bytes() {
+        let bytes = AppMessage::ClientHello {
+            version: 2,
+            requested_capabilities: 0x0102_0304,
+        }
+        .encode_to_bytes();
+        assert_eq!(
+            &bytes[..],
+            &[
+                0x55, 0x54, // magic
+                0x01, 0x00, // type
+                0x06, 0x00, 0x00, 0x00, // payload len
+                0x02, 0x00, // version
+                0x04, 0x03, 0x02, 0x01, // capabilities
+            ]
+        );
     }
 
     #[test]

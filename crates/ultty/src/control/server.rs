@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -69,6 +70,18 @@ impl ControlServer {
 
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// File descriptors that should wake the UI loop when readable.
+    pub fn readiness_fds(&self) -> Vec<RawFd> {
+        let mut fds = Vec::with_capacity(self.clients.len() + 1);
+        fds.push(self.listener.as_raw_fd());
+        fds.extend(
+            self.clients
+                .values()
+                .map(|client| client.stream.as_raw_fd()),
+        );
+        fds
     }
 
     pub fn poll(&mut self, timeout: Option<Duration>) -> io::Result<()> {
@@ -507,6 +520,21 @@ mod tests {
 
     fn test_server(name: &str) -> ControlServer {
         ControlServer::new_at(test_socket_path(name)).unwrap()
+    }
+
+    #[test]
+    fn readiness_fds_include_listener_and_clients() {
+        let mut server = test_server("readiness");
+        let listener_fd = server.listener.as_raw_fd();
+        assert_eq!(server.readiness_fds(), vec![listener_fd]);
+
+        let mut client = UnixStream::connect(server.socket_path()).unwrap();
+        writeln!(client, "ping").unwrap();
+        server.poll(Some(Duration::from_millis(100))).unwrap();
+
+        let fds = server.readiness_fds();
+        assert!(fds.contains(&listener_fd));
+        assert_eq!(fds.len(), 2);
     }
 
     fn poll_until_pending(server: &mut ControlServer) -> Vec<(usize, ControlRequest)> {

@@ -99,6 +99,10 @@ pub trait Application: Sized {
     }
 
     /// Handle an event and optionally return a message.
+    ///
+    /// Applications own interactive state. The runner annotates key events with
+    /// the current `focused_id`, then forwards the event here. Rendered `View`
+    /// values are treated as output and are not mutated by the runner.
     fn on_event(&mut self, _event: &Event) -> Option<Self::Message> {
         None
     }

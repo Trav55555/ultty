@@ -115,6 +115,15 @@ One pass through the Ulttui runner: poll backend events, route screen/app events
 **Command scheduling**
 The Ulttui runtime behavior that interprets `Cmd` values from `Application::update`, including immediate messages, batches, spawned futures, delayed messages, subscriptions, toasts, screen stack changes, and quit requests.
 
+**Native protocol socket**
+The per-process Unix socket where native applications connect to one Ultty terminal instance.
+
+**Control socket**
+The active-instance Unix socket where local automation sends control requests to the currently running Ultty process.
+
+**Runtime readiness wakeup**
+The app-loop wakeup bridge that watches PTY, native protocol, and control-plane file descriptors and wakes the UI loop only when runtime I/O is readable.
+
 ## Relationships
 
 - The **Ultty terminal** is the product center of the workspace.
@@ -136,6 +145,8 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - **Ultty-native mode** is the premium path, but **ANSI mode** is not an afterthought.
 - **Dual-mode apps** follow **Behavioral parity** with **Capability uplift**.
 - A **Dual-mode widget** requires core behavior coverage in both runtime modes.
+- A **Native protocol socket** is per process, while the **Control socket** is the active-instance automation target.
+- A **Runtime readiness wakeup** covers PTY, native protocol, and control-plane readability.
 
 ## Flagged ambiguities
 
@@ -151,3 +162,4 @@ The Ulttui runtime behavior that interprets `Cmd` values from `Application::upda
 - "Dual-mode" does not mean native and ANSI must have identical capabilities; core behavior matches while native mode can add capability.
 - "Widget done" does not mean native-only visual output; it means dual-mode behavior, keyboard access, resize resilience, realistic content, and focused coverage.
 - "Cross-platform" does not currently include Windows runtime support; Windows requires a future platform boundary.
+- "Runtime wakeup" does not mean a render-loop timer; fd readability is the responsiveness path and the maintenance tick is a fallback for periodic work.

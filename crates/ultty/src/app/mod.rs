@@ -42,8 +42,8 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// Maximum time to suppress drawing during synchronized update mode.
 const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(200);
 
-/// Maintenance wakeup while PTY and control sockets are not wired into winit wakeups.
-const MAINTENANCE_POLL_INTERVAL: Duration = Duration::from_millis(16);
+/// Low-frequency maintenance wakeup for timers and config reloads.
+const MAINTENANCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Faster PTY polling while a frame is dirty but not ready to render.
 const PTY_CATCHUP_POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -51,8 +51,8 @@ const PTY_CATCHUP_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// User events sent to the winit application loop.
 #[derive(Debug, Clone, Copy)]
 enum AppEvent {
-    /// At least one PTY fd is readable and should be drained on the UI thread.
-    PtyReadable,
+    /// At least one runtime fd is readable and should be drained on the UI thread.
+    RuntimeReadable,
 }
 
 /// Terminal application.
@@ -297,7 +297,7 @@ impl App {
 
         // Initialize tab bar state so it renders on first frame
         app.update_tab_bar();
-        app.refresh_pty_wakeup_fds();
+        app.refresh_runtime_wakeup_fds();
 
         Ok(app)
     }
@@ -468,7 +468,7 @@ impl App {
                         elwt.exit();
                     }
                 }
-                Event::UserEvent(AppEvent::PtyReadable) => {
+                Event::UserEvent(AppEvent::RuntimeReadable) => {
                     if app.update() {
                         elwt.exit();
                     }
@@ -540,11 +540,18 @@ impl App {
             }
         }
 
-        self.refresh_pty_wakeup_fds();
+        self.refresh_runtime_wakeup_fds();
     }
 
-    fn refresh_pty_wakeup_fds(&mut self) {
-        self.pty_wakeup.set_fds(self.terminal_manager.pty_fds());
+    fn refresh_runtime_wakeup_fds(&mut self) {
+        let mut fds = self.terminal_manager.pty_fds();
+        if let Some(server) = self.protocol_server.as_ref() {
+            fds.extend(server.readiness_fds());
+        }
+        if let Some(server) = self.control_server.as_ref() {
+            fds.extend(server.readiness_fds());
+        }
+        self.pty_wakeup.set_fds(fds);
     }
 
     /// Extract text from a vim selection.
@@ -919,5 +926,17 @@ impl App {
         }
 
         self.needs_redraw = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::MAINTENANCE_POLL_INTERVAL;
+
+    #[test]
+    fn maintenance_poll_interval_is_not_frame_cadence() {
+        assert_eq!(MAINTENANCE_POLL_INTERVAL, Duration::from_millis(250));
     }
 }

@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -67,6 +68,18 @@ impl ProtocolServer {
     /// Returns the path to the Unix socket this server is listening on.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// File descriptors that should wake the UI loop when readable.
+    pub fn readiness_fds(&self) -> Vec<RawFd> {
+        let mut fds = Vec::with_capacity(self.sessions.len() + 1);
+        fds.push(self.listener.as_raw_fd());
+        fds.extend(
+            self.sessions
+                .values()
+                .map(|session| session.stream_fd().as_raw_fd()),
+        );
+        fds
     }
 
     /// Update the viewport dimensions and propagate to all connected sessions.
@@ -454,6 +467,23 @@ mod tests {
         assert!(path.exists(), "socket file should exist after new()");
         drop(server);
         assert!(!path.exists(), "socket file should be removed after drop");
+    }
+
+    #[test]
+    fn readiness_fds_include_listener_and_sessions() {
+        let path = temp_socket_path();
+        let _cleanup = Cleanup(path.clone());
+
+        let mut server = ProtocolServer::new(&path).unwrap();
+        let listener_fd = server.listener.as_raw_fd();
+        assert_eq!(server.readiness_fds(), vec![listener_fd]);
+
+        let _client = UnixStream::connect(&path).unwrap();
+        server.poll(Some(Duration::from_millis(100))).unwrap();
+
+        let fds = server.readiness_fds();
+        assert!(fds.contains(&listener_fd));
+        assert_eq!(fds.len(), 2);
     }
 
     // ---------------------------------------------------------------

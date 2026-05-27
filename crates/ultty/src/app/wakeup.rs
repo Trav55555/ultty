@@ -1,4 +1,4 @@
-//! Bridge PTY readiness into the winit event loop.
+//! Bridge runtime fd readiness into the winit event loop.
 
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +14,7 @@ use super::AppEvent;
 const WATCH_TIMEOUT: Duration = Duration::from_millis(100);
 const WAKE_COALESCE: Duration = Duration::from_millis(1);
 
-/// Sends a winit user event when any tracked PTY fd becomes readable.
+/// Sends a winit user event when any tracked runtime fd becomes readable.
 pub(super) struct PtyWakeup {
     fds: Arc<Mutex<Vec<RawFd>>>,
     stop: Arc<AtomicBool>,
@@ -29,8 +29,8 @@ impl PtyWakeup {
         let thread_stop = Arc::clone(&stop);
 
         let handle = thread::Builder::new()
-            .name("ultty-pty-wakeup".to_string())
-            .spawn(move || watch_pty_readiness(thread_fds, thread_stop, proxy))
+            .name("ultty-runtime-wakeup".to_string())
+            .spawn(move || watch_runtime_readiness(thread_fds, thread_stop, proxy))
             .ok();
 
         Self { fds, stop, handle }
@@ -56,7 +56,7 @@ impl Drop for PtyWakeup {
     }
 }
 
-fn watch_pty_readiness(
+fn watch_runtime_readiness(
     fds: Arc<Mutex<Vec<RawFd>>>,
     stop: Arc<AtomicBool>,
     proxy: EventLoopProxy<AppEvent>,
@@ -69,7 +69,7 @@ fn watch_pty_readiness(
         }
 
         if wait_for_readable_fd(&snapshot, WATCH_TIMEOUT).unwrap_or(false) {
-            if proxy.send_event(AppEvent::PtyReadable).is_err() {
+            if proxy.send_event(AppEvent::RuntimeReadable).is_err() {
                 break;
             }
             thread::sleep(WAKE_COALESCE);
