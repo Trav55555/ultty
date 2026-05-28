@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use super::{App, CLICK_THRESHOLD};
+use super::{resize_direction_at_window_edge, App, CLICK_THRESHOLD};
 use ultty::config::KeybindingConfig;
 use ultty::grid::{
     MouseButton as TerminalMouseButton, MouseModifiers, SelectionMode, SelectionPoint,
@@ -52,8 +52,9 @@ impl App {
                     self.handle_mouse_motion();
                 }
                 self.update_tab_hover();
-                self.update_resize_cursor();
-                self.update_cursor_for_url();
+                if !self.update_resize_cursor() {
+                    self.update_cursor_for_url();
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.handle_mouse_button(button, state);
@@ -191,23 +192,10 @@ impl App {
             ElementState::Pressed => {
                 // Edge resize for CSD (no native decorations)
                 if button == MouseButton::Left {
-                    use winit::window::ResizeDirection;
                     let size = self.window.inner_size();
                     let w = size.width as f32;
                     let h = size.height as f32;
-                    let edge = 10.0;
-                    let dir = match (x < edge, x > w - edge, y < edge, y > h - edge) {
-                        (true, _, true, _) => Some(ResizeDirection::NorthWest),
-                        (_, true, true, _) => Some(ResizeDirection::NorthEast),
-                        (true, _, _, true) => Some(ResizeDirection::SouthWest),
-                        (_, true, _, true) => Some(ResizeDirection::SouthEast),
-                        (true, _, _, _) => Some(ResizeDirection::West),
-                        (_, true, _, _) => Some(ResizeDirection::East),
-                        (_, _, true, _) => Some(ResizeDirection::North),
-                        (_, _, _, true) => Some(ResizeDirection::South),
-                        _ => None,
-                    };
-                    if let Some(direction) = dir {
+                    if let Some(direction) = resize_direction_at_window_edge(x, y, w, h) {
                         let _ = self.window.drag_resize_window(direction);
                         return;
                     }

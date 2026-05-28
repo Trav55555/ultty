@@ -24,7 +24,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::Event;
 use winit::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
 use winit::keyboard::ModifiersState;
-use winit::window::{CursorIcon, Window, WindowBuilder};
+use winit::window::{CursorIcon, ResizeDirection, Window, WindowBuilder};
 
 /// Default window dimensions.
 const DEFAULT_WIDTH: u32 = 800;
@@ -32,6 +32,12 @@ const DEFAULT_HEIGHT: u32 = 600;
 
 /// Time window for detecting double/triple clicks.
 pub(super) const CLICK_THRESHOLD: Duration = Duration::from_millis(500);
+
+/// Width of the invisible window-edge resize grab area for client-side decorations.
+const WINDOW_RESIZE_EDGE_HITBOX: f32 = 16.0;
+
+/// Length of the invisible corner resize grab area along each window edge.
+const WINDOW_RESIZE_CORNER_HITBOX: f32 = 28.0;
 
 /// Cursor blink interval (how long cursor stays on/off).
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
@@ -742,23 +748,26 @@ impl App {
         }
     }
 
-    /// Update cursor icon based on URL hover state.
-    fn update_resize_cursor(&mut self) {
+    /// Update cursor icon when hovering a client-side resize zone.
+    fn update_resize_cursor(&mut self) -> bool {
         let size = self.window.inner_size();
         let x = self.mouse_pos.x as f32;
         let y = self.mouse_pos.y as f32;
         let w = size.width as f32;
         let h = size.height as f32;
-        let edge = 10.0;
 
-        let cursor = match (x < edge, x > w - edge, y < edge, y > h - edge) {
-            (true, _, true, _) | (_, true, _, true) => CursorIcon::NwseResize,
-            (_, true, true, _) | (true, _, _, true) => CursorIcon::NeswResize,
-            (true, _, _, _) | (_, true, _, _) => CursorIcon::EwResize,
-            (_, _, true, _) | (_, _, _, true) => CursorIcon::NsResize,
-            _ => return, // Not near edge, don't override cursor
+        let Some(direction) = resize_direction_at_window_edge(x, y, w, h) else {
+            return false;
+        };
+
+        let cursor = match direction {
+            ResizeDirection::NorthWest | ResizeDirection::SouthEast => CursorIcon::NwseResize,
+            ResizeDirection::NorthEast | ResizeDirection::SouthWest => CursorIcon::NeswResize,
+            ResizeDirection::West | ResizeDirection::East => CursorIcon::EwResize,
+            ResizeDirection::North | ResizeDirection::South => CursorIcon::NsResize,
         };
         self.window.set_cursor_icon(cursor);
+        true
     }
 
     fn update_cursor_for_url(&mut self) {
@@ -929,14 +938,94 @@ impl App {
     }
 }
 
+fn resize_direction_at_window_edge(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> Option<ResizeDirection> {
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+
+    let near_left_edge = x <= WINDOW_RESIZE_EDGE_HITBOX;
+    let near_right_edge = x >= width - WINDOW_RESIZE_EDGE_HITBOX;
+    let near_top_edge = y <= WINDOW_RESIZE_EDGE_HITBOX;
+    let near_bottom_edge = y >= height - WINDOW_RESIZE_EDGE_HITBOX;
+
+    let in_left_corner = x <= WINDOW_RESIZE_CORNER_HITBOX;
+    let in_right_corner = x >= width - WINDOW_RESIZE_CORNER_HITBOX;
+    let in_top_corner = y <= WINDOW_RESIZE_CORNER_HITBOX;
+    let in_bottom_corner = y >= height - WINDOW_RESIZE_CORNER_HITBOX;
+
+    match (
+        near_left_edge,
+        near_right_edge,
+        near_top_edge,
+        near_bottom_edge,
+        in_left_corner,
+        in_right_corner,
+        in_top_corner,
+        in_bottom_corner,
+    ) {
+        (_, _, _, _, true, _, true, _) => Some(ResizeDirection::NorthWest),
+        (_, _, _, _, _, true, true, _) => Some(ResizeDirection::NorthEast),
+        (_, _, _, _, true, _, _, true) => Some(ResizeDirection::SouthWest),
+        (_, _, _, _, _, true, _, true) => Some(ResizeDirection::SouthEast),
+        (true, _, _, _, _, _, _, _) => Some(ResizeDirection::West),
+        (_, true, _, _, _, _, _, _) => Some(ResizeDirection::East),
+        (_, _, true, _, _, _, _, _) => Some(ResizeDirection::North),
+        (_, _, _, true, _, _, _, _) => Some(ResizeDirection::South),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::MAINTENANCE_POLL_INTERVAL;
+    use winit::window::ResizeDirection;
+
+    use super::{resize_direction_at_window_edge, MAINTENANCE_POLL_INTERVAL};
 
     #[test]
     fn maintenance_poll_interval_is_not_frame_cadence() {
         assert_eq!(MAINTENANCE_POLL_INTERVAL, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn resize_hitbox_uses_wider_edges() {
+        assert_eq!(
+            resize_direction_at_window_edge(15.0, 200.0, 800.0, 600.0),
+            Some(ResizeDirection::West)
+        );
+        assert_eq!(
+            resize_direction_at_window_edge(784.0, 200.0, 800.0, 600.0),
+            Some(ResizeDirection::East)
+        );
+        assert_eq!(
+            resize_direction_at_window_edge(17.0, 200.0, 800.0, 600.0),
+            None
+        );
+    }
+
+    #[test]
+    fn resize_hitbox_uses_larger_corners() {
+        assert_eq!(
+            resize_direction_at_window_edge(24.0, 8.0, 800.0, 600.0),
+            Some(ResizeDirection::NorthWest)
+        );
+        assert_eq!(
+            resize_direction_at_window_edge(792.0, 24.0, 800.0, 600.0),
+            Some(ResizeDirection::NorthEast)
+        );
+        assert_eq!(
+            resize_direction_at_window_edge(24.0, 592.0, 800.0, 600.0),
+            Some(ResizeDirection::SouthWest)
+        );
+        assert_eq!(
+            resize_direction_at_window_edge(792.0, 576.0, 800.0, 600.0),
+            Some(ResizeDirection::SouthEast)
+        );
     }
 }
