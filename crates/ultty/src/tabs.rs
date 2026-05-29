@@ -5,7 +5,7 @@
 use crate::terminal_manager::{Tab, TabId};
 
 /// Height of the window control band in pixels (at default scale).
-pub const TITLE_BAR_HEIGHT: f32 = 28.0;
+pub const TITLE_BAR_HEIGHT: f32 = 36.0;
 
 /// Height of the tab row in pixels (at default scale).
 pub const TAB_ROW_HEIGHT: f32 = 28.0;
@@ -137,7 +137,7 @@ impl TabBarState {
     }
 
     /// Width of the new-tab "+" button.
-    pub const NEW_TAB_BUTTON_WIDTH: f32 = 28.0;
+    pub const NEW_TAB_BUTTON_WIDTH: f32 = TITLE_BAR_HEIGHT;
 
     /// Whether the lower tab row should be visible.
     pub fn shows_tab_row(&self) -> bool {
