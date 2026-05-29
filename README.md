@@ -171,6 +171,7 @@ Run the renderer screenshot smoke against a running Ultty instance:
 
 ```bash
 cargo run -p ultty --bin ultty
+scripts/live-smoke-gate.sh /tmp/ultty-live-smoke-gate
 scripts/screenshot-smoke.sh /tmp/ultty-screenshot-smoke
 scripts/native-richtext-smoke.sh /tmp/ultty-native-richtext-smoke
 scripts/append-content-smoke.sh /tmp/ultty-append-content-smoke

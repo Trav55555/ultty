@@ -18,6 +18,19 @@ scripts/append-content-smoke.sh /tmp/ultty-append-content-smoke
 scripts/screenshot-smoke.sh /tmp/ultty-screenshot-smoke
 ```
 
+Run the sequential release gate when you need one pass that proves the live
+smokes can run back-to-back against a single Ultty instance:
+
+```bash
+scripts/live-smoke-gate.sh /tmp/ultty-live-smoke-gate
+```
+
+The gate runs the chrome screenshot, terminal surface, native rich text, and
+AppendContent smokes in that order. It captures `ulttyctl ping`, `tabs`, `info`,
+and a control-plane screenshot before and after each smoke under
+`$OUT_DIR/health/<smoke>/<phase>/`. On failure, the script preserves the smoke
+artifacts and exits with the failed smoke or health-check phase in stderr.
+
 Result:
 
 - `cargo test --workspace` passed.
