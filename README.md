@@ -43,6 +43,8 @@ This opens Ultty as a GPU-accelerated terminal emulator. It runs any existing te
 
 Platform status: Ultty is Unix-first today. Linux and macOS are the supported runtime targets; Windows support is future work that requires a native transport and PTY platform boundary.
 
+Linux desktop packages install `dist/ultty.desktop` and the Ultty app icon from the hicolor icon set. Brand asset usage is documented in [docs/brand.md](docs/brand.md).
+
 Useful runtime overlays:
 
 - `Ctrl+Shift+?` opens the keyboard shortcuts overlay.

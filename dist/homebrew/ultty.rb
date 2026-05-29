@@ -25,6 +25,11 @@ class Ultty < Formula
   def install
     bin.install "ultty"
     bin.install "ulttyctl"
+
+    if OS.linux?
+      (share/"applications").install "dist/ultty.desktop"
+      (share/"icons").install "dist/icons/hicolor"
+    end
   end
 
   test do

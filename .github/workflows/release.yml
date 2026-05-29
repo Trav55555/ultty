@@ -57,8 +57,12 @@ jobs:
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
+          mkdir -p package/dist
+          cp ultty ulttyctl package/
+          cp ../../../dist/ultty.desktop package/dist/
+          cp -R ../../../dist/icons package/dist/
           if [ "${{ matrix.archive }}" = "tar.gz" ]; then
-            tar czf ../../../ultty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz ultty ulttyctl
+            tar czf ../../../ultty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C package .
           fi
 
       - name: Upload artifact
