@@ -268,7 +268,7 @@ cargo run -p todo-app       # Todo list with add/remove
 cargo run -p dashboard      # Dashboard with live timer (Sub::every)
 cargo run -p form-app       # Form with text inputs and checkboxes
 cargo run -p chat           # Chat interface with message history
-cargo run -p hello-native   # Raw protocol demo (run inside ultty)
+cargo run -p hello-native --bin hello-native  # Raw protocol demo (run inside ultty)
 cargo run -p hello-native --bin append-content-smoke  # AppendContent smoke app
 ```
 

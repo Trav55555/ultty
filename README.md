@@ -36,7 +36,7 @@ App declares constraints ──→ Binary protocol ──→ Terminal computes l
 ### Run the terminal
 
 ```bash
-cargo run -p ultty
+cargo run -p ultty --bin ultty
 ```
 
 This opens Ultty as a GPU-accelerated terminal emulator. It runs any existing terminal application (vim, htop, tmux, etc.) through full VT100/xterm ANSI compatibility.
@@ -55,7 +55,7 @@ Useful runtime overlays:
 From within an Ultty terminal:
 
 ```bash
-cargo run -p hello-native   # Raw protocol demo
+cargo run -p hello-native --bin hello-native  # Raw protocol demo
 cargo run -p counter-app    # Elm-architecture counter
 cargo run -p todo-app       # Todo list with vim navigation
 cargo run -p dashboard      # Multi-panel dashboard with live updates

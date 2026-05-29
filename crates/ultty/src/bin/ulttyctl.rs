@@ -12,6 +12,11 @@ fn main() {
         std::process::exit(0);
     }
 
+    if should_print_version(&args) {
+        println!("{}", version_output());
+        std::process::exit(0);
+    }
+
     let use_json = args.iter().any(|a| a == "--json");
     let timeout_secs: u64 = args
         .windows(2)
@@ -61,6 +66,14 @@ fn remove_flag_with_value(args: Vec<String>, flag: &str) -> Vec<String> {
         result.push(arg);
     }
     result
+}
+
+fn should_print_version(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--version" || arg == "-V")
+}
+
+fn version_output() -> String {
+    format!("ulttyctl {}", env!("CARGO_PKG_VERSION"))
 }
 
 fn send_command(command: &str, timeout_secs: u64) -> Result<String, String> {
@@ -126,6 +139,7 @@ USAGE:
 GLOBAL FLAGS:
     --json                  Output in JSON format
     --read-timeout <secs>   Socket read timeout in seconds (default: 5)
+    -V, --version           Show ulttyctl version without connecting to Ultty
     -h, --help              Show this help
 
 INPUT COMMANDS:
@@ -191,7 +205,7 @@ EXAMPLES:
 
 #[cfg(test)]
 mod tests {
-    use super::read_response;
+    use super::{read_response, should_print_version, version_output};
 
     use std::io::Write;
     use std::os::unix::net::UnixStream;
@@ -228,5 +242,30 @@ mod tests {
         handle.join().unwrap();
 
         assert_eq!(response, "PONG\n");
+    }
+
+    #[test]
+    fn version_flag_is_detected() {
+        assert!(should_print_version(&["--version".to_string()]));
+        assert!(should_print_version(&["-V".to_string()]));
+        assert!(should_print_version(&[
+            "--read-timeout".to_string(),
+            "1".to_string(),
+            "--version".to_string()
+        ]));
+    }
+
+    #[test]
+    fn unrelated_args_do_not_request_version() {
+        assert!(!should_print_version(&["version".to_string()]));
+        assert!(!should_print_version(&["ping".to_string()]));
+    }
+
+    #[test]
+    fn version_output_includes_binary_name_and_package_version() {
+        assert_eq!(
+            version_output(),
+            format!("ulttyctl {}", env!("CARGO_PKG_VERSION"))
+        );
     }
 }
