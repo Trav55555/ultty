@@ -34,8 +34,16 @@ renderer screenshot smokes also require a running Ultty control socket and
 capture renderer output through `ulttyctl screenshot`; see
 [`../visual-regression.md`](../visual-regression.md).
 
+`scripts/live-pipeline-trace.sh` passes a longer stress timeout to
+`scripts/perf-smoke.sh` because live PTY workloads can exceed the generic
+60-second smoke default on slower or noisy workstations. Override it with
+`ULTTY_TRACE_TIMEOUT_SECS=<seconds>` when collecting a targeted investigation.
+
 The current dated evidence set is:
 
+- [`2026-05-29-current-readiness.md`](./2026-05-29-current-readiness.md) for
+  current benchmark refresh evidence and the open live-readiness failure from
+  issue #103.
 - [`2026-05-14-baseline.md`](./2026-05-14-baseline.md) for repeatable benchmark
   baselines.
 - [`2026-05-14-ascii-span.md`](./2026-05-14-ascii-span.md) for parser/grid

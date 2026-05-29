@@ -11,6 +11,7 @@ OUT="${1:-/tmp/ultty-perf-smoke.md}"
 ULTTYCTL="${ULTTYCTL:-target/debug/ulttyctl}"
 RUNS="${ULTTY_PERF_SMOKE_RUNS:-2}"
 TESTS="${ULTTY_PERF_SMOKE_TESTS:-1,6,8}"
+TIMEOUT_SECS="${ULTTY_PERF_SMOKE_TIMEOUT_SECS:-60}"
 
 if ! "$ULTTYCTL" ping >/dev/null 2>&1; then
   if [[ "${ULTTY_REQUIRE_LIVE:-0}" == "1" ]]; then
@@ -23,7 +24,7 @@ if ! "$ULTTYCTL" ping >/dev/null 2>&1; then
   exit 0
 fi
 
-scripts/stress-repeat.sh --runs "$RUNS" --tests "$TESTS" --out "$OUT" >/dev/null
+scripts/stress-repeat.sh --runs "$RUNS" --tests "$TESTS" --timeout "$TIMEOUT_SECS" --out "$OUT" >/dev/null
 
 if [[ ! -s "$OUT" ]]; then
   echo "perf smoke failed: missing report $OUT" >&2
