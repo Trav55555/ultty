@@ -40,6 +40,9 @@ jobs:
       - name: Run sequential live smoke gate
         run: scripts/live-smoke-gate.sh "$RUNNER_TEMP/ultty-live-smoke/gate"
 
+      - name: Run terminal workflow smoke
+        run: scripts/terminal-workflow-smoke.sh "$RUNNER_TEMP/ultty-live-smoke/terminal-workflow"
+
       - name: Stop Ultty
         if: always()
         run: |

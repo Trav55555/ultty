@@ -42,8 +42,8 @@ capture renderer output through `ulttyctl screenshot`; see
 The current dated evidence set is:
 
 - [`2026-05-29-current-readiness.md`](./2026-05-29-current-readiness.md) for
-  current benchmark refresh evidence and the open live-readiness failure from
-  issue #103.
+  current benchmark refresh, fixed live-pipeline evidence, soft-wrap evidence,
+  and process-level idle sample.
 - [`2026-05-14-baseline.md`](./2026-05-14-baseline.md) for repeatable benchmark
   baselines.
 - [`2026-05-14-ascii-span.md`](./2026-05-14-ascii-span.md) for parser/grid

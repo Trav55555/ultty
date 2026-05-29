@@ -17,6 +17,20 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Complete control socket request envelope.
+///
+/// `ulttyctl` sends this structure so automation can preserve argument
+/// boundaries and request machine-readable responses without relying on
+/// shell-like command parsing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControlEnvelope {
+    /// Preferred response format for this client.
+    #[serde(default)]
+    pub output_format: OutputFormat,
+    /// Typed request to execute.
+    pub request: ControlRequest,
+}
+
 /// Request message sent over the control socket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

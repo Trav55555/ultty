@@ -2,7 +2,8 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use ultty_protocol::control::control_socket_path;
+use ultty_protocol::control::{control_socket_path, ControlEnvelope, ControlRequest, OutputFormat};
+use ultty_protocol::{Key, Modifiers};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -30,15 +31,25 @@ fn main() {
         .unwrap_or(5);
 
     let args: Vec<String> = args.into_iter().filter(|a| a != "--json").collect();
-    // Remove --read-timeout and its value
     let args = remove_flag_with_value(args, "--read-timeout");
 
-    let command = if use_json {
-        // Pass the text command; the server handles both JSON and plain text
-        args.join(" ")
-    } else {
-        args.join(" ")
+    let request = match parse_cli_request(&args) {
+        Ok(request) => request,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(2);
+        }
     };
+    let envelope = ControlEnvelope {
+        output_format: if use_json {
+            OutputFormat::Json
+        } else {
+            OutputFormat::Text
+        },
+        request,
+    };
+    let command =
+        serde_json::to_string(&envelope).expect("control request envelope should serialize");
 
     match send_command(&command, timeout_secs) {
         Ok(response) => {
@@ -66,6 +77,217 @@ fn remove_flag_with_value(args: Vec<String>, flag: &str) -> Vec<String> {
         result.push(arg);
     }
     result
+}
+
+fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
+    let command = args
+        .first()
+        .ok_or_else(|| "missing command".to_string())?
+        .as_str();
+    let rest = &args[1..];
+
+    match command {
+        "ping" => Ok(ControlRequest::Ping),
+        "version" => Ok(ControlRequest::Version),
+        "info" => Ok(ControlRequest::GetInfo),
+        "tabs" => Ok(ControlRequest::ListTabs),
+        "text" => Ok(ControlRequest::GetText {
+            include_scrollback: rest.iter().any(|arg| arg == "--scrollback"),
+            scrollback_lines: None,
+        }),
+        "selection" => Ok(ControlRequest::GetSelection),
+        "send-text" => {
+            let text = rest.join(" ");
+            if text.is_empty() {
+                Err("send-text requires text".to_string())
+            } else {
+                Ok(ControlRequest::SendText { text })
+            }
+        }
+        "send-key" => {
+            let key = parse_key(
+                rest.first()
+                    .ok_or_else(|| "send-key requires a key".to_string())?,
+            )
+            .ok_or_else(|| "unknown key".to_string())?;
+            let modifiers = parse_modifiers(rest.get(1).map(String::as_str).unwrap_or(""));
+            Ok(ControlRequest::SendKey { key, modifiers })
+        }
+        "send-raw" => {
+            let hex = rest.join("");
+            let data = hex_decode(&hex).ok_or_else(|| "send-raw requires valid hex".to_string())?;
+            Ok(ControlRequest::SendRaw { data })
+        }
+        "new-tab" => Ok(ControlRequest::NewTab {
+            title: None,
+            command: rest.first().cloned(),
+            args: rest.iter().skip(1).cloned().collect(),
+            working_dir: None,
+        }),
+        "switch-tab" => {
+            let index = parse_display_tab_index(
+                rest.first()
+                    .ok_or_else(|| "switch-tab requires an index".to_string())?,
+            )
+            .ok_or_else(|| "switch-tab index must be 1 or greater".to_string())?;
+            Ok(ControlRequest::SwitchTab { index })
+        }
+        "close-tab" => Ok(ControlRequest::CloseTab {
+            index: rest.first().and_then(|arg| parse_display_tab_index(arg)),
+        }),
+        "focus" => Ok(ControlRequest::FocusWindow),
+        "fullscreen" => Ok(ControlRequest::ToggleFullscreen),
+        "opacity" => {
+            let opacity = rest
+                .first()
+                .ok_or_else(|| "opacity requires a value".to_string())?
+                .parse()
+                .map_err(|_| "opacity requires a number".to_string())?;
+            Ok(ControlRequest::SetOpacity { opacity })
+        }
+        "run" => {
+            let command = rest
+                .first()
+                .ok_or_else(|| "run requires a command".to_string())?
+                .clone();
+            Ok(ControlRequest::RunCommand {
+                command,
+                args: rest.iter().skip(1).cloned().collect(),
+            })
+        }
+        "resize" => {
+            let width = rest
+                .first()
+                .ok_or_else(|| "resize requires width and height".to_string())?
+                .parse()
+                .map_err(|_| "resize width must be a number".to_string())?;
+            let height = rest
+                .get(1)
+                .ok_or_else(|| "resize requires width and height".to_string())?
+                .parse()
+                .map_err(|_| "resize height must be a number".to_string())?;
+            Ok(ControlRequest::Resize { width, height })
+        }
+        "screenshot" => Ok(ControlRequest::Screenshot {
+            path: rest.first().cloned(),
+        }),
+        "search" => {
+            let pattern = rest.join(" ");
+            if pattern.is_empty() {
+                Err("search requires a pattern".to_string())
+            } else {
+                Ok(ControlRequest::Search {
+                    pattern,
+                    regex: false,
+                    case_sensitive: false,
+                    include_scrollback: true,
+                })
+            }
+        }
+        "wait-for" => parse_wait_for(rest),
+        "auth" => Ok(ControlRequest::Authenticate {
+            token: rest
+                .first()
+                .ok_or_else(|| "auth requires a token".to_string())?
+                .clone(),
+        }),
+        _ => Err(format!("unknown command: {}", command)),
+    }
+}
+
+fn parse_wait_for(args: &[String]) -> Result<ControlRequest, String> {
+    let mut timeout_ms = 30000;
+    let mut pattern_parts = Vec::new();
+    let mut index = 0;
+
+    while index < args.len() {
+        if args[index] == "--timeout" {
+            let timeout = args
+                .get(index + 1)
+                .ok_or_else(|| "wait-for --timeout requires milliseconds".to_string())?;
+            timeout_ms = timeout
+                .parse()
+                .map_err(|_| "wait-for timeout must be a number".to_string())?;
+            index += 2;
+        } else {
+            pattern_parts.push(args[index].clone());
+            index += 1;
+        }
+    }
+
+    let pattern = pattern_parts.join(" ");
+    if pattern.is_empty() {
+        Err("wait-for requires a pattern".to_string())
+    } else {
+        Ok(ControlRequest::WaitFor {
+            pattern,
+            regex: false,
+            timeout_ms,
+        })
+    }
+}
+
+fn parse_key(s: &str) -> Option<Key> {
+    match s.to_lowercase().as_str() {
+        "enter" | "return" => Some(Key::Enter),
+        "tab" => Some(Key::Tab),
+        "escape" | "esc" => Some(Key::Escape),
+        "backspace" => Some(Key::Backspace),
+        "delete" | "del" => Some(Key::Delete),
+        "insert" | "ins" => Some(Key::Insert),
+        "home" => Some(Key::Home),
+        "end" => Some(Key::End),
+        "pageup" | "pgup" => Some(Key::PageUp),
+        "pagedown" | "pgdn" => Some(Key::PageDown),
+        "up" => Some(Key::Up),
+        "down" => Some(Key::Down),
+        "left" => Some(Key::Left),
+        "right" => Some(Key::Right),
+        "space" => Some(Key::Char(' ')),
+        s if s.starts_with('f') && s.len() <= 3 => {
+            let n: u8 = s[1..].parse().ok()?;
+            if (1..=12).contains(&n) {
+                Some(Key::Function(n))
+            } else {
+                None
+            }
+        }
+        s if s.len() == 1 => Some(Key::Char(s.chars().next()?)),
+        _ => None,
+    }
+}
+
+fn parse_display_tab_index(s: &str) -> Option<usize> {
+    s.parse::<usize>().ok()?.checked_sub(1)
+}
+
+fn parse_modifiers(s: &str) -> Modifiers {
+    let mut mods = Modifiers::NONE;
+    let lower = s.to_lowercase();
+    if lower.contains("shift") {
+        mods = mods.union(Modifiers::SHIFT);
+    }
+    if lower.contains("ctrl") || lower.contains("control") {
+        mods = mods.union(Modifiers::CTRL);
+    }
+    if lower.contains("alt") {
+        mods = mods.union(Modifiers::ALT);
+    }
+    if lower.contains("meta") || lower.contains("super") || lower.contains("cmd") {
+        mods = mods.union(Modifiers::META);
+    }
+    mods
+}
+
+fn hex_decode(hex: &str) -> Option<Vec<u8>> {
+    let hex = hex.trim();
+    if hex.len() & 1 != 0 {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect()
 }
 
 fn should_print_version(args: &[String]) -> bool {
@@ -205,12 +427,14 @@ EXAMPLES:
 
 #[cfg(test)]
 mod tests {
-    use super::{read_response, should_print_version, version_output};
+    use super::{parse_cli_request, read_response, should_print_version, version_output};
 
     use std::io::Write;
     use std::os::unix::net::UnixStream;
     use std::thread;
     use std::time::Duration;
+
+    use ultty_protocol::control::ControlRequest;
 
     #[test]
     fn read_response_retries_until_delayed_writer_closes() {
@@ -266,6 +490,38 @@ mod tests {
         assert_eq!(
             version_output(),
             format!("ulttyctl {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn parse_cli_request_preserves_run_argument_boundaries() {
+        let request = parse_cli_request(&[
+            "run".to_string(),
+            "/usr/bin/env".to_string(),
+            "bash".to_string(),
+            "-lc".to_string(),
+            "printf 'hello world\\n'".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            request,
+            ControlRequest::RunCommand {
+                command: "/usr/bin/env".to_string(),
+                args: vec![
+                    "bash".to_string(),
+                    "-lc".to_string(),
+                    "printf 'hello world\\n'".to_string(),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cli_request_parses_json_query_command() {
+        assert_eq!(
+            parse_cli_request(&["info".to_string()]).unwrap(),
+            ControlRequest::GetInfo
         );
     }
 }

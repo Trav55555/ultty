@@ -5,15 +5,19 @@
 
 use regex::Regex;
 use std::hash::{Hash, Hasher};
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 
 /// URL regex pattern.
 ///
 /// Matches HTTP and HTTPS URLs, being careful to avoid trailing punctuation.
-static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"https?://[^\s<>"'`\{\}\|\\\^\[\]]+[^\s<>"'`\{\}\|\\\^\[\]\.,;:!?\)\]]"#)
-        .expect("Invalid URL regex")
-});
+static URL_REGEX: OnceLock<Regex> = OnceLock::new();
+
+fn url_regex() -> &'static Regex {
+    URL_REGEX.get_or_init(|| {
+        Regex::new(r#"https?://[^\s<>"'`\{\}\|\\\^\[\]]+[^\s<>"'`\{\}\|\\\^\[\]\.,;:!?\)\]]"#)
+            .expect("Invalid URL regex")
+    })
+}
 
 /// A detected URL with its position in the terminal grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,7 +123,7 @@ impl UrlDetector {
 
     /// Detect URLs in a single line.
     fn detect_in_line(&mut self, text: &str, row: u16) {
-        for mat in URL_REGEX.find_iter(text) {
+        for mat in url_regex().find_iter(text) {
             // Convert byte offsets to character offsets for column positions
             let start_col = text[..mat.start()].chars().count() as u16;
             let end_col = text[..mat.end()].chars().count() as u16;

@@ -394,12 +394,13 @@ impl Renderer {
                     }
 
                     if session.is_streaming(region.id) {
-                        let blink_on = (std::time::SystemTime::now()
+                        let blink_on = ((std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_millis()
                             / 500)
-                            .is_multiple_of(2);
+                            % 2)
+                            == 0;
 
                         if blink_on {
                             if max_cols > 0 && cursor_col >= max_cols {

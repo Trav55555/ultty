@@ -22,15 +22,15 @@ dogfood, public alpha, and general use.
 | Desktop icon and package icon assets | Implemented | [Brand Assets](brand.md), [Release Artifact Smokes](release-artifacts.md) |
 | License and release metadata hygiene | Implemented | [Release Metadata](release-metadata.md) |
 | Security audit gate | Implemented | [Security Audit](security-audit.md) |
-| Current live performance evidence | Not clean yet | [2026-05-29 readiness artifact](perf/2026-05-29-current-readiness.md), issue #103 |
+| Current live performance evidence | Clean local evidence exists; refresh per release candidate | [2026-05-29 readiness artifact](perf/2026-05-29-current-readiness.md) |
 
 ## Readiness Board
 
 | Level | Goal | Current Assessment |
 |-------|------|--------------------|
 | Dogfood | Maintainers can use Ultty from source with known limitations. | Mostly satisfied when local GUI smoke passes. The sequential live smoke passed on 2026-05-29. |
-| Public alpha | External technical users can install prerelease builds with explicit caveats. | Blocked on clean live pipeline/soft-wrap evidence and process-level idle evidence (#103). |
-| General use | Broad recommendation as a dependable terminal emulator. | Blocked on public-alpha evidence plus runtime maintainability work (#102) and repeated external dogfood feedback. |
+| Public alpha | External technical users can install prerelease builds with explicit caveats. | Needs one filled release-candidate checklist with hosted CI, package smoke, live smoke workflow evidence, install verification, and known limitations. |
+| General use | Broad recommendation as a dependable terminal emulator. | Needs repeated release-candidate evidence, broader terminal workflow smokes, runtime maintainability slices, and external dogfood feedback. |
 
 ## Completed Historical Plan
 
@@ -49,10 +49,12 @@ concrete product surface depends on them.
 
 ## Next Executable Slices
 
-| Priority | Issue | Why it matters | Exit condition |
+| Priority | Slice | Why it matters | Exit condition |
 |----------|-------|----------------|----------------|
-| P1 | #103 Refresh current performance and live-readiness evidence | Public-alpha claims need fresh live evidence, not only microbenchmarks. | Live pipeline and soft-wrap probes complete on current `main`; process-level idle evidence is captured. |
-| P2 | #102 Split remaining large app runtime modules | General-use work needs faster, lower-risk fixes in runtime/chrome/control paths. | Runtime modules are split enough that targeted fixes and instrumentation do not require broad edits. |
+| P1 | Fill a release-candidate checklist | Public-alpha claims need evidence tied to a specific commit, not only standing docs. | `docs/releases/<version-or-date>.md` links CI, live-smoke workflow artifact, package smoke, install check, and known limitations. |
+| P1 | Prove the dedicated live smoke workflow | General-use evidence must be reproducible outside one local shell. | `.github/workflows/live-smoke.yml` has at least one successful run URL and uploaded artifact cited from the release checklist. |
+| P2 | Add terminal workflow smoke coverage | General use depends on real shell/editor/pager behavior, not only renderer screenshots. | `scripts/terminal-workflow-smoke.sh` runs against a live Ultty instance and records artifacts. |
+| P2 | Split one large runtime module per slice | General-use work needs faster, lower-risk fixes in runtime/chrome/control paths. | Each extraction preserves public Interfaces and lands with targeted tests. |
 
 ## Release Gate Cadence
 
@@ -70,7 +72,7 @@ Before claiming general use:
 1. Repeat the public-alpha gate across at least two release candidates.
 2. Promote or document stable live renderer automation artifacts.
 3. Close known P0/P1 terminal correctness and live-readiness issues.
-4. Complete the runtime maintainability slice tracked in #102 or replace it
-   with more precise follow-up issues.
+4. Complete at least one runtime maintainability slice from
+   [Architecture Deepening Backlog](architecture-deepening-backlog.md).
 5. Publish install, upgrade, uninstall, diagnostics, and known-limitations docs
    for every advertised distribution channel.

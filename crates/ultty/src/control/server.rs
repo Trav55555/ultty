@@ -10,7 +10,8 @@ use polling::{Event, Events, Poller};
 use tracing::{debug, error, info, warn};
 
 use ultty_protocol::control::{
-    control_socket_path, ControlData, ControlRequest, ControlResponse, OutputFormat,
+    control_socket_path, ControlData, ControlEnvelope, ControlRequest, ControlResponse,
+    OutputFormat,
 };
 
 const LISTENER_KEY: usize = 0;
@@ -29,6 +30,11 @@ struct ClientState {
     stream: UnixStream,
     output_format: OutputFormat,
     authenticated: bool,
+}
+
+struct ParsedControlRequest {
+    request: ControlRequest,
+    output_format: OutputFormat,
 }
 
 impl ControlServer {
@@ -160,8 +166,11 @@ impl ControlServer {
         }
 
         if let Some(data) = request_data {
-            if let Some(request) = self.parse_request(&data) {
-                self.pending_requests.push((key, request));
+            if let Some(parsed) = self.parse_request(&data) {
+                if let Some(client) = self.clients.get_mut(&key) {
+                    client.output_format = parsed.output_format;
+                }
+                self.pending_requests.push((key, parsed.request));
             }
         }
 
@@ -180,7 +189,7 @@ impl ControlServer {
         Ok(())
     }
 
-    fn parse_request(&self, data: &[u8]) -> Option<ControlRequest> {
+    fn parse_request(&self, data: &[u8]) -> Option<ParsedControlRequest> {
         parse_request(data)
     }
 
@@ -238,17 +247,29 @@ fn remove_stale_socket(socket_path: &Path) -> io::Result<()> {
     }
 }
 
-fn parse_request(data: &[u8]) -> Option<ControlRequest> {
+fn parse_request(data: &[u8]) -> Option<ParsedControlRequest> {
     let text = std::str::from_utf8(data).ok()?.trim();
 
     if text.starts_with('{') {
-        return serde_json::from_str(text).ok();
+        if let Ok(envelope) = serde_json::from_str::<ControlEnvelope>(text) {
+            return Some(ParsedControlRequest {
+                request: envelope.request,
+                output_format: envelope.output_format,
+            });
+        }
+
+        return serde_json::from_str::<ControlRequest>(text)
+            .ok()
+            .map(|request| ParsedControlRequest {
+                request,
+                output_format: OutputFormat::Text,
+            });
     }
 
     let mut parts = text.split_whitespace();
     let cmd = parts.next()?;
 
-    match cmd {
+    let request = match cmd {
         "ping" => Some(ControlRequest::Ping),
         "version" => Some(ControlRequest::Version),
         "info" => Some(ControlRequest::GetInfo),
@@ -362,7 +383,17 @@ fn parse_request(data: &[u8]) -> Option<ControlRequest> {
             Some(ControlRequest::Authenticate { token })
         }
         _ => None,
-    }
+    }?;
+
+    Some(ParsedControlRequest {
+        request,
+        output_format: OutputFormat::Text,
+    })
+}
+
+#[cfg(test)]
+fn parse_request_only(data: &[u8]) -> Option<ControlRequest> {
+    parse_request(data).map(|parsed| parsed.request)
 }
 
 fn parse_key(s: &str) -> Option<ultty_protocol::Key> {
@@ -568,18 +599,21 @@ mod tests {
 
     #[test]
     fn parse_ping() {
-        assert_eq!(parse_request(b"ping"), Some(ControlRequest::Ping));
+        assert_eq!(parse_request_only(b"ping"), Some(ControlRequest::Ping));
     }
 
     #[test]
     fn parse_version() {
-        assert_eq!(parse_request(b"version"), Some(ControlRequest::Version));
+        assert_eq!(
+            parse_request_only(b"version"),
+            Some(ControlRequest::Version)
+        );
     }
 
     #[test]
     fn parse_send_text() {
         assert_eq!(
-            parse_request(b"send-text hello world"),
+            parse_request_only(b"send-text hello world"),
             Some(ControlRequest::SendText {
                 text: "hello world".to_string()
             })
@@ -589,7 +623,7 @@ mod tests {
     #[test]
     fn parse_send_raw() {
         assert_eq!(
-            parse_request(b"send-raw 1b5b41"),
+            parse_request_only(b"send-raw 1b5b41"),
             Some(ControlRequest::SendRaw {
                 data: vec![0x1b, 0x5b, 0x41]
             })
@@ -599,7 +633,7 @@ mod tests {
     #[test]
     fn parse_resize() {
         assert_eq!(
-            parse_request(b"resize 1920 1080"),
+            parse_request_only(b"resize 1920 1080"),
             Some(ControlRequest::Resize {
                 width: 1920,
                 height: 1080
@@ -609,13 +643,13 @@ mod tests {
 
     #[test]
     fn parse_unknown_returns_none() {
-        assert_eq!(parse_request(b"nonexistent-command"), None);
+        assert_eq!(parse_request_only(b"nonexistent-command"), None);
     }
 
     #[test]
     fn parse_wait_for_with_timeout() {
         assert_eq!(
-            parse_request(b"wait-for $ --timeout 5000"),
+            parse_request_only(b"wait-for $ --timeout 5000"),
             Some(ControlRequest::WaitFor {
                 pattern: "$".to_string(),
                 regex: false,
@@ -627,7 +661,7 @@ mod tests {
     #[test]
     fn parse_search() {
         assert_eq!(
-            parse_request(b"search error log"),
+            parse_request_only(b"search error log"),
             Some(ControlRequest::Search {
                 pattern: "error log".to_string(),
                 regex: false,
@@ -640,27 +674,41 @@ mod tests {
     #[test]
     fn parse_tab_commands_use_display_indices() {
         assert_eq!(
-            parse_request(b"switch-tab 2"),
+            parse_request_only(b"switch-tab 2"),
             Some(ControlRequest::SwitchTab { index: 1 })
         );
         assert_eq!(
-            parse_request(b"close-tab 2"),
+            parse_request_only(b"close-tab 2"),
             Some(ControlRequest::CloseTab { index: Some(1) })
         );
         assert_eq!(
-            parse_request(b"close-tab"),
+            parse_request_only(b"close-tab"),
             Some(ControlRequest::CloseTab { index: None })
         );
-        assert_eq!(parse_request(b"switch-tab 0"), None);
+        assert_eq!(parse_request_only(b"switch-tab 0"), None);
     }
 
     #[test]
     fn parse_send_key() {
-        let req = parse_request(b"send-key enter");
+        let req = parse_request_only(b"send-key enter");
         assert!(req.is_some());
         if let Some(ControlRequest::SendKey { key, .. }) = req {
             assert_eq!(key, ultty_protocol::Key::Enter);
         }
+    }
+
+    #[test]
+    fn parse_json_envelope_sets_output_format() {
+        let json = serde_json::to_vec(&ControlEnvelope {
+            output_format: OutputFormat::Json,
+            request: ControlRequest::Ping,
+        })
+        .unwrap();
+
+        let parsed = parse_request(&json).unwrap();
+
+        assert_eq!(parsed.request, ControlRequest::Ping);
+        assert_eq!(parsed.output_format, OutputFormat::Json);
     }
 
     #[test]

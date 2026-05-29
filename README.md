@@ -176,6 +176,7 @@ Run live gates when a GUI environment is available:
 ```bash
 scripts/live-pipeline-trace.sh /tmp/ultty-live-pipeline-trace
 scripts/softwrap-pty-probe.sh /tmp/ultty-softwrap-pty-probe
+scripts/terminal-workflow-smoke.sh /tmp/ultty-terminal-workflow-smoke
 ```
 
 Run the renderer screenshot smoke against a running Ultty instance:
@@ -239,8 +240,11 @@ examples/
 - [Performance Reports](docs/perf/README.md) — Dated benchmark and live-gate evidence
 - [Visual Regression](docs/visual-regression.md) — Renderer screenshot smoke path
 - [Live Smoke Automation](docs/live-smoke-automation.md) — Dedicated GUI runner workflow and artifacts
+- [Widget Readiness](docs/widget-readiness.md) — Dual-mode widget evidence matrix
+- [Architecture Deepening Backlog](docs/architecture-deepening-backlog.md) — Runtime and protocol implementation-depth slices
 - [Release Artifact Smokes](docs/release-artifacts.md) — Headless package and tarball verification
 - [Release Metadata](docs/release-metadata.md) — License, package, and desktop metadata conventions
+- [Release Candidate Template](docs/releases/RC_TEMPLATE.md) — Per-candidate evidence checklist
 - [Testing Strategy](docs/TESTING_STRATEGY.md) — How to test
 - [30/60/90 Execution Plan](docs/ROADMAP_30_60_90.md) — Milestones, ticket map, and acceptance criteria
 - [30/60/90 Issue Backlog](docs/ISSUE_BACKLOG_30_60_90.md) — Copy-paste issue templates with dependencies

@@ -38,12 +38,16 @@ The workflow:
 2. Starts `cargo run -p ultty --bin ultty` and preserves its log.
 3. Waits for `target/debug/ulttyctl ping` before running the gate.
 4. Runs `scripts/live-smoke-gate.sh`.
-5. Uploads the full `${RUNNER_TEMP}/ultty-live-smoke` directory on success or
+5. Runs `scripts/terminal-workflow-smoke.sh`.
+6. Uploads the full `${RUNNER_TEMP}/ultty-live-smoke` directory on success or
    failure.
 
 The gate currently runs chrome screenshot, terminal surface, native rich text,
 and AppendContent smokes against one live Ultty instance. It captures
 `ulttyctl ping`, `tabs`, `info`, and screenshots before and after each smoke.
+The terminal workflow smoke then exercises structured `ulttyctl` requests,
+shell command execution, wait/search, scrollback capture, and a small
+job-control workflow.
 
 ## Artifacts
 
@@ -58,6 +62,12 @@ Uploaded artifacts include:
 
 Use these artifacts for renderer and native-runtime failure diagnosis. Do not
 use them as performance evidence.
+
+For release candidates, copy the workflow URL and artifact name into
+`docs/releases/<version-or-date>.md` using
+[RC_TEMPLATE.md](releases/RC_TEMPLATE.md). A configured workflow file is not
+enough evidence by itself; each candidate needs a recorded run or an explicit
+manual substitute.
 
 ## Performance Boundary
 
