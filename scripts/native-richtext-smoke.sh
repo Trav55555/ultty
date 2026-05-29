@@ -53,7 +53,7 @@ normalize_tabs() {
 trap normalize_tabs EXIT
 normalize_tabs
 
-ctl new-tab cargo run -p hello-native >/dev/null
+ctl new-tab cargo run -p hello-native --bin hello-native >/dev/null
 sleep 5
 
 ctl screenshot "$OUT_DIR/hello-native.png" >/dev/null
