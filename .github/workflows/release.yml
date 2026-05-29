@@ -65,6 +65,12 @@ jobs:
             tar czf ../../../ultty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C package .
           fi
 
+      - name: Smoke tarball contents
+        run: |
+          scripts/release-artifact-smoke.sh \
+            --tarball ultty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
+            --homebrew dist/homebrew/ultty.rb
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -110,17 +116,24 @@ jobs:
           mkdir -p target/x86_64-unknown-linux-gnu/release
           tar xzf artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
             -C target/x86_64-unknown-linux-gnu/release
-      - run: cargo install cargo-deb
+      - name: Smoke Linux tarball binaries
+        run: |
+          scripts/release-artifact-smoke.sh \
+            --tarball artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
+            --run-binaries
+      - run: cargo install cargo-deb --version 3.7.0 --locked
       - run: cargo deb -p ultty --no-build --target x86_64-unknown-linux-gnu
+      - name: Smoke .deb artifact
+        run: scripts/release-artifact-smoke.sh --deb target/debian/*.deb
       - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:
           name: ultty-deb
-          path: target/x86_64-unknown-linux-gnu/debian/*.deb
+          path: target/debian/*.deb
       - name: Upload .deb to release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/x86_64-unknown-linux-gnu/debian/*.deb
+          files: target/debian/*.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -132,7 +145,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
+      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev rpm
       - name: Download x86_64 Linux artifact
         uses: actions/download-artifact@v4
         with:
@@ -142,8 +155,15 @@ jobs:
           mkdir -p target/x86_64-unknown-linux-gnu/release
           tar xzf artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
             -C target/x86_64-unknown-linux-gnu/release
-      - run: cargo install cargo-generate-rpm
+      - name: Smoke Linux tarball binaries
+        run: |
+          scripts/release-artifact-smoke.sh \
+            --tarball artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
+            --run-binaries
+      - run: cargo install cargo-generate-rpm --version 0.21.0 --locked
       - run: cargo generate-rpm -p crates/ultty --target x86_64-unknown-linux-gnu
+      - name: Smoke .rpm artifact
+        run: scripts/release-artifact-smoke.sh --rpm target/x86_64-unknown-linux-gnu/generate-rpm/*.rpm
       - name: Upload .rpm
         uses: actions/upload-artifact@v4
         with:

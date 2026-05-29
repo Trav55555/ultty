@@ -237,6 +237,7 @@ examples/
 - [Protocol Specification](docs/PROTOCOL_SPEC.md) — Native protocol details
 - [Performance Reports](docs/perf/README.md) — Dated benchmark and live-gate evidence
 - [Visual Regression](docs/visual-regression.md) — Renderer screenshot smoke path
+- [Release Artifact Smokes](docs/release-artifacts.md) — Headless package and tarball verification
 - [Testing Strategy](docs/TESTING_STRATEGY.md) — How to test
 - [30/60/90 Execution Plan](docs/ROADMAP_30_60_90.md) — Milestones, ticket map, and acceptance criteria
 - [30/60/90 Issue Backlog](docs/ISSUE_BACKLOG_30_60_90.md) — Copy-paste issue templates with dependencies

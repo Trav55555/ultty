@@ -34,5 +34,6 @@ class Ultty < Formula
 
   test do
     assert_match "ultty", shell_output("#{bin}/ultty --version")
+    assert_match "ulttyctl", shell_output("#{bin}/ulttyctl --version")
   end
 end

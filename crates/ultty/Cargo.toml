@@ -105,12 +105,12 @@ libxkbcommon = "*"
 assets = [
     ["target/release/ultty", "usr/bin/ultty", "755"],
     ["target/release/ulttyctl", "usr/bin/ulttyctl", "755"],
-    ["dist/ultty.desktop", "usr/share/applications/ultty.desktop", "644"],
-    ["dist/icons/hicolor/scalable/apps/ultty.svg", "usr/share/icons/hicolor/scalable/apps/ultty.svg", "644"],
-    ["dist/icons/hicolor/32x32/apps/ultty.png", "usr/share/icons/hicolor/32x32/apps/ultty.png", "644"],
-    ["dist/icons/hicolor/64x64/apps/ultty.png", "usr/share/icons/hicolor/64x64/apps/ultty.png", "644"],
-    ["dist/icons/hicolor/128x128/apps/ultty.png", "usr/share/icons/hicolor/128x128/apps/ultty.png", "644"],
-    ["dist/icons/hicolor/256x256/apps/ultty.png", "usr/share/icons/hicolor/256x256/apps/ultty.png", "644"],
+    ["../../dist/ultty.desktop", "usr/share/applications/ultty.desktop", "644"],
+    ["../../dist/icons/hicolor/scalable/apps/ultty.svg", "usr/share/icons/hicolor/scalable/apps/ultty.svg", "644"],
+    ["../../dist/icons/hicolor/32x32/apps/ultty.png", "usr/share/icons/hicolor/32x32/apps/ultty.png", "644"],
+    ["../../dist/icons/hicolor/64x64/apps/ultty.png", "usr/share/icons/hicolor/64x64/apps/ultty.png", "644"],
+    ["../../dist/icons/hicolor/128x128/apps/ultty.png", "usr/share/icons/hicolor/128x128/apps/ultty.png", "644"],
+    ["../../dist/icons/hicolor/256x256/apps/ultty.png", "usr/share/icons/hicolor/256x256/apps/ultty.png", "644"],
 ]
 
 [[bench]]
