@@ -160,6 +160,17 @@ timeout 900s cargo bench -p ultty --bench render -- --noplot
 timeout 900s cargo bench -p ultty --bench memory -- --noplot
 ```
 
+Run the dependency security audit separately from the normal local build/test
+loop:
+
+```bash
+cargo install cargo-audit --version 0.22.1 --locked
+scripts/security-audit.sh
+```
+
+The current accepted warning-only advisory exceptions are documented in
+[docs/security-audit.md](docs/security-audit.md).
+
 Run live gates when a GUI environment is available:
 
 ```bash
