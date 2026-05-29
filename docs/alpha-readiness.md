@@ -50,7 +50,7 @@ stated plainly in the release notes.
 |------|------|------|----------|
 | Release artifacts | Tarball, `.deb`, `.rpm`, and Homebrew formula structure pass release smoke checks. Binaries expose `--version`. Desktop files and icon assets are packaged. | Automated CI | [Release Artifact Smokes](release-artifacts.md), `.github/workflows/release.yml` |
 | Security audit | `scripts/security-audit.sh` passes. Any ignored advisory is warning-only, documented, and not directly reachable through Ultty code. | Automated CI | [Security Audit](security-audit.md) |
-| License and metadata | Repository license files, package metadata, release metadata, desktop metadata, and crate metadata are complete and consistent. | Automated CI plus HITL/manual | Issue #97 tracks remaining hygiene work. |
+| License and metadata | Repository license files, package metadata, release metadata, desktop metadata, and crate metadata are complete and consistent. | Automated CI plus HITL/manual | [Release Metadata](release-metadata.md) |
 | Fresh performance evidence | A dated performance and live-readiness artifact from the current release candidate exists before publishing alpha claims. | Local-only plus HITL/manual | Issue #103 tracks the next refresh. |
 | Native runtime evidence | A local live smoke artifact is attached or linked from the release checklist. Screenshots should show real rendered output rather than only process success. | Local-only plus HITL/manual | [Visual Regression](visual-regression.md) |
 | Packaging install check | At least one Linux install path is manually verified from the produced artifact. macOS/Homebrew should be verified before claiming macOS install support. | HITL/manual | [Release Artifact Smokes](release-artifacts.md) |
