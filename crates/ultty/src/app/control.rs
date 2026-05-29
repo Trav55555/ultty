@@ -2,22 +2,10 @@
 //!
 //! Processes CLI automation requests from ulttyctl and other tools.
 
+use super::control_wait::{PendingControlWait, WaitMatcher};
 use super::App;
-use regex::Regex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use winit::dpi::PhysicalSize;
-
-pub(super) struct PendingControlWait {
-    client_key: usize,
-    matcher: WaitMatcher,
-    start: Instant,
-    timeout: Duration,
-}
-
-enum WaitMatcher {
-    Plain { pattern_lower: String },
-    Regex(Regex),
-}
 
 impl App {
     pub(super) fn handle_control_requests(&mut self) {
@@ -60,7 +48,7 @@ impl App {
 
         for wait in pending {
             if let Some(response) = self.pending_wait_response(&wait) {
-                responses.push((wait.client_key, response));
+                responses.push((wait.client_key(), response));
             } else {
                 still_pending.push(wait);
             }
@@ -114,12 +102,11 @@ impl App {
             }));
         }
 
-        self.pending_control_waits.push(PendingControlWait {
+        self.pending_control_waits.push(PendingControlWait::new(
             client_key,
             matcher,
-            start: Instant::now(),
-            timeout: Duration::from_millis(*timeout_ms),
-        });
+            Duration::from_millis(*timeout_ms),
+        ));
         None
     }
 
@@ -129,14 +116,14 @@ impl App {
     ) -> Option<ultty_protocol::control::ControlResponse> {
         use ultty_protocol::control::{ControlData, ControlResponse};
 
-        if let Some((line, col)) = self.find_wait_match(&wait.matcher) {
+        if let Some((line, col)) = self.find_wait_match(wait.matcher()) {
             return Some(ControlResponse::Data(ControlData::WaitMatched {
                 line,
                 col,
             }));
         }
 
-        if wait.start.elapsed() >= wait.timeout {
+        if wait.is_expired() {
             return Some(ControlResponse::Data(ControlData::WaitTimeout));
         }
 
@@ -702,37 +689,12 @@ impl App {
             };
             let text = grid_row.text_trimmed();
 
-            match matcher {
-                WaitMatcher::Plain { pattern_lower } => {
-                    let text_lower = text.to_lowercase();
-                    if let Some(col) = text_lower.find(pattern_lower) {
-                        return Some((row, col));
-                    }
-                }
-                WaitMatcher::Regex(re) => {
-                    if let Some(m) = re.find(&text) {
-                        return Some((row, m.start()));
-                    }
-                }
+            if let Some(col) = matcher.find_in(&text) {
+                return Some((row, col));
             }
         }
 
         None
-    }
-}
-
-impl WaitMatcher {
-    fn new(pattern: &str, use_regex: bool) -> Result<Self, String> {
-        if use_regex {
-            let regex_pattern = format!("(?i){}", pattern);
-            Regex::new(&regex_pattern)
-                .map(WaitMatcher::Regex)
-                .map_err(|e| format!("Invalid regex: {}", e))
-        } else {
-            Ok(WaitMatcher::Plain {
-                pattern_lower: pattern.to_lowercase(),
-            })
-        }
     }
 }
 

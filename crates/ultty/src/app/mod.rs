@@ -2,6 +2,7 @@
 
 mod actions;
 mod control;
+mod control_wait;
 mod input;
 mod render;
 mod update;
@@ -126,7 +127,7 @@ pub struct App {
     /// Control server for CLI automation (ulttyctl)
     control_server: Option<ControlServer>,
     /// Control wait requests that are checked after terminal output is drained.
-    pending_control_waits: Vec<control::PendingControlWait>,
+    pending_control_waits: Vec<control_wait::PendingControlWait>,
     /// Cross-thread wakeups from PTY readiness into winit.
     pty_wakeup: wakeup::PtyWakeup,
     /// Search matches for native protocol regions
