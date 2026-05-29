@@ -235,6 +235,7 @@ examples/
 - [Architecture](docs/ARCHITECTURE.md) — System design and components
 - [Architecture Vocabulary](CONTEXT.md) — Stable terms for core seams
 - [Protocol Specification](docs/PROTOCOL_SPEC.md) — Native protocol details
+- [Public Alpha Readiness](docs/alpha-readiness.md) — Dogfood, alpha, and general-use release gates
 - [Performance Reports](docs/perf/README.md) — Dated benchmark and live-gate evidence
 - [Visual Regression](docs/visual-regression.md) — Renderer screenshot smoke path
 - [Release Artifact Smokes](docs/release-artifacts.md) — Headless package and tarball verification
