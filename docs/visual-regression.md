@@ -53,25 +53,28 @@ Current CI already runs deterministic Rust checks, protocol tests, and
 because they require a running Ultty process, a GUI-capable compositor, a
 working wgpu backend, and a reachable control socket.
 
+The promoted automation path is the
+[Live Smoke](../.github/workflows/live-smoke.yml) workflow on a dedicated
+self-hosted Linux runner labelled `self-hosted`, `linux`, and `ultty-gui`.
+See [Live Smoke Automation](live-smoke-automation.md) for the runner contract,
+dispatch process, and artifact layout.
+
 | Check | Classification | Proposed command | Required environment | Rationale |
 |-------|----------------|------------------|----------------------|-----------|
 | `cargo fmt --all -- --check` | CI-ready | existing CI command | Rust toolchain | Deterministic and already in CI. |
 | `cargo test --workspace` | CI-ready | existing CI command | Linux/macOS deps from CI workflow | Deterministic enough for current CI and already required. |
 | `cargo clippy --workspace --all-targets -- -D warnings` | CI-ready | existing CI command | Linux/macOS deps from CI workflow | Deterministic and already required. |
 | `cargo test -p ulttui --test snapshots` | CI-ready | existing CI command | Rust toolchain | ANSI/widget snapshots do not require a live renderer. |
-| `scripts/screenshot-smoke.sh` | CI-with-runner-work | `cargo run -p ultty --bin ultty` then `scripts/screenshot-smoke.sh /tmp/ultty-screenshot-smoke` | GUI compositor, GPU or software wgpu backend, live control socket | Valuable for chrome regressions, but current hosted CI does not provide a stable Ultty window/control-socket setup. |
-| `scripts/terminal-surface-smoke.sh` | CI-with-runner-work | `cargo run -p ultty --bin ultty` then `scripts/terminal-surface-smoke.sh /tmp/ultty-terminal-surface-smoke` | GUI compositor, PTY shell, control socket, resize support | Depends on live terminal rendering and resize behavior; runner/window-manager differences affect evidence. |
-| `scripts/native-richtext-smoke.sh` | CI-with-runner-work | `cargo run -p ultty --bin ultty` then `scripts/native-richtext-smoke.sh /tmp/ultty-native-richtext-smoke` | GUI compositor, control socket, native protocol socket | Good candidate for a dedicated Linux GUI runner because it uses the real native protocol path. |
-| `scripts/append-content-smoke.sh` | CI-with-runner-work | `cargo run -p ultty --bin ultty` then `scripts/append-content-smoke.sh /tmp/ultty-append-content-smoke` | GUI compositor, control socket, native protocol socket | Good candidate for the same dedicated runner once live screenshot capture is stable. |
+| `scripts/screenshot-smoke.sh` | Dedicated GUI runner | `scripts/live-smoke-gate.sh $RUNNER_TEMP/ultty-live-smoke/gate` | Self-hosted Linux runner with GUI compositor, GPU or software wgpu backend, live control socket | Runs through `.github/workflows/live-smoke.yml`; artifacts are uploaded on success or failure. |
+| `scripts/terminal-surface-smoke.sh` | Dedicated GUI runner | `scripts/live-smoke-gate.sh $RUNNER_TEMP/ultty-live-smoke/gate` | Self-hosted Linux runner with GUI compositor, PTY shell, control socket, resize support | Runs as part of the sequential gate; resize behavior remains compositor dependent and should be interpreted through artifacts. |
+| `scripts/native-richtext-smoke.sh` | Dedicated GUI runner | `scripts/live-smoke-gate.sh $RUNNER_TEMP/ultty-live-smoke/gate` | Self-hosted Linux runner with GUI compositor, control socket, native protocol socket | Runs as part of the sequential gate and exercises the real native protocol path. |
+| `scripts/append-content-smoke.sh` | Dedicated GUI runner | `scripts/live-smoke-gate.sh $RUNNER_TEMP/ultty-live-smoke/gate` | Self-hosted Linux runner with GUI compositor, control socket, native protocol socket | Runs as part of the sequential gate and exercises append-oriented native updates. |
 | `scripts/live-pipeline-trace.sh` | Local-only for now | `scripts/live-pipeline-trace.sh /tmp/ultty-live-pipeline-trace` | Focused live Ultty window, PTY workload, low scheduler noise | Produces performance evidence sensitive to local scheduling and window state; use as manual release evidence until runner variance is characterized. |
 | `scripts/softwrap-pty-probe.sh` | Local-only for now | `scripts/softwrap-pty-probe.sh /tmp/ultty-softwrap-pty-probe` | Focused live Ultty window, PTY workload, low scheduler noise | Measures latency-sensitive live behavior; keep out of hosted CI until thresholds are calibrated per runner. |
 | `scripts/chrome-pointer-audit.sh` | Local-only for now | `scripts/chrome-pointer-audit.sh /tmp/ultty-chrome-pointer-audit` | Pointer automation, compositor geometry, live Ultty window | Pointer and compositor behavior vary across desktop sessions; use manually for chrome interaction reviews. |
 
-To promote a `CI-with-runner-work` smoke into CI, add a dedicated Linux job
-that starts Ultty under a known compositor such as Xvfb/wlroots-compatible
-software rendering, waits for `ulttyctl ping`, runs one smoke at a time, and
-uploads `/tmp/ultty-*` artifacts on failure. Do not mix these with performance
-thresholds until the runner variance is measured.
+Do not mix the dedicated live smoke workflow with performance thresholds until
+runner variance is measured.
 
 `ulttyctl resize` is platform/compositor dependent. On platforms where Winit
 does not accept programmatic resize requests, the control command must return a

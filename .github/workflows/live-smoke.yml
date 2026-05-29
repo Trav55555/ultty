@@ -1,0 +1,56 @@
+name: Live Smoke
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  live-smoke:
+    name: Sequential live renderer smoke
+    runs-on: [self-hosted, linux, ultty-gui]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build live smoke binaries
+        run: cargo build -p ultty -p hello-native --bins
+
+      - name: Start Ultty
+        run: |
+          mkdir -p "$RUNNER_TEMP/ultty-live-smoke"
+          cargo run -p ultty --bin ultty >"$RUNNER_TEMP/ultty-live-smoke/ultty.log" 2>&1 &
+          echo "$!" >"$RUNNER_TEMP/ultty-live-smoke/ultty.pid"
+          for _ in $(seq 1 60); do
+            if target/debug/ulttyctl ping >"$RUNNER_TEMP/ultty-live-smoke/startup-ping.txt" 2>"$RUNNER_TEMP/ultty-live-smoke/startup-ping.err"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Ultty did not become reachable through ulttyctl" >&2
+          cat "$RUNNER_TEMP/ultty-live-smoke/ultty.log" >&2
+          exit 1
+
+      - name: Run sequential live smoke gate
+        run: scripts/live-smoke-gate.sh "$RUNNER_TEMP/ultty-live-smoke/gate"
+
+      - name: Stop Ultty
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/ultty-live-smoke/ultty.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/ultty-live-smoke/ultty.pid")" || true
+          fi
+
+      - name: Upload live smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ultty-live-smoke-${{ github.run_id }}
+          path: ${{ runner.temp }}/ultty-live-smoke
+          if-no-files-found: warn

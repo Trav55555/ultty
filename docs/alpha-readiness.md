@@ -65,7 +65,7 @@ evidence that the release process and live renderer remain stable.
 
 | Area | Gate | Type | Evidence |
 |------|------|------|----------|
-| Automated live renderer gate | At least one renderer screenshot or equivalent live smoke runs in automation on a suitable runner, or the release process has a documented dedicated-runner substitute. | Automated CI or dedicated runner | Issue #104 tracks promotion of live smoke automation. |
+| Automated live renderer gate | At least one renderer screenshot or equivalent live smoke runs in automation on a suitable runner, or the release process has a documented dedicated-runner substitute. | Automated CI or dedicated runner | [Live Smoke Automation](live-smoke-automation.md) |
 | Repeated performance evidence | Current performance docs include repeated runs, variance notes, and hardware/window conditions for any public performance claim. | Local-only plus HITL/manual | [Performance Artifact Conventions](perf/README.md) |
 | Runtime module maintainability | Remaining large app runtime modules are split enough that issue triage, instrumentation, and targeted fixes are practical. | HITL/manual | Issue #102 tracks the next refactor slice. |
 | Roadmap and backlog | Roadmap and backlog match the readiness language in this document and do not imply unsupported release maturity. | HITL/manual | Issue #105 tracks the roadmap refresh. |
