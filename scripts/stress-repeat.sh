@@ -96,13 +96,20 @@ if [[ ! -x "$STRESS_SCRIPT" && ! -f "$STRESS_SCRIPT" ]]; then
   exit 1
 fi
 
+ENV_BIN="$(command -v env)"
+BASH_BIN="$(command -v bash)"
+
 test_args=()
 if [[ -n "$TESTS" ]]; then
   IFS=',' read -r -a test_args <<< "$TESTS"
 fi
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ultty-stress-repeat.XXXXXX")"
+KEEP_TMP=0
 cleanup() {
+  if [[ "$KEEP_TMP" == "1" ]]; then
+    return
+  fi
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -124,10 +131,12 @@ for run in $(seq 1 "$RUNS"); do
   log="$TMP_DIR/run-$run.log"
   RUN_LOGS+=("$log")
   echo "starting live stress run $run/$RUNS" >&2
-  "$ULTTYCTL" new-tab env "ULTTY_STRESS_LOG=$log" bash "$STRESS_SCRIPT" "${test_args[@]}" >/dev/null
+  "$ULTTYCTL" new-tab "$ENV_BIN" "ULTTY_STRESS_LOG=$log" "$BASH_BIN" "$STRESS_SCRIPT" "${test_args[@]}" >/dev/null
   if ! poll_done "$log"; then
     echo "timed out waiting for run $run to finish; log: $log" >&2
     [[ -f "$log" ]] && cat "$log" >&2
+    KEEP_TMP=1
+    echo "preserving stress-repeat temp directory: $TMP_DIR" >&2
     exit 1
   fi
 done
@@ -141,7 +150,7 @@ done
   echo "| Commit | \`$(git rev-parse HEAD)\` |"
   echo "| Runs | $RUNS |"
   echo "| Tests | ${TESTS:-all} |"
-  echo "| Driver | \`$ULTTYCTL new-tab env ULTTY_STRESS_LOG=<log> bash scripts/stress.sh\` |"
+  echo "| Driver | \`$ULTTYCTL new-tab $ENV_BIN ULTTY_STRESS_LOG=<log> $BASH_BIN scripts/stress.sh\` |"
   echo
   echo "## Summary"
   echo

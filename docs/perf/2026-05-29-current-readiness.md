@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | Date | 2026-05-29 |
-| Commit | `b3ab0ba77753f0d8e3d204c99dc7d78df94e6dd9` |
+| Commit | `b00dd225bff4967149f174e6dfcab4f85af7ef60` plus the stress driver fix committed with this artifact |
 | Host | `Aurora` |
 | OS | Linux 6.17.0-29-generic x86_64 |
 | CPU | AMD Ryzen 5 7600, 6 cores / 12 threads |
@@ -22,12 +22,13 @@ timeout 900s cargo bench -p ultty --bench memory -- --noplot
 cargo run -p ultty --bin ultty
 scripts/live-smoke-gate.sh /tmp/ultty-issue103-live-smoke-gate
 
-scripts/live-pipeline-trace.sh /tmp/ultty-issue103-live-pipeline-trace
-ULTTY_TRACE_TESTS=1,8 scripts/live-pipeline-trace.sh /tmp/ultty-issue103-live-pipeline-trace-throughput-scrollback
+scripts/live-pipeline-trace.sh /tmp/ultty-issue103-live-pipeline-trace-fixed
+scripts/softwrap-pty-probe.sh /tmp/ultty-issue103-softwrap-pty-probe-fixed
 ```
 
 The benchmark commands completed. The sequential live smoke completed. The
-live pipeline trace did not complete; see [Live Readiness](#live-readiness).
+live pipeline trace and soft-wrap PTY probe completed after fixing the live
+stress driver to use absolute `env` and `bash` paths.
 
 ## Benchmark Summary
 
@@ -78,39 +79,107 @@ It ran:
 - native rich text smoke
 - AppendContent smoke
 
-The full live pipeline trace did not complete. With the default 60s
-`stress-repeat` timeout, workload 6 timed out before the `DONE` sentinel. After
-raising the traced-live timeout to 180s, the same workload still timed out:
+The first live pipeline attempt timed out because the live stress driver used
+`new-tab env ... bash ...`, which relies on PATH lookup inside the PTY child.
+In this launch environment that exited with status 127 before producing the
+`DONE` sentinel. `scripts/stress-repeat.sh` now resolves absolute paths for
+`env` and `bash`, and preserves its temp directory when a timeout occurs.
+
+After that fix, the live pipeline trace passed at:
 
 ```text
-timed out waiting for run 1 to finish; log: /tmp/ultty-stress-repeat.UdUpbY/run-1.log
+/tmp/ultty-issue103-live-pipeline-trace-fixed
 ```
 
-The trace log for the timed-out run is:
+Pipeline summary:
+
+| Metric | Value |
+|--------|-------|
+| Parser/grid entries | 14302 |
+| Parser/grid bytes | 12984913 |
+| Parser/grid actions | 529837 |
+| Parser/grid print actions | 12631786 |
+| Parser/grid time | 150.425 ms |
+| PTY drain entries | 382 |
+| PTY read batches | 14302 |
+| PTY drain bytes | 12984913 |
+| PTY drain time | 228.296 ms |
+| Render scheduled | 33 |
+| Render frames | 33 |
+| Render frame time | 54.056 ms |
+| Max render frame | 12.591 ms |
+
+Pipeline gate:
+
+| Metric | Value | Limit | Status |
+|--------|-------|-------|--------|
+| Parser/grid time | 150.425 ms | 900.000 ms | PASS |
+| PTY drain time | 228.296 ms | 1000.000 ms | PASS |
+| Render frame time | 54.056 ms | 400.000 ms | PASS |
+| Max render frame | 12.591 ms | 50.000 ms | PASS |
+
+Live stress repeat summary:
+
+| Workload | Runs | Mean | Stddev | Min | Max | Spread |
+|----------|------|------|--------|-----|-----|--------|
+| `1. throughput-4MiB` | 2 | 68.5 ms | 12.0 ms | 60 ms | 77 ms | 17 ms |
+| `6. 500-lines-4000-cols` | 2 | 145.0 ms | 1.4 ms | 144 ms | 146 ms | 2 ms |
+| `8. 20k-scrollback-lines` | 2 | 37.0 ms | 1.4 ms | 36 ms | 38 ms | 2 ms |
+
+The soft-wrap PTY probe passed at:
 
 ```text
-/tmp/ultty-issue103-live-pipeline-trace/pipeline.log
+/tmp/ultty-issue103-softwrap-pty-probe-fixed
 ```
 
-It captured 346 render frames with mean render-frame work of 0.739 ms and max
-render-frame work of 13.579 ms. Near the timeout window, Ultty was scheduling a
-render about every 530 ms with frame work mostly between 0.5 ms and 0.9 ms.
-That is useful renderer-cadence evidence, but it is not a substitute for
-process-level CPU/GPU idle sampling.
+Soft-wrap summary:
 
-A follow-up attempt to run a smaller throughput/scrollback-only trace failed at
-launch because Winit could not connect to the Wayland compositor:
+| Field | Value |
+|-------|-------|
+| Runs | 2 |
+| Generator-only mean | 123.0 ms |
+| Live child mean | 147.5 ms |
+| Live minus generator estimate | 24.5 ms |
+| Parser/grid mean per run | 21.9 ms |
+| PTY drain mean per run | 27.9 ms |
+| Render-frame mean per run | 23.5 ms |
+| Combined measured app-side work | 73.3 ms |
+| Live minus measured app-side estimate | 74.2 ms |
+| PTY read batches | 1002 |
+| Render frames | 24 |
+| Max render frame | 13.146 ms |
 
-```text
-Ultty control socket did not become ready.
-Trace log: /tmp/ultty-issue103-live-pipeline-trace-throughput-scrollback/pipeline.log
+## Idle Evidence
+
+Methodology: launch a GUI Ultty instance, wait for the control socket to become
+ready, allow the process to settle, then sample the Ultty process with:
+
+```bash
+ps -p <ultty-pid> -o pid=,pcpu=,rss=,etime=,stat=,comm=
 ```
 
-The trace log ended with:
+The sample used 12 readings spaced 5 seconds apart. The process had been up
+for more than seven minutes before the first recorded sample.
 
-```text
-Could not find wayland compositor
-```
+| Sample | `%CPU` | RSS |
+|--------|--------|-----|
+| 1 | 0.3 | 107960 KB |
+| 2 | 0.3 | 107960 KB |
+| 3 | 0.3 | 107960 KB |
+| 4 | 0.3 | 107960 KB |
+| 5 | 0.3 | 107960 KB |
+| 6 | 0.3 | 107960 KB |
+| 7 | 0.3 | 107960 KB |
+| 8 | 0.3 | 107960 KB |
+| 9 | 0.3 | 107960 KB |
+| 10 | 0.3 | 107960 KB |
+| 11 | 0.3 | 107960 KB |
+| 12 | 0.3 | 107960 KB |
+
+This is process-level idle evidence only. It does not measure GPU utilization.
+The RSS is higher than the synthetic memory estimate because it includes the
+debug build process image, renderer/windowing allocations, loaded libraries,
+and runtime state, not only terminal data structures.
 
 ## Interpretation
 
@@ -119,24 +188,24 @@ layout remains below 1 ms for the sampled cases, render remains below 5 ms for
 the sampled CPU-side render benches, and memory remains below the 50 MB target
 estimate.
 
-The live side is not healthy enough to claim public-alpha live readiness from
-this artifact. The renderer smoke path passed, but the live pipeline/soft-wrap
-stress path timed out before producing a completed stress report, and explicit
-process-level idle CPU/GPU evidence was not captured in this run.
+The live side is now healthy enough for current public-alpha readiness evidence:
+the sequential renderer/native smoke passed, the live pipeline gate passed,
+the soft-wrap PTY probe passed, and process-level idle CPU stayed at 0.3% for
+the sampled minute.
 
 ## Caveats
 
 - Criterion values are CPU-side benchmark evidence, not end-to-end interactive
   latency.
-- The live trace timeout may represent a workload/runtime regression, an
-  environment problem, or a stress harness problem. It should be reduced before
-  making a release claim from live pipeline evidence.
-- The failed Wayland launch prevented a clean follow-up process-idle sample.
-- The logged render cadence during the timed-out run is not the same as GPU
-  utilization.
+- The fixed live stress driver should be kept because relative `env`/`bash`
+  lookup in spawned PTY commands can fail depending on the child environment.
+- The idle sample measures process CPU and RSS only, not GPU utilization.
+- The RSS sample came from a debug build and should not be used as a release
+  package memory claim.
 
 ## Recommendation
 
-Keep the benchmark numbers as the current dated benchmark refresh. Do not use
-this artifact as public-alpha live-readiness proof until the live pipeline
-timeout is diagnosed and a process-level idle sample is captured.
+Use this artifact as the current dated benchmark and live-readiness refresh for
+public-alpha decisions. Repeat it for release candidates or after changes to
+PTY draining, parser/grid hot paths, renderer scheduling, or live smoke
+orchestration.
