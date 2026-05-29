@@ -548,6 +548,18 @@ impl TerminalManager {
         if self.tabs.len() > 1 {
             self.tabs.retain(|t| !t.is_empty());
         }
+
+        self.repair_active_tab();
+    }
+
+    fn repair_active_tab(&mut self) {
+        if self.tabs.iter().any(|tab| tab.id == self.active_tab) {
+            return;
+        }
+
+        if let Some(tab) = self.tabs.first() {
+            self.active_tab = tab.id;
+        }
     }
 
     /// Check if all terminals have exited.
@@ -1122,6 +1134,32 @@ mod tests {
 
         assert_eq!(manager.tab_count(), 1);
         assert_eq!(manager.active_tab, second_tab);
+    }
+
+    #[test]
+    fn cleanup_exited_repairs_active_tab_when_active_tab_was_removed() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        manager.create_tab().unwrap();
+
+        let first_tab = manager.tabs[0].id;
+        let first_terminal = manager.tabs[0].focused_terminal;
+        let second_tab = manager.tabs[1].id;
+        let second_terminal = manager.tabs[1].focused_terminal;
+
+        manager.active_tab = second_tab;
+        manager.tabs[1].remove_terminal(second_terminal);
+        manager
+            .terminals
+            .retain(|terminal| terminal.id != second_terminal);
+
+        manager.cleanup_exited();
+
+        assert_eq!(manager.tab_count(), 1);
+        assert_eq!(manager.active_tab, first_tab);
+        assert_eq!(
+            manager.focused_terminal().map(|terminal| terminal.id),
+            Some(first_terminal)
+        );
     }
 
     #[test]
