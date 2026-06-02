@@ -5,7 +5,7 @@
 use crate::terminal_manager::{Tab, TabId};
 
 /// Height of the window control band in pixels (at default scale).
-pub const TITLE_BAR_HEIGHT: f32 = 36.0;
+pub const TITLE_BAR_HEIGHT: f32 = 44.0;
 
 /// Height of the tab row in pixels (at default scale).
 pub const TAB_ROW_HEIGHT: f32 = 28.0;
@@ -26,13 +26,13 @@ pub const TAB_CLOSE_HOVER_SIZE: f32 = 18.0;
 pub const MIN_TAB_WIDTH: f32 = 80.0;
 
 /// Maximum tab width.
-pub const MAX_TAB_WIDTH: f32 = 200.0;
+pub const MAX_TAB_WIDTH: f32 = 140.0;
 
 /// Width reserved for window control buttons (close, maximize, minimize) on the right.
-pub const WINDOW_CONTROLS_WIDTH: f32 = 100.0;
+pub const WINDOW_CONTROLS_WIDTH: f32 = 128.0;
 
 /// Width of each window control button.
-pub const WINDOW_BUTTON_WIDTH: f32 = 32.0;
+pub const WINDOW_BUTTON_WIDTH: f32 = 40.0;
 
 /// Which window control button was clicked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +92,17 @@ impl TabBarState {
 
     /// Update the tab bar state from terminal manager tabs.
     pub fn update(&mut self, tabs: &[Tab], active_tab: TabId, total_width: f32) {
+        self.update_with_tab_width_override(tabs, active_tab, total_width, None);
+    }
+
+    /// Update the tab bar state with an optional fixed tab width.
+    pub fn update_with_tab_width_override(
+        &mut self,
+        tabs: &[Tab],
+        active_tab: TabId,
+        total_width: f32,
+        tab_width_override: Option<f32>,
+    ) {
         self.total_width = total_width;
         self.tabs.clear();
 
@@ -111,7 +122,10 @@ impl TabBarState {
         let tabs_start_x = 0.0;
         let usable_width = total_width;
         let ideal_width = usable_width / tab_count as f32;
-        let tab_width = ideal_width.clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH);
+        let tab_width = tab_width_override
+            .filter(|width| width.is_finite() && *width > 0.0)
+            .map(|width| width.clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH))
+            .unwrap_or_else(|| ideal_width.clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH));
 
         // "+" button is at the left edge
         self.new_tab_button_x = 0.0;
@@ -160,6 +174,14 @@ impl TabBarState {
             && (0.0..TITLE_BAR_HEIGHT).contains(&y)
             && x >= self.new_tab_button_x
             && x < self.new_tab_button_x + Self::NEW_TAB_BUTTON_WIDTH
+    }
+
+    /// Check if a click at (x, y) is in the title band area that toggles maximize on double click.
+    pub fn is_title_bar_toggle_area(&self, x: f32, y: f32) -> bool {
+        self.visible
+            && (0.0..TITLE_BAR_HEIGHT).contains(&y)
+            && !self.is_new_tab_button_at(x, y)
+            && self.window_control_at(x, y).is_none()
     }
 
     /// Check if a click at (x, y) is on a window control button.
@@ -503,7 +525,7 @@ mod tests {
 
     #[test]
     fn tab_width_clamped_to_max() {
-        // 2 tabs in 1000px => ideal 500px, clamped to MAX_TAB_WIDTH (200)
+        // 2 tabs in 1000px => ideal 500px, clamped to MAX_TAB_WIDTH.
         let state = bar_with(2, 0, 1000.0);
         for tab in &state.tabs {
             assert_eq!(tab.width, MAX_TAB_WIDTH);
@@ -521,10 +543,10 @@ mod tests {
 
     #[test]
     fn tab_width_in_range_not_clamped() {
-        // 5 tabs in 750px => ideal 150 => between 80 and 200
-        let state = bar_with(5, 0, 750.0);
-        let usable = 750.0;
-        let expected = usable / 5.0;
+        // 10 tabs in 900px => ideal 90 => between MIN_TAB_WIDTH and MAX_TAB_WIDTH.
+        let state = bar_with(10, 0, 900.0);
+        let usable = 900.0;
+        let expected = usable / 10.0;
         for tab in &state.tabs {
             assert!(
                 (tab.width - expected).abs() < 0.1,
@@ -532,6 +554,34 @@ mod tests {
                 expected,
                 tab.width
             );
+        }
+    }
+
+    #[test]
+    fn tab_width_override_keeps_width_after_tab_count_changes() {
+        let mut state = TabBarState::new();
+        let tabs = make_tabs(8);
+
+        state.update_with_tab_width_override(&tabs, TabId::new(0), 900.0, Some(90.0));
+
+        for tab in &state.tabs {
+            assert_eq!(tab.width, 90.0);
+        }
+    }
+
+    #[test]
+    fn tab_width_override_is_clamped_to_valid_range() {
+        let mut state = TabBarState::new();
+        let tabs = make_tabs(8);
+
+        state.update_with_tab_width_override(&tabs, TabId::new(0), 900.0, Some(10.0));
+        for tab in &state.tabs {
+            assert_eq!(tab.width, MIN_TAB_WIDTH);
+        }
+
+        state.update_with_tab_width_override(&tabs, TabId::new(0), 900.0, Some(500.0));
+        for tab in &state.tabs {
+            assert_eq!(tab.width, MAX_TAB_WIDTH);
         }
     }
 
@@ -658,7 +708,7 @@ mod tests {
     #[test]
     fn hover_sets_correct_tab() {
         let mut state = bar_with(3, 0, 600.0);
-        state.set_hover(250.0, TITLE_BAR_HEIGHT + 10.0);
+        state.set_hover(state.tabs[1].x + 5.0, TITLE_BAR_HEIGHT + 10.0);
         assert_eq!(state.hovered_tab, Some(1));
         assert!(state.tabs[1].is_hovered);
         assert!(!state.tabs[0].is_hovered);
@@ -750,15 +800,30 @@ mod tests {
     }
 
     #[test]
+    fn title_band_toggle_area_excludes_interactive_chrome_controls() {
+        let state = bar_with(2, 0, 800.0);
+        assert!(state.is_title_bar_toggle_area(400.0, 10.0));
+        assert!(!state.is_title_bar_toggle_area(5.0, 10.0));
+        assert!(!state.is_title_bar_toggle_area(790.0, 10.0));
+        assert!(!state.is_title_bar_toggle_area(400.0, -1.0));
+        assert!(!state.is_title_bar_toggle_area(400.0, TITLE_BAR_HEIGHT));
+        assert!(!state.is_title_bar_toggle_area(400.0, TITLE_BAR_HEIGHT + 10.0));
+    }
+
+    #[test]
     fn window_controls_are_only_in_title_band() {
         let state = bar_with(2, 0, 800.0);
+        let minimize_x = 800.0 - WINDOW_CONTROLS_WIDTH + 10.0;
         assert_eq!(
-            state.window_control_at(720.0, 10.0),
+            state.window_control_at(minimize_x, 10.0),
             Some(WindowControl::Minimize)
         );
-        assert_eq!(state.window_control_at(720.0, -1.0), None);
-        assert_eq!(state.window_control_at(720.0, TITLE_BAR_HEIGHT), None);
-        assert_eq!(state.window_control_at(720.0, TITLE_BAR_HEIGHT + 1.0), None);
+        assert_eq!(state.window_control_at(minimize_x, -1.0), None);
+        assert_eq!(state.window_control_at(minimize_x, TITLE_BAR_HEIGHT), None);
+        assert_eq!(
+            state.window_control_at(minimize_x, TITLE_BAR_HEIGHT + 1.0),
+            None
+        );
     }
 
     // ---------------------------------------------------------------

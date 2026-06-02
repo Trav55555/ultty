@@ -7,8 +7,14 @@ use std::borrow::Cow;
 
 use super::{Renderer, Rgba, Vertex};
 use crate::tabs::{
-    TabBarState, TAB_CLOSE_BUTTON_SIZE, TAB_PADDING, TAB_ROW_HEIGHT, TITLE_BAR_HEIGHT,
+    TabBarState, WindowControl, TAB_CLOSE_BUTTON_SIZE, TAB_PADDING, TAB_ROW_HEIGHT,
+    TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH, WINDOW_CONTROLS_WIDTH,
 };
+
+const CHROME_BUTTON_PAD_X: f32 = 4.0;
+const CHROME_BUTTON_PAD_Y: f32 = 6.0;
+const CHROME_BUTTON_RADIUS: f32 = 7.0;
+const CHROME_BUTTON_BORDER: f32 = 1.0;
 
 fn lighten(color: Rgba, amount: f32) -> Rgba {
     Rgba::new(
@@ -26,6 +32,83 @@ fn dim(color: Rgba, amount: f32) -> Rgba {
         (color.b * amount).min(1.0),
         color.a,
     )
+}
+
+fn mix(a: Rgba, b: Rgba, amount: f32) -> Rgba {
+    let amount = amount.clamp(0.0, 1.0);
+    Rgba::new(
+        a.r + (b.r - a.r) * amount,
+        a.g + (b.g - a.g) * amount,
+        a.b + (b.b - a.b) * amount,
+        a.a + (b.a - a.a) * amount,
+    )
+}
+
+fn chrome_symbol_color(foreground: Rgba, accent: Rgba, is_hovered: bool) -> Rgba {
+    if is_hovered {
+        mix(foreground, accent, 0.22)
+    } else {
+        dim(foreground, 0.9)
+    }
+}
+
+fn close_symbol_color(foreground: Rgba, is_hovered: bool) -> Rgba {
+    if is_hovered {
+        Rgba::new(1.0, 0.88, 0.86, 1.0)
+    } else {
+        dim(foreground, 0.9)
+    }
+}
+
+fn chrome_button_rect(button_x: f32, button_width: f32) -> (f32, f32, f32, f32) {
+    (
+        button_x + CHROME_BUTTON_PAD_X,
+        CHROME_BUTTON_PAD_Y,
+        (button_width - CHROME_BUTTON_PAD_X * 2.0).max(0.0),
+        (TITLE_BAR_HEIGHT - CHROME_BUTTON_PAD_Y * 2.0).max(0.0),
+    )
+}
+
+fn chrome_button_inner_rect(x: f32, y: f32, width: f32, height: f32) -> (f32, f32, f32, f32) {
+    (
+        x + CHROME_BUTTON_BORDER,
+        y + CHROME_BUTTON_BORDER,
+        (width - CHROME_BUTTON_BORDER * 2.0).max(0.0),
+        (height - CHROME_BUTTON_BORDER * 2.0).max(0.0),
+    )
+}
+
+fn vertex_bounds(vertices: &[Vertex]) -> Option<(f32, f32, f32, f32)> {
+    let first = vertices.first()?;
+    let mut min_x = first.position[0];
+    let mut max_x = first.position[0];
+    let mut min_y = first.position[1];
+    let mut max_y = first.position[1];
+
+    for vertex in vertices.iter().skip(1) {
+        min_x = min_x.min(vertex.position[0]);
+        max_x = max_x.max(vertex.position[0]);
+        min_y = min_y.min(vertex.position[1]);
+        max_y = max_y.max(vertex.position[1]);
+    }
+
+    Some((min_x, max_x, min_y, max_y))
+}
+
+fn center_vertices_in_rect(vertices: &mut [Vertex], x: f32, y: f32, width: f32, height: f32) {
+    let Some((min_x, max_x, min_y, max_y)) = vertex_bounds(vertices) else {
+        return;
+    };
+
+    let glyph_width = max_x - min_x;
+    let glyph_height = max_y - min_y;
+    let dx = x + (width - glyph_width) / 2.0 - min_x;
+    let dy = y + (height - glyph_height) / 2.0 - min_y;
+
+    for vertex in vertices {
+        vertex.position[0] += dx;
+        vertex.position[1] += dy;
+    }
 }
 
 fn truncate_tab_title(title: &str, max_width: f32, cell_width: f32) -> Cow<'_, str> {
@@ -54,6 +137,42 @@ fn truncate_tab_title(title: &str, max_width: f32, cell_width: f32) -> Cow<'_, s
 }
 
 impl Renderer {
+    #[allow(clippy::too_many_arguments)]
+    fn emit_chrome_button(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        fill: Rgba,
+        border: Rgba,
+    ) {
+        self.emit_rounded_rect(
+            vertices,
+            indices,
+            x,
+            y,
+            width,
+            height,
+            CHROME_BUTTON_RADIUS,
+            border,
+        );
+
+        let (inner_x, inner_y, inner_w, inner_h) = chrome_button_inner_rect(x, y, width, height);
+        self.emit_rounded_rect(
+            vertices,
+            indices,
+            inner_x,
+            inner_y,
+            inner_w,
+            inner_h,
+            CHROME_BUTTON_RADIUS - CHROME_BUTTON_BORDER,
+            fill,
+        );
+    }
+
     /// Build tab bar vertex data.
     pub(super) fn build_tab_bar_vertices(&self, tab_bar: &TabBarState) -> (Vec<Vertex>, Vec<u32>) {
         let mut vertices = Vec::new();
@@ -74,8 +193,12 @@ impl Renderer {
         let inactive_hover_bg = lighten(bg, 0.055);
         let accent_color = dim(self.color_scheme.cursor, 0.92);
         let active_edge = dim(self.color_scheme.foreground, 0.18);
-        let control_hover_bg = lighten(bg, 0.07);
+        let control_bg = lighten(bg, 0.085);
+        let control_hover_bg = lighten(bg, 0.19);
+        let control_border = lighten(bg, 0.17);
+        let control_hover_border = lighten(bg, 0.26);
         let destructive_hover_bg = Rgba::new(0.55, 0.16, 0.14, 1.0);
+        let destructive_hover_border = Rgba::new(0.78, 0.25, 0.23, 1.0);
 
         self.emit_rect(
             &mut vertices,
@@ -188,30 +311,36 @@ impl Renderer {
 
         // New tab "+" button
         {
-            use crate::tabs::TabBarState;
             let btn_x = tab_bar.new_tab_button_x;
             let btn_w = TabBarState::NEW_TAB_BUTTON_WIDTH;
-            let margin = 3.0;
-            if tab_bar.new_tab_button_hovered {
-                self.emit_rect(
-                    &mut vertices,
-                    &mut indices,
-                    btn_x + margin,
-                    margin,
-                    btn_w - margin * 2.0,
-                    TITLE_BAR_HEIGHT - margin * 2.0,
-                    control_hover_bg,
-                );
-            }
+            let (button_x, button_y, button_w, button_h) = chrome_button_rect(btn_x, btn_w);
+            let button_bg = if tab_bar.new_tab_button_hovered {
+                control_hover_bg
+            } else {
+                control_bg
+            };
+
+            let button_border = if tab_bar.new_tab_button_hovered {
+                control_hover_border
+            } else {
+                control_border
+            };
+            self.emit_chrome_button(
+                &mut vertices,
+                &mut indices,
+                button_x,
+                button_y,
+                button_w,
+                button_h,
+                button_bg,
+                button_border,
+            );
         }
 
         // Window control buttons (right side): minimize, maximize, close
         {
-            use crate::tabs::{WindowControl, WINDOW_BUTTON_WIDTH, WINDOW_CONTROLS_WIDTH};
             let controls_start = tab_bar.total_width - WINDOW_CONTROLS_WIDTH;
             let padding = (WINDOW_CONTROLS_WIDTH - WINDOW_BUTTON_WIDTH * 3.0) / 2.0;
-            let margin = 3.0;
-            let btn_h = TITLE_BAR_HEIGHT - margin * 2.0;
 
             for (i, control) in [
                 WindowControl::Minimize,
@@ -222,24 +351,39 @@ impl Renderer {
             .enumerate()
             {
                 let btn_x = controls_start + padding + i as f32 * WINDOW_BUTTON_WIDTH;
+                let (button_x, button_y, button_w, button_h) =
+                    chrome_button_rect(btn_x, WINDOW_BUTTON_WIDTH);
                 let is_hovered = tab_bar.hovered_window_control == Some(*control);
-
-                if is_hovered {
-                    let hover_bg = if *control == WindowControl::Close {
+                let button_bg = if is_hovered {
+                    if *control == WindowControl::Close {
                         destructive_hover_bg
                     } else {
                         control_hover_bg
-                    };
-                    self.emit_rect(
-                        &mut vertices,
-                        &mut indices,
-                        btn_x,
-                        margin,
-                        WINDOW_BUTTON_WIDTH,
-                        btn_h,
-                        hover_bg,
-                    );
-                }
+                    }
+                } else {
+                    control_bg
+                };
+
+                let button_border = if is_hovered {
+                    if *control == WindowControl::Close {
+                        destructive_hover_border
+                    } else {
+                        control_hover_border
+                    }
+                } else {
+                    control_border
+                };
+
+                self.emit_chrome_button(
+                    &mut vertices,
+                    &mut indices,
+                    button_x,
+                    button_y,
+                    button_w,
+                    button_h,
+                    button_bg,
+                    button_border,
+                );
             }
         }
 
@@ -258,10 +402,10 @@ impl Renderer {
             return (all_vertices, all_indices);
         }
 
-        // Center text vertically in the tab bar. Place the cell top so the
-        // glyph baseline lands roughly in the vertical middle.
+        // Center tab text vertically in the tab row. Chrome symbols are centered
+        // by their emitted glyph bounds because symbols have uneven side bearings.
         let tab_text_y = TITLE_BAR_HEIGHT + (TAB_ROW_HEIGHT - self.cell_height) / 2.0;
-        let control_text_y = (TITLE_BAR_HEIGHT - self.cell_height) / 2.0;
+        let accent_color = dim(self.color_scheme.cursor, 0.92);
 
         let show_tabs = tab_bar.shows_tab_row();
         for (tab_idx, tab) in tab_bar.tabs.iter().enumerate() {
@@ -316,22 +460,34 @@ impl Renderer {
 
         // Render window control button symbols
         {
-            use crate::tabs::{WINDOW_BUTTON_WIDTH, WINDOW_CONTROLS_WIDTH};
             let controls_start = tab_bar.total_width - WINDOW_CONTROLS_WIDTH;
             let padding = (WINDOW_CONTROLS_WIDTH - WINDOW_BUTTON_WIDTH * 3.0) / 2.0;
 
-            let ctrl_color = dim(self.color_scheme.foreground, 0.46);
-
-            for (i, symbol) in ["−", "□", "×"].iter().enumerate() {
+            for (i, (control, symbol)) in [
+                (WindowControl::Minimize, "−"),
+                (WindowControl::Maximize, "▢"),
+                (WindowControl::Close, "×"),
+            ]
+            .iter()
+            .enumerate()
+            {
                 let btn_x = controls_start + padding + i as f32 * WINDOW_BUTTON_WIDTH;
-                let center_x = btn_x + WINDOW_BUTTON_WIDTH / 2.0 - self.cell_width / 2.0;
-                let (v, idx) = self.text_renderer.build_label_vertices(
+                let (button_x, button_y, button_w, button_h) =
+                    chrome_button_rect(btn_x, WINDOW_BUTTON_WIDTH);
+                let is_hovered = tab_bar.hovered_window_control == Some(*control);
+                let ctrl_color = if *control == WindowControl::Close {
+                    close_symbol_color(self.color_scheme.foreground, is_hovered)
+                } else {
+                    chrome_symbol_color(self.color_scheme.foreground, accent_color, is_hovered)
+                };
+                let (mut v, idx) = self.text_renderer.build_label_vertices(
                     symbol,
-                    center_x,
-                    control_text_y,
+                    button_x,
+                    button_y,
                     WINDOW_BUTTON_WIDTH,
                     ctrl_color,
                 );
+                center_vertices_in_rect(&mut v, button_x, button_y, button_w, button_h);
                 let base_idx = all_vertices.len() as u32;
                 all_vertices.extend(v);
                 all_indices.extend(idx.iter().map(|i| i + base_idx));
@@ -340,20 +496,20 @@ impl Renderer {
 
         // Render "+" for new tab button
         {
-            use crate::tabs::TabBarState;
             let btn_x = tab_bar.new_tab_button_x;
             let btn_w = TabBarState::NEW_TAB_BUTTON_WIDTH;
-            let center_x = btn_x + btn_w / 2.0 - self.cell_width / 2.0;
+            let (button_x, button_y, button_w, button_h) = chrome_button_rect(btn_x, btn_w);
 
-            let plus_color = dim(self.color_scheme.foreground, 0.58);
-
-            let (vertices, indices) = self.text_renderer.build_label_vertices(
-                "+",
-                center_x,
-                control_text_y,
-                btn_w,
-                plus_color,
+            let plus_color = chrome_symbol_color(
+                self.color_scheme.foreground,
+                accent_color,
+                tab_bar.new_tab_button_hovered,
             );
+
+            let (mut vertices, indices) = self
+                .text_renderer
+                .build_label_vertices("+", button_x, button_y, btn_w, plus_color);
+            center_vertices_in_rect(&mut vertices, button_x, button_y, button_w, button_h);
             let base_idx = all_vertices.len() as u32;
             all_vertices.extend(vertices);
             all_indices.extend(indices.iter().map(|i| i + base_idx));
@@ -365,7 +521,12 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_tab_title;
+    use super::{
+        center_vertices_in_rect, chrome_button_inner_rect, chrome_button_rect, chrome_symbol_color,
+        close_symbol_color, dim, mix, truncate_tab_title, vertex_bounds, CHROME_BUTTON_BORDER,
+        CHROME_BUTTON_PAD_X, CHROME_BUTTON_PAD_Y, TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH,
+    };
+    use crate::renderer::{Rgba, Vertex};
 
     #[test]
     fn truncate_tab_title_keeps_short_titles() {
@@ -389,5 +550,82 @@ mod tests {
     fn truncate_tab_title_handles_no_space() {
         assert_eq!(truncate_tab_title("long", 0.0, 10.0).as_ref(), "");
         assert_eq!(truncate_tab_title("long", 10.0, 0.0).as_ref(), "");
+    }
+
+    #[test]
+    fn mix_interpolates_between_colors() {
+        let color = mix(
+            Rgba::new(0.0, 0.2, 0.4, 1.0),
+            Rgba::new(1.0, 0.6, 0.0, 1.0),
+            0.5,
+        );
+
+        assert!((color.r - 0.5).abs() < f32::EPSILON);
+        assert!((color.g - 0.4).abs() < 0.000_001);
+        assert!((color.b - 0.2).abs() < f32::EPSILON);
+        assert!((color.a - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn chrome_symbol_hover_moves_toward_accent() {
+        let fg = Rgba::new(0.8, 0.8, 0.8, 1.0);
+        let accent = Rgba::new(0.2, 0.6, 1.0, 1.0);
+
+        assert_eq!(chrome_symbol_color(fg, accent, false), dim(fg, 0.9));
+        assert_eq!(chrome_symbol_color(fg, accent, true), mix(fg, accent, 0.22));
+    }
+
+    #[test]
+    fn close_symbol_hover_uses_high_contrast_destructive_color() {
+        let fg = Rgba::new(0.8, 0.8, 0.8, 1.0);
+
+        assert_eq!(close_symbol_color(fg, false), dim(fg, 0.9));
+        assert_eq!(
+            close_symbol_color(fg, true),
+            Rgba::new(1.0, 0.88, 0.86, 1.0)
+        );
+    }
+
+    #[test]
+    fn chrome_button_rect_applies_padding() {
+        let (x, y, width, height) = chrome_button_rect(100.0, WINDOW_BUTTON_WIDTH);
+
+        assert_eq!(x, 100.0 + CHROME_BUTTON_PAD_X);
+        assert_eq!(y, CHROME_BUTTON_PAD_Y);
+        assert_eq!(width, WINDOW_BUTTON_WIDTH - CHROME_BUTTON_PAD_X * 2.0);
+        assert_eq!(height, TITLE_BAR_HEIGHT - CHROME_BUTTON_PAD_Y * 2.0);
+    }
+
+    #[test]
+    fn chrome_button_inner_rect_reserves_even_border() {
+        let (x, y, width, height) = chrome_button_inner_rect(100.0, 20.0, 24.0, 18.0);
+
+        assert_eq!(x, 100.0 + CHROME_BUTTON_BORDER);
+        assert_eq!(y, 20.0 + CHROME_BUTTON_BORDER);
+        assert_eq!(width, 24.0 - CHROME_BUTTON_BORDER * 2.0);
+        assert_eq!(height, 18.0 - CHROME_BUTTON_BORDER * 2.0);
+    }
+
+    #[test]
+    fn center_vertices_in_rect_uses_actual_vertex_bounds() {
+        let mut vertices = vec![
+            test_vertex(2.0, 4.0),
+            test_vertex(6.0, 4.0),
+            test_vertex(6.0, 12.0),
+            test_vertex(2.0, 12.0),
+        ];
+
+        center_vertices_in_rect(&mut vertices, 10.0, 20.0, 20.0, 20.0);
+
+        assert_eq!(vertex_bounds(&vertices), Some((18.0, 22.0, 26.0, 34.0)));
+    }
+
+    fn test_vertex(x: f32, y: f32) -> Vertex {
+        Vertex {
+            position: [x, y],
+            tex_coord: [0.0, 0.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+            is_color: 0,
+        }
     }
 }

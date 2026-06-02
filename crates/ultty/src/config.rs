@@ -8,6 +8,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::warn;
 
+/// Default patched monospace font used for terminal icons.
+pub const DEFAULT_FONT_FAMILY: &str = "DroidSansMono Nerd Font";
+
 /// Main configuration structure.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -474,11 +477,10 @@ pub struct FontConfig {
 impl Default for FontConfig {
     fn default() -> Self {
         Self {
-            // Empty string means use system monospace font, which has better
-            // Unicode coverage and fallback for box-drawing characters.
-            // Users can override this in config.toml with a specific font.
-            family: String::new(),
-            size: 16.0,
+            // A patched monospace default keeps terminal UI icons readable in
+            // apps such as LazyVim. Users can override this in config.toml.
+            family: DEFAULT_FONT_FAMILY.to_string(),
+            size: 14.0,
             // 1.0 = no extra spacing between lines, required for block characters
             // to touch (e.g., OpenCode logo). Users can increase if they prefer
             // more line spacing for regular text.
@@ -489,7 +491,7 @@ impl Default for FontConfig {
 }
 
 impl FontConfig {
-    /// Check if using default system font.
+    /// Check if using the system monospace fallback.
     pub fn is_system_font(&self) -> bool {
         self.family.is_empty()
     }
@@ -955,7 +957,8 @@ mod tests {
     #[test]
     fn default_config() {
         let config = Config::default();
-        assert_eq!(config.font.size, 16.0);
+        assert_eq!(config.font.family, DEFAULT_FONT_FAMILY);
+        assert_eq!(config.font.size, 14.0);
         assert_eq!(config.behavior.scrollback_lines, 10_000);
     }
 

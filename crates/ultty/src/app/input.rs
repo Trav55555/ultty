@@ -192,12 +192,22 @@ impl App {
             ElementState::Pressed => {
                 // Edge resize for CSD (no native decorations)
                 if button == MouseButton::Left {
+                    if !self.tab_bar.is_title_bar_toggle_area(x, y) {
+                        self.last_title_bar_toggle_click_time =
+                            Instant::now() - CLICK_THRESHOLD * 2;
+                    }
+
                     let size = self.window.inner_size();
                     let w = size.width as f32;
                     let h = size.height as f32;
-                    if let Some(direction) = resize_direction_at_window_edge(x, y, w, h) {
-                        let _ = self.window.drag_resize_window(direction);
-                        return;
+                    let over_chrome_button = self.tab_bar.visible
+                        && (self.tab_bar.is_new_tab_button_at(x, y)
+                            || self.tab_bar.window_control_at(x, y).is_some());
+                    if !over_chrome_button {
+                        if let Some(direction) = resize_direction_at_window_edge(x, y, w, h) {
+                            let _ = self.window.drag_resize_window(direction);
+                            return;
+                        }
                     }
                 }
 
@@ -223,6 +233,18 @@ impl App {
 
                         // Draggable title bar area
                         if self.tab_bar.is_drag_area(x, y) {
+                            if self.tab_bar.is_title_bar_toggle_area(x, y) {
+                                let now = Instant::now();
+                                if now.duration_since(self.last_title_bar_toggle_click_time)
+                                    < CLICK_THRESHOLD
+                                {
+                                    self.window.set_maximized(!self.window.is_maximized());
+                                    self.last_title_bar_toggle_click_time =
+                                        now - CLICK_THRESHOLD * 2;
+                                    return;
+                                }
+                                self.last_title_bar_toggle_click_time = now;
+                            }
                             let _ = self.window.drag_window();
                             return;
                         }
@@ -237,6 +259,7 @@ impl App {
                                 let tabs = self.terminal_manager.tabs();
                                 if let Some(tab) = tabs.get(tab_idx) {
                                     let tab_id = tab.id;
+                                    self.freeze_tab_width_after_close();
                                     self.terminal_manager.close_tab(tab_id);
                                     tracing::info!("Closed tab {} via middle click", tab_idx);
                                     self.update_tab_bar();
@@ -253,6 +276,7 @@ impl App {
                             let tabs = self.terminal_manager.tabs();
                             if let Some(tab) = tabs.get(tab_idx) {
                                 let tab_id = tab.id;
+                                self.freeze_tab_width_after_close();
                                 self.terminal_manager.close_tab(tab_id);
                                 tracing::info!("Closed tab {} via close button", tab_idx);
                                 self.update_tab_bar();
@@ -266,6 +290,7 @@ impl App {
                     if button == MouseButton::Left && self.tab_bar.is_new_tab_button_at(x, y) {
                         match self.terminal_manager.create_tab() {
                             Ok(_) => {
+                                self.clear_tab_width_freeze();
                                 tracing::info!("Created new tab via + button");
                                 self.update_tab_bar();
                                 self.needs_redraw = true;
@@ -863,6 +888,7 @@ impl App {
         if self.check_keybinding(&event, &self.config.keybindings.new_tab.clone()) {
             match self.terminal_manager.create_tab() {
                 Ok(tab_id) => {
+                    self.clear_tab_width_freeze();
                     tracing::info!("Created new tab {:?}", tab_id);
                     self.update_tab_bar();
                     self.needs_redraw = true;
@@ -875,6 +901,7 @@ impl App {
             if self.terminal_manager.tab_count() > 1 {
                 if let Some(tab) = self.terminal_manager.active_tab() {
                     let tab_id = tab.id;
+                    self.freeze_tab_width_after_close();
                     self.terminal_manager.close_tab(tab_id);
                     self.renderer.clear_image_cache();
                     tracing::info!("Closed tab {:?}", tab_id);

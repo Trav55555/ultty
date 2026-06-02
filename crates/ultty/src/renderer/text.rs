@@ -2,6 +2,7 @@
 
 use super::atlas::GlyphAtlas;
 use super::pipeline::TextPipeline;
+use super::powerline::is_powerline_triangle;
 use super::{ColorScheme, Rgba, Vertex};
 use crate::config::FontConfig;
 use crate::grid::{CellFlags, Terminal};
@@ -11,6 +12,14 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 type ShapingCacheKey = (char, u8);
+
+#[derive(Clone, Copy)]
+struct ShapedGlyph {
+    cache_key: CacheKey,
+    x_offset: f32,
+    y_offset: f32,
+    line_y: f32,
+}
 
 pub struct TextRenderer {
     font_system: FontSystem,
@@ -22,7 +31,7 @@ pub struct TextRenderer {
     device: Arc<wgpu::Device>,
     font_family: String,
     ligatures: bool,
-    shaping_cache: HashMap<ShapingCacheKey, CacheKey>,
+    shaping_cache: HashMap<ShapingCacheKey, ShapedGlyph>,
     styled_text_buffer: Buffer,
     byte_to_char_offsets: Vec<usize>,
 }
@@ -481,8 +490,8 @@ impl TextRenderer {
                     fg_color
                 };
 
-                // Skip block characters - they're rendered procedurally in the background pass
-                if is_block_char(ch) {
+                // Skip cell-filling symbols rendered procedurally in the background pass.
+                if is_procedural_cell_symbol(ch) {
                     continue;
                 }
 
@@ -490,7 +499,7 @@ impl TextRenderer {
                 let style_key: u8 = if self.ligatures { 1 } else { 0 };
                 let cache_key_lookup = (ch, style_key);
 
-                let cache_key = if !has_combining {
+                let shaped_glyph = if !has_combining {
                     if let Some(&cached) = self.shaping_cache.get(&cache_key_lookup) {
                         Some(cached)
                     } else {
@@ -505,9 +514,14 @@ impl TextRenderer {
                         if let Some(run) = buffer.layout_runs().next() {
                             if let Some(glyph) = run.glyphs.first() {
                                 let physical = glyph.physical((0.0, 0.0), 1.0);
-                                self.shaping_cache
-                                    .insert(cache_key_lookup, physical.cache_key);
-                                Some(physical.cache_key)
+                                let shaped = ShapedGlyph {
+                                    cache_key: physical.cache_key,
+                                    x_offset: physical.x as f32,
+                                    y_offset: physical.y as f32,
+                                    line_y: run.line_y,
+                                };
+                                self.shaping_cache.insert(cache_key_lookup, shaped);
+                                Some(shaped)
                             } else {
                                 None
                             }
@@ -528,23 +542,34 @@ impl TextRenderer {
                     buffer.set_text(&mut self.font_system, &grapheme, attrs, shaping);
 
                     buffer.layout_runs().next().and_then(|run| {
-                        run.glyphs
-                            .first()
-                            .map(|g| g.physical((0.0, 0.0), 1.0).cache_key)
+                        run.glyphs.first().map(|g| {
+                            let physical = g.physical((0.0, 0.0), 1.0);
+                            ShapedGlyph {
+                                cache_key: physical.cache_key,
+                                x_offset: physical.x as f32,
+                                y_offset: physical.y as f32,
+                                line_y: run.line_y,
+                            }
+                        })
                     })
                 };
 
-                if let Some(key) = cache_key {
-                    if let Some(glyph_info) = self.atlas.get_glyph(&mut self.font_system, key) {
+                if let Some(shaped) = shaped_glyph {
+                    if let Some(glyph_info) = self
+                        .atlas
+                        .get_glyph(&mut self.font_system, shaped.cache_key)
+                    {
                         if glyph_info.width == 0.0 || glyph_info.height == 0.0 {
                             continue;
                         }
 
-                        let x = (col_idx as f32 * cell_width + glyph_info.left + x_offset).round();
-                        let y = (row_idx as f32 * cell_height
-                            + (cell_height - glyph_info.top)
-                            + y_offset)
-                            .round();
+                        let (x, y) = cell_glyph_origin(
+                            (col_idx, row_idx),
+                            (cell_width, cell_height),
+                            (x_offset, y_offset),
+                            shaped,
+                            &glyph_info,
+                        );
 
                         Self::emit_glyph_quad(
                             &mut vertices,
@@ -762,6 +787,10 @@ fn is_block_char(ch: char) -> bool {
     matches!(ch, '\u{2580}'..='\u{259F}')
 }
 
+fn is_procedural_cell_symbol(ch: char) -> bool {
+    is_block_char(ch) || is_powerline_triangle(ch)
+}
+
 fn fill_byte_to_char_offsets(text: &str, offsets: &mut Vec<usize>) {
     offsets.clear();
     offsets.extend(text.char_indices().map(|(byte_offset, _)| byte_offset));
@@ -772,6 +801,24 @@ fn byte_offset_to_char_index(offsets: &[usize], byte_offset: usize) -> usize {
         Ok(index) => index,
         Err(index) => index.saturating_sub(1),
     }
+}
+
+fn cell_glyph_origin(
+    cell: (u16, u16),
+    cell_size: (f32, f32),
+    render_offset: (f32, f32),
+    shaped: ShapedGlyph,
+    glyph_info: &super::atlas::GlyphInfo,
+) -> (f32, f32) {
+    let (col, row) = cell;
+    let (cell_width, cell_height) = cell_size;
+    let (x_offset, y_offset) = render_offset;
+
+    (
+        (col as f32 * cell_width + glyph_info.left + shaped.x_offset + x_offset).round(),
+        (row as f32 * cell_height + shaped.line_y + shaped.y_offset - glyph_info.top + y_offset)
+            .round(),
+    )
 }
 
 #[cfg(test)]
@@ -805,6 +852,44 @@ mod tests {
         assert_eq!(byte_offset_to_char_index(&offsets, 2), 1);
         assert_eq!(byte_offset_to_char_index(&offsets, 6), 2);
         assert_eq!(byte_offset_to_char_index(&offsets, 99), 3);
+    }
+
+    #[test]
+    fn powerline_triangles_are_procedural_cell_symbols() {
+        assert!(is_procedural_cell_symbol('\u{E0B0}'));
+        assert!(is_procedural_cell_symbol('\u{E0B2}'));
+        assert!(!is_procedural_cell_symbol('\u{E0B1}'));
+        assert!(!is_procedural_cell_symbol('A'));
+    }
+
+    #[test]
+    fn cell_glyph_origin_applies_shaped_offsets() {
+        let (cache_key, _, _) = CacheKey::new(
+            cosmic_text::fontdb::ID::dummy(),
+            42,
+            14.0,
+            (0.0, 0.0),
+            cosmic_text::CacheKeyFlags::empty(),
+        );
+        let shaped = ShapedGlyph {
+            cache_key,
+            x_offset: 3.0,
+            y_offset: -2.0,
+            line_y: 13.0,
+        };
+        let glyph = super::super::atlas::GlyphInfo {
+            uv: [0.0, 0.0, 1.0, 1.0],
+            width: 8.0,
+            height: 12.0,
+            left: 1.0,
+            top: 11.0,
+            is_color: false,
+        };
+
+        let (x, y) = cell_glyph_origin((2, 3), (10.0, 18.0), (5.0, 7.0), shaped, &glyph);
+
+        assert_eq!(x, 29.0);
+        assert_eq!(y, 61.0);
     }
 
     /// This test verifies that cosmic-text Buffer requires set_size before layout_runs

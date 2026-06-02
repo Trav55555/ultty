@@ -295,6 +295,7 @@ impl App {
 
                 match result {
                     Ok(_) => {
+                        self.clear_tab_width_freeze();
                         self.update_tab_bar();
                         self.needs_redraw = true;
                         ControlResponse::Ok
@@ -333,6 +334,7 @@ impl App {
                 let idx = index.unwrap_or(active_idx);
                 if self.terminal_manager.tab_count() > 1 && idx < tabs.len() {
                     let tab_id = tabs[idx].id;
+                    self.freeze_tab_width_after_close();
                     self.terminal_manager.close_tab(tab_id);
                     self.update_tab_bar();
                     self.needs_redraw = true;

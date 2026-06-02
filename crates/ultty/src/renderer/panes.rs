@@ -5,6 +5,7 @@
 //! tab bar / vim indicator / shortcuts overlay.
 
 use super::block_chars::block_char_rects;
+use super::powerline::powerline_triangle;
 use super::{OverlayState, PaneInfo, Renderer, Rgba, Vertex};
 use crate::grid::{CellFlags, CursorShape, Terminal};
 use wgpu::util::DeviceExt;
@@ -546,6 +547,45 @@ impl Renderer {
             }
         }
 
+        // Full Powerline separators rendered as solid triangles for edge-to-edge
+        // statusline transitions.
+        for row_idx in 0..dims.rows {
+            let row = match buffer.visible_row(row_idx) {
+                Some(r) => r,
+                None => continue,
+            };
+            for col_idx in 0..dims.cols {
+                let cell = match row.get(col_idx) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let Some(direction) = powerline_triangle(cell.char()) else {
+                    continue;
+                };
+
+                let fg = if cell.has_flag(CellFlags::REVERSE) {
+                    self.color_scheme.resolve(cell.bg(), false)
+                } else {
+                    self.color_scheme.resolve(cell.fg(), true)
+                };
+                let fg = if cell.has_flag(CellFlags::DIM) {
+                    Rgba::new(fg.r * 0.65, fg.g * 0.65, fg.b * 0.65, fg.a)
+                } else {
+                    fg
+                };
+                self.emit_powerline_triangle(
+                    &mut vertices,
+                    &mut indices,
+                    (col_idx as f32 * self.cell_width + self.pane_offset_x).round(),
+                    (row_idx as f32 * self.cell_height + self.pane_offset_y).round(),
+                    self.cell_width.round(),
+                    self.cell_height.round(),
+                    direction,
+                    fg,
+                );
+            }
+        }
+
         // Draw cursor
         let cursor = terminal.buffer().grid().cursor();
         let should_show_cursor =
@@ -558,11 +598,10 @@ impl Renderer {
 
             match cursor.shape {
                 CursorShape::Block => {
-                    self.emit_quad_with_offset(
+                    self.emit_cursor_block_with_offset(
                         &mut vertices,
                         &mut indices,
                         col,
-                        col + 1,
                         row,
                         cursor_color,
                     );

@@ -15,6 +15,7 @@ mod native_render;
 mod overlays;
 mod panes;
 mod pipeline;
+mod powerline;
 mod screenshot;
 mod scrollbar;
 mod tabbar;
@@ -34,8 +35,38 @@ use crate::tabs::TabBarState;
 use crate::url::DetectedUrl;
 use crate::vim::CopyMode;
 use block_chars::block_char_rects;
+use powerline::{powerline_triangle, triangle_points, PowerlineTriangle};
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
+
+#[allow(clippy::too_many_arguments)]
+fn append_powerline_triangle(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    direction: PowerlineTriangle,
+    color: Rgba,
+) {
+    let points = triangle_points(direction);
+    let base = vertices.len() as u32;
+    let color = color.to_array();
+
+    for (px, py) in points {
+        vertices.push(Vertex {
+            position: [x + px * width, y + py * height],
+            tex_coord: [0.0, 0.0],
+            color,
+            is_color: 0,
+        });
+    }
+
+    indices.push(base);
+    indices.push(base + 1);
+    indices.push(base + 2);
+}
 
 /// Overlay state for rendering vim mode and URL highlights.
 #[derive(Debug)]
@@ -1347,6 +1378,93 @@ impl Renderer {
         indices.push(base_idx + 3);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn emit_powerline_triangle(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        direction: PowerlineTriangle,
+        color: Rgba,
+    ) {
+        append_powerline_triangle(vertices, indices, x, y, width, height, direction, color);
+    }
+
+    /// Emit a filled rounded rectangle.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_rounded_rect(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radius: f32,
+        color: Rgba,
+    ) {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+
+        let radius = radius.clamp(0.0, width.min(height) / 2.0);
+        if radius <= 0.0 {
+            self.emit_rect(vertices, indices, x, y, width, height, color);
+            return;
+        }
+
+        const ARC_SEGMENTS: usize = 6;
+
+        let mut points = Vec::with_capacity(ARC_SEGMENTS * 4 + 1);
+        let mut append_arc = |cx: f32, cy: f32, start: f32, end: f32, skip_first: bool| {
+            for segment in 0..=ARC_SEGMENTS {
+                if skip_first && segment == 0 {
+                    continue;
+                }
+
+                let t = segment as f32 / ARC_SEGMENTS as f32;
+                let angle = start + (end - start) * t;
+                points.push([cx + angle.cos() * radius, cy + angle.sin() * radius]);
+            }
+        };
+
+        let half_pi = std::f32::consts::FRAC_PI_2;
+        let pi = std::f32::consts::PI;
+        append_arc(x + width - radius, y + radius, -half_pi, 0.0, false);
+        append_arc(x + width - radius, y + height - radius, 0.0, half_pi, true);
+        append_arc(x + radius, y + height - radius, half_pi, pi, true);
+        append_arc(x + radius, y + radius, pi, pi + half_pi, true);
+
+        let base_idx = vertices.len() as u32;
+        let color_arr = color.to_array();
+        vertices.push(Vertex {
+            position: [x + width / 2.0, y + height / 2.0],
+            tex_coord: [0.5, 0.5],
+            color: color_arr,
+            is_color: 0,
+        });
+
+        for point in &points {
+            vertices.push(Vertex {
+                position: *point,
+                tex_coord: [0.0, 0.0],
+                color: color_arr,
+                is_color: 0,
+            });
+        }
+
+        for index in 0..points.len() {
+            let current = base_idx + 1 + index as u32;
+            let next = base_idx + 1 + ((index + 1) % points.len()) as u32;
+            indices.push(base_idx);
+            indices.push(current);
+            indices.push(next);
+        }
+    }
+
     /// Build background vertex data from terminal state.
     fn build_background_vertices(
         &self,
@@ -1530,6 +1648,47 @@ impl Renderer {
             }
         }
 
+        // Full Powerline separators rendered as solid triangles for edge-to-edge
+        // statusline transitions. Font glyph side bearings otherwise leave
+        // visible gaps around symbols such as U+E0B0 and U+E0B2.
+        for row_idx in 0..dims.rows {
+            let row = match buffer.visible_row(row_idx) {
+                Some(r) => r,
+                None => continue,
+            };
+            for col_idx in 0..dims.cols {
+                let cell = match row.get(col_idx) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let Some(direction) = powerline_triangle(cell.char()) else {
+                    continue;
+                };
+
+                let fg = if cell.has_flag(CellFlags::REVERSE) {
+                    self.color_scheme.resolve(cell.bg(), false)
+                } else {
+                    self.color_scheme.resolve(cell.fg(), true)
+                };
+                let fg = if cell.has_flag(CellFlags::DIM) {
+                    Rgba::new(fg.r * 0.65, fg.g * 0.65, fg.b * 0.65, fg.a)
+                } else {
+                    fg
+                };
+
+                self.emit_powerline_triangle(
+                    &mut vertices,
+                    &mut indices,
+                    col_idx as f32 * self.cell_width,
+                    row_idx as f32 * self.cell_height + self.tab_bar_height,
+                    self.cell_width,
+                    self.cell_height,
+                    direction,
+                    fg,
+                );
+            }
+        }
+
         // Draw cursor
         let cursor = terminal.buffer().grid().cursor();
         // Only draw if visible and (not blinking or blink phase is visible)
@@ -1543,8 +1702,7 @@ impl Renderer {
 
             match cursor.shape {
                 CursorShape::Block => {
-                    // Full cell block cursor
-                    self.emit_quad(&mut vertices, &mut indices, col, col + 1, row, cursor_color);
+                    self.emit_cursor_block(&mut vertices, &mut indices, col, row, cursor_color);
                 }
                 CursorShape::Underline => {
                     // Thin underline cursor (bottom 2 pixels of cell)
@@ -1626,6 +1784,29 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_powerline_triangle_emits_cell_filling_points() {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        append_powerline_triangle(
+            &mut vertices,
+            &mut indices,
+            10.0,
+            20.0,
+            8.0,
+            16.0,
+            PowerlineTriangle::Right,
+            Rgba::new(1.0, 0.0, 0.0, 1.0),
+        );
+
+        assert_eq!(indices, vec![0, 1, 2]);
+        assert_eq!(vertices.len(), 3);
+        assert_eq!(vertices[0].position, [10.0, 20.0]);
+        assert_eq!(vertices[1].position, [10.0, 36.0]);
+        assert_eq!(vertices[2].position, [18.0, 28.0]);
+    }
 
     #[test]
     fn native_buffer_cache_accumulates_multiple_sessions() {

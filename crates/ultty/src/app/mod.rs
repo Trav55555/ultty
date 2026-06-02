@@ -34,11 +34,14 @@ const DEFAULT_HEIGHT: u32 = 600;
 /// Time window for detecting double/triple clicks.
 pub(super) const CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 
-/// Width of the invisible window-edge resize grab area for client-side decorations.
-const WINDOW_RESIZE_EDGE_HITBOX: f32 = 16.0;
+/// Resize grab area outside the window edge, when the compositor reports outside positions.
+const WINDOW_RESIZE_OUTER_HITBOX: f32 = 8.0;
 
-/// Length of the invisible corner resize grab area along each window edge.
-const WINDOW_RESIZE_CORNER_HITBOX: f32 = 28.0;
+/// Resize grab area inside the window edge for client-side decorations.
+const WINDOW_RESIZE_INNER_EDGE_HITBOX: f32 = 8.0;
+
+/// Length of the inside corner resize grab area along each window edge.
+const WINDOW_RESIZE_INNER_CORNER_HITBOX: f32 = 18.0;
 
 /// Cursor blink interval (how long cursor stays on/off).
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
@@ -55,11 +58,20 @@ const MAINTENANCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Faster PTY polling while a frame is dirty but not ready to render.
 const PTY_CATCHUP_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
+/// Duration to keep tab widths stable after a tab close.
+const TAB_CLOSE_WIDTH_FREEZE_DURATION: Duration = Duration::from_secs(3);
+
 /// User events sent to the winit application loop.
 #[derive(Debug, Clone, Copy)]
 enum AppEvent {
     /// At least one runtime fd is readable and should be drained on the UI thread.
     RuntimeReadable,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TabWidthFreeze {
+    width: f32,
+    until: Instant,
 }
 
 /// Terminal application.
@@ -74,6 +86,8 @@ pub struct App {
     terminal_manager: TerminalManager,
     /// Tab bar state for rendering
     tab_bar: TabBarState,
+    /// Temporarily fixed tab width after a close, so close buttons stay aligned.
+    tab_width_freeze: Option<TabWidthFreeze>,
     /// Last render time for frame limiting
     last_render: Instant,
     /// Whether we need to redraw
@@ -94,6 +108,8 @@ pub struct App {
     click_count: u8,
     /// Last click position for multi-click detection
     last_click_pos: (u16, u16),
+    /// Last click time in the title band's maximize/restore toggle area.
+    last_title_bar_toggle_click_time: Instant,
     /// Configuration
     config: Config,
     /// Vim-style copy mode
@@ -258,6 +274,7 @@ impl App {
             renderer,
             terminal_manager,
             tab_bar,
+            tab_width_freeze: None,
             last_render: Instant::now(),
             needs_redraw: true,
             pending_close: false,
@@ -268,6 +285,7 @@ impl App {
             last_click_time: Instant::now() - CLICK_THRESHOLD * 2,
             click_count: 0,
             last_click_pos: (0, 0),
+            last_title_bar_toggle_click_time: Instant::now() - CLICK_THRESHOLD * 2,
             config,
             copy_mode: CopyMode::new(),
             url_detector,
@@ -530,8 +548,14 @@ impl App {
             .map(|t| t.id)
             .unwrap_or_else(|| ultty::terminal_manager::TabId::new(0));
 
-        self.tab_bar
-            .update(self.terminal_manager.tabs(), active_tab_id, total_width);
+        let tab_width_override = self.active_tab_width_freeze().map(|freeze| freeze.width);
+
+        self.tab_bar.update_with_tab_width_override(
+            self.terminal_manager.tabs(),
+            active_tab_id,
+            total_width,
+            tab_width_override,
+        );
 
         // Update renderer's tab bar height for dimension calculations
         let new_height = self.tab_bar.height();
@@ -548,6 +572,37 @@ impl App {
         }
 
         self.refresh_runtime_wakeup_fds();
+    }
+
+    fn freeze_tab_width_after_close(&mut self) {
+        let Some(width) = self.tab_bar.tabs.first().map(|tab| tab.width) else {
+            return;
+        };
+
+        self.tab_width_freeze = Some(TabWidthFreeze {
+            width,
+            until: Instant::now() + TAB_CLOSE_WIDTH_FREEZE_DURATION,
+        });
+    }
+
+    fn clear_tab_width_freeze(&mut self) {
+        self.tab_width_freeze = None;
+    }
+
+    fn active_tab_width_freeze(&self) -> Option<TabWidthFreeze> {
+        self.tab_width_freeze
+            .filter(|freeze| Instant::now() < freeze.until)
+    }
+
+    fn expire_tab_width_freeze(&mut self, now: Instant) {
+        if self
+            .tab_width_freeze
+            .is_some_and(|freeze| now >= freeze.until)
+        {
+            self.tab_width_freeze = None;
+            self.update_tab_bar();
+            self.needs_redraw = true;
+        }
     }
 
     fn refresh_runtime_wakeup_fds(&mut self) {
@@ -740,11 +795,18 @@ impl App {
         let x = self.mouse_pos.x as f32;
         let y = self.mouse_pos.y as f32;
 
-        let old_hovered = self.tab_bar.hovered_tab;
+        let old_hovered_tab = self.tab_bar.hovered_tab;
+        let old_new_tab_hovered = self.tab_bar.new_tab_button_hovered;
+        let old_window_control = self.tab_bar.hovered_window_control;
+        let old_close_button = self.tab_bar.hovered_close_button;
         self.tab_bar.set_hover(x, y);
 
         // Redraw if hover state changed
-        if old_hovered != self.tab_bar.hovered_tab {
+        if old_hovered_tab != self.tab_bar.hovered_tab
+            || old_new_tab_hovered != self.tab_bar.new_tab_button_hovered
+            || old_window_control != self.tab_bar.hovered_window_control
+            || old_close_button != self.tab_bar.hovered_close_button
+        {
             self.needs_redraw = true;
         }
     }
@@ -756,6 +818,13 @@ impl App {
         let y = self.mouse_pos.y as f32;
         let w = size.width as f32;
         let h = size.height as f32;
+
+        if self.tab_bar.visible
+            && (self.tab_bar.is_new_tab_button_at(x, y)
+                || self.tab_bar.window_control_at(x, y).is_some())
+        {
+            return false;
+        }
 
         let Some(direction) = resize_direction_at_window_edge(x, y, w, h) else {
             return false;
@@ -910,6 +979,8 @@ impl App {
 
         // Resize renderer
         self.renderer.resize(&self.surface, size.width, size.height);
+        self.clear_tab_width_freeze();
+        self.update_tab_bar();
 
         // Get new terminal dimensions
         let (cols, rows) = self.renderer.terminal_dimensions();
@@ -949,15 +1020,26 @@ fn resize_direction_at_window_edge(
         return None;
     }
 
-    let near_left_edge = x <= WINDOW_RESIZE_EDGE_HITBOX;
-    let near_right_edge = x >= width - WINDOW_RESIZE_EDGE_HITBOX;
-    let near_top_edge = y <= WINDOW_RESIZE_EDGE_HITBOX;
-    let near_bottom_edge = y >= height - WINDOW_RESIZE_EDGE_HITBOX;
+    let near_left_edge =
+        (-WINDOW_RESIZE_OUTER_HITBOX..=WINDOW_RESIZE_INNER_EDGE_HITBOX).contains(&x);
+    let near_right_edge =
+        (width - WINDOW_RESIZE_INNER_EDGE_HITBOX..=width + WINDOW_RESIZE_OUTER_HITBOX).contains(&x);
+    let near_top_edge =
+        (-WINDOW_RESIZE_OUTER_HITBOX..=WINDOW_RESIZE_INNER_EDGE_HITBOX).contains(&y);
+    let near_bottom_edge = (height - WINDOW_RESIZE_INNER_EDGE_HITBOX
+        ..=height + WINDOW_RESIZE_OUTER_HITBOX)
+        .contains(&y);
 
-    let in_left_corner = x <= WINDOW_RESIZE_CORNER_HITBOX;
-    let in_right_corner = x >= width - WINDOW_RESIZE_CORNER_HITBOX;
-    let in_top_corner = y <= WINDOW_RESIZE_CORNER_HITBOX;
-    let in_bottom_corner = y >= height - WINDOW_RESIZE_CORNER_HITBOX;
+    let in_left_corner =
+        (-WINDOW_RESIZE_OUTER_HITBOX..=WINDOW_RESIZE_INNER_CORNER_HITBOX).contains(&x);
+    let in_right_corner = (width - WINDOW_RESIZE_INNER_CORNER_HITBOX
+        ..=width + WINDOW_RESIZE_OUTER_HITBOX)
+        .contains(&x);
+    let in_top_corner =
+        (-WINDOW_RESIZE_OUTER_HITBOX..=WINDOW_RESIZE_INNER_CORNER_HITBOX).contains(&y);
+    let in_bottom_corner = (height - WINDOW_RESIZE_INNER_CORNER_HITBOX
+        ..=height + WINDOW_RESIZE_OUTER_HITBOX)
+        .contains(&y);
 
     match (
         near_left_edge,
@@ -995,38 +1077,58 @@ mod tests {
     }
 
     #[test]
-    fn resize_hitbox_uses_wider_edges() {
+    fn resize_hitbox_uses_smaller_inside_edges_and_outside_edges() {
         assert_eq!(
-            resize_direction_at_window_edge(15.0, 200.0, 800.0, 600.0),
+            resize_direction_at_window_edge(8.0, 200.0, 800.0, 600.0),
             Some(ResizeDirection::West)
         );
         assert_eq!(
-            resize_direction_at_window_edge(784.0, 200.0, 800.0, 600.0),
+            resize_direction_at_window_edge(-8.0, 200.0, 800.0, 600.0),
+            Some(ResizeDirection::West)
+        );
+        assert_eq!(
+            resize_direction_at_window_edge(792.0, 200.0, 800.0, 600.0),
             Some(ResizeDirection::East)
         );
         assert_eq!(
-            resize_direction_at_window_edge(17.0, 200.0, 800.0, 600.0),
+            resize_direction_at_window_edge(808.0, 200.0, 800.0, 600.0),
+            Some(ResizeDirection::East)
+        );
+        assert_eq!(
+            resize_direction_at_window_edge(9.0, 200.0, 800.0, 600.0),
             None
         );
     }
 
     #[test]
-    fn resize_hitbox_uses_larger_corners() {
+    fn resize_hitbox_uses_smaller_inside_corners_and_outside_corners() {
         assert_eq!(
-            resize_direction_at_window_edge(24.0, 8.0, 800.0, 600.0),
+            resize_direction_at_window_edge(18.0, 8.0, 800.0, 600.0),
             Some(ResizeDirection::NorthWest)
         );
         assert_eq!(
-            resize_direction_at_window_edge(792.0, 24.0, 800.0, 600.0),
+            resize_direction_at_window_edge(-8.0, -8.0, 800.0, 600.0),
+            Some(ResizeDirection::NorthWest)
+        );
+        assert_eq!(
+            resize_direction_at_window_edge(782.0, 18.0, 800.0, 600.0),
             Some(ResizeDirection::NorthEast)
         );
         assert_eq!(
-            resize_direction_at_window_edge(24.0, 592.0, 800.0, 600.0),
+            resize_direction_at_window_edge(808.0, -8.0, 800.0, 600.0),
+            Some(ResizeDirection::NorthEast)
+        );
+        assert_eq!(
+            resize_direction_at_window_edge(18.0, 592.0, 800.0, 600.0),
             Some(ResizeDirection::SouthWest)
         );
         assert_eq!(
-            resize_direction_at_window_edge(792.0, 576.0, 800.0, 600.0),
+            resize_direction_at_window_edge(782.0, 582.0, 800.0, 600.0),
             Some(ResizeDirection::SouthEast)
+        );
+        assert_eq!(
+            resize_direction_at_window_edge(19.0, 8.0, 800.0, 600.0),
+            Some(ResizeDirection::North)
         );
     }
 }

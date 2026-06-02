@@ -23,6 +23,10 @@ impl App {
 
         deadline = deadline.min(self.last_cursor_blink + super::CURSOR_BLINK_INTERVAL);
 
+        if let Some(freeze) = self.tab_width_freeze {
+            deadline = deadline.min(freeze.until);
+        }
+
         if let Some(until) = self.bell_active_until {
             deadline = deadline.min(until);
         }
@@ -96,6 +100,8 @@ impl App {
 
         // Update cursor blink state
         let now = Instant::now();
+        self.expire_tab_width_freeze(now);
+
         if now.duration_since(self.last_cursor_blink) >= super::CURSOR_BLINK_INTERVAL {
             self.cursor_blink_visible = !self.cursor_blink_visible;
             self.last_cursor_blink = now;
