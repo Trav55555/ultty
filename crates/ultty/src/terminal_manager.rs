@@ -5,9 +5,11 @@
 //! - Pane splitting within tabs
 //! - Keyboard navigation between tabs and panes
 
-use crate::event_loop::{EventLoop as TerminalEventLoop, TerminalEvent};
 use std::io;
 use std::os::fd::RawFd;
+use std::path::Path;
+
+use crate::event_loop::{EventLoop as TerminalEventLoop, TerminalEvent};
 
 // ── Split tree for nested pane layouts ────────────────────────────────────
 
@@ -295,6 +297,14 @@ impl Tab {
     pub fn is_empty(&self) -> bool {
         self.terminals.is_empty()
     }
+
+    fn default_title(&self) -> String {
+        format!("Tab {}", self.id.0 + 1)
+    }
+
+    fn has_default_title(&self) -> bool {
+        self.title.is_empty() || self.title == self.default_title()
+    }
 }
 
 /// Manager for multiple terminals organized in tabs.
@@ -345,6 +355,16 @@ impl TerminalManager {
         self.active_tab = tab_id;
 
         Ok(tab_id)
+    }
+
+    /// Set a tab's explicit display title.
+    pub fn set_tab_title(&mut self, tab_id: TabId, title: &str) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return false;
+        };
+
+        tab.title = title.to_string();
+        true
     }
 
     /// Close a tab and all its terminals.
@@ -438,6 +458,56 @@ impl TerminalManager {
         &self.tabs
     }
 
+    /// Get the display title for a tab.
+    pub fn tab_display_title(&self, tab_id: TabId) -> String {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return String::new();
+        };
+
+        if !tab.has_default_title() {
+            return tab.title.clone();
+        }
+
+        let Some(terminal) = self.terminal(tab.focused_terminal) else {
+            return tab.default_title();
+        };
+
+        if tab.id == self.active_tab {
+            if let Some(app) = terminal.event_loop.foreground_process_name() {
+                return app;
+            }
+        }
+
+        let terminal_state = terminal.event_loop.terminal();
+        let title = terminal_state.title().trim();
+        if !title.is_empty() && !is_shell_label(title) {
+            return title.to_string();
+        }
+
+        let cwd = terminal_state
+            .working_directory()
+            .map(str::to_string)
+            .or_else(|| terminal.event_loop.child_working_directory());
+
+        if let Some(cwd) = cwd.and_then(|path| compact_working_directory(&path)) {
+            return cwd;
+        }
+
+        if !title.is_empty() {
+            return title.to_string();
+        }
+
+        tab.default_title()
+    }
+
+    /// Get display titles for every tab in order.
+    pub fn tab_display_titles(&self) -> Vec<String> {
+        self.tabs
+            .iter()
+            .map(|tab| self.tab_display_title(tab.id))
+            .collect()
+    }
+
     /// Get number of tabs.
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
@@ -504,6 +574,13 @@ impl TerminalManager {
         for terminal in &mut self.terminals {
             let events = terminal.process()?;
             if !events.is_empty() {
+                if let Some(title) = events.iter().rev().find_map(|event| match event {
+                    TerminalEvent::TitleChanged(title) => Some(title),
+                    _ => None,
+                }) {
+                    terminal.title = title.clone();
+                }
+
                 all_events.push((terminal.id, events));
             }
         }
@@ -1053,6 +1130,41 @@ impl TerminalManager {
     }
 }
 
+fn compact_working_directory(path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+
+    let home = std::env::var("HOME").ok();
+    if let Some(home) = home.as_deref().filter(|home| !home.is_empty()) {
+        if path == home {
+            return Some("~".to_string());
+        }
+
+        if let Some(rest) = path
+            .strip_prefix(home)
+            .and_then(|rest| rest.strip_prefix('/'))
+        {
+            return Some(format!("~/{rest}"));
+        }
+    }
+
+    Some(path.to_string())
+}
+
+fn is_shell_label(label: &str) -> bool {
+    let command = Path::new(label)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(label);
+
+    matches!(
+        command,
+        "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "elvish"
+    )
+}
+
 impl ManagedTerminal {
     /// Create a new managed terminal with a specific working directory.
     pub fn new_with_dir(
@@ -1081,6 +1193,54 @@ mod tests {
         let manager = TerminalManager::new(80, 24).unwrap();
         assert_eq!(manager.tab_count(), 1);
         assert!(manager.focused_terminal().is_some());
+    }
+
+    #[test]
+    fn tab_display_title_uses_explicit_title() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let tab_id = manager.active_tab().unwrap().id;
+        manager.set_tab_title(tab_id, "editor");
+        manager.terminals[0]
+            .event_loop
+            .terminal_mut()
+            .set_title("nvim".to_string());
+
+        assert_eq!(manager.tab_display_title(tab_id), "editor");
+    }
+
+    #[test]
+    fn tab_display_title_uses_osc_title_for_default_tabs() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let tab_id = manager.active_tab().unwrap().id;
+        manager.terminals[0]
+            .event_loop
+            .terminal_mut()
+            .set_title("nvim".to_string());
+
+        assert_eq!(manager.tab_display_title(tab_id), "nvim");
+    }
+
+    #[test]
+    fn tab_display_title_falls_back_to_working_directory_for_shell_titles() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let tab_id = manager.active_tab().unwrap().id;
+        let terminal = manager.terminals[0].event_loop.terminal_mut();
+        terminal.set_title("zsh".to_string());
+        terminal.set_working_directory("/tmp/ultty-project".to_string());
+
+        assert_eq!(manager.tab_display_title(tab_id), "/tmp/ultty-project");
+    }
+
+    #[test]
+    fn compact_working_directory_ignores_empty_paths() {
+        assert_eq!(compact_working_directory(""), None);
+        assert_eq!(compact_working_directory("   "), None);
+    }
+
+    #[test]
+    fn shell_label_filter_handles_paths() {
+        assert!(is_shell_label("/bin/zsh"));
+        assert!(!is_shell_label("nvim"));
     }
 
     #[test]

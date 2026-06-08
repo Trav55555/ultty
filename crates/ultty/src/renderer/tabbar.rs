@@ -7,13 +7,12 @@ use std::borrow::Cow;
 
 use super::{Renderer, Rgba, Vertex};
 use crate::tabs::{
-    TabBarState, WindowControl, TAB_CLOSE_BUTTON_SIZE, TAB_PADDING, TAB_ROW_HEIGHT,
+    TabBarState, TabState, WindowControl, TAB_CLOSE_BUTTON_SIZE, TAB_PADDING, TAB_ROW_HEIGHT,
     TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH, WINDOW_CONTROLS_WIDTH,
 };
 
-const CHROME_BUTTON_PAD_X: f32 = 4.0;
-const CHROME_BUTTON_PAD_Y: f32 = 6.0;
-const CHROME_BUTTON_RADIUS: f32 = 7.0;
+const CHROME_BUTTON_SIZE: f32 = 26.0;
+const CHROME_BUTTON_RADIUS: f32 = 6.0;
 const CHROME_BUTTON_BORDER: f32 = 1.0;
 
 fn lighten(color: Rgba, amount: f32) -> Rgba {
@@ -61,11 +60,14 @@ fn close_symbol_color(foreground: Rgba, is_hovered: bool) -> Rgba {
 }
 
 fn chrome_button_rect(button_x: f32, button_width: f32) -> (f32, f32, f32, f32) {
+    let size = CHROME_BUTTON_SIZE
+        .min(button_width)
+        .clamp(0.0, TITLE_BAR_HEIGHT);
     (
-        button_x + CHROME_BUTTON_PAD_X,
-        CHROME_BUTTON_PAD_Y,
-        (button_width - CHROME_BUTTON_PAD_X * 2.0).max(0.0),
-        (TITLE_BAR_HEIGHT - CHROME_BUTTON_PAD_Y * 2.0).max(0.0),
+        button_x + (button_width - size) / 2.0,
+        (TITLE_BAR_HEIGHT - size) / 2.0,
+        size,
+        size,
     )
 }
 
@@ -134,6 +136,17 @@ fn truncate_tab_title(title: &str, max_width: f32, cell_width: f32) -> Cow<'_, s
     truncated.extend(title.chars().take(max_cells - 1));
     truncated.push('…');
     Cow::Owned(truncated)
+}
+
+fn centered_tab_title_x(tab: &TabState, title: &str, cell_width: f32) -> f32 {
+    let label_x = tab.x + TAB_PADDING;
+    let label_width = tab.max_text_width().max(0.0);
+    if title.is_empty() || label_width <= 0.0 || cell_width <= 0.0 {
+        return label_x;
+    }
+
+    let title_width = title.chars().count() as f32 * cell_width;
+    label_x + ((label_width - title_width).max(0.0) / 2.0)
 }
 
 impl Renderer {
@@ -418,10 +431,10 @@ impl Renderer {
                 dim(self.color_scheme.foreground, 0.62)
             };
 
-            // Calculate text position and max width
-            let text_x = tab.x + TAB_PADDING;
+            // Calculate text position and max width.
             let max_text_width = tab.max_text_width();
             let title = truncate_tab_title(&tab.title, max_text_width, self.cell_width);
+            let text_x = centered_tab_title_x(tab, title.as_ref(), self.cell_width);
 
             let (vertices, indices) = self.text_renderer.build_label_vertices(
                 &title,
@@ -522,11 +535,14 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::{
-        center_vertices_in_rect, chrome_button_inner_rect, chrome_button_rect, chrome_symbol_color,
-        close_symbol_color, dim, mix, truncate_tab_title, vertex_bounds, CHROME_BUTTON_BORDER,
-        CHROME_BUTTON_PAD_X, CHROME_BUTTON_PAD_Y, TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH,
+        center_vertices_in_rect, centered_tab_title_x, chrome_button_inner_rect,
+        chrome_button_rect, chrome_symbol_color, close_symbol_color, dim, mix, truncate_tab_title,
+        vertex_bounds, CHROME_BUTTON_BORDER, CHROME_BUTTON_SIZE, TITLE_BAR_HEIGHT,
+        WINDOW_BUTTON_WIDTH,
     };
     use crate::renderer::{Rgba, Vertex};
+    use crate::tabs::TabState;
+    use crate::terminal_manager::TabId;
 
     #[test]
     fn truncate_tab_title_keeps_short_titles() {
@@ -550,6 +566,29 @@ mod tests {
     fn truncate_tab_title_handles_no_space() {
         assert_eq!(truncate_tab_title("long", 0.0, 10.0).as_ref(), "");
         assert_eq!(truncate_tab_title("long", 10.0, 0.0).as_ref(), "");
+    }
+
+    #[test]
+    fn centered_tab_title_x_centers_short_titles_in_label_area() {
+        let tab = test_tab_state(0.0, 200.0);
+
+        assert_eq!(centered_tab_title_x(&tab, "Tab", 10.0), 76.0);
+    }
+
+    #[test]
+    fn centered_tab_title_x_keeps_truncated_titles_inside_label_area() {
+        let tab = test_tab_state(0.0, 80.0);
+        let title = truncate_tab_title("long-title", tab.max_text_width(), 10.0);
+
+        assert_eq!(title.as_ref(), "lo…");
+        assert_eq!(centered_tab_title_x(&tab, title.as_ref(), 10.0), 16.0);
+    }
+
+    #[test]
+    fn centered_tab_title_x_returns_label_start_for_empty_titles() {
+        let tab = test_tab_state(20.0, 200.0);
+
+        assert_eq!(centered_tab_title_x(&tab, "", 10.0), 32.0);
     }
 
     #[test]
@@ -587,13 +626,13 @@ mod tests {
     }
 
     #[test]
-    fn chrome_button_rect_applies_padding() {
+    fn chrome_button_rect_centers_square_in_slot() {
         let (x, y, width, height) = chrome_button_rect(100.0, WINDOW_BUTTON_WIDTH);
 
-        assert_eq!(x, 100.0 + CHROME_BUTTON_PAD_X);
-        assert_eq!(y, CHROME_BUTTON_PAD_Y);
-        assert_eq!(width, WINDOW_BUTTON_WIDTH - CHROME_BUTTON_PAD_X * 2.0);
-        assert_eq!(height, TITLE_BAR_HEIGHT - CHROME_BUTTON_PAD_Y * 2.0);
+        assert_eq!(x, 100.0 + (WINDOW_BUTTON_WIDTH - CHROME_BUTTON_SIZE) / 2.0);
+        assert_eq!(y, (TITLE_BAR_HEIGHT - CHROME_BUTTON_SIZE) / 2.0);
+        assert_eq!(width, CHROME_BUTTON_SIZE);
+        assert_eq!(height, CHROME_BUTTON_SIZE);
     }
 
     #[test]
@@ -618,6 +657,17 @@ mod tests {
         center_vertices_in_rect(&mut vertices, 10.0, 20.0, 20.0, 20.0);
 
         assert_eq!(vertex_bounds(&vertices), Some((18.0, 22.0, 26.0, 34.0)));
+    }
+
+    fn test_tab_state(x: f32, width: f32) -> TabState {
+        TabState {
+            id: TabId::new(0),
+            title: "Tab".to_string(),
+            x,
+            width,
+            is_active: false,
+            is_hovered: false,
+        }
     }
 
     fn test_vertex(x: f32, y: f32) -> Vertex {

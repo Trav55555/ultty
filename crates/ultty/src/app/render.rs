@@ -9,6 +9,8 @@ use ultty::renderer::{OverlayState, ScrollbarState};
 impl App {
     /// Render the terminal.
     pub(super) fn render(&mut self) {
+        self.update_window_corner_radius();
+
         let trace_start = pipeline_trace_enabled().then(Instant::now);
         let pane_count = self.terminal_manager.pane_count();
 

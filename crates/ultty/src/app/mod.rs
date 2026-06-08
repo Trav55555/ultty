@@ -43,6 +43,12 @@ const WINDOW_RESIZE_INNER_EDGE_HITBOX: f32 = 8.0;
 /// Length of the inside corner resize grab area along each window edge.
 const WINDOW_RESIZE_INNER_CORNER_HITBOX: f32 = 18.0;
 
+/// Rounded corner radius for floating client-side decorated windows.
+const WINDOW_CORNER_RADIUS: f32 = 10.0;
+
+/// Tolerance for recognizing compositor-tiled half/quarter window sizes.
+const TILED_WINDOW_SIZE_TOLERANCE_PX: u32 = 48;
+
 /// Cursor blink interval (how long cursor stays on/off).
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
@@ -60,6 +66,9 @@ const PTY_CATCHUP_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 /// Duration to keep tab widths stable after a tab close.
 const TAB_CLOSE_WIDTH_FREEZE_DURATION: Duration = Duration::from_secs(3);
+
+/// Cadence for best-effort active app/path tab title refreshes.
+const TAB_TITLE_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 /// User events sent to the winit application loop.
 #[derive(Debug, Clone, Copy)]
@@ -90,6 +99,8 @@ pub struct App {
     tab_width_freeze: Option<TabWidthFreeze>,
     /// Last render time for frame limiting
     last_render: Instant,
+    /// Last time best-effort tab display titles were refreshed.
+    last_tab_title_refresh: Instant,
     /// Whether we need to redraw
     needs_redraw: bool,
     /// Pending close request (from window control button).
@@ -276,6 +287,7 @@ impl App {
             tab_bar,
             tab_width_freeze: None,
             last_render: Instant::now(),
+            last_tab_title_refresh: Instant::now() - TAB_TITLE_REFRESH_INTERVAL,
             needs_redraw: true,
             pending_close: false,
             modifiers: ModifiersState::empty(),
@@ -541,6 +553,8 @@ impl App {
 
     /// Update the tab bar state from the terminal manager.
     fn update_tab_bar(&mut self) {
+        self.last_tab_title_refresh = Instant::now();
+
         let total_width = self.window.inner_size().width as f32;
         let active_tab_id = self
             .terminal_manager
@@ -549,9 +563,11 @@ impl App {
             .unwrap_or_else(|| ultty::terminal_manager::TabId::new(0));
 
         let tab_width_override = self.active_tab_width_freeze().map(|freeze| freeze.width);
+        let tab_titles = self.terminal_manager.tab_display_titles();
 
-        self.tab_bar.update_with_tab_width_override(
+        self.tab_bar.update_with_titles_and_tab_width_override(
             self.terminal_manager.tabs(),
+            &tab_titles,
             active_tab_id,
             total_width,
             tab_width_override,
@@ -979,6 +995,7 @@ impl App {
 
         // Resize renderer
         self.renderer.resize(&self.surface, size.width, size.height);
+        self.update_window_corner_radius();
         self.clear_tab_width_freeze();
         self.update_tab_bar();
 
@@ -1008,6 +1025,60 @@ impl App {
 
         self.needs_redraw = true;
     }
+
+    fn update_window_corner_radius(&mut self) {
+        let size = self.window.inner_size();
+        let monitor_size = self.window.current_monitor().map(|monitor| monitor.size());
+        let square_corners =
+            window_should_use_square_corners(size, monitor_size, self.window.is_maximized());
+        let radius = if square_corners {
+            0.0
+        } else {
+            WINDOW_CORNER_RADIUS
+        };
+        self.renderer.set_window_corner_radius(radius);
+    }
+}
+
+fn window_should_use_square_corners(
+    window_size: PhysicalSize<u32>,
+    monitor_size: Option<PhysicalSize<u32>>,
+    is_maximized: bool,
+) -> bool {
+    if is_maximized {
+        return true;
+    }
+
+    let Some(monitor_size) = monitor_size else {
+        return false;
+    };
+
+    is_tiled_window_size(window_size, monitor_size)
+}
+
+fn is_tiled_window_size(window_size: PhysicalSize<u32>, monitor_size: PhysicalSize<u32>) -> bool {
+    if window_size.width == 0
+        || window_size.height == 0
+        || monitor_size.width == 0
+        || monitor_size.height == 0
+    {
+        return false;
+    }
+
+    let width_full = near_scaled_dimension(window_size.width, monitor_size.width, 1);
+    let width_half = near_scaled_dimension(window_size.width, monitor_size.width, 2);
+    let height_full = near_scaled_dimension(window_size.height, monitor_size.height, 1);
+    let height_half = near_scaled_dimension(window_size.height, monitor_size.height, 2);
+
+    (width_full || width_half) && (height_full || height_half)
+}
+
+fn near_scaled_dimension(value: u32, target: u32, divisor: u32) -> bool {
+    let scaled = value as i64 * divisor as i64;
+    let target = target as i64;
+    let tolerance = TILED_WINDOW_SIZE_TOLERANCE_PX as i64 * divisor as i64;
+
+    (scaled - target).abs() <= tolerance
 }
 
 fn resize_direction_at_window_edge(
@@ -1067,9 +1138,13 @@ fn resize_direction_at_window_edge(
 mod tests {
     use std::time::Duration;
 
+    use winit::dpi::PhysicalSize;
     use winit::window::ResizeDirection;
 
-    use super::{resize_direction_at_window_edge, MAINTENANCE_POLL_INTERVAL};
+    use super::{
+        resize_direction_at_window_edge, window_should_use_square_corners,
+        MAINTENANCE_POLL_INTERVAL,
+    };
 
     #[test]
     fn maintenance_poll_interval_is_not_frame_cadence() {
@@ -1130,5 +1205,58 @@ mod tests {
             resize_direction_at_window_edge(19.0, 8.0, 800.0, 600.0),
             Some(ResizeDirection::North)
         );
+    }
+
+    #[test]
+    fn square_corners_for_maximized_windows() {
+        assert!(window_should_use_square_corners(
+            PhysicalSize::new(800, 600),
+            None,
+            true
+        ));
+    }
+
+    #[test]
+    fn square_corners_for_half_and_quarter_monitor_sizes() {
+        let monitor = Some(PhysicalSize::new(1920, 1080));
+
+        assert!(window_should_use_square_corners(
+            PhysicalSize::new(960, 1080),
+            monitor,
+            false
+        ));
+        assert!(window_should_use_square_corners(
+            PhysicalSize::new(1920, 540),
+            monitor,
+            false
+        ));
+        assert!(window_should_use_square_corners(
+            PhysicalSize::new(960, 540),
+            monitor,
+            false
+        ));
+    }
+
+    #[test]
+    fn square_corners_tolerate_os_panel_offsets() {
+        assert!(window_should_use_square_corners(
+            PhysicalSize::new(960, 1032),
+            Some(PhysicalSize::new(1920, 1080)),
+            false
+        ));
+    }
+
+    #[test]
+    fn rounded_corners_for_freeform_window_sizes() {
+        assert!(!window_should_use_square_corners(
+            PhysicalSize::new(1000, 700),
+            Some(PhysicalSize::new(1920, 1080)),
+            false
+        ));
+        assert!(!window_should_use_square_corners(
+            PhysicalSize::new(1000, 700),
+            None,
+            false
+        ));
     }
 }

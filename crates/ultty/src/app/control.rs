@@ -178,7 +178,7 @@ impl App {
                         current_tab: active_idx,
                         tab_count: self.terminal_manager.tab_count(),
                         focused: true,
-                        cwd: None,
+                        cwd: terminal_working_directory(terminal),
                     }))
                 } else {
                     ControlResponse::Error {
@@ -197,10 +197,16 @@ impl App {
                     .enumerate()
                     .map(|(i, tab)| TabInfo {
                         index: i,
-                        title: tab.title.clone(),
+                        title: self.terminal_manager.tab_display_title(tab.id),
                         active: Some(tab.id) == active_tab_id,
-                        pid: None,
-                        cwd: None,
+                        pid: self
+                            .terminal_manager
+                            .terminal(tab.focused_terminal)
+                            .map(|terminal| terminal.event_loop.child_pid()),
+                        cwd: self
+                            .terminal_manager
+                            .terminal(tab.focused_terminal)
+                            .and_then(terminal_working_directory),
                     })
                     .collect();
                 ControlResponse::Data(ControlData::Tabs(tabs))
@@ -290,7 +296,11 @@ impl App {
                         title.as_deref(),
                     )
                 } else {
-                    self.terminal_manager.create_tab()
+                    let result = self.terminal_manager.create_tab();
+                    if let (Ok(tab_id), Some(title)) = (result.as_ref(), title.as_deref()) {
+                        self.terminal_manager.set_tab_title(*tab_id, title);
+                    }
+                    result
                 };
 
                 match result {
@@ -700,6 +710,17 @@ impl App {
     }
 }
 
+fn terminal_working_directory(
+    terminal: &ultty::terminal_manager::ManagedTerminal,
+) -> Option<String> {
+    terminal
+        .event_loop
+        .terminal()
+        .working_directory()
+        .map(str::to_string)
+        .or_else(|| terminal.event_loop.child_working_directory())
+}
+
 fn control_auth_token_exists() -> bool {
     ultty_protocol::control::auth_token_path().is_file()
 }
@@ -900,6 +921,22 @@ mod tests {
             regex: false,
             timeout_ms: 100,
         }));
+    }
+
+    #[test]
+    fn terminal_working_directory_prefers_terminal_reported_cwd() {
+        let mut manager = ultty::terminal_manager::TerminalManager::new(80, 24).unwrap();
+        manager
+            .focused_terminal_mut()
+            .unwrap()
+            .event_loop
+            .terminal_mut()
+            .set_working_directory("/tmp/ultty-control-cwd".to_string());
+
+        assert_eq!(
+            terminal_working_directory(manager.focused_terminal().unwrap()).as_deref(),
+            Some("/tmp/ultty-control-cwd")
+        );
     }
 
     #[test]

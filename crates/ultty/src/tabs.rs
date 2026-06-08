@@ -5,7 +5,7 @@
 use crate::terminal_manager::{Tab, TabId};
 
 /// Height of the window control band in pixels (at default scale).
-pub const TITLE_BAR_HEIGHT: f32 = 44.0;
+pub const TITLE_BAR_HEIGHT: f32 = 36.0;
 
 /// Height of the tab row in pixels (at default scale).
 pub const TAB_ROW_HEIGHT: f32 = 28.0;
@@ -16,23 +16,23 @@ pub const TAB_BAR_HEIGHT: f32 = TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT;
 /// Padding inside each tab.
 pub const TAB_PADDING: f32 = 12.0;
 
+/// Distance between the tab close target and the tab's right edge.
+pub const TAB_CLOSE_EDGE_PADDING: f32 = 8.0;
+
 /// Width and height of a tab close target.
-pub const TAB_CLOSE_BUTTON_SIZE: f32 = 12.0;
+pub const TAB_CLOSE_BUTTON_SIZE: f32 = 18.0;
 
 /// Width and height of the visible close-hover affordance.
-pub const TAB_CLOSE_HOVER_SIZE: f32 = 18.0;
+pub const TAB_CLOSE_HOVER_SIZE: f32 = 22.0;
 
 /// Minimum tab width.
 pub const MIN_TAB_WIDTH: f32 = 80.0;
 
-/// Maximum tab width.
-pub const MAX_TAB_WIDTH: f32 = 140.0;
-
 /// Width reserved for window control buttons (close, maximize, minimize) on the right.
-pub const WINDOW_CONTROLS_WIDTH: f32 = 128.0;
+pub const WINDOW_CONTROLS_WIDTH: f32 = 108.0;
 
 /// Width of each window control button.
-pub const WINDOW_BUTTON_WIDTH: f32 = 40.0;
+pub const WINDOW_BUTTON_WIDTH: f32 = 36.0;
 
 /// Which window control button was clicked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +103,24 @@ impl TabBarState {
         total_width: f32,
         tab_width_override: Option<f32>,
     ) {
+        self.update_with_titles_and_tab_width_override(
+            tabs,
+            &[],
+            active_tab,
+            total_width,
+            tab_width_override,
+        );
+    }
+
+    /// Update the tab bar state with computed display titles and optional fixed tab width.
+    pub fn update_with_titles_and_tab_width_override(
+        &mut self,
+        tabs: &[Tab],
+        titles: &[String],
+        active_tab: TabId,
+        total_width: f32,
+        tab_width_override: Option<f32>,
+    ) {
         self.total_width = total_width;
         self.tabs.clear();
 
@@ -124,8 +142,8 @@ impl TabBarState {
         let ideal_width = usable_width / tab_count as f32;
         let tab_width = tab_width_override
             .filter(|width| width.is_finite() && *width > 0.0)
-            .map(|width| width.clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH))
-            .unwrap_or_else(|| ideal_width.clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH));
+            .map(|width| width.max(MIN_TAB_WIDTH))
+            .unwrap_or_else(|| ideal_width.max(MIN_TAB_WIDTH));
 
         // "+" button is at the left edge
         self.new_tab_button_x = 0.0;
@@ -139,7 +157,10 @@ impl TabBarState {
 
             self.tabs.push(TabState {
                 id: tab.id,
-                title: tab.title.clone(),
+                title: titles
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| tab.title.clone()),
                 x,
                 width: tab_width,
                 is_active,
@@ -380,12 +401,12 @@ impl TabState {
     /// Get the maximum text width.
     pub fn max_text_width(&self) -> f32 {
         // Leave space for close button
-        self.width - TAB_PADDING * 2.0 - TAB_CLOSE_BUTTON_SIZE - 4.0
+        self.width - TAB_PADDING - TAB_CLOSE_EDGE_PADDING - TAB_CLOSE_BUTTON_SIZE - 4.0
     }
 
     /// Get the close button's left edge.
     pub fn close_button_x(&self) -> f32 {
-        self.x + self.width - TAB_PADDING - TAB_CLOSE_BUTTON_SIZE
+        self.x + self.width - TAB_CLOSE_EDGE_PADDING - TAB_CLOSE_BUTTON_SIZE
     }
 
     /// Get the close hover affordance bounds.
@@ -524,11 +545,10 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn tab_width_clamped_to_max() {
-        // 2 tabs in 1000px => ideal 500px, clamped to MAX_TAB_WIDTH.
+    fn tab_width_fills_available_rail_equally() {
         let state = bar_with(2, 0, 1000.0);
         for tab in &state.tabs {
-            assert_eq!(tab.width, MAX_TAB_WIDTH);
+            assert_eq!(tab.width, 500.0);
         }
     }
 
@@ -543,7 +563,7 @@ mod tests {
 
     #[test]
     fn tab_width_in_range_not_clamped() {
-        // 10 tabs in 900px => ideal 90 => between MIN_TAB_WIDTH and MAX_TAB_WIDTH.
+        // 10 tabs in 900px => ideal 90 => above MIN_TAB_WIDTH.
         let state = bar_with(10, 0, 900.0);
         let usable = 900.0;
         let expected = usable / 10.0;
@@ -570,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_width_override_is_clamped_to_valid_range() {
+    fn tab_width_override_is_clamped_to_minimum_only() {
         let mut state = TabBarState::new();
         let tabs = make_tabs(8);
 
@@ -581,7 +601,7 @@ mod tests {
 
         state.update_with_tab_width_override(&tabs, TabId::new(0), 900.0, Some(500.0));
         for tab in &state.tabs {
-            assert_eq!(tab.width, MAX_TAB_WIDTH);
+            assert_eq!(tab.width, 500.0);
         }
     }
 
@@ -1052,7 +1072,8 @@ mod tests {
     fn tab_state_max_text_width() {
         let state = bar_with(4, 0, 800.0);
         let tab = &state.tabs[0];
-        let expected = tab.width - TAB_PADDING * 2.0 - TAB_CLOSE_BUTTON_SIZE - 4.0;
+        let expected =
+            tab.width - TAB_PADDING - TAB_CLOSE_EDGE_PADDING - TAB_CLOSE_BUTTON_SIZE - 4.0;
         assert_eq!(tab.max_text_width(), expected);
         assert!(tab.max_text_width() > 0.0);
     }
@@ -1063,7 +1084,7 @@ mod tests {
         let tab = &state.tabs[0];
         assert_eq!(
             tab.close_button_x(),
-            tab.x + tab.width - TAB_PADDING - TAB_CLOSE_BUTTON_SIZE
+            tab.x + tab.width - TAB_CLOSE_EDGE_PADDING - TAB_CLOSE_BUTTON_SIZE
         );
         let (x, y, w, h) = tab.close_hover_bounds();
         assert_eq!(w, TAB_CLOSE_HOVER_SIZE);
@@ -1134,9 +1155,9 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn min_less_than_max_tab_width() {
+    fn min_tab_width_positive() {
         const {
-            assert!(MIN_TAB_WIDTH < MAX_TAB_WIDTH);
+            assert!(MIN_TAB_WIDTH > 0.0);
         }
     }
 
@@ -1151,6 +1172,13 @@ mod tests {
     fn tab_padding_positive() {
         const {
             assert!(TAB_PADDING > 0.0);
+        }
+    }
+
+    #[test]
+    fn tab_close_edge_padding_positive() {
+        const {
+            assert!(TAB_CLOSE_EDGE_PADDING > 0.0);
         }
     }
 

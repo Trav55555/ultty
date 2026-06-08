@@ -39,6 +39,8 @@ use powerline::{powerline_triangle, triangle_points, PowerlineTriangle};
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
+const DEFAULT_WINDOW_CORNER_RADIUS: f32 = 10.0;
+
 #[allow(clippy::too_many_arguments)]
 fn append_powerline_triangle(
     vertices: &mut Vec<Vertex>,
@@ -187,6 +189,10 @@ pub struct Uniforms {
 
 impl Uniforms {
     pub fn orthographic(width: f32, height: f32) -> Self {
+        Self::orthographic_with_corner_radius(width, height, DEFAULT_WINDOW_CORNER_RADIUS)
+    }
+
+    fn orthographic_with_corner_radius(width: f32, height: f32, corner_radius: f32) -> Self {
         // Orthographic projection: (0,0) top-left, (width, height) bottom-right
         Self {
             projection: [
@@ -195,7 +201,7 @@ impl Uniforms {
                 [0.0, 0.0, 1.0, 0.0],
                 [-1.0, 1.0, 0.0, 1.0],
             ],
-            window_params: [width, height, 10.0, 0.0], // width, height, corner_radius, padding
+            window_params: [width, height, corner_radius, 0.0],
         }
     }
 }
@@ -240,6 +246,8 @@ pub struct Renderer {
     pane_offset_y: f32,
     /// Window opacity (0.0-1.0)
     opacity: f32,
+    /// Window corner radius used by the shader clip mask.
+    window_corner_radius: f32,
     /// Cached image textures (terminal sixel images)
     image_cache: std::collections::HashMap<ImageId, CachedImageTexture>,
     /// Cached image textures for native protocol ImageWidget, keyed by RegionId
@@ -441,6 +449,7 @@ impl Renderer {
             pane_offset_x: 0.0,
             pane_offset_y: 0.0,
             opacity: 1.0,
+            window_corner_radius: DEFAULT_WINDOW_CORNER_RADIUS,
             image_cache: std::collections::HashMap::new(),
             native_image_cache: std::collections::HashMap::new(),
             animated_progress: std::collections::HashMap::new(),
@@ -569,6 +578,7 @@ impl Renderer {
             pane_offset_x: 0.0,
             pane_offset_y: 0.0,
             opacity: 1.0,
+            window_corner_radius: DEFAULT_WINDOW_CORNER_RADIUS,
             image_cache: std::collections::HashMap::new(),
             native_image_cache: std::collections::HashMap::new(),
             animated_progress: std::collections::HashMap::new(),
@@ -756,7 +766,32 @@ impl Renderer {
         surface.configure(&self.device, &self.config);
 
         // Update projection matrix
-        let uniforms = Uniforms::orthographic(width as f32, height as f32);
+        let uniforms = Uniforms::orthographic_with_corner_radius(
+            width as f32,
+            height as f32,
+            self.window_corner_radius,
+        );
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+    }
+
+    /// Set the shader corner radius used for top-level window clipping.
+    pub fn set_window_corner_radius(&mut self, radius: f32) {
+        let radius = radius.max(0.0);
+        if (self.window_corner_radius - radius).abs() < f32::EPSILON {
+            return;
+        }
+
+        self.window_corner_radius = radius;
+        if self.config.width == 0 || self.config.height == 0 {
+            return;
+        }
+
+        let uniforms = Uniforms::orthographic_with_corner_radius(
+            self.config.width as f32,
+            self.config.height as f32,
+            self.window_corner_radius,
+        );
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }

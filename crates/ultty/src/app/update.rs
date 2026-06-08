@@ -110,11 +110,16 @@ impl App {
 
         // Get the focused terminal ID for title updates
         let focused_id = self.terminal_manager.focused_terminal().map(|t| t.id);
+        let tab_state_before_cleanup = (
+            self.terminal_manager.tab_count(),
+            self.terminal_manager.active_tab().map(|tab| tab.id),
+        );
 
         // Process all terminals
         match self.terminal_manager.process_all() {
             Ok(all_events) => {
                 let mut content_changed = false;
+                let mut tab_titles_changed = false;
                 for (terminal_id, events) in all_events {
                     for event in events {
                         match event {
@@ -149,6 +154,7 @@ impl App {
                                 }
                             }
                             TerminalEvent::TitleChanged(title) => {
+                                tab_titles_changed = true;
                                 // Only set window title from focused terminal
                                 if Some(terminal_id) == focused_id {
                                     self.window.set_title(&title);
@@ -200,7 +206,18 @@ impl App {
 
                 // Clean up exited terminals
                 self.terminal_manager.cleanup_exited();
-                self.update_tab_bar();
+                let tab_state_after_cleanup = (
+                    self.terminal_manager.tab_count(),
+                    self.terminal_manager.active_tab().map(|tab| tab.id),
+                );
+                let tab_structure_changed = tab_state_before_cleanup != tab_state_after_cleanup;
+                if tab_title_refresh_due(
+                    now,
+                    self.last_tab_title_refresh,
+                    tab_titles_changed || tab_structure_changed,
+                ) {
+                    self.update_tab_bar();
+                }
 
                 // Check if all terminals have exited
                 if self.terminal_manager.all_exited() {
@@ -289,6 +306,17 @@ fn catchup_poll_deadline(
     }
 }
 
+fn tab_title_refresh_due(now: Instant, last_refresh: Instant, force: bool) -> bool {
+    if force {
+        return true;
+    }
+
+    match now.checked_duration_since(last_refresh) {
+        Some(elapsed) => elapsed >= super::TAB_TITLE_REFRESH_INTERVAL,
+        None => false,
+    }
+}
+
 pub(super) fn pipeline_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -305,7 +333,9 @@ pub(super) fn pipeline_trace_enabled() -> bool {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{catchup_poll_deadline, render_delay_for_sync_state, should_render};
+    use super::{
+        catchup_poll_deadline, render_delay_for_sync_state, should_render, tab_title_refresh_due,
+    };
 
     #[test]
     fn should_render_when_dirty_and_frame_interval_elapsed() {
@@ -356,6 +386,40 @@ mod tests {
             None
         );
         assert_eq!(catchup_poll_deadline(now, now, true), None);
+    }
+
+    #[test]
+    fn tab_title_refresh_due_respects_interval() {
+        let now = Instant::now();
+
+        assert!(!tab_title_refresh_due(
+            now,
+            now - super::super::TAB_TITLE_REFRESH_INTERVAL + Duration::from_millis(1),
+            false
+        ));
+        assert!(tab_title_refresh_due(
+            now,
+            now - super::super::TAB_TITLE_REFRESH_INTERVAL,
+            false
+        ));
+    }
+
+    #[test]
+    fn tab_title_refresh_due_honors_force() {
+        let now = Instant::now();
+
+        assert!(tab_title_refresh_due(now, now, true));
+    }
+
+    #[test]
+    fn tab_title_refresh_due_ignores_future_last_refresh() {
+        let now = Instant::now();
+
+        assert!(!tab_title_refresh_due(
+            now,
+            now + Duration::from_millis(1),
+            false
+        ));
     }
 
     #[test]

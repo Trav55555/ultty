@@ -6,14 +6,18 @@
 //! - Updating terminal state
 //! - Handling user input
 
-use crate::grid::{Dimensions, Terminal, TerminalHandler};
-use crate::protocol::ansi::AnsiParser;
-use crate::pty::{Child, PtySize};
-use polling::{Event, Events, Poller};
+#[cfg(target_os = "linux")]
+use std::fs;
 use std::io;
 use std::os::fd::RawFd;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+use polling::{Event, Events, Poller};
+
+use crate::grid::{Dimensions, Terminal, TerminalHandler};
+use crate::protocol::ansi::AnsiParser;
+use crate::pty::{Child, PtySize};
 
 /// Events produced by the terminal event loop.
 #[derive(Debug, Clone)]
@@ -163,6 +167,21 @@ impl EventLoop {
     /// Get the PTY master file descriptor for readiness wakeups.
     pub fn pty_fd(&self) -> RawFd {
         self.child.pty_fd()
+    }
+
+    /// Get the child process ID.
+    pub fn child_pid(&self) -> u32 {
+        self.child.pid().as_raw() as u32
+    }
+
+    /// Best-effort name of the foreground process attached to this PTY.
+    pub fn foreground_process_name(&self) -> Option<String> {
+        foreground_process_name(self.child.pty_fd())
+    }
+
+    /// Best-effort current working directory of the PTY child.
+    pub fn child_working_directory(&self) -> Option<String> {
+        child_working_directory(self.child_pid())
     }
 
     /// Get exit status if child has exited.
@@ -377,6 +396,98 @@ impl EventLoop {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn foreground_process_name(pty_fd: RawFd) -> Option<String> {
+    // SAFETY: `pty_fd` is an open PTY master file descriptor owned by the child
+    // wrapper. `tcgetpgrp` only queries kernel metadata for that terminal.
+    let pgrp = unsafe { nix::libc::tcgetpgrp(pty_fd) };
+    if pgrp <= 0 {
+        return None;
+    }
+
+    process_name_for_group(pgrp)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn foreground_process_name(_pty_fd: RawFd) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn child_working_directory(pid: u32) -> Option<String> {
+    fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+        .filter(|path| !path.is_empty())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn child_working_directory(_pid: u32) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn process_name_for_group(pgrp: i32) -> Option<String> {
+    let mut fallback = None;
+
+    for entry in fs::read_dir("/proc").ok()? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if entry.file_name().to_string_lossy().parse::<i32>().is_err() {
+            continue;
+        }
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(process) = parse_proc_stat(&stat) else {
+            continue;
+        };
+
+        if process.pgrp != pgrp || is_shell_process(&process.name) {
+            continue;
+        }
+
+        if process.pid == pgrp {
+            return Some(process.name);
+        }
+
+        fallback.get_or_insert(process.name);
+    }
+
+    fallback
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+struct ProcStat {
+    pid: i32,
+    pgrp: i32,
+    name: String,
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_stat(stat: &str) -> Option<ProcStat> {
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    let pid = stat[..open].trim().parse().ok()?;
+    let name = stat[open + 1..close].to_string();
+    let mut fields = stat[close + 1..].split_whitespace();
+    let _state = fields.next()?;
+    let _ppid = fields.next()?;
+    let pgrp = fields.next()?.parse().ok()?;
+
+    Some(ProcStat { pid, pgrp, name })
+}
+
+#[cfg(target_os = "linux")]
+fn is_shell_process(name: &str) -> bool {
+    matches!(
+        name.rsplit('/').next().unwrap_or(name),
+        "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "elvish"
+    )
+}
+
 fn pipeline_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -392,6 +503,29 @@ fn pipeline_trace_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_stat_handles_process_names_with_spaces() {
+        let stat = "1234 (name with space) S 1 5678 5678 0 -1 4194304";
+
+        assert_eq!(
+            parse_proc_stat(stat),
+            Some(ProcStat {
+                pid: 1234,
+                pgrp: 5678,
+                name: "name with space".to_string(),
+            })
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shell_process_filter_recognizes_common_shells() {
+        assert!(is_shell_process("zsh"));
+        assert!(is_shell_process("/bin/bash"));
+        assert!(!is_shell_process("nvim"));
+    }
 
     #[test]
     fn create_event_loop() {
