@@ -1,0 +1,11 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+expression: output
+---
+┌──────────────────────────────────┐
+│Player                            │
+│                                  │
+│ Ready HP 12                      │
+│charge ==============--------- 65%│
+│                                  │
+└──────────────────────────────────┘

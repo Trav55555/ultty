@@ -4,7 +4,8 @@
 
 For the canonical project vocabulary used in architecture work, see
 [`CONTEXT.md`](../CONTEXT.md). For accepted design decisions, see
-[`docs/adr/`](adr/).
+[`docs/adr/`](adr/). For the immediate-output / retained-internals
+layout contract, see [`docs/LAYOUT_MODEL.md`](LAYOUT_MODEL.md).
 
 Ultty is composed of three main crates:
 
@@ -174,11 +175,12 @@ Ultty performance is judged first by idle efficiency and user-visible interactio
 
 ## Key Design Decisions
 
-1. **Terminal-side layout**: Apps declare constraints, terminal computes positions
-2. **Retained mode scene graph**: Terminal owns the tree, apps send diffs
-3. **Atomic frames**: BeginFrame/EndFrame prevents tearing
-4. **Dual-mode framework**: ANSI mode and Ultty-native mode are both product commitments; native mode adds capability uplift
-5. **Native session decomposition**: command application, frame batching, and layout output have named seams behind `NativeSession`
+1. **Immediate output, retained internals**: `ulttui` apps rebuild views from state each render while backends retain protocol/layout caches
+2. **Terminal-side layout**: Apps declare constraints, terminal computes positions
+3. **Retained mode scene graph**: Terminal owns the tree, apps send diffs
+4. **Atomic frames**: BeginFrame/EndFrame prevents tearing
+5. **Dual-mode framework**: ANSI mode and Ultty-native mode are both product commitments; native mode adds capability uplift
+6. **Native session decomposition**: command application, frame batching, and layout output have named seams behind `NativeSession`
 
 ## File Organization
 

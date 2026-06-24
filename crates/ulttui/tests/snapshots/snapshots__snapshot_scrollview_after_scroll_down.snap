@@ -1,0 +1,9 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+expression: output
+---
+┌ScrollView [42%]────────────┐
+│Scroll: 3/7                 │
+│                            │
+│                            │
+└────────────────────────────┘

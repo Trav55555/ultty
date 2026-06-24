@@ -544,8 +544,12 @@ impl NativeSession {
         }))
     }
 
-    /// Hit-test: find the deepest region containing the point (in cell coords).
-    /// Returns (region_id, region-local x, region-local y).
+    /// Hit-test against the last committed computed layout.
+    ///
+    /// During input handling this is effectively previous-frame hit testing:
+    /// events are routed using what the user could actually see, not a
+    /// speculative next layout. Returns `(region_id, region-local x,
+    /// region-local y)` in cell coordinates.
     pub fn hit_test(&self, x: f32, y: f32) -> (RegionId, f32, f32) {
         let mut best = (RegionId::ROOT, x, y);
         self.hit_test_recursive(self.scene.root(), x, y, &mut best);
@@ -563,7 +567,8 @@ impl NativeSession {
             let c = &region.computed;
             if x >= c.x && x < c.x + c.width && y >= c.y && y < c.y + c.height {
                 *best = (region_id, x - c.x, y - c.y);
-                // Check children (later children are rendered on top, so iterate forward)
+                // Iterate in render order; because matches overwrite `best`,
+                // later siblings win overlapping hit tests.
                 for &child_id in &region.children {
                     self.hit_test_recursive(child_id, x, y, best);
                 }
@@ -740,6 +745,49 @@ mod tests {
         assert_eq!(id, RegionId::new(1));
         assert_eq!(lx, 5.0); // 15 - 10
         assert_eq!(ly, 3.0); // 8 - 5
+    }
+
+    #[test]
+    fn hit_test_overlapping_siblings_prefers_later_rendered_child() {
+        let mut session = make_session();
+        if let Some(root) = session.scene.get_mut(RegionId::ROOT) {
+            root.computed = ComputedLayout {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 24.0,
+                ..Default::default()
+            };
+        }
+
+        let first_id = RegionId::new(1);
+        let mut first = Region::new(first_id);
+        first.parent = Some(RegionId::ROOT);
+        first.computed = ComputedLayout {
+            x: 10.0,
+            y: 5.0,
+            width: 20.0,
+            height: 10.0,
+            ..Default::default()
+        };
+        session.scene.insert(first);
+
+        let second_id = RegionId::new(2);
+        let mut second = Region::new(second_id);
+        second.parent = Some(RegionId::ROOT);
+        second.computed = ComputedLayout {
+            x: 15.0,
+            y: 6.0,
+            width: 20.0,
+            height: 10.0,
+            ..Default::default()
+        };
+        session.scene.insert(second);
+
+        let (id, lx, ly) = session.hit_test(16.0, 7.0);
+        assert_eq!(id, second_id);
+        assert_eq!(lx, 1.0);
+        assert_eq!(ly, 1.0);
     }
 
     #[test]

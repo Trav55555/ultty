@@ -28,6 +28,17 @@ fn buffer_contains(buffer: &Buffer, needle: &str) -> bool {
     content.contains(needle)
 }
 
+fn find_symbol(buffer: &Buffer, symbol: &str) -> Option<(u16, u16)> {
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            if buffer[(x, y)].symbol() == symbol {
+                return Some((x, y));
+            }
+        }
+    }
+    None
+}
+
 mod text_widget {
     use super::*;
 
@@ -196,7 +207,8 @@ mod layout_tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert!(buffer[(0, 0)].symbol().contains('1') || buffer_contains(buffer, "1"));
+        assert_eq!(buffer[(0, 0)].symbol(), "1");
+        assert_eq!(buffer[(0, 1)].symbol(), "2");
     }
 
     #[test]
@@ -213,8 +225,11 @@ mod layout_tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert!(buffer_contains(buffer, "L"));
-        assert!(buffer_contains(buffer, "R"));
+        let left = find_symbol(buffer, "L").expect("left child should render");
+        let right = find_symbol(buffer, "R").expect("right child should render");
+        assert_eq!(left.1, 0);
+        assert_eq!(right.1, 0);
+        assert!(right.0 > left.0, "row should place children left-to-right");
     }
 
     #[test]

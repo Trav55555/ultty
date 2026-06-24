@@ -107,7 +107,13 @@ pub trait Application: Sized {
         None
     }
 
-    /// Render the UI.
+    /// Render the UI from current application state.
+    ///
+    /// `view` is an immediate-mode output function: each render pass should
+    /// rebuild a fresh view tree from `self` rather than depending on identity
+    /// or mutation of previously returned `View` values. Persistent interactive
+    /// state belongs in the application (or in app-owned widget state), while
+    /// backends may retain protocol/layout caches internally between frames.
     fn view(&self) -> impl View;
 
     /// Run the application.

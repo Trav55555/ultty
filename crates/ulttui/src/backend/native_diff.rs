@@ -1,4 +1,11 @@
 //! Native protocol frame diffing.
+//!
+//! Ulttui view trees are rebuilt in immediate-mode style each render pass, but
+//! native protocol regions are retained by the terminal. This optimizer maps the
+//! fresh frame's traversal-order `RegionId`s onto the previous retained
+//! snapshot. Until stable native keys are wired through the protocol, sibling
+//! insertion/reorder changes are treated as content/style updates to existing
+//! traversal slots rather than semantic moves.
 
 use std::collections::HashMap;
 
@@ -190,6 +197,23 @@ mod tests {
         }
     }
 
+    fn create_region(id: RegionId) -> AppMessage {
+        AppMessage::CreateRegion {
+            id,
+            parent: RegionId::ROOT,
+            insert_index: -1,
+            constraints: Constraints::default(),
+            style: Style::default(),
+        }
+    }
+
+    fn set_text(id: RegionId, text: &str) -> AppMessage {
+        AppMessage::SetContent {
+            id,
+            content: Content::Text(TextContent::new(text)),
+        }
+    }
+
     #[test]
     fn optimize_converts_text_growth_to_append_content() {
         let id = RegionId::new(1);
@@ -267,6 +291,46 @@ mod tests {
         assert_eq!(
             next.get(&id).map(|r| &r.content),
             Some(&Content::RichText(RichText::new().text("hello world")))
+        );
+    }
+
+    #[test]
+    fn optimize_documents_traversal_order_identity_on_sibling_insert() {
+        let id_1 = RegionId::new(1);
+        let id_2 = RegionId::new(2);
+        let id_3 = RegionId::new(3);
+
+        let mut previous = HashMap::new();
+        previous.insert(id_1, snapshot_with_text("A"));
+        previous.insert(id_2, snapshot_with_text("B"));
+
+        // Semantic children changed from [A, B] to [X, A, B]. Because region
+        // IDs are traversal-order slots today, the optimizer mutates slot 1 to
+        // X and slot 2 to A, then creates slot 3 for B. A future stable-keyed
+        // native identity layer can preserve semantic A/B identity instead.
+        let frame = vec![
+            create_region(id_1),
+            set_text(id_1, "X"),
+            create_region(id_2),
+            set_text(id_2, "A"),
+            create_region(id_3),
+            set_text(id_3, "B"),
+        ];
+
+        let (outgoing, next) = optimize_frame_messages(&previous, frame, false);
+
+        assert!(outgoing.iter().any(|m| {
+            matches!(m, AppMessage::SetContent { id, content: Content::Text(text) } if *id == id_1 && text.text == "X")
+        }));
+        assert!(outgoing.iter().any(|m| {
+            matches!(m, AppMessage::SetContent { id, content: Content::Text(text) } if *id == id_2 && text.text == "A")
+        }));
+        assert!(outgoing
+            .iter()
+            .any(|m| matches!(m, AppMessage::CreateRegion { id, .. } if *id == id_3)));
+        assert_eq!(
+            next.get(&id_3).map(|r| &r.content),
+            Some(&Content::Text(TextContent::new("B")))
         );
     }
 

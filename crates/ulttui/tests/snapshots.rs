@@ -6,6 +6,7 @@
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
+use ulttui::event::{Event, Modifiers, MouseEvent, MouseEventKind};
 use ulttui::widgets::{
     Badge, Button, Card, Checkbox, Collapsible, Column, DiffView, Divider, DockLayout, Image,
     Inset, List, MarkdownView, Modal, ProgressBar, Row, ScrollView, Section, Select, Spacer,
@@ -462,6 +463,20 @@ fn snapshot_card() {
 }
 
 #[test]
+fn snapshot_card_nested_content() {
+    let card = Card::new()
+        .child(Text::new("Player"))
+        .child(
+            Row::new()
+                .child(Badge::success("Ready"))
+                .child(Text::new("HP 12")),
+        )
+        .child(ProgressBar::new(65.0).label("charge"));
+    let output = render_to_string(&card, 36, 7);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
 fn snapshot_section_with_title() {
     let section = Section::new()
         .title("My Section")
@@ -525,6 +540,45 @@ fn snapshot_narrow_column() {
         .child(Text::new("Hello world"))
         .child(Button::new("OK"));
     let output = render_to_string(&col, 5, 3);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_column_with_gap() {
+    let col = Column::new()
+        .gap(1.0)
+        .child(Text::new("Top"))
+        .child(Text::new("Middle"))
+        .child(Text::new("Bottom"));
+    let output = render_to_string(&col, 20, 7);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_row_with_fixed_and_flex_children() {
+    let row = Row::new()
+        .gap(2.0)
+        .child(Button::new("Fixed"))
+        .child(Spacer)
+        .child(Button::new("Tail"));
+    let output = render_to_string(&row, 40, 1);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_scrollview_after_scroll_down() {
+    let mut scroll = ScrollView::new();
+    scroll.set_content_height(10.0);
+    scroll.set_viewport_height(3.0);
+    let handled = scroll.on_event(&Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        x: 0,
+        y: 0,
+        modifiers: Modifiers::default(),
+    }));
+    assert!(handled);
+
+    let output = render_to_string(&scroll, 30, 5);
     insta::assert_snapshot!(output);
 }
 

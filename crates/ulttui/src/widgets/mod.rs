@@ -144,8 +144,23 @@ pub trait View {
     fn render_ansi(&self, _frame: &mut Frame, _area: Rect) {}
 
     /// Widget ID for focus management. Override in focusable widgets.
+    ///
+    /// IDs should be stable across renders. Immediate-mode view values are
+    /// rebuilt every frame, so app code must not rely on Rust object identity
+    /// for focus or interaction continuity.
     fn widget_id(&self) -> Option<&str> {
         None
+    }
+
+    /// Stable semantic key for native rendering identity.
+    ///
+    /// This currently defaults to `widget_id()` and is reserved for native
+    /// backends that need to map immediate-mode output onto retained protocol
+    /// regions. If overridden, keep the key stable for the same logical widget
+    /// across frames; traversal-order identity is not stable across sibling
+    /// insertions or reorders.
+    fn native_key(&self) -> Option<&str> {
+        self.widget_id()
     }
 
     fn is_focusable(&self) -> bool {
@@ -217,6 +232,10 @@ impl<T: View> View for &T {
         (*self).widget_id()
     }
 
+    fn native_key(&self) -> Option<&str> {
+        (*self).native_key()
+    }
+
     fn is_focusable(&self) -> bool {
         (*self).is_focusable()
     }
@@ -285,6 +304,12 @@ mod tests {
     fn default_is_not_focusable() {
         let v = EmptyView;
         assert!(!v.is_focusable());
+    }
+
+    #[test]
+    fn default_native_key_follows_widget_id() {
+        let v = EmptyView;
+        assert_eq!(v.native_key(), v.widget_id());
     }
 
     #[test]
