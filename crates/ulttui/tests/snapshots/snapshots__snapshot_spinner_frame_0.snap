@@ -3,3 +3,5 @@ source: crates/ulttui/tests/snapshots.rs
 expression: output
 ---
 ⠋
+-- styles --
+0:0-19 fg=Rgb(97, 175, 239) bg=Reset mod=NONE

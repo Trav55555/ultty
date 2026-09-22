@@ -3,6 +3,8 @@
 //! Focus state is thread-local and owned by the UI/render thread.
 //! Do not access `with_current`/`with_current_mut` from background tasks.
 
+use crate::widgets::View;
+
 /// Tracks which widget is currently focused.
 #[derive(Debug, Default)]
 pub struct FocusManager {
@@ -24,9 +26,37 @@ impl FocusManager {
         self.focusable_ids.clear();
     }
 
-    /// Register a focusable widget ID (called during render for each focusable widget).
-    pub fn register(&mut self, id: String) {
+    /// Register a focusable widget ID for this frame.
+    ///
+    /// Returns `false` (and registers nothing) when the same ID was already
+    /// registered this frame: duplicate IDs would make Tab navigation loop on
+    /// one widget, so the second registration is a bug in the view.
+    pub fn register(&mut self, id: String) -> bool {
+        if self.focusable_ids.contains(&id) {
+            tracing::warn!("focusable widget id {id:?} registered twice in one frame; ignoring");
+            return false;
+        }
         self.focusable_ids.push(id);
+        true
+    }
+
+    /// Register every focusable widget in `view`'s tree, in render order.
+    ///
+    /// This is the single, backend-independent registration point: the runner
+    /// calls it once per frame before rendering, so ANSI and native modes
+    /// always agree on the Tab order.
+    pub fn register_view_tree(&mut self, view: &dyn View) {
+        if view.is_focusable() {
+            if let Some(id) = view.widget_id() {
+                self.register(id.to_string());
+            }
+        }
+        view.for_each_child(&mut |child| self.register_view_tree(child));
+    }
+
+    /// Focusable widget IDs registered this frame, in Tab order.
+    pub fn focusable_ids(&self) -> &[String] {
+        &self.focusable_ids
     }
 
     /// Get the currently focused widget ID.
@@ -228,6 +258,40 @@ mod tests {
         focus.focus("b");
         assert!(focus.is_focused("b"));
         assert!(!focus.is_focused("a"));
+    }
+
+    #[test]
+    fn register_rejects_duplicate_id_in_same_frame() {
+        let mut focus = FocusManager::new();
+        assert!(focus.register("a".to_string()));
+        assert!(!focus.register("a".to_string()));
+        assert_eq!(focus.focusable_ids(), ["a".to_string()]);
+
+        focus.begin_frame();
+        assert!(focus.register("a".to_string()));
+    }
+
+    #[test]
+    fn register_view_tree_collects_focusable_ids_in_render_order() {
+        use crate::widgets::{Button, Column, Row, ScrollView, Text, TextInput};
+
+        let view = Column::new()
+            .child(TextInput::new().id("name"))
+            .child(Text::new("not focusable"))
+            .child(
+                Row::new()
+                    .child(Button::new("Save").id("save"))
+                    .child(ScrollView::new().child(TextInput::new().id("email"))),
+            )
+            .child(Button::new("anonymous"));
+
+        let mut focus = FocusManager::new();
+        focus.register_view_tree(&view);
+
+        assert_eq!(
+            focus.focusable_ids(),
+            ["name".to_string(), "save".to_string(), "email".to_string()]
+        );
     }
 
     #[test]

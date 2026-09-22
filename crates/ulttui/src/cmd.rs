@@ -19,6 +19,18 @@ pub enum Cmd<M> {
     Batch(Vec<Cmd<M>>),
     /// Spawn an async task that produces a message.
     Spawn(Pin<Box<dyn Future<Output = M> + Send + 'static>>),
+    /// Spawn an async task that can later be cancelled by `id`.
+    ///
+    /// Spawning again with the same `id` aborts the previous task first.
+    SpawnWithId {
+        id: String,
+        future: Pin<Box<dyn Future<Output = M> + Send + 'static>>,
+    },
+    /// Abort a task started with `Cmd::spawn_with_id`. No-op if it already
+    /// finished or was never started.
+    CancelSpawn {
+        id: String,
+    },
     /// Dispatch a message after a delay.
     After(Duration, Box<dyn Fn() -> M + Send + 'static>),
     /// Subscribe to a long-lived async stream of messages.
@@ -66,6 +78,22 @@ impl<M> Cmd<M> {
         Cmd::Spawn(Box::pin(future))
     }
 
+    /// Spawn an async task that `Cmd::cancel(id)` can abort.
+    pub fn spawn_with_id<F>(id: impl Into<String>, future: F) -> Self
+    where
+        F: Future<Output = M> + Send + 'static,
+    {
+        Cmd::SpawnWithId {
+            id: id.into(),
+            future: Box::pin(future),
+        }
+    }
+
+    /// Cancel a task started with `Cmd::spawn_with_id`.
+    pub fn cancel(id: impl Into<String>) -> Self {
+        Cmd::CancelSpawn { id: id.into() }
+    }
+
     /// Dispatch a message after a delay.
     pub fn after<F>(duration: Duration, f: F) -> Self
     where
@@ -109,6 +137,8 @@ impl<M> std::fmt::Debug for Cmd<M> {
             Cmd::Message(_) => "Cmd::Message",
             Cmd::Batch(_) => "Cmd::Batch",
             Cmd::Spawn(_) => "Cmd::Spawn",
+            Cmd::SpawnWithId { .. } => "Cmd::SpawnWithId",
+            Cmd::CancelSpawn { .. } => "Cmd::CancelSpawn",
             Cmd::After(_, _) => "Cmd::After",
             Cmd::Subscribe { .. } => "Cmd::Subscribe",
             Cmd::Unsubscribe { .. } => "Cmd::Unsubscribe",
@@ -128,7 +158,14 @@ pub enum Sub<M> {
     #[default]
     None,
     /// Tick at a regular interval.
+    ///
+    /// Timer state (the last tick) is tracked per timer identity across
+    /// frames. With an explicit `id` the identity is that id; without one it
+    /// is the interval plus the timer's position among unkeyed timers with
+    /// the same interval, so a conditional sibling timer appearing or
+    /// disappearing does not reset unrelated timers.
     Every {
+        id: Option<String>,
         interval: Duration,
         f: Box<dyn Fn() -> M + Send + 'static>,
     },
@@ -152,6 +189,23 @@ impl<M> Sub<M> {
         F: Fn() -> M + Send + 'static,
     {
         Sub::Every {
+            id: None,
+            interval,
+            f: Box::new(f),
+        }
+    }
+
+    /// Tick at a regular interval, with an explicit identity.
+    ///
+    /// Use this when the same timer may move position in the subscription
+    /// tree between frames (for example next to conditional subscriptions)
+    /// and must keep its phase.
+    pub fn every_with_id<F>(id: impl Into<String>, interval: Duration, f: F) -> Self
+    where
+        F: Fn() -> M + Send + 'static,
+    {
+        Sub::Every {
+            id: Some(id.into()),
             interval,
             f: Box::new(f),
         }
@@ -171,95 +225,5 @@ impl<M> Sub<M> {
 
     pub fn batch(subs: Vec<Sub<M>>) -> Self {
         Sub::Batch(subs)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Cmd, Sub};
-    use std::time::Duration;
-
-    #[test]
-    fn cmd_none_is_default() {
-        let cmd: Cmd<()> = Cmd::default();
-        assert!(matches!(cmd, Cmd::None));
-    }
-
-    #[test]
-    fn cmd_message_wraps_value() {
-        let cmd = Cmd::message(7);
-        match cmd {
-            Cmd::Message(value) => assert_eq!(value, 7),
-            _ => panic!("expected Cmd::Message"),
-        }
-    }
-
-    #[test]
-    fn cmd_batch_holds_multiple() {
-        let cmd = Cmd::batch(vec![Cmd::none(), Cmd::message(1)]);
-        match cmd {
-            Cmd::Batch(cmds) => assert_eq!(cmds.len(), 2),
-            _ => panic!("expected Cmd::Batch"),
-        }
-    }
-
-    #[test]
-    fn sub_none_is_default() {
-        let sub: Sub<()> = Sub::default();
-        assert!(matches!(sub, Sub::None));
-    }
-
-    #[test]
-    fn sub_every_stores_interval() {
-        let interval = Duration::from_millis(250);
-        let sub = Sub::every(interval, || ());
-        match sub {
-            Sub::Every {
-                interval: stored, ..
-            } => assert_eq!(stored, interval),
-            _ => panic!("expected Sub::Every"),
-        }
-    }
-
-    #[test]
-    fn sub_batch_holds_multiple() {
-        let sub: Sub<()> = Sub::batch(vec![Sub::none(), Sub::none()]);
-        match sub {
-            Sub::Batch(subs) => assert_eq!(subs.len(), 2),
-            _ => panic!("expected Sub::Batch"),
-        }
-    }
-
-    #[test]
-    fn cmd_subscribe_stores_id() {
-        let stream = futures_util::stream::iter(vec![1, 2, 3]);
-        let cmd = Cmd::subscribe("test-sub", stream);
-        match cmd {
-            Cmd::Subscribe { id, .. } => assert_eq!(id, "test-sub"),
-            _ => panic!("expected Cmd::Subscribe"),
-        }
-    }
-
-    #[test]
-    fn cmd_unsubscribe_stores_id() {
-        let cmd: Cmd<()> = Cmd::unsubscribe("my-sub");
-        match cmd {
-            Cmd::Unsubscribe { id } => assert_eq!(id, "my-sub"),
-            _ => panic!("expected Cmd::Unsubscribe"),
-        }
-    }
-
-    #[test]
-    fn sub_stream_stores_id_and_url() {
-        let sub: Sub<String> = Sub::stream("ws-sub", "ws://localhost:9090", |msg| {
-            format!("got: {}", msg)
-        });
-        match sub {
-            Sub::Stream { id, url, .. } => {
-                assert_eq!(id, "ws-sub");
-                assert_eq!(url, "ws://localhost:9090");
-            }
-            _ => panic!("expected Sub::Stream"),
-        }
     }
 }

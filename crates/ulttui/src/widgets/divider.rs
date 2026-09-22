@@ -73,8 +73,7 @@ impl View for Divider {
         let content = if self.horizontal {
             self.ch.to_string().repeat(area.width as usize)
         } else {
-            std::iter::repeat(self.ch)
-                .take(area.height as usize)
+            std::iter::repeat_n(self.ch, area.height as usize)
                 .map(|ch| ch.to_string())
                 .collect::<Vec<_>>()
                 .join("\n")

@@ -7,3 +7,12 @@ expression: output
 │Line 2                      │
 │Line 3                      │
 └────────────────────────────┘
+-- styles --
+0:0-29 fg=Rgb(108, 112, 134) bg=Reset mod=NONE
+1:0-0 fg=Rgb(108, 112, 134) bg=Reset mod=NONE
+1:29-29 fg=Rgb(108, 112, 134) bg=Reset mod=NONE
+2:0-0 fg=Rgb(108, 112, 134) bg=Reset mod=NONE
+2:29-29 fg=Rgb(108, 112, 134) bg=Reset mod=NONE
+3:0-0 fg=Rgb(108, 112, 134) bg=Reset mod=NONE
+3:29-29 fg=Rgb(108, 112, 134) bg=Reset mod=NONE
+4:0-29 fg=Rgb(108, 112, 134) bg=Reset mod=NONE

@@ -7,7 +7,7 @@ use ulttui::backend::mock::MockBackend;
 use ulttui::backend::Backend;
 use ulttui::cmd::Cmd;
 use ulttui::event::{Event, Key, KeyEvent, Modifiers};
-use ulttui::widgets::{Text, View};
+use ulttui::widgets::{Button, Column, Text, View};
 
 // --- Simple counter app for testing ---
 
@@ -154,19 +154,57 @@ fn event_loop_processes_key_events() {
     assert_eq!(*final_count, 3);
 }
 
+/// Records the `focused_id` the runner attached to every key event.
+struct FocusProbe {
+    focused_ids: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+impl Application for FocusProbe {
+    type Message = ();
+
+    fn on_event(&mut self, event: &Event) -> Option<()> {
+        if let Event::Key(ke) = event {
+            self.focused_ids.lock().unwrap().push(ke.focused_id.clone());
+        }
+        None
+    }
+
+    fn view(&self) -> impl View {
+        Column::new()
+            .child(Button::new("First").id("first"))
+            .child(Button::new("Second").id("second"))
+    }
+}
+
 #[test]
-fn tab_navigation_does_not_crash() {
+fn tab_navigation_cycles_focus_across_registered_widgets() {
     let events = vec![
         make_tab(false),
         make_tab(true),
         make_tab(false),
+        make_key('x'),
         Some(Event::Quit),
     ];
-    let shared = Arc::new(Mutex::new(0));
-    let app = TestCounter { count: 0, shared };
+    let focused_ids = Arc::new(Mutex::new(Vec::new()));
+    let app = FocusProbe {
+        focused_ids: Arc::clone(&focused_ids),
+    };
     let mock = MockBackend::new(events);
     let runner = App::new_with_backend(app, Backend::Mock(mock));
     runner.run().unwrap();
+
+    // The first render focuses "first"; each Tab (left unhandled by the app)
+    // moves focus and the next key event reports the new focused widget.
+    let seen = focused_ids.lock().unwrap();
+    assert_eq!(
+        *seen,
+        vec![
+            Some("first".to_string()),
+            Some("second".to_string()),
+            Some("first".to_string()),
+            Some("second".to_string()),
+        ]
+    );
 }
 
 #[test]

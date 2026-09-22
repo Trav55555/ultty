@@ -14,7 +14,21 @@ use ulttui::widgets::{
 };
 
 /// Render a widget and return its buffer as a string for snapshot comparison.
+///
+/// Panics if nothing was drawn: every widget snapshotted through this helper
+/// is expected to render something, so an empty snapshot is a regression, not
+/// a baseline. Use [`render_to_string_allow_empty`] for the rare widget whose
+/// correct output is nothing.
 fn render_to_string(widget: &impl View, width: u16, height: u16) -> String {
+    let output = render_to_string_allow_empty(widget, width, height);
+    assert!(
+        !output.is_empty(),
+        "widget rendered nothing into a {width}x{height} area"
+    );
+    output
+}
+
+fn render_to_string_allow_empty(widget: &impl View, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
 
@@ -28,15 +42,45 @@ fn render_to_string(widget: &impl View, width: u16, height: u16) -> String {
     buffer_to_string(buffer)
 }
 
-/// Convert a ratatui buffer to a human-readable string.
+/// Convert a ratatui buffer to a human-readable string: the symbols first,
+/// then a summary of every run of non-default styling (`row:x0-x1 fg=.. bg=..
+/// mod=..`), so style regressions show up in snapshots too.
 fn buffer_to_string(buffer: &ratatui::buffer::Buffer) -> String {
+    use ratatui::style::{Color, Modifier};
+
     let mut lines = Vec::new();
+    let mut style_runs = Vec::new();
 
     for y in 0..buffer.area.height {
         let mut line = String::new();
+        let mut run: Option<(u16, u16, Color, Color, Modifier)> = None;
         for x in 0..buffer.area.width {
             let cell = &buffer[(x, y)];
             line.push_str(cell.symbol());
+
+            let styled = cell.fg != Color::Reset
+                || cell.bg != Color::Reset
+                || cell.modifier != Modifier::empty();
+            match run {
+                Some((x0, x1, fg, bg, modifier))
+                    if styled
+                        && x1 + 1 == x
+                        && (fg, bg, modifier) == (cell.fg, cell.bg, cell.modifier) =>
+                {
+                    run = Some((x0, x, fg, bg, modifier));
+                }
+                _ => {
+                    if let Some(finished) = run.take() {
+                        style_runs.push((y, finished));
+                    }
+                    if styled {
+                        run = Some((x, x, cell.fg, cell.bg, cell.modifier));
+                    }
+                }
+            }
+        }
+        if let Some(finished) = run.take() {
+            style_runs.push((y, finished));
         }
         // Trim trailing spaces but keep the line
         lines.push(line.trim_end().to_string());
@@ -47,7 +91,16 @@ fn buffer_to_string(buffer: &ratatui::buffer::Buffer) -> String {
         lines.pop();
     }
 
-    lines.join("\n")
+    let mut output = lines.join("\n");
+    if !style_runs.is_empty() {
+        output.push_str("\n-- styles --");
+        for (y, (x0, x1, fg, bg, modifier)) in style_runs {
+            output.push_str(&format!(
+                "\n{y}:{x0}-{x1} fg={fg:?} bg={bg:?} mod={modifier:?}"
+            ));
+        }
+    }
+    output
 }
 
 #[test]
@@ -528,7 +581,8 @@ fn snapshot_modal_hidden() {
         .title("Hidden")
         .body("Should not appear")
         .visible(false);
-    let output = render_to_string(&modal, 60, 12);
+    let output = render_to_string_allow_empty(&modal, 60, 12);
+    assert!(output.is_empty(), "hidden modal must draw nothing");
     insta::assert_snapshot!(output);
 }
 
@@ -579,6 +633,23 @@ fn snapshot_scrollview_after_scroll_down() {
     assert!(handled);
 
     let output = render_to_string(&scroll, 30, 5);
+    insta::assert_snapshot!(output);
+}
+
+#[test]
+fn snapshot_scrollview_scrolled_shows_window_of_child() {
+    let lines: Vec<String> = (0..20).map(|i| format!("Line {i}")).collect();
+    let mut scroll = ScrollView::new().child(Text::new(lines.join("\n")));
+    scroll.set_content_height(20.0);
+    scroll.set_viewport_height(5.0);
+    scroll.scroll_to(10.0);
+
+    // 7 rows: 2 for the border, 5 for the viewport.
+    let output = render_to_string(&scroll, 20, 7);
+    assert!(output.contains("Line 10"));
+    assert!(output.contains("Line 14"));
+    assert!(!output.contains("Line 9"));
+    assert!(!output.contains("Line 15"));
     insta::assert_snapshot!(output);
 }
 

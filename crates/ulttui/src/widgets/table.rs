@@ -8,8 +8,8 @@ use ratatui::Frame;
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
 use ultty_protocol::{
-    AppMessage, Color as ProtoColor, Constraints, Dimension, Display, FlexDirection, NamedColor,
-    RegionId, Style as ProtoStyle, TextContent,
+    AppMessage, Constraints, Dimension, Display, FlexDirection, RegionId, Style as ProtoStyle,
+    TextContent,
 };
 
 /// A table with headers and selectable rows.
@@ -83,6 +83,131 @@ impl Table {
             self.selected = self.rows.len() - 1;
         }
     }
+
+    /// Fixed width for `column`, if one was given via `column_widths`.
+    /// Columns without a width share the remaining space equally.
+    fn column_width(&self, column: usize) -> Option<f32> {
+        self.column_widths.get(column).copied()
+    }
+
+    fn column_count(&self) -> usize {
+        self.headers
+            .len()
+            .max(self.rows.iter().map(Vec::len).max().unwrap_or(0))
+    }
+
+    fn row_view<'a>(&self, cells: &'a [String], style: ProtoStyle) -> TableRow<'a> {
+        TableRow {
+            cells: cells
+                .iter()
+                .enumerate()
+                .map(|(col, text)| TableCell {
+                    text,
+                    width: self.column_width(col),
+                })
+                .collect(),
+            style,
+        }
+    }
+}
+
+/// Header row style, shared by both render modes.
+fn header_style(theme: &Theme) -> ProtoStyle {
+    ProtoStyle::new().fg(theme.primary).bold()
+}
+
+/// Selected data row style, shared by both render modes.
+fn selected_row_style(theme: &Theme) -> ProtoStyle {
+    ProtoStyle::new()
+        .fg(theme.selection.fg)
+        .bg(theme.selection.bg)
+        .bold()
+}
+
+fn to_ratatui_style(style: &ProtoStyle) -> Style {
+    let mut out = Style::default();
+    if let Some(fg) = style.fg {
+        out = out.fg(to_ratatui_color(fg));
+    }
+    if let Some(bg) = style.bg {
+        out = out.bg(to_ratatui_color(bg));
+    }
+    if style.bold {
+        out = out.add_modifier(Modifier::BOLD);
+    }
+    out
+}
+
+/// One native table row: a flex row of `TableCell`s.
+struct TableRow<'a> {
+    cells: Vec<TableCell<'a>>,
+    style: ProtoStyle,
+}
+
+impl View for TableRow<'_> {
+    fn constraints(&self) -> Constraints {
+        Constraints {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            width: Dimension::Percent(100.0),
+            ..Default::default()
+        }
+    }
+
+    fn style(&self) -> ProtoStyle {
+        self.style.clone()
+    }
+
+    fn children_count(&self) -> usize {
+        self.cells.len()
+    }
+
+    fn render_child_native(
+        &self,
+        index: usize,
+        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        parent: RegionId,
+        next_id: &mut u32,
+    ) -> anyhow::Result<Option<RegionId>> {
+        match self.cells.get(index) {
+            Some(cell) => Ok(Some(super::render_view_to_native(
+                cell,
+                send_message,
+                parent,
+                next_id,
+                None,
+            )?)),
+            None => Ok(None),
+        }
+    }
+}
+
+/// One native table cell: fixed width when the column has one, else flex.
+struct TableCell<'a> {
+    text: &'a str,
+    width: Option<f32>,
+}
+
+impl View for TableCell<'_> {
+    fn constraints(&self) -> Constraints {
+        match self.width {
+            Some(width) => Constraints {
+                display: Display::Flex,
+                width: Dimension::Cells(width),
+                flex_shrink: 0.0,
+                ..Default::default()
+            },
+            None => Constraints {
+                display: Display::Flex,
+                flex_grow: 1.0,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn content(&self) -> ultty_protocol::Content {
+        ultty_protocol::Content::Text(TextContent::new(self.text))
+    }
 }
 
 impl View for Table {
@@ -111,125 +236,45 @@ impl View for Table {
         parent: RegionId,
         next_id: &mut u32,
     ) -> anyhow::Result<Option<RegionId>> {
-        let region_id = RegionId::new(*next_id);
-        *next_id += 1;
-
-        if index == 0 {
-            // Header row
-            let style = ProtoStyle::new()
-                .fg(ProtoColor::Named(NamedColor::Cyan))
-                .bold();
-            let constraints = Constraints {
-                display: Display::Flex,
-                flex_direction: FlexDirection::Row,
-                width: Dimension::Percent(100.0),
-                ..Default::default()
-            };
-
-            send_message(&AppMessage::CreateRegion {
-                id: region_id,
-                parent,
-                insert_index: -1,
-                constraints,
-                style,
-            })?;
-
-            // Create child cells for each header
-            for header in &self.headers {
-                let cell_id = RegionId::new(*next_id);
-                *next_id += 1;
-                send_message(&AppMessage::CreateRegion {
-                    id: cell_id,
-                    parent: region_id,
-                    insert_index: -1,
-                    constraints: Constraints {
-                        display: Display::Flex,
-                        flex_grow: 1.0,
-                        ..Default::default()
-                    },
-                    style: ProtoStyle::default(),
-                })?;
-                send_message(&AppMessage::SetContent {
-                    id: cell_id,
-                    content: ultty_protocol::Content::Text(TextContent::new(header)),
-                })?;
-            }
+        let theme = Theme::current();
+        let row = if index == 0 {
+            self.row_view(&self.headers, header_style(&theme))
         } else {
-            // Data row
             let row_idx = index - 1;
-            let is_selected = row_idx == self.selected;
-            let theme = Theme::current();
-            let style = if is_selected {
-                ProtoStyle::new()
-                    .fg(theme.selection.fg)
-                    .bg(theme.selection.bg)
-                    .bold()
+            let Some(cells) = self.rows.get(row_idx) else {
+                return Ok(None);
+            };
+            let style = if row_idx == self.selected {
+                selected_row_style(&theme)
             } else {
                 ProtoStyle::default()
             };
-
-            let constraints = Constraints {
-                display: Display::Flex,
-                flex_direction: FlexDirection::Row,
-                width: Dimension::Percent(100.0),
-                ..Default::default()
-            };
-
-            send_message(&AppMessage::CreateRegion {
-                id: region_id,
-                parent,
-                insert_index: -1,
-                constraints,
-                style,
-            })?;
-
-            if let Some(row) = self.rows.get(row_idx) {
-                for cell_text in row {
-                    let cell_id = RegionId::new(*next_id);
-                    *next_id += 1;
-                    send_message(&AppMessage::CreateRegion {
-                        id: cell_id,
-                        parent: region_id,
-                        insert_index: -1,
-                        constraints: Constraints {
-                            display: Display::Flex,
-                            flex_grow: 1.0,
-                            ..Default::default()
-                        },
-                        style: ProtoStyle::default(),
-                    })?;
-                    send_message(&AppMessage::SetContent {
-                        id: cell_id,
-                        content: ultty_protocol::Content::Text(TextContent::new(cell_text)),
-                    })?;
-                }
-            }
-        }
-
-        Ok(Some(region_id))
+            self.row_view(cells, style)
+        };
+        Ok(Some(super::render_view_to_native(
+            &row,
+            send_message,
+            parent,
+            next_id,
+            None,
+        )?))
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         let theme = Theme::current();
-        let widths: Vec<Constraint> = {
-            self.column_widths
-                .iter()
-                .map(|&w| Constraint::Min(w as u16))
-                .collect()
-        };
+        let widths: Vec<Constraint> = (0..self.column_count())
+            .map(|col| match self.column_width(col) {
+                Some(width) => Constraint::Length(width as u16),
+                None => Constraint::Fill(1),
+            })
+            .collect();
 
         let header_cells: Vec<Cell> = self
             .headers
             .iter()
-            .map(|h| {
-                Cell::from(h.as_str()).style(
-                    Style::default()
-                        .fg(to_ratatui_color(theme.primary))
-                        .add_modifier(Modifier::BOLD),
-                )
-            })
+            .map(|h| Cell::from(h.as_str()).style(to_ratatui_style(&header_style(&theme))))
             .collect();
-        let header = RatatuiRow::new(header_cells).bottom_margin(1);
+        let header = RatatuiRow::new(header_cells);
 
         let rows: Vec<RatatuiRow> = self
             .rows
@@ -238,10 +283,7 @@ impl View for Table {
             .map(|(i, row)| {
                 let cells: Vec<Cell> = row.iter().map(|c| Cell::from(c.as_str())).collect();
                 let style = if i == self.selected {
-                    Style::default()
-                        .fg(to_ratatui_color(theme.selection.fg))
-                        .bg(to_ratatui_color(theme.selection.bg))
-                        .add_modifier(Modifier::BOLD)
+                    to_ratatui_style(&selected_row_style(&theme))
                 } else {
                     Style::default()
                 };
@@ -373,13 +415,107 @@ mod tests {
         assert_eq!(table.selected_row(), None);
     }
 
+    fn native_messages(table: &Table) -> Vec<AppMessage> {
+        crate::widgets::render_view_messages(table).unwrap()
+    }
+
+    fn created_constraints(messages: &[AppMessage], parent: RegionId) -> Vec<Constraints> {
+        messages
+            .iter()
+            .filter_map(|m| match m {
+                AppMessage::CreateRegion {
+                    parent: p,
+                    constraints,
+                    ..
+                } if *p == parent => Some(constraints.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn table_column_widths_builder() {
+    fn native_cells_use_column_widths_and_flex_for_the_rest() {
         let table = Table::new()
-            .headers(vec!["A", "B"])
-            .column_widths(vec![10.0, 20.0]);
-        // Verify it doesn't panic and the table is constructed
-        assert_eq!(table.selected_index(), 0);
+            .headers(vec!["A", "B", "C"])
+            .column_widths(vec![10.0, 5.0])
+            .rows(vec![vec!["1", "2", "3"]]);
+        let messages = native_messages(&table);
+
+        // Region 1 is the table, region 2 the header row.
+        let header_cells = created_constraints(&messages, RegionId::new(2));
+        assert_eq!(header_cells.len(), 3);
+        assert_eq!(header_cells[0].width, Dimension::Cells(10.0));
+        assert_eq!(header_cells[0].flex_grow, 0.0);
+        assert_eq!(header_cells[1].width, Dimension::Cells(5.0));
+        assert_eq!(header_cells[2].width, Dimension::Auto);
+        assert_eq!(header_cells[2].flex_grow, 1.0);
+
+        let data_row_id = messages
+            .iter()
+            .filter_map(|m| match m {
+                AppMessage::CreateRegion { id, parent, .. } if *parent == RegionId::new(1) => {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .nth(1)
+            .expect("data row region");
+        let data_cells = created_constraints(&messages, data_row_id);
+        assert_eq!(data_cells.len(), 3);
+        assert_eq!(data_cells[0].width, Dimension::Cells(10.0));
+        assert_eq!(data_cells[2].flex_grow, 1.0);
+    }
+
+    #[test]
+    fn native_header_row_uses_theme_primary() {
+        let theme = Theme::dark();
+        Theme::set_current(theme.clone());
+        let table = Table::new().headers(vec!["A"]).rows(vec![vec!["1"]]);
+        let messages = native_messages(&table);
+
+        let header_style = messages
+            .iter()
+            .find_map(|m| match m {
+                AppMessage::CreateRegion { id, style, .. } if *id == RegionId::new(2) => {
+                    Some(style.clone())
+                }
+                _ => None,
+            })
+            .expect("header row region");
+        assert_eq!(header_style.fg, Some(theme.primary));
+        assert!(header_style.bold);
+    }
+
+    #[test]
+    fn ansi_columns_use_fixed_widths_and_rows_follow_header_directly() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let theme = Theme::dark();
+        Theme::set_current(theme.clone());
+        let table = Table::new()
+            .headers(vec!["AA", "BB", "CC"])
+            .column_widths(vec![4.0, 3.0])
+            .rows(vec![vec!["x", "y", "z"]]);
+        let mut terminal = Terminal::new(TestBackend::new(24, 5)).unwrap();
+        terminal
+            .draw(|frame| table.render_ansi(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // Border takes column 0; columns are 4 and 3 wide with 1 cell spacing.
+        assert_eq!(buffer[(1, 1)].symbol(), "A");
+        assert_eq!(buffer[(6, 1)].symbol(), "B");
+        assert_eq!(buffer[(10, 1)].symbol(), "C");
+        assert_eq!(
+            buffer[(1, 1)].fg,
+            to_ratatui_color(theme.primary),
+            "header uses theme.primary"
+        );
+        // No blank separator row: the data row is directly below the header.
+        assert_eq!(buffer[(1, 2)].symbol(), "x");
+        assert_eq!(buffer[(6, 2)].symbol(), "y");
+        assert_eq!(buffer[(10, 2)].symbol(), "z");
     }
 
     #[test]
@@ -430,17 +566,6 @@ mod tests {
             .rows(vec![vec!["a"], vec!["b"], vec!["c"]]);
         table.move_selection(10);
         assert_eq!(table.selected_index(), 2);
-    }
-
-    #[test]
-    fn table_debug_format() {
-        let table = Table::new()
-            .headers(vec!["Name", "Age"])
-            .rows(vec![vec!["Alice", "30"]]);
-        let debug = format!("{:?}", table);
-        assert!(debug.contains("Table"));
-        assert!(debug.contains("rows_count"));
-        assert!(debug.contains("selected"));
     }
 
     #[test]

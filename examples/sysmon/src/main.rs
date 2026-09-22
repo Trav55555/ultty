@@ -5,10 +5,8 @@ mod views;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ulttui::cmd::{Cmd, Sub};
-use ulttui::event::{Event, Key};
-use ulttui::prelude::Application;
-use ulttui::widgets::{Column, Divider, View};
+use ulttui::event::Key;
+use ulttui::prelude::*;
 
 use data::{ProcessInfo, SystemCollector, SystemSnapshot};
 

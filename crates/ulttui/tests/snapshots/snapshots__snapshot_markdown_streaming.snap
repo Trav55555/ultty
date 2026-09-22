@@ -3,3 +3,5 @@ source: crates/ulttui/tests/snapshots.rs
 expression: output
 ---
 Partial markdown response|
+-- styles --
+0:8-15 fg=Reset bg=Reset mod=BOLD

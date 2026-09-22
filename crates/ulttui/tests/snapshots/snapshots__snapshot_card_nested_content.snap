@@ -9,3 +9,22 @@ expression: output
 │charge ==============--------- 65%│
 │                                  │
 └──────────────────────────────────┘
+-- styles --
+0:0-35 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+1:0-0 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+1:1-34 fg=Reset bg=Rgb(49, 50, 68) mod=NONE
+1:35-35 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+2:0-0 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+2:1-34 fg=Reset bg=Rgb(49, 50, 68) mod=NONE
+2:35-35 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+3:0-0 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+3:1-7 fg=Rgb(166, 227, 161) bg=Rgb(49, 50, 68) mod=NONE
+3:8-34 fg=Reset bg=Rgb(49, 50, 68) mod=NONE
+3:35-35 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+4:0-0 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+4:1-34 fg=Rgb(97, 175, 239) bg=Rgb(49, 50, 68) mod=NONE
+4:35-35 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+5:0-0 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+5:1-34 fg=Rgb(97, 175, 239) bg=Rgb(49, 50, 68) mod=NONE
+5:35-35 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+6:0-35 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE

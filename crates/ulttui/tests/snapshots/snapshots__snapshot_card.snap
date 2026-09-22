@@ -7,3 +7,15 @@ expression: output
 │                            │
 │                            │
 └────────────────────────────┘
+-- styles --
+0:0-29 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+1:0-0 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+1:1-28 fg=Reset bg=Rgb(49, 50, 68) mod=NONE
+1:29-29 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+2:0-0 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+2:1-28 fg=Reset bg=Rgb(49, 50, 68) mod=NONE
+2:29-29 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+3:0-0 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+3:1-28 fg=Reset bg=Rgb(49, 50, 68) mod=NONE
+3:29-29 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE
+4:0-29 fg=Rgb(69, 71, 90) bg=Rgb(49, 50, 68) mod=NONE

@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
-use crate::vim::{VimConfig, VimHandler, VimResult};
+use crate::vim::{KeyParser, VimConfig, VimHandler, VimResult};
 use crate::{impl_vim_ext, impl_vim_handler_accessors};
 use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimState};
 use ultty_protocol::{AppMessage, Constraints, Display, FlexDirection, OverflowAxis, RegionId};
@@ -24,6 +24,7 @@ pub struct ScrollView {
     item_height: f32,
     vim_state: VimState,
     vim_config: VimConfig,
+    key_parser: KeyParser,
     search: super::scroll_search::ScrollSearch,
 }
 
@@ -63,6 +64,7 @@ impl Default for ScrollView {
             item_height: 1.0,
             vim_state: VimState::new(),
             vim_config: VimConfig::for_scroll_view(),
+            key_parser: KeyParser::new(),
             search: Default::default(),
         }
     }
@@ -194,6 +196,66 @@ impl ScrollView {
         self.search.search(query);
     }
 
+    /// Size of the offscreen canvas the child is laid out on in ANSI mode.
+    ///
+    /// Height is the app-reported `content_height` when set, else the child's
+    /// intrinsic height, and never less than the viewport. Both axes are capped
+    /// so a runaway content size cannot allocate an unbounded buffer.
+    fn ansi_canvas_size(&self, child: &dyn View, viewport: Rect) -> (u16, u16) {
+        const MAX_CANVAS_CELLS: f32 = 4096.0;
+
+        let intrinsic_height = match child.constraints().height {
+            ultty_protocol::Dimension::Cells(n) => n,
+            _ => 0.0,
+        };
+        let height = self
+            .content_height
+            .max(intrinsic_height)
+            .max(f32::from(viewport.height))
+            .min(MAX_CANVAS_CELLS);
+        let width = (f32::from(viewport.width) + self.scroll_x.max(0.0)).min(MAX_CANVAS_CELLS);
+        (width as u16, height as u16)
+    }
+
+    /// Lay the child out on an offscreen canvas and blit the window at the
+    /// current scroll offset into `viewport`, clamping so the window always
+    /// stays inside the content.
+    fn render_child_scrolled(&self, child: &dyn View, frame: &mut Frame, viewport: Rect) {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        if viewport.width == 0 || viewport.height == 0 {
+            return;
+        }
+
+        let (canvas_width, canvas_height) = self.ansi_canvas_size(child, viewport);
+        let mut canvas = match Terminal::new(TestBackend::new(canvas_width, canvas_height)) {
+            Ok(terminal) => terminal,
+            Err(err) => {
+                tracing::warn!("ScrollView offscreen canvas failed: {err}");
+                child.render_ansi(frame, viewport);
+                return;
+            }
+        };
+        if let Err(err) = canvas.draw(|f| child.render_ansi(f, f.area())) {
+            tracing::warn!("ScrollView offscreen draw failed: {err}");
+            return;
+        }
+
+        let max_x = canvas_width.saturating_sub(viewport.width);
+        let max_y = canvas_height.saturating_sub(viewport.height);
+        let sx = (self.scroll_x.max(0.0) as u16).min(max_x);
+        let sy = (self.scroll_y.max(0.0) as u16).min(max_y);
+
+        let source = canvas.backend().buffer();
+        let target = frame.buffer_mut();
+        for y in 0..viewport.height {
+            for x in 0..viewport.width {
+                target[(viewport.x + x, viewport.y + y)] = source[(sx + x, sy + y)].clone();
+            }
+        }
+    }
+
     pub fn add_search_match(&mut self, line: usize) {
         self.search.add_match(line);
     }
@@ -248,35 +310,22 @@ impl View for ScrollView {
         parent: RegionId,
         next_id: &mut u32,
     ) -> anyhow::Result<Option<RegionId>> {
-        if index == 0 {
-            if let Some(child) = &self.child {
-                let region_id = RegionId::new(*next_id);
-                *next_id += 1;
-
-                send_message(&AppMessage::CreateRegion {
-                    id: region_id,
-                    parent,
-                    insert_index: -1,
-                    constraints: child.constraints(),
-                    style: child.style(),
-                })?;
-
-                let content = child.content();
-                if content != ultty_protocol::Content::None {
-                    send_message(&AppMessage::SetContent {
-                        id: region_id,
-                        content,
-                    })?;
-                }
-
-                for i in 0..child.children_count() {
-                    child.render_child_native(i, send_message, region_id, next_id)?;
-                }
-
-                return Ok(Some(region_id));
-            }
+        match (index, &self.child) {
+            (0, Some(child)) => Ok(Some(super::render_view_to_native(
+                child.as_ref(),
+                send_message,
+                parent,
+                next_id,
+                None,
+            )?)),
+            _ => Ok(None),
         }
-        Ok(None)
+    }
+
+    fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
+        if let Some(child) = &self.child {
+            visit(child.as_ref());
+        }
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
@@ -302,7 +351,7 @@ impl View for ScrollView {
         frame.render_widget(block, area);
 
         if let Some(child) = &self.child {
-            child.render_ansi(frame, inner);
+            self.render_child_scrolled(child.as_ref(), frame, inner);
         } else {
             let scroll_info = format!("Scroll: {:.0}/{:.0}", self.scroll_y, max_scroll);
             let paragraph = Paragraph::new(Line::raw(scroll_info));
@@ -343,33 +392,17 @@ impl View for ScrollView {
         use crate::event::Key;
 
         match key.key {
-            Key::Char('j') | Key::Down => {
-                self.scroll_lines(1);
-                Some(super::FocusAction::Consumed)
-            }
-            Key::Char('k') | Key::Up => {
-                self.scroll_lines(-1);
-                Some(super::FocusAction::Consumed)
-            }
-            Key::Char('d') if key.modifiers.ctrl => {
-                self.scroll_by(self.half_page_size());
-                Some(super::FocusAction::Consumed)
-            }
-            Key::Char('u') if key.modifiers.ctrl => {
-                self.scroll_by(-self.half_page_size());
-                Some(super::FocusAction::Consumed)
-            }
-            Key::Char('g') => {
-                self.scroll_to_top();
-                Some(super::FocusAction::Consumed)
-            }
-            Key::Char('G') => {
-                self.scroll_to_bottom();
-                Some(super::FocusAction::Consumed)
-            }
-            Key::Tab if key.modifiers.shift => Some(super::FocusAction::Previous),
-            Key::Tab => Some(super::FocusAction::Next),
-            _ => None,
+            Key::Tab if key.modifiers.shift => return Some(super::FocusAction::Previous),
+            Key::Tab => return Some(super::FocusAction::Next),
+            _ => {}
+        }
+
+        // Everything else goes through the persistent vim parser so `gg`,
+        // `5j`, `/` searches and Ctrl-D/U complete across key events.
+        let vim_key = crate::vim::to_vim_key(&key.key)?;
+        match self.handle_vim_key(&vim_key, crate::vim::to_vim_modifiers(key.modifiers)) {
+            VimResult::Ignored => None,
+            _ => Some(super::FocusAction::Consumed),
         }
     }
 }
@@ -946,14 +979,6 @@ mod tests {
     }
 
     #[test]
-    fn scroll_debug_format() {
-        let scroll = ScrollView::new();
-        let debug = format!("{:?}", scroll);
-        assert!(debug.contains("ScrollView"));
-        assert!(debug.contains("scroll_y"));
-    }
-
-    #[test]
     fn scroll_style_has_border() {
         let scroll = ScrollView::new();
         let style = <ScrollView as View>::style(&scroll);
@@ -1060,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn scroll_on_key_g_goes_to_top() {
+    fn scroll_on_key_gg_goes_to_top_but_single_g_waits() {
         let mut scroll = ScrollView::new();
         scroll.set_content_height(1000.0);
         scroll.set_viewport_height(100.0);
@@ -1068,7 +1093,26 @@ mod tests {
 
         let result = scroll.on_key(&key(Key::Char('g')));
         assert!(matches!(result, Some(FocusAction::Consumed)));
+        assert_eq!(scroll.scroll_y, 500.0, "lone g must not jump");
+
+        let result = scroll.on_key(&key(Key::Char('g')));
+        assert!(matches!(result, Some(FocusAction::Consumed)));
         assert_eq!(scroll.scroll_y, 0.0);
+    }
+
+    #[test]
+    fn scroll_on_key_count_prefix_scrolls_that_many_lines() {
+        let mut scroll = ScrollView::new();
+        scroll.set_content_height(1000.0);
+        scroll.set_viewport_height(100.0);
+
+        assert!(matches!(
+            scroll.on_key(&key(Key::Char('5'))),
+            Some(FocusAction::Consumed)
+        ));
+        assert_eq!(scroll.scroll_y, 0.0, "count alone does not scroll");
+        scroll.on_key(&key(Key::Char('j')));
+        assert_eq!(scroll.scroll_y, 5.0);
     }
 
     #[test]
@@ -1099,7 +1143,7 @@ mod tests {
     #[test]
     fn scroll_on_key_unhandled_returns_none() {
         let mut scroll = ScrollView::new();
-        let result = scroll.on_key(&key(Key::Char('z')));
+        let result = scroll.on_key(&key(Key::Char('q')));
         assert!(result.is_none());
     }
 

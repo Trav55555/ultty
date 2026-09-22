@@ -67,7 +67,9 @@ pub mod prelude {
     };
 
     // Re-export protocol types
-    pub use ultty_protocol::{Color, Constraints, Dimension, Style};
+    pub use ultty_protocol::{
+        BorderEdges, BorderStyle, BorderType, Color, Constraints, Dimension, Style,
+    };
 
     // Re-export vim types from protocol
     pub use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator};

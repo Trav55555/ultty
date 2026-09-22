@@ -1,6 +1,5 @@
 use ulttui::prelude::*;
 use ulttui::widgets::RichText;
-use ultty_protocol::{BorderEdges, BorderStyle, BorderType, Color, Dimension};
 
 use crate::PorygonTui;
 
@@ -46,9 +45,7 @@ fn moon_phase() -> MoonInfo {
 
     // Format the full moon date
     let full_epoch = now + secs_to_full;
-    let time_t = full_epoch as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&time_t, &mut tm) };
+    let tm = crate::views::local_time(full_epoch);
     let months = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
@@ -300,15 +297,8 @@ fn weather_view(app: &PorygonTui) -> Column {
             // Day label row below chart (day-of-month numbers)
             {
                 // Get today's day-of-month
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let secs = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let time_t = secs as libc::time_t;
-                let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-                unsafe { libc::localtime_r(&time_t, &mut tm) };
-                let today_mday = tm.tm_mday as usize;
+                let today_mday =
+                    crate::views::local_time(crate::views::unix_now()).tm_mday as usize;
 
                 let mut edges = vec![0usize];
                 for &bc in &boundary_cols {
@@ -360,11 +350,16 @@ fn weather_view(app: &PorygonTui) -> Column {
             }
         }
     } else {
+        let status = if app.weather_enabled {
+            "Loading..."
+        } else {
+            "off (set PORYGON_WEATHER=1)"
+        };
         panel = panel.child(
             RichText::new()
                 .span("WEATHER: ", Style::new().fg(cyan).bold())
                 .span(
-                    "Loading...",
+                    status,
                     Style {
                         dim: true,
                         ..Style::new()
@@ -374,6 +369,18 @@ fn weather_view(app: &PorygonTui) -> Column {
     }
 
     panel
+}
+
+/// Ten-cell usage bar for a 0..=1 fraction; out-of-range or NaN input
+/// saturates instead of underflowing the empty-cell count.
+fn usage_bar(fraction: f64) -> String {
+    const CELLS: usize = 10;
+    let filled = if fraction.is_nan() {
+        0
+    } else {
+        ((fraction.clamp(0.0, 1.0) * CELLS as f64).round() as usize).min(CELLS)
+    };
+    format!("[{}{}]", "█".repeat(filled), "░".repeat(CELLS - filled))
 }
 
 fn moon_view(_app: &PorygonTui) -> Column {
@@ -575,11 +582,7 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
             RichText::new()
                 .span("CPU     ", label_style.clone())
                 .span(
-                    format!(
-                        "[{}{}]",
-                        "█".repeat((app.status.cpu_usage * 10.0).round() as usize),
-                        "░".repeat(10 - (app.status.cpu_usage * 10.0).round() as usize)
-                    ),
+                    usage_bar(app.status.cpu_usage),
                     Style::new().fg(if app.status.cpu_usage > 0.8 {
                         Color::Rgb(255, 93, 110)
                     } else {
@@ -596,11 +599,7 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
             RichText::new()
                 .span("RAM     ", label_style.clone())
                 .span(
-                    format!(
-                        "[{}{}]",
-                        "█".repeat((app.status.ram_usage * 10.0).round() as usize),
-                        "░".repeat(10 - (app.status.ram_usage * 10.0).round() as usize)
-                    ),
+                    usage_bar(app.status.ram_usage),
                     Style::new().fg(if app.status.ram_usage > 0.8 {
                         Color::Rgb(255, 93, 110)
                     } else {
@@ -713,6 +712,16 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn usage_bar_saturates_out_of_range_input() {
+        assert_eq!(super::usage_bar(0.0), "[░░░░░░░░░░]");
+        assert_eq!(super::usage_bar(0.5), "[█████░░░░░]");
+        assert_eq!(super::usage_bar(1.0), "[██████████]");
+        assert_eq!(super::usage_bar(7.5), "[██████████]");
+        assert_eq!(super::usage_bar(-3.0), "[░░░░░░░░░░]");
+        assert_eq!(super::usage_bar(f64::NAN), "[░░░░░░░░░░]");
+    }
     use super::*;
     use ultty_protocol::{AlignContent, JustifyContent};
 

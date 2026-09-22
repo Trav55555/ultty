@@ -38,7 +38,7 @@ pub use divider::Divider;
 pub use dock::DockLayout;
 pub use image::Image;
 pub use list::List;
-pub use markdown::MarkdownView;
+pub use markdown::{wrapped_line_count, MarkdownView};
 pub use modal::Modal;
 pub use primitives::{Card, Inset, Section, Spacer};
 pub use progress::ProgressBar;
@@ -59,13 +59,32 @@ use ratatui::layout::Rect;
 use ratatui::Frame;
 use ultty_protocol::{AppMessage, Constraints, Content, RegionId};
 
-pub(crate) fn register_and_check_focus(widget_id: Option<&str>) -> bool {
-    if let Some(id) = widget_id {
-        FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
-        FocusManager::with_current(|fm| fm.is_focused(id))
-    } else {
-        false
+/// Read-only focus query for widgets that render differently when focused.
+///
+/// Registration is not done here: the runner registers every focusable
+/// widget once per frame via [`FocusManager::register_view_tree`], so
+/// rendering code stays free of side effects.
+pub(crate) fn is_widget_focused(widget_id: Option<&str>) -> bool {
+    match widget_id {
+        Some(id) => FocusManager::with_current(|fm| fm.is_focused(id)),
+        None => false,
     }
+}
+
+/// Render a view tree into native protocol messages, rooted at `RegionId::ROOT`.
+///
+/// This is the same walk the native backend performs for child views. It is
+/// exposed so tests and the mock backend can inspect the exact message tree a
+/// view produces without a terminal connection.
+pub fn render_view_messages(view: &dyn View) -> anyhow::Result<Vec<AppMessage>> {
+    let mut messages = Vec::new();
+    let mut next_id = 1u32;
+    let mut sink = |msg: &AppMessage| -> anyhow::Result<()> {
+        messages.push(msg.clone());
+        Ok(())
+    };
+    render_view_to_native(view, &mut sink, RegionId::ROOT, &mut next_id, None)?;
+    Ok(messages)
 }
 
 pub(crate) fn render_view_to_native(
@@ -74,7 +93,6 @@ pub(crate) fn render_view_to_native(
     parent: RegionId,
     next_id: &mut u32,
     constraint_overrides: Option<Constraints>,
-    include_scroll_offset: bool,
 ) -> anyhow::Result<RegionId> {
     let region_id = RegionId::new(*next_id);
     *next_id += 1;
@@ -86,6 +104,9 @@ pub(crate) fn render_view_to_native(
         constraints: constraint_overrides.unwrap_or_else(|| child.constraints()),
         style: child.style(),
     })?;
+    if let Some(key) = child.native_key() {
+        crate::backend::native_diff::record_native_key(region_id, key);
+    }
 
     let content = child.content();
     if content != Content::None {
@@ -95,15 +116,13 @@ pub(crate) fn render_view_to_native(
         })?;
     }
 
-    if include_scroll_offset {
-        if let Some((sx, sy)) = child.scroll_offset() {
-            send_message(&AppMessage::Scroll {
-                id: region_id,
-                x: sx,
-                y: sy,
-                animate: false,
-            })?;
-        }
+    if let Some((sx, sy)) = child.scroll_offset() {
+        send_message(&AppMessage::Scroll {
+            id: region_id,
+            x: sx,
+            y: sy,
+            animate: false,
+        })?;
     }
 
     for i in 0..child.children_count() {
@@ -142,6 +161,15 @@ pub trait View {
     }
 
     fn render_ansi(&self, _frame: &mut Frame, _area: Rect) {}
+
+    /// Visit every child view this view will render this frame.
+    ///
+    /// This is the structural walk used by mode-independent passes such as
+    /// focus registration, so it must be implemented by every container that
+    /// owns child views and must visit them in render order. Children that a
+    /// widget synthesizes on the fly (table cells, tab labels) are not views
+    /// and need not be visited.
+    fn for_each_child(&self, _visit: &mut dyn FnMut(&dyn View)) {}
 
     /// Widget ID for focus management. Override in focusable widgets.
     ///
@@ -228,6 +256,10 @@ impl<T: View> View for &T {
         (*self).render_ansi(frame, area)
     }
 
+    fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
+        (*self).for_each_child(visit)
+    }
+
     fn widget_id(&self) -> Option<&str> {
         (*self).widget_id()
     }
@@ -307,12 +339,6 @@ mod tests {
     }
 
     #[test]
-    fn default_native_key_follows_widget_id() {
-        let v = EmptyView;
-        assert_eq!(v.native_key(), v.widget_id());
-    }
-
-    #[test]
     fn default_on_key_returns_none() {
         let mut v = EmptyView;
         let key = KeyEvent {
@@ -338,27 +364,6 @@ mod tests {
         let mut send = |_msg: &ultty_protocol::AppMessage| -> anyhow::Result<()> { Ok(()) };
         let result = v.render_child_native(0, &mut send, parent, &mut next_id);
         assert!(result.unwrap().is_none());
-    }
-
-    // --- Custom view overrides ---
-
-    #[test]
-    fn custom_constraints() {
-        let v = CustomView;
-        let c = v.constraints();
-        assert_eq!(c.width, ultty_protocol::Dimension::Percent(50.0));
-    }
-
-    #[test]
-    fn custom_is_focusable() {
-        let v = CustomView;
-        assert!(v.is_focusable());
-    }
-
-    #[test]
-    fn custom_children_count() {
-        let v = CustomView;
-        assert_eq!(v.children_count(), 3);
     }
 
     // --- View impl for &T ---

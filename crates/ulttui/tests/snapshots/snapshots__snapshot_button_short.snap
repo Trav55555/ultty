@@ -1,6 +1,7 @@
 ---
 source: crates/ulttui/tests/snapshots.rs
-assertion_line: 80
 expression: output
 ---
 [ OK ]
+-- styles --
+0:0-5 fg=Rgb(205, 214, 244) bg=Rgb(69, 71, 90) mod=BOLD

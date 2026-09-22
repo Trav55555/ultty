@@ -230,10 +230,15 @@ impl View for Column {
                 parent,
                 next_id,
                 None,
-                true,
             )?))
         } else {
             Ok(None)
+        }
+    }
+
+    fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
+        for child in &self.children {
+            visit(child.as_ref());
         }
     }
 
@@ -423,10 +428,15 @@ impl View for Row {
                 parent,
                 next_id,
                 None,
-                true,
             )?))
         } else {
             Ok(None)
+        }
+    }
+
+    fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
+        for child in &self.children {
+            visit(child.as_ref());
         }
     }
 
@@ -555,10 +565,15 @@ impl View for Stack {
                 parent,
                 next_id,
                 None,
-                true,
             )?))
         } else {
             Ok(None)
+        }
+    }
+
+    fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
+        for child in &self.children {
+            visit(child.as_ref());
         }
     }
 
