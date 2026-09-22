@@ -6,8 +6,8 @@
 //! - Updating terminal state
 //! - Handling user input
 
-#[cfg(target_os = "linux")]
 use std::cell::RefCell;
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::io;
 use std::os::fd::RawFd;

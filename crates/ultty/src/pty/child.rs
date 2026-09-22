@@ -357,7 +357,7 @@ fn setup_child(slave: SlavePty, exec_plan: &ChildExec) -> ! {
     // (after setsid), so TIOCSCTTY will set this terminal as our controlling terminal.
     // The third argument (0) means don't steal the terminal from another session.
     unsafe {
-        if libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) < 0 {
+        if libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0) < 0 {
             exit_child(1);
         }
     }

@@ -281,6 +281,7 @@ impl SlavePty {
 }
 
 /// Get the name of the slave PTY device.
+#[cfg(target_os = "linux")]
 fn get_slave_name(master_fd: RawFd) -> Result<String> {
     // Use ptsname_r for thread safety
     let mut name_buf = [0u8; 256];
@@ -304,6 +305,26 @@ fn get_slave_name(master_fd: RawFd) -> Result<String> {
         .position(|&c| c == 0)
         .unwrap_or(name_buf.len());
     let name = String::from_utf8_lossy(&name_buf[..len]).to_string();
+    Ok(name)
+}
+
+/// Get the name of the slave PTY device.
+///
+/// macOS libc has no `ptsname_r`; `ptsname` returns a pointer to static
+/// storage, so the string is copied out immediately under the call.
+#[cfg(not(target_os = "linux"))]
+fn get_slave_name(master_fd: RawFd) -> Result<String> {
+    // SAFETY: master_fd is a valid PTY master file descriptor obtained from
+    // openpty. ptsname returns null on failure or a pointer to a
+    // NUL-terminated string in static storage that stays valid until the
+    // next ptsname call; we copy it before returning.
+    let name = unsafe {
+        let ptr = libc::ptsname(master_fd);
+        if ptr.is_null() {
+            return Err(PtyError::OpenFailed(nix::Error::last()));
+        }
+        std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    };
     Ok(name)
 }
 
