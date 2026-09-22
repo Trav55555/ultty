@@ -20,6 +20,7 @@ impl Renderer {
     ) -> Result<(), wgpu::SurfaceError> {
         // Update tab bar height from overlay state
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
+        self.text_renderer.begin_frame();
 
         let output = surface.get_current_texture()?;
         let view = output
@@ -198,6 +199,7 @@ impl Renderer {
                 self.cell_height,
                 self.pane_offset_x,
                 self.pane_offset_y,
+                overlay.cursor_blink_visible,
                 &self.uniform_bind_group,
             )?;
 

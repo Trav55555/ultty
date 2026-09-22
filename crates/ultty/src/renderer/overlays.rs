@@ -10,6 +10,19 @@ use crate::vim::{CopyMode, Selection as VimSelection};
 use ultty_protocol::vim::VimMode;
 use wgpu::util::DeviceExt;
 
+/// Map an absolute buffer row (history + grid) to a viewport row.
+///
+/// Rows above the viewport (`row < scroll_offset`) and below it are not
+/// visible and yield `None`; they must be skipped, not clamped onto row 0.
+fn viewport_row(row: usize, scroll_offset: usize, viewport_rows: usize) -> Option<u16> {
+    let visible = row.checked_sub(scroll_offset)?;
+    if visible < viewport_rows {
+        u16::try_from(visible).ok()
+    } else {
+        None
+    }
+}
+
 impl Renderer {
     /// Build overlay vertex data (vim cursor, selection, URL underlines).
     pub(super) fn build_overlay_vertices(
@@ -29,14 +42,15 @@ impl Renderer {
 
                 // Draw vim cursor (different color from normal cursor)
                 let vim_cursor_color = Rgba::new(0.8, 0.4, 0.0, 0.8); // Orange
-                let visible_row = cursor_row.saturating_sub(scroll_offset);
-                if visible_row < dims.rows as usize {
+                if let Some(visible_row) =
+                    viewport_row(cursor_row, scroll_offset, dims.rows as usize)
+                {
                     self.emit_quad(
                         &mut vertices,
                         &mut indices,
                         cursor_col as u16,
                         cursor_col as u16 + 1,
-                        visible_row as u16,
+                        visible_row,
                         vim_cursor_color,
                     );
                 }
@@ -62,8 +76,9 @@ impl Renderer {
                     let current_match_color = Rgba::new(1.0, 0.5, 0.0, 0.6); // Bright orange for current
 
                     for (i, &(match_row, match_col)) in matches.iter().enumerate() {
-                        let visible_row = match_row.saturating_sub(scroll_offset);
-                        if visible_row < dims.rows as usize {
+                        if let Some(visible_row) =
+                            viewport_row(match_row, scroll_offset, dims.rows as usize)
+                        {
                             let color = if i == current_match {
                                 current_match_color
                             } else {
@@ -75,7 +90,7 @@ impl Renderer {
                                 &mut indices,
                                 match_col as u16,
                                 match_col as u16 + 1,
-                                visible_row as u16,
+                                visible_row,
                                 color,
                             );
                         }
@@ -211,10 +226,9 @@ impl Renderer {
                 end_col,
             } => {
                 for row in *start_row..=*end_row {
-                    let visible_row = row.saturating_sub(scroll_offset);
-                    if visible_row >= viewport_rows {
+                    let Some(visible_row) = viewport_row(row, scroll_offset, viewport_rows) else {
                         continue;
-                    }
+                    };
 
                     let sc = if row == *start_row { *start_col } else { 0 };
                     let ec = if row == *end_row {
@@ -228,24 +242,23 @@ impl Renderer {
                         indices,
                         sc as u16,
                         (ec + 1) as u16,
-                        visible_row as u16,
+                        visible_row,
                         color,
                     );
                 }
             }
             VimSelection::Line { start_row, end_row } => {
                 for row in *start_row..=*end_row {
-                    let visible_row = row.saturating_sub(scroll_offset);
-                    if visible_row >= viewport_rows {
+                    let Some(visible_row) = viewport_row(row, scroll_offset, viewport_rows) else {
                         continue;
-                    }
+                    };
 
                     self.emit_quad(
                         vertices,
                         indices,
                         0,
                         viewport_cols as u16,
-                        visible_row as u16,
+                        visible_row,
                         color,
                     );
                 }
@@ -257,17 +270,16 @@ impl Renderer {
                 end_col,
             } => {
                 for row in *start_row..=*end_row {
-                    let visible_row = row.saturating_sub(scroll_offset);
-                    if visible_row >= viewport_rows {
+                    let Some(visible_row) = viewport_row(row, scroll_offset, viewport_rows) else {
                         continue;
-                    }
+                    };
 
                     self.emit_quad(
                         vertices,
                         indices,
                         *start_col as u16,
                         (*end_col + 1) as u16,
-                        visible_row as u16,
+                        visible_row,
                         color,
                     );
                 }
@@ -720,5 +732,21 @@ impl Renderer {
             rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
             rp.draw_indexed(0..text_indices.len() as u32, 0, 0..1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn viewport_row_skips_rows_outside_the_viewport() {
+        assert_eq!(super::viewport_row(10, 10, 24), Some(0));
+        assert_eq!(super::viewport_row(33, 10, 24), Some(23));
+        assert_eq!(super::viewport_row(34, 10, 24), None);
+        assert_eq!(
+            super::viewport_row(9, 10, 24),
+            None,
+            "rows above must not collapse onto row 0"
+        );
+        assert_eq!(super::viewport_row(0, 5, 24), None);
     }
 }

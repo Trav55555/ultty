@@ -1156,6 +1156,35 @@ fn full_reset_esc_c() {
     assert_eq!(parse(b"\x1bc"), vec![Action::FullReset]);
 }
 
+#[test]
+fn full_reset_restores_ascii_charset() {
+    // ESC ( 0 designates DEC Special Graphics into G0: 'a' becomes a
+    // checkerboard. RIS must undo that, unlike an ordinary sequence reset.
+    let actions = parse(b"\x1b(0a\x1bca");
+    assert_eq!(
+        actions,
+        vec![
+            Action::Print('\u{2592}'),
+            Action::FullReset,
+            Action::Print('a')
+        ]
+    );
+}
+
+#[test]
+fn full_reset_restores_shift_in_state() {
+    // ESC ) 0 designates graphics into G1, SO (0x0E) shifts it in.
+    let actions = parse(b"\x1b)0\x0ea\x1bca");
+    assert_eq!(
+        actions,
+        vec![
+            Action::Print('\u{2592}'),
+            Action::FullReset,
+            Action::Print('a')
+        ]
+    );
+}
+
 // ---------------------------------------------------------------
 // Soft reset (DECSTR — CSI ! p)
 // ---------------------------------------------------------------

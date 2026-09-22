@@ -2,6 +2,13 @@
 
 use super::{Buffer, CursorPosition, Dimensions, Grid, ImageStore, TerminalImage};
 
+/// Maximum number of distinct OSC 8 hyperlink URIs remembered per terminal.
+///
+/// Identical URIs share one id, so only genuinely different links count.
+/// When the map is full the oldest link is forgotten; cells that still
+/// reference it simply stop resolving to a URI.
+pub const MAX_HYPERLINKS: usize = 4096;
+
 /// Mouse tracking mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MouseMode {
@@ -132,6 +139,9 @@ pub struct Terminal {
     modes: TerminalModes,
     /// Current selection (if any)
     selection: Option<Selection>,
+    /// Content version of the active grid when the selection was made.
+    /// A selection is only valid while the content it refers to is unchanged.
+    selection_content_version: u64,
     /// Window title
     title: String,
     /// Shell integration state
@@ -142,6 +152,10 @@ pub struct Terminal {
     pending_responses: Vec<Vec<u8>>,
     /// Hyperlink ID to URI mapping (OSC 8)
     hyperlinks: std::collections::HashMap<u32, String>,
+    /// Reverse map so identical URIs share an id
+    hyperlink_ids: std::collections::HashMap<String, u32>,
+    /// Hyperlink ids in insertion order (front = oldest) for eviction
+    hyperlink_order: std::collections::VecDeque<u32>,
     /// Next hyperlink ID to assign
     next_hyperlink_id: u32,
     /// Current hyperlink ID (0 = none, applied to new cells)
@@ -150,6 +164,9 @@ pub struct Terminal {
     kitty_keyboard_stack: Vec<u8>,
     /// Pending column mode resize request (132 or 80 columns, DECCOLM)
     pending_column_resize: Option<u16>,
+    /// Dimensions the inactive alternate buffer still has to be resized to.
+    /// Reflowing it on every drag frame is wasted work while it is hidden.
+    pending_alternate_resize: Option<Dimensions>,
 }
 
 impl Terminal {
@@ -161,15 +178,19 @@ impl Terminal {
             using_alternate: false,
             modes: TerminalModes::default(),
             selection: None,
+            selection_content_version: 0,
             title: String::new(),
             shell_integration: ShellIntegration::default(),
             images: ImageStore::new(),
             pending_responses: Vec::new(),
             hyperlinks: std::collections::HashMap::new(),
+            hyperlink_ids: std::collections::HashMap::new(),
+            hyperlink_order: std::collections::VecDeque::new(),
             next_hyperlink_id: 1, // 0 means no hyperlink
             current_hyperlink_id: 0,
             kitty_keyboard_stack: Vec::new(),
             pending_column_resize: None,
+            pending_alternate_resize: None,
         }
     }
 
@@ -198,10 +219,11 @@ impl Terminal {
     }
 
     /// Get mutable access to the active buffer.
+    ///
+    /// This does not touch the selection: cursor moves and viewport scrolling
+    /// keep it, and content mutations invalidate it through the grid's
+    /// content version (see [`Grid::content_version`]).
     pub fn buffer_mut(&mut self) -> &mut Buffer {
-        // Clear selection when buffer is modified
-        self.selection = None;
-
         if self.using_alternate {
             &mut self.alternate
         } else {
@@ -232,6 +254,7 @@ impl Terminal {
     /// Enter alternate screen buffer (mode 47 — no clear).
     pub fn enter_alternate_screen(&mut self) {
         if !self.using_alternate {
+            self.apply_pending_alternate_resize();
             self.using_alternate = true;
             self.selection = None;
         }
@@ -240,6 +263,7 @@ impl Terminal {
     /// Enter alternate screen buffer and clear it (modes 1047, 1049).
     pub fn enter_alternate_screen_clear(&mut self) {
         if !self.using_alternate {
+            self.apply_pending_alternate_resize();
             self.using_alternate = true;
             self.alternate.grid_mut().clear();
             self.alternate.grid_mut().cursor_mut().position = CursorPosition::origin();
@@ -266,8 +290,15 @@ impl Terminal {
     }
 
     /// Get current selection.
+    ///
+    /// Returns `None` once the selected content has been mutated (text
+    /// written, scrolled, erased, or resized) since the selection was made.
     pub fn selection(&self) -> Option<&Selection> {
-        self.selection.as_ref()
+        if self.selection_content_version == self.grid().content_version() {
+            self.selection.as_ref()
+        } else {
+            None
+        }
     }
 
     /// Start a new selection.
@@ -277,10 +308,17 @@ impl Terminal {
             end: pos,
             mode,
         });
+        self.selection_content_version = self.grid().content_version();
     }
 
     /// Update selection end point.
+    ///
+    /// A selection invalidated by content changes is dropped instead.
     pub fn update_selection(&mut self, end: SelectionPoint) {
+        if self.selection().is_none() {
+            self.selection = None;
+            return;
+        }
         if let Some(sel) = &mut self.selection {
             sel.end = end;
         }
@@ -293,7 +331,7 @@ impl Terminal {
 
     /// Get selected text.
     pub fn selected_text(&self) -> Option<String> {
-        let sel = self.selection.as_ref()?;
+        let sel = self.selection()?;
         let (start, end) = sel.ordered();
 
         let mut text = String::new();
@@ -376,7 +414,7 @@ impl Terminal {
 
     /// Check if a cell is within the selection.
     pub fn is_selected(&self, col: u16, row: u16) -> bool {
-        let Some(sel) = &self.selection else {
+        let Some(sel) = self.selection() else {
             return false;
         };
 
@@ -499,12 +537,28 @@ impl Terminal {
     /// All subsequent characters will be associated with this hyperlink
     /// until `end_hyperlink` is called.
     pub fn start_hyperlink(&mut self, uri: String) {
+        if let Some(&id) = self.hyperlink_ids.get(&uri) {
+            self.current_hyperlink_id = id;
+            return;
+        }
+
+        while self.hyperlink_order.len() >= MAX_HYPERLINKS {
+            let Some(oldest) = self.hyperlink_order.pop_front() else {
+                break;
+            };
+            if let Some(old_uri) = self.hyperlinks.remove(&oldest) {
+                self.hyperlink_ids.remove(&old_uri);
+            }
+        }
+
         let id = self.next_hyperlink_id;
         self.next_hyperlink_id = self.next_hyperlink_id.wrapping_add(1);
         if self.next_hyperlink_id == 0 {
             self.next_hyperlink_id = 1; // Skip 0, which means no hyperlink
         }
-        self.hyperlinks.insert(id, uri);
+        self.hyperlinks.insert(id, uri.clone());
+        self.hyperlink_ids.insert(uri, id);
+        self.hyperlink_order.push_back(id);
         self.current_hyperlink_id = id;
     }
 
@@ -604,10 +658,43 @@ impl Terminal {
     }
 
     /// Resize the terminal.
+    ///
+    /// The visible buffer is reflowed now; a hidden alternate buffer is
+    /// resized lazily when it next becomes active.
     pub fn resize(&mut self, new_dims: Dimensions) {
         self.main.resize(new_dims);
-        self.alternate.resize(new_dims);
+        if self.using_alternate {
+            self.alternate.resize(new_dims);
+            self.pending_alternate_resize = None;
+        } else {
+            self.pending_alternate_resize = Some(new_dims);
+        }
         self.selection = None;
+    }
+
+    fn apply_pending_alternate_resize(&mut self) {
+        if let Some(dims) = self.pending_alternate_resize.take() {
+            self.alternate.resize(dims);
+        }
+    }
+
+    /// Drop everything a hard reset (RIS) must forget besides the active
+    /// grid: the alternate screen, scrollback, images, hyperlinks, the
+    /// selection and any pushed keyboard modes.
+    pub fn reset_auxiliary_state(&mut self) {
+        self.apply_pending_alternate_resize();
+        self.alternate.grid_mut().clear();
+        self.alternate.grid_mut().cursor_mut().position = CursorPosition::origin();
+        self.alternate.clear_history();
+        self.main.clear_history();
+        self.images.clear();
+        self.hyperlinks.clear();
+        self.hyperlink_ids.clear();
+        self.hyperlink_order.clear();
+        self.current_hyperlink_id = 0;
+        self.selection = None;
+        self.kitty_keyboard_stack.clear();
+        self.pending_column_resize = None;
     }
 
     /// Request a column mode resize (DECCOLM - 132 or 80 columns).
@@ -1085,6 +1172,145 @@ mod tests {
 
         let text = term.selected_text().unwrap();
         assert_eq!(text, "BCD\nBCD\nBCD");
+    }
+
+    #[test]
+    fn selection_survives_viewport_scroll_and_cursor_moves() {
+        let mut term = Terminal::new(Dimensions::new(10, 3));
+        for line in ["one", "two", "three", "four"] {
+            for c in line.chars() {
+                term.buffer_mut().write_char(c);
+            }
+            term.grid_mut().carriage_return();
+            term.buffer_mut().newline();
+        }
+        assert!(term.buffer().history_len() > 0);
+
+        term.start_selection(SelectionPoint::new(0, 0), SelectionMode::Normal);
+        term.update_selection(SelectionPoint::new(2, 0));
+        assert!(term.selection().is_some());
+
+        term.buffer_mut().scroll_up(1);
+        assert!(
+            term.selection().is_some(),
+            "viewport scroll must keep selection"
+        );
+        term.buffer_mut().scroll_down(1);
+
+        term.grid_mut().cursor_down(1);
+        term.grid_mut().cursor_right(2);
+        term.grid_mut().set_cursor_position(1, 1);
+        assert!(
+            term.selection().is_some(),
+            "cursor moves must keep selection"
+        );
+    }
+
+    #[test]
+    fn selection_cleared_when_content_changes() {
+        let mut term = Terminal::new(Dimensions::new(10, 3));
+        for c in "Hello".chars() {
+            term.grid_mut().write_char(c);
+        }
+        term.start_selection(SelectionPoint::new(0, 0), SelectionMode::Normal);
+        term.update_selection(SelectionPoint::new(2, 0));
+        assert_eq!(term.selected_text().as_deref(), Some("Hel"));
+
+        term.buffer_mut().write_char('x');
+
+        assert!(term.selection().is_none());
+        assert!(!term.is_selected(0, 0));
+        assert_eq!(term.selected_text(), None);
+    }
+
+    #[test]
+    fn selection_cleared_by_grid_scroll_and_erase() {
+        let mut term = Terminal::new(Dimensions::new(10, 3));
+        term.start_selection(SelectionPoint::new(0, 0), SelectionMode::Normal);
+        term.buffer_mut().scroll_grid_up(1);
+        assert!(term.selection().is_none());
+
+        term.start_selection(SelectionPoint::new(0, 0), SelectionMode::Normal);
+        term.grid_mut().erase_line();
+        assert!(term.selection().is_none());
+    }
+
+    #[test]
+    fn identical_hyperlink_uris_share_an_id() {
+        let mut term = Terminal::new(Dimensions::new(10, 3));
+        term.start_hyperlink("https://example.com".to_string());
+        let first = term.current_hyperlink_id();
+        term.end_hyperlink();
+        term.start_hyperlink("https://example.com".to_string());
+        assert_eq!(term.current_hyperlink_id(), first);
+        assert_eq!(term.all_hyperlinks().len(), 1);
+    }
+
+    #[test]
+    fn hyperlink_map_is_bounded_and_evicts_oldest() {
+        let mut term = Terminal::new(Dimensions::new(10, 3));
+        term.start_hyperlink("https://example.com/0".to_string());
+        let oldest = term.current_hyperlink_id();
+        for i in 1..(MAX_HYPERLINKS + 10) {
+            term.start_hyperlink(format!("https://example.com/{i}"));
+        }
+        let newest = term.current_hyperlink_id();
+
+        assert_eq!(term.all_hyperlinks().len(), MAX_HYPERLINKS);
+        assert!(term.hyperlink(oldest).is_none());
+        assert_eq!(
+            term.hyperlink(newest),
+            Some(format!("https://example.com/{}", MAX_HYPERLINKS + 9).as_str())
+        );
+        term.end_hyperlink();
+        assert_eq!(term.current_hyperlink_id(), 0);
+    }
+
+    #[test]
+    fn reset_auxiliary_state_clears_alternate_images_and_links() {
+        let mut term = Terminal::new(Dimensions::new(10, 3));
+        term.enter_alternate_screen();
+        term.grid_mut().write_char('Z');
+        term.leave_alternate_screen();
+        term.start_hyperlink("https://example.com".to_string());
+        let image = TerminalImage {
+            id: ImageId(0),
+            width: 1,
+            height: 1,
+            data: vec![0; 4],
+            start_col: 0,
+            start_row: 0,
+            cell_width: 1,
+            cell_height: 1,
+        };
+        term.add_image(image);
+
+        term.reset_auxiliary_state();
+
+        assert!(term.images().is_empty());
+        assert!(term.all_hyperlinks().is_empty());
+        assert_eq!(term.current_hyperlink_id(), 0);
+        term.enter_alternate_screen();
+        assert_eq!(term.grid().cell(0, 0).unwrap().char(), ' ');
+    }
+
+    #[test]
+    fn hidden_alternate_buffer_is_resized_when_it_becomes_active() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+        term.resize(Dimensions::new(100, 30));
+        term.resize(Dimensions::new(60, 20));
+        assert_eq!(term.dimensions(), Dimensions::new(60, 20));
+
+        term.enter_alternate_screen_clear();
+        assert!(term.is_alternate_screen());
+        assert_eq!(term.grid().dimensions(), Dimensions::new(60, 20));
+        assert_eq!(term.grid().rows().count(), 20);
+
+        // While active, the alternate buffer is resized eagerly
+        term.resize(Dimensions::new(50, 10));
+        assert_eq!(term.grid().dimensions(), Dimensions::new(50, 10));
+        term.leave_alternate_screen();
+        assert_eq!(term.grid().dimensions(), Dimensions::new(50, 10));
     }
 
     #[test]
