@@ -39,7 +39,10 @@ use frame::{begin_frame, decode_frame_header, finish_frame};
 const MAX_STRING_LEN: usize = 1024 * 1024;
 
 /// Maximum allowed region count in a layout message to prevent OOM attacks.
-const MAX_REGION_COUNT: usize = 10_000;
+///
+/// A terminal must keep a session's scene at or below this many regions,
+/// otherwise its `LayoutComputed` reply could not be decoded by the client.
+pub const MAX_REGION_COUNT: usize = 10_000;
 
 /// Maximum allowed payload length (16 MB) to prevent OOM attacks.
 const MAX_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
@@ -47,8 +50,16 @@ const MAX_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
 /// Maximum allowed grid track count to prevent OOM attacks.
 const MAX_TRACK_COUNT: usize = 1_000;
 
-/// Maximum allowed image data size (64 MB) to prevent OOM attacks.
-const MAX_IMAGE_DATA_LEN: usize = 64 * 1024 * 1024;
+/// Maximum allowed image data size. Equal to the frame payload cap: a frame
+/// can never carry more than `MAX_PAYLOAD_LEN` bytes, so the payload cap is
+/// what actually governs image size on the wire.
+const MAX_IMAGE_DATA_LEN: usize = MAX_PAYLOAD_LEN;
+
+/// Maximum image width or height in pixels.
+const MAX_IMAGE_DIMENSION: u32 = 16_384;
+
+// The image cap must be reachable within a single frame.
+const _: () = assert!(MAX_IMAGE_DATA_LEN <= MAX_PAYLOAD_LEN);
 
 /// Maximum allowed RichText span count to prevent OOM attacks.
 const MAX_SPAN_COUNT: usize = 10_000;
@@ -69,6 +80,19 @@ fn validate_f32(v: f32) -> Result<f32> {
         return Err(ProtocolError::InvalidFloat(v));
     }
     Ok(v)
+}
+
+/// Smallest encoded size of a `Style` (four option tags, border, flags, opacity).
+const MIN_STYLE_LEN: usize = 1 + 1 + 3 + 1 + 1 + 4;
+
+/// Encoded size of a `ComputedRegionLayout` (id + 8 floats + visible).
+const COMPUTED_REGION_LAYOUT_LEN: usize = 4 + 8 * 4 + 1;
+
+/// Cap a declared element count by what the remaining bytes could possibly
+/// hold, so a hostile length prefix cannot force a huge allocation before the
+/// element decode loop notices the buffer is short.
+fn bounded_capacity(buf: &impl Buf, declared: usize, min_element_len: usize) -> usize {
+    declared.min(buf.remaining() / min_element_len.max(1))
 }
 
 // ============================================================================
@@ -520,7 +544,7 @@ impl Decode for Transition {
             1 => Easing::EaseIn,
             2 => Easing::EaseOut,
             3 => Easing::EaseInOut,
-            _ => Easing::Linear,
+            v => return Err(ProtocolError::InvalidData(format!("invalid easing: {}", v))),
         };
         let properties = buf.get_u32_le();
         Ok(Transition {
@@ -830,7 +854,7 @@ impl Decode for TrackSizingFunction {
                         len, MAX_TRACK_COUNT
                     )));
                 }
-                let mut dims = Vec::with_capacity(len);
+                let mut dims = Vec::with_capacity(bounded_capacity(buf, len, 1));
                 for _ in 0..len {
                     dims.push(Dimension::decode(buf)?);
                 }
@@ -865,7 +889,7 @@ fn decode_vec_track(buf: &mut impl Buf) -> Result<Vec<TrackSizingFunction>> {
             len, MAX_TRACK_COUNT
         )));
     }
-    let mut vec = Vec::with_capacity(len);
+    let mut vec = Vec::with_capacity(bounded_capacity(buf, len, 2));
     for _ in 0..len {
         vec.push(TrackSizingFunction::decode(buf)?);
     }
@@ -1191,7 +1215,8 @@ impl Decode for RichText {
                 len, MAX_SPAN_COUNT
             )));
         }
-        let mut spans = Vec::with_capacity(len);
+        // A span is at least a 4-byte string length plus a Style.
+        let mut spans = Vec::with_capacity(bounded_capacity(buf, len, 4 + MIN_STYLE_LEN));
         for _ in 0..len {
             spans.push(Span::decode(buf)?);
         }
@@ -1284,7 +1309,7 @@ impl Decode for ProgressWidget {
                 have: buf.remaining(),
             });
         }
-        let value = buf.get_f32_le();
+        let value = validate_f32(buf.get_f32_le())?;
         let label = decode_option_string(buf)?;
         // Read optional trailing bytes for backward compatibility
         let animated = if buf.remaining() >= 1 {
@@ -1352,6 +1377,12 @@ impl Decode for ImageWidget {
         }
         let width = buf.get_u32_le();
         let height = buf.get_u32_le();
+        if width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION {
+            return Err(ProtocolError::InvalidData(format!(
+                "image dimensions {}x{} exceed maximum {}",
+                width, height, MAX_IMAGE_DIMENSION
+            )));
+        }
         let scale = match buf.get_u8() {
             0 => ImageScale::Fit,
             1 => ImageScale::Fill,
@@ -1376,6 +1407,18 @@ impl Decode for ImageWidget {
                 "image data length {} exceeds maximum {}",
                 data_len, MAX_IMAGE_DATA_LEN
             )));
+        }
+        let required_len = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4));
+        match required_len {
+            Some(required) if required <= data_len => {}
+            _ => {
+                return Err(ProtocolError::InvalidData(format!(
+                    "image data length {} is too small for {}x{} RGBA pixels",
+                    data_len, width, height
+                )));
+            }
         }
         if buf.remaining() < data_len {
             return Err(ProtocolError::UnexpectedEof {
@@ -1722,8 +1765,8 @@ impl Decode for InputType {
                     });
                 }
                 Ok(InputType::MouseScroll {
-                    delta_x: buf.get_f32_le(),
-                    delta_y: buf.get_f32_le(),
+                    delta_x: validate_f32(buf.get_f32_le())?,
+                    delta_y: validate_f32(buf.get_f32_le())?,
                 })
             }
             4 => Ok(InputType::KeyDown {
@@ -1765,8 +1808,8 @@ impl Decode for InputEvent {
                 have: buf.remaining(),
             });
         }
-        let x = buf.get_f32_le();
-        let y = buf.get_f32_le();
+        let x = validate_f32(buf.get_f32_le())?;
+        let y = validate_f32(buf.get_f32_le())?;
         let modifiers = if buf.has_remaining() {
             Modifiers::decode(buf)?
         } else {
@@ -1846,8 +1889,8 @@ impl Decode for ScrollEvent {
         }
         Ok(ScrollEvent {
             region_id,
-            scroll_x: buf.get_f32_le(),
-            scroll_y: buf.get_f32_le(),
+            scroll_x: validate_f32(buf.get_f32_le())?,
+            scroll_y: validate_f32(buf.get_f32_le())?,
         })
     }
 }
@@ -1905,14 +1948,14 @@ impl Decode for ComputedRegionLayout {
         }
         Ok(ComputedRegionLayout {
             id,
-            x: buf.get_f32_le(),
-            y: buf.get_f32_le(),
-            width: buf.get_f32_le(),
-            height: buf.get_f32_le(),
-            content_x: buf.get_f32_le(),
-            content_y: buf.get_f32_le(),
-            content_width: buf.get_f32_le(),
-            content_height: buf.get_f32_le(),
+            x: validate_f32(buf.get_f32_le())?,
+            y: validate_f32(buf.get_f32_le())?,
+            width: validate_f32(buf.get_f32_le())?,
+            height: validate_f32(buf.get_f32_le())?,
+            content_x: validate_f32(buf.get_f32_le())?,
+            content_y: validate_f32(buf.get_f32_le())?,
+            content_width: validate_f32(buf.get_f32_le())?,
+            content_height: validate_f32(buf.get_f32_le())?,
             visible: buf.get_u8() != 0,
         })
     }
@@ -2179,7 +2222,8 @@ impl Decode for AppMessage {
                         len, MAX_METADATA_PAIRS
                     )));
                 }
-                let mut metadata = Vec::with_capacity(len);
+                // Each pair is at least two 4-byte string lengths.
+                let mut metadata = Vec::with_capacity(bounded_capacity(buf, len, 8));
                 let mut total_metadata_bytes = 0usize;
                 for _ in 0..len {
                     let key = decode_string(buf)?;
@@ -2231,8 +2275,8 @@ impl Decode for AppMessage {
                         have: buf.remaining(),
                     });
                 }
-                let x = buf.get_f32_le();
-                let y = buf.get_f32_le();
+                let x = validate_f32(buf.get_f32_le())?;
+                let y = validate_f32(buf.get_f32_le())?;
                 let animate = buf.get_u8() != 0;
                 Ok(AppMessage::Scroll { id, x, y, animate })
             }
@@ -2432,7 +2476,8 @@ impl Decode for TerminalMessage {
                         count, MAX_REGION_COUNT
                     )));
                 }
-                let mut regions = Vec::with_capacity(count);
+                let mut regions =
+                    Vec::with_capacity(bounded_capacity(buf, count, COMPUTED_REGION_LAYOUT_LEN));
                 for _ in 0..count {
                     regions.push(ComputedRegionLayout::decode(buf)?);
                 }
@@ -2913,5 +2958,361 @@ mod tests {
         let mut cursor = raw.freeze();
         let result = Constraints::decode(&mut cursor);
         assert!(result.is_err(), "NaN flex_grow should be rejected");
+    }
+
+    // ── Hardening: every decoded float is validated ─────────────────
+
+    /// Sentinel float that is unlikely to collide with any other byte pattern
+    /// in an encoded message.
+    const SENTINEL: f32 = 12345.5;
+
+    /// Replace every little-endian occurrence of `SENTINEL` with NaN.
+    fn patch_sentinel_with_nan(bytes: &[u8]) -> Vec<u8> {
+        let needle = SENTINEL.to_le_bytes();
+        let nan = f32::NAN.to_le_bytes();
+        let mut out = bytes.to_vec();
+        let mut patched = 0;
+        let mut i = 0;
+        while i + 4 <= out.len() {
+            if out[i..i + 4] == needle {
+                out[i..i + 4].copy_from_slice(&nan);
+                patched += 1;
+                i += 4;
+            } else {
+                i += 1;
+            }
+        }
+        assert!(patched > 0, "sentinel float not found in encoded bytes");
+        out
+    }
+
+    #[test]
+    fn app_message_decode_rejects_nan_in_every_float_field() {
+        let messages = vec![
+            AppMessage::Scroll {
+                id: RegionId(1),
+                x: SENTINEL,
+                y: 0.0,
+                animate: false,
+            },
+            AppMessage::Scroll {
+                id: RegionId(1),
+                x: 0.0,
+                y: SENTINEL,
+                animate: true,
+            },
+            AppMessage::SetContent {
+                id: RegionId(1),
+                content: Content::Widget(WidgetContent::Progress(ProgressWidget {
+                    value: SENTINEL,
+                    label: None,
+                    animated: false,
+                    indeterminate: false,
+                })),
+            },
+        ];
+        for msg in messages {
+            let good = msg.encode_to_bytes();
+            assert!(
+                AppMessage::decode(&mut good.as_ref()).is_ok(),
+                "sentinel message must decode: {:?}",
+                msg
+            );
+            let bad = patch_sentinel_with_nan(&good);
+            let result = AppMessage::decode(&mut bad.as_slice());
+            assert!(
+                matches!(result, Err(ProtocolError::InvalidFloat(_))),
+                "NaN must be rejected for {:?}, got {:?}",
+                msg,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_message_decode_rejects_nan_in_every_float_field() {
+        let input = |event_type: InputType, x: f32, y: f32| {
+            TerminalMessage::Input(InputEvent {
+                region_id: RegionId(1),
+                event_type,
+                x,
+                y,
+                modifiers: Modifiers::NONE,
+            })
+        };
+        let layout = |field: usize| {
+            let mut values = [0.0f32; 8];
+            values[field] = SENTINEL;
+            TerminalMessage::LayoutComputed {
+                frame_id: Some(FrameId(7)),
+                trigger: LayoutTrigger::ContentChange,
+                regions: vec![ComputedRegionLayout {
+                    id: RegionId(1),
+                    x: values[0],
+                    y: values[1],
+                    width: values[2],
+                    height: values[3],
+                    content_x: values[4],
+                    content_y: values[5],
+                    content_width: values[6],
+                    content_height: values[7],
+                    visible: true,
+                }],
+            }
+        };
+        let mut messages = vec![
+            input(
+                InputType::MouseScroll {
+                    delta_x: SENTINEL,
+                    delta_y: 0.0,
+                },
+                0.0,
+                0.0,
+            ),
+            input(
+                InputType::MouseScroll {
+                    delta_x: 0.0,
+                    delta_y: SENTINEL,
+                },
+                0.0,
+                0.0,
+            ),
+            input(InputType::MouseMove, SENTINEL, 0.0),
+            input(InputType::MouseMove, 0.0, SENTINEL),
+            TerminalMessage::Scroll(ScrollEvent {
+                region_id: RegionId(1),
+                scroll_x: SENTINEL,
+                scroll_y: 0.0,
+            }),
+            TerminalMessage::Scroll(ScrollEvent {
+                region_id: RegionId(1),
+                scroll_x: 0.0,
+                scroll_y: SENTINEL,
+            }),
+        ];
+        messages.extend((0..8).map(layout));
+
+        for msg in messages {
+            let good = msg.encode_to_bytes();
+            assert!(
+                TerminalMessage::decode(&mut good.as_ref()).is_ok(),
+                "sentinel message must decode: {:?}",
+                msg
+            );
+            let bad = patch_sentinel_with_nan(&good);
+            let result = TerminalMessage::decode(&mut bad.as_slice());
+            assert!(
+                matches!(result, Err(ProtocolError::InvalidFloat(_))),
+                "NaN must be rejected for {:?}, got {:?}",
+                msg,
+                result
+            );
+        }
+    }
+
+    // ── Hardening: images ───────────────────────────────────────────
+
+    fn encode_raw_image(width: u32, height: u32, data_len: u32) -> BytesMut {
+        let mut buf = BytesMut::new();
+        buf.put_u32_le(width);
+        buf.put_u32_le(height);
+        buf.put_u8(0); // scale: Fit
+        buf.put_u32_le(data_len);
+        buf
+    }
+
+    #[test]
+    fn image_decode_rejects_oversized_dimensions() {
+        let mut cursor = encode_raw_image(MAX_IMAGE_DIMENSION + 1, 1, 4).freeze();
+        assert!(matches!(
+            ImageWidget::decode(&mut cursor),
+            Err(ProtocolError::InvalidData(_))
+        ));
+        let mut cursor = encode_raw_image(1, MAX_IMAGE_DIMENSION + 1, 4).freeze();
+        assert!(matches!(
+            ImageWidget::decode(&mut cursor),
+            Err(ProtocolError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn image_decode_rejects_data_shorter_than_pixels() {
+        // 2x2 RGBA needs 16 bytes; declare and supply only 8.
+        let mut buf = encode_raw_image(2, 2, 8);
+        buf.put_slice(&[0u8; 8]);
+        let mut cursor = buf.freeze();
+        assert!(matches!(
+            ImageWidget::decode(&mut cursor),
+            Err(ProtocolError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn image_decode_does_not_overflow_on_max_dimensions() {
+        // 16384 * 16384 * 4 = 2^30 fits usize, but must still be rejected
+        // because the data is far too small; and it must not panic.
+        let mut cursor = encode_raw_image(MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION, 16).freeze();
+        assert!(ImageWidget::decode(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn image_decode_accepts_exact_size() {
+        let mut buf = encode_raw_image(2, 1, 8);
+        buf.put_slice(&[0xAB; 8]);
+        let mut cursor = buf.freeze();
+        let img = ImageWidget::decode(&mut cursor).unwrap();
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(img.data.len(), 8);
+    }
+
+    // ── Hardening: enums and allocations ────────────────────────────
+
+    #[test]
+    fn transition_decode_rejects_unknown_easing() {
+        let mut buf = BytesMut::new();
+        buf.put_u32_le(100);
+        buf.put_u8(42); // unknown easing
+        buf.put_u32_le(0);
+        let mut cursor = buf.freeze();
+        assert!(matches!(
+            Transition::decode(&mut cursor),
+            Err(ProtocolError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn bounded_capacity_caps_by_remaining_bytes() {
+        let bytes = [0u8; 40];
+        assert_eq!(bounded_capacity(&&bytes[..], 1_000_000, 4), 10);
+        assert_eq!(bounded_capacity(&&bytes[..], 3, 4), 3);
+        assert_eq!(bounded_capacity(&&bytes[..], 100, 0), 40);
+    }
+
+    #[test]
+    fn huge_declared_counts_with_short_buffers_fail_cleanly() {
+        // RichText: declares MAX_SPAN_COUNT spans but supplies nothing.
+        let mut buf = BytesMut::new();
+        buf.put_u32_le(MAX_SPAN_COUNT as u32);
+        assert!(RichText::decode(&mut buf.freeze()).is_err());
+
+        // LayoutComputed: declares MAX_REGION_COUNT regions with an empty body.
+        let mut buf = BytesMut::new();
+        buf.put_slice(&FRAME_MAGIC);
+        buf.put_u16_le(msg_type::LAYOUT_COMPUTED);
+        buf.put_u32_le(6);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u32_le(MAX_REGION_COUNT as u32);
+        assert!(TerminalMessage::decode(&mut buf.freeze()).is_err());
+    }
+
+    // ── Drift guard: wire constants match the documented tables ─────
+
+    #[test]
+    fn message_type_codes_match_documented_table() {
+        // Mirrors docs/PROTOCOL_SPEC.md section 3.2. Update both together.
+        let app: [(&str, u16); 22] = [
+            ("CLIENT_HELLO", 0x0001),
+            ("CREATE_REGION", 0x0010),
+            ("DELETE_REGION", 0x0012),
+            ("REPARENT_REGION", 0x0013),
+            ("SET_REGION_METADATA", 0x0014),
+            ("SET_CONTENT", 0x0020),
+            ("SET_STYLE", 0x0021),
+            ("SET_CONSTRAINTS", 0x0022),
+            ("APPEND_CONTENT", 0x0023),
+            ("STREAM_START", 0x0024),
+            ("STREAM_END", 0x0025),
+            ("BEGIN_FRAME", 0x0030),
+            ("END_FRAME", 0x0031),
+            ("SCROLL", 0x0040),
+            ("FOCUS", 0x0041),
+            ("BLUR", 0x0042),
+            ("SUBSCRIBE", 0x0050),
+            ("UNSUBSCRIBE", 0x0051),
+            ("CLIPBOARD_GET", 0x0060),
+            ("CLIPBOARD_SET", 0x0061),
+            ("PONG", 0x0070),
+            ("DISCONNECT", 0x00FF),
+        ];
+        let actual_app = [
+            ("CLIENT_HELLO", msg_type::CLIENT_HELLO),
+            ("CREATE_REGION", msg_type::CREATE_REGION),
+            ("DELETE_REGION", msg_type::DELETE_REGION),
+            ("REPARENT_REGION", msg_type::REPARENT_REGION),
+            ("SET_REGION_METADATA", msg_type::SET_REGION_METADATA),
+            ("SET_CONTENT", msg_type::SET_CONTENT),
+            ("SET_STYLE", msg_type::SET_STYLE),
+            ("SET_CONSTRAINTS", msg_type::SET_CONSTRAINTS),
+            ("APPEND_CONTENT", msg_type::APPEND_CONTENT),
+            ("STREAM_START", msg_type::STREAM_START),
+            ("STREAM_END", msg_type::STREAM_END),
+            ("BEGIN_FRAME", msg_type::BEGIN_FRAME),
+            ("END_FRAME", msg_type::END_FRAME),
+            ("SCROLL", msg_type::SCROLL),
+            ("FOCUS", msg_type::FOCUS),
+            ("BLUR", msg_type::BLUR),
+            ("SUBSCRIBE", msg_type::SUBSCRIBE),
+            ("UNSUBSCRIBE", msg_type::UNSUBSCRIBE),
+            ("CLIPBOARD_GET", msg_type::CLIPBOARD_GET),
+            ("CLIPBOARD_SET", msg_type::CLIPBOARD_SET),
+            ("PONG", msg_type::PONG),
+            ("DISCONNECT", msg_type::DISCONNECT),
+        ];
+        assert_eq!(actual_app, app);
+
+        let terminal: [(&str, u16); 10] = [
+            ("SERVER_HELLO", 0x0001),
+            ("SESSION_READY", 0x0002),
+            ("LAYOUT_COMPUTED", 0x0010),
+            ("INPUT", 0x0020),
+            ("RESIZE", 0x0022),
+            ("FOCUS_EVENT", 0x0023),
+            ("SCROLL_EVENT", 0x0024),
+            ("CLIPBOARD_CONTENT", 0x0025),
+            ("PING", 0x0070),
+            ("ERROR", 0x00FF),
+        ];
+        let actual_terminal = [
+            ("SERVER_HELLO", msg_type::SERVER_HELLO),
+            ("SESSION_READY", msg_type::SESSION_READY),
+            ("LAYOUT_COMPUTED", msg_type::LAYOUT_COMPUTED),
+            ("INPUT", msg_type::INPUT),
+            ("RESIZE", msg_type::RESIZE),
+            ("FOCUS_EVENT", msg_type::FOCUS_EVENT),
+            ("SCROLL_EVENT", msg_type::SCROLL_EVENT),
+            ("CLIPBOARD_CONTENT", msg_type::CLIPBOARD_CONTENT),
+            ("PING", msg_type::PING),
+            ("ERROR", msg_type::ERROR),
+        ];
+        assert_eq!(actual_terminal, terminal);
+    }
+
+    #[test]
+    fn capability_bits_and_triggers_match_documented_table() {
+        // Mirrors docs/PROTOCOL_SPEC.md section 2.1 and 7.5.
+        use crate::{
+            CAP_ALL_KNOWN, CAP_APPEND_CONTENT, CAP_LAYOUT_FLEXBOX, CAP_REGION_METADATA,
+            CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+        };
+        assert_eq!(CAP_LAYOUT_FLEXBOX, 0x0001);
+        assert_eq!(CAP_WIDGET_SCROLL, 0x0010);
+        assert_eq!(CAP_APPEND_CONTENT, 0x0020);
+        assert_eq!(CAP_STREAM_LIFECYCLE, 0x0040);
+        assert_eq!(CAP_REGION_METADATA, 0x0080);
+        assert_eq!(CAP_ALL_KNOWN, 0x00F1);
+        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(MIN_PROTOCOL_VERSION, 1);
+
+        let mut buf = BytesMut::new();
+        LayoutTrigger::Resize.encode(&mut buf);
+        LayoutTrigger::ConstraintChange.encode(&mut buf);
+        LayoutTrigger::ContentChange.encode(&mut buf);
+        LayoutTrigger::TreeChange.encode(&mut buf);
+        assert_eq!(&buf[..], &[0, 1, 2, 3]);
+
+        let mut buf = BytesMut::new();
+        Dimension::Cells(3.0).encode(&mut buf);
+        assert_eq!(&buf[..], &[1, 0, 0, 0x40, 0x40]);
     }
 }

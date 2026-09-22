@@ -1,0 +1,29 @@
+[package]
+name = "ultty-protocol-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Not a workspace member: cargo-fuzz needs nightly and its own profile.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ultty-protocol = { path = "../crates/ultty-protocol" }
+
+[[bin]]
+name = "decode_app"
+path = "fuzz_targets/decode_app.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_terminal"
+path = "fuzz_targets/decode_terminal.rs"
+test = false
+doc = false
+bench = false

@@ -27,6 +27,18 @@
 //! // Encode for wire
 //! let bytes = msg.encode_to_bytes();
 //! ```
+//!
+//! ## Robustness testing
+//!
+//! `src/codec.rs` is the normative wire format. `tests/malformed.rs` runs
+//! proptests that feed arbitrary bytes and validly-framed random payloads to
+//! both decoders and asserts they never panic. For deeper coverage the
+//! repository ships cargo-fuzz targets in `fuzz/` (not a workspace member):
+//! `cargo install cargo-fuzz`, then from the repository root run
+//! `cargo +nightly fuzz run decode_app` or
+//! `cargo +nightly fuzz run decode_terminal` (add `-- -max_len=65536` to
+//! exercise large frames). Any crash artifact should be turned into a
+//! regression test in `tests/malformed.rs` or the codec unit tests.
 
 mod codec;
 mod content;
@@ -38,7 +50,7 @@ mod messages;
 mod style;
 pub mod vim;
 
-pub use codec::{Decode, Encode};
+pub use codec::{Decode, Encode, MAX_REGION_COUNT};
 pub use content::{
     ButtonStyle, ButtonWidget, CodeWidget, Content, ImageScale, ImageWidget, InputWidget,
     MarkdownWidget, ProgressWidget, RichText, Span, SpinnerStyle, SpinnerWidget, TextAlign,
