@@ -577,8 +577,7 @@ mod tests {
 
     impl StatusServer {
         fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("ultty-status-overlay-{tag}-{}", std::process::id()));
+            let dir = ultty::testing::short_socket_test_dir(tag);
             let _ = std::fs::remove_dir_all(&dir);
             let mut server = ProtocolServer::new(&dir).expect("server should start");
             let tab = ultty::terminal_manager::TabId::new(0);
