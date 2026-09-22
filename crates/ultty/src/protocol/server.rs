@@ -669,11 +669,7 @@ mod tests {
 
     impl TempDir {
         fn new() -> Self {
-            use std::sync::atomic::AtomicU64;
-            static COUNTER: AtomicU64 = AtomicU64::new(0);
-            let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-            let pid = std::process::id();
-            Self(std::env::temp_dir().join(format!("ultty-server-test-{pid}-{id}")))
+            Self(crate::testing::short_socket_test_dir("srv"))
         }
     }
 

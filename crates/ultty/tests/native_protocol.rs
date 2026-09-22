@@ -27,13 +27,7 @@ struct TestDir(PathBuf);
 
 impl TestDir {
     fn new() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        // Keep the name short: the socket path must fit in sun_path (104
-        // bytes on macOS) and the macOS temp dir alone is ~50 bytes.
-        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let pid = std::process::id();
-        Self(std::env::temp_dir().join(format!("ultty-it-{pid}-{id}")))
+        Self(ultty::testing::short_socket_test_dir("it"))
     }
 }
 

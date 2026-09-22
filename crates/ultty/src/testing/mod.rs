@@ -24,6 +24,28 @@ pub mod snapshot;
 
 pub use snapshot::{SnapshotDiff, TerminalSnapshot, TerminalVerifier};
 
+/// A fresh, short directory path for tests that bind Unix sockets.
+///
+/// Unix socket paths must fit in `sun_path` (104 bytes on macOS), and the
+/// macOS temp dir alone is about 50 bytes, so a descriptive test-dir name
+/// under it can push a socket path over the limit depending on the pid.
+/// The name is kept compact and, when the temp dir itself is long, `/tmp`
+/// is used instead. The directory is not created; callers own its lifetime.
+pub fn short_socket_test_dir(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    const MAX_BASE_LEN: usize = 40;
+
+    let base = std::env::temp_dir();
+    let base = if base.as_os_str().len() > MAX_BASE_LEN {
+        std::path::PathBuf::from("/tmp")
+    } else {
+        base
+    };
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    base.join(format!("ut-{tag}-{}-{id}", std::process::id()))
+}
+
 use crate::event_loop::EventLoop;
 use crate::grid::{MouseMode, Terminal};
 use std::time::{Duration, Instant};
