@@ -1,3 +1,6 @@
+> Historical document, archived 2026-09-22. Not maintained.
+> See [docs/ISSUE_BACKLOG_30_60_90.md](../ISSUE_BACKLOG_30_60_90.md) for current work.
+
 # Feature Parity Execution Plan
 
 **Source**: Architectural review comparing porygon-tui against Porygon AI daemon, OpenCode, and Codex CLI.
@@ -5,8 +8,8 @@
 **Principle**: Each chunk is ≤1 day, independently mergeable, and leaves tests green. Phases build on each other but chunks within a phase are independent where possible.
 
 **Companion documents**:
-- `docs/FEATURE_PARITY_PLAN.md` — Architectural overview and rationale
-- `docs/TECH_DEBT_PLAN.md` — Code cleanup (separate from feature work)
+- `docs/archive/FEATURE_PARITY_PLAN.md` — Architectural overview and rationale
+- `docs/archive/TECH_DEBT_PLAN.md` — Code cleanup (separate from feature work)
 
 ---
 

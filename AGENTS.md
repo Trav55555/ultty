@@ -1,61 +1,51 @@
 # Ultty — Agent Guide
 
-GPU-accelerated terminal emulator + TUI framework. Rust workspace, edition 2021, MSRV 1.75.
+GPU-accelerated terminal emulator + TUI framework. Rust workspace, edition 2021,
+MSRV 1.85 (`rust-version` in the root `Cargo.toml`). The toolchain is pinned by
+`rust-toolchain.toml`.
+
+[CLAUDE.md](CLAUDE.md) is the authoritative guide for build commands,
+architecture, coding conventions, and layout pitfalls. Read it first. This file
+covers only what CLAUDE.md does not: code style details, testing conventions,
+and the dependency policy.
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the human-facing version of the same
+workflow.
 
 ## Repository Layout
 
 ```
 crates/
   ultty/            # Terminal emulator binary (GPU renderer, ANSI parser, native protocol)
-  ulttui/           # TUI framework library (Elm architecture, 22+ widgets, dual-mode)
+  ulttui/           # TUI framework library (Elm architecture, 28 widget modules, dual-mode)
   ultty-protocol/   # Wire protocol codec (binary encode/decode, layout types)
   ultty-client/     # Low-level client SDK (raw protocol access)
-examples/           # 8 example apps (counter, todo, dashboard, chat, porygon-tui, etc.)
-tests/              # Workspace-level integration tests
+examples/           # 9 workspace example apps: hello-native, counter-app, todo-app,
+                    # dashboard, chat, form-app, split-panes, sysmon, async-fetch.
+                    # porygon-tui sits under examples/ but is excluded from the
+                    # workspace; build it with
+                    # `cargo build --manifest-path examples/porygon-tui/Cargo.toml`.
+docs/               # Project documentation; docs/archive/ holds historical plans
+scripts/            # Smoke gates, screenshot capture, security audit
 ```
 
-## Build / Test / Lint Commands
+Integration tests live in each crate's own `tests/` directory. There is no
+workspace-level `tests/` directory.
 
-```bash
-# Full workspace
-cargo build --workspace
-cargo test --workspace                # ~1820 tests
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all
-cargo fmt --all -- --check            # CI format check
+## Build / Test / Lint
 
-# Single crate
-cargo test -p ultty --lib             # Terminal tests (~1005)
-cargo test -p ulttui --lib            # Framework tests (~537)
-cargo test -p ultty-protocol          # Protocol tests
-cargo test -p ulttui --test snapshots # Snapshot tests (25, uses insta)
+Commands are listed in [CLAUDE.md](CLAUDE.md). Do not hard-code test counts in
+documentation; run `cargo test --workspace` and read the number from there.
 
-# Single test by name
-cargo test -p ultty -- test_name
-cargo test -p ulttui -- test_name
+**CI** (`.github/workflows/ci.yml`) runs five jobs: `fmt`, `security-audit`,
+`clippy` (`--all-targets -D warnings`, on ubuntu and macos), `test` (ubuntu and
+macos), and `msrv` (`cargo check --workspace --all-targets` on 1.85). There is
+no coverage or benchmark job. The runtime is Unix-first: CI validates Linux and
+macOS; Windows requires future named-pipe/ConPTY platform work.
+**RUSTFLAGS=-Dwarnings** — all warnings are errors.
 
-# Snapshot review (after changing widget rendering)
-cargo insta review
-
-# Benchmarks
-cargo bench -p ultty
-
-# Run
-cargo run -p ultty                    # Terminal emulator
-cargo run -p counter-app              # Example app
-```
-
-**CI** (`.github/workflows/ci.yml`): check, test, clippy (`-D warnings`), fmt (`--check`), security audit, coverage (tarpaulin), benchmarks. The runtime is Unix-first: CI validates Linux and macOS; Windows requires future named-pipe/ConPTY platform work. **RUSTFLAGS=-Dwarnings** — all warnings are errors.
-
-## Architecture
-
-Apps built with `ulttui` auto-detect environment:
-- **Inside Ultty**: Native binary protocol over Unix socket → terminal-side layout (Taffy) → GPU rendering (wgpu)
-- **Any supported Unix terminal**: ANSI mode via ratatui → character-cell rendering
-
-**Elm architecture**: `Application` trait with `update()` → `view()` → `on_event()`. Side effects via `Cmd::spawn()` (async) and `Sub` (subscriptions).
-
-**Retained scene graph**: Terminal owns a region tree. Apps send diffs (`CreateRegion`, `SetContent`, `DeleteRegion`). Atomic `BeginFrame`/`EndFrame` prevents tearing.
+`.github/workflows/live-smoke.yml` (manual dispatch, self-hosted GUI runner) and
+`.github/workflows/release.yml` (tag push) are the other two workflows.
 
 ## Code Style
 
@@ -108,8 +98,12 @@ pub type Result<T> = std::result::Result<T, ProtocolError>;
 
 ### Logging & Safety
 
-- `tracing` crate only. Never `println!` or `log` in non-test code.
-- No `unsafe`. If unavoidable, add `// SAFETY:` comment.
+- `tracing` crate only for diagnostics. Never `log`. Never `println!` in library
+  or runtime code. Exception: CLI binaries write their own output with
+  `println!` (`ulttyctl` command results, `--version`).
+- Avoid `unsafe`. The codebase has a small number of unsafe blocks, mostly in
+  the platform and renderer layers. Every unsafe block needs a `// SAFETY:`
+  comment explaining the invariant it relies on.
 
 ### Formatting
 
@@ -117,16 +111,19 @@ Standard `rustfmt` defaults (no config file). `rust-analyzer.toml` sets clippy a
 
 ### Commit Discipline
 
-- Commit frequently — make small, atomic commits after each logical unit of work
+- Commit frequently — make small, atomic commits after each logical unit of work.
+- No AI attribution footers or trailers in commit messages or PR bodies.
 
 ## Testing
 
 - **Unit**: Inline `#[cfg(test)] mod tests { ... }` in same file
-- **Integration**: `tests/` directory at crate or workspace level
+- **Integration**: `tests/` directory inside the crate under test
 - **Snapshot**: `insta` for widget rendering golden files → `cargo insta review`
 - **Property**: `proptest` for codec roundtrips
 - **Names**: `test_<thing>_<scenario>` (e.g., `test_parse_empty_input`)
 - **Helpers**: `ultty::testing::TestTerminal` (headless terminal), `MockBackend` (framework, `test-utils` feature)
+
+See [docs/TESTING_STRATEGY.md](docs/TESTING_STRATEGY.md) for the full picture.
 
 ## Key Dependencies
 
@@ -140,20 +137,13 @@ Standard `rustfmt` defaults (no config file). `rust-analyzer.toml` sets clippy a
 | `tracing` | Structured logging |
 | `insta` / `proptest` | Snapshot / property testing |
 
-**Policy**: Minimize deps. Prefer `no_std`-compatible. Pin versions in workspace `Cargo.toml`.
-
-## Layout Pitfalls
-
-- `AlignItems::Start` in Row = children keep natural height. Use `Stretch` for fill.
-- Content area = region size minus padding AND border.
-- ScrollView defaults: `flex_grow: 1.0`, `overflow_y: Scroll`, `flex_direction: Column`.
-- Unicode block chars (▁▂▃▄▅▆▇█) render poorly in GPU — use ASCII alternatives.
+**Policy**: Minimize deps. Pin versions in the workspace `Cargo.toml`. Several
+of the graphics and TUI dependencies are well behind current releases; upgrading
+them is tracked in [docs/ISSUE_BACKLOG_30_60_90.md](docs/ISSUE_BACKLOG_30_60_90.md).
 
 ## Widgets
 
-All implement `View` with `content()` (native) and `render_ansi()` (fallback). Interactive widgets support `.id()` for focus. `Tab`/`Shift+Tab` cycles focus.
-
-**Display**: Text, RichText, Image, ProgressBar, Spinner, Divider, Badge
-**Interactive**: Button, TextInput, Checkbox, Toggle, Select
-**Data**: List, Table, Tabs
-**Containers**: Column, Row, Stack, ScrollView, Modal
+All implement `View` with `content()` (native) and `render_ansi()` (fallback).
+Interactive widgets support `.id()` for focus. `Tab`/`Shift+Tab` cycles focus.
+[docs/WIDGET_REFERENCE.md](docs/WIDGET_REFERENCE.md) is the full list;
+`crates/ulttui/src/widgets/` is the source of truth.

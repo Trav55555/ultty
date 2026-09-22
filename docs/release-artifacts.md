@@ -9,6 +9,7 @@ The release workflow runs these checks automatically:
 - `.deb` contents include both binaries, the desktop entry, and hicolor icons; extracted binaries report versions.
 - `.rpm` contents include both binaries, the desktop entry, and hicolor icons.
 - The Homebrew formula test checks both `ultty --version` and `ulttyctl --version`.
+- The rendered Homebrew formula has no leftover `VERSION` or `SHA256_` placeholders, declares the release version, and carries three 64-hex-character sha256 values.
 
 Local examples:
 
@@ -17,4 +18,39 @@ scripts/release-artifact-smoke.sh --tarball path/to/ultty-v0.1.0-x86_64-unknown-
 scripts/release-artifact-smoke.sh --deb path/to/ultty_0.1.0_amd64.deb
 scripts/release-artifact-smoke.sh --rpm path/to/ultty-0.1.0-1.x86_64.rpm
 scripts/release-artifact-smoke.sh --homebrew dist/homebrew/ultty.rb
+scripts/release-artifact-smoke.sh --expected-version 0.1.0 --homebrew-rendered path/to/rendered/ultty.rb
 ```
+
+`--homebrew` checks the template in `dist/homebrew/ultty.rb`, which still holds
+placeholders. `--homebrew-rendered` checks a formula produced for a specific
+release and rejects any placeholder that survived rendering.
+
+## Checksums and the Homebrew Formula
+
+The release workflow collects every tarball, `.deb`, and `.rpm` into one
+directory, writes a `SHA256SUMS` file over all of them, and attaches it to the
+GitHub release. Verify a download with:
+
+```bash
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+`scripts/render-homebrew-formula.sh` then fills the formula template for the
+tag and the workflow attaches the rendered `ultty.rb` as a release asset:
+
+```bash
+scripts/render-homebrew-formula.sh \
+  --version v0.1.0 \
+  --artifact-dir artifacts \
+  --out artifacts/ultty.rb
+```
+
+## macOS Signing Status
+
+macOS binaries are not signed or notarized. There are no Apple Developer
+credentials wired into the release workflow. Gatekeeper quarantines the
+downloaded binaries, so users must run
+`xattr -d com.apple.quarantine ./ultty ./ulttyctl` or right-click the binary in
+Finder and choose Open. Say this in the release notes for any candidate that
+advertises macOS artifacts. Signing and notarization are tracked in
+[Issue Backlog](ISSUE_BACKLOG_30_60_90.md).

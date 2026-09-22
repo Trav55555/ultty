@@ -1,3 +1,6 @@
+> Historical document, archived 2026-09-22. Not maintained.
+> See [docs/ISSUE_BACKLOG_30_60_90.md](../ISSUE_BACKLOG_30_60_90.md) for current work.
+
 # Porygon TUI Visual Parity Plan
 
 Status: Historical execution document. Canonical completion status is tracked in `tasks.md` (Visual Parity is complete).

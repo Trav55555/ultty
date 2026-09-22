@@ -1,3 +1,6 @@
+> Historical document, archived 2026-09-22. Not maintained.
+> See [docs/ISSUE_BACKLOG_30_60_90.md](../ISSUE_BACKLOG_30_60_90.md) for current work.
+
 # Tech Debt Reduction Plan
 
 **Source**: Code review of 50 commits (+10,500 LOC) from late Jan–mid Feb 2026.

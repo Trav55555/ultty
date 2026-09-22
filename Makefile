@@ -28,7 +28,7 @@ fmt:
 	$(CARGO) fmt --all
 
 lint:
-	$(CARGO) clippy --workspace -- -D warnings
+	$(CARGO) clippy --workspace --all-targets -- -D warnings
 
 examples:
 	$(CARGO) build --workspace --examples

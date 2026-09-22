@@ -1,3 +1,6 @@
+> Historical document, archived 2026-09-22. Not maintained.
+> See [docs/ISSUE_BACKLOG_30_60_90.md](../ISSUE_BACKLOG_30_60_90.md) for current work.
+
 # Native Rendering Execution Plan (Beautiful + Performant)
 
 Status: Historical execution document. Use `tasks.md` as the source of truth for open/closed execution items.

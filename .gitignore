@@ -20,10 +20,11 @@ Thumbs.db
 *.profraw
 *.profdata
 coverage/
-tests/visual/__pycache__/
 
 # Screenshots (ad-hoc test captures)
 *.png
+# Release candidate evidence is committed on purpose.
+!docs/releases/evidence/**/*.png
 
 # Benchmarks
 criterion/

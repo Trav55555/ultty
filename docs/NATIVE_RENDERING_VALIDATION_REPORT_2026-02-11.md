@@ -1,7 +1,7 @@
 # Native Rendering Validation Report
 
 **Date**: 2026-02-11
-**Scope**: Execute the runnable matrix in `docs/NATIVE_RENDERING_EXECUTION_PLAN.md` and record pass/fail evidence.
+**Scope**: Execute the runnable matrix in `docs/archive/NATIVE_RENDERING_EXECUTION_PLAN.md` and record pass/fail evidence.
 
 ---
 

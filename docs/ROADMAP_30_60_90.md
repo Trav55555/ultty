@@ -28,7 +28,7 @@ dogfood, public alpha, and general use.
 
 | Level | Goal | Current Assessment |
 |-------|------|--------------------|
-| Dogfood | Maintainers can use Ultty from source with known limitations. | Mostly satisfied when local GUI smoke passes. The sequential live smoke passed on 2026-05-29. |
+| Dogfood | Maintainers can use Ultty from source with known limitations. | Not confirmed. The 2026-05-29 sequential live smoke failed: `chrome-screenshot` and `terminal-surface` passed, `native-richtext` failed. See [2026-05-29 RC](releases/2026-05-29-rc.md). A later local run on 2026-06-08 passed, but its evidence is gone. Re-run the gate and record durable evidence. |
 | Public alpha | External technical users can install prerelease builds with explicit caveats. | Needs one filled release-candidate checklist with hosted CI, package smoke, live smoke workflow evidence, install verification, and known limitations. |
 | General use | Broad recommendation as a dependable terminal emulator. | Needs repeated release-candidate evidence, broader terminal workflow smokes, runtime maintainability slices, and external dogfood feedback. |
 

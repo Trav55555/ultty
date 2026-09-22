@@ -152,7 +152,9 @@ expression: output
 
 ## Layer 5: Integration Tests
 
-**Location**: `tests/integration/`
+**Location**: each crate's own `tests/` directory, for example
+`crates/ultty/tests/native_protocol.rs`, `crates/ultty/tests/app_compat.rs`,
+and `crates/ulttui/tests/e2e_ultty.rs`.
 
 **Pattern**: Full app lifecycle
 ```rust
@@ -173,36 +175,29 @@ async fn app_sends_frame_to_terminal() {
 
 ## Layer 6: Screenshot Tests (Visual Regression)
 
-**Location**: `tests/screenshots/`
+**Location**: `scripts/*-smoke.sh`, driven against a running Ultty instance.
 
-**Approach** (Ghostty-inspired):
+There is no golden-image comparison suite. The screenshot gates capture images
+from a live window through `ulttyctl` and assert structural properties with the
+`scripts/analyze-*.py` helpers, rather than diffing against committed PNGs.
+
 ```bash
-# tests/screenshots/run.sh
-ultty --headless --screenshot-mode &
-sleep 0.5
-xdotool type "test content"
-import -window root actual.png
-compare -metric AE actual.png expected.png diff.png
+cargo run -p ultty --bin ultty
+scripts/live-smoke-gate.sh out/live-smoke-gate      # runs the gates below in order
+scripts/screenshot-smoke.sh out/screenshot
+scripts/terminal-surface-smoke.sh out/terminal-surface
+scripts/native-richtext-smoke.sh out/native-richtext
+scripts/append-content-smoke.sh out/append-content
 ```
 
-**Test cases**:
-```
-tests/screenshots/
-├── cases/
-│   ├── basic_text/
-│   │   ├── script.sh           # Commands to run
-│   │   └── expected.png        # Golden screenshot
-│   ├── scrollback/
-│   ├── colors_256/
-│   ├── true_color/
-│   └── unicode_rendering/
-└── run.sh                      # Test runner
-```
+These need a GUI session. [Visual Regression](visual-regression.md) documents
+the canonical commands and what each artifact means.
+[Live Smoke Automation](live-smoke-automation.md) covers running them on the
+self-hosted runner and the rules for citing their output as release evidence.
 
-**Comparison method**:
-- ImageMagick `compare -metric AE` (Absolute Error)
-- Threshold: 0 pixels different (exact match)
-- Generate diff image for failures
+**Not implemented**: pixel-exact golden-image comparison. Adopting it needs a
+deterministic headless renderer path first, otherwise font and compositor
+differences make every run a false failure.
 
 ## Layer 7: Performance Benchmarks
 
@@ -266,16 +261,21 @@ criterion_main!(benches);
 
 ## CI Pipeline
 
-```yaml
-# .github/workflows/test.yml
-test:
-  steps:
-    - cargo test --workspace              # Unit + integration
-    - cargo test -p ultty-protocol        # Property tests (1000 cases)
-    - cargo insta test                    # Snapshot tests
-    - ./tests/screenshots/run.sh          # Visual regression
-    - cargo bench -- --noplot             # Performance (no regression)
-```
+`.github/workflows/ci.yml` runs five jobs on every push and pull request to
+`main`:
+
+| Job | What it runs |
+|-----|--------------|
+| `fmt` | `cargo fmt --all -- --check` |
+| `security-audit` | `scripts/security-audit.sh` |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` on ubuntu and macos |
+| `test` | `cargo test --workspace`, the ignored protocol roundtrip tests, and the snapshot tests, on ubuntu and macos |
+| `msrv` | `cargo check --workspace --all-targets` on the MSRV toolchain |
+
+The screenshot gates and the benchmarks are not in this pipeline. Screenshot
+gates run through `.github/workflows/live-smoke.yml` on manual dispatch, since
+they need a GUI runner. Benchmarks are run by hand and recorded under
+`docs/perf/`.
 
 ## Test Data Management
 
@@ -289,9 +289,6 @@ test:
 ```bash
 # Snapshot tests
 cargo insta review
-
-# Screenshot tests
-./tests/screenshots/run.sh --update
 
 # Reference tests (manual)
 # Edit expected.json after verifying behavior
@@ -320,10 +317,8 @@ ultty/
 │   └── ultty-protocol/
 │       └── tests/
 │           └── roundtrip.rs      # Property tests
-├── tests/
-│   ├── integration/              # Cross-crate tests
-│   └── screenshots/              # Visual regression
-│       ├── cases/
-│       └── run.sh
-└── benches/                      # Workspace benchmarks
+└── scripts/                      # Live GUI smoke gates and analyzers
 ```
+
+There is no workspace-level `tests/` directory. Every integration test lives in
+the `tests/` directory of the crate it exercises.

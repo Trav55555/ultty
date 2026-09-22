@@ -10,10 +10,10 @@ cargo build --workspace              # Debug build (opt-level=1, deps at opt-lev
 cargo build --workspace --release    # Release build (LTO, codegen-units=1, panic=abort)
 
 # Test
-cargo test --workspace               # All tests (~1820 unit tests)
-cargo test -p ultty --lib            # Terminal emulator tests only (~1005 tests)
-cargo test -p ulttui --lib           # Framework tests only (~537 tests)
-cargo test -p ulttui --test snapshots # Snapshot tests (25 tests, uses insta)
+cargo test --workspace               # All tests
+cargo test -p ultty --lib            # Terminal emulator tests only
+cargo test -p ulttui --lib           # Framework tests only
+cargo test -p ulttui --test snapshots # Snapshot tests (uses insta)
 cargo test -p ultty -- test_name     # Run a single test by name
 cargo insta review                   # Review snapshot diffs interactively
 
@@ -28,7 +28,13 @@ cargo bench -p ultty                 # Parser, grid, layout, render benchmarks
 # Run
 cargo run -p ultty                   # Run the terminal emulator
 cargo run -p counter-app             # Run an example app
+
+# porygon-tui is excluded from the workspace; build it from its own manifest
+cargo build --manifest-path examples/porygon-tui/Cargo.toml
 ```
+
+The toolchain is pinned by `rust-toolchain.toml`. CI runs the same version plus
+an MSRV job; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Architecture
 
@@ -48,7 +54,7 @@ examples/*                ←─depends─  ulttui
 | Crate | Role |
 |-------|------|
 | `ultty` | Terminal emulator binary. GPU renderer (wgpu), ANSI parser, native protocol server, scene graph, tabs/splits. Also produces `ulttyctl` CLI tool. |
-| `ulttui` | TUI application framework. Elm architecture (Application trait with update/view/on_event), 22+ widgets, dual-mode rendering. |
+| `ulttui` | TUI application framework. Elm architecture (Application trait with update/view/on_event), 28 widget modules, dual-mode rendering. |
 | `ultty-protocol` | Wire protocol codec. Binary message encode/decode, layout constraint types (wraps Taffy), content types, event types. |
 | `ultty-client` | Low-level client SDK for apps that want raw protocol access without the framework. |
 
@@ -81,9 +87,9 @@ Same binary works in both modes. Widgets implement both `render_child_native()` 
 ## Coding Conventions
 
 - **Error handling**: `thiserror` in library crates, `anyhow` in binaries/examples
-- **Logging**: `tracing` crate only, never `println!`
+- **Logging**: `tracing` crate only, never `println!`. Exception: CLI binaries write their own output with `println!` (`ulttyctl` command results, `--version`).
 - **Unsafe**: Avoid; if required, add `// SAFETY:` comment
-- **Rust edition**: 2021, MSRV 1.75
+- **Rust edition**: 2021, MSRV 1.85 (`rust-version` in the root `Cargo.toml`)
 - **Commit frequently**: Make small, atomic commits after each logical unit of work
 
 ## Layout Pitfalls

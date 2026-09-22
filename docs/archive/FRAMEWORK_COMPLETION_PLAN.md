@@ -1,3 +1,6 @@
+> Historical document, archived 2026-09-22. Not maintained.
+> See [docs/ISSUE_BACKLOG_30_60_90.md](../ISSUE_BACKLOG_30_60_90.md) for current work.
+
 # ulttui Framework Completion Plan
 
 **Goal**: Framework-complete, ship fast. Make ulttui competitive as a TUI framework library.
