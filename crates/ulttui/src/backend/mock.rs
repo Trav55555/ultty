@@ -25,6 +25,11 @@ pub struct MockBackend {
     pub rendered_messages: Vec<Vec<AppMessage>>,
     /// Error to return on next `poll_event` call (one-shot).
     pending_error: Option<String>,
+    /// When set, an exhausted event list yields `None` (idle) instead of
+    /// `Quit`, so the app under test decides when to stop.
+    idle_when_exhausted: bool,
+    /// Idle polls returned since the event list ran out.
+    idle_polls: usize,
     /// Events that were actually dispatched (for assertion).
     pub dispatched_events: Vec<Event>,
 }
@@ -39,8 +44,23 @@ impl MockBackend {
             rendered_messages: Vec::new(),
             pending_error: None,
             dispatched_events: Vec::new(),
+            idle_when_exhausted: false,
+            idle_polls: 0,
         }
     }
+
+    /// Keep polling `None` after the scripted events run out instead of
+    /// quitting, so a test can wait for asynchronous work to deliver a
+    /// message and let the app quit itself. A safety cap of
+    /// [`MockBackend::MAX_IDLE_POLLS`] idle polls still produces `Quit`, so a
+    /// test that never quits fails instead of hanging.
+    pub fn idle_until_quit(mut self) -> Self {
+        self.idle_when_exhausted = true;
+        self
+    }
+
+    /// Upper bound on idle polls after the event list is exhausted.
+    pub const MAX_IDLE_POLLS: usize = 1_000_000;
 
     pub fn init(&mut self) -> anyhow::Result<()> {
         Ok(())
@@ -67,7 +87,14 @@ impl MockBackend {
         // Give spawned tokio tasks a chance to run without a wall-clock sleep.
         std::thread::yield_now();
 
-        let event = self.events.pop_front().unwrap_or(Some(Event::Quit));
+        let event = match self.events.pop_front() {
+            Some(event) => event,
+            None if self.idle_when_exhausted && self.idle_polls < Self::MAX_IDLE_POLLS => {
+                self.idle_polls += 1;
+                None
+            }
+            None => Some(Event::Quit),
+        };
         if let Some(ref e) = event {
             self.dispatched_events.push(e.clone());
         }

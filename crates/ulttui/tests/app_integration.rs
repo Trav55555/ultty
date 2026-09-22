@@ -91,7 +91,9 @@ impl Application for SpawnApp {
                 if let Ok(mut shared) = self.shared.lock() {
                     *shared = Some(value);
                 }
-                Cmd::none()
+                // The test ends when the spawned result arrives, not after a
+                // fixed number of polls, so it cannot race the task.
+                Cmd::Quit
             }
         }
     }
@@ -209,14 +211,12 @@ fn tab_navigation_cycles_focus_across_registered_widgets() {
 
 #[test]
 fn cmd_spawn_executes() {
-    let mut events = vec![make_key('s')];
-    events.extend(std::iter::repeat_n(None, 50));
-    events.push(Some(Event::Quit));
+    let events = vec![make_key('s')];
     let shared = Arc::new(Mutex::new(None));
     let app = SpawnApp {
         shared: Arc::clone(&shared),
     };
-    let mock = MockBackend::new(events);
+    let mock = MockBackend::new(events).idle_until_quit();
     let runner = App::new_with_backend(app, Backend::Mock(mock));
     runner.run().unwrap();
 
