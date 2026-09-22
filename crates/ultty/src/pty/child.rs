@@ -537,6 +537,7 @@ mod tests {
     }
 
     /// Extract the hexadecimal mask of a `Sig*:` line from `/proc/self/status`.
+    #[cfg(target_os = "linux")]
     fn proc_status_mask(output: &str, field: &str) -> u64 {
         let line = output
             .lines()
@@ -547,6 +548,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn child_gets_default_sigpipe_disposition() {
         // The Rust runtime sets SIGPIPE to SIG_IGN, and ignored dispositions
         // survive exec. The child must start with SIGPIPE back at SIG_DFL.
@@ -561,6 +563,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn child_starts_with_empty_signal_mask() {
         use nix::sys::signal::{pthread_sigmask, SigSet, SigmaskHow, Signal};
 

@@ -742,6 +742,10 @@ mod tests {
         let _a = connect(&mut server, &path_a);
         let mut b = connect(&mut server, &path_b);
         assert_eq!(server.session_count(), 2);
+        // Set the timeout while the peer is still open: macOS rejects
+        // SO_RCVTIMEO on a Unix socket whose peer has already gone away.
+        b.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
 
         server.close_tab(TAB_B);
         assert!(!path_b.exists(), "closed tab's socket is unlinked");
@@ -753,8 +757,6 @@ mod tests {
 
         // The dropped server end shows up as EOF on the client.
         let mut buf = [0u8; 16];
-        b.set_read_timeout(Some(Duration::from_millis(200)))
-            .unwrap();
         assert_eq!(std::io::Read::read(&mut b, &mut buf).unwrap(), 0);
 
         // Closing an unknown or already closed tab is a no-op.

@@ -361,7 +361,10 @@ mod tests {
 
         let (pty, _slave) = result.unwrap();
         assert!(!pty.slave_name().is_empty());
+        #[cfg(target_os = "linux")]
         assert!(pty.slave_name().starts_with("/dev/pts/"));
+        #[cfg(target_os = "macos")]
+        assert!(pty.slave_name().starts_with("/dev/ttys"));
     }
 
     #[test]
