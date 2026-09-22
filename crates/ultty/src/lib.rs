@@ -41,6 +41,7 @@ pub mod config;
 pub mod config_watcher;
 pub mod control;
 pub mod grid;
+pub mod platform;
 pub mod protocol;
 pub mod pty;
 

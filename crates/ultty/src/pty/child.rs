@@ -5,7 +5,7 @@ use nix::libc;
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{fork, setsid, ForkResult, Pid};
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::os::raw::c_char;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -24,24 +24,43 @@ pub struct Child {
 
 impl Child {
     /// Spawn a new shell in a PTY.
-    pub fn spawn_shell(size: PtySize) -> Result<Self> {
+    ///
+    /// `env` is added to the inherited environment (see [`Child::spawn`]).
+    pub fn spawn_shell(size: PtySize, env: &[(OsString, OsString)]) -> Result<Self> {
         let shell = default_shell();
         let working_dir = current_dir();
-        Self::spawn(&shell, &[&shell], &working_dir, size)
+        Self::spawn(&shell, &[&shell], &working_dir, size, env)
     }
 
     /// Spawn a shell in a specific working directory.
-    pub fn spawn_shell_in_dir(size: PtySize, working_dir: &str) -> Result<Self> {
+    ///
+    /// `env` is added to the inherited environment (see [`Child::spawn`]).
+    pub fn spawn_shell_in_dir(
+        size: PtySize,
+        working_dir: &str,
+        env: &[(OsString, OsString)],
+    ) -> Result<Self> {
         let shell = default_shell();
         let wd = std::path::PathBuf::from(working_dir);
         let wd = if wd.exists() { wd } else { current_dir() };
-        Self::spawn(&shell, &[&shell], &wd, size)
+        Self::spawn(&shell, &[&shell], &wd, size, env)
     }
 
     /// Spawn a command in a PTY.
-    pub fn spawn(program: &str, args: &[&str], working_dir: &Path, size: PtySize) -> Result<Self> {
+    ///
+    /// The child inherits this process's environment plus `env`, whose
+    /// entries override inherited variables of the same name. Passing the
+    /// extra variables per spawn keeps them out of `std::env`, which is
+    /// unsound to mutate in a multithreaded process.
+    pub fn spawn(
+        program: &str,
+        args: &[&str],
+        working_dir: &Path,
+        size: PtySize,
+        env: &[(OsString, OsString)],
+    ) -> Result<Self> {
         let (pty, slave) = Pty::open_with_size(size)?;
-        let exec_plan = ChildExec::new(program, args, working_dir)?;
+        let exec_plan = ChildExec::new(program, args, working_dir, env)?;
 
         // SAFETY: the child path only performs session/fd setup and execve with
         // argv/env/cwd prepared before fork. It must not allocate or take locks.
@@ -235,7 +254,12 @@ struct ChildExec {
 }
 
 impl ChildExec {
-    fn new(program: &str, args: &[&str], working_dir: &Path) -> Result<Self> {
+    fn new(
+        program: &str,
+        args: &[&str],
+        working_dir: &Path,
+        extra_env: &[(OsString, OsString)],
+    ) -> Result<Self> {
         let program = cstring_from_bytes(resolve_program_path(program).as_bytes())?;
         let working_dir = cstring_from_bytes(working_dir.as_os_str().as_bytes())?;
 
@@ -252,14 +276,16 @@ impl ChildExec {
 
         let mut env = Vec::new();
         for (key, value) in std::env::vars_os() {
-            if key == "TERM" || key == "COLORTERM" {
+            if key == "TERM"
+                || key == "COLORTERM"
+                || extra_env.iter().any(|(extra_key, _)| *extra_key == key)
+            {
                 continue;
             }
-            let mut entry = Vec::new();
-            entry.extend_from_slice(key.as_os_str().as_bytes());
-            entry.push(b'=');
-            entry.extend_from_slice(value.as_os_str().as_bytes());
-            env.push(cstring_from_bytes(&entry)?);
+            env.push(env_entry(&key, &value)?);
+        }
+        for (key, value) in extra_env {
+            env.push(env_entry(key, value)?);
         }
         env.push(cstring_from_bytes(b"TERM=xterm-256color")?);
         env.push(cstring_from_bytes(b"COLORTERM=truecolor")?);
@@ -286,6 +312,14 @@ impl ChildExec {
 
 fn cstring_from_bytes(bytes: &[u8]) -> Result<CString> {
     CString::new(bytes).map_err(|_| PtyError::ExecFailed(nix::Error::EINVAL))
+}
+
+fn env_entry(key: &std::ffi::OsStr, value: &std::ffi::OsStr) -> Result<CString> {
+    let mut entry = Vec::with_capacity(key.len() + value.len() + 1);
+    entry.extend_from_slice(key.as_bytes());
+    entry.push(b'=');
+    entry.extend_from_slice(value.as_bytes());
+    cstring_from_bytes(&entry)
 }
 
 fn resolve_program_path(program: &str) -> std::borrow::Cow<'_, str> {
@@ -329,6 +363,8 @@ fn setup_child(slave: SlavePty, exec_plan: &ChildExec) -> ! {
     }
 
     // Redirect stdin, stdout, stderr to the slave
+    // SAFETY: slave_fd is an open descriptor we own; dup2 onto the standard
+    // fds is async-signal-safe and valid between fork and exec.
     unsafe {
         if libc::dup2(slave_fd, libc::STDIN_FILENO) < 0 {
             exit_child(1);
@@ -343,17 +379,37 @@ fn setup_child(slave: SlavePty, exec_plan: &ChildExec) -> ! {
 
     // Close the original slave fd if it's not one of the standard fds
     if slave_fd > libc::STDERR_FILENO {
+        // SAFETY: slave_fd is still open and is not one of the standard fds
+        // we just duplicated onto, so closing it cannot invalidate them.
         unsafe {
             libc::close(slave_fd);
         }
     }
 
     // Change to working directory
+    // SAFETY: working_dir is a NUL-terminated CString built before fork and
+    // outlives this call; chdir is async-signal-safe. Failure is tolerated.
     unsafe {
         libc::chdir(exec_plan.working_dir.as_ptr());
     }
 
+    // The Rust runtime ignores SIGPIPE and this thread may have signals
+    // blocked; neither must leak into the shell. Both calls are
+    // async-signal-safe.
+    // SAFETY: plain libc calls with valid arguments; `mask` is a fully
+    // initialized sigset_t (sigemptyset) before it is passed to sigprocmask
+    // and the old-mask pointer is allowed to be null.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        let mut mask: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut mask);
+        libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
+    }
+
     // Execute the program
+    // SAFETY: program, argv and envp are NUL-terminated arrays of CStrings
+    // built before fork; argv and envp end with a null pointer. execve only
+    // returns on failure, after which we _exit without touching Rust state.
     unsafe {
         libc::execve(
             exec_plan.program.as_ptr(),
@@ -365,6 +421,8 @@ fn setup_child(slave: SlavePty, exec_plan: &ChildExec) -> ! {
 }
 
 fn exit_child(code: i32) -> ! {
+    // SAFETY: _exit is async-signal-safe and never returns; it skips Rust
+    // destructors and atexit handlers, which is required in a forked child.
     unsafe {
         libc::_exit(code);
     }
@@ -381,6 +439,7 @@ mod tests {
             &["/bin/echo", "hello"],
             &current_dir(),
             PtySize::default(),
+            &[],
         )
         .expect("Failed to spawn echo");
 
@@ -412,6 +471,7 @@ mod tests {
             &["/bin/cat"],
             &current_dir(),
             PtySize::default(),
+            &[],
         )
         .expect("Failed to spawn cat");
 
@@ -438,6 +498,122 @@ mod tests {
         child.terminate().unwrap();
     }
 
+    /// Read PTY output until `needle` appears or the timeout elapses.
+    fn read_until(child: &Child, needle: &str, timeout: std::time::Duration) -> String {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut output = Vec::new();
+        let mut buf = [0u8; 4096];
+        while std::time::Instant::now() < deadline {
+            match child.read(&mut buf) {
+                Ok(0) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Ok(n) => {
+                    output.extend_from_slice(&buf[..n]);
+                    if String::from_utf8_lossy(&output).contains(needle) {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&output).into_owned()
+    }
+
+    fn run_in_pty(script: &str) -> String {
+        run_in_pty_with_env(script, &[])
+    }
+
+    fn run_in_pty_with_env(script: &str, env: &[(OsString, OsString)]) -> String {
+        let mut child = Child::spawn(
+            "/bin/sh",
+            &["/bin/sh", "-c", script],
+            &current_dir(),
+            PtySize::default(),
+            env,
+        )
+        .expect("Failed to spawn sh");
+        let output = read_until(&child, "DONE", std::time::Duration::from_secs(5));
+        let _ = child.wait();
+        output
+    }
+
+    /// Extract the hexadecimal mask of a `Sig*:` line from `/proc/self/status`.
+    fn proc_status_mask(output: &str, field: &str) -> u64 {
+        let line = output
+            .lines()
+            .find(|line| line.starts_with(field))
+            .unwrap_or_else(|| panic!("no {field} line in {output:?}"));
+        u64::from_str_radix(line.trim_start_matches(field).trim(), 16)
+            .unwrap_or_else(|_| panic!("unparsable mask in {line:?}"))
+    }
+
+    #[test]
+    fn child_gets_default_sigpipe_disposition() {
+        // The Rust runtime sets SIGPIPE to SIG_IGN, and ignored dispositions
+        // survive exec. The child must start with SIGPIPE back at SIG_DFL.
+        let output = run_in_pty("grep SigIgn /proc/self/status; echo DONE");
+        let ignored = proc_status_mask(&output, "SigIgn:");
+        let sigpipe_bit = 1u64 << (libc::SIGPIPE - 1);
+        assert_eq!(
+            ignored & sigpipe_bit,
+            0,
+            "child inherited ignored SIGPIPE: {output:?}"
+        );
+    }
+
+    #[test]
+    fn child_starts_with_empty_signal_mask() {
+        use nix::sys::signal::{pthread_sigmask, SigSet, SigmaskHow, Signal};
+
+        // Block a signal in the spawning thread; fork() copies that mask.
+        let mut blocked = SigSet::empty();
+        blocked.add(Signal::SIGUSR1);
+        let mut previous = SigSet::empty();
+        pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&blocked), Some(&mut previous)).unwrap();
+
+        let output = run_in_pty("grep SigBlk /proc/self/status; echo DONE");
+
+        pthread_sigmask(SigmaskHow::SIG_SETMASK, Some(&previous), None).unwrap();
+
+        let blocked = proc_status_mask(&output, "SigBlk:");
+        assert_eq!(
+            blocked, 0,
+            "child inherited a blocked-signal mask: {output:?}"
+        );
+    }
+
+    #[test]
+    fn per_spawn_env_reaches_only_that_child() {
+        let env = [(
+            OsString::from("ULTTY_CHILD_ENV_TEST"),
+            OsString::from("per-spawn"),
+        )];
+        let output = run_in_pty_with_env("echo \"value=$ULTTY_CHILD_ENV_TEST\"; echo DONE", &env);
+        assert!(
+            output.contains("value=per-spawn"),
+            "child did not receive per-spawn env: {output:?}"
+        );
+
+        // The variable is scoped to that spawn: a sibling spawned without it
+        // must not see it (nothing leaked into a process-wide table or std::env).
+        let output = run_in_pty("echo \"value=[$ULTTY_CHILD_ENV_TEST]\"; echo DONE");
+        assert!(
+            output.contains("value=[]"),
+            "per-spawn env leaked into another child: {output:?}"
+        );
+    }
+
+    #[test]
+    fn per_spawn_env_overrides_inherited_variable() {
+        // PATH is always inherited; the per-spawn value must replace it
+        // rather than appear alongside it.
+        let env = [(OsString::from("PATH"), OsString::from("/ultty-override"))];
+        let output = run_in_pty_with_env("echo \"path=$PATH\"; echo DONE", &env);
+        assert!(
+            output.contains("path=/ultty-override"),
+            "override did not replace inherited PATH: {output:?}"
+        );
+    }
+
     #[test]
     fn resize_child() {
         let child = Child::spawn(
@@ -445,6 +621,7 @@ mod tests {
             &["/bin/sh"],
             &current_dir(),
             PtySize::new(80, 24),
+            &[],
         )
         .expect("Failed to spawn shell");
 

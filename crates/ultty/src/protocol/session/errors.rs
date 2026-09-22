@@ -4,6 +4,7 @@ use tracing::warn;
 use ultty_protocol::{RegionId, TerminalMessage, MIN_PROTOCOL_VERSION};
 
 use super::NativeSession;
+use crate::scene::tree::SceneTreeError;
 
 /// Native protocol error response before wire encoding.
 pub(super) struct NativeProtocolError {
@@ -65,9 +66,27 @@ impl NativeProtocolError {
         Self::not_found(format!("region {} not found", id.0))
     }
 
-    /// Create an error for a failed reparent where either endpoint is missing.
-    pub(super) fn region_or_parent_not_found(id: RegionId, parent: RegionId) -> Self {
-        Self::not_found(format!("region {} or parent {} not found", id.0, parent.0))
+    /// Map a rejected scene-tree edit to a protocol error.
+    pub(super) fn scene_edit_rejected(command: &'static str, error: SceneTreeError) -> Self {
+        let message = format!("{}: {}", command, error);
+        match error {
+            SceneTreeError::RegionNotFound(_) | SceneTreeError::ParentNotFound(_) => {
+                Self::not_found(message)
+            }
+            SceneTreeError::DuplicateRegion(_)
+            | SceneTreeError::CannotMoveRoot
+            | SceneTreeError::CyclicReparent { .. }
+            | SceneTreeError::TooManyRegions { .. }
+            | SceneTreeError::TooDeep { .. } => Self::bad_request(message),
+        }
+    }
+
+    /// Create an error for a frame that exceeded the pending-operation budget.
+    pub(super) fn frame_too_large(ops: usize, bytes: usize) -> Self {
+        Self::bad_request(format!(
+            "frame exceeded pending limits ({} ops, {} bytes); frame dropped",
+            ops, bytes
+        ))
     }
 
     /// Create an error for a layout engine failure.

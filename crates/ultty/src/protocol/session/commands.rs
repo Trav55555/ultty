@@ -265,14 +265,23 @@ impl NativeSession {
         region.constraints = constraints;
         region.style = style;
 
-        if insert_index >= 0 {
-            self.scene.insert_at(region, insert_index as usize);
-        } else {
-            self.scene.insert(region);
+        let index = usize::try_from(insert_index).unwrap_or(usize::MAX);
+        match self.scene.try_insert_at(region, index) {
+            Ok(()) => {
+                self.mark_full_scene_rebuild();
+                debug!("Created region {:?} under {:?}", id, parent);
+            }
+            Err(error) => {
+                warn!(
+                    "CreateRegion {:?} under {:?} rejected: {}",
+                    id, parent, error
+                );
+                self.queue_protocol_error(NativeProtocolError::scene_edit_rejected(
+                    "create_region",
+                    error,
+                ));
+            }
         }
-
-        self.mark_full_scene_rebuild();
-        debug!("Created region {:?} under {:?}", id, parent);
     }
 
     /// Handle SetConstraints.
@@ -408,17 +417,21 @@ impl NativeSession {
     /// Handle ReparentRegion.
     fn handle_reparent_region(&mut self, id: RegionId, new_parent: RegionId, insert_index: i32) {
         let index = usize::try_from(insert_index).unwrap_or(usize::MAX);
-        if self.scene.reparent(id, new_parent, index) {
-            self.mark_full_scene_rebuild();
-            debug!("Reparented region {:?} to {:?}", id, new_parent);
-        } else {
-            warn!(
-                "ReparentRegion failed for region {:?} to parent {:?}",
-                id, new_parent
-            );
-            self.queue_protocol_error(NativeProtocolError::region_or_parent_not_found(
-                id, new_parent,
-            ));
+        match self.scene.reparent(id, new_parent, index) {
+            Ok(()) => {
+                self.mark_full_scene_rebuild();
+                debug!("Reparented region {:?} to {:?}", id, new_parent);
+            }
+            Err(error) => {
+                warn!(
+                    "ReparentRegion {:?} to parent {:?} rejected: {}",
+                    id, new_parent, error
+                );
+                self.queue_protocol_error(NativeProtocolError::scene_edit_rejected(
+                    "reparent_region",
+                    error,
+                ));
+            }
         }
     }
 }

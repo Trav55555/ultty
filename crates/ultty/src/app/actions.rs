@@ -170,8 +170,8 @@ impl App {
 
         let mut rows = vec![
             (
-                "Socket".to_string(),
-                server.socket_path().display().to_string(),
+                "Socket dir".to_string(),
+                server.socket_dir().display().to_string(),
             ),
             (
                 "Sessions".to_string(),
@@ -208,7 +208,8 @@ impl App {
             rows.push((
                 format!("Session {}", session.session_id()),
                 format!(
-                    "v{} caps=0x{:08x} viewport={:.0}x{:.0} regions={}",
+                    "tab={} v{} caps=0x{:08x} viewport={:.0}x{:.0} regions={}",
+                    session.tab_id().raw(),
                     session.protocol_version(),
                     session.capabilities(),
                     viewport_w,
@@ -329,7 +330,7 @@ impl App {
         let native_sessions: Vec<&ultty::protocol::NativeSession> = self
             .protocol_server
             .as_ref()
-            .map(|s| s.sessions().collect())
+            .map(|s| s.active_tab_sessions().collect())
             .unwrap_or_default();
 
         match self.renderer.capture_screenshot_with_native(
@@ -567,16 +568,41 @@ mod tests {
             .any(|(key, value)| key == "Sessions" && value == "0 connected"));
     }
 
+    /// Server with one open tab in a private temp dir; the dir is removed on drop.
+    struct StatusServer {
+        server: ProtocolServer,
+        socket_path: std::path::PathBuf,
+        dir: std::path::PathBuf,
+    }
+
+    impl StatusServer {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("ultty-status-overlay-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let mut server = ProtocolServer::new(&dir).expect("server should start");
+            let tab = ultty::terminal_manager::TabId::new(0);
+            let socket_path = server.open_tab(tab).expect("tab socket opens");
+            server.set_active_tab(Some(tab));
+            Self {
+                server,
+                socket_path,
+                dir,
+            }
+        }
+    }
+
+    impl Drop for StatusServer {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
     #[test]
     fn protocol_status_rows_cover_empty_server() {
-        let path = std::env::temp_dir().join(format!(
-            "ultty-status-overlay-test-{}.sock",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let server = ProtocolServer::new(&path).expect("server should start");
+        let status = StatusServer::new("empty");
 
-        let rows = App::format_protocol_status_rows(Some(&server));
+        let rows = App::format_protocol_status_rows(Some(&status.server));
 
         assert!(rows
             .iter()
@@ -588,24 +614,24 @@ mod tests {
 
     #[test]
     fn protocol_status_rows_cover_connected_session() {
-        let path = std::env::temp_dir().join(format!(
-            "ultty-status-overlay-session-test-{}.sock",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let mut server = ProtocolServer::new(&path).expect("server should start");
-        let _client = std::os::unix::net::UnixStream::connect(&path).expect("client connects");
+        let mut status = StatusServer::new("session");
+        let _client =
+            std::os::unix::net::UnixStream::connect(&status.socket_path).expect("client connects");
 
-        server
+        status
+            .server
             .poll(Some(std::time::Duration::from_millis(0)))
             .expect("server accepts client");
-        let rows = App::format_protocol_status_rows(Some(&server));
+        let rows = App::format_protocol_status_rows(Some(&status.server));
 
         assert!(rows
             .iter()
             .any(|(key, value)| key == "Sessions" && value == "1 connected"));
         assert!(rows.iter().any(|(key, value)| {
-            key.starts_with("Session ") && value.contains("caps=0x") && value.contains("regions=")
+            key.starts_with("Session ")
+                && value.contains("tab=0")
+                && value.contains("caps=0x")
+                && value.contains("regions=")
         }));
         assert!(rows
             .iter()

@@ -2,14 +2,19 @@
 //!
 //! Processes CLI automation requests from ulttyctl and other tools.
 
-use super::control_wait::{PendingControlWait, WaitMatcher};
+use super::control_wait::{find_ignore_case, PendingControlWait, WaitMatcher};
 use super::App;
+use std::io;
+use std::path::Path;
 use std::time::Duration;
 use winit::dpi::PhysicalSize;
 
+/// Number of random bytes in a freshly generated control auth token.
+const AUTH_TOKEN_BYTES: usize = 32;
+
 impl App {
     pub(super) fn handle_control_requests(&mut self) {
-        use ultty_protocol::control::ControlResponse;
+        use ultty_protocol::control::{ControlRequest, ControlResponse};
 
         let requests = {
             let Some(ref mut server) = self.control_server else {
@@ -21,6 +26,19 @@ impl App {
         let mut responses: Vec<(usize, ControlResponse)> = Vec::new();
 
         for (client_key, request) in requests {
+            // `WithToken` authenticates the connection and then behaves
+            // exactly like its inner request (including wait-for deferral).
+            let request = match request {
+                ControlRequest::WithToken { token, request } => {
+                    if let Err(response) = self.authenticate_client(client_key, &token) {
+                        responses.push((client_key, response));
+                        continue;
+                    }
+                    *request
+                }
+                other => other,
+            };
+
             if let Some(response) = self.defer_wait_for_request(client_key, &request) {
                 responses.push((client_key, response));
                 continue;
@@ -289,14 +307,14 @@ impl App {
                 working_dir,
             } => {
                 let result = if let Some(cmd) = command {
-                    self.terminal_manager.create_tab_with_command(
+                    self.create_tab_with_command(
                         &cmd,
                         &args,
                         working_dir.as_deref(),
                         title.as_deref(),
                     )
                 } else {
-                    let result = self.terminal_manager.create_tab();
+                    let result = self.create_tab();
                     if let (Ok(tab_id), Some(title)) = (result.as_ref(), title.as_deref()) {
                         self.terminal_manager.set_tab_title(*tab_id, title);
                     }
@@ -547,41 +565,27 @@ impl App {
                                     });
                                 }
                             } else {
-                                let pattern_search = if case_sensitive {
-                                    pattern.clone()
+                                let spans: Vec<(usize, usize, usize)> = if case_sensitive {
+                                    text.match_indices(pattern.as_str())
+                                        .map(|(start, matched)| {
+                                            (
+                                                text[..start].chars().count(),
+                                                start,
+                                                start + matched.len(),
+                                            )
+                                        })
+                                        .collect()
                                 } else {
-                                    pattern.to_lowercase()
-                                };
-                                let search_text = if case_sensitive {
-                                    text.clone()
-                                } else {
-                                    text.to_lowercase()
+                                    let pattern_lower = pattern.to_lowercase();
+                                    find_ignore_case(&text, &pattern_lower)
+                                        .map(|m| (m.char_col, m.byte_start, m.byte_end))
+                                        .collect()
                                 };
 
-                                for (byte_off, matched) in
-                                    search_text.match_indices(&pattern_search)
-                                {
-                                    let match_byte_end = byte_off + matched.len();
-                                    // Find char-safe context boundaries
-                                    let ctx_start = search_text[..byte_off]
-                                        .char_indices()
-                                        .rev()
-                                        .nth(19)
-                                        .map(|(i, _)| i)
-                                        .unwrap_or(0);
-                                    let ctx_end = search_text[match_byte_end..]
-                                        .char_indices()
-                                        .nth(20)
-                                        .map(|(i, _)| match_byte_end + i)
-                                        .unwrap_or(text.len());
-                                    let col = search_text[..byte_off].chars().count();
-                                    matches.push(SearchMatch {
-                                        line: row,
-                                        col,
-                                        text: text[byte_off..match_byte_end].to_string(),
-                                        context_before: text[ctx_start..byte_off].to_string(),
-                                        context_after: text[match_byte_end..ctx_end].to_string(),
-                                    });
+                                for (col, byte_start, byte_end) in spans {
+                                    matches.push(plain_search_match(
+                                        &text, row, col, byte_start, byte_end,
+                                    ));
                                 }
                             }
                         }
@@ -614,26 +618,55 @@ impl App {
             }
 
             ControlRequest::Authenticate { token } => {
-                let expected =
-                    std::fs::read_to_string(ultty_protocol::control::auth_token_path()).ok();
+                match self.authenticate_client(client_key, &token) {
+                    Ok(()) => ControlResponse::Data(ControlData::Authenticated),
+                    Err(response) => response,
+                }
+            }
 
-                if let Some(expected_token) = expected {
-                    if token.trim() == expected_token.trim() {
-                        if let Some(ref mut server) = self.control_server {
-                            server.set_client_authenticated(client_key, true);
-                        }
-                        ControlResponse::Data(ControlData::Authenticated)
-                    } else {
-                        ControlResponse::Error {
-                            code: 403,
-                            message: "Invalid token".to_string(),
-                        }
-                    }
-                } else {
-                    ControlResponse::Data(ControlData::Authenticated)
+            ControlRequest::WithToken { token, request } => {
+                // Reached only when nested inside a batch; top-level
+                // WithToken is unwrapped in `handle_control_requests`.
+                match self.authenticate_client(client_key, &token) {
+                    Ok(()) => self.process_control_request(client_key, *request),
+                    Err(response) => response,
                 }
             }
         }
+    }
+
+    /// Check `token` against the token file and mark the client authenticated.
+    ///
+    /// Fails closed: a missing or unreadable token file rejects every token.
+    fn authenticate_client(
+        &mut self,
+        client_key: usize,
+        token: &str,
+    ) -> Result<(), ultty_protocol::control::ControlResponse> {
+        use ultty_protocol::control::ControlResponse;
+
+        let expected = match read_auth_token(&ultty_protocol::control::auth_token_path()) {
+            Ok(expected) => expected,
+            Err(e) => {
+                tracing::warn!("Control auth token unavailable: {}", e);
+                return Err(ControlResponse::Error {
+                    code: 500,
+                    message: "Control auth token unavailable".to_string(),
+                });
+            }
+        };
+
+        if !token_matches(token, &expected) {
+            return Err(ControlResponse::Error {
+                code: 403,
+                message: "Invalid token".to_string(),
+            });
+        }
+
+        if let Some(ref mut server) = self.control_server {
+            server.set_client_authenticated(client_key, true);
+        }
+        Ok(())
     }
 
     fn forward_key_to_pty(
@@ -665,11 +698,7 @@ impl App {
         client_key: usize,
         request: &ultty_protocol::control::ControlRequest,
     ) -> Option<ultty_protocol::control::ControlResponse> {
-        use ultty_protocol::control::{ControlRequest, ControlResponse};
-
-        if matches!(request, ControlRequest::Authenticate { .. }) || !control_auth_token_exists() {
-            return None;
-        }
+        use ultty_protocol::control::ControlResponse;
 
         if !control_request_requires_auth(request) {
             return None;
@@ -721,25 +750,92 @@ fn terminal_working_directory(
         .or_else(|| terminal.event_loop.child_working_directory())
 }
 
-fn control_auth_token_exists() -> bool {
-    ultty_protocol::control::auth_token_path().is_file()
+/// Generate a fresh random control auth token and write it to `path`.
+///
+/// The file is created with mode 0600 (and its parent directory 0700 when
+/// it has to be created), so only the owning user can talk to the control
+/// socket. Called once per control-server start; a running instance owns
+/// the socket, so rotating the token on start never races another instance.
+pub(super) fn write_auth_token(path: &Path) -> io::Result<String> {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+
+    let mut random = [0u8; AUTH_TOKEN_BYTES];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+    let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+        }
+    }
+
+    // Replace atomically-ish: truncate an existing file rather than leaving
+    // a stale token readable while we write.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    // `mode` only applies on creation; enforce it for pre-existing files too.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(token.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    Ok(token)
+}
+
+/// Read the expected control auth token from `path`.
+fn read_auth_token(path: &Path) -> io::Result<String> {
+    let token = std::fs::read_to_string(path)?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "auth token file is empty",
+        ));
+    }
+    Ok(token.to_string())
+}
+
+/// Compare a presented token with the expected one without early exit on
+/// the first differing byte.
+fn token_matches(presented: &str, expected: &str) -> bool {
+    let presented = presented.trim().as_bytes();
+    let expected = expected.as_bytes();
+    if presented.len() != expected.len() {
+        return false;
+    }
+    presented
+        .iter()
+        .zip(expected)
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
 }
 
 fn control_request_requires_auth(request: &ultty_protocol::control::ControlRequest) -> bool {
     use ultty_protocol::control::ControlRequest;
 
     match request {
+        // Harmless liveness/version probes and the auth handshake itself.
         ControlRequest::Ping
         | ControlRequest::Version
-        | ControlRequest::GetInfo
+        | ControlRequest::Authenticate { .. }
+        | ControlRequest::WithToken { .. } => false,
+        // Batch members are checked individually when they run.
+        ControlRequest::Batch { .. } => false,
+        // Everything that reads screen content or drives the terminal.
+        ControlRequest::GetInfo
         | ControlRequest::ListTabs
         | ControlRequest::GetText { .. }
         | ControlRequest::GetSelection
         | ControlRequest::Search { .. }
         | ControlRequest::WaitFor { .. }
-        | ControlRequest::Authenticate { .. } => false,
-        ControlRequest::Batch { .. } => false,
-        ControlRequest::SendText { .. }
+        | ControlRequest::SendText { .. }
         | ControlRequest::SendKey { .. }
         | ControlRequest::SendRaw { .. }
         | ControlRequest::NewTab { .. }
@@ -752,6 +848,35 @@ fn control_request_requires_auth(request: &ultty_protocol::control::ControlReque
         | ControlRequest::SetOpacity { .. }
         | ControlRequest::SetAgentStatus { .. }
         | ControlRequest::Screenshot { .. } => true,
+    }
+}
+
+/// Build a search match for `text[byte_start..byte_end]` with up to 20 chars
+/// of context on each side. Offsets must be char boundaries of `text`.
+fn plain_search_match(
+    text: &str,
+    line: usize,
+    col: usize,
+    byte_start: usize,
+    byte_end: usize,
+) -> ultty_protocol::control::SearchMatch {
+    let ctx_start = text[..byte_start]
+        .char_indices()
+        .rev()
+        .nth(19)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let ctx_end = text[byte_end..]
+        .char_indices()
+        .nth(20)
+        .map(|(i, _)| byte_end + i)
+        .unwrap_or(text.len());
+    ultty_protocol::control::SearchMatch {
+        line,
+        col,
+        text: text[byte_start..byte_end].to_string(),
+        context_before: text[ctx_start..byte_start].to_string(),
+        context_after: text[byte_end..ctx_end].to_string(),
     }
 }
 
@@ -890,7 +1015,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn mutating_control_requests_require_auth_when_token_exists() {
+    fn mutating_control_requests_require_auth() {
         assert!(control_request_requires_auth(&ControlRequest::SendText {
             text: "hello".to_string(),
         }));
@@ -907,20 +1032,99 @@ mod tests {
     }
 
     #[test]
-    fn read_only_control_requests_do_not_require_auth() {
-        assert!(!control_request_requires_auth(&ControlRequest::Ping));
-        assert!(!control_request_requires_auth(&ControlRequest::GetInfo));
-        assert!(!control_request_requires_auth(&ControlRequest::Search {
+    fn screen_reading_control_requests_require_auth() {
+        assert!(control_request_requires_auth(&ControlRequest::GetText {
+            include_scrollback: true,
+            scrollback_lines: None,
+        }));
+        assert!(control_request_requires_auth(&ControlRequest::GetSelection));
+        assert!(control_request_requires_auth(&ControlRequest::Search {
             pattern: "needle".to_string(),
             regex: false,
             case_sensitive: false,
             include_scrollback: true,
         }));
-        assert!(!control_request_requires_auth(&ControlRequest::WaitFor {
+        assert!(control_request_requires_auth(&ControlRequest::WaitFor {
             pattern: "ready".to_string(),
             regex: false,
             timeout_ms: 100,
         }));
+        assert!(control_request_requires_auth(&ControlRequest::GetInfo));
+    }
+
+    #[test]
+    fn only_probes_and_auth_are_exempt_from_auth() {
+        assert!(!control_request_requires_auth(&ControlRequest::Ping));
+        assert!(!control_request_requires_auth(&ControlRequest::Version));
+        assert!(!control_request_requires_auth(
+            &ControlRequest::Authenticate {
+                token: "t".to_string(),
+            }
+        ));
+        assert!(!control_request_requires_auth(&ControlRequest::WithToken {
+            token: "t".to_string(),
+            request: Box::new(ControlRequest::Ping),
+        }));
+    }
+
+    #[test]
+    fn write_auth_token_creates_private_random_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("ultty-auth.token");
+
+        let first = write_auth_token(&path).unwrap();
+        let second = write_auth_token(&path).unwrap();
+
+        assert_eq!(first.len(), AUTH_TOKEN_BYTES * 2);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(first, second, "token must be regenerated");
+        assert_eq!(read_auth_token(&path).unwrap(), second);
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700);
+    }
+
+    #[test]
+    fn read_auth_token_fails_closed_when_missing_or_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.token");
+        assert!(read_auth_token(&missing).is_err());
+
+        let empty = dir.path().join("empty.token");
+        std::fs::write(&empty, "\n").unwrap();
+        assert!(read_auth_token(&empty).is_err());
+    }
+
+    #[test]
+    fn token_matches_ignores_surrounding_whitespace_only() {
+        assert!(token_matches("abc123\n", "abc123"));
+        assert!(!token_matches("abc124", "abc123"));
+        assert!(!token_matches("abc12", "abc123"));
+        assert!(!token_matches("", "abc123"));
+    }
+
+    #[test]
+    fn plain_search_match_uses_char_columns_on_multibyte_rows() {
+        let text = "aİé ready";
+        let pattern_lower = "ready";
+        let found: Vec<_> = find_ignore_case(text, pattern_lower).collect();
+        assert_eq!(found.len(), 1);
+        let m = found[0];
+        let result = plain_search_match(text, 3, m.char_col, m.byte_start, m.byte_end);
+
+        assert_eq!(result.line, 3);
+        assert_eq!(result.col, 4);
+        assert_eq!(result.text, "ready");
+        assert_eq!(result.context_before, "aİé ");
+        assert_eq!(result.context_after, "");
     }
 
     #[test]

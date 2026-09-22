@@ -120,24 +120,56 @@ impl LayoutEngine {
             self.node_to_region.remove(&node_id);
         }
 
+        // Collect every node whose child list differs from the scene.
+        let mut changed = Vec::new();
         for region in scene.iter_depth_first() {
-            if let Some(&parent_node) = self.region_to_node.get(&region.id) {
-                let child_nodes: Vec<_> = region
-                    .children
-                    .iter()
-                    .filter_map(|child_id| self.region_to_node.get(child_id).copied())
-                    .collect();
-
-                self.taffy
-                    .set_children(parent_node, &child_nodes)
-                    .map_err(|source| LayoutEngineError::SetChildren {
-                        region_id: region.id,
-                        source,
-                    })?;
+            let Some(&parent_node) = self.region_to_node.get(&region.id) else {
+                continue;
+            };
+            let child_nodes: Vec<_> = region
+                .children
+                .iter()
+                .filter_map(|child_id| self.region_to_node.get(child_id).copied())
+                .collect();
+            let current = self.taffy.children(parent_node).map_err(|source| {
+                LayoutEngineError::SetChildren {
+                    region_id: region.id,
+                    source,
+                }
+            })?;
+            if current != child_nodes {
+                changed.push((region.id, parent_node, child_nodes));
             }
         }
 
+        // Taffy's `set_children` unconditionally clears the parent pointer of
+        // every child it previously held. If a child moved to a node that was
+        // updated earlier in this pass, that would leave it attached to the
+        // new parent's child list with no parent pointer, and the next
+        // `remove` of the child would leave a dangling key behind (and panic
+        // on the following sync). Detach all changed nodes first so the
+        // second pass only ever installs parent pointers.
+        for (region_id, node, _) in &changed {
+            self.taffy.set_children(*node, &[]).map_err(|source| {
+                LayoutEngineError::SetChildren {
+                    region_id: *region_id,
+                    source,
+                }
+            })?;
+        }
+        for (region_id, node, child_nodes) in changed {
+            self.taffy
+                .set_children(node, &child_nodes)
+                .map_err(|source| LayoutEngineError::SetChildren { region_id, source })?;
+        }
+
         Ok(())
+    }
+
+    /// Number of regions currently tracked by the engine.
+    #[cfg(test)]
+    fn node_count(&self) -> usize {
+        self.region_to_node.len()
     }
 
     pub fn compute(&mut self, width: f32, height: f32) -> Result<(), LayoutEngineError> {
@@ -328,7 +360,7 @@ mod tests {
         let mut engine = LayoutEngine::new();
         engine.sync(&scene).unwrap();
 
-        assert!(scene.reparent(RegionId::new(2), RegionId::ROOT, 0));
+        scene.reparent(RegionId::new(2), RegionId::ROOT, 0).unwrap();
         scene.remove(RegionId::new(1));
 
         engine.sync(&scene).unwrap();
@@ -376,6 +408,115 @@ mod tests {
 
         assert!(engine.get_layout(RegionId::new(1)).is_none());
         assert!(engine.get_layout(RegionId::new(2)).is_none());
+    }
+
+    #[test]
+    fn layout_reparent_then_delete_across_syncs_does_not_panic() {
+        // Regression: set_children in depth-first order used to clear the
+        // taffy parent pointer of a child that had already been re-attached
+        // to an earlier sibling, leaving a dangling child reference that
+        // panicked on the next sync.
+        let mut scene = SceneTree::new();
+
+        let mut q = Region::new(RegionId::new(1));
+        q.parent = Some(RegionId::ROOT);
+        scene.insert(q);
+
+        let mut p = Region::new(RegionId::new(2));
+        p.parent = Some(RegionId::ROOT);
+        scene.insert(p);
+
+        let mut b = Region::new(RegionId::new(3));
+        b.parent = Some(RegionId::new(2));
+        scene.insert(b);
+
+        let mut engine = LayoutEngine::new();
+        engine.sync(&scene).unwrap();
+        engine.compute(80.0, 24.0).unwrap();
+
+        // Move B from P (later sibling) to Q (earlier sibling).
+        scene
+            .reparent(RegionId::new(3), RegionId::new(1), 0)
+            .unwrap();
+        engine.sync(&scene).unwrap();
+        engine.compute(80.0, 24.0).unwrap();
+
+        // Delete B, then sync again: must not panic and Q must have no children.
+        scene.remove(RegionId::new(3));
+        engine.sync(&scene).unwrap();
+        engine.compute(80.0, 24.0).unwrap();
+
+        assert!(engine.get_layout(RegionId::new(3)).is_none());
+        let q_node = engine.region_to_node[&RegionId::new(1)];
+        assert!(engine.taffy.children(q_node).unwrap().is_empty());
+        assert_eq!(engine.node_count(), 3, "root, Q and P remain");
+    }
+
+    #[test]
+    fn layout_engine_survives_create_delete_recreate_cycles() {
+        let mut scene = build_scene();
+        let mut engine = LayoutEngine::new();
+
+        for cycle in 0..5 {
+            // Add a nested pair under the body region, lay out, then delete
+            // the parent (cascading) and lay out again with the same engine.
+            let mut panel = Region::new(RegionId::new(100 + cycle));
+            panel.parent = Some(RegionId::new(2));
+            panel.constraints = Constraints {
+                height: ProtoDimension::Cells(5.0),
+                width: ProtoDimension::Percent(100.0),
+                ..Default::default()
+            };
+            scene.insert(panel);
+
+            let mut inner = Region::new(RegionId::new(200 + cycle));
+            inner.parent = Some(RegionId::new(100 + cycle));
+            inner.constraints = Constraints {
+                height: ProtoDimension::Cells(2.0),
+                width: ProtoDimension::Percent(100.0),
+                ..Default::default()
+            };
+            scene.insert(inner);
+
+            let layouts = engine.compute_scene_layout(&mut scene, 80.0, 24.0).unwrap();
+            let panel_layout = layouts
+                .iter()
+                .find(|l| l.id == RegionId::new(100 + cycle))
+                .expect("panel laid out");
+            assert_eq!(panel_layout.height, 5.0);
+            assert_eq!(panel_layout.y, 3.0, "panel sits below the 3-row header");
+            let inner_layout = layouts
+                .iter()
+                .find(|l| l.id == RegionId::new(200 + cycle))
+                .expect("inner laid out");
+            assert_eq!(inner_layout.height, 2.0);
+
+            scene.remove(RegionId::new(100 + cycle));
+            let layouts = engine.compute_scene_layout(&mut scene, 80.0, 24.0).unwrap();
+            assert!(layouts.iter().all(|l| l.id.0 < 100));
+            let body = layouts
+                .iter()
+                .find(|l| l.id == RegionId::new(2))
+                .expect("body laid out");
+            assert_eq!(body.height, 21.0);
+        }
+
+        // Re-create an id that was deleted earlier, under a different parent.
+        let mut revived = Region::new(RegionId::new(100));
+        revived.parent = Some(RegionId::new(1));
+        revived.constraints = Constraints {
+            height: ProtoDimension::Cells(1.0),
+            width: ProtoDimension::Cells(10.0),
+            ..Default::default()
+        };
+        scene.insert(revived);
+        let layouts = engine.compute_scene_layout(&mut scene, 80.0, 24.0).unwrap();
+        let revived_layout = layouts
+            .iter()
+            .find(|l| l.id == RegionId::new(100))
+            .expect("revived laid out");
+        assert_eq!(revived_layout.width, 10.0);
+        assert_eq!(revived_layout.y, 0.0, "revived region lives in the header");
     }
 
     #[test]

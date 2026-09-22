@@ -24,10 +24,11 @@ impl App {
             Ok(()) => {
                 // Clear dirty flags after successful render
                 self.terminal_manager.clear_dirty();
-                // Clear native session render dirty flags so renderer can
-                // reuse cached GPU buffers on subsequent frames.
+                // Clear render dirty flags of the sessions that were just
+                // drawn so the renderer can reuse cached GPU buffers. Hidden
+                // tabs' sessions stay dirty until they are shown.
                 if let Some(ref mut server) = self.protocol_server {
-                    for session in server.sessions_mut() {
+                    for session in server.active_tab_sessions_mut() {
                         session.clear_render_dirty();
                         session.clear_scroll_dirty();
                     }
@@ -124,8 +125,10 @@ impl App {
             cursor_blink_visible: self.cursor_blink_visible,
         };
 
+        // Only the visible tab's native sessions are drawn; a session in a
+        // background tab must not paint over the tab the user is looking at.
         if let Some(ref server) = self.protocol_server {
-            if server.session_count() > 0 {
+            if server.active_tab_sessions().next().is_some() {
                 let search_matches =
                     if self.native_search_active && !self.native_search_matches.is_empty() {
                         Some(self.native_search_matches.as_slice())
@@ -133,7 +136,8 @@ impl App {
                         None
                     };
 
-                // Collect live region IDs for image cache eviction
+                // Collect live region IDs (across all tabs, so switching tabs
+                // does not evict images of hidden sessions) for cache eviction.
                 let live_regions: std::collections::HashSet<ultty_protocol::RegionId> = server
                     .sessions()
                     .flat_map(|s| s.scene().iter_depth_first().map(|r| r.id))
@@ -144,7 +148,7 @@ impl App {
                     &self.surface,
                     terminal,
                     &overlay,
-                    server.sessions(),
+                    server.active_tab_sessions(),
                     search_matches,
                     self.native_search_index,
                 );

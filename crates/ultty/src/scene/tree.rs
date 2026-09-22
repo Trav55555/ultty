@@ -2,9 +2,37 @@
 
 use std::collections::HashMap;
 
-use ultty_protocol::{Content, RegionId, WidgetContent};
+use ultty_protocol::{Content, RegionId, WidgetContent, MAX_REGION_COUNT};
 
 use super::region::Region;
+
+/// Maximum number of regions (including the root) a scene may hold.
+///
+/// Bounded by the region count a `LayoutComputed` message can carry, so a
+/// full layout reply always stays decodable by the client.
+pub const MAX_REGIONS: usize = MAX_REGION_COUNT;
+
+/// Maximum depth of a region below the root (root is depth 0).
+pub const MAX_TREE_DEPTH: usize = 256;
+
+/// Reasons a structural edit to the scene tree is rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SceneTreeError {
+    #[error("region {} already exists", .0 .0)]
+    DuplicateRegion(RegionId),
+    #[error("region {} not found", .0 .0)]
+    RegionNotFound(RegionId),
+    #[error("parent region {} not found", .0 .0)]
+    ParentNotFound(RegionId),
+    #[error("root region cannot be moved")]
+    CannotMoveRoot,
+    #[error("region {} cannot be reparented under itself or its descendant {}", id.0, new_parent.0)]
+    CyclicReparent { id: RegionId, new_parent: RegionId },
+    #[error("scene already holds the maximum of {max} regions")]
+    TooManyRegions { max: usize },
+    #[error("region would exceed the maximum tree depth of {max}")]
+    TooDeep { max: usize },
+}
 
 /// A search match within the scene tree.
 #[derive(Debug, Clone)]
@@ -51,97 +79,203 @@ impl SceneTree {
         self.regions.get_mut(&id)
     }
 
-    /// Insert a new region (appends to parent's children).
+    /// Insert a region, appending to its parent's children.
+    ///
+    /// Lenient variant for internal construction: a missing parent leaves the
+    /// region unlinked, and re-inserting an existing id replaces the region
+    /// without ever duplicating a child reference. Protocol-driven inserts go
+    /// through [`SceneTree::try_insert_at`], which rejects both cases.
     pub fn insert(&mut self, region: Region) {
-        let id = region.id;
-        if let Some(parent_id) = region.parent {
-            if let Some(parent) = self.regions.get_mut(&parent_id) {
-                parent.children.push(id);
-            }
-        }
-        self.regions.insert(id, region);
+        self.insert_at(region, usize::MAX);
     }
 
-    /// Insert a new region at a specific index in the parent's children list.
-    /// If index is out of bounds, appends to the end.
+    /// Insert a region at a specific index in the parent's children list.
+    /// If index is out of bounds, appends to the end. See [`SceneTree::insert`].
     pub fn insert_at(&mut self, region: Region, index: usize) {
         let id = region.id;
+        if self.regions.contains_key(&id) {
+            self.unlink_from_parent(id);
+        }
         if let Some(parent_id) = region.parent {
             if let Some(parent) = self.regions.get_mut(&parent_id) {
-                if index <= parent.children.len() {
-                    parent.children.insert(index, id);
-                } else {
-                    parent.children.push(id);
-                }
+                Self::link_child(parent, id, index);
             }
         }
         self.regions.insert(id, region);
     }
 
-    /// Remove a region and its children.
+    /// Insert a new region under an existing parent, enforcing tree limits.
+    ///
+    /// Rejects duplicate ids, missing parents, more than [`MAX_REGIONS`]
+    /// regions, and nesting deeper than [`MAX_TREE_DEPTH`]. On error the tree
+    /// is left untouched.
+    pub fn try_insert_at(&mut self, region: Region, index: usize) -> Result<(), SceneTreeError> {
+        let id = region.id;
+        if self.regions.contains_key(&id) {
+            return Err(SceneTreeError::DuplicateRegion(id));
+        }
+        let Some(parent_id) = region.parent else {
+            return Err(SceneTreeError::ParentNotFound(RegionId::ROOT));
+        };
+        let Some(parent_depth) = self.depth_of(parent_id) else {
+            return Err(SceneTreeError::ParentNotFound(parent_id));
+        };
+        if self.regions.len() >= MAX_REGIONS {
+            return Err(SceneTreeError::TooManyRegions { max: MAX_REGIONS });
+        }
+        if parent_depth + 1 > MAX_TREE_DEPTH {
+            return Err(SceneTreeError::TooDeep {
+                max: MAX_TREE_DEPTH,
+            });
+        }
+        self.insert_at(region, index);
+        Ok(())
+    }
+
+    /// Remove a region and its entire subtree.
     pub fn remove(&mut self, id: RegionId) -> Option<Region> {
         if id == self.root {
             return None; // Cannot remove root
         }
 
-        if let Some(region) = self.regions.remove(&id) {
-            // Remove from parent's children
-            if let Some(parent_id) = region.parent {
-                if let Some(parent) = self.regions.get_mut(&parent_id) {
-                    parent.children.retain(|&child| child != id);
-                }
+        let region = self.regions.remove(&id)?;
+        if let Some(parent_id) = region.parent {
+            if let Some(parent) = self.regions.get_mut(&parent_id) {
+                parent.children.retain(|&child| child != id);
             }
-
-            // Recursively remove children
-            for child_id in &region.children {
-                self.remove(*child_id);
-            }
-
-            Some(region)
-        } else {
-            None
         }
+
+        // Remove descendants with an explicit worklist; deep chains must not
+        // recurse on the stack.
+        let mut pending: Vec<RegionId> = region.children.clone();
+        while let Some(child_id) = pending.pop() {
+            if let Some(child) = self.regions.remove(&child_id) {
+                pending.extend(child.children);
+            }
+        }
+
+        Some(region)
     }
 
     /// Move an existing region under a new parent.
     ///
     /// If `index` is out of bounds, appends to the end of the new parent's
-    /// children list. Returns false when the region is the root, the region does
-    /// not exist, or the new parent does not exist.
-    pub fn reparent(&mut self, id: RegionId, new_parent: RegionId, index: usize) -> bool {
-        if id == self.root
-            || !self.regions.contains_key(&id)
-            || !self.regions.contains_key(&new_parent)
-        {
-            return false;
+    /// children list. Rejects moving the root, unknown regions or parents,
+    /// moving a region under itself or one of its descendants, and moves that
+    /// would nest deeper than [`MAX_TREE_DEPTH`]. On error the tree is left
+    /// untouched.
+    pub fn reparent(
+        &mut self,
+        id: RegionId,
+        new_parent: RegionId,
+        index: usize,
+    ) -> Result<(), SceneTreeError> {
+        if id == self.root {
+            return Err(SceneTreeError::CannotMoveRoot);
+        }
+        if !self.regions.contains_key(&id) {
+            return Err(SceneTreeError::RegionNotFound(id));
+        }
+        let Some(parent_depth) = self.depth_of(new_parent) else {
+            return Err(SceneTreeError::ParentNotFound(new_parent));
+        };
+        if new_parent == id || self.is_descendant(id, new_parent) {
+            return Err(SceneTreeError::CyclicReparent { id, new_parent });
+        }
+        if parent_depth + 1 + self.subtree_height(id) > MAX_TREE_DEPTH {
+            return Err(SceneTreeError::TooDeep {
+                max: MAX_TREE_DEPTH,
+            });
         }
 
-        let old_parent = self.regions.get(&id).and_then(|region| region.parent);
-
-        if let Some(old_id) = old_parent {
-            if let Some(old) = self.regions.get_mut(&old_id) {
-                old.children.retain(|&child| child != id);
-            }
-        }
-
+        self.unlink_from_parent(id);
         if let Some(region) = self.regions.get_mut(&id) {
             region.parent = Some(new_parent);
         }
-
         if let Some(parent) = self.regions.get_mut(&new_parent) {
-            if index <= parent.children.len() {
-                parent.children.insert(index, id);
-            } else {
-                parent.children.push(id);
-            }
+            Self::link_child(parent, id, index);
         }
-
-        true
+        Ok(())
     }
 
     /// Get the root region ID.
     pub fn root(&self) -> RegionId {
         self.root
+    }
+
+    /// Number of regions in the tree, including the root.
+    pub fn len(&self) -> usize {
+        self.regions.len()
+    }
+
+    /// True when only the root region exists.
+    pub fn is_empty(&self) -> bool {
+        self.regions.len() <= 1
+    }
+
+    /// Depth of a region below the root (root is 0), or `None` if the region
+    /// does not exist or is not attached to the root.
+    pub fn depth_of(&self, id: RegionId) -> Option<usize> {
+        let mut depth = 0;
+        let mut current = id;
+        loop {
+            if current == self.root {
+                return Some(depth);
+            }
+            current = self.regions.get(&current)?.parent?;
+            depth += 1;
+            if depth > self.regions.len() {
+                // Parent links form a cycle; treat as detached.
+                return None;
+            }
+        }
+    }
+
+    /// True if `candidate` is a strict descendant of `ancestor`.
+    pub fn is_descendant(&self, ancestor: RegionId, candidate: RegionId) -> bool {
+        let mut current = candidate;
+        let mut steps = 0;
+        while let Some(parent) = self.regions.get(&current).and_then(|r| r.parent) {
+            if parent == ancestor {
+                return true;
+            }
+            current = parent;
+            steps += 1;
+            if steps > self.regions.len() {
+                return false;
+            }
+        }
+        false
+    }
+
+    /// Height of the subtree rooted at `id` (a leaf has height 0).
+    fn subtree_height(&self, id: RegionId) -> usize {
+        let mut height = 0;
+        let mut pending = vec![(id, 0usize)];
+        while let Some((current, depth)) = pending.pop() {
+            height = height.max(depth);
+            if let Some(region) = self.regions.get(&current) {
+                pending.extend(region.children.iter().map(|&child| (child, depth + 1)));
+            }
+        }
+        height
+    }
+
+    fn unlink_from_parent(&mut self, id: RegionId) {
+        let old_parent = self.regions.get(&id).and_then(|region| region.parent);
+        if let Some(old_id) = old_parent {
+            if let Some(old) = self.regions.get_mut(&old_id) {
+                old.children.retain(|&child| child != id);
+            }
+        }
+    }
+
+    fn link_child(parent: &mut Region, id: RegionId, index: usize) {
+        if index <= parent.children.len() {
+            parent.children.insert(index, id);
+        } else {
+            parent.children.push(id);
+        }
     }
 
     /// Iterate all regions in depth-first order.
@@ -548,7 +682,8 @@ mod tests {
         );
         assert!(tree.get(RegionId::new(2)).unwrap().children.is_empty());
 
-        assert!(tree.reparent(RegionId::new(3), RegionId::new(2), 0));
+        tree.reparent(RegionId::new(3), RegionId::new(2), 0)
+            .unwrap();
 
         assert!(tree.get(RegionId::new(1)).unwrap().children.is_empty());
         assert_eq!(
@@ -575,7 +710,7 @@ mod tests {
         child.parent = Some(RegionId::new(1));
         tree.insert(child);
 
-        assert!(tree.reparent(RegionId::new(4), RegionId::ROOT, 1));
+        tree.reparent(RegionId::new(4), RegionId::ROOT, 1).unwrap();
 
         assert_eq!(
             tree.get(RegionId::ROOT).unwrap().children,
@@ -596,9 +731,18 @@ mod tests {
         region.parent = Some(RegionId::ROOT);
         tree.insert(region);
 
-        assert!(!tree.reparent(RegionId::ROOT, RegionId::new(1), 0));
-        assert!(!tree.reparent(RegionId::new(99), RegionId::ROOT, 0));
-        assert!(!tree.reparent(RegionId::new(1), RegionId::new(99), 0));
+        assert_eq!(
+            tree.reparent(RegionId::ROOT, RegionId::new(1), 0),
+            Err(SceneTreeError::CannotMoveRoot)
+        );
+        assert_eq!(
+            tree.reparent(RegionId::new(99), RegionId::ROOT, 0),
+            Err(SceneTreeError::RegionNotFound(RegionId::new(99)))
+        );
+        assert_eq!(
+            tree.reparent(RegionId::new(1), RegionId::new(99), 0),
+            Err(SceneTreeError::ParentNotFound(RegionId::new(99)))
+        );
 
         assert_eq!(
             tree.get(RegionId::ROOT).unwrap().children,
@@ -608,6 +752,209 @@ mod tests {
             tree.get(RegionId::new(1)).unwrap().parent,
             Some(RegionId::ROOT)
         );
+    }
+
+    fn chain(tree: &mut SceneTree, first_id: u32, len: u32) {
+        let mut parent = RegionId::ROOT;
+        for i in 0..len {
+            let id = RegionId::new(first_id + i);
+            let mut r = Region::new(id);
+            r.parent = Some(parent);
+            tree.try_insert_at(r, usize::MAX).unwrap();
+            parent = id;
+        }
+    }
+
+    #[test]
+    fn remove_deep_chain_is_iterative() {
+        let mut tree = SceneTree::new();
+        // Deeper than MAX_TREE_DEPTH would allow via try_insert_at, so build
+        // it with the lenient insert to exercise remove on its own.
+        let mut parent = RegionId::ROOT;
+        for i in 1..=200 {
+            let id = RegionId::new(i);
+            let mut r = Region::new(id);
+            r.parent = Some(parent);
+            tree.insert(r);
+            parent = id;
+        }
+        assert_eq!(tree.len(), 201);
+
+        assert!(tree.remove(RegionId::new(1)).is_some());
+        assert_eq!(tree.len(), 1);
+        assert!(tree.get(RegionId::ROOT).unwrap().children.is_empty());
+    }
+
+    #[test]
+    fn remove_very_deep_chain_does_not_overflow_stack() {
+        let mut tree = SceneTree::new();
+        let mut parent = RegionId::ROOT;
+        for i in 1..=100_000u32 {
+            let id = RegionId::new(i);
+            let mut r = Region::new(id);
+            r.parent = Some(parent);
+            tree.insert(r);
+            parent = id;
+        }
+        assert!(tree.remove(RegionId::new(1)).is_some());
+        assert_eq!(tree.len(), 1);
+    }
+
+    #[test]
+    fn try_insert_rejects_chain_deeper_than_limit() {
+        let mut tree = SceneTree::new();
+        chain(&mut tree, 1, MAX_TREE_DEPTH as u32);
+        assert_eq!(
+            tree.depth_of(RegionId::new(MAX_TREE_DEPTH as u32)),
+            Some(MAX_TREE_DEPTH)
+        );
+
+        let mut too_deep = Region::new(RegionId::new(100_000));
+        too_deep.parent = Some(RegionId::new(MAX_TREE_DEPTH as u32));
+        assert_eq!(
+            tree.try_insert_at(too_deep, usize::MAX),
+            Err(SceneTreeError::TooDeep {
+                max: MAX_TREE_DEPTH
+            })
+        );
+        assert!(tree.get(RegionId::new(100_000)).is_none());
+    }
+
+    #[test]
+    fn try_insert_rejects_more_than_max_regions() {
+        let mut tree = SceneTree::new();
+        for i in 1..MAX_REGIONS as u32 {
+            let mut r = Region::new(RegionId::new(i));
+            r.parent = Some(RegionId::ROOT);
+            tree.try_insert_at(r, usize::MAX).unwrap();
+        }
+        assert_eq!(tree.len(), MAX_REGIONS);
+
+        let mut extra = Region::new(RegionId::new(MAX_REGIONS as u32));
+        extra.parent = Some(RegionId::ROOT);
+        assert_eq!(
+            tree.try_insert_at(extra, usize::MAX),
+            Err(SceneTreeError::TooManyRegions { max: MAX_REGIONS })
+        );
+        assert_eq!(tree.len(), MAX_REGIONS);
+    }
+
+    #[test]
+    fn try_insert_rejects_duplicate_id_and_missing_parent() {
+        let mut tree = SceneTree::new();
+        let mut r = Region::new(RegionId::new(1));
+        r.parent = Some(RegionId::ROOT);
+        tree.try_insert_at(r, usize::MAX).unwrap();
+
+        let mut dup = Region::new(RegionId::new(1));
+        dup.parent = Some(RegionId::ROOT);
+        assert_eq!(
+            tree.try_insert_at(dup, usize::MAX),
+            Err(SceneTreeError::DuplicateRegion(RegionId::new(1)))
+        );
+        assert_eq!(
+            tree.get(RegionId::ROOT).unwrap().children,
+            vec![RegionId::new(1)]
+        );
+
+        let mut orphan = Region::new(RegionId::new(2));
+        orphan.parent = Some(RegionId::new(999));
+        assert_eq!(
+            tree.try_insert_at(orphan, usize::MAX),
+            Err(SceneTreeError::ParentNotFound(RegionId::new(999)))
+        );
+        assert!(tree.get(RegionId::new(2)).is_none());
+
+        let no_parent = Region::new(RegionId::new(3));
+        assert!(tree.try_insert_at(no_parent, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn insert_duplicate_id_does_not_duplicate_child_reference() {
+        let mut tree = SceneTree::new();
+        let mut first = Region::new(RegionId::new(1));
+        first.parent = Some(RegionId::ROOT);
+        tree.insert(first);
+
+        let mut again = Region::new(RegionId::new(1));
+        again.parent = Some(RegionId::ROOT);
+        again.content = Content::Text(TextContent::new("replaced"));
+        tree.insert(again);
+
+        assert_eq!(
+            tree.get(RegionId::ROOT).unwrap().children,
+            vec![RegionId::new(1)]
+        );
+        match &tree.get(RegionId::new(1)).unwrap().content {
+            Content::Text(tc) => assert_eq!(tc.text, "replaced"),
+            _ => panic!("expected replaced text"),
+        }
+    }
+
+    #[test]
+    fn reparent_rejects_self_and_descendant_as_new_parent() {
+        let mut tree = SceneTree::new();
+        chain(&mut tree, 1, 3); // ROOT -> 1 -> 2 -> 3
+
+        assert_eq!(
+            tree.reparent(RegionId::new(1), RegionId::new(1), 0),
+            Err(SceneTreeError::CyclicReparent {
+                id: RegionId::new(1),
+                new_parent: RegionId::new(1)
+            })
+        );
+        assert_eq!(
+            tree.reparent(RegionId::new(1), RegionId::new(3), 0),
+            Err(SceneTreeError::CyclicReparent {
+                id: RegionId::new(1),
+                new_parent: RegionId::new(3)
+            })
+        );
+        // Tree unchanged.
+        assert_eq!(
+            tree.get(RegionId::new(1)).unwrap().parent,
+            Some(RegionId::ROOT)
+        );
+        assert_eq!(
+            tree.get(RegionId::new(3)).unwrap().children,
+            Vec::<RegionId>::new()
+        );
+        assert_eq!(tree.iter_depth_first().count(), 4);
+    }
+
+    #[test]
+    fn reparent_rejects_moves_that_exceed_depth_limit() {
+        let mut tree = SceneTree::new();
+        chain(&mut tree, 1, MAX_TREE_DEPTH as u32); // deepest at MAX_TREE_DEPTH
+        let mut leaf = Region::new(RegionId::new(5000));
+        leaf.parent = Some(RegionId::ROOT);
+        tree.try_insert_at(leaf, usize::MAX).unwrap();
+
+        assert_eq!(
+            tree.reparent(RegionId::new(5000), RegionId::new(MAX_TREE_DEPTH as u32), 0),
+            Err(SceneTreeError::TooDeep {
+                max: MAX_TREE_DEPTH
+            })
+        );
+        assert_eq!(
+            tree.get(RegionId::new(5000)).unwrap().parent,
+            Some(RegionId::ROOT)
+        );
+    }
+
+    #[test]
+    fn depth_and_descendant_helpers() {
+        let mut tree = SceneTree::new();
+        chain(&mut tree, 1, 3);
+        assert_eq!(tree.depth_of(RegionId::ROOT), Some(0));
+        assert_eq!(tree.depth_of(RegionId::new(3)), Some(3));
+        assert_eq!(tree.depth_of(RegionId::new(42)), None);
+        assert!(tree.is_descendant(RegionId::ROOT, RegionId::new(3)));
+        assert!(tree.is_descendant(RegionId::new(1), RegionId::new(3)));
+        assert!(!tree.is_descendant(RegionId::new(3), RegionId::new(1)));
+        assert!(!tree.is_descendant(RegionId::new(1), RegionId::new(1)));
+        assert!(!tree.is_empty());
+        assert!(SceneTree::new().is_empty());
     }
 
     #[test]

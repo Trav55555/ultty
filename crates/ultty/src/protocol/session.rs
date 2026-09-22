@@ -27,6 +27,7 @@ use crate::scene::layout::LayoutEngine;
 #[cfg(test)]
 use crate::scene::region::Region;
 use crate::scene::tree::SceneTree;
+use crate::terminal_manager::TabId;
 
 /// Capabilities supported by this terminal.
 const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
@@ -43,6 +44,11 @@ const MAX_RECENT_PROTOCOL_ERRORS: usize = 5;
 pub struct NativeSession {
     /// Session ID.
     session_id: u64,
+    /// Tab whose socket accepted this connection.
+    ///
+    /// Input and clipboard access are routed by tab, and only sessions of
+    /// the visible tab are rendered.
+    tab_id: TabId,
     /// Scene tree for this session.
     scene: SceneTree,
     /// Layout engine.
@@ -58,11 +64,16 @@ pub struct NativeSession {
     viewport_height: f32,
     /// Current frame being built (if any).
     current_frame: Option<FrameId>,
+    /// Operations queued since `BeginFrame`, applied at `EndFrame`.
     pending_frame_ops: Vec<AppMessage>,
+    /// Wire bytes represented by `pending_frame_ops`, for bounding memory.
+    pending_frame_bytes: usize,
     /// Whether scene changed during current frame.
     scene_dirty: bool,
     /// Whether layout constraints changed (requires Taffy recomputation).
     constraints_dirty: bool,
+    /// Whether the region tree changed shape (create/delete/reparent).
+    tree_dirty: bool,
     /// Whether visual state changed (requires vertex buffer rebuild).
     render_dirty: bool,
     /// Regions whose content/style changed since last render.
@@ -124,8 +135,8 @@ struct StyleAnimation {
 }
 
 impl NativeSession {
-    /// Create a new session from an accepted socket connection.
-    pub fn new(stream: UnixStream, session_id: u64) -> io::Result<Self> {
+    /// Create a new session from a connection accepted on `tab_id`'s socket.
+    pub fn new(stream: UnixStream, session_id: u64, tab_id: TabId) -> io::Result<Self> {
         stream.set_nonblocking(true)?;
 
         let mut scene = SceneTree::new();
@@ -138,6 +149,7 @@ impl NativeSession {
 
         Ok(Self {
             session_id,
+            tab_id,
             scene,
             layout: LayoutEngine::new(),
             stream,
@@ -147,8 +159,10 @@ impl NativeSession {
             viewport_height: 24.0,
             current_frame: None,
             pending_frame_ops: Vec::new(),
+            pending_frame_bytes: 0,
             scene_dirty: false,
             constraints_dirty: false,
+            tree_dirty: false,
             render_dirty: true,
             dirty_regions: HashSet::new(),
             scroll_dirty: true,
@@ -188,6 +202,11 @@ impl NativeSession {
 
     pub fn session_id(&self) -> u64 {
         self.session_id
+    }
+
+    /// Tab that owns this session.
+    pub fn tab_id(&self) -> TabId {
+        self.tab_id
     }
 
     pub fn viewport(&self) -> (f32, f32) {
@@ -239,8 +258,8 @@ impl NativeSession {
         }
 
         // Process complete messages
-        while let Some(msg) = self.try_decode_message()? {
-            if !self.handle_message(msg)? {
+        while let Some((msg, wire_len)) = self.try_decode_message()? {
+            if !self.handle_wire_message(msg, wire_len)? {
                 return Ok(false);
             }
         }
@@ -251,28 +270,48 @@ impl NativeSession {
         Ok(true)
     }
 
-    /// Handle a decoded message. Returns false if session should close.
-    fn handle_message(&mut self, msg: AppMessage) -> io::Result<bool> {
+    /// Handle a decoded message that occupied `wire_len` bytes on the socket.
+    /// Returns false if session should close.
+    fn handle_wire_message(&mut self, msg: AppMessage, wire_len: usize) -> io::Result<bool> {
         debug!("Session {} received: {:?}", self.session_id, msg);
 
-        match self.handle_frame_message(msg)? {
+        match self.handle_frame_message(msg, wire_len)? {
             frame::FrameMessageOutcome::Handled(result) => Ok(result),
             frame::FrameMessageOutcome::Apply(msg) => self.apply_message(*msg),
         }
     }
 
+    /// Test helper: handle a message as if it had arrived with its encoded size.
+    #[cfg(test)]
+    fn handle_message(&mut self, msg: AppMessage) -> io::Result<bool> {
+        use ultty_protocol::Encode;
+        let wire_len = msg.encode_to_bytes().len();
+        self.handle_wire_message(msg, wire_len)
+    }
+
+    /// Recompute layout after a viewport resize and notify the client.
+    ///
+    /// Sessions that have not built a scene yet have nothing to lay out and
+    /// receive only the `Resize` event.
+    pub fn relayout_for_resize(&mut self) -> io::Result<()> {
+        if self.scene.is_empty() {
+            return Ok(());
+        }
+        self.compute_and_send_layout(None, LayoutTrigger::Resize)?;
+        self.mark_scene_layout_clean();
+        Ok(())
+    }
+
     /// Compute layout and send LayoutComputed to client.
+    ///
+    /// The layout engine is reused across frames; `LayoutEngine::sync`
+    /// reconciles created, deleted and moved regions incrementally.
     fn compute_and_send_layout(
         &mut self,
         frame_id: Option<FrameId>,
         trigger: LayoutTrigger,
     ) -> io::Result<()> {
         let layout_start = std::time::Instant::now();
-        if self.constraints_dirty {
-            // Taffy panics on stale SlotMap keys, so structural frames rebuild
-            // from the authoritative scene tree instead of reusing old nodes.
-            self.layout = LayoutEngine::new();
-        }
         let regions = match self.layout.compute_scene_layout(
             &mut self.scene,
             self.viewport_width,
@@ -363,6 +402,13 @@ impl NativeSession {
         self.render_dirty
     }
 
+    /// Force a full rebuild on the next render, e.g. when the session's tab
+    /// becomes visible again and the renderer's cached buffers belong to
+    /// another tab.
+    pub fn mark_render_dirty(&mut self) {
+        self.render_dirty = true;
+    }
+
     /// Clear the render dirty flag (call after rebuilding vertex buffers).
     pub fn clear_render_dirty(&mut self) {
         self.render_dirty = false;
@@ -416,8 +462,18 @@ impl NativeSession {
             let (cx, cy) = self.scroll_offsets.get(&id).copied().unwrap_or((0.0, 0.0));
             let nx = cx + (tx - cx) * LERP_FACTOR;
             let ny = cy + (ty - cy) * LERP_FACTOR;
-            let nx = if (nx - tx).abs() < EPSILON { tx } else { nx };
-            let ny = if (ny - ty).abs() < EPSILON { ty } else { ny };
+            // Snap when close, and also when the value is not finite: a NaN
+            // or infinite offset would otherwise never converge.
+            let nx = if !nx.is_finite() || (nx - tx).abs() < EPSILON {
+                tx
+            } else {
+                nx
+            };
+            let ny = if !ny.is_finite() || (ny - ty).abs() < EPSILON {
+                ty
+            } else {
+                ny
+            };
             self.scroll_offsets.insert(id, (nx, ny));
             if nx == tx && ny == ty {
                 done.push(id);
@@ -689,7 +745,7 @@ mod tests {
 
     fn make_session() -> NativeSession {
         let (s1, _s2) = UnixStream::pair().unwrap();
-        NativeSession::new(s1, 1).unwrap()
+        NativeSession::new(s1, 1, TabId::new(0)).unwrap()
     }
 
     fn negotiate_all_test_capabilities(session: &mut NativeSession) {
@@ -1252,5 +1308,408 @@ mod tests {
             })
             .unwrap();
         assert!(session.dirty_regions().contains(&id));
+    }
+
+    // ── Frame gate, layout replies, and scene-edit rejection ────────
+
+    /// Decode and clear every message queued for the client.
+    fn drain_messages(session: &mut NativeSession) -> Vec<TerminalMessage> {
+        use ultty_protocol::Decode;
+        let bytes = session.write_buf.split().freeze();
+        let mut cursor = bytes.as_ref();
+        let mut out = Vec::new();
+        while !cursor.is_empty() {
+            out.push(TerminalMessage::decode(&mut cursor).expect("valid terminal message"));
+        }
+        out
+    }
+
+    fn error_codes(messages: &[TerminalMessage]) -> Vec<u16> {
+        messages
+            .iter()
+            .filter_map(|m| match m {
+                TerminalMessage::Error { code, .. } => Some(*code),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn layout_replies(messages: &[TerminalMessage]) -> Vec<(Option<FrameId>, LayoutTrigger)> {
+        messages
+            .iter()
+            .filter_map(|m| match m {
+                TerminalMessage::LayoutComputed {
+                    frame_id, trigger, ..
+                } => Some((*frame_id, *trigger)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn create_region(id: u32, parent: u32) -> AppMessage {
+        AppMessage::CreateRegion {
+            id: RegionId::new(id),
+            parent: RegionId::new(parent),
+            insert_index: -1,
+            constraints: ultty_protocol::Constraints {
+                height: Dimension::Cells(2.0),
+                width: Dimension::Percent(100.0),
+                // Default margins are Auto, which would absorb free space.
+                margin: ultty_protocol::Edges::all(Dimension::Cells(0.0)),
+                ..Default::default()
+            },
+            style: Style::default(),
+        }
+    }
+
+    fn run_frame(session: &mut NativeSession, frame: u32, ops: Vec<AppMessage>) {
+        session
+            .handle_message(AppMessage::BeginFrame {
+                frame_id: FrameId(frame),
+            })
+            .unwrap();
+        for op in ops {
+            session.handle_message(op).unwrap();
+        }
+        session
+            .handle_message(AppMessage::EndFrame {
+                frame_id: FrameId(frame),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn end_frame_mismatch_discards_frame_and_next_frame_renders() {
+        let mut session = make_session();
+        session.set_viewport(80.0, 24.0);
+        drain_messages(&mut session);
+
+        session
+            .handle_message(AppMessage::BeginFrame {
+                frame_id: FrameId(1),
+            })
+            .unwrap();
+        session.handle_message(create_region(9, 0)).unwrap();
+        session
+            .handle_message(AppMessage::EndFrame {
+                frame_id: FrameId(2),
+            })
+            .unwrap();
+
+        let messages = drain_messages(&mut session);
+        assert_eq!(error_codes(&messages), vec![400]);
+        assert!(layout_replies(&messages).is_empty());
+        assert_eq!(session.current_frame, None, "mismatch must close the frame");
+        assert!(session.pending_frame_ops.is_empty());
+        assert!(
+            session.scene.get(RegionId::new(9)).is_none(),
+            "ops of a mismatched frame are never applied"
+        );
+
+        run_frame(
+            &mut session,
+            3,
+            vec![
+                create_region(1, 0),
+                AppMessage::SetContent {
+                    id: RegionId::new(1),
+                    content: Content::Text(ultty_protocol::TextContent::new("ok")),
+                },
+            ],
+        );
+        let messages = drain_messages(&mut session);
+        assert!(error_codes(&messages).is_empty());
+        assert_eq!(
+            layout_replies(&messages),
+            vec![(Some(FrameId(3)), LayoutTrigger::TreeChange)]
+        );
+        assert!(session.scene.get(RegionId::new(1)).is_some());
+        assert_eq!(
+            session.scene.get(RegionId::new(1)).unwrap().computed.height,
+            2.0
+        );
+    }
+
+    #[test]
+    fn pending_frame_ops_over_limit_drop_frame_and_disconnect() {
+        let mut session = make_session();
+        session
+            .handle_message(AppMessage::BeginFrame {
+                frame_id: FrameId(1),
+            })
+            .unwrap();
+        for _ in 0..frame::MAX_PENDING_FRAME_OPS {
+            assert!(session.handle_message(AppMessage::Blur).unwrap());
+        }
+        assert_eq!(
+            session.pending_frame_ops.len(),
+            frame::MAX_PENDING_FRAME_OPS
+        );
+
+        let keep_alive = session.handle_message(AppMessage::Blur).unwrap();
+        assert!(!keep_alive, "exceeding the op budget disconnects");
+        assert_eq!(session.current_frame, None);
+        assert!(session.pending_frame_ops.is_empty());
+        assert_eq!(session.pending_frame_bytes, 0);
+        let messages = drain_messages(&mut session);
+        assert_eq!(error_codes(&messages), vec![400]);
+    }
+
+    #[test]
+    fn pending_frame_bytes_over_limit_drop_frame_and_disconnect() {
+        let mut session = make_session();
+        session
+            .handle_message(AppMessage::BeginFrame {
+                frame_id: FrameId(1),
+            })
+            .unwrap();
+        assert!(session
+            .handle_wire_message(AppMessage::Blur, frame::MAX_PENDING_FRAME_BYTES)
+            .unwrap());
+        assert_eq!(session.pending_frame_bytes, frame::MAX_PENDING_FRAME_BYTES);
+
+        let keep_alive = session.handle_wire_message(AppMessage::Blur, 1).unwrap();
+        assert!(!keep_alive, "exceeding the byte budget disconnects");
+        assert!(session.pending_frame_ops.is_empty());
+        assert_eq!(session.pending_frame_bytes, 0);
+        assert_eq!(error_codes(&drain_messages(&mut session)), vec![400]);
+    }
+
+    #[test]
+    fn begin_frame_resets_pending_byte_budget() {
+        let mut session = make_session();
+        session
+            .handle_message(AppMessage::BeginFrame {
+                frame_id: FrameId(1),
+            })
+            .unwrap();
+        session.handle_wire_message(AppMessage::Blur, 1024).unwrap();
+        session
+            .handle_message(AppMessage::EndFrame {
+                frame_id: FrameId(1),
+            })
+            .unwrap();
+        assert_eq!(session.pending_frame_bytes, 0);
+    }
+
+    #[test]
+    fn every_scene_changing_frame_gets_a_layout_reply() {
+        let mut session = make_session();
+        session.set_viewport(80.0, 24.0);
+        run_frame(&mut session, 1, vec![create_region(1, 0)]);
+        assert_eq!(
+            layout_replies(&drain_messages(&mut session)),
+            vec![(Some(FrameId(1)), LayoutTrigger::TreeChange)]
+        );
+
+        // Content-only frame: no constraint change, still answered.
+        run_frame(
+            &mut session,
+            2,
+            vec![AppMessage::SetContent {
+                id: RegionId::new(1),
+                content: Content::Text(ultty_protocol::TextContent::new("hello")),
+            }],
+        );
+        assert_eq!(
+            layout_replies(&drain_messages(&mut session)),
+            vec![(Some(FrameId(2)), LayoutTrigger::ContentChange)]
+        );
+
+        run_frame(
+            &mut session,
+            3,
+            vec![AppMessage::SetConstraints {
+                id: RegionId::new(1),
+                constraints: ultty_protocol::Constraints {
+                    height: Dimension::Cells(5.0),
+                    ..Default::default()
+                },
+            }],
+        );
+        assert_eq!(
+            layout_replies(&drain_messages(&mut session)),
+            vec![(Some(FrameId(3)), LayoutTrigger::ConstraintChange)]
+        );
+        assert_eq!(
+            session.scene.get(RegionId::new(1)).unwrap().computed.height,
+            5.0
+        );
+
+        // A frame that changes nothing sends no layout.
+        run_frame(&mut session, 4, vec![]);
+        assert!(layout_replies(&drain_messages(&mut session)).is_empty());
+    }
+
+    #[test]
+    fn relayout_for_resize_only_when_scene_has_regions() {
+        let mut session = make_session();
+        session.set_viewport(80.0, 24.0);
+        session.relayout_for_resize().unwrap();
+        assert!(
+            drain_messages(&mut session).is_empty(),
+            "empty scene has nothing to lay out"
+        );
+
+        run_frame(&mut session, 1, vec![create_region(1, 0)]);
+        drain_messages(&mut session);
+
+        session.set_viewport(120.0, 40.0);
+        session.relayout_for_resize().unwrap();
+        let messages = drain_messages(&mut session);
+        assert_eq!(
+            layout_replies(&messages),
+            vec![(None, LayoutTrigger::Resize)]
+        );
+        let regions = messages
+            .iter()
+            .find_map(|m| match m {
+                TerminalMessage::LayoutComputed { regions, .. } => Some(regions.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let root = regions.iter().find(|r| r.id == RegionId::ROOT).unwrap();
+        assert_eq!((root.width, root.height), (120.0, 40.0));
+        let child = regions.iter().find(|r| r.id == RegionId::new(1)).unwrap();
+        assert_eq!(child.width, 120.0);
+        assert!(!session.scene_dirty, "resize layout leaves the scene clean");
+    }
+
+    #[test]
+    fn layout_engine_is_reused_across_create_delete_recreate_frames() {
+        let mut session = make_session();
+        session.set_viewport(80.0, 24.0);
+
+        for frame in 0..4u32 {
+            run_frame(
+                &mut session,
+                frame * 10 + 1,
+                vec![
+                    create_region(1, 0),
+                    create_region(2, 1),
+                    create_region(3, 0),
+                ],
+            );
+            let messages = drain_messages(&mut session);
+            assert!(error_codes(&messages).is_empty(), "frame {}", frame);
+            assert_eq!(
+                session.scene.get(RegionId::new(3)).unwrap().computed.y,
+                2.0,
+                "third region stacks under the first (frame {})",
+                frame
+            );
+            assert!(session.layout.get_layout(RegionId::new(2)).is_some());
+
+            // Move 3 under 1 (earlier sibling) then delete 1; this used to
+            // corrupt the layout engine and required a full rebuild.
+            run_frame(
+                &mut session,
+                frame * 10 + 2,
+                vec![AppMessage::ReparentRegion {
+                    id: RegionId::new(3),
+                    new_parent: RegionId::new(1),
+                    insert_index: 0,
+                }],
+            );
+            run_frame(
+                &mut session,
+                frame * 10 + 3,
+                vec![AppMessage::DeleteRegion {
+                    id: RegionId::new(1),
+                }],
+            );
+            let messages = drain_messages(&mut session);
+            assert!(error_codes(&messages).is_empty(), "frame {}", frame);
+            assert!(session.layout.get_layout(RegionId::new(1)).is_none());
+            assert!(session.layout.get_layout(RegionId::new(2)).is_none());
+            assert!(session.layout.get_layout(RegionId::new(3)).is_none());
+            assert_eq!(session.scene.len(), 1);
+        }
+    }
+
+    #[test]
+    fn create_region_rejects_duplicate_id_and_missing_parent() {
+        let mut session = make_session();
+        run_frame(&mut session, 1, vec![create_region(1, 0)]);
+        drain_messages(&mut session);
+
+        let mut dup = create_region(1, 0);
+        if let AppMessage::CreateRegion { style, .. } = &mut dup {
+            style.opacity = 0.25;
+        }
+        session.handle_message(dup).unwrap();
+        assert_eq!(error_codes(&drain_messages(&mut session)), vec![400]);
+        assert_eq!(
+            session.scene.get(RegionId::new(1)).unwrap().style.opacity,
+            1.0,
+            "duplicate create must not overwrite the existing region"
+        );
+        assert_eq!(
+            session.scene.get(RegionId::ROOT).unwrap().children,
+            vec![RegionId::new(1)]
+        );
+
+        session.handle_message(create_region(2, 77)).unwrap();
+        assert_eq!(error_codes(&drain_messages(&mut session)), vec![404]);
+        assert!(session.scene.get(RegionId::new(2)).is_none());
+    }
+
+    #[test]
+    fn reparent_rejects_self_and_descendant_targets() {
+        let mut session = make_session();
+        run_frame(
+            &mut session,
+            1,
+            vec![create_region(1, 0), create_region(2, 1)],
+        );
+        drain_messages(&mut session);
+
+        for target in [1, 2] {
+            session
+                .handle_message(AppMessage::ReparentRegion {
+                    id: RegionId::new(1),
+                    new_parent: RegionId::new(target),
+                    insert_index: -1,
+                })
+                .unwrap();
+            assert_eq!(error_codes(&drain_messages(&mut session)), vec![400]);
+        }
+        assert_eq!(
+            session.scene.get(RegionId::new(1)).unwrap().parent,
+            Some(RegionId::ROOT)
+        );
+        assert_eq!(session.scene.iter_depth_first().count(), 3);
+    }
+
+    #[test]
+    fn create_region_rejects_chain_deeper_than_limit() {
+        use crate::scene::tree::MAX_TREE_DEPTH;
+
+        let mut session = make_session();
+        let mut ops = Vec::new();
+        for depth in 1..=(MAX_TREE_DEPTH as u32 + 1) {
+            ops.push(create_region(depth, depth - 1));
+        }
+        run_frame(&mut session, 1, ops);
+
+        let messages = drain_messages(&mut session);
+        assert_eq!(
+            error_codes(&messages),
+            vec![400],
+            "exactly one rejected create"
+        );
+        assert_eq!(
+            session.scene.depth_of(RegionId::new(MAX_TREE_DEPTH as u32)),
+            Some(MAX_TREE_DEPTH)
+        );
+        assert!(session
+            .scene
+            .get(RegionId::new(MAX_TREE_DEPTH as u32 + 1))
+            .is_none());
+        assert_eq!(
+            layout_replies(&messages).len(),
+            1,
+            "the rest of the frame still renders"
+        );
     }
 }

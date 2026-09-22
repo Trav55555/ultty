@@ -5,154 +5,29 @@
 //! - Pane splitting within tabs
 //! - Keyboard navigation between tabs and panes
 
+use std::ffi::OsString;
 use std::io;
 use std::os::fd::RawFd;
 use std::path::Path;
 
 use crate::event_loop::{EventLoop as TerminalEventLoop, TerminalEvent};
+use crate::pty::{Child, PtySize};
 
-// ── Split tree for nested pane layouts ────────────────────────────────────
+/// Extra environment variables for the shells of one tab.
+pub type TabEnv = Vec<(OsString, OsString)>;
 
-/// A binary split tree node. Each leaf is a terminal pane; each internal node
-/// splits its area into two children (first/second) along a direction.
-#[derive(Debug, Clone)]
-pub enum SplitNode {
-    /// A leaf containing a single terminal.
-    Leaf(TerminalId),
-    /// An internal split with two children and a ratio (0..1) for the first child.
-    Split {
-        direction: SplitDirection,
-        ratio: f32,
-        first: Box<SplitNode>,
-        second: Box<SplitNode>,
-    },
-}
+/// Supplies a new tab's shell environment.
+///
+/// It is called with the tab's id before the tab's first shell is spawned,
+/// so the caller can prepare per-tab resources the shell must know about
+/// (the tab's native protocol socket, for example) and hand back the
+/// variables that describe them. Panes split off the tab later inherit the
+/// same environment.
+pub type TabEnvFn<'a> = &'a mut dyn FnMut(TabId) -> io::Result<TabEnv>;
 
-impl SplitNode {
-    /// Create a leaf node.
-    pub fn leaf(id: TerminalId) -> Self {
-        SplitNode::Leaf(id)
-    }
-
-    /// Collect all terminal IDs in depth-first order.
-    pub fn terminals(&self) -> Vec<TerminalId> {
-        match self {
-            SplitNode::Leaf(id) => vec![*id],
-            SplitNode::Split { first, second, .. } => {
-                let mut v = first.terminals();
-                v.extend(second.terminals());
-                v
-            }
-        }
-    }
-
-    /// Count the number of leaves.
-    pub fn leaf_count(&self) -> usize {
-        match self {
-            SplitNode::Leaf(_) => 1,
-            SplitNode::Split { first, second, .. } => first.leaf_count() + second.leaf_count(),
-        }
-    }
-
-    /// Find the leaf containing `id` and split it, placing a new terminal alongside.
-    /// Returns true if the split was performed.
-    pub fn split_at(
-        &mut self,
-        target: TerminalId,
-        new_id: TerminalId,
-        direction: SplitDirection,
-    ) -> bool {
-        match self {
-            SplitNode::Leaf(id) if *id == target => {
-                let existing = SplitNode::Leaf(*id);
-                *self = SplitNode::Split {
-                    direction,
-                    ratio: 0.5,
-                    first: Box::new(existing),
-                    second: Box::new(SplitNode::Leaf(new_id)),
-                };
-                true
-            }
-            SplitNode::Leaf(_) => false,
-            SplitNode::Split { first, second, .. } => {
-                first.split_at(target, new_id, direction)
-                    || second.split_at(target, new_id, direction)
-            }
-        }
-    }
-
-    /// Remove a terminal by ID. Returns true if removed.
-    /// If removal leaves an internal node with one child, collapses it.
-    pub fn remove(&mut self, target: TerminalId) -> bool {
-        match self {
-            SplitNode::Leaf(id) => *id == target,
-            SplitNode::Split { first, second, .. } => {
-                if first.remove(target) {
-                    // First child was removed — replace self with second
-                    if matches!(**first, SplitNode::Leaf(id) if id == target) {
-                        *self = *second.clone();
-                    }
-                    true
-                } else if second.remove(target) {
-                    if matches!(**second, SplitNode::Leaf(id) if id == target) {
-                        *self = *first.clone();
-                    }
-                    true
-                } else {
-                    false
-                }
-            }
-        }
-    }
-
-    /// Compute layout rectangles for each leaf given a bounding box.
-    /// Returns (TerminalId, x, y, width, height) for each leaf.
-    pub fn layout(&self, x: f32, y: f32, w: f32, h: f32) -> Vec<(TerminalId, f32, f32, f32, f32)> {
-        match self {
-            SplitNode::Leaf(id) => vec![(*id, x, y, w, h)],
-            SplitNode::Split {
-                direction,
-                ratio,
-                first,
-                second,
-            } => {
-                let mut result = Vec::new();
-                match direction {
-                    SplitDirection::Horizontal => {
-                        let w1 = w * ratio;
-                        result.extend(first.layout(x, y, w1, h));
-                        result.extend(second.layout(x + w1, y, w - w1, h));
-                    }
-                    SplitDirection::Vertical => {
-                        let h1 = h * ratio;
-                        result.extend(first.layout(x, y, w, h1));
-                        result.extend(second.layout(x, y + h1, w, h - h1));
-                    }
-                }
-                result
-            }
-        }
-    }
-
-    /// Find the next terminal after `current` in depth-first order.
-    pub fn next_terminal(&self, current: TerminalId) -> Option<TerminalId> {
-        let terminals = self.terminals();
-        let pos = terminals.iter().position(|&id| id == current)?;
-        let next_pos = (pos + 1) % terminals.len();
-        Some(terminals[next_pos])
-    }
-
-    /// Find the previous terminal before `current` in depth-first order.
-    pub fn prev_terminal(&self, current: TerminalId) -> Option<TerminalId> {
-        let terminals = self.terminals();
-        let pos = terminals.iter().position(|&id| id == current)?;
-        let prev_pos = if pos == 0 {
-            terminals.len() - 1
-        } else {
-            pos - 1
-        };
-        Some(terminals[prev_pos])
-    }
+/// A [`TabEnvFn`] for tabs whose shells need no extra environment.
+pub fn no_tab_env(_tab_id: TabId) -> io::Result<TabEnv> {
+    Ok(Vec::new())
 }
 
 /// Direction of pane splits within a tab.
@@ -194,9 +69,17 @@ pub struct ManagedTerminal {
 }
 
 impl ManagedTerminal {
-    /// Create a new managed terminal.
-    pub fn new(id: TerminalId, tab_id: TabId, cols: u16, rows: u16) -> io::Result<Self> {
-        let event_loop = TerminalEventLoop::new(cols, rows)?;
+    /// Create a new managed terminal whose shell gets `env` on top of the
+    /// inherited environment.
+    pub fn new(
+        id: TerminalId,
+        tab_id: TabId,
+        cols: u16,
+        rows: u16,
+        env: &[(OsString, OsString)],
+    ) -> io::Result<Self> {
+        let child = Child::spawn_shell(PtySize::new(cols, rows), env).map_err(io::Error::other)?;
+        let event_loop = TerminalEventLoop::from_child(child, cols, rows)?;
         Ok(Self {
             id,
             event_loop,
@@ -227,12 +110,12 @@ pub struct TabId(usize);
 
 impl TabId {
     /// Create a new tab ID.
-    pub fn new(id: usize) -> Self {
+    pub const fn new(id: usize) -> Self {
         Self(id)
     }
 
     /// Get the raw ID value.
-    pub fn raw(&self) -> usize {
+    pub const fn raw(&self) -> usize {
         self.0
     }
 }
@@ -252,9 +135,8 @@ pub struct Tab {
     /// Relative size of each pane (normalized to sum to 1.0).
     /// Length matches `terminals`. Empty means equal distribution.
     pub pane_ratios: Vec<f32>,
-    /// Binary split tree for nested pane layouts.
-    /// When present, this drives layout instead of the flat `terminals` + `split_direction`.
-    pub split_tree: Option<SplitNode>,
+    /// Extra environment given to every shell spawned in this tab.
+    pub shell_env: TabEnv,
 }
 
 impl Tab {
@@ -267,7 +149,7 @@ impl Tab {
             title: format!("Tab {}", id.0 + 1),
             split_direction: SplitDirection::default(),
             pane_ratios: Vec::new(),
-            split_tree: None,
+            shell_env: Vec::new(),
         }
     }
 
@@ -326,7 +208,16 @@ pub struct TerminalManager {
 
 impl TerminalManager {
     /// Create a new terminal manager with one tab and one terminal.
+    ///
+    /// The initial tab's shell gets no extra environment; use
+    /// [`TerminalManager::with_tab_env`] when it needs some.
     pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
+        Self::with_tab_env(cols, rows, &mut no_tab_env)
+    }
+
+    /// Create a new terminal manager with one tab whose shell environment
+    /// comes from `tab_env`.
+    pub fn with_tab_env(cols: u16, rows: u16, tab_env: TabEnvFn) -> io::Result<Self> {
         let mut manager = Self {
             terminals: Vec::new(),
             tabs: Vec::new(),
@@ -338,19 +229,26 @@ impl TerminalManager {
         };
 
         // Create initial tab with terminal
-        manager.create_tab()?;
+        manager.create_tab_with_env(tab_env)?;
 
         Ok(manager)
     }
 
-    /// Create a new tab with a new terminal.
+    /// Create a new tab with a new terminal and no extra shell environment.
     pub fn create_tab(&mut self) -> io::Result<TabId> {
+        self.create_tab_with_env(&mut no_tab_env)
+    }
+
+    /// Create a new tab whose shell environment comes from `tab_env`.
+    pub fn create_tab_with_env(&mut self, tab_env: TabEnvFn) -> io::Result<TabId> {
         let tab_id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
 
-        let terminal_id = self.create_terminal(tab_id)?;
+        let env = tab_env(tab_id)?;
+        let terminal_id = self.create_terminal_with_env(tab_id, &env)?;
 
-        let tab = Tab::new(tab_id, terminal_id);
+        let mut tab = Tab::new(tab_id, terminal_id);
+        tab.shell_env = env;
         self.tabs.push(tab);
         self.active_tab = tab_id;
 
@@ -400,13 +298,34 @@ impl TerminalManager {
         true
     }
 
-    /// Create a new terminal in a specific tab.
+    /// Create a new terminal (pane) in an existing tab, inheriting the
+    /// tab's shell environment.
     fn create_terminal(&mut self, tab_id: TabId) -> io::Result<TerminalId> {
+        let env = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.shell_env.clone())
+            .unwrap_or_default();
+        self.create_terminal_with_env(tab_id, &env)
+    }
+
+    /// Create a new terminal in `tab_id` whose shell gets `env`.
+    fn create_terminal_with_env(
+        &mut self,
+        tab_id: TabId,
+        env: &[(OsString, OsString)],
+    ) -> io::Result<TerminalId> {
         let terminal_id = TerminalId(self.next_terminal_id);
         self.next_terminal_id += 1;
 
-        let terminal =
-            ManagedTerminal::new(terminal_id, tab_id, self.default_cols, self.default_rows)?;
+        let terminal = ManagedTerminal::new(
+            terminal_id,
+            tab_id,
+            self.default_cols,
+            self.default_rows,
+            env,
+        )?;
 
         self.terminals.push(terminal);
         Ok(terminal_id)
@@ -786,20 +705,25 @@ impl TerminalManager {
         self.active_tab().map(|t| t.focused_terminal)
     }
 
-    /// Create a new tab with a custom command.
+    /// Create a new tab running a custom command, with the shell
+    /// environment supplied by `tab_env`.
     pub fn create_tab_with_command(
         &mut self,
         command: &str,
         args: &[String],
         working_dir: Option<&str>,
         title: Option<&str>,
+        tab_env: TabEnvFn,
     ) -> io::Result<TabId> {
         let tab_id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
 
-        let terminal_id = self.create_terminal_with_command(tab_id, command, args, working_dir)?;
+        let env = tab_env(tab_id)?;
+        let terminal_id =
+            self.create_terminal_with_command(tab_id, command, args, working_dir, &env)?;
 
         let mut tab = Tab::new(tab_id, terminal_id);
+        tab.shell_env = env;
         if let Some(title) = title {
             tab.title = title.to_string();
         }
@@ -824,6 +748,7 @@ impl TerminalManager {
         command: &str,
         args: &[String],
         working_dir: Option<&str>,
+        env: &[(OsString, OsString)],
     ) -> io::Result<TerminalId> {
         let terminal_id = TerminalId(self.next_terminal_id);
         self.next_terminal_id += 1;
@@ -834,13 +759,16 @@ impl TerminalManager {
             full_args.push(arg);
         }
 
-        let event_loop = TerminalEventLoop::with_command(
+        let child = Child::spawn(
             command,
             &full_args,
-            self.default_cols,
-            self.default_rows,
+            &crate::pty::current_dir(),
+            PtySize::new(self.default_cols, self.default_rows),
+            env,
         )
         .map_err(io::Error::other)?;
+        let event_loop =
+            TerminalEventLoop::from_child(child, self.default_cols, self.default_rows)?;
 
         // Change working directory if specified
         if let Some(dir) = working_dir {
@@ -1031,14 +959,17 @@ impl TerminalManager {
     }
 
     /// Create a terminal manager from session data.
+    ///
+    /// `tab_env` supplies the shell environment of every restored tab.
     pub fn from_session(
         session: &crate::session::SessionData,
         cols: u16,
         rows: u16,
+        tab_env: TabEnvFn,
     ) -> io::Result<Self> {
         if session.tabs.is_empty() {
             // No tabs in session, create default
-            return Self::new(cols, rows);
+            return Self::with_tab_env(cols, rows, tab_env);
         }
 
         let mut manager = Self {
@@ -1055,6 +986,7 @@ impl TerminalManager {
             // Create tab
             let tab_id = TabId(manager.next_tab_id);
             manager.next_tab_id += 1;
+            let env = tab_env(tab_id)?;
 
             // Create at least one terminal for this tab
             let terminal_count = tab_data.terminals.len().max(1);
@@ -1067,11 +999,11 @@ impl TerminalManager {
 
                 // Create terminal with working directory if available
                 let mut terminal = if let Some(ref wd) = term_data.working_directory {
-                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, wd)?
+                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, wd, &env)?
                 } else if let Some(ref wd) = tab_data.working_directory {
-                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, wd)?
+                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, wd, &env)?
                 } else {
-                    ManagedTerminal::new(tid, tab_id, cols, rows)?
+                    ManagedTerminal::new(tid, tab_id, cols, rows, &env)?
                 };
 
                 terminal.title = term_data.title.clone();
@@ -1088,9 +1020,9 @@ impl TerminalManager {
                 let tid = TerminalId(manager.next_terminal_id);
                 manager.next_terminal_id += 1;
                 let mut terminal = if let Some(ref wd) = tab_data.working_directory {
-                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, wd)?
+                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, wd, &env)?
                 } else {
-                    ManagedTerminal::new(tid, tab_id, cols, rows)?
+                    ManagedTerminal::new(tid, tab_id, cols, rows, &env)?
                 };
                 terminal.title = tab_data.title.clone();
                 manager.terminals.push(terminal);
@@ -1115,7 +1047,7 @@ impl TerminalManager {
                 title: tab_data.title.clone(),
                 split_direction,
                 pane_ratios: Vec::new(),
-                split_tree: None,
+                shell_env: env,
             };
 
             manager.tabs.push(tab);
@@ -1166,15 +1098,19 @@ fn is_shell_label(label: &str) -> bool {
 }
 
 impl ManagedTerminal {
-    /// Create a new managed terminal with a specific working directory.
+    /// Create a new managed terminal with a specific working directory and
+    /// extra shell environment.
     pub fn new_with_dir(
         id: TerminalId,
         tab_id: TabId,
         cols: u16,
         rows: u16,
         working_dir: &str,
+        env: &[(OsString, OsString)],
     ) -> io::Result<Self> {
-        let event_loop = TerminalEventLoop::new_with_dir(cols, rows, working_dir)?;
+        let child = Child::spawn_shell_in_dir(PtySize::new(cols, rows), working_dir, env)
+            .map_err(io::Error::other)?;
+        let event_loop = TerminalEventLoop::from_child(child, cols, rows)?;
         Ok(Self {
             id,
             event_loop,
@@ -1334,73 +1270,88 @@ mod tests {
         assert_eq!(manager.active_tab, first_tab);
     }
 
-    // ── SplitNode tests ──────────────────────────────────────────────
+    /// Value of `key` in the child's environment once it has exec'd, or
+    /// `None` if it never shows up within the timeout.
+    #[cfg(target_os = "linux")]
+    fn wait_for_child_env(pid: u32, key: &str) -> Option<String> {
+        let prefix = format!("{key}=");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) {
+                for entry in environ.split(|byte| *byte == 0) {
+                    let entry = String::from_utf8_lossy(entry);
+                    if let Some(value) = entry.strip_prefix(&prefix) {
+                        return Some(value.to_string());
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        None
+    }
 
-    #[test]
-    fn split_node_leaf() {
-        let id = TerminalId::new(1);
-        let node = SplitNode::leaf(id);
-        assert_eq!(node.terminals(), vec![id]);
-        assert_eq!(node.leaf_count(), 1);
+    #[cfg(target_os = "linux")]
+    fn env_for_tab(tab_id: TabId) -> io::Result<TabEnv> {
+        Ok(vec![(
+            OsString::from("ULTTY_TAB_ENV_TEST"),
+            OsString::from(format!("tab-{}", tab_id.raw())),
+        )])
     }
 
     #[test]
-    fn split_node_split_at() {
-        let id1 = TerminalId::new(1);
-        let id2 = TerminalId::new(2);
-        let mut node = SplitNode::leaf(id1);
-        assert!(node.split_at(id1, id2, SplitDirection::Horizontal));
-        assert_eq!(node.leaf_count(), 2);
-        assert_eq!(node.terminals(), vec![id1, id2]);
+    #[cfg(target_os = "linux")]
+    fn tab_env_reaches_the_tab_shell_and_its_split_panes() {
+        let mut seen = Vec::new();
+        let mut manager = TerminalManager::with_tab_env(80, 24, &mut |tab_id| {
+            seen.push(tab_id);
+            env_for_tab(tab_id)
+        })
+        .unwrap();
+        assert_eq!(
+            seen,
+            vec![TabId::new(0)],
+            "env fn is called once with the new tab id"
+        );
+
+        let first_tab = manager.active_tab().unwrap();
+        assert_eq!(first_tab.shell_env, env_for_tab(TabId::new(0)).unwrap());
+        let first_pid = manager.focused_terminal().unwrap().event_loop.child_pid();
+        assert_eq!(
+            wait_for_child_env(first_pid, "ULTTY_TAB_ENV_TEST").as_deref(),
+            Some("tab-0"),
+            "the tab's shell sees its env"
+        );
+
+        // A pane split off the tab inherits the tab's env without the env
+        // fn being consulted again.
+        let pane = manager.split_horizontal().unwrap().unwrap();
+        let pane_pid = manager.terminal(pane).unwrap().event_loop.child_pid();
+        assert_eq!(
+            wait_for_child_env(pane_pid, "ULTTY_TAB_ENV_TEST").as_deref(),
+            Some("tab-0")
+        );
+
+        // A second tab gets its own env, and the first tab's is unchanged.
+        let second = manager.create_tab_with_env(&mut env_for_tab).unwrap();
+        assert_eq!(second, TabId::new(1));
+        let second_pid = manager.focused_terminal().unwrap().event_loop.child_pid();
+        assert_eq!(
+            wait_for_child_env(second_pid, "ULTTY_TAB_ENV_TEST").as_deref(),
+            Some("tab-1")
+        );
+        assert_eq!(
+            manager.active_tab().unwrap().shell_env,
+            env_for_tab(TabId::new(1)).unwrap()
+        );
     }
 
     #[test]
-    fn split_node_nested_split() {
-        let id1 = TerminalId::new(1);
-        let id2 = TerminalId::new(2);
-        let id3 = TerminalId::new(3);
-        let mut node = SplitNode::leaf(id1);
-        node.split_at(id1, id2, SplitDirection::Horizontal);
-        node.split_at(id2, id3, SplitDirection::Vertical);
-        assert_eq!(node.leaf_count(), 3);
-        assert_eq!(node.terminals(), vec![id1, id2, id3]);
-    }
-
-    #[test]
-    fn split_node_layout() {
-        let id1 = TerminalId::new(1);
-        let id2 = TerminalId::new(2);
-        let mut node = SplitNode::leaf(id1);
-        node.split_at(id1, id2, SplitDirection::Horizontal);
-        let rects = node.layout(0.0, 0.0, 100.0, 50.0);
-        assert_eq!(rects.len(), 2);
-        assert_eq!(rects[0], (id1, 0.0, 0.0, 50.0, 50.0));
-        assert_eq!(rects[1], (id2, 50.0, 0.0, 50.0, 50.0));
-    }
-
-    #[test]
-    fn split_node_remove() {
-        let id1 = TerminalId::new(1);
-        let id2 = TerminalId::new(2);
-        let mut node = SplitNode::leaf(id1);
-        node.split_at(id1, id2, SplitDirection::Horizontal);
-        assert!(node.remove(id2));
-        assert_eq!(node.leaf_count(), 1);
-        assert_eq!(node.terminals(), vec![id1]);
-    }
-
-    #[test]
-    fn split_node_navigation() {
-        let id1 = TerminalId::new(1);
-        let id2 = TerminalId::new(2);
-        let id3 = TerminalId::new(3);
-        let mut node = SplitNode::leaf(id1);
-        node.split_at(id1, id2, SplitDirection::Horizontal);
-        node.split_at(id2, id3, SplitDirection::Vertical);
-
-        assert_eq!(node.next_terminal(id1), Some(id2));
-        assert_eq!(node.next_terminal(id3), Some(id1));
-        assert_eq!(node.prev_terminal(id1), Some(id3));
-        assert_eq!(node.prev_terminal(id2), Some(id1));
+    fn tab_env_error_aborts_tab_creation() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let err = manager
+            .create_tab_with_env(&mut |_| Err(io::Error::other("no socket")))
+            .unwrap_err();
+        assert_eq!(err.to_string(), "no socket");
+        assert_eq!(manager.tab_count(), 1, "failed tab is not added");
     }
 }

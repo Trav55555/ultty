@@ -288,7 +288,7 @@ impl App {
 
                     // Click on "+" new tab button
                     if button == MouseButton::Left && self.tab_bar.is_new_tab_button_at(x, y) {
-                        match self.terminal_manager.create_tab() {
+                        match self.create_tab() {
                             Ok(_) => {
                                 self.clear_tab_width_freeze();
                                 tracing::info!("Created new tab via + button");
@@ -886,7 +886,7 @@ impl App {
 
         // Tab keybindings
         if self.check_keybinding(&event, &self.config.keybindings.new_tab.clone()) {
-            match self.terminal_manager.create_tab() {
+            match self.create_tab() {
                 Ok(tab_id) => {
                     self.clear_tab_width_freeze();
                     tracing::info!("Created new tab {:?}", tab_id);
@@ -1465,7 +1465,17 @@ impl App {
         let protocol_key = self.winit_key_to_protocol(&event.logical_key);
         let protocol_mods = self.winit_mods_to_protocol();
 
-        match self.copy_mode.handle_key(&protocol_key, protocol_mods) {
+        // Word motions need the text of the row the copy-mode cursor is on.
+        let (cursor_row, _) = self.copy_mode.cursor_position();
+        let row_text = self
+            .terminal()
+            .and_then(|t| t.buffer().row_at(cursor_row).map(|row| row.text()))
+            .unwrap_or_default();
+
+        match self
+            .copy_mode
+            .handle_key_in_row(&protocol_key, protocol_mods, &row_text)
+        {
             CopyModeResult::Handled => {
                 // If native search is active, mirror n/N navigation
                 if self.native_search_active && !self.native_search_matches.is_empty() {
