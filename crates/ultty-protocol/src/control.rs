@@ -130,6 +130,16 @@ pub enum ControlRequest {
         token: String,
     },
 
+    /// Authenticate and execute `request` in one round trip.
+    ///
+    /// The control server handles one request per connection, so clients
+    /// (ulttyctl) wrap their request with the token from
+    /// [`auth_token_path`]. The response is the inner request's response.
+    WithToken {
+        token: String,
+        request: Box<ControlRequest>,
+    },
+
     // === Misc ===
     Ping,
 

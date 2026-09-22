@@ -32,7 +32,9 @@ impl NativeSession {
     }
 
     /// Try to decode a complete message from the session read buffer.
-    pub(super) fn try_decode_message(&mut self) -> io::Result<Option<AppMessage>> {
+    ///
+    /// Returns the message together with the number of wire bytes it occupied.
+    pub(super) fn try_decode_message(&mut self) -> io::Result<Option<(AppMessage, usize)>> {
         if self.read_buf.len() < 8 {
             return Ok(None);
         }
@@ -59,7 +61,7 @@ impl NativeSession {
         match AppMessage::decode(&mut cursor) {
             Ok(msg) => {
                 self.read_buf.advance(total_len);
-                Ok(Some(msg))
+                Ok(Some((msg, total_len)))
             }
             Err(e) => {
                 warn!(

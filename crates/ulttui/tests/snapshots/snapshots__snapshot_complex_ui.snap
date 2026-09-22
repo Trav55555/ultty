@@ -14,3 +14,5 @@ expression: output
 │                            │
 └────────────────────────────┘
 Ready | Line 1, Col 1
+-- styles --
+2:1-28 fg=Rgb(30, 30, 46) bg=Rgb(97, 175, 239) mod=BOLD

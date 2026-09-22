@@ -1,12 +1,19 @@
 //! PTY master side (terminal emulator side).
 
 use super::{PtyError, Result};
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
 use nix::libc;
 use nix::pty::{openpty, OpenptyResult, Winsize};
 use nix::unistd::{read, write};
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::time::{Duration, Instant};
+
+/// How long a single `poll()` waits for the PTY to become writable.
+const WRITE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Total time [`Pty::write_all`] waits for a stalled reader before giving up.
+pub const WRITE_ALL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// PTY size in characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +87,12 @@ impl Pty {
 
         // Get slave name for child process
         let slave_name = get_slave_name(master.as_raw_fd())?;
+
+        // Neither end may leak into spawned children: the child gets its
+        // slave via dup2 (which clears CLOEXEC on the new fds) and nothing
+        // else should ever inherit the master.
+        set_cloexec(master.as_raw_fd())?;
+        set_cloexec(slave.as_raw_fd())?;
 
         // Set master to non-blocking
         set_nonblocking(master.as_raw_fd())?;
@@ -162,19 +175,59 @@ impl Pty {
         }
     }
 
-    /// Write all data to the PTY (blocking until complete).
-    pub fn write_all(&self, mut data: &[u8]) -> Result<()> {
+    /// Write all data to the PTY, waiting up to [`WRITE_ALL_TIMEOUT`] for a
+    /// stalled reader before failing with a timed-out `WriteFailed` error.
+    pub fn write_all(&self, data: &[u8]) -> Result<()> {
+        self.write_all_with_timeout(data, WRITE_ALL_TIMEOUT)
+    }
+
+    /// Write all data to the PTY, giving up after `timeout` of no progress.
+    ///
+    /// When the write would block, the fd is polled for writability in
+    /// [`WRITE_POLL_INTERVAL`] slices instead of busy-spinning.
+    pub fn write_all_with_timeout(&self, mut data: &[u8], timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
         while !data.is_empty() {
             match self.write(data) {
                 Ok(0) => {
-                    // Would block, try again
-                    std::thread::yield_now();
+                    if Instant::now() >= deadline {
+                        return Err(PtyError::WriteFailed(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "PTY not writable: child is not draining its input",
+                        )));
+                    }
+                    self.wait_writable(WRITE_POLL_INTERVAL)?;
                 }
                 Ok(n) => {
                     data = &data[n..];
                 }
                 Err(e) => return Err(e),
             }
+        }
+        Ok(())
+    }
+
+    /// Block until the master is writable or `timeout` elapses.
+    fn wait_writable(&self, timeout: Duration) -> Result<()> {
+        let mut pollfd = libc::pollfd {
+            fd: self.master.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let timeout_ms = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
+        // SAFETY: `pollfd` is a valid, initialized array of exactly one entry
+        // and `self.master` is an open fd owned by this Pty for the call's
+        // duration. poll only writes `revents`.
+        let ready = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+        if ready < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                return Ok(());
+            }
+            return Err(PtyError::WriteFailed(err));
+        }
+        if pollfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err(PtyError::Closed);
         }
         Ok(())
     }
@@ -207,6 +260,12 @@ pub struct SlavePty {
     fd: OwnedFd,
 }
 
+impl AsFd for SlavePty {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
 impl SlavePty {
     /// Get the file descriptor.
     pub fn as_raw_fd(&self) -> RawFd {
@@ -222,6 +281,7 @@ impl SlavePty {
 }
 
 /// Get the name of the slave PTY device.
+#[cfg(target_os = "linux")]
 fn get_slave_name(master_fd: RawFd) -> Result<String> {
     // Use ptsname_r for thread safety
     let mut name_buf = [0u8; 256];
@@ -248,12 +308,46 @@ fn get_slave_name(master_fd: RawFd) -> Result<String> {
     Ok(name)
 }
 
+/// Get the name of the slave PTY device.
+///
+/// macOS libc has no `ptsname_r`; `ptsname` returns a pointer to static
+/// storage, so the string is copied out immediately under the call.
+#[cfg(not(target_os = "linux"))]
+fn get_slave_name(master_fd: RawFd) -> Result<String> {
+    // SAFETY: master_fd is a valid PTY master file descriptor obtained from
+    // openpty. ptsname returns null on failure or a pointer to a
+    // NUL-terminated string in static storage that stays valid until the
+    // next ptsname call; we copy it before returning.
+    let name = unsafe {
+        let ptr = libc::ptsname(master_fd);
+        if ptr.is_null() {
+            return Err(PtyError::OpenFailed(nix::Error::last()));
+        }
+        std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    };
+    Ok(name)
+}
+
 /// Set a file descriptor to non-blocking mode.
 fn set_nonblocking(fd: RawFd) -> Result<()> {
     let flags = fcntl(fd, FcntlArg::F_GETFL).map_err(PtyError::OpenFailed)?;
     let flags = OFlag::from_bits_truncate(flags);
     fcntl(fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).map_err(PtyError::OpenFailed)?;
     Ok(())
+}
+
+/// Mark a file descriptor close-on-exec.
+fn set_cloexec(fd: RawFd) -> Result<()> {
+    fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(PtyError::OpenFailed)?;
+    Ok(())
+}
+
+/// Whether a file descriptor is close-on-exec.
+#[cfg(test)]
+fn is_cloexec(fd: RawFd) -> bool {
+    fcntl(fd, FcntlArg::F_GETFD)
+        .map(|flags| FdFlag::from_bits_truncate(flags).contains(FdFlag::FD_CLOEXEC))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -267,7 +361,46 @@ mod tests {
 
         let (pty, _slave) = result.unwrap();
         assert!(!pty.slave_name().is_empty());
+        #[cfg(target_os = "linux")]
         assert!(pty.slave_name().starts_with("/dev/pts/"));
+        #[cfg(target_os = "macos")]
+        assert!(pty.slave_name().starts_with("/dev/ttys"));
+    }
+
+    #[test]
+    fn pty_fds_are_close_on_exec() {
+        let (pty, slave) = Pty::open().unwrap();
+        assert!(is_cloexec(pty.as_raw_fd()), "master must be CLOEXEC");
+        assert!(is_cloexec(slave.as_raw_fd()), "slave must be CLOEXEC");
+    }
+
+    #[test]
+    fn write_all_times_out_instead_of_spinning_when_nobody_reads() {
+        // Nothing reads the slave, so the input queue fills and the master
+        // reports EAGAIN forever. write_all must give up within the budget.
+        // Raw mode is needed: canonical mode silently discards overlong lines
+        // instead of applying back-pressure.
+        use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
+        let (pty, slave) = Pty::open().unwrap();
+        let mut termios = tcgetattr(&slave).unwrap();
+        cfmakeraw(&mut termios);
+        tcsetattr(&slave, SetArg::TCSANOW, &termios).unwrap();
+        let data = vec![b'x'; 1 << 20];
+        let budget = Duration::from_millis(200);
+
+        let start = Instant::now();
+        let result = pty.write_all_with_timeout(&data, budget);
+        let elapsed = start.elapsed();
+
+        match result {
+            Err(PtyError::WriteFailed(e)) => assert_eq!(e.kind(), io::ErrorKind::TimedOut),
+            other => panic!("expected timed-out write, got {:?}", other.map(|_| ())),
+        }
+        assert!(elapsed >= budget, "gave up too early: {elapsed:?}");
+        assert!(
+            elapsed < budget + Duration::from_secs(1),
+            "took far longer than the budget: {elapsed:?}"
+        );
     }
 
     #[test]

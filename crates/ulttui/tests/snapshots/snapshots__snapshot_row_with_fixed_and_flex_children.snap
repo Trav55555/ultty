@@ -3,3 +3,6 @@ source: crates/ulttui/tests/snapshots.rs
 expression: output
 ---
 [ Fixed ]                       [ Tail ]
+-- styles --
+0:0-8 fg=Rgb(205, 214, 244) bg=Rgb(69, 71, 90) mod=BOLD
+0:32-39 fg=Rgb(205, 214, 244) bg=Rgb(69, 71, 90) mod=BOLD

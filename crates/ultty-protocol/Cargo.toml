@@ -9,7 +9,6 @@ rust-version.workspace = true
 
 [dependencies]
 bytes = { workspace = true }
-zerocopy = { workspace = true }
 thiserror = { workspace = true }
 taffy = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }

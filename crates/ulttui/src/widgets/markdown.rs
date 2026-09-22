@@ -740,7 +740,13 @@ fn count_lines_wrapped(text: &str, wrap_width_cols: Option<usize>) -> usize {
     wrapped_line_count(text, max_cols)
 }
 
-fn wrapped_line_count(text: &str, max_cols: usize) -> usize {
+/// Number of terminal rows `text` occupies when hard-wrapped at `max_cols`
+/// display columns (wide characters count as their display width).
+///
+/// Explicit newlines always start a new row, an empty text is one row, and
+/// `max_cols == 0` disables wrapping. Apps that size regions to wrapped text
+/// (chat transcripts, logs) should use this rather than re-deriving it.
+pub fn wrapped_line_count(text: &str, max_cols: usize) -> usize {
     if max_cols == 0 {
         return count_lines(text);
     }

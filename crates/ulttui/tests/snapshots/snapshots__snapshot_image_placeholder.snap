@@ -5,3 +5,7 @@ expression: output
 ┌Image 10x10 (fit)───────────┐
 │10x10 RGBA (400 bytes)      │
 └────────────────────────────┘
+-- styles --
+0:0-29 fg=Rgb(108, 112, 134) bg=Reset mod=NONE
+1:0-29 fg=Rgb(108, 112, 134) bg=Reset mod=NONE
+2:0-29 fg=Rgb(108, 112, 134) bg=Reset mod=NONE

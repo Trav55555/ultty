@@ -534,7 +534,7 @@ impl<'a> TerminalHandler<'a> {
                 if self.terminal.is_alternate_screen() {
                     self.terminal.leave_alternate_screen();
                 }
-                self.terminal.buffer_mut().clear_history();
+                self.terminal.reset_auxiliary_state();
             }
 
             // Soft reset (DECSTR — CSI ! p)
@@ -1196,5 +1196,60 @@ mod tests {
         process(&mut term, b"\x1b[1G");
         assert!(!term.grid().cursor().wrap_pending);
         assert_eq!(term.grid().cursor().position.col, 0);
+    }
+
+    #[test]
+    fn stale_scroll_region_survives_reflow_resize_without_panic() {
+        let mut term = Terminal::new(Dimensions::new(80, 40));
+        process(&mut term, b"\x1b[32;40r");
+        assert_eq!(
+            term.grid().scroll_region().map(|r| (r.top, r.bottom)),
+            Some((31, 39))
+        );
+
+        // Width change goes through Buffer::reflow_all -> Grid::set_rows
+        term.resize(Dimensions::new(60, 20));
+
+        process(&mut term, b"\x1bM");
+        process(&mut term, b"\x1b[S");
+        process(&mut term, b"\x1b[T");
+        process(&mut term, b"\n\n\n");
+        assert!(term.grid().cursor().position.row < 20);
+    }
+
+    #[test]
+    fn ris_resets_charset_designation() {
+        // Charset state lives in the parser, so keep one parser across steps.
+        let mut term = Terminal::new(Dimensions::new(10, 3));
+        let mut parser = AnsiParser::new();
+
+        let mut handler = TerminalHandler::new(&mut term);
+        parser.feed(b"\x1b(0a", |action| handler.handle(action));
+        // 'a' in DEC Special Graphics is a checkerboard, not a letter
+        assert_ne!(term.grid().cell(0, 0).unwrap().char(), 'a');
+
+        let mut handler = TerminalHandler::new(&mut term);
+        parser.feed(b"\x1bca", |action| handler.handle(action));
+        assert_eq!(term.grid().cell(0, 0).unwrap().char(), 'a');
+    }
+
+    #[test]
+    fn ris_clears_alternate_screen_images_and_hyperlinks() {
+        let mut term = Terminal::new(Dimensions::new(10, 3));
+        process(
+            &mut term,
+            b"\x1b]8;;https://example.com\x07link\x1b]8;;\x07",
+        );
+        assert_eq!(term.all_hyperlinks().len(), 1);
+        process(&mut term, b"\x1b[?1049h");
+        process(&mut term, b"ALT");
+        process(&mut term, b"\x1b[?1049l");
+
+        process(&mut term, b"\x1bc");
+
+        assert!(term.all_hyperlinks().is_empty());
+        assert!(!term.is_alternate_screen());
+        term.enter_alternate_screen();
+        assert_eq!(term.grid().cell(0, 0).unwrap().char(), ' ');
     }
 }

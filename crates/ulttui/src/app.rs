@@ -3,6 +3,8 @@
 mod runtime;
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::backend::Backend;
@@ -67,7 +69,6 @@ impl View for OverlayView<'_> {
                     parent,
                     next_id,
                     None,
-                    false,
                 )?));
             }
         }
@@ -79,6 +80,13 @@ impl View for OverlayView<'_> {
         self.base.render_ansi(frame, area);
         if let Some(overlay) = &self.overlay {
             overlay.render_ansi(frame, area);
+        }
+    }
+
+    fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
+        self.base.for_each_child(visit);
+        if let Some(overlay) = &self.overlay {
+            visit(overlay);
         }
     }
 }
@@ -134,11 +142,15 @@ pub struct App<A: Application> {
     focus: FocusManager,
     focus_initialized: bool,
     theme: Theme,
-    subscriptions: Vec<SubState<A::Message>>,
-    spawn_handles: Vec<tokio::task::JoinHandle<A::Message>>,
+    /// `Sub::every` timer state keyed by timer identity (see `Sub::Every`).
+    timers: HashMap<String, TimerState>,
+    /// Spawned tasks (`Cmd::spawn*` / `Cmd::after`) with their optional
+    /// cancellation id. Finished handles are pruned every tick.
+    spawn_handles: Vec<(Option<String>, tokio::task::JoinHandle<A::Message>)>,
     cmd_subscription_handles: HashMap<String, tokio::task::JoinHandle<()>>,
     stream_subscription_handles: HashMap<String, tokio::task::JoinHandle<()>>,
     stream_subscription_urls: HashMap<String, String>,
+    stream_backoff: HashMap<String, StreamBackoff>,
     subscription_tx: mpsc::UnboundedSender<A::Message>,
     subscription_rx: mpsc::UnboundedReceiver<A::Message>,
     msg_queue: VecDeque<A::Message>,
@@ -150,11 +162,24 @@ pub struct App<A: Application> {
     needs_render: bool,
 }
 
-#[allow(dead_code)]
-struct SubState<M> {
-    interval: Duration,
-    f: Box<dyn Fn() -> M + Send + 'static>,
+/// Per-timer state for `Sub::Every`.
+struct TimerState {
+    /// The reference tick the next firing is scheduled from.
     last_tick: Instant,
+}
+
+const STREAM_BACKOFF_BASE: Duration = Duration::from_millis(250);
+const STREAM_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Reconnect bookkeeping for one `Sub::stream` id.
+struct StreamBackoff {
+    /// Consecutive attempts that ended without a working connection.
+    failures: u32,
+    /// When the next attempt may start; `None` while a task is running or
+    /// has finished but not yet been scheduled.
+    retry_at: Option<Instant>,
+    /// Set by the task once the WebSocket handshake succeeded.
+    connected: Arc<AtomicBool>,
 }
 
 struct StreamSubSpec<M> {
@@ -172,9 +197,11 @@ enum StreamSubscriptionAction {
 }
 
 struct SubCollectCtx<'a, M> {
-    old_states: &'a [SubState<M>],
-    index: &'a mut usize,
-    new_states: &'a mut Vec<SubState<M>>,
+    now: Instant,
+    old_timers: &'a HashMap<String, TimerState>,
+    new_timers: &'a mut HashMap<String, TimerState>,
+    /// Ordinal counters for unkeyed timers, per interval, within one frame.
+    unkeyed_timer_counts: &'a mut HashMap<Duration, usize>,
     stream_specs: &'a mut Vec<StreamSubSpec<M>>,
     messages: &'a mut Vec<M>,
 }
@@ -189,11 +216,12 @@ impl<A: Application> App<A> {
             focus: FocusManager::new(),
             focus_initialized: false,
             theme: Theme::dark(),
-            subscriptions: Vec::new(),
+            timers: HashMap::new(),
             spawn_handles: Vec::new(),
             cmd_subscription_handles: HashMap::new(),
             stream_subscription_handles: HashMap::new(),
             stream_subscription_urls: HashMap::new(),
+            stream_backoff: HashMap::new(),
             subscription_tx,
             subscription_rx,
             msg_queue: VecDeque::new(),
@@ -291,17 +319,20 @@ impl<A: Application> App<A> {
                 }
             }
 
-            if let Event::Key(ref key_event) = event {
-                if allow_navigation && self.handle_navigation(key_event) {
-                    self.needs_render = true;
-                    return Ok(true);
-                }
-            }
-
+            // The app (and its focused widget) sees every key first; Tab only
+            // drives focus navigation when the app leaves it unhandled.
+            let mut handled_by_app = false;
             if forward_to_app {
                 event_changed_state = true;
                 if let Some(msg) = self.app.on_event(&event) {
                     self.msg_queue.push_back(msg);
+                    handled_by_app = true;
+                }
+            }
+
+            if let Event::Key(ref key_event) = event {
+                if allow_navigation && !handled_by_app && self.handle_navigation(key_event) {
+                    event_changed_state = true;
                 }
             }
 
@@ -358,7 +389,7 @@ impl<A: Application> App<A> {
         for (_, handle) in self.stream_subscription_handles.drain() {
             handle.abort();
         }
-        for handle in self.spawn_handles.drain(..) {
+        for (_, handle) in self.spawn_handles.drain(..) {
             handle.abort();
         }
     }
@@ -372,36 +403,42 @@ impl<A: Application> App<A> {
     }
 
     /// Drain the message queue, calling update for each message and scheduling
-    /// any resulting commands. Includes a safety limit to prevent infinite loops
-    /// from recursive `Cmd::Message` chains.
+    /// any resulting commands.
+    ///
+    /// At most `MAX_ITERATIONS` messages are processed per call so one tick
+    /// cannot starve rendering; the rest stay queued for the next drain. If the
+    /// queue itself grows past `MAX_QUEUE_SIZE`, the oldest messages are
+    /// dropped so the newest state-changing messages survive.
     fn drain_messages(&mut self, rt: &Runtime) -> bool {
         const MAX_ITERATIONS: usize = 100;
         const MAX_QUEUE_SIZE: usize = 10_000;
-        let mut iterations = 0;
 
         if self.msg_queue.len() > MAX_QUEUE_SIZE {
+            let excess = self.msg_queue.len() - MAX_QUEUE_SIZE;
             tracing::error!(
-                "msg_queue has {} entries (max {}); truncating",
+                "msg_queue has {} entries (max {}); dropping {} oldest",
                 self.msg_queue.len(),
-                MAX_QUEUE_SIZE
+                MAX_QUEUE_SIZE,
+                excess
             );
-            self.msg_queue.truncate(MAX_QUEUE_SIZE);
+            self.msg_queue.drain(..excess);
         }
 
         let mut processed_any = false;
-        while let Some(msg) = self.msg_queue.pop_front() {
+        for _ in 0..MAX_ITERATIONS {
+            let Some(msg) = self.msg_queue.pop_front() else {
+                break;
+            };
             processed_any = true;
-            iterations += 1;
-            if iterations > MAX_ITERATIONS {
-                tracing::warn!(
-                    "drain_messages hit MAX_ITERATIONS ({}); {} messages dropped",
-                    MAX_ITERATIONS,
-                    self.msg_queue.len()
-                );
-                return true;
-            }
             let cmd = self.app.update(msg);
             self.process_cmd(cmd, rt);
+        }
+        if !self.msg_queue.is_empty() {
+            tracing::warn!(
+                "drain_messages processed {} messages; {} deferred to next tick",
+                MAX_ITERATIONS,
+                self.msg_queue.len()
+            );
         }
         processed_any
     }
@@ -442,10 +479,12 @@ impl<A: Application> App<A> {
             if let Some(screen) = self.screen_stack.last() {
                 let view = screen.view();
                 let composed = OverlayView::new(&view, overlay);
+                FocusManager::with_current_mut(|fm| fm.register_view_tree(&composed));
                 self.backend.render(&composed)?;
             } else {
                 let view = self.app.view();
                 let composed = OverlayView::new(&view, overlay);
+                FocusManager::with_current_mut(|fm| fm.register_view_tree(&composed));
                 self.backend.render(&composed)?;
             }
             FocusManager::with_current_mut(|fm| fm.end_frame());
@@ -485,24 +524,25 @@ impl<A: Application> App<A> {
 
     fn process_subscriptions(&mut self, rt: &Runtime) -> bool {
         let now = Instant::now();
-        let old_states = std::mem::take(&mut self.subscriptions);
-        let mut new_states = Vec::new();
+        let old_timers = std::mem::take(&mut self.timers);
+        let mut new_timers = HashMap::new();
+        let mut unkeyed_timer_counts = HashMap::new();
         let mut stream_specs = Vec::new();
         let mut messages = Vec::new();
-        let mut index = 0;
 
         let mut ctx = SubCollectCtx {
-            old_states: &old_states,
-            index: &mut index,
-            new_states: &mut new_states,
+            now,
+            old_timers: &old_timers,
+            new_timers: &mut new_timers,
+            unkeyed_timer_counts: &mut unkeyed_timer_counts,
             stream_specs: &mut stream_specs,
             messages: &mut messages,
         };
 
-        self.collect_subscriptions(self.app.subscriptions(), now, &mut ctx);
+        collect_subscriptions(self.app.subscriptions(), &mut ctx);
 
-        self.subscriptions = new_states;
-        self.reconcile_stream_subscriptions(rt, stream_specs);
+        self.timers = new_timers;
+        self.reconcile_stream_subscriptions(rt, stream_specs, now);
 
         let produced_messages = !messages.is_empty();
         for msg in messages {
@@ -511,57 +551,11 @@ impl<A: Application> App<A> {
         produced_messages
     }
 
-    fn collect_subscriptions(
-        &self,
-        sub: Sub<A::Message>,
-        now: Instant,
-        ctx: &mut SubCollectCtx<'_, A::Message>,
-    ) {
-        match sub {
-            Sub::None => {}
-            Sub::Every { interval, f } => {
-                let last_tick = ctx
-                    .old_states
-                    .get(*ctx.index)
-                    .map(|state| state.last_tick)
-                    .unwrap_or(now);
-
-                let mut next_tick = last_tick;
-                if now.duration_since(last_tick) >= interval {
-                    ctx.messages.push(f());
-                    next_tick = now;
-                }
-
-                ctx.new_states.push(SubState {
-                    interval,
-                    f,
-                    last_tick: next_tick,
-                });
-                *ctx.index += 1;
-            }
-            Sub::Stream {
-                id,
-                url,
-                on_message,
-            } => {
-                ctx.stream_specs.push(StreamSubSpec {
-                    id,
-                    url,
-                    on_message,
-                });
-            }
-            Sub::Batch(subs) => {
-                for sub in subs {
-                    self.collect_subscriptions(sub, now, ctx);
-                }
-            }
-        }
-    }
-
     fn reconcile_stream_subscriptions(
         &mut self,
         rt: &Runtime,
         stream_specs: Vec<StreamSubSpec<A::Message>>,
+        now: Instant,
     ) {
         let mut desired_by_id: HashMap<String, StreamSubSpec<A::Message>> = HashMap::new();
         for spec in stream_specs {
@@ -587,28 +581,82 @@ impl<A: Application> App<A> {
                         handle.abort();
                     }
                     self.stream_subscription_urls.remove(&id);
+                    self.stream_backoff.remove(&id);
                 }
-                StreamSubscriptionAction::Start { id }
-                | StreamSubscriptionAction::Restart { id } => {
-                    if let Some(handle) = self.stream_subscription_handles.remove(&id) {
-                        handle.abort();
-                    }
+                StreamSubscriptionAction::Start { id } => {
+                    self.stream_backoff.remove(&id);
                     let spec = desired_by_id
                         .remove(&id)
-                        .expect("start/restart action should have a desired spec");
-                    let handle = Self::spawn_stream_subscription(
-                        rt,
-                        self.subscription_tx.clone(),
-                        id.clone(),
-                        spec.url.clone(),
-                        spec.on_message,
-                    );
-
-                    self.stream_subscription_handles.insert(id.clone(), handle);
-                    self.stream_subscription_urls.insert(id, spec.url);
+                        .expect("start action should have a desired spec");
+                    self.start_stream_subscription(rt, spec, 0);
+                }
+                StreamSubscriptionAction::Restart { id } => {
+                    let url_changed = active_urls.get(&id) != desired_urls.get(&id);
+                    if url_changed {
+                        self.stream_backoff.remove(&id);
+                    }
+                    let failures = match self.stream_backoff.get_mut(&id) {
+                        Some(backoff) if backoff.retry_at.is_none() => {
+                            // The task just ended. A connection that had been
+                            // established counts as a fresh failure sequence.
+                            if backoff.connected.load(Ordering::SeqCst) {
+                                backoff.failures = 0;
+                            }
+                            backoff.failures += 1;
+                            let delay = stream_backoff_delay(backoff.failures, jitter_unit());
+                            backoff.retry_at = Some(now + delay);
+                            tracing::warn!(
+                                "stream subscription {} ended; reconnecting in {:?} (attempt {})",
+                                id,
+                                delay,
+                                backoff.failures
+                            );
+                            continue;
+                        }
+                        Some(backoff) if backoff.retry_at.is_some_and(|at| now < at) => continue,
+                        Some(backoff) => backoff.failures,
+                        None => 0,
+                    };
+                    let spec = desired_by_id
+                        .remove(&id)
+                        .expect("restart action should have a desired spec");
+                    self.start_stream_subscription(rt, spec, failures);
                 }
             }
         }
+    }
+
+    fn start_stream_subscription(
+        &mut self,
+        rt: &Runtime,
+        spec: StreamSubSpec<A::Message>,
+        failures: u32,
+    ) {
+        if let Some(handle) = self.stream_subscription_handles.remove(&spec.id) {
+            handle.abort();
+        }
+        let connected = Arc::new(AtomicBool::new(false));
+        let handle = Self::spawn_stream_subscription(
+            rt,
+            self.subscription_tx.clone(),
+            spec.id.clone(),
+            spec.url.clone(),
+            spec.on_message,
+            connected.clone(),
+        );
+
+        self.stream_subscription_handles
+            .insert(spec.id.clone(), handle);
+        self.stream_subscription_urls
+            .insert(spec.id.clone(), spec.url);
+        self.stream_backoff.insert(
+            spec.id,
+            StreamBackoff {
+                failures,
+                retry_at: None,
+                connected,
+            },
+        );
     }
 
     fn spawn_stream_subscription(
@@ -617,6 +665,7 @@ impl<A: Application> App<A> {
         id: String,
         url: String,
         on_message: Box<dyn Fn(String) -> A::Message + Send + 'static>,
+        connected: Arc<AtomicBool>,
     ) -> tokio::task::JoinHandle<()> {
         rt.spawn(async move {
             use futures_util::StreamExt;
@@ -630,6 +679,7 @@ impl<A: Application> App<A> {
                     return;
                 }
             };
+            connected.store(true, Ordering::SeqCst);
 
             while let Some(item) = socket.next().await {
                 match item {
@@ -690,6 +740,105 @@ impl<A: Application> App<A> {
     }
 }
 
+fn collect_subscriptions<M>(sub: Sub<M>, ctx: &mut SubCollectCtx<'_, M>) {
+    match sub {
+        Sub::None => {}
+        Sub::Every { id, interval, f } => {
+            let key = match id {
+                Some(id) => id,
+                None => unkeyed_timer_key(interval, ctx.unkeyed_timer_counts),
+            };
+            if ctx.new_timers.contains_key(&key) {
+                tracing::warn!(
+                    "duplicate Sub::every id {key:?} in one frame; ignoring the later one"
+                );
+                return;
+            }
+            let last_tick = ctx
+                .old_timers
+                .get(&key)
+                .map(|state| state.last_tick)
+                .unwrap_or(ctx.now);
+            let (fired, next_tick) = advance_timer(last_tick, interval, ctx.now);
+            if fired {
+                ctx.messages.push(f());
+            }
+            ctx.new_timers.insert(
+                key,
+                TimerState {
+                    last_tick: next_tick,
+                },
+            );
+        }
+        Sub::Stream {
+            id,
+            url,
+            on_message,
+        } => {
+            ctx.stream_specs.push(StreamSubSpec {
+                id,
+                url,
+                on_message,
+            });
+        }
+        Sub::Batch(subs) => {
+            for sub in subs {
+                collect_subscriptions(sub, ctx);
+            }
+        }
+    }
+}
+
+/// Identity for a `Sub::every` without an explicit id: the interval plus the
+/// timer's ordinal among unkeyed timers with that same interval this frame.
+fn unkeyed_timer_key(interval: Duration, counts: &mut HashMap<Duration, usize>) -> String {
+    let ordinal = counts.entry(interval).or_insert(0);
+    let key = format!("every:{}ns#{}", interval.as_nanos(), *ordinal);
+    *ordinal += 1;
+    key
+}
+
+/// Decide whether a timer fires at `now` and compute its next reference tick.
+///
+/// The next tick is scheduled from the previous tick rather than from `now`,
+/// so polling latency does not accumulate as drift. If several periods were
+/// missed the timer catches up to the latest missed tick and fires once; it
+/// never bursts once per missed period.
+fn advance_timer(last_tick: Instant, interval: Duration, now: Instant) -> (bool, Instant) {
+    if interval.is_zero() {
+        return (true, now);
+    }
+    let elapsed = now.saturating_duration_since(last_tick);
+    if elapsed < interval {
+        return (false, last_tick);
+    }
+    let periods = u32::try_from(elapsed.as_nanos() / interval.as_nanos()).unwrap_or(u32::MAX);
+    let next_tick = last_tick
+        .checked_add(interval.saturating_mul(periods))
+        .unwrap_or(now);
+    (true, next_tick)
+}
+
+/// Delay before the `failures`-th consecutive reconnect attempt of a stream
+/// subscription: 250 ms doubling per failure, plus up to 25% jitter
+/// (`jitter_unit` in `0.0..=1.0`), capped at 30 s.
+fn stream_backoff_delay(failures: u32, jitter_unit: f64) -> Duration {
+    let exponent = failures.saturating_sub(1).min(20);
+    let raw = STREAM_BACKOFF_BASE.saturating_mul(1u32 << exponent);
+    let jitter = raw.mul_f64(0.25 * jitter_unit.clamp(0.0, 1.0));
+    raw.saturating_add(jitter).min(STREAM_BACKOFF_MAX)
+}
+
+/// Cheap uniform-ish value in `0.0..1.0` for backoff jitter, derived from the
+/// std hasher's per-instance random keys so no RNG dependency is needed.
+fn jitter_unit() -> f64 {
+    use std::hash::{BuildHasher, Hasher};
+    let hash = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    (hash % 1_000) as f64 / 1_000.0
+}
+
 fn stream_subscription_actions(
     active_urls: &HashMap<String, String>,
     running_by_id: &HashMap<String, bool>,
@@ -738,11 +887,12 @@ impl<A: Application> App<A> {
             focus: FocusManager::new(),
             focus_initialized: false,
             theme: Theme::dark(),
-            subscriptions: Vec::new(),
+            timers: HashMap::new(),
             spawn_handles: Vec::new(),
             cmd_subscription_handles: HashMap::new(),
             stream_subscription_handles: HashMap::new(),
             stream_subscription_urls: HashMap::new(),
+            stream_backoff: HashMap::new(),
             subscription_tx,
             subscription_rx,
             msg_queue: VecDeque::new(),
@@ -1046,27 +1196,6 @@ mod async_tests {
     }
 
     #[test]
-    fn cmd_spawn_produces_message() {
-        let rt = test_runtime();
-        let handle = rt.spawn(async { 42 });
-        let result = rt.block_on(handle).expect("join");
-        assert_eq!(result, 42);
-    }
-
-    #[test]
-    fn cmd_after_produces_message_after_delay() {
-        let rt = test_runtime();
-        let start = Instant::now();
-        let handle = rt.spawn(async {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            "done"
-        });
-        let result = rt.block_on(handle).expect("join");
-        assert_eq!(result, "done");
-        assert!(start.elapsed() >= Duration::from_millis(40));
-    }
-
-    #[test]
     fn cmd_batch_processes_all_sub_commands() {
         let (mut runner, updates) = make_test_app();
         let rt = test_runtime();
@@ -1128,45 +1257,342 @@ mod async_tests {
 
         runner.process_cmd(Cmd::message(0), &rt);
 
-        let log = updates.lock().unwrap();
-        // process_cmd has MAX_ITERATIONS=100, first call is msg 0 which counts as iteration 1
-        // so we get at most 100 updates (iterations 1..=100)
-        assert!(log.len() <= 101);
-        assert!(log.len() >= 100);
+        // The chain is cut at depth 100 and the overflow message is deferred,
+        // not dropped: it is still queued for the next drain.
+        assert_eq!(updates.lock().unwrap().len(), 100);
+        assert_eq!(runner.msg_queue.len(), 1);
+        assert_eq!(runner.msg_queue.front(), Some(&100));
     }
 
     #[test]
-    fn sub_every_no_burst_replay() {
-        let (runner, _updates) = make_test_app();
+    fn cmd_batch_of_many_messages_is_fully_delivered_then_quits() {
+        let (mut runner, updates) = make_test_app();
+        let rt = test_runtime();
 
+        let mut cmds: Vec<Cmd<i32>> = (0..150).map(Cmd::message).collect();
+        cmds.push(Cmd::Quit);
+        runner.process_cmd(Cmd::batch(cmds), &rt);
+
+        let log = updates.lock().unwrap();
+        assert_eq!(log.len(), 150);
+        assert_eq!(*log, (0..150).collect::<Vec<_>>());
+        assert!(runner.quit_requested);
+        assert!(runner.msg_queue.is_empty());
+    }
+
+    #[test]
+    fn drain_messages_defers_overflow_instead_of_dropping() {
+        let (mut runner, updates) = make_test_app();
+        let rt = test_runtime();
+        runner.msg_queue.extend(0..150);
+
+        assert!(runner.drain_messages(&rt));
+        assert_eq!(updates.lock().unwrap().len(), 100);
+        assert_eq!(runner.msg_queue.len(), 50);
+
+        assert!(runner.drain_messages(&rt));
+        assert_eq!(*updates.lock().unwrap(), (0..150).collect::<Vec<_>>());
+        assert!(runner.msg_queue.is_empty());
+    }
+
+    #[test]
+    fn drain_messages_drops_oldest_when_queue_overflows() {
+        let (mut runner, updates) = make_test_app();
+        let rt = test_runtime();
+        runner.msg_queue.extend(0..10_005);
+
+        runner.drain_messages(&rt);
+
+        // The five oldest (0..5) were dropped; processing starts at 5.
+        assert_eq!(updates.lock().unwrap()[0], 5);
+        assert_eq!(runner.msg_queue.len(), 10_000 - 100);
+    }
+
+    #[test]
+    fn cmd_spawn_with_id_can_be_cancelled_and_is_pruned() {
+        let (mut runner, updates) = make_test_app();
+        let rt = test_runtime();
+
+        runner.process_cmd(
+            Cmd::spawn_with_id("slow", async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                1
+            }),
+            &rt,
+        );
+        assert_eq!(runner.spawn_handles.len(), 1);
+
+        runner.process_cmd(Cmd::cancel("slow"), &rt);
+        assert!(runner.spawn_handles.is_empty());
+        assert!(!runner.poll_spawned_tasks(&rt));
+        assert!(updates.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cmd_spawn_with_same_id_replaces_previous_task() {
+        let (mut runner, updates) = make_test_app();
+        let rt = test_runtime();
+
+        runner.process_cmd(
+            Cmd::spawn_with_id("job", async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                1
+            }),
+            &rt,
+        );
+        runner.process_cmd(Cmd::spawn_with_id("job", async { 2 }), &rt);
+        assert_eq!(runner.spawn_handles.len(), 1);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !runner.poll_spawned_tasks(&rt) {
+            assert!(Instant::now() < deadline, "replacement task never finished");
+            std::thread::yield_now();
+        }
+        runner.drain_messages(&rt);
+        assert_eq!(*updates.lock().unwrap(), vec![2]);
+        assert!(runner.spawn_handles.is_empty());
+    }
+
+    #[test]
+    fn advance_timer_does_not_fire_before_interval() {
+        let now = Instant::now();
+        let last = now - Duration::from_millis(40);
+        let (fired, next) = advance_timer(last, Duration::from_millis(100), now);
+        assert!(!fired);
+        assert_eq!(next, last);
+    }
+
+    #[test]
+    fn advance_timer_schedules_from_last_tick_not_now() {
+        let now = Instant::now();
         let interval = Duration::from_millis(100);
-        let far_past = Instant::now() - Duration::from_secs(10);
+        let last = now - Duration::from_millis(130);
+        let (fired, next) = advance_timer(last, interval, now);
+        assert!(fired);
+        // Next reference tick is last + 1 period, so the 30 ms of polling
+        // latency is not added to the period.
+        assert_eq!(next, last + interval);
+    }
 
-        let old_states = vec![SubState {
-            interval,
-            f: Box::new(|| 42i32),
-            last_tick: far_past,
-        }];
+    #[test]
+    fn advance_timer_catches_up_without_bursting() {
+        let now = Instant::now();
+        let interval = Duration::from_millis(100);
+        let far_past = now - Duration::from_secs(10);
+        let (fired, next) = advance_timer(far_past, interval, now);
+        assert!(fired);
+        // 100 periods were missed: skip to the latest one, fire exactly once.
+        assert_eq!(next, far_past + interval * 100);
+        assert!(next <= now);
+        assert!(now - next < interval);
+    }
 
-        let mut new_states = Vec::new();
-        let mut stream_specs = Vec::new();
+    struct TogglingTimerApp {
+        poll_enabled: Arc<AtomicBool>,
+    }
+
+    impl Application for TogglingTimerApp {
+        type Message = &'static str;
+
+        fn subscriptions(&self) -> Sub<Self::Message> {
+            let poll = if self.poll_enabled.load(Ordering::SeqCst) {
+                Sub::every(Duration::from_millis(100), || "poll")
+            } else {
+                Sub::none()
+            };
+            Sub::batch(vec![
+                poll,
+                Sub::every(Duration::from_secs(60), || "refresh"),
+            ])
+        }
+
+        fn view(&self) -> impl View {
+            Text::new("timers")
+        }
+    }
+
+    #[test]
+    fn toggling_conditional_timer_does_not_reset_sibling_timer() {
+        let poll_enabled = Arc::new(AtomicBool::new(true));
+        let mut runner = App::new(TogglingTimerApp {
+            poll_enabled: poll_enabled.clone(),
+        });
+        let rt = test_runtime();
+
+        runner.process_subscriptions(&rt);
+        let refresh_key = "every:60000000000ns#0";
+        assert!(runner.timers.contains_key(refresh_key));
+        assert!(runner.timers.contains_key("every:100000000ns#0"));
+
+        // Pretend the refresh timer has been running for 59 s.
+        let almost_due = Instant::now() - Duration::from_secs(59);
+        runner.timers.get_mut(refresh_key).unwrap().last_tick = almost_due;
+
+        poll_enabled.store(false, Ordering::SeqCst);
+        runner.process_subscriptions(&rt);
+
+        assert_eq!(runner.timers.len(), 1);
+        assert_eq!(runner.timers[refresh_key].last_tick, almost_due);
+        assert!(runner.msg_queue.is_empty());
+    }
+
+    #[test]
+    fn sub_every_with_id_keeps_identity_when_position_changes() {
+        let (mut runner, _updates) = make_test_app();
+        let rt = test_runtime();
+        runner.timers.insert(
+            "poll".to_string(),
+            TimerState {
+                last_tick: Instant::now() - Duration::from_secs(1),
+            },
+        );
+        let old_tick = runner.timers["poll"].last_tick;
+
+        let mut ctx_timers = HashMap::new();
+        let mut counts = HashMap::new();
+        let mut streams = Vec::new();
         let mut messages = Vec::new();
-        let mut index = 0;
         let mut ctx = SubCollectCtx {
-            old_states: &old_states,
-            index: &mut index,
-            new_states: &mut new_states,
-            stream_specs: &mut stream_specs,
+            now: Instant::now(),
+            old_timers: &runner.timers,
+            new_timers: &mut ctx_timers,
+            unkeyed_timer_counts: &mut counts,
+            stream_specs: &mut streams,
             messages: &mut messages,
         };
+        collect_subscriptions(
+            Sub::batch(vec![
+                Sub::every(Duration::from_secs(5), || 1),
+                Sub::every_with_id("poll", Duration::from_secs(60), || 2),
+            ]),
+            &mut ctx,
+        );
 
-        let sub = Sub::every(interval, || 99);
-        runner.collect_subscriptions(sub, Instant::now(), &mut ctx);
+        assert_eq!(ctx_timers["poll"].last_tick, old_tick);
+        assert!(messages.is_empty());
+        drop(rt);
+    }
 
-        // Even though 10 seconds have passed (100x the interval),
-        // only ONE message should be emitted — no burst replay.
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0], 99);
+    #[test]
+    fn stream_backoff_delay_doubles_with_jitter_and_caps() {
+        let no_jitter: Vec<u128> = (1..=8)
+            .map(|f| stream_backoff_delay(f, 0.0).as_millis())
+            .collect();
+        assert_eq!(
+            no_jitter,
+            vec![250, 500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000]
+        );
+        assert_eq!(stream_backoff_delay(0, 0.0).as_millis(), 250);
+        assert_eq!(
+            stream_backoff_delay(1, 1.0),
+            Duration::from_millis(250) + Duration::from_micros(62_500)
+        );
+        assert_eq!(stream_backoff_delay(40, 1.0), STREAM_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn stream_reconnect_waits_for_backoff_before_restarting() {
+        let app = StreamSubApp {
+            enabled: Arc::new(AtomicBool::new(true)),
+            url: Arc::new(Mutex::new("ws://127.0.0.1:1".to_string())),
+        };
+        let mut runner = App::new(app);
+        let rt = test_runtime();
+
+        runner.process_subscriptions(&rt);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !runner.stream_subscription_handles["ws-sub"].is_finished() {
+            assert!(Instant::now() < deadline, "connect to a closed port hung");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // First tick after the failure schedules the retry instead of respawning.
+        runner.process_subscriptions(&rt);
+        assert_eq!(runner.stream_backoff["ws-sub"].failures, 1);
+        assert!(runner.stream_backoff["ws-sub"].retry_at.is_some());
+        assert!(runner.stream_subscription_handles["ws-sub"].is_finished());
+
+        // Ticks before retry_at leave everything untouched.
+        runner.process_subscriptions(&rt);
+        assert_eq!(runner.stream_backoff["ws-sub"].failures, 1);
+        assert!(runner.stream_subscription_handles["ws-sub"].is_finished());
+
+        // Once the retry time has passed, a fresh task is spawned.
+        runner.stream_backoff.get_mut("ws-sub").unwrap().retry_at =
+            Some(Instant::now() - Duration::from_millis(1));
+        runner.process_subscriptions(&rt);
+        assert_eq!(runner.stream_backoff["ws-sub"].failures, 1);
+        assert!(runner.stream_backoff["ws-sub"].retry_at.is_none());
+    }
+
+    /// The `focused_id` attached to every Tab the app saw, in order.
+    type TabsSeen = Arc<Mutex<Vec<Option<String>>>>;
+
+    struct TabApp {
+        tabs_seen: TabsSeen,
+        consume_tab: bool,
+    }
+
+    impl Application for TabApp {
+        type Message = ();
+
+        fn on_event(&mut self, event: &Event) -> Option<Self::Message> {
+            if let Event::Key(key_event) = event {
+                if key_event.key == Key::Tab {
+                    self.tabs_seen
+                        .lock()
+                        .unwrap()
+                        .push(key_event.focused_id.clone());
+                    return self.consume_tab.then_some(());
+                }
+            }
+            None
+        }
+
+        fn view(&self) -> impl View {
+            Column::new()
+                .child(crate::widgets::Button::new("A").id("a"))
+                .child(crate::widgets::Button::new("B").id("b"))
+        }
+    }
+
+    fn tab_runner(consume_tab: bool) -> (App<TabApp>, TabsSeen) {
+        let tabs_seen = Arc::new(Mutex::new(Vec::new()));
+        let app = TabApp {
+            tabs_seen: tabs_seen.clone(),
+            consume_tab,
+        };
+        let backend = Backend::Mock(MockBackend::new(vec![Some(Event::Key(KeyEvent {
+            key: Key::Tab,
+            modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
+        }))]));
+        (App::new_with_backend(app, backend), tabs_seen)
+    }
+
+    #[test]
+    fn tab_handled_by_app_does_not_move_focus() {
+        let (mut runner, tabs_seen) = tab_runner(true);
+        let rt = test_runtime();
+        runner.render().expect("initial render");
+        assert_eq!(runner.focus.focused_id(), Some("a"));
+
+        runner.run_tick(&rt).expect("tick");
+
+        assert_eq!(*tabs_seen.lock().unwrap(), vec![Some("a".to_string())]);
+        assert_eq!(runner.focus.focused_id(), Some("a"));
+    }
+
+    #[test]
+    fn tab_unhandled_by_app_moves_focus() {
+        let (mut runner, tabs_seen) = tab_runner(false);
+        let rt = test_runtime();
+        runner.render().expect("initial render");
+
+        runner.run_tick(&rt).expect("tick");
+
+        assert_eq!(*tabs_seen.lock().unwrap(), vec![Some("a".to_string())]);
+        assert_eq!(runner.focus.focused_id(), Some("b"));
     }
 
     struct StreamSubApp {
@@ -1396,18 +1822,30 @@ mod async_tests {
     }
 
     #[test]
-    fn toast_auto_expires() {
-        let (mut runner, _updates) = make_test_app();
-        runner.active_toasts.push((
-            Toast::info("short").duration(Duration::from_millis(1)),
-            Instant::now(),
-        ));
+    fn toast_auto_expires_on_tick_and_triggers_rerender() {
+        let app = TickApp {
+            updates: Arc::new(Mutex::new(Vec::new())),
+            view_calls: Arc::new(Mutex::new(0)),
+        };
+        let backend = Backend::Mock(MockBackend::new(vec![None, None]));
+        let mut runner = App::new_with_backend(app, backend);
+        let rt = test_runtime();
+        runner.process_cmd(
+            Cmd::ShowToast(Toast::info("short").duration(Duration::from_millis(1))),
+            &rt,
+        );
+        runner.needs_render = false;
 
-        std::thread::sleep(Duration::from_millis(10));
-        runner
-            .active_toasts
-            .retain(|(toast, created)| created.elapsed() < toast.duration);
+        // Not yet expired: nothing to re-render.
+        runner.active_toasts[0].1 = Instant::now() + Duration::from_secs(60);
+        assert!(runner.run_tick(&rt).unwrap());
+        assert_eq!(runner.active_toasts.len(), 1);
+        assert_eq!(mock_render_count(&runner), 0);
 
+        // Expired: the tick drops it and re-renders without the overlay.
+        runner.active_toasts[0].1 = Instant::now() - Duration::from_secs(1);
+        assert!(runner.run_tick(&rt).unwrap());
         assert!(runner.active_toasts.is_empty());
+        assert_eq!(mock_render_count(&runner), 1);
     }
 }

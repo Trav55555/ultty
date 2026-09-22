@@ -1,6 +1,18 @@
 //! Image storage and Sixel decoding for terminal inline images.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+
+/// Maximum width or height in pixels of a decoded Sixel image.
+pub const MAX_SIXEL_DIM: u32 = 16384;
+
+/// Maximum number of pixels in a decoded Sixel image (64 MiB of RGBA).
+pub const MAX_SIXEL_PIXELS: u64 = 16 * 1024 * 1024;
+
+/// Maximum total RGBA bytes held by an [`ImageStore`] before old images are evicted.
+pub const MAX_IMAGE_STORE_BYTES: usize = 256 * 1024 * 1024;
+
+/// Maximum number of images held by an [`ImageStore`].
+pub const MAX_IMAGE_STORE_COUNT: usize = 1024;
 
 /// Unique identifier for terminal images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,9 +40,16 @@ pub struct TerminalImage {
 }
 
 /// Storage for terminal images.
+///
+/// Bounded by [`MAX_IMAGE_STORE_BYTES`] and [`MAX_IMAGE_STORE_COUNT`]; the
+/// oldest images are evicted first.
 #[derive(Debug, Default)]
 pub struct ImageStore {
     images: HashMap<ImageId, TerminalImage>,
+    /// Insertion order (front = oldest) for eviction
+    order: VecDeque<ImageId>,
+    /// Sum of `data.len()` over all stored images
+    total_bytes: usize,
     next_id: u32,
 }
 
@@ -39,15 +58,41 @@ impl ImageStore {
     pub fn new() -> Self {
         Self {
             images: HashMap::new(),
+            order: VecDeque::new(),
+            total_bytes: 0,
             next_id: 0,
         }
     }
 
-    /// Add an image to the store.
+    /// Add an image to the store, evicting the oldest images if the byte or
+    /// count limits would be exceeded.
     pub fn add(&mut self, image: TerminalImage) -> ImageId {
         let id = image.id;
+        if let Some(previous) = self.images.remove(&id) {
+            self.total_bytes -= previous.data.len();
+            self.order.retain(|&existing| existing != id);
+        }
+        self.total_bytes += image.data.len();
         self.images.insert(id, image);
+        self.order.push_back(id);
+
+        while (self.total_bytes > MAX_IMAGE_STORE_BYTES
+            || self.images.len() > MAX_IMAGE_STORE_COUNT)
+            && self.order.len() > 1
+        {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = self.images.remove(&oldest) {
+                self.total_bytes -= evicted.data.len();
+            }
+        }
         id
+    }
+
+    /// Total RGBA bytes currently stored.
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
     }
 
     /// Allocate a new image ID.
@@ -64,12 +109,17 @@ impl ImageStore {
 
     /// Remove an image.
     pub fn remove(&mut self, id: ImageId) -> Option<TerminalImage> {
-        self.images.remove(&id)
+        let removed = self.images.remove(&id)?;
+        self.total_bytes -= removed.data.len();
+        self.order.retain(|&existing| existing != id);
+        Some(removed)
     }
 
     /// Clear all images.
     pub fn clear(&mut self) {
         self.images.clear();
+        self.order.clear();
+        self.total_bytes = 0;
     }
 
     /// Get all images.
@@ -196,7 +246,7 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
             b'-' => {
                 max_x = max_x.max(x);
                 x = 0;
-                y += 6;
+                y = y.saturating_add(6);
             }
             // Carriage return ($)
             b'$' => {
@@ -208,7 +258,8 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
                 let (count, next_i) = parse_number(&data[i + 1..]);
                 i = i + 1 + next_i;
                 if i < data.len() && data[i] >= 63 && data[i] <= 126 {
-                    x += count;
+                    // Saturate: anything past MAX_SIXEL_DIM is rejected below
+                    x = x.saturating_add(count);
                 }
             }
             // Color introducer (#)
@@ -223,7 +274,7 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
             }
             // Sixel data character (63-126)
             63..=126 => {
-                x += 1;
+                x = x.saturating_add(1);
             }
             // Raster attributes (")
             b'"' => {
@@ -241,15 +292,17 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
         i += 1;
     }
     max_x = max_x.max(x);
-    let max_y: u32 = y + 6; // Add final row height
+    let max_y: u32 = y.saturating_add(6); // Add final row height
 
     if max_x == 0 || max_y == 0 {
         return None;
     }
 
     // Limit dimensions to prevent OOM from crafted Sixel data
-    const MAX_SIXEL_DIM: u32 = 16384;
-    if max_x > MAX_SIXEL_DIM || max_y > MAX_SIXEL_DIM {
+    if max_x > MAX_SIXEL_DIM
+        || max_y > MAX_SIXEL_DIM
+        || u64::from(max_x) * u64::from(max_y) > MAX_SIXEL_PIXELS
+    {
         return None;
     }
 
@@ -275,7 +328,7 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
             // Graphics newline
             b'-' => {
                 x = 0;
-                y += 6;
+                y = y.saturating_add(6);
             }
             // Carriage return
             b'$' => {
@@ -288,6 +341,9 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
                 if i < data.len() && data[i] >= 63 && data[i] <= 126 {
                     let sixel = data[i] - 63;
                     let color = palette.get(current_color);
+                    // Clamp to the remaining width: pixels past it are
+                    // invisible and would only burn time.
+                    let count = count.min(max_x.saturating_sub(x));
                     for _ in 0..count {
                         draw_sixel(&mut pixels, max_x, max_y, x, y, sixel, color);
                         x += 1;
@@ -349,7 +405,7 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
                 let sixel = c - 63;
                 let color = palette.get(current_color);
                 draw_sixel(&mut pixels, max_x, max_y, x, y, sixel, color);
-                x += 1;
+                x = x.saturating_add(1);
             }
             _ => {}
         }
@@ -532,6 +588,92 @@ mod tests {
         assert_eq!(params.len(), 2);
         assert_eq!(params[0], u16::MAX);
         assert_eq!(params[1], u16::MAX);
+    }
+
+    #[test]
+    fn sixel_huge_repeat_counts_do_not_overflow() {
+        // Two repeats that together exceed u32::MAX, then a modest one.
+        let data = b"!2147483648~!2147483648~!100~";
+        let start = std::time::Instant::now();
+        let result = decode_sixel(data, 0);
+        assert!(result.is_none(), "oversized width must be rejected");
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn sixel_repeat_is_clamped_to_image_width() {
+        // First row is 2 columns wide; a later repeat of 1000 on a row must
+        // not walk past the buffer or take noticeable time.
+        let data = b"~~$!1000~";
+        let (pixels, width, height) = decode_sixel(data, 0).unwrap();
+        assert_eq!(width, 1000);
+        assert_eq!(height, 6);
+        assert_eq!(pixels.len(), 1000 * 6 * 4);
+    }
+
+    #[test]
+    fn sixel_rejects_too_many_pixels() {
+        // 16384 wide via repeat, then enough rows to exceed MAX_SIXEL_PIXELS
+        // while each dimension alone is still within MAX_SIXEL_DIM.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"!16384~");
+        let rows_needed = (MAX_SIXEL_PIXELS / 16384 / 6) as usize + 2;
+        data.extend(std::iter::repeat_n(b'-', rows_needed));
+        data.push(b'~');
+        assert!(decode_sixel(&data, 0).is_none());
+    }
+
+    fn image_of(id: u32, bytes: usize) -> TerminalImage {
+        TerminalImage {
+            id: ImageId(id),
+            width: 1,
+            height: 1,
+            data: vec![0; bytes],
+            start_col: 0,
+            start_row: 0,
+            cell_width: 1,
+            cell_height: 1,
+        }
+    }
+
+    #[test]
+    fn image_store_evicts_oldest_when_over_byte_limit() {
+        let mut store = ImageStore::new();
+        let chunk = MAX_IMAGE_STORE_BYTES / 4;
+        for id in 0..6 {
+            store.add(image_of(id, chunk));
+        }
+        assert_eq!(store.len(), 4);
+        assert_eq!(store.total_bytes(), chunk * 4);
+        assert!(store.get(ImageId(0)).is_none());
+        assert!(store.get(ImageId(1)).is_none());
+        assert!(store.get(ImageId(5)).is_some());
+    }
+
+    #[test]
+    fn image_store_evicts_oldest_when_over_count_limit() {
+        let mut store = ImageStore::new();
+        for id in 0..(MAX_IMAGE_STORE_COUNT as u32 + 5) {
+            store.add(image_of(id, 4));
+        }
+        assert_eq!(store.len(), MAX_IMAGE_STORE_COUNT);
+        assert!(store.get(ImageId(0)).is_none());
+        assert!(store
+            .get(ImageId(MAX_IMAGE_STORE_COUNT as u32 + 4))
+            .is_some());
+    }
+
+    #[test]
+    fn image_store_remove_and_clear_track_bytes() {
+        let mut store = ImageStore::new();
+        store.add(image_of(1, 16));
+        store.add(image_of(2, 32));
+        assert_eq!(store.total_bytes(), 48);
+        store.remove(ImageId(1));
+        assert_eq!(store.total_bytes(), 32);
+        store.clear();
+        assert_eq!(store.total_bytes(), 0);
+        assert!(store.is_empty());
     }
 
     #[test]

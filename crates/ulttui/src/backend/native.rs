@@ -17,7 +17,11 @@ use crate::event::Event;
 use crate::widgets::View;
 
 use super::detect;
-use super::native_diff::{optimize_frame_messages, RegionSnapshot};
+use super::native_diff::{
+    begin_native_key_recording, optimize_frame_messages, record_native_key, take_native_keys,
+    RetainedTree,
+};
+use transport::{FrameError, ReadOutcome};
 
 pub struct NativeBackend {
     stream: Option<UnixStream>,
@@ -27,10 +31,10 @@ pub struct NativeBackend {
     viewport_width: u16,
     viewport_height: u16,
     read_buf: BytesMut,
-    next_region_id: u32,
     next_frame_id: u32,
     region_layouts: HashMap<RegionId, ComputedRegionLayout>,
-    previous_regions: HashMap<RegionId, RegionSnapshot>,
+    /// Regions the terminal retains from the last frame, with stable ids.
+    retained: RetainedTree,
     pending_events: VecDeque<Event>,
 }
 
@@ -44,10 +48,9 @@ impl NativeBackend {
             viewport_width: 80,
             viewport_height: 24,
             read_buf: BytesMut::with_capacity(4096),
-            next_region_id: 1,
             next_frame_id: 1,
             region_layouts: HashMap::new(),
-            previous_regions: HashMap::new(),
+            retained: RetainedTree::new(),
             pending_events: VecDeque::new(),
         }
     }
@@ -108,16 +111,14 @@ impl NativeBackend {
 
         self.send_message(&AppMessage::BeginFrame { frame_id })?;
 
-        self.next_region_id = 1;
-        let mut frame_messages = Vec::new();
-        let _frame_root =
-            self.render_view_tree(view, self.root_region, true, &mut frame_messages)?;
-        let (optimized_messages, next_regions) = optimize_frame_messages(
-            &self.previous_regions,
+        let (frame_messages, native_keys) = self.collect_frame(view)?;
+        let (optimized_messages, next_tree) = optimize_frame_messages(
+            &self.retained,
             frame_messages,
+            &native_keys,
             self.supports_capability(CAP_APPEND_CONTENT),
         );
-        self.previous_regions = next_regions;
+        self.retained = next_tree;
 
         for msg in optimized_messages {
             self.send_message(&msg)?;
@@ -130,50 +131,59 @@ impl NativeBackend {
         Ok(())
     }
 
-    fn render_view_tree(
-        &mut self,
+    /// Walk the view tree into provisional-id messages, recording the native
+    /// key of every region created along the way.
+    fn collect_frame(
+        &self,
         view: &impl View,
-        parent: RegionId,
-        is_root: bool,
-        frame_messages: &mut Vec<AppMessage>,
-    ) -> anyhow::Result<RegionId> {
-        let region_id = RegionId::new(self.next_region_id);
-        self.next_region_id += 1;
+    ) -> anyhow::Result<(Vec<AppMessage>, HashMap<RegionId, String>)> {
+        begin_native_key_recording();
+        let walked = self.render_view_tree(view);
+        let keys = take_native_keys();
+        walked.map(|messages| (messages, keys))
+    }
 
+    fn render_view_tree(&self, view: &impl View) -> anyhow::Result<Vec<AppMessage>> {
+        let mut messages = Vec::new();
+        let mut next_id = 1u32;
+        let region_id = RegionId::new(next_id);
+        next_id += 1;
+
+        // Root view fills the entire viewport — use absolute cells since
+        // the ROOT parent region has height:auto and percentage heights
+        // cannot resolve against an auto-height parent.
         let mut constraints = view.constraints();
+        constraints.width = ultty_protocol::Dimension::Cells(self.viewport_width as f32);
+        constraints.height = ultty_protocol::Dimension::Cells(self.viewport_height as f32);
+        // Opaque background so native app covers the PTY terminal content
         let mut style = view.style();
-        if is_root {
-            // Root view fills the entire viewport — use absolute cells since
-            // the ROOT parent region has height:auto and percentage heights
-            // cannot resolve against an auto-height parent.
-            constraints.width = ultty_protocol::Dimension::Cells(self.viewport_width as f32);
-            constraints.height = ultty_protocol::Dimension::Cells(self.viewport_height as f32);
-            // Opaque background so native app covers the PTY terminal content
-            if style.bg.is_none() {
-                let theme = crate::theme::Theme::current();
-                style.bg = Some(theme.background);
-            }
-            style.opacity = 1.0;
+        if style.bg.is_none() {
+            let theme = crate::theme::Theme::current();
+            style.bg = Some(theme.background);
         }
+        style.opacity = 1.0;
 
-        frame_messages.push(AppMessage::CreateRegion {
+        messages.push(AppMessage::CreateRegion {
             id: region_id,
-            parent,
+            parent: self.root_region,
             insert_index: -1,
             constraints,
             style,
         });
+        if let Some(key) = view.native_key() {
+            record_native_key(region_id, key);
+        }
 
         let content = view.content();
         if content != Content::None {
-            frame_messages.push(AppMessage::SetContent {
+            messages.push(AppMessage::SetContent {
                 id: region_id,
                 content,
             });
         }
 
         if let Some((sx, sy)) = view.scroll_offset() {
-            frame_messages.push(AppMessage::Scroll {
+            messages.push(AppMessage::Scroll {
                 id: region_id,
                 x: sx,
                 y: sy,
@@ -181,29 +191,15 @@ impl NativeBackend {
             });
         }
 
-        let children_count = view.children_count();
-        let mut pending_messages: Vec<AppMessage> = Vec::new();
-
-        for i in 0..children_count {
-            let mut next_id = self.next_region_id;
-            let mut captured_messages: Vec<AppMessage> = Vec::new();
-            let mut send_fn = |msg: &AppMessage| -> anyhow::Result<()> {
-                captured_messages.push(msg.clone());
-                Ok(())
-            };
-
-            if view
-                .render_child_native(i, &mut send_fn, region_id, &mut next_id)?
-                .is_some()
-            {
-                self.next_region_id = next_id;
-            }
-            pending_messages.extend(captured_messages);
+        let mut sink = |msg: &AppMessage| -> anyhow::Result<()> {
+            messages.push(msg.clone());
+            Ok(())
+        };
+        for i in 0..view.children_count() {
+            view.render_child_native(i, &mut sink, region_id, &mut next_id)?;
         }
 
-        frame_messages.extend(pending_messages);
-
-        Ok(region_id)
+        Ok(messages)
     }
 
     fn supports_capability(&self, capability: u32) -> bool {
@@ -231,9 +227,11 @@ impl NativeBackend {
     fn wait_for_session_ready(&mut self) -> anyhow::Result<()> {
         let mut attempts = 0;
         while attempts < 50 {
-            self.read_available()?;
+            if self.read_available()? == ReadOutcome::Closed {
+                anyhow::bail!("Connection closed during handshake");
+            }
 
-            while let Some(msg) = self.try_decode_message()? {
+            while let Some(msg) = self.next_decoded_message()? {
                 match msg {
                     TerminalMessage::ServerHello {
                         version,
@@ -256,6 +254,7 @@ impl NativeBackend {
                     } => {
                         self.session_id = session_id;
                         self.root_region = root_region;
+                        self.retained.reserve(root_region);
                         self.viewport_width = width;
                         self.viewport_height = height;
                         return Ok(());
@@ -271,10 +270,28 @@ impl NativeBackend {
         anyhow::bail!("Timeout waiting for SessionReady")
     }
 
-    fn process_pending_messages(&mut self) -> anyhow::Result<()> {
-        let _ = self.read_available();
+    /// Next well-formed buffered message, skipping (and logging) malformed
+    /// frames so one bad frame from the terminal does not take the app down.
+    fn next_decoded_message(&mut self) -> anyhow::Result<Option<TerminalMessage>> {
+        loop {
+            match self.try_decode_message() {
+                Ok(msg) => return Ok(msg),
+                Err(err @ FrameError::Malformed { .. }) => {
+                    tracing::warn!("skipping {err}");
+                }
+                Err(err @ FrameError::BadMagic(_)) => return Err(err.into()),
+            }
+        }
+    }
 
-        while let Some(msg) = self.try_decode_message()? {
+    fn process_pending_messages(&mut self) -> anyhow::Result<()> {
+        if self.stream.is_none() {
+            return Ok(());
+        }
+
+        let outcome = self.read_available()?;
+
+        while let Some(msg) = self.next_decoded_message()? {
             match msg {
                 TerminalMessage::LayoutComputed { regions, .. } => {
                     for layout in regions {
@@ -307,6 +324,12 @@ impl NativeBackend {
                 }
                 _ => {}
             }
+        }
+
+        if outcome == ReadOutcome::Closed {
+            tracing::info!("terminal closed the native connection; quitting");
+            self.stream = None;
+            self.pending_events.push_back(Event::Quit);
         }
 
         Ok(())
@@ -411,5 +434,101 @@ impl NativeBackend {
 impl Default for NativeBackend {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+
+    use ultty_protocol::{AppMessage, Content, Decode, RegionId, WidgetContent};
+
+    use super::NativeBackend;
+    use crate::widgets::{Button, Column};
+
+    /// Backend writing into one end of a socket pair; returns the reader end.
+    fn backend_over_pair() -> (NativeBackend, UnixStream) {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        let mut backend = NativeBackend::new();
+        backend.stream = Some(writer);
+        (backend, reader)
+    }
+
+    fn drain_messages(reader: &mut UnixStream) -> Vec<AppMessage> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("read failed: {e}"),
+            }
+        }
+        let mut cursor = &bytes[..];
+        let mut messages = Vec::new();
+        while !cursor.is_empty() {
+            messages.push(AppMessage::decode(&mut cursor).unwrap());
+        }
+        messages
+    }
+
+    fn button_labels(messages: &[AppMessage]) -> Vec<(RegionId, String)> {
+        messages
+            .iter()
+            .filter_map(|m| match m {
+                AppMessage::SetContent {
+                    id,
+                    content: Content::Widget(WidgetContent::Button(button)),
+                } => Some((*id, button.label.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn buttons(labels: &[&str]) -> Column {
+        labels.iter().fold(Column::new(), |col, label| {
+            col.child(Button::new(*label).id(*label))
+        })
+    }
+
+    #[test]
+    fn keyed_widgets_keep_region_ids_when_a_sibling_is_prepended() {
+        let (mut backend, mut reader) = backend_over_pair();
+
+        backend.render(&buttons(&["a", "b", "c"])).unwrap();
+        let first = drain_messages(&mut reader);
+        let first_ids = button_labels(&first);
+        assert_eq!(first_ids.len(), 3);
+
+        backend.render(&buttons(&["x", "a", "b", "c"])).unwrap();
+        let second = drain_messages(&mut reader);
+
+        let sent = button_labels(&second);
+        assert_eq!(sent.len(), 1, "only the new button's content is sent");
+        assert_eq!(sent[0].1, "x");
+        assert!(second
+            .iter()
+            .all(|m| !matches!(m, AppMessage::DeleteRegion { .. })));
+        assert!(matches!(
+            second
+                .iter()
+                .find(|m| matches!(m, AppMessage::CreateRegion { .. })),
+            Some(AppMessage::CreateRegion {
+                insert_index: 0,
+                ..
+            })
+        ));
+
+        let column = backend.retained.children_of(backend.root_region)[0];
+        let retained_children = backend.retained.children_of(column);
+        assert_eq!(retained_children.len(), 4);
+        assert_eq!(retained_children[0], sent[0].0);
+        for (index, (id, _)) in first_ids.iter().enumerate() {
+            assert_eq!(retained_children[index + 1], *id);
+        }
     }
 }

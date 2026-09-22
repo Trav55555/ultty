@@ -1,5 +1,5 @@
-use ulttui::widgets::{Column, RichText, Row, Text};
-use ultty_protocol::Color;
+use ulttui::prelude::*;
+use ulttui::widgets::RichText;
 
 use crate::data::{DiskInfo, ProcessInfo};
 use crate::sparkline::{bar, chart, format_bytes, format_uptime};

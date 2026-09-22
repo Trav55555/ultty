@@ -3,3 +3,6 @@ source: crates/ulttui/tests/snapshots.rs
 expression: output
 ---
 [N] Enter name...
+-- styles --
+0:0-3 fg=Reset bg=Reset mod=BOLD
+0:4-16 fg=Rgb(108, 112, 134) bg=Reset mod=NONE

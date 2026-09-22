@@ -66,8 +66,8 @@ impl App {
             if server.update_animations() {
                 self.needs_redraw = true;
             }
-            // Redraw when any native session has new content
-            if server.sessions().any(|s| s.is_render_dirty()) {
+            // Redraw when a visible native session has new content
+            if server.active_tab_sessions().any(|s| s.is_render_dirty()) {
                 self.needs_redraw = true;
             }
             // Check keepalive timeouts
@@ -271,7 +271,9 @@ impl App {
             }
             self.render();
             self.last_render = now;
-            self.needs_redraw = false;
+            // A frame that skipped glyphs (atlas overflow) must draw again
+            // once the deferred eviction has run.
+            self.needs_redraw = self.renderer.frame_incomplete();
         }
 
         false

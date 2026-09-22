@@ -31,7 +31,14 @@ pub struct CopyMode {
     search_query: String,
     search_matches: Vec<(usize, usize)>,
     current_match: usize,
+    /// A `g` was pressed and we are waiting for the second key of `gg`.
+    pending_g: bool,
+    /// Count prefix typed before a motion (`5j`), if any.
+    count: Option<usize>,
 }
+
+/// Largest count prefix honoured; larger digits strings saturate here.
+const MAX_COUNT: usize = 9999;
 
 impl Default for CopyMode {
     fn default() -> Self {
@@ -48,6 +55,8 @@ impl Default for CopyMode {
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match: 0,
+            pending_g: false,
+            count: None,
         }
     }
 }
@@ -71,6 +80,8 @@ impl CopyMode {
         self.cursor_row = self.scroll_offset;
         self.cursor_col = 0;
         self.selection_anchor = None;
+        self.pending_g = false;
+        self.count = None;
     }
 
     pub fn enter_search(&mut self, total_rows: usize, viewport_rows: usize, viewport_cols: usize) {
@@ -109,6 +120,8 @@ impl CopyMode {
     pub fn exit(&mut self) {
         self.active = false;
         self.selection_anchor = None;
+        self.pending_g = false;
+        self.count = None;
         self.vim_state.reset_to_normal();
     }
 
@@ -158,7 +171,21 @@ impl CopyMode {
         self.vim_state.mode
     }
 
+    /// Handle a key with no knowledge of the cursor row's text.
+    ///
+    /// Word motions (`w`/`b`/`e`) need the row text; callers that have it
+    /// should use [`CopyMode::handle_key_in_row`].
     pub fn handle_key(&mut self, key: &Key, modifiers: Modifiers) -> CopyModeResult {
+        self.handle_key_in_row(key, modifiers, "")
+    }
+
+    /// Handle a key, given the text of the row the cursor is on.
+    pub fn handle_key_in_row(
+        &mut self,
+        key: &Key,
+        modifiers: Modifiers,
+        row_text: &str,
+    ) -> CopyModeResult {
         if !self.active {
             return CopyModeResult::NotHandled;
         }
@@ -167,8 +194,42 @@ impl CopyMode {
             return self.handle_search_key(key, modifiers);
         }
 
+        // `gg`: the second key completes the motion, anything else cancels it.
+        if self.pending_g {
+            self.pending_g = false;
+            if matches!(key, Key::Char('g')) && !modifiers.ctrl() {
+                let target = self.count.take().map(|n| n.saturating_sub(1));
+                self.cursor_row = target.unwrap_or(0).min(self.total_rows.saturating_sub(1));
+                self.ensure_cursor_visible();
+                return CopyModeResult::Handled;
+            }
+        }
+
+        // Count prefix: digits accumulate, except a leading `0` which is the
+        // line-start motion.
+        if let Key::Char(c) = key {
+            if let Some(digit) = c.to_digit(10) {
+                if !modifiers.ctrl() && (digit != 0 || self.count.is_some()) {
+                    let current = self.count.unwrap_or(0);
+                    self.count = Some(
+                        current
+                            .saturating_mul(10)
+                            .saturating_add(digit as usize)
+                            .min(MAX_COUNT),
+                    );
+                    return CopyModeResult::Handled;
+                }
+            }
+        }
+        let count = self.count.take();
+        let repeat = count.unwrap_or(1).max(1);
+
         match key {
             Key::Escape | Key::Char('q') => {
+                if count.is_some() {
+                    // Cancel a pending count only
+                    return CopyModeResult::Handled;
+                }
                 if self.vim_state.mode.is_visual() {
                     self.selection_anchor = None;
                     self.vim_state.mode = VimMode::Normal;
@@ -191,19 +252,19 @@ impl CopyMode {
             }
 
             Key::Char('h') | Key::Left => {
-                self.move_cursor(0, -1);
+                self.move_cursor(0, -(repeat as i32));
                 CopyModeResult::Handled
             }
             Key::Char('l') | Key::Right => {
-                self.move_cursor(0, 1);
+                self.move_cursor(0, repeat as i32);
                 CopyModeResult::Handled
             }
             Key::Char('j') | Key::Down => {
-                self.move_cursor(1, 0);
+                self.move_cursor(repeat as i32, 0);
                 CopyModeResult::Handled
             }
             Key::Char('k') | Key::Up => {
-                self.move_cursor(-1, 0);
+                self.move_cursor(-(repeat as i32), 0);
                 CopyModeResult::Handled
             }
 
@@ -234,15 +295,21 @@ impl CopyMode {
             }
 
             Key::Char('w') => {
-                self.move_word_forward();
+                for _ in 0..repeat {
+                    self.move_word_forward(row_text);
+                }
                 CopyModeResult::Handled
             }
             Key::Char('b') => {
-                self.move_word_backward();
+                for _ in 0..repeat {
+                    self.move_word_backward(row_text);
+                }
                 CopyModeResult::Handled
             }
             Key::Char('e') => {
-                self.move_word_end();
+                for _ in 0..repeat {
+                    self.move_word_end(row_text);
+                }
                 CopyModeResult::Handled
             }
 
@@ -259,9 +326,18 @@ impl CopyMode {
                 CopyModeResult::Handled
             }
 
-            Key::Char('g') => CopyModeResult::Handled,
+            Key::Char('g') => {
+                self.pending_g = true;
+                // Keep the count for `5gg`
+                self.count = count;
+                CopyModeResult::Handled
+            }
             Key::Char('G') => {
-                self.cursor_row = self.total_rows.saturating_sub(1);
+                let last = self.total_rows.saturating_sub(1);
+                self.cursor_row = match count {
+                    Some(n) => n.saturating_sub(1).min(last),
+                    None => last,
+                };
                 self.ensure_cursor_visible();
                 CopyModeResult::Handled
             }
@@ -396,16 +472,23 @@ impl CopyMode {
         self.ensure_cursor_visible();
     }
 
-    fn move_word_forward(&mut self) {
-        self.cursor_col = (self.cursor_col + 5).min(self.viewport_cols.saturating_sub(1));
+    fn move_word_forward(&mut self, row_text: &str) {
+        let chars: Vec<char> = row_text.chars().collect();
+        self.cursor_col = word_forward(&chars, self.cursor_col).min(self.last_col());
     }
 
-    fn move_word_backward(&mut self) {
-        self.cursor_col = self.cursor_col.saturating_sub(5);
+    fn move_word_backward(&mut self, row_text: &str) {
+        let chars: Vec<char> = row_text.chars().collect();
+        self.cursor_col = word_backward(&chars, self.cursor_col).min(self.last_col());
     }
 
-    fn move_word_end(&mut self) {
-        self.cursor_col = (self.cursor_col + 4).min(self.viewport_cols.saturating_sub(1));
+    fn move_word_end(&mut self, row_text: &str) {
+        let chars: Vec<char> = row_text.chars().collect();
+        self.cursor_col = word_end(&chars, self.cursor_col).min(self.last_col());
+    }
+
+    fn last_col(&self) -> usize {
+        self.viewport_cols.saturating_sub(1)
     }
 
     fn scroll_half_page_down(&mut self) {
@@ -524,6 +607,91 @@ pub enum CopyModeResult {
     Copy(Option<Selection>),
     CopyAndExit(Option<Selection>),
     Search(String),
+}
+
+/// Vim word character classes: whitespace, keyword (`\w`), or other punctuation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordClass {
+    Blank,
+    Keyword,
+    Punctuation,
+}
+
+fn word_class(c: char) -> WordClass {
+    if c.is_whitespace() {
+        WordClass::Blank
+    } else if c.is_alphanumeric() || c == '_' {
+        WordClass::Keyword
+    } else {
+        WordClass::Punctuation
+    }
+}
+
+/// Class of the cell at `col`; cells past the end of the text are blank.
+fn class_at(chars: &[char], col: usize) -> WordClass {
+    chars.get(col).copied().map_or(WordClass::Blank, word_class)
+}
+
+/// Vim `w`: the start of the next word on this row, or the last character of
+/// the row when there is none (never moves left).
+fn word_forward(chars: &[char], col: usize) -> usize {
+    let len = chars.len();
+    let mut i = col;
+    let class = class_at(chars, i);
+    if class != WordClass::Blank {
+        while i < len && class_at(chars, i) == class {
+            i += 1;
+        }
+    }
+    while i < len && class_at(chars, i) == WordClass::Blank {
+        i += 1;
+    }
+    if i >= len {
+        col.max(len.saturating_sub(1))
+    } else {
+        i
+    }
+}
+
+/// Vim `b`: the start of the current word if the cursor is inside it,
+/// otherwise the start of the previous word; column 0 when there is none.
+fn word_backward(chars: &[char], col: usize) -> usize {
+    if col == 0 {
+        return 0;
+    }
+    let mut i = col.min(chars.len()).saturating_sub(1);
+    if col > chars.len() {
+        i = chars.len().saturating_sub(1);
+    }
+    while i > 0 && class_at(chars, i) == WordClass::Blank {
+        i -= 1;
+    }
+    let class = class_at(chars, i);
+    if class == WordClass::Blank {
+        return 0;
+    }
+    while i > 0 && class_at(chars, i - 1) == class {
+        i -= 1;
+    }
+    i
+}
+
+/// Vim `e`: the end of the word the cursor moves into (at least one column
+/// right), or the last character of the row when there is none.
+fn word_end(chars: &[char], col: usize) -> usize {
+    let len = chars.len();
+    let mut i = col + 1;
+    while i < len && class_at(chars, i) == WordClass::Blank {
+        i += 1;
+    }
+    if i >= len {
+        return col.max(len.saturating_sub(1));
+    }
+    let class = class_at(chars, i);
+    while i + 1 < len && class_at(chars, i + 1) == class {
+        i += 1;
+    }
+    i
 }
 
 #[cfg(test)]
@@ -734,43 +902,116 @@ mod tests {
     // 6. Word motions: w, b, e
     // ---------------------------------------------------------------
 
+    const ROW: &str = "hello world, foo_bar";
+
     #[test]
-    fn word_forward() {
+    fn word_forward_moves_to_next_word_start() {
         let mut m = active_mode();
         assert_eq!(m.cursor_col, 0);
+        m.handle_key_in_row(&Key::Char('w'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 6); // "world"
+        m.handle_key_in_row(&Key::Char('w'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 11); // ","
+        m.handle_key_in_row(&Key::Char('w'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 13); // "foo_bar" (underscore is a word char)
+    }
+
+    #[test]
+    fn word_forward_on_last_word_stops_at_row_end() {
+        let mut m = active_mode();
+        m.cursor_col = 13;
+        m.handle_key_in_row(&Key::Char('w'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 19);
+        m.handle_key_in_row(&Key::Char('w'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 19);
+    }
+
+    #[test]
+    fn word_backward_moves_to_previous_word_start() {
+        let mut m = active_mode();
+        m.cursor_col = 15; // inside foo_bar
+        m.handle_key_in_row(&Key::Char('b'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 13);
+        m.handle_key_in_row(&Key::Char('b'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 11);
+        m.handle_key_in_row(&Key::Char('b'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 6);
+        m.handle_key_in_row(&Key::Char('b'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 0);
+        m.handle_key_in_row(&Key::Char('b'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 0);
+    }
+
+    #[test]
+    fn word_end_moves_to_end_of_word() {
+        let mut m = active_mode();
+        m.handle_key_in_row(&Key::Char('e'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 4); // end of "hello"
+        m.handle_key_in_row(&Key::Char('e'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 10); // end of "world"
+        m.handle_key_in_row(&Key::Char('e'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 11); // ","
+        m.handle_key_in_row(&Key::Char('e'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 19); // end of foo_bar
+    }
+
+    #[test]
+    fn word_motions_on_empty_row_stay_put() {
+        let mut m = active_mode();
+        m.cursor_col = 3;
         m.handle_key(&Key::Char('w'), Modifiers::NONE);
-        assert_eq!(m.cursor_col, 5); // moves +5
-    }
-
-    #[test]
-    fn word_backward() {
-        let mut m = active_mode();
-        m.cursor_col = 10;
-        m.handle_key(&Key::Char('b'), Modifiers::NONE);
-        assert_eq!(m.cursor_col, 5); // moves -5
-    }
-
-    #[test]
-    fn word_end() {
-        let mut m = active_mode();
-        assert_eq!(m.cursor_col, 0);
+        assert_eq!(m.cursor_col, 3);
         m.handle_key(&Key::Char('e'), Modifiers::NONE);
-        assert_eq!(m.cursor_col, 4); // moves +4
-    }
-
-    #[test]
-    fn word_forward_clamps_at_end() {
-        let mut m = active_mode();
-        m.cursor_col = 78;
-        m.handle_key(&Key::Char('w'), Modifiers::NONE);
-        assert_eq!(m.cursor_col, 79);
-    }
-
-    #[test]
-    fn word_backward_clamps_at_zero() {
-        let mut m = active_mode();
-        m.cursor_col = 2;
+        assert_eq!(m.cursor_col, 3);
         m.handle_key(&Key::Char('b'), Modifiers::NONE);
+        assert_eq!(m.cursor_col, 0);
+    }
+
+    #[test]
+    fn word_motions_never_leave_the_viewport() {
+        let mut m = CopyMode::new();
+        m.enter(100, 24, 10);
+        m.handle_key_in_row(&Key::Char('w'), Modifiers::NONE, ROW);
+        m.handle_key_in_row(&Key::Char('w'), Modifiers::NONE, ROW);
+        m.handle_key_in_row(&Key::Char('w'), Modifiers::NONE, ROW);
+        assert!(m.cursor_col <= 9);
+    }
+
+    #[test]
+    fn count_prefix_repeats_motions() {
+        let mut m = active_mode();
+        m.handle_key(&Key::Char('k'), Modifiers::NONE); // row 75
+        m.handle_key(&Key::Char('k'), Modifiers::NONE); // row 74
+        m.handle_key(&Key::Char('1'), Modifiers::NONE);
+        m.handle_key(&Key::Char('0'), Modifiers::NONE);
+        m.handle_key(&Key::Char('j'), Modifiers::NONE);
+        assert_eq!(m.cursor_row, 84);
+        m.handle_key(&Key::Char('5'), Modifiers::NONE);
+        m.handle_key(&Key::Char('l'), Modifiers::NONE);
+        assert_eq!(m.cursor_col, 5);
+        m.handle_key(&Key::Char('2'), Modifiers::NONE);
+        m.handle_key_in_row(&Key::Char('w'), Modifiers::NONE, ROW);
+        assert_eq!(m.cursor_col, 11); // 5 -> "world" -> ","
+    }
+
+    #[test]
+    fn count_with_upper_g_goes_to_that_line() {
+        let mut m = active_mode();
+        m.handle_key(&Key::Char('3'), Modifiers::NONE);
+        m.handle_key(&Key::Char('G'), Modifiers::NONE);
+        assert_eq!(m.cursor_row, 2);
+        m.handle_key(&Key::Char('9'), Modifiers::NONE);
+        m.handle_key(&Key::Char('9'), Modifiers::NONE);
+        m.handle_key(&Key::Char('9'), Modifiers::NONE);
+        m.handle_key(&Key::Char('G'), Modifiers::NONE);
+        assert_eq!(m.cursor_row, 99);
+    }
+
+    #[test]
+    fn leading_zero_is_still_line_start() {
+        let mut m = active_mode();
+        m.cursor_col = 7;
+        m.handle_key(&Key::Char('0'), Modifiers::NONE);
         assert_eq!(m.cursor_col, 0);
     }
 
@@ -786,11 +1027,38 @@ mod tests {
     }
 
     #[test]
-    fn g_lower_is_noop() {
+    fn single_g_waits_for_second_g() {
         let mut m = active_mode();
         let before = m.cursor_position();
         m.handle_key(&Key::Char('g'), Modifiers::NONE);
         assert_eq!(m.cursor_position(), before);
+    }
+
+    #[test]
+    fn gg_goes_to_top() {
+        let mut m = active_mode();
+        m.handle_key(&Key::Char('g'), Modifiers::NONE);
+        m.handle_key(&Key::Char('g'), Modifiers::NONE);
+        assert_eq!(m.cursor_row, 0);
+        assert_eq!(m.scroll_offset, 0);
+    }
+
+    #[test]
+    fn g_followed_by_other_key_cancels_and_runs_that_key() {
+        let mut m = active_mode();
+        let (row, _) = m.cursor_position();
+        m.handle_key(&Key::Char('g'), Modifiers::NONE);
+        m.handle_key(&Key::Char('j'), Modifiers::NONE);
+        assert_eq!(m.cursor_row, row + 1);
+    }
+
+    #[test]
+    fn count_gg_goes_to_that_line() {
+        let mut m = active_mode();
+        m.handle_key(&Key::Char('7'), Modifiers::NONE);
+        m.handle_key(&Key::Char('g'), Modifiers::NONE);
+        m.handle_key(&Key::Char('g'), Modifiers::NONE);
+        assert_eq!(m.cursor_row, 6);
     }
 
     #[test]

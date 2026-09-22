@@ -6,12 +6,22 @@
 //! - Updating terminal state
 //! - Handling user input
 
+use std::cell::RefCell;
 #[cfg(target_os = "linux")]
 use std::fs;
 use std::io;
 use std::os::fd::RawFd;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+/// How long a foreground-process-name lookup stays valid before `/proc` is
+/// scanned again. Resize storms and the periodic tab-title refresh both go
+/// through this cache.
+const FOREGROUND_NAME_TTL: Duration = Duration::from_millis(500);
+
+/// Maximum PTY bytes drained per `process()` call so rendering and input
+/// handling are never starved by a process that floods its terminal.
+pub const PTY_DRAIN_BUDGET: usize = 1024 * 1024;
 
 use polling::{Event, Events, Poller};
 
@@ -62,14 +72,41 @@ pub struct EventLoop {
     events: Vec<TerminalEvent>,
     /// Poller for I/O events
     poller: Poller,
+    /// Cached foreground process name and when it was looked up
+    foreground_name_cache: RefCell<Option<(Instant, Option<String>)>>,
+    /// Bytes drained by the most recent `process()` call
+    last_drain_bytes: usize,
+    /// The last `process()` stopped at the drain budget with data left
+    drain_pending: bool,
 }
 
 impl EventLoop {
     /// Create a new event loop with a shell.
     pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
-        let size = PtySize::new(cols, rows);
-        let child = Child::spawn_shell(size).map_err(io::Error::other)?;
+        let child = Child::spawn_shell(PtySize::new(cols, rows), &[]).map_err(io::Error::other)?;
+        Self::from_child(child, cols, rows)
+    }
 
+    /// Create a new event loop with a shell in a specific working directory.
+    pub fn new_with_dir(cols: u16, rows: u16, working_dir: &str) -> io::Result<Self> {
+        let child = Child::spawn_shell_in_dir(PtySize::new(cols, rows), working_dir, &[])
+            .map_err(io::Error::other)?;
+        Self::from_child(child, cols, rows)
+    }
+
+    /// Create with a specific command.
+    pub fn with_command(program: &str, args: &[&str], cols: u16, rows: u16) -> io::Result<Self> {
+        let working_dir = crate::pty::current_dir();
+        let child = Child::spawn(program, args, &working_dir, PtySize::new(cols, rows), &[])
+            .map_err(io::Error::other)?;
+        Self::from_child(child, cols, rows)
+    }
+
+    /// Drive an already spawned child whose PTY is `cols` x `rows`.
+    ///
+    /// Use this when the child needs spawn options the convenience
+    /// constructors do not take, such as per-child environment variables.
+    pub fn from_child(child: Child, cols: u16, rows: u16) -> io::Result<Self> {
         let terminal = Terminal::new(Dimensions::new(cols, rows));
         let parser = AnsiParser::new();
 
@@ -90,62 +127,9 @@ impl EventLoop {
             read_buf: vec![0u8; 65536], // 64KB read buffer
             events: Vec::new(),
             poller,
-        })
-    }
-
-    /// Create a new event loop with a shell in a specific working directory.
-    pub fn new_with_dir(cols: u16, rows: u16, working_dir: &str) -> io::Result<Self> {
-        let size = PtySize::new(cols, rows);
-        let child = Child::spawn_shell_in_dir(size, working_dir).map_err(io::Error::other)?;
-
-        let terminal = Terminal::new(Dimensions::new(cols, rows));
-        let parser = AnsiParser::new();
-
-        let poller = Poller::new()?;
-
-        // Register PTY fd for reading
-        // SAFETY: The PTY file descriptor is valid and owned by `child` for the
-        // lifetime of this EventLoop. The poller only uses it for edge-triggered
-        // notifications, not for reading/writing.
-        unsafe {
-            poller.add(child.pty().as_raw_fd(), Event::readable(0))?;
-        }
-
-        Ok(Self {
-            child,
-            terminal,
-            parser,
-            read_buf: vec![0u8; 65536],
-            events: Vec::new(),
-            poller,
-        })
-    }
-
-    /// Create with a specific command.
-    pub fn with_command(program: &str, args: &[&str], cols: u16, rows: u16) -> io::Result<Self> {
-        let size = PtySize::new(cols, rows);
-        let working_dir = crate::pty::current_dir();
-        let child = Child::spawn(program, args, &working_dir, size).map_err(io::Error::other)?;
-
-        let terminal = Terminal::new(Dimensions::new(cols, rows));
-        let parser = AnsiParser::new();
-
-        let poller = Poller::new()?;
-
-        // SAFETY: The PTY file descriptor is valid and owned by `child` for the
-        // lifetime of this EventLoop. The poller only uses it for edge-triggered
-        // notifications, not for reading/writing.
-        unsafe {
-            poller.add(child.pty().as_raw_fd(), Event::readable(0))?;
-        }
-
-        Ok(Self {
-            child,
-            terminal,
-            parser,
-            read_buf: vec![0u8; 65536],
-            events: Vec::new(),
-            poller,
+            foreground_name_cache: RefCell::new(None),
+            last_drain_bytes: 0,
+            drain_pending: false,
         })
     }
 
@@ -175,8 +159,30 @@ impl EventLoop {
     }
 
     /// Best-effort name of the foreground process attached to this PTY.
+    ///
+    /// The answer is cached for [`FOREGROUND_NAME_TTL`]: it needs a full
+    /// `/proc` scan, which must not run on every resize frame.
     pub fn foreground_process_name(&self) -> Option<String> {
-        foreground_process_name(self.child.pty_fd())
+        let now = Instant::now();
+        if let Some((looked_up, name)) = self.foreground_name_cache.borrow().as_ref() {
+            if now.duration_since(*looked_up) < FOREGROUND_NAME_TTL {
+                return name.clone();
+            }
+        }
+        let name = foreground_process_name(self.child.pty_fd());
+        *self.foreground_name_cache.borrow_mut() = Some((now, name.clone()));
+        name
+    }
+
+    /// Bytes drained from the PTY by the most recent [`EventLoop::process`].
+    pub fn last_drain_bytes(&self) -> usize {
+        self.last_drain_bytes
+    }
+
+    /// Whether the most recent [`EventLoop::process`] stopped at
+    /// [`PTY_DRAIN_BUDGET`] with more output still queued in the PTY.
+    pub fn drain_pending(&self) -> bool {
+        self.drain_pending
     }
 
     /// Best-effort current working directory of the PTY child.
@@ -211,6 +217,14 @@ impl EventLoop {
     ///
     /// Returns events that occurred during processing.
     pub fn process(&mut self) -> io::Result<Vec<TerminalEvent>> {
+        self.process_with_budget(PTY_DRAIN_BUDGET)
+    }
+
+    /// Process pending PTY output, draining at most `budget` bytes.
+    ///
+    /// When the budget is exhausted [`EventLoop::drain_pending`] is set and
+    /// the next [`EventLoop::wait`] resumes draining without blocking.
+    pub fn process_with_budget(&mut self, budget: usize) -> io::Result<Vec<TerminalEvent>> {
         self.events.clear();
         let trace = pipeline_trace_enabled();
         let process_start = trace.then(Instant::now);
@@ -218,9 +232,18 @@ impl EventLoop {
         let mut read_bytes = 0usize;
 
         // Read available data from PTY FIRST (before checking child exit)
-        // This ensures we don't miss output from fast-exiting processes like `echo`
+        // This ensures we don't miss output from fast-exiting processes like `echo`.
+        // Stop after PTY_DRAIN_BUDGET bytes; the fd stays readable so the
+        // next tick picks up the rest after a render/input pass.
+        self.drain_pending = false;
         loop {
-            match self.child.read(&mut self.read_buf) {
+            let remaining = budget.saturating_sub(read_bytes);
+            if remaining == 0 {
+                self.drain_pending = true;
+                break;
+            }
+            let read_len = remaining.min(self.read_buf.len());
+            match self.child.read(&mut self.read_buf[..read_len]) {
                 Ok(0) => break,
                 Ok(n) => {
                     read_batches += 1;
@@ -242,6 +265,8 @@ impl EventLoop {
                 }
             }
         }
+
+        self.last_drain_bytes = read_bytes;
 
         if let Some(start) = process_start {
             if read_bytes > 0 {
@@ -275,6 +300,11 @@ impl EventLoop {
     ///
     /// Returns events that occurred, or empty vec on timeout.
     pub fn wait(&mut self, timeout: Duration) -> io::Result<Vec<TerminalEvent>> {
+        if self.drain_pending {
+            // The previous tick hit the drain budget; data is still queued.
+            return self.process();
+        }
+
         let mut poll_events = Events::new();
 
         // Wait for PTY to be readable
@@ -588,5 +618,53 @@ mod tests {
         let row = event_loop.terminal().grid().row(0).unwrap();
         let text = row.text_trimmed();
         assert!(text.contains("hello"), "Expected 'hello', got: {}", text);
+    }
+
+    #[test]
+    fn process_drains_at_most_the_byte_budget_per_call() {
+        let mut event_loop = EventLoop::with_command(
+            "/bin/sh",
+            &[
+                "/bin/sh",
+                "-c",
+                "printf 'abcdefghijklmnopqrstuvwxyz0123456789'",
+            ],
+            80,
+            24,
+        )
+        .expect("Failed to spawn printf");
+
+        // Let the 36 bytes land in the PTY before draining with a tiny budget.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut first = None;
+        while Instant::now() < deadline && first.is_none() {
+            let mut poll_events = Events::new();
+            event_loop
+                .poller
+                .wait(&mut poll_events, Some(Duration::from_millis(50)))
+                .unwrap();
+            if !poll_events.is_empty() {
+                event_loop.process_with_budget(10).unwrap();
+                first = Some(event_loop.last_drain_bytes());
+            }
+        }
+
+        assert_eq!(
+            first,
+            Some(10),
+            "first call must stop exactly at the budget"
+        );
+        assert!(event_loop.drain_pending());
+
+        let mut total = 10;
+        while event_loop.drain_pending() {
+            event_loop.process_with_budget(10).unwrap();
+            assert!(event_loop.last_drain_bytes() <= 10);
+            total += event_loop.last_drain_bytes();
+        }
+        assert_eq!(total, 36);
+
+        let text = event_loop.terminal().grid().row(0).unwrap().text_trimmed();
+        assert_eq!(text, "abcdefghijklmnopqrstuvwxyz0123456789");
     }
 }

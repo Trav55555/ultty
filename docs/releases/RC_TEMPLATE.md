@@ -15,6 +15,13 @@ general-use release candidate.
 
 ## Required Evidence
 
+Every entry in this table must be either a full CI run URL (plus the uploaded
+artifact name) or a repository-relative path under
+`docs/releases/evidence/<date>/` whose files are committed. Paths under `/tmp`,
+`$RUNNER_TEMP`, or any other scratch directory are not evidence: they are gone
+by the time anyone checks. Copy what you want to cite into
+`docs/releases/evidence/<date>/` and commit it first.
+
 | Gate | Evidence |
 |------|----------|
 | Hosted CI | Link to successful `ci.yml` run |

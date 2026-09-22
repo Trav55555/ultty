@@ -323,11 +323,7 @@ impl TabBarState {
         self.drag_offset_x = x - self.drag_start_x;
 
         // Check if we should swap with adjacent tabs
-        let tab_width = if let Some(tab) = self.tabs.get(dragging_index) {
-            tab.width
-        } else {
-            return None;
-        };
+        let tab_width = self.tabs.get(dragging_index)?.width;
 
         // If dragged more than half a tab width, swap
         if self.drag_offset_x > tab_width / 2.0 && dragging_index + 1 < self.tabs.len() {

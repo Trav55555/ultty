@@ -4,3 +4,5 @@ expression: output
 ---
 ▾ Details
 Hidden content here
+-- styles --
+0:0-1 fg=Rgb(108, 112, 134) bg=Reset mod=NONE

@@ -1,79 +1,228 @@
-//! Protocol server - accepts TUI app connections on a Unix socket.
+//! Protocol server - accepts TUI app connections on per-tab Unix sockets.
+//!
+//! Every tab listens on its own socket, and the tab's shell is told about
+//! that socket alone (`ULTTY_SOCKET`). A session therefore belongs to the
+//! tab whose socket accepted it, which is what lets the server route input
+//! and clipboard access to the tab the user is looking at rather than to
+//! whichever process connected most recently.
 
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use polling::{Event, Events, Poller};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::session::NativeSession;
+use crate::platform::socket::{peer_uid, set_cloexec, tab_socket_file_name};
+use crate::terminal_manager::TabId;
 
-const LISTENER_KEY: usize = 0;
-const SESSION_KEY_BASE: usize = 1000;
+/// Session identifier assigned by the server on accept.
+pub type SessionId = u64;
+
+/// Permissions applied to each listening socket file: owner only.
+const SOCKET_FILE_MODE: u32 = 0o600;
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
-pub struct ProtocolServer {
+/// One tab's listening socket.
+struct TabListener {
+    tab_id: TabId,
     listener: UnixListener,
     socket_path: PathBuf,
+}
+
+pub struct ProtocolServer {
+    /// Directory that holds the per-tab socket files.
+    socket_dir: PathBuf,
     poller: Poller,
+    /// Listeners keyed by their poller key.
+    listeners: HashMap<usize, TabListener>,
+    /// Sessions keyed by their poller key.
     sessions: HashMap<usize, NativeSession>,
+    /// Next poller key; listeners and sessions share one key space.
     next_key: usize,
     viewport_width: f32,
     viewport_height: f32,
+    /// Tab whose sessions receive keyboard input and may read the clipboard.
+    ///
+    /// `None` withholds input from every session. The app layer keeps this
+    /// in sync with the visible tab via `set_active_tab`.
+    active_tab: Option<TabId>,
 }
 
 impl ProtocolServer {
-    /// Create a new protocol server listening on the given Unix socket path.
-    pub fn new(socket_path: impl AsRef<Path>) -> io::Result<Self> {
-        let socket_path = socket_path.as_ref().to_path_buf();
+    /// Create a protocol server whose per-tab sockets live in `socket_dir`.
+    ///
+    /// No socket is bound until a tab is opened with [`open_tab`].
+    ///
+    /// [`open_tab`]: ProtocolServer::open_tab
+    pub fn new(socket_dir: impl AsRef<Path>) -> io::Result<Self> {
+        let socket_dir = socket_dir.as_ref().to_path_buf();
+        fs::create_dir_all(&socket_dir)?;
 
+        Ok(Self {
+            socket_dir,
+            poller: Poller::new()?,
+            listeners: HashMap::new(),
+            sessions: HashMap::new(),
+            next_key: 0,
+            viewport_width: 80.0,
+            viewport_height: 24.0,
+            active_tab: None,
+        })
+    }
+
+    /// Directory that holds the per-tab socket files.
+    pub fn socket_dir(&self) -> &Path {
+        &self.socket_dir
+    }
+
+    /// Bind the listening socket for `tab_id` and return its path.
+    ///
+    /// The socket file is owner-only (0600), the listener is close-on-exec
+    /// so the tab's shell cannot inherit it, and each accepted peer must
+    /// run as the terminal's uid. Opening a tab twice is an error.
+    pub fn open_tab(&mut self, tab_id: TabId) -> io::Result<PathBuf> {
+        if self.listener_key(tab_id).is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("tab {} already has a protocol socket", tab_id.raw()),
+            ));
+        }
+
+        let socket_path = self.socket_dir.join(tab_socket_file_name(tab_id));
         if socket_path.exists() {
             remove_stale_socket(&socket_path)?;
         }
 
-        if let Some(parent) = socket_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
         let listener = UnixListener::bind(&socket_path)?;
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(SOCKET_FILE_MODE))?;
+        set_cloexec(&listener)?;
         listener.set_nonblocking(true)?;
 
-        let poller = Poller::new()?;
-
-        // SAFETY: listener fd is valid and we maintain it for the lifetime of the server
+        let key = self.allocate_key();
+        // SAFETY: the listener fd stays valid until `close_tab` deletes it
+        // from the poller and drops it.
         unsafe {
-            poller.add(&listener, Event::readable(LISTENER_KEY))?;
+            self.poller.add(&listener, Event::readable(key))?;
         }
 
-        info!("Protocol server listening on {:?}", socket_path);
-
-        Ok(Self {
-            listener,
-            socket_path,
-            poller,
-            sessions: HashMap::new(),
-            next_key: SESSION_KEY_BASE,
-            viewport_width: 80.0,
-            viewport_height: 24.0,
-        })
+        info!(
+            "Protocol server listening for tab {} on {:?}",
+            tab_id.raw(),
+            socket_path
+        );
+        self.listeners.insert(
+            key,
+            TabListener {
+                tab_id,
+                listener,
+                socket_path: socket_path.clone(),
+            },
+        );
+        Ok(socket_path)
     }
 
-    /// Returns the path to the Unix socket this server is listening on.
-    pub fn socket_path(&self) -> &Path {
-        &self.socket_path
+    /// Stop listening for `tab_id`: unlink its socket and disconnect its
+    /// sessions. A tab that was never opened is ignored.
+    pub fn close_tab(&mut self, tab_id: TabId) {
+        if let Some(key) = self.listener_key(tab_id) {
+            if let Some(tab) = self.listeners.remove(&key) {
+                let _ = self.poller.delete(&tab.listener);
+                let _ = fs::remove_file(&tab.socket_path);
+                info!("Protocol server closed tab {} socket", tab_id.raw());
+            }
+        }
+
+        let session_keys: Vec<usize> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.tab_id() == tab_id)
+            .map(|(&key, _)| key)
+            .collect();
+        for key in session_keys {
+            self.remove_session(key);
+        }
+    }
+
+    /// Socket path of an open tab.
+    pub fn tab_socket_path(&self, tab_id: TabId) -> Option<&Path> {
+        self.listener_key(tab_id)
+            .and_then(|key| self.listeners.get(&key))
+            .map(|tab| tab.socket_path.as_path())
+    }
+
+    /// Tabs that currently have a listening socket.
+    pub fn open_tabs(&self) -> impl Iterator<Item = TabId> + '_ {
+        self.listeners.values().map(|tab| tab.tab_id)
+    }
+
+    /// Tab whose sessions receive keyboard input and may read the clipboard.
+    pub fn active_tab(&self) -> Option<TabId> {
+        self.active_tab
+    }
+
+    /// Route keyboard input and clipboard reads to the sessions of `tab_id`.
+    ///
+    /// `None` withholds input from every session. Sessions of a newly
+    /// activated tab are marked render-dirty so the renderer rebuilds them
+    /// instead of reusing buffers cached for the previous tab.
+    pub fn set_active_tab(&mut self, tab_id: Option<TabId>) {
+        if self.active_tab == tab_id {
+            return;
+        }
+        self.active_tab = tab_id;
+        for session in self.active_tab_sessions_mut() {
+            session.mark_render_dirty();
+        }
+    }
+
+    /// Sessions that belong to the active tab.
+    pub fn active_tab_sessions(&self) -> impl Iterator<Item = &NativeSession> {
+        let active = self.active_tab;
+        self.sessions
+            .values()
+            .filter(move |session| Some(session.tab_id()) == active)
+    }
+
+    /// Sessions that belong to the active tab (mutable).
+    pub fn active_tab_sessions_mut(&mut self) -> impl Iterator<Item = &mut NativeSession> {
+        let active = self.active_tab;
+        self.sessions
+            .values_mut()
+            .filter(move |session| Some(session.tab_id()) == active)
+    }
+
+    fn allocate_key(&mut self) -> usize {
+        let key = self.next_key;
+        self.next_key += 1;
+        key
+    }
+
+    fn listener_key(&self, tab_id: TabId) -> Option<usize> {
+        self.listeners
+            .iter()
+            .find(|(_, tab)| tab.tab_id == tab_id)
+            .map(|(&key, _)| key)
+    }
+
+    fn remove_session(&mut self, key: usize) {
+        if let Some(session) = self.sessions.remove(&key) {
+            let _ = self.poller.delete(session.stream_fd());
+        }
     }
 
     /// File descriptors that should wake the UI loop when readable.
     pub fn readiness_fds(&self) -> Vec<RawFd> {
-        let mut fds = Vec::with_capacity(self.sessions.len() + 1);
-        fds.push(self.listener.as_raw_fd());
+        let mut fds = Vec::with_capacity(self.listeners.len() + self.sessions.len());
+        fds.extend(self.listeners.values().map(|tab| tab.listener.as_raw_fd()));
         fds.extend(
             self.sessions
                 .values()
@@ -98,8 +247,8 @@ impl ProtocolServer {
         self.poller.wait(&mut events, timeout)?;
 
         for event in events.iter() {
-            if event.key == LISTENER_KEY {
-                self.accept_connections()?;
+            if self.listeners.contains_key(&event.key) {
+                self.accept_connections(event.key)?;
             } else {
                 self.handle_session_event(event.key)?;
             }
@@ -108,32 +257,41 @@ impl ProtocolServer {
         Ok(())
     }
 
-    fn accept_connections(&mut self) -> io::Result<()> {
-        loop {
-            match self.listener.accept() {
-                Ok((stream, addr)) => {
-                    let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst);
-                    info!(
-                        "Accepted connection from {:?}, session {}",
-                        addr, session_id
-                    );
-
-                    let mut session = NativeSession::new(stream, session_id)?;
-                    session.set_viewport(self.viewport_width, self.viewport_height);
-
-                    let key = self.next_key;
-                    self.next_key += 1;
-
-                    self.sessions.insert(key, session);
-                    self.register_session(key)?;
+    fn accept_connections(&mut self, listener_key: usize) -> io::Result<()> {
+        let mut accepted = Vec::new();
+        {
+            let Some(tab) = self.listeners.get(&listener_key) else {
+                return Ok(());
+            };
+            loop {
+                match tab.listener.accept() {
+                    Ok((stream, addr)) => {
+                        if !peer_is_authorized(&stream) {
+                            continue;
+                        }
+                        let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst);
+                        info!(
+                            "Accepted connection from {:?} on tab {}, session {}",
+                            addr,
+                            tab.tab_id.raw(),
+                            session_id
+                        );
+                        accepted.push(NativeSession::new(stream, session_id, tab.tab_id)?);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) => return Err(e),
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) => return Err(e),
             }
+            self.poller
+                .modify(&tab.listener, Event::readable(listener_key))?;
         }
 
-        self.poller
-            .modify(&self.listener, Event::readable(LISTENER_KEY))?;
+        for mut session in accepted {
+            session.set_viewport(self.viewport_width, self.viewport_height);
+            let key = self.allocate_key();
+            self.sessions.insert(key, session);
+            self.register_session(key)?;
+        }
 
         Ok(())
     }
@@ -179,9 +337,7 @@ impl ProtocolServer {
         };
 
         if should_remove {
-            if let Some(session) = self.sessions.remove(&key) {
-                let _ = self.poller.delete(session.stream_fd());
-            }
+            self.remove_session(key);
         }
 
         Ok(())
@@ -202,15 +358,18 @@ impl ProtocolServer {
         self.sessions.values_mut()
     }
 
-    /// Send a key event to all connected native sessions that have subscribed to key events.
+    /// Send a key event to the active tab's sessions that subscribed to keys.
+    ///
+    /// Keys are never fanned out to every session: only sessions of the tab
+    /// the user is looking at (see `set_active_tab`) see them.
     pub fn broadcast_key(
         &mut self,
         key: ultty_protocol::Key,
         modifiers: ultty_protocol::Modifiers,
     ) {
-        for session in self.sessions.values_mut() {
+        for session in self.active_tab_sessions_mut() {
             if let Err(e) = session.send_key(key.clone(), modifiers) {
-                tracing::warn!(
+                warn!(
                     "Failed to send key to session {}: {}",
                     session.session_id(),
                     e
@@ -220,19 +379,21 @@ impl ProtocolServer {
         self.flush();
     }
 
+    /// True if any session of the active tab subscribed to key events.
     pub fn has_key_subscribers(&self) -> bool {
-        self.sessions.values().any(|s| s.has_key_subscription())
+        self.active_tab_sessions()
+            .any(NativeSession::has_key_subscription)
     }
 
-    /// Send a key-up event to all connected native sessions that have subscribed to key events.
+    /// Send a key-up event to the active tab's sessions that subscribed to keys.
     pub fn broadcast_key_up(
         &mut self,
         key: ultty_protocol::Key,
         modifiers: ultty_protocol::Modifiers,
     ) {
-        for session in self.sessions.values_mut() {
+        for session in self.active_tab_sessions_mut() {
             if let Err(e) = session.send_key_up(key.clone(), modifiers) {
-                tracing::warn!(
+                warn!(
                     "Failed to send key_up to session {}: {}",
                     session.session_id(),
                     e
@@ -242,11 +403,11 @@ impl ProtocolServer {
         self.flush();
     }
 
-    /// Send a text input event to all connected native sessions that have subscribed to key events.
+    /// Send a text input event to the active tab's sessions that subscribed to keys.
     pub fn broadcast_text_input(&mut self, text: String) {
-        for session in self.sessions.values_mut() {
+        for session in self.active_tab_sessions_mut() {
             if let Err(e) = session.send_text_input(text.clone()) {
-                tracing::warn!(
+                warn!(
                     "Failed to send text_input to session {}: {}",
                     session.session_id(),
                     e
@@ -256,7 +417,7 @@ impl ProtocolServer {
         self.flush();
     }
 
-    /// Forward a mouse event to all native sessions.
+    /// Forward a mouse event to the active tab's sessions.
     /// Hit-tests each session's scene tree to find the target region,
     /// checks subscriptions, and sends the event with region-local coords.
     pub fn broadcast_mouse(
@@ -270,7 +431,7 @@ impl ProtocolServer {
             ultty_protocol::InputType::MouseScroll { .. } => ultty_protocol::EVENT_SCROLL,
             _ => ultty_protocol::EVENT_MOUSE,
         };
-        for session in self.sessions.values_mut() {
+        for session in self.active_tab_sessions_mut() {
             let (region_id, local_x, local_y) = session.hit_test(cell_x, cell_y);
             if session.is_subscribed(region_id, event_mask)
                 || session.is_subscribed(ultty_protocol::RegionId::ROOT, event_mask)
@@ -294,14 +455,39 @@ impl ProtocolServer {
         self.flush();
     }
 
-    /// Collect pending clipboard get requests from all sessions.
+    /// Collect pending clipboard get requests.
+    ///
+    /// Only sessions of the active tab may read the clipboard. Requests from
+    /// other sessions are answered with an empty `ClipboardContent` so the
+    /// client does not hang, and are not returned here.
     /// Returns a list of session keys that requested clipboard content.
     pub fn pending_clipboard_gets(&mut self) -> Vec<usize> {
         let mut gets = Vec::new();
+        let mut denied = false;
         for (&key, session) in &mut self.sessions {
-            if session.take_clipboard_get() {
-                gets.push(key);
+            if !session.take_clipboard_get() {
+                continue;
             }
+            if Some(session.tab_id()) == self.active_tab {
+                gets.push(key);
+            } else {
+                warn!(
+                    "Session {} (tab {}) requested clipboard while its tab is not active; denied",
+                    session.session_id(),
+                    session.tab_id().raw()
+                );
+                if let Err(e) = session.send_clipboard_content(None) {
+                    warn!(
+                        "Failed to send clipboard denial to session {}: {}",
+                        session.session_id(),
+                        e
+                    );
+                }
+                denied = true;
+            }
+        }
+        if denied {
+            self.flush();
         }
         gets
     }
@@ -367,9 +553,7 @@ impl ProtocolServer {
             }
         }
         for key in to_remove {
-            if let Some(session) = self.sessions.remove(&key) {
-                let _ = self.poller.delete(session.stream_fd());
-            }
+            self.remove_session(key);
         }
         if queued_writes {
             self.flush();
@@ -387,19 +571,55 @@ impl ProtocolServer {
         }
     }
 
-    /// Send a resize event to all connected native sessions.
+    /// Send a resize event to all connected native sessions, followed by a
+    /// fresh `LayoutComputed` for every session that has a scene.
+    ///
+    /// Every tab shares the window's cell grid, so a resize applies to all
+    /// sessions regardless of which tab is visible.
     pub fn broadcast_resize(&mut self, width: u16, height: u16) {
+        self.viewport_width = width as f32;
+        self.viewport_height = height as f32;
         for session in self.sessions.values_mut() {
             session.set_viewport(width as f32, height as f32);
             if let Err(e) = session.send_resize(width, height) {
-                tracing::warn!(
+                warn!(
                     "Failed to send resize to session {}: {}",
+                    session.session_id(),
+                    e
+                );
+                continue;
+            }
+            if let Err(e) = session.relayout_for_resize() {
+                warn!(
+                    "Failed to send resize layout to session {}: {}",
                     session.session_id(),
                     e
                 );
             }
         }
         self.flush();
+    }
+}
+
+/// Accept only peers running as the same user as the terminal.
+fn peer_is_authorized(stream: &UnixStream) -> bool {
+    match peer_uid(stream) {
+        Ok(uid) if uid == crate::platform::socket::current_uid() => true,
+        Ok(uid) => {
+            warn!(
+                "Rejected native protocol connection from uid {} (server uid {})",
+                uid,
+                crate::platform::socket::current_uid()
+            );
+            false
+        }
+        Err(e) => {
+            warn!(
+                "Rejected native protocol connection: cannot read peer credentials: {}",
+                e
+            );
+            false
+        }
     }
 }
 
@@ -429,7 +649,9 @@ fn is_disconnect_error(e: &io::Error) -> bool {
 
 impl Drop for ProtocolServer {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.socket_path);
+        for tab in self.listeners.values() {
+            let _ = fs::remove_file(&tab.socket_path);
+        }
         info!("Protocol server shut down");
     }
 }
@@ -439,51 +661,174 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
 
-    fn temp_socket_path() -> PathBuf {
-        use std::sync::atomic::AtomicU64;
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let pid = std::process::id();
-        PathBuf::from(format!("/tmp/ultty-test-{}-{}", pid, id))
-    }
+    const TAB_A: TabId = TabId::new(0);
+    const TAB_B: TabId = TabId::new(1);
 
-    /// Helper: ensure the socket file is removed even if the test panics.
-    struct Cleanup(PathBuf);
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
+    /// Per-test socket directory, removed (with anything left in it) on drop.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            use std::sync::atomic::AtomicU64;
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let pid = std::process::id();
+            Self(std::env::temp_dir().join(format!("ultty-server-test-{pid}-{id}")))
         }
     }
 
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Server with one open, active tab; returns that tab's socket path.
+    fn server_with_tab(dir: &TempDir) -> (ProtocolServer, PathBuf) {
+        let mut server = ProtocolServer::new(&dir.0).expect("failed to create server");
+        let path = server.open_tab(TAB_A).expect("open tab");
+        server.set_active_tab(Some(TAB_A));
+        (server, path)
+    }
+
+    fn connect(server: &mut ProtocolServer, path: &Path) -> UnixStream {
+        let client = UnixStream::connect(path).expect("connect");
+        server.poll(Some(Duration::from_millis(100))).unwrap();
+        client
+    }
+
     // ---------------------------------------------------------------
-    // 1. Lifecycle: new() creates socket, drop removes it
+    // 1. Lifecycle: open_tab creates the socket, close_tab/drop remove it
     // ---------------------------------------------------------------
     #[test]
-    fn new_creates_socket_file() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let server = ProtocolServer::new(&path).expect("failed to create server");
-        assert!(path.exists(), "socket file should exist after new()");
+    fn open_tab_creates_socket_file_and_drop_removes_it() {
+        let dir = TempDir::new();
+        let (server, path) = server_with_tab(&dir);
+        assert!(path.exists(), "socket file should exist after open_tab()");
+        assert_eq!(server.tab_socket_path(TAB_A), Some(path.as_path()));
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            format!("ultty-{}-tab0.sock", std::process::id())
+        );
         drop(server);
         assert!(!path.exists(), "socket file should be removed after drop");
     }
 
     #[test]
-    fn readiness_fds_include_listener_and_sessions() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
+    fn socket_file_is_owner_only_and_listener_is_cloexec() {
+        let dir = TempDir::new();
+        let (server, path) = server_with_tab(&dir);
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "socket must be private to the owner");
+        let listener = server.listeners.values().next().unwrap();
+        assert!(crate::platform::socket::is_cloexec(&listener.listener).unwrap());
+    }
 
-        let mut server = ProtocolServer::new(&path).unwrap();
-        let listener_fd = server.listener.as_raw_fd();
+    #[test]
+    fn open_tab_twice_is_an_error() {
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
+        let err = server.open_tab(TAB_A).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(server.open_tabs().count(), 1);
+    }
+
+    #[test]
+    fn close_tab_unlinks_socket_and_disconnects_its_sessions() {
+        let dir = TempDir::new();
+        let (mut server, path_a) = server_with_tab(&dir);
+        let path_b = server.open_tab(TAB_B).unwrap();
+
+        let _a = connect(&mut server, &path_a);
+        let mut b = connect(&mut server, &path_b);
+        assert_eq!(server.session_count(), 2);
+        // Set the timeout while the peer is still open: macOS rejects
+        // SO_RCVTIMEO on a Unix socket whose peer has already gone away.
+        b.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+
+        server.close_tab(TAB_B);
+        assert!(!path_b.exists(), "closed tab's socket is unlinked");
+        assert!(path_a.exists(), "other tab's socket is untouched");
+        assert_eq!(server.tab_socket_path(TAB_B), None);
+        assert_eq!(server.open_tabs().collect::<Vec<_>>(), vec![TAB_A]);
+        assert_eq!(server.session_count(), 1);
+        assert!(server.sessions().all(|s| s.tab_id() == TAB_A));
+
+        // The dropped server end shows up as EOF on the client.
+        let mut buf = [0u8; 16];
+        assert_eq!(std::io::Read::read(&mut b, &mut buf).unwrap(), 0);
+
+        // Closing an unknown or already closed tab is a no-op.
+        server.close_tab(TAB_B);
+        server.close_tab(TabId::new(99));
+        assert_eq!(server.session_count(), 1);
+    }
+
+    #[test]
+    fn sessions_record_the_tab_that_accepted_them() {
+        let dir = TempDir::new();
+        let (mut server, path_a) = server_with_tab(&dir);
+        let path_b = server.open_tab(TAB_B).unwrap();
+
+        let _a = connect(&mut server, &path_a);
+        let _b = connect(&mut server, &path_b);
+
+        let mut tabs: Vec<TabId> = server.sessions().map(|s| s.tab_id()).collect();
+        tabs.sort_by_key(|t| t.raw());
+        assert_eq!(tabs, vec![TAB_A, TAB_B]);
+    }
+
+    #[test]
+    fn active_tab_selects_sessions_and_marks_them_dirty() {
+        let dir = TempDir::new();
+        let (mut server, path_a) = server_with_tab(&dir);
+        let path_b = server.open_tab(TAB_B).unwrap();
+        let _a = connect(&mut server, &path_a);
+        let _b = connect(&mut server, &path_b);
+        for session in server.sessions_mut() {
+            session.clear_render_dirty();
+        }
+
+        assert_eq!(server.active_tab(), Some(TAB_A));
+        assert!(server.active_tab_sessions().all(|s| s.tab_id() == TAB_A));
+        assert_eq!(server.active_tab_sessions().count(), 1);
+
+        server.set_active_tab(Some(TAB_B));
+        assert_eq!(server.active_tab_sessions().count(), 1);
+        for session in server.sessions() {
+            assert_eq!(
+                session.is_render_dirty(),
+                session.tab_id() == TAB_B,
+                "only the newly visible tab's sessions need a rebuild"
+            );
+        }
+
+        server.set_active_tab(None);
+        assert_eq!(server.active_tab_sessions().count(), 0);
+        assert!(!server.has_key_subscribers());
+    }
+
+    #[test]
+    fn readiness_fds_include_listeners_and_sessions() {
+        let dir = TempDir::new();
+        let (mut server, path_a) = server_with_tab(&dir);
+        let listener_fd = server
+            .listeners
+            .values()
+            .next()
+            .unwrap()
+            .listener
+            .as_raw_fd();
         assert_eq!(server.readiness_fds(), vec![listener_fd]);
 
-        let _client = UnixStream::connect(&path).unwrap();
-        server.poll(Some(Duration::from_millis(100))).unwrap();
+        let _path_b = server.open_tab(TAB_B).unwrap();
+        assert_eq!(server.readiness_fds().len(), 2);
 
+        let _client = connect(&mut server, &path_a);
         let fds = server.readiness_fds();
         assert!(fds.contains(&listener_fd));
-        assert_eq!(fds.len(), 2);
+        assert_eq!(fds.len(), 3);
     }
 
     // ---------------------------------------------------------------
@@ -491,15 +836,9 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn set_viewport_updates_dimensions() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let mut server = ProtocolServer::new(&path).unwrap();
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
         server.set_viewport(120.0, 40.0);
-        // The internal fields should now reflect the new viewport.
-        // We can verify indirectly by checking that a newly accepted
-        // session would inherit these values, but at minimum the call
-        // must not panic.
         assert_eq!(server.viewport_width, 120.0);
         assert_eq!(server.viewport_height, 40.0);
     }
@@ -509,10 +848,8 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn session_count_starts_at_zero() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let server = ProtocolServer::new(&path).unwrap();
+        let dir = TempDir::new();
+        let (server, _path) = server_with_tab(&dir);
         assert_eq!(server.session_count(), 0);
     }
 
@@ -521,11 +858,8 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn poll_no_connections_returns_ok() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let mut server = ProtocolServer::new(&path).unwrap();
-        // Use a zero-duration timeout so poll returns immediately.
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
         let result = server.poll(Some(Duration::ZERO));
         assert!(result.is_ok(), "poll with no connections should succeed");
     }
@@ -535,11 +869,8 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn broadcast_key_no_sessions() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let mut server = ProtocolServer::new(&path).unwrap();
-        // Should not panic when there are no sessions.
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
         server.broadcast_key(
             ultty_protocol::Key::Char('a'),
             ultty_protocol::Modifiers::NONE,
@@ -551,10 +882,8 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn broadcast_mouse_no_sessions() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let mut server = ProtocolServer::new(&path).unwrap();
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
         server.broadcast_mouse(
             ultty_protocol::InputType::MouseDown {
                 button: ultty_protocol::MouseButton::Left,
@@ -570,10 +899,8 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn broadcast_resize_no_sessions() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let mut server = ProtocolServer::new(&path).unwrap();
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
         server.broadcast_resize(120, 40);
     }
 
@@ -582,23 +909,20 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn update_animations_no_sessions() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let mut server = ProtocolServer::new(&path).unwrap();
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
         assert!(!server.update_animations());
     }
 
     // ---------------------------------------------------------------
-    // 9. socket_path returns correct path
+    // 9. socket_dir returns the configured directory
     // ---------------------------------------------------------------
     #[test]
-    fn socket_path_returns_correct_path() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let server = ProtocolServer::new(&path).unwrap();
-        assert_eq!(server.socket_path(), path.as_path());
+    fn socket_dir_returns_configured_directory() {
+        let dir = TempDir::new();
+        let (server, path) = server_with_tab(&dir);
+        assert_eq!(server.socket_dir(), dir.0.as_path());
+        assert_eq!(path.parent(), Some(dir.0.as_path()));
     }
 
     // ---------------------------------------------------------------
@@ -606,20 +930,10 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn accept_connection_increments_session_count() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let mut server = ProtocolServer::new(&path).unwrap();
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
         assert_eq!(server.session_count(), 0);
-
-        // Connect a client to the server socket.
-        let _client = UnixStream::connect(&path).expect("failed to connect");
-
-        // poll() should accept the pending connection.
-        server
-            .poll(Some(Duration::from_millis(100)))
-            .expect("poll failed");
-
+        let _client = connect(&mut server, &path);
         assert_eq!(server.session_count(), 1);
     }
 
@@ -628,10 +942,8 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn multiple_connections_tracked() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let mut server = ProtocolServer::new(&path).unwrap();
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
 
         let _c1 = UnixStream::connect(&path).unwrap();
         let _c2 = UnixStream::connect(&path).unwrap();
@@ -648,12 +960,9 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn broadcast_key_with_session() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let mut server = ProtocolServer::new(&path).unwrap();
-        let _client = UnixStream::connect(&path).unwrap();
-        server.poll(Some(Duration::from_millis(100))).unwrap();
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
+        let _client = connect(&mut server, &path);
 
         assert_eq!(server.session_count(), 1);
         server.broadcast_key(ultty_protocol::Key::Enter, ultty_protocol::Modifiers::CTRL);
@@ -664,12 +973,9 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn broadcast_mouse_with_session() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let mut server = ProtocolServer::new(&path).unwrap();
-        let _client = UnixStream::connect(&path).unwrap();
-        server.poll(Some(Duration::from_millis(100))).unwrap();
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
+        let _client = connect(&mut server, &path);
 
         server.broadcast_mouse(
             ultty_protocol::InputType::MouseScroll {
@@ -687,37 +993,39 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn broadcast_resize_with_session() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let mut server = ProtocolServer::new(&path).unwrap();
-        let _client = UnixStream::connect(&path).unwrap();
-        server.poll(Some(Duration::from_millis(100))).unwrap();
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
+        let _client = connect(&mut server, &path);
 
         server.broadcast_resize(200, 60);
     }
 
     // ---------------------------------------------------------------
-    // 15. new() removes stale socket file before binding
+    // 15. open_tab removes a stale socket file before binding
     // ---------------------------------------------------------------
     #[test]
-    fn new_removes_stale_socket() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
+    fn open_tab_removes_stale_socket() {
+        let dir = TempDir::new();
+        fs::create_dir_all(&dir.0).unwrap();
+        let stale = dir.0.join(tab_socket_file_name(TAB_A));
+        fs::write(&stale, b"stale").expect("create stale socket placeholder");
 
-        fs::write(&path, b"stale").expect("create stale socket placeholder");
-
-        let _server2 = ProtocolServer::new(&path)
-            .expect("should be able to create server on path with stale socket");
+        let mut server = ProtocolServer::new(&dir.0).unwrap();
+        let path = server
+            .open_tab(TAB_A)
+            .expect("should be able to bind on a path with a stale socket");
+        assert_eq!(path, stale);
     }
 
     #[test]
-    fn new_does_not_remove_active_socket() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-        let _server = ProtocolServer::new(&path).unwrap();
+    fn open_tab_does_not_remove_active_socket() {
+        let dir = TempDir::new();
+        let (_server, _path) = server_with_tab(&dir);
 
-        let err = match ProtocolServer::new(&path) {
+        // A second server (as another ultty instance with the same pid
+        // would be impossible, but a stale-path check must still hold).
+        let mut other = ProtocolServer::new(&dir.0).unwrap();
+        let err = match other.open_tab(TAB_A) {
             Ok(_) => panic!("active socket should not be unlinked"),
             Err(err) => err,
         };
@@ -730,16 +1038,12 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn set_viewport_propagates_to_sessions() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let mut server = ProtocolServer::new(&path).unwrap();
-        let _client = UnixStream::connect(&path).unwrap();
-        server.poll(Some(Duration::from_millis(100))).unwrap();
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
+        let _client = connect(&mut server, &path);
 
         server.set_viewport(200.0, 50.0);
 
-        // Verify each session received the viewport update.
         for session in server.sessions() {
             let (w, h) = session.viewport();
             assert_eq!(w, 200.0);
@@ -752,14 +1056,11 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn sessions_iterator() {
-        let path = temp_socket_path();
-        let _cleanup = Cleanup(path.clone());
-
-        let mut server = ProtocolServer::new(&path).unwrap();
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
         assert_eq!(server.sessions().count(), 0);
 
-        let _c1 = UnixStream::connect(&path).unwrap();
-        server.poll(Some(Duration::from_millis(100))).unwrap();
+        let _c1 = connect(&mut server, &path);
 
         assert_eq!(server.sessions().count(), 1);
     }

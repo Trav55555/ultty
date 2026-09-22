@@ -63,11 +63,25 @@ Uploaded artifacts include:
 Use these artifacts for renderer and native-runtime failure diagnosis. Do not
 use them as performance evidence.
 
-For release candidates, copy the workflow URL and artifact name into
-`docs/releases/<version-or-date>.md` using
-[RC_TEMPLATE.md](releases/RC_TEMPLATE.md). A configured workflow file is not
-enough evidence by itself; each candidate needs a recorded run or an explicit
-manual substitute.
+## Recording Evidence
+
+For release candidates, record the result in `docs/releases/<version-or-date>.md`
+using [RC_TEMPLATE.md](releases/RC_TEMPLATE.md). A configured workflow file is
+not evidence by itself. Each candidate needs a recorded run.
+
+An evidence entry must be one of:
+
+1. A full CI run URL, for example
+   `https://github.com/<owner>/ultty/actions/runs/<run-id>`, plus the name of
+   the uploaded artifact.
+2. A repository-relative path under `docs/releases/evidence/<date>/`, with the
+   referenced files committed.
+
+A path under `/tmp`, `$RUNNER_TEMP`, or any other scratch directory is not
+evidence. Those directories are cleared, so the claim cannot be checked later.
+When a smoke is run locally, copy the summary, logs, and screenshots you want
+to cite into `docs/releases/evidence/<date>/` and commit them before citing
+them.
 
 ## Performance Boundary
 

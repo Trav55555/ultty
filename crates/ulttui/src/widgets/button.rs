@@ -91,7 +91,7 @@ impl View for Button {
 
     fn style(&self) -> ProtoStyle {
         let theme = Theme::current();
-        let is_focused = super::register_and_check_focus(self.widget_id());
+        let is_focused = super::is_widget_focused(self.widget_id());
         let (fg, bg) = if is_focused {
             (theme.button.focused_fg, theme.button.focused_bg)
         } else {
@@ -114,13 +114,7 @@ impl View for Button {
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
-        if let Some(id) = self.widget_id() {
-            crate::focus::FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
-        }
-        let is_focused = self
-            .widget_id()
-            .map(|id| crate::focus::FocusManager::with_current(|fm| fm.is_focused(id)))
-            .unwrap_or(false);
+        let is_focused = super::is_widget_focused(self.widget_id());
 
         let styled_label = format!("[ {} ]", self.label);
         let theme = Theme::current();
@@ -256,42 +250,26 @@ mod tests {
     }
 
     #[test]
-    fn button_registers_with_focus_manager() {
+    fn button_is_registered_by_tree_walk_not_by_rendering() {
         use crate::focus::FocusManager;
-
-        let old = FocusManager::set_current(FocusManager::new());
-        FocusManager::with_current_mut(|fm| fm.begin_frame());
 
         let btn = Button::new("OK").id("submit");
-        if let Some(id) = btn.widget_id() {
-            FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
-        }
-        FocusManager::with_current_mut(|fm| fm.focus_next());
-
-        let focused = FocusManager::with_current(|fm| fm.focused_id().map(str::to_string));
-        assert_eq!(focused.as_deref(), Some("submit"));
-
-        FocusManager::set_current(old);
-    }
-
-    #[test]
-    fn focused_button_is_detected() {
-        use crate::focus::FocusManager;
 
         let old = FocusManager::set_current(FocusManager::new());
-        FocusManager::with_current_mut(|fm| {
-            fm.register("btn".to_string());
-            fm.focus("btn");
-        });
-
-        let btn = Button::new("OK").id("btn");
-        let is_focused = btn
-            .widget_id()
-            .map(|id| FocusManager::with_current(|fm| fm.is_focused(id)))
-            .unwrap_or(false);
-        assert!(is_focused);
-
+        let backend = ratatui::backend::TestBackend::new(10, 1);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| btn.render_ansi(frame, frame.area()))
+            .unwrap();
+        let _ = <Button as View>::style(&btn);
+        let registered_by_render = FocusManager::with_current(|fm| fm.focusable_ids().to_vec());
         FocusManager::set_current(old);
+        assert!(registered_by_render.is_empty());
+
+        let mut fm = FocusManager::new();
+        fm.register_view_tree(&btn);
+        fm.focus_next();
+        assert_eq!(fm.focused_id(), Some("submit"));
     }
 
     #[test]

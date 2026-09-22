@@ -1,37 +1,46 @@
-# ultimate-terminal
+# ultty
 
-**Purpose**: GPU-accelerated terminal emulator with native TUI protocol support.
+**Purpose**: GPU-accelerated terminal emulator with native TUI protocol
+support. Also produces the `ulttyctl` CLI.
+
+Repository-wide conventions live in [CLAUDE.md](../../CLAUDE.md) and
+[AGENTS.md](../../AGENTS.md). This file covers only what is specific to this
+crate.
 
 ## Structure
 
 ```
 src/
-├── main.rs             # Entry point, window setup
-├── app.rs              # Application state machine
-├── renderer/           # GPU rendering
-│   ├── mod.rs
+├── main.rs             # Entry point
+├── lib.rs              # Library surface used by tests and ulttyctl
+├── bin/                # ulttyctl CLI
+├── app/                # winit event loop, input, render driving, control plane
+├── control/            # Control socket server and request handling
+├── renderer/           # GPU rendering (wgpu, cosmic-text)
 │   ├── pipeline.rs     # wgpu render pipeline
-│   ├── glyph_cache.rs  # Font glyph caching
-│   └── texture.rs      # Texture management
-├── input/              # Input handling
-│   ├── mod.rs
-│   ├── keyboard.rs     # Key mapping
-│   └── mouse.rs        # Mouse events
+│   ├── atlas.rs        # Glyph atlas
+│   ├── text.rs         # Text shaping and layout
+│   ├── native_render/  # Native protocol region rendering
+│   ├── panes.rs        # Split pane rendering
+│   ├── tabbar.rs       # Tab chrome
+│   ├── overlays.rs     # Shortcut and protocol status overlays
+│   └── screenshot.rs   # Headless capture for smokes
 ├── protocol/           # Protocol handling
-│   ├── mod.rs
-│   ├── native.rs       # Binary protocol parser
-│   ├── ansi.rs         # VT100/ANSI parser
-│   └── connection.rs   # Unix socket / IPC
+│   ├── ansi/           # VT100/xterm parser
+│   ├── server.rs       # Native protocol Unix socket server
+│   └── session/        # Per-client native session state
+├── grid/               # Terminal cell grid and scrollback
+├── pty/                # PTY spawn and IO
 ├── scene/              # Scene graph
-│   ├── mod.rs
 │   ├── region.rs       # Region node
 │   ├── tree.rs         # Tree operations
-│   └── layout.rs       # Taffy integration
+│   └── layout/         # Taffy integration
+├── vim/                # Vim-style copy mode
+├── testing/            # TestTerminal helper
 └── platform/           # Platform-specific code
-    ├── mod.rs
-    ├── linux.rs        # Linux-specific (pty, etc)
-    └── macos.rs        # macOS-specific
 ```
+
+Run `ls crates/ultty/src` when this tree looks stale; the filesystem wins.
 
 ## Key Responsibilities
 
@@ -68,13 +77,15 @@ Scene Graph Changes
 └──────────────┘
 ```
 
-## Conventions
-
-- Commit frequently — make small, atomic commits after each logical unit of work
-
 ## Testing Strategy
 
-- Unit tests for protocol parsing
-- Integration tests with mock TUI client
-- Benchmarks for render performance
-- Visual regression tests (screenshot comparison)
+- Unit tests for protocol and ANSI parsing, inline in the source files
+- Integration tests in `crates/ultty/tests/`, driven by `ultty::testing::TestTerminal`
+- Benchmarks under `crates/ultty/benches/` (`cargo bench -p ultty`)
+- Visual regression through the screenshot smoke scripts; see
+  [docs/visual-regression.md](../../docs/visual-regression.md)
+
+## Output Rules
+
+Diagnostics go through `tracing`. The `ulttyctl` binary is the one place that
+writes to stdout with `println!`, because its stdout is the CLI's result.

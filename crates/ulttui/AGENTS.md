@@ -2,6 +2,10 @@
 
 **Purpose**: TUI framework library that apps link against. Dual-mode: native protocol when in Ultty, ANSI fallback otherwise.
 
+Repository-wide conventions live in [CLAUDE.md](../../CLAUDE.md) and
+[AGENTS.md](../../AGENTS.md). This file covers only what is specific to this
+crate.
+
 ## Structure
 
 ```
@@ -14,32 +18,25 @@ src/
 ├── theme.rs            # Theme system (dark/light presets, thread-local)
 ├── vim/                # Vim keybinding support
 │   └── mod.rs
-├── widgets/            # Built-in widgets
+├── screen.rs           # Screen abstraction shared by both backends
+├── toast.rs            # Transient notifications
+├── widgets/            # Built-in widgets, one module each (28 modules)
 │   ├── mod.rs          # View trait definition
 │   ├── text.rs         # Text, RichText, TextInput
-│   ├── button.rs       # Button
-│   ├── checkbox.rs     # Checkbox
-│   ├── toggle.rs       # Toggle
-│   ├── select.rs       # Select (dropdown)
 │   ├── container.rs    # Column, Row, Stack
-│   ├── scroll.rs       # ScrollView
-│   ├── list.rs         # List (vim-navigable)
-│   ├── table.rs        # Table (headers + rows)
-│   ├── tabs.rs         # Tabs
-│   ├── modal.rs        # Modal dialog
-│   ├── image.rs        # Inline image
-│   ├── progress.rs     # ProgressBar
-│   ├── spinner.rs      # Spinner (loading indicator)
-│   ├── divider.rs      # Divider (horizontal/vertical)
-│   └── badge.rs        # Badge (status indicator)
+│   ├── markdown.rs     # MarkdownView (streaming-aware)
+│   └── ...             # See `ls crates/ulttui/src/widgets`
 ├── layout/             # Layout containers (Column, Row, Stack)
-│   └── mod.rs
+├── app/                # Runner internals
 └── backend/            # Rendering backends
-    ├── mod.rs
     ├── native.rs       # Native protocol (Ultty)
     ├── ansi.rs         # ANSI fallback (via ratatui)
     └── detect.rs       # Auto-detect which backend to use
 ```
+
+Run `ls crates/ulttui/src/widgets` when this tree looks stale; the filesystem
+wins. [docs/WIDGET_REFERENCE.md](../../docs/WIDGET_REFERENCE.md) is the
+user-facing list.
 
 ## Architecture
 
@@ -129,30 +126,35 @@ fn main() -> anyhow::Result<()> {
 ### Display
 - `Text` — Plain text
 - `RichText` — Styled text spans
+- `MarkdownView` — Rendered markdown, with a streaming mode
 - `Image` — Inline RGBA image
 - `ProgressBar` — Horizontal progress bar (0-100%)
 - `Spinner` — Loading indicator (app controls frame via Sub)
 - `Divider` — Horizontal/vertical separator
 - `Badge` — Status indicator (Primary/Success/Error/Warning)
+- `Diff` — Unified diff view
 
 ### Interactive (support `.id()` for focus + events)
 - `Button` — Clickable button
-- `TextInput` — Text input with vim motions
+- `TextInput` — Text input with vim motions and history
 - `Checkbox` — Toggleable checkbox
-- `Toggle` — On/off switch
+- `Toggle` / `BinaryToggle` — On/off switches
 - `Select` — Dropdown select
 
 ### Data
 - `List` — Selectable list with vim navigation
 - `Table` — Headers + selectable rows
 - `Tabs` — Tab bar
+- `Tree` — Expandable tree view
+- `Collapsible` — Expand/collapse section
 
 ### Containers
 - `Column` — Vertical flex
 - `Row` — Horizontal flex
 - `Stack` — Overlay
-- `ScrollView` — Scrollable container with vim navigation
+- `ScrollView` — Scrollable container with vim navigation and search
 - `Modal` — Dialog overlay
+- `Dock` — Edge-anchored container
 
 ## Theme System
 
@@ -183,16 +185,13 @@ Is ULTTY_TERMINAL env var set?
        └──No───► Initialize ratatui, use ANSI rendering
 ```
 
-## Conventions
-
-- Commit frequently — make small, atomic commits after each logical unit of work
-
 ## Testing
 
 ```bash
-cargo test -p ulttui              # All tests (unit + integration + snapshot)
-cargo test -p ulttui --lib        # Unit tests only
-cargo clippy -p ulttui            # Lint
+cargo test -p ulttui                  # All tests (unit + integration + snapshot)
+cargo test -p ulttui --lib            # Unit tests only
+cargo test -p ulttui --test snapshots # Snapshot tests (insta)
+cargo insta review                    # Review snapshot diffs
 ```
 
 Integration tests use `MockBackend` (behind `test-utils` feature) for headless event loop testing.

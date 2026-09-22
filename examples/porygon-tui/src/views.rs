@@ -2,9 +2,7 @@ use std::time::Instant;
 
 use ulttui::event::{Event, Key};
 use ulttui::prelude::*;
-use ulttui::widgets::{parse_unified_diff, DiffKind, RichText, Stack};
-use ultty_protocol::{BorderStyle, Color, Dimension};
-use unicode_width::UnicodeWidthChar;
+use ulttui::widgets::{parse_unified_diff, wrapped_line_count, DiffKind, RichText, Stack};
 
 use crate::sidebar::sidebar_view;
 use crate::types::{ApprovalRequest, FileTreeEntry, ToolStatus};
@@ -168,18 +166,30 @@ pub(crate) fn format_tool_result_with_diff(result: &str) -> String {
     }
 }
 
-pub(crate) fn format_clock() -> String {
+/// Seconds since the Unix epoch, saturating to zero if the clock is before it.
+pub(crate) fn unix_now() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let secs = SystemTime::now()
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_secs()
+}
 
+/// Local broken-down time for a Unix timestamp.
+pub(crate) fn local_time(secs: u64) -> libc::tm {
     let time_t = secs as libc::time_t;
+    // SAFETY: `libc::tm` is a plain C struct of integers and a raw pointer,
+    // for which the all-zero bit pattern is a valid value.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: both pointers refer to live, exclusively borrowed stack values
+    // for the duration of the call; `localtime_r` only writes into `tm`.
     unsafe { libc::localtime_r(&time_t, &mut tm) };
+    tm
+}
 
+pub(crate) fn format_clock() -> String {
+    let tm = local_time(unix_now());
     let h = tm.tm_hour as u64;
     let m = tm.tm_min as u64;
     let s = tm.tm_sec as u64;
@@ -187,17 +197,7 @@ pub(crate) fn format_clock() -> String {
 }
 
 pub(crate) fn format_timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let time_t = secs as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&time_t, &mut tm) };
-
+    let tm = local_time(unix_now());
     let h = tm.tm_hour as u64;
     let m = tm.tm_min as u64;
     format!("{h:02}:{m:02}")
@@ -789,40 +789,6 @@ impl PorygonTui {
             .child(main_content)
             .child(Modal::new().visible(false))
     }
-}
-
-fn wrapped_line_count(text: &str, max_cols: usize) -> usize {
-    if max_cols == 0 {
-        return text.lines().count().max(1);
-    }
-
-    let mut count = 0usize;
-    for line in text.split('\n') {
-        count += line_wrapped_count(line, max_cols);
-    }
-    count.max(1)
-}
-
-fn line_wrapped_count(line: &str, max_cols: usize) -> usize {
-    if line.is_empty() {
-        return 1;
-    }
-
-    let mut lines = 1usize;
-    let mut cols = 0usize;
-    for ch in line.chars() {
-        let width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
-        if cols > 0 && cols + width > max_cols {
-            lines += 1;
-            cols = 0;
-        }
-        cols += width;
-        while cols > max_cols {
-            lines += 1;
-            cols -= max_cols;
-        }
-    }
-    lines
 }
 
 #[cfg(test)]

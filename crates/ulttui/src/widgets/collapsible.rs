@@ -162,6 +162,13 @@ impl View for Collapsible {
         }
     }
 
+    fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
+        visit(self.header.as_ref());
+        if self.expanded {
+            visit(self.body.as_ref());
+        }
+    }
+
     fn is_focusable(&self) -> bool {
         self.id.is_some()
     }

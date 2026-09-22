@@ -730,6 +730,11 @@ impl AnsiParser {
             }
             // Full reset (RIS — ESC c)
             b'c' => {
+                // A hard reset also forgets charset designations (G0/G1 back
+                // to ASCII, shift-in), unlike the per-sequence reset below.
+                self.g0_charset_graphics = false;
+                self.g1_charset_graphics = false;
+                self.using_g1 = false;
                 callback(Action::FullReset);
                 self.reset();
             }

@@ -2,10 +2,13 @@
 
 Consolidated tracker for all ultty/ulttui/porygon-tui work.
 
-**Source plans**:
-- `docs/TECH_DEBT_PLAN.md` — 21 chunks, ~15.5 hrs
-- `docs/PORYGON_VISUAL_PARITY_PLAN.md` — 16 phases (all ✅)
-- `docs/FEATURE_PARITY_EXECUTION.md` — 38 chunks, ~93-125 hrs
+**Source plans** (archived 2026-09-22, no longer maintained):
+- [`docs/archive/TECH_DEBT_PLAN.md`](docs/archive/TECH_DEBT_PLAN.md) — 21 chunks, ~15.5 hrs
+- [`docs/archive/PORYGON_VISUAL_PARITY_PLAN.md`](docs/archive/PORYGON_VISUAL_PARITY_PLAN.md) — 21 checklist items, 9 ticked
+- [`docs/archive/FEATURE_PARITY_EXECUTION.md`](docs/archive/FEATURE_PARITY_EXECUTION.md) — 38 chunks, ~93-125 hrs
+
+Current work is tracked in
+[`docs/ISSUE_BACKLOG_30_60_90.md`](docs/ISSUE_BACKLOG_30_60_90.md).
 
 ---
 

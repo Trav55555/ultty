@@ -1,8 +1,10 @@
 //! ANSI fallback backend using Ratatui.
 
 use std::io::{self, Stdout};
+use std::sync::Once;
 use std::time::Duration;
 
+use crossterm::cursor::Show;
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
@@ -24,6 +26,7 @@ impl AnsiBackend {
     }
 
     pub fn init(&mut self) -> anyhow::Result<()> {
+        install_panic_hook();
         terminal::enable_raw_mode()?;
         io::stdout().execute(EnterAlternateScreen)?;
         io::stdout().execute(crossterm::event::EnableMouseCapture)?;
@@ -36,9 +39,7 @@ impl AnsiBackend {
 
     pub fn shutdown(&mut self) -> anyhow::Result<()> {
         if self.terminal.is_some() {
-            io::stdout().execute(crossterm::event::DisableMouseCapture)?;
-            io::stdout().execute(LeaveAlternateScreen)?;
-            terminal::disable_raw_mode()?;
+            restore_terminal()?;
             self.terminal = None;
         }
         Ok(())
@@ -72,6 +73,39 @@ impl Default for AnsiBackend {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Put the terminal back the way we found it: mouse capture off, main screen,
+/// cooked mode, cursor visible. Safe to call more than once and when nothing
+/// was ever enabled.
+pub fn restore_terminal() -> io::Result<()> {
+    let mut stdout = io::stdout();
+    stdout.execute(crossterm::event::DisableMouseCapture)?;
+    stdout.execute(LeaveAlternateScreen)?;
+    if terminal::is_raw_mode_enabled()? {
+        terminal::disable_raw_mode()?;
+    }
+    stdout.execute(Show)?;
+    Ok(())
+}
+
+/// Restore the terminal before the default panic output is printed.
+///
+/// The release profile uses `panic = "abort"`, so `Drop` impls never run on a
+/// panic; without this hook the shell would be left in raw mode on the
+/// alternate screen with the panic message invisible. Installed once per
+/// process; later calls are no-ops.
+pub fn install_panic_hook() {
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Err(err) = restore_terminal() {
+                tracing::error!("failed to restore terminal in panic hook: {err}");
+            }
+            previous(info);
+        }));
+    });
 }
 
 fn convert_event(event: CrosstermEvent) -> Option<Event> {
@@ -162,6 +196,35 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         })
+    }
+
+    #[test]
+    fn restore_terminal_is_idempotent_without_an_active_session() {
+        // Nothing was enabled, so both calls must be no-ops that succeed.
+        restore_terminal().unwrap();
+        restore_terminal().unwrap();
+    }
+
+    #[test]
+    fn install_panic_hook_is_installed_once_and_chains_previous_hook() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let previous_calls = Arc::new(AtomicUsize::new(0));
+        let counter = previous_calls.clone();
+        std::panic::set_hook(Box::new(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        install_panic_hook();
+        install_panic_hook();
+
+        let result = std::panic::catch_unwind(|| panic!("boom"));
+        assert!(result.is_err());
+        // Our hook restored the terminal and then called the previous hook
+        // exactly once (the second install was a no-op).
+        assert_eq!(previous_calls.load(Ordering::SeqCst), 1);
+        let _ = std::panic::take_hook();
     }
 
     #[test]

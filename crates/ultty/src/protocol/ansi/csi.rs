@@ -3,7 +3,20 @@
 use super::AnsiParser;
 use super::{Action, Mode, State};
 
+/// Maximum number of CSI parameters kept per sequence.
+///
+/// xterm keeps 30; extra parameters are parsed and ignored so a hostile
+/// `CSI 1;1;1;...` can never grow the parameter vector without bound.
+pub const MAX_CSI_PARAMS: usize = 32;
+
 impl AnsiParser {
+    /// Record a finished CSI parameter, ignoring any past [`MAX_CSI_PARAMS`].
+    fn push_csi_param(&mut self, value: u16) {
+        if self.params.len() < MAX_CSI_PARAMS {
+            self.params.push(value);
+        }
+    }
+
     /// CSI entry - just entered CSI sequence.
     pub(super) fn csi_entry<F>(&mut self, byte: u8, callback: &mut F)
     where
@@ -29,7 +42,7 @@ impl AnsiParser {
             }
             // Semicolon with no preceding digit
             b';' => {
-                self.params.push(0);
+                self.push_csi_param(0);
                 self.state = State::CsiParam;
             }
             // Final byte - no parameters
@@ -69,13 +82,14 @@ impl AnsiParser {
             }
             // Semicolon - end current parameter
             b';' => {
-                self.params.push(self.current_param.unwrap_or(0));
+                let value = self.current_param.unwrap_or(0);
+                self.push_csi_param(value);
                 self.current_param = None;
             }
             // Final byte - dispatch
             b'@'..=b'~' => {
                 if let Some(p) = self.current_param {
-                    self.params.push(p);
+                    self.push_csi_param(p);
                 }
                 self.dispatch_csi(byte, callback);
                 self.reset();
@@ -853,6 +867,34 @@ mod tests {
             parse(b"\x1b[1m"),
             vec![Action::SetAttribute(Attribute::Bold)]
         );
+    }
+
+    #[test]
+    fn csi_params_are_capped_and_extra_ones_ignored() {
+        // 100 parameters: only the first MAX_CSI_PARAMS are kept, the
+        // sequence still dispatches, and the parser returns to ground.
+        let mut data = b"\x1b[".to_vec();
+        for _ in 0..100 {
+            data.extend_from_slice(b"1;");
+        }
+        data.extend_from_slice(b"4mX");
+
+        let mut parser = AnsiParser::new();
+        let mut actions = Vec::new();
+        let mut max_params = 0;
+        parser.feed(&data, |a| {
+            actions.push(a);
+        });
+        // Re-run byte by byte to observe the parameter vector while collecting
+        let mut parser = AnsiParser::new();
+        for &byte in &data {
+            parser.feed(&[byte], |_| {});
+            max_params = max_params.max(parser.params.len());
+        }
+
+        assert!(max_params <= super::MAX_CSI_PARAMS);
+        assert!(actions.contains(&Action::SetAttribute(super::super::Attribute::Bold)));
+        assert_eq!(actions.last(), Some(&Action::Print('X')));
     }
 
     #[test]

@@ -130,7 +130,6 @@ impl View for DockLayout {
                     parent,
                     next_id,
                     None,
-                    true,
                 )?));
             }
             current += 1;
@@ -165,7 +164,6 @@ impl View for DockLayout {
                         middle_id,
                         next_id,
                         Some(left_constraints),
-                        true,
                     )?;
                 }
                 if let Some(center) = &self.center {
@@ -181,7 +179,6 @@ impl View for DockLayout {
                         middle_id,
                         next_id,
                         Some(center_constraints),
-                        true,
                     )?;
                 }
                 if let Some(right) = &self.right {
@@ -192,7 +189,6 @@ impl View for DockLayout {
                         middle_id,
                         next_id,
                         Some(right_constraints),
-                        true,
                     )?;
                 }
 
@@ -209,12 +205,26 @@ impl View for DockLayout {
                     parent,
                     next_id,
                     None,
-                    true,
                 )?));
             }
         }
 
         Ok(None)
+    }
+
+    fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
+        for child in [
+            &self.top,
+            &self.left,
+            &self.center,
+            &self.right,
+            &self.bottom,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            visit(child.as_ref());
+        }
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {

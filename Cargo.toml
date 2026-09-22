@@ -13,21 +13,22 @@ members = [
     "examples/form-app",
     "examples/split-panes",
     "examples/async-fetch",
-    "examples/porygon-tui",
     "examples/sysmon",
 ]
+# porygon-tui is a standalone client for a private daemon; it builds from its own
+# directory and is intentionally kept out of the workspace build and test set.
+exclude = ["examples/porygon-tui"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Trav55555/ultty"
-rust-version = "1.75"
+rust-version = "1.85"
 
 [workspace.dependencies]
 # Protocol & Serialization
 bytes = "1.5"
-zerocopy = { version = "0.7", features = ["derive"] }
 
 # Layout
 taffy = "0.5"
@@ -44,7 +45,6 @@ futures-util = "0.3"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json"] }
 
 # GPU Rendering
 wgpu = "0.19"

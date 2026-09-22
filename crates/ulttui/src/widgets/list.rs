@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
-use crate::vim::{VimConfig, VimHandler, VimResult};
+use crate::vim::{KeyParser, VimConfig, VimHandler, VimResult};
 use crate::{impl_vim_ext, impl_vim_handler_accessors};
 use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimState};
 use ultty_protocol::{
@@ -23,6 +23,7 @@ pub struct List<T> {
     selected: usize,
     vim_state: VimState,
     vim_config: VimConfig,
+    key_parser: KeyParser,
     filter_query: Option<String>,
     filtered_indices: Vec<usize>,
 }
@@ -34,6 +35,7 @@ impl<T> Default for List<T> {
             selected: 0,
             vim_state: VimState::new(),
             vim_config: VimConfig::for_list(),
+            key_parser: KeyParser::new(),
             filter_query: None,
             filtered_indices: Vec::new(),
         }
@@ -301,25 +303,17 @@ impl<T: std::fmt::Display> View for List<T> {
         use crate::event::Key;
 
         match key.key {
-            Key::Char('j') | Key::Down => {
-                self.move_selection(1);
-                Some(super::FocusAction::Consumed)
-            }
-            Key::Char('k') | Key::Up => {
-                self.move_selection(-1);
-                Some(super::FocusAction::Consumed)
-            }
-            Key::Char('g') => {
-                self.select_first();
-                Some(super::FocusAction::Consumed)
-            }
-            Key::Char('G') => {
-                self.select_last();
-                Some(super::FocusAction::Consumed)
-            }
-            Key::Tab if key.modifiers.shift => Some(super::FocusAction::Previous),
-            Key::Tab => Some(super::FocusAction::Next),
-            _ => None,
+            Key::Tab if key.modifiers.shift => return Some(super::FocusAction::Previous),
+            Key::Tab => return Some(super::FocusAction::Next),
+            _ => {}
+        }
+
+        // Everything else goes through the persistent vim parser so `gg`,
+        // `G`, `3j` and page motions complete across key events.
+        let vim_key = crate::vim::to_vim_key(&key.key)?;
+        match self.handle_vim_key(&vim_key, crate::vim::to_vim_modifiers(key.modifiers)) {
+            VimResult::Ignored => None,
+            _ => Some(super::FocusAction::Consumed),
         }
     }
 }
@@ -401,8 +395,67 @@ impl_vim_ext!(List<T>, generics: T);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{Key, KeyEvent, Modifiers};
+    use crate::widgets::FocusAction;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    fn key(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            modifiers: Modifiers::default(),
+            focused_id: None,
+        }
+    }
+
+    fn ten_items() -> List<String> {
+        List::new().items((0..10).map(|i| format!("item {i}")).collect())
+    }
+
+    #[test]
+    fn list_on_key_j_k_and_arrows_move_selection() {
+        let mut list = ten_items();
+        assert!(matches!(
+            list.on_key(&key(Key::Char('j'))),
+            Some(FocusAction::Consumed)
+        ));
+        list.on_key(&key(Key::Down));
+        assert_eq!(list.selected_index(), 2);
+        list.on_key(&key(Key::Char('k')));
+        list.on_key(&key(Key::Up));
+        assert_eq!(list.selected_index(), 0);
+    }
+
+    #[test]
+    fn list_on_key_gg_and_shift_g_jump_to_ends() {
+        let mut list = ten_items();
+        list.on_key(&key(Key::Char('G')));
+        assert_eq!(list.selected_index(), 9);
+
+        list.on_key(&key(Key::Char('g')));
+        assert_eq!(list.selected_index(), 9, "lone g must not jump");
+        list.on_key(&key(Key::Char('g')));
+        assert_eq!(list.selected_index(), 0);
+    }
+
+    #[test]
+    fn list_on_key_count_prefix_moves_multiple() {
+        let mut list = ten_items();
+        list.on_key(&key(Key::Char('3')));
+        assert_eq!(list.selected_index(), 0);
+        list.on_key(&key(Key::Char('j')));
+        assert_eq!(list.selected_index(), 3);
+    }
+
+    #[test]
+    fn list_on_key_tab_and_unhandled() {
+        let mut list = ten_items();
+        assert!(matches!(
+            list.on_key(&key(Key::Tab)),
+            Some(FocusAction::Next)
+        ));
+        assert!(list.on_key(&key(Key::Char('q'))).is_none());
+    }
 
     fn render_ansi_text(list: &List<&str>, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);

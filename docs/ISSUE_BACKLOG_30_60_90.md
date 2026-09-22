@@ -1,16 +1,109 @@
 # Ultty Readiness Issue Backlog
 
-**Updated:** 2026-05-29
+**Updated:** 2026-09-22
 **Source plan:** [Ultty Readiness Roadmap](ROADMAP_30_60_90.md)
 **Readiness gates:** [Public Alpha Readiness](alpha-readiness.md)
 
-The GitHub issue tracker is the canonical queue. At the time this backlog was
-refreshed there were no open readiness issues, so this file records the next
-candidate slices to file when work resumes.
+The GitHub issue tracker is the canonical queue. The Active Issues below are
+not filed there yet; file them before starting. Candidate Issues further down
+are slices to file when work resumes.
 
 ## Active Issues
 
-None.
+### 1. Upgrade the graphics, layout, and TUI dependencies
+
+**Problem.** `wgpu 0.19`, `winit 0.29`, `cosmic-text 0.11`, `taffy 0.5`,
+`ratatui 0.29`, and `crossterm 0.28` are all two or more years behind current
+releases. Nothing in the roadmap covers moving off them. They hold open all
+three advisory ignores in [Security Audit](security-audit.md):
+`RUSTSEC-2024-0436` (`paste`, via `ratatui` and `wgpu`/`metal`),
+`RUSTSEC-2026-0002` (`lru`, via `ratatui`), and `RUSTSEC-2026-0097` (`rand`,
+via `tokio-tungstenite`).
+
+**Scope.** Split into one slice per dependency, largest blast radius first.
+
+| Dependency | Files that touch its API |
+|------------|--------------------------|
+| `wgpu` 0.19 -> current | `crates/ultty/src/app/mod.rs`, `app/render.rs`, `renderer/mod.rs`, `renderer/pipeline.rs`, `renderer/atlas.rs`, `renderer/text.rs`, `renderer/image.rs`, `renderer/overlays.rs`, `renderer/panes.rs`, `renderer/screenshot.rs`, `renderer/native_render/mod.rs`, `renderer/native_render/cache.rs`, `renderer/native_render/images.rs` |
+| `winit` 0.29 -> 0.30+ | `crates/ultty/src/app/mod.rs`, `app/input.rs`, `app/control.rs`, `app/wakeup.rs` |
+| `cosmic-text` 0.11 -> current | `crates/ultty/src/renderer/text.rs`, `renderer/atlas.rs` |
+| `taffy` 0.5 -> current | `crates/ultty/src/scene/layout.rs`, `scene/layout/constraints.rs` |
+| `ratatui` 0.29 / `crossterm` 0.28 -> current | `crates/ulttui/src/backend/ansi.rs` plus 30 other files using `ratatui::` types in widget render paths |
+| `tokio-tungstenite` 0.24 -> current | `crates/ulttui` dev-dependency only; carries the vulnerable `rand` |
+
+The `winit` 0.30 move is the sharp edge: it replaces the closure-based
+`EventLoop::run` with the `ApplicationHandler` trait, so the whole event loop,
+wakeup plumbing, and control-socket integration change shape. `wgpu` is the
+largest by file count but mostly mechanical API renames.
+
+**Acceptance.**
+- Each dependency lands as its own commit with `cargo clippy --workspace
+  --all-targets -- -D warnings` and `cargo test --workspace` green.
+- The live smoke gate passes afterwards, with evidence recorded under
+  `docs/releases/evidence/<date>/` or as a `live-smoke.yml` run URL.
+- `scripts/security-audit.sh` runs with zero `--ignore` flags, and the
+  Accepted Warning Advisories table in [Security Audit](security-audit.md) is
+  empty.
+
+### 2. Sign and notarize macOS release artifacts
+
+**Problem.** The release workflow ships unsigned, un-notarized macOS binaries.
+Gatekeeper quarantines them, so every macOS user has to run
+`xattr -d com.apple.quarantine` or use the right-click Open workaround. The
+README and [Release Artifacts](release-artifacts.md) say so, which is honest
+but not a fix. No Apple Developer credentials exist yet.
+
+**Scope.** Obtain an Apple Developer ID Application certificate, store the
+certificate, its password, and an App Store Connect API key as repository
+secrets, then add codesign and notarytool steps to the `x86_64-apple-darwin`
+and `aarch64-apple-darwin` matrix legs of `.github/workflows/release.yml`.
+
+**Acceptance.**
+- `codesign --verify --deep --strict` and `spctl --assess --type execute` both
+  pass on `ultty` and `ulttyctl` extracted from a published tarball.
+- A macOS user can open a downloaded binary with no quarantine workaround.
+- The Gatekeeper notes in README.md and `docs/release-artifacts.md` are
+  replaced with the signing status.
+
+### 3. Durable GUI smoke runner
+
+**Problem.** `.github/workflows/live-smoke.yml` targets a self-hosted
+`[self-hosted, linux, ultty-gui]` runner that was registered temporarily on one
+machine for a single 2026-05-29 run. That registration is not durable, so the
+workflow cannot be dispatched today and the live smoke gate has no home.
+
+**Scope.** Either stand up a persistent GUI runner with a documented
+provisioning recipe, or move the gate onto a hosted runner using a virtual
+display and a software `wgpu` backend (Xvfb or a headless Wayland compositor
+plus `WGPU_BACKEND=gl` or lavapipe). Record whichever path is chosen in
+[Live Smoke Automation](live-smoke-automation.md).
+
+**Acceptance.**
+- `live-smoke.yml` can be dispatched on demand and completes.
+- Three consecutive dispatches on different days pass, showing the runner is
+  not a one-off.
+- The runner setup is reproducible from a checked-in document or script, not
+  from one maintainer's memory.
+
+### 4. Add a `cargo-deny` step to CI
+
+**Problem.** `cargo audit` covers advisories only. Nothing checks licenses,
+banned or duplicated crates, or unexpected registry sources. Now that the
+workspace has two license files and an excluded standalone package, license
+drift is easy to miss.
+
+**Scope.** Add `deny.toml` covering `advisories`, `licenses`, `bans`, and
+`sources`, then add a `cargo-deny` job to `.github/workflows/ci.yml` pinned the
+same way the other jobs are. Reconcile its advisory ignores with
+`scripts/security-audit.sh` so there is one list, not two.
+
+**Not started on purpose.** Tracked here; do not add it until item 1 is far
+enough along that the advisory ignore list is stable.
+
+**Acceptance.**
+- `cargo deny check` passes locally and in CI.
+- The allowed license set is explicit and matches `MIT OR Apache-2.0` plus the
+  licenses of the current dependency tree.
 
 ## Recently Completed Readiness Work
 

@@ -43,8 +43,9 @@ impl Config {
     /// Load configuration from a specific path.
     pub fn load_from_path(path: &PathBuf) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
-        let config: Self = toml::from_str(&contents).map_err(ConfigError::Parse)?;
+        let mut config: Self = toml::from_str(&contents).map_err(ConfigError::Parse)?;
         config.warn_on_duplicate_keybindings();
+        config.font.clamp_size();
         Ok(config)
     }
 
@@ -490,11 +491,41 @@ impl Default for FontConfig {
     }
 }
 
+/// Smallest font size (points) the renderer accepts.
+pub const MIN_FONT_SIZE: f32 = 4.0;
+
+/// Largest font size (points) the renderer accepts.
+pub const MAX_FONT_SIZE: f32 = 128.0;
+
 impl FontConfig {
     /// Check if using the system monospace fallback.
     pub fn is_system_font(&self) -> bool {
         self.family.is_empty()
     }
+
+    /// Clamp `size` into [`MIN_FONT_SIZE`]..=[`MAX_FONT_SIZE`], warning when
+    /// the configured value was out of range or not a number.
+    ///
+    /// A zero, negative, NaN or huge size would give zero-width cells and
+    /// nonsensical grid dimensions.
+    pub fn clamp_size(&mut self) {
+        let clamped = clamp_font_size(self.size);
+        if clamped != self.size {
+            warn!(
+                "font.size {} is out of range; using {} (allowed {}..={})",
+                self.size, clamped, MIN_FONT_SIZE, MAX_FONT_SIZE
+            );
+            self.size = clamped;
+        }
+    }
+}
+
+/// Clamp a font size into the supported range, mapping NaN to the default.
+pub fn clamp_font_size(size: f32) -> f32 {
+    if size.is_nan() {
+        return FontConfig::default().size;
+    }
+    size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
 }
 
 /// Keybinding configuration.
@@ -1040,6 +1071,33 @@ copy = "ctrl+c"
         assert!(config.passthrough);
         assert!(config.auto_detect);
         assert!(config.session_name.is_none());
+    }
+
+    #[test]
+    fn font_size_is_clamped_to_sane_range() {
+        assert_eq!(clamp_font_size(0.0), MIN_FONT_SIZE);
+        assert_eq!(clamp_font_size(-3.0), MIN_FONT_SIZE);
+        assert_eq!(clamp_font_size(1.0e9), MAX_FONT_SIZE);
+        assert_eq!(clamp_font_size(f32::NAN), FontConfig::default().size);
+        assert_eq!(clamp_font_size(14.0), 14.0);
+
+        let mut font = FontConfig {
+            size: 0.0,
+            ..Default::default()
+        };
+        font.clamp_size();
+        assert_eq!(font.size, MIN_FONT_SIZE);
+    }
+
+    #[test]
+    fn loaded_config_clamps_font_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[font]\nsize = 0.0\n").unwrap();
+
+        let config = Config::load_from_path(&path).unwrap();
+
+        assert_eq!(config.font.size, MIN_FONT_SIZE);
     }
 
     #[test]

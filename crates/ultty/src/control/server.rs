@@ -247,6 +247,14 @@ fn remove_stale_socket(socket_path: &Path) -> io::Result<()> {
     }
 }
 
+/// Parse one client request.
+///
+/// A request starting with `{` is JSON: either a [`ControlEnvelope`] or a
+/// bare [`ControlRequest`]. Anything else is a whitespace-separated text
+/// command such as `send-text hello`. A text command may carry a leading
+/// `token <hex> ` prefix (for example `token abc123 send-text hello`), which
+/// authenticates the connection and parses into
+/// [`ControlRequest::WithToken`]; a malformed prefix rejects the request.
 fn parse_request(data: &[u8]) -> Option<ParsedControlRequest> {
     let text = std::str::from_utf8(data).ok()?.trim();
 
@@ -266,10 +274,49 @@ fn parse_request(data: &[u8]) -> Option<ParsedControlRequest> {
             });
     }
 
+    let request = parse_text_request(text)?;
+
+    Some(ParsedControlRequest {
+        request,
+        output_format: OutputFormat::Text,
+    })
+}
+
+/// Parse a text-mode command line, honouring an optional `token <hex>` prefix.
+fn parse_text_request(text: &str) -> Option<ControlRequest> {
+    let (first, after_first) = split_word(text);
+    if first != "token" {
+        return parse_text_command(text);
+    }
+
+    let (token, command) = split_word(after_first);
+    let token_is_hex = !token.is_empty() && token.bytes().all(|b| b.is_ascii_hexdigit());
+    if !token_is_hex || command.is_empty() {
+        return None;
+    }
+
+    // `parse_text_command` has no `token` arm, so the prefix cannot nest.
+    let request = parse_text_command(command)?;
+    Some(ControlRequest::WithToken {
+        token: token.to_string(),
+        request: Box::new(request),
+    })
+}
+
+/// Split off the first whitespace-delimited word; both halves are trimmed
+/// of leading whitespace.
+fn split_word(text: &str) -> (&str, &str) {
+    let text = text.trim_start();
+    let end = text.find(char::is_whitespace).unwrap_or(text.len());
+    (&text[..end], text[end..].trim_start())
+}
+
+/// Parse a text-mode command without any authentication prefix.
+fn parse_text_command(text: &str) -> Option<ControlRequest> {
     let mut parts = text.split_whitespace();
     let cmd = parts.next()?;
 
-    let request = match cmd {
+    match cmd {
         "ping" => Some(ControlRequest::Ping),
         "version" => Some(ControlRequest::Version),
         "info" => Some(ControlRequest::GetInfo),
@@ -383,12 +430,7 @@ fn parse_request(data: &[u8]) -> Option<ParsedControlRequest> {
             Some(ControlRequest::Authenticate { token })
         }
         _ => None,
-    }?;
-
-    Some(ParsedControlRequest {
-        request,
-        output_format: OutputFormat::Text,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -644,6 +686,49 @@ mod tests {
     #[test]
     fn parse_unknown_returns_none() {
         assert_eq!(parse_request_only(b"nonexistent-command"), None);
+    }
+
+    #[test]
+    fn parse_token_prefix_wraps_request_in_with_token() {
+        let parsed = parse_request(b"token abc123 send-text hello world").unwrap();
+
+        assert_eq!(
+            parsed.request,
+            ControlRequest::WithToken {
+                token: "abc123".to_string(),
+                request: Box::new(ControlRequest::SendText {
+                    text: "hello world".to_string()
+                }),
+            }
+        );
+        assert_eq!(parsed.output_format, OutputFormat::Text);
+    }
+
+    #[test]
+    fn parse_token_prefix_tolerates_extra_whitespace() {
+        assert_eq!(
+            parse_request_only(b"  token   0F  ping \n"),
+            Some(ControlRequest::WithToken {
+                token: "0F".to_string(),
+                request: Box::new(ControlRequest::Ping),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_token_prefix_rejects_malformed_prefixes() {
+        // No token, no command.
+        assert_eq!(parse_request_only(b"token"), None);
+        // Token without a command.
+        assert_eq!(parse_request_only(b"token abc123"), None);
+        // Token is not hex.
+        assert_eq!(parse_request_only(b"token xyz ping"), None);
+        // Command after the prefix is unknown.
+        assert_eq!(parse_request_only(b"token abc123 nonexistent"), None);
+        // Prefix cannot nest.
+        assert_eq!(parse_request_only(b"token abc123 token abc123 ping"), None);
+        // "token" must be its own word.
+        assert_eq!(parse_request_only(b"tokenabc123 ping"), None);
     }
 
     #[test]

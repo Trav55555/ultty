@@ -268,12 +268,22 @@ pub async fn fetch_status(
     status.step = body.step.unwrap_or(status.step);
     status.agent_name = body.agent_name.unwrap_or(status.agent_name);
 
-    // Get system stats
+    // Get system stats. Daemon-reported values are untrusted input: clamp
+    // them into 0..=1 so the sidebar bars never underflow.
     let (cpu, ram) = get_system_stats();
-    status.cpu_usage = body.cpu_usage.unwrap_or(cpu);
-    status.ram_usage = body.ram_usage.unwrap_or(ram);
+    status.cpu_usage = unit_fraction(body.cpu_usage.unwrap_or(cpu));
+    status.ram_usage = unit_fraction(body.ram_usage.unwrap_or(ram));
 
     Ok(status)
+}
+
+/// Clamp a usage value into `0.0..=1.0`, treating NaN as zero.
+pub(crate) fn unit_fraction(value: f64) -> f64 {
+    if value.is_nan() {
+        0.0
+    } else {
+        value.clamp(0.0, 1.0)
+    }
 }
 
 fn get_system_stats() -> (f64, f64) {
@@ -284,8 +294,12 @@ fn get_system_stats() -> (f64, f64) {
     {
         // CPU usage from loadavg (1 min)
         let mut load = [0.0; 1];
+        // SAFETY: `load` is a one-element array and we ask for at most one
+        // sample, so getloadavg never writes past the buffer.
         if unsafe { libc::getloadavg(load.as_mut_ptr(), 1) } != -1 {
             // Normalize by number of cores
+            // SAFETY: sysconf only reads its integer argument and has no
+            // memory-safety preconditions.
             let cores = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as f64;
             cpu = (load[0] / cores).clamp(0.0, 1.0);
         }
@@ -1331,10 +1345,11 @@ impl PorygonTui {
                     Cmd::none()
                 } else {
                     self.started = true;
-                    Cmd::batch(vec![
-                        Cmd::PushScreen(Box::new(SplashScreen::new())),
-                        Cmd::message(Msg::PollWeather),
-                    ])
+                    let mut cmds = vec![Cmd::PushScreen(Box::new(SplashScreen::new()))];
+                    if self.weather_enabled {
+                        cmds.push(Cmd::message(Msg::PollWeather));
+                    }
+                    Cmd::batch(cmds)
                 }
             }
             Msg::SendMessage => {
@@ -1614,6 +1629,9 @@ impl PorygonTui {
                 self.status.ram_usage = ram;
                 Cmd::none()
             }
+            // Weather is opt-in (PORYGON_WEATHER=1): it sends the user's IP to
+            // a third-party geolocation service.
+            Msg::PollWeather if !self.weather_enabled => Cmd::none(),
             Msg::PollWeather => {
                 let client = self.client.clone();
                 Cmd::spawn(async move {

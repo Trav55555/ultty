@@ -7,40 +7,49 @@ use crate::cmd::Cmd;
 
 impl<A: Application> App<A> {
     pub(super) fn process_cmd(&mut self, cmd: Cmd<A::Message>, rt: &Runtime) {
-        const MAX_ITERATIONS: usize = 100;
-        let mut stack = vec![cmd];
-        let mut iterations = 0;
+        // Bound on how deep a `Cmd::Message -> update -> Cmd::Message` chain
+        // may recurse within one call. Messages beyond the bound are deferred
+        // to the queue (processed on a later drain) rather than dropped, so a
+        // wide batch of independent messages is never truncated.
+        const MAX_CHAIN_DEPTH: usize = 100;
+        let mut stack = vec![(cmd, 0usize)];
 
-        while let Some(cmd) = stack.pop() {
+        while let Some((cmd, depth)) = stack.pop() {
             match cmd {
                 Cmd::None => {}
                 Cmd::Message(msg) => {
-                    iterations += 1;
-                    if iterations > MAX_ITERATIONS {
+                    if depth >= MAX_CHAIN_DEPTH {
                         tracing::warn!(
-                            "process_cmd hit MAX_ITERATIONS ({}); recursive Cmd::Message chain truncated",
-                            MAX_ITERATIONS,
+                            "process_cmd: Cmd::Message chain exceeded depth {}; deferring to next tick",
+                            MAX_CHAIN_DEPTH,
                         );
-                        return;
+                        self.msg_queue.push_back(msg);
+                        continue;
                     }
                     let next_cmd = self.app.update(msg);
-                    stack.push(next_cmd);
+                    stack.push((next_cmd, depth + 1));
                 }
                 Cmd::Batch(cmds) => {
                     for cmd in cmds.into_iter().rev() {
-                        stack.push(cmd);
+                        stack.push((cmd, depth));
                     }
                 }
                 Cmd::Spawn(future) => {
-                    let handle = rt.spawn(future);
-                    self.spawn_handles.push(handle);
+                    self.spawn_handles.push((None, rt.spawn(future)));
+                }
+                Cmd::SpawnWithId { id, future } => {
+                    self.cancel_spawn(&id);
+                    self.spawn_handles.push((Some(id), rt.spawn(future)));
+                }
+                Cmd::CancelSpawn { id } => {
+                    self.cancel_spawn(&id);
                 }
                 Cmd::After(duration, f) => {
                     let handle = rt.spawn(async move {
                         tokio::time::sleep(duration).await;
                         f()
                     });
-                    self.spawn_handles.push(handle);
+                    self.spawn_handles.push((None, handle));
                 }
                 Cmd::Subscribe { id, stream } => {
                     if let Some(handle) = self.cmd_subscription_handles.remove(&id) {
@@ -85,20 +94,36 @@ impl<A: Application> App<A> {
         }
     }
 
+    /// Abort and forget the named spawned task, if it is still tracked.
+    fn cancel_spawn(&mut self, id: &str) {
+        if let Some(index) = self
+            .spawn_handles
+            .iter()
+            .position(|(name, _)| name.as_deref() == Some(id))
+        {
+            let (_, handle) = self.spawn_handles.swap_remove(index);
+            handle.abort();
+        }
+    }
+
+    /// Collect messages from finished spawned tasks, pruning their handles.
     pub(super) fn poll_spawned_tasks(&mut self, rt: &Runtime) -> bool {
         let mut produced_messages = false;
         let mut index = 0;
         while index < self.spawn_handles.len() {
-            if self.spawn_handles[index].is_finished() {
-                let handle = self.spawn_handles.swap_remove(index);
+            if self.spawn_handles[index].1.is_finished() {
+                let (id, handle) = self.spawn_handles.swap_remove(index);
                 // is_finished() == true guarantees block_on returns immediately.
                 match rt.block_on(handle) {
                     Ok(msg) => {
                         self.msg_queue.push_back(msg);
                         produced_messages = true;
                     }
+                    Err(e) if e.is_cancelled() => {
+                        tracing::debug!("Spawned task {:?} was cancelled", id);
+                    }
                     Err(e) => {
-                        tracing::warn!("Spawned task panicked: {}", e);
+                        tracing::warn!("Spawned task {:?} panicked: {}", id, e);
                     }
                 }
             } else {

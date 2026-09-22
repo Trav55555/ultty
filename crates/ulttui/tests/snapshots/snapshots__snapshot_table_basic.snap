@@ -3,8 +3,13 @@ source: crates/ulttui/tests/snapshots.rs
 expression: output
 ---
 ┌Table─────────────────────────────────┐
-│Name            Age         City      │
-│                                      │
-│Alice           30          NYC       │
-│Bob             25          LA        │
+│Name            Age   City            │
+│Alice           30    NYC             │
+│Bob             25    LA              │
+│Carol           35    Chicago         │
 └──────────────────────────────────────┘
+-- styles --
+1:1-15 fg=Rgb(97, 175, 239) bg=Reset mod=BOLD
+1:17-21 fg=Rgb(97, 175, 239) bg=Reset mod=BOLD
+1:23-32 fg=Rgb(97, 175, 239) bg=Reset mod=BOLD
+2:1-38 fg=Rgb(30, 30, 46) bg=Rgb(97, 175, 239) mod=BOLD

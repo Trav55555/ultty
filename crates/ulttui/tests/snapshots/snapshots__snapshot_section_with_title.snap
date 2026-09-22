@@ -4,3 +4,9 @@ expression: output
 ---
 My Section
 Body text
+-- styles --
+0:0-9 fg=Rgb(205, 214, 244) bg=Rgb(30, 30, 46) mod=BOLD
+0:10-29 fg=Reset bg=Rgb(30, 30, 46) mod=NONE
+1:0-29 fg=Reset bg=Rgb(30, 30, 46) mod=NONE
+2:0-29 fg=Reset bg=Rgb(30, 30, 46) mod=NONE
+3:0-29 fg=Reset bg=Rgb(30, 30, 46) mod=NONE

@@ -7,7 +7,7 @@ use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator
 use ultty_protocol::{Key, Modifiers};
 
 /// Parser for vim key sequences.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct KeyParser {
     /// Pending character for f/F/t/T commands.
     pending_find: Option<FindType>,

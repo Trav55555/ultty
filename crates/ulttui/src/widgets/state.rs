@@ -1,5 +1,8 @@
 //! Shared state widgets for empty, loading, and error UI.
 
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
@@ -11,6 +14,19 @@ use crate::theme::{to_ratatui_color, Theme};
 use ultty_protocol::{Content, SpinnerStyle, SpinnerWidget, Style as ProtoStyle, WidgetContent};
 
 const LOADING_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const LOADING_FRAME_PERIOD: Duration = Duration::from_millis(80);
+
+/// Spinner frame for the given time since the animation epoch.
+fn frame_for_elapsed(elapsed: Duration) -> usize {
+    let ticks = elapsed.as_millis() / LOADING_FRAME_PERIOD.as_millis();
+    (ticks % LOADING_FRAMES.len() as u128) as usize
+}
+
+/// Process-wide animation epoch so every spinner shares one phase.
+fn clock_frame() -> usize {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    frame_for_elapsed(EPOCH.get_or_init(Instant::now).elapsed())
+}
 
 /// A reusable empty-state widget.
 #[derive(Debug, Clone)]
@@ -72,24 +88,39 @@ impl View for EmptyState {
     }
 }
 
-/// A reusable loading-state widget.
+/// A reusable loading-state widget (spinner plus label).
+///
+/// Animation differs by backend:
+/// - **Native (Ultty)**: the terminal animates the spinner widget itself; no
+///   app involvement is needed.
+/// - **ANSI**: each render picks the frame from a monotonic clock, so the
+///   spinner advances whenever the app re-renders. The runner only renders
+///   when something changed, so an otherwise idle screen needs a re-render
+///   trigger such as `Sub::every(Duration::from_millis(80), ..)` to animate
+///   smoothly. Use [`LoadingState::frame`] to pin a specific frame instead
+///   (for example in snapshot tests).
 #[derive(Debug, Clone)]
 pub struct LoadingState {
     label: String,
-    frame: usize,
+    frame: Option<usize>,
 }
 
 impl LoadingState {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            frame: 0,
+            frame: None,
         }
     }
 
+    /// Pin the spinner to a specific frame instead of following the clock.
     pub fn frame(mut self, frame: usize) -> Self {
-        self.frame = frame % LOADING_FRAMES.len();
+        self.frame = Some(frame % LOADING_FRAMES.len());
         self
+    }
+
+    fn current_frame(&self) -> usize {
+        self.frame.unwrap_or_else(clock_frame)
     }
 }
 
@@ -113,7 +144,7 @@ impl View for LoadingState {
 
         let theme = Theme::current();
         let style = Style::default().fg(to_ratatui_color(theme.primary));
-        let text = format!("{} {}", LOADING_FRAMES[self.frame], self.label);
+        let text = format!("{} {}", LOADING_FRAMES[self.current_frame()], self.label);
         frame.render_widget(Paragraph::new(text).style(style), area);
     }
 }
@@ -213,7 +244,20 @@ mod tests {
     #[test]
     fn loading_frame_wraps() {
         let loading = LoadingState::new("Loading").frame(LOADING_FRAMES.len() + 2);
-        assert_eq!(loading.frame, 2);
+        assert_eq!(loading.current_frame(), 2);
+    }
+
+    #[test]
+    fn loading_frame_advances_with_clock_when_not_pinned() {
+        assert_eq!(frame_for_elapsed(Duration::ZERO), 0);
+        assert_eq!(frame_for_elapsed(LOADING_FRAME_PERIOD), 1);
+        assert_eq!(frame_for_elapsed(LOADING_FRAME_PERIOD * 3), 3);
+        let full_cycle = LOADING_FRAME_PERIOD * LOADING_FRAMES.len() as u32;
+        assert_eq!(frame_for_elapsed(full_cycle), 0);
+        assert_eq!(frame_for_elapsed(full_cycle + LOADING_FRAME_PERIOD * 2), 2);
+
+        let unpinned = LoadingState::new("Loading");
+        assert!(unpinned.current_frame() < LOADING_FRAMES.len());
     }
 
     #[test]

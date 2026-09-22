@@ -79,7 +79,7 @@ impl View for Select {
 
     fn style(&self) -> ultty_protocol::Style {
         let theme = Theme::current();
-        let is_focused = super::register_and_check_focus(self.widget_id());
+        let is_focused = super::is_widget_focused(self.widget_id());
         let fg = if is_focused {
             theme.control.indicator
         } else {
@@ -89,7 +89,7 @@ impl View for Select {
     }
 
     fn content(&self) -> ultty_protocol::Content {
-        let is_focused = super::register_and_check_focus(self.widget_id());
+        let is_focused = super::is_widget_focused(self.widget_id());
         let focus_prefix = if is_focused { ">> " } else { "" };
         let text = if self.expanded {
             let mut lines = Vec::new();
@@ -159,14 +159,7 @@ impl View for Select {
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         use ratatui::text::Span;
 
-        // Register with focus manager if we have an ID
-        if let Some(id) = self.widget_id() {
-            crate::focus::FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
-        }
-        let is_focused = self
-            .widget_id()
-            .map(|id| crate::focus::FocusManager::with_current(|fm| fm.is_focused(id)))
-            .unwrap_or(false);
+        let is_focused = super::is_widget_focused(self.widget_id());
 
         let theme = Theme::current();
         if self.expanded {

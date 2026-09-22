@@ -1,3 +1,6 @@
+> Historical document, archived 2026-09-22. Not maintained.
+> See [docs/ISSUE_BACKLOG_30_60_90.md](../ISSUE_BACKLOG_30_60_90.md) for current work.
+
 # Feature Parity Plan: porygon-tui → Definitive AI Agent TUI
 
 **Goal**: Transform porygon-tui from a proof-of-concept into the definitive AI agent terminal experience, surpassing OpenCode, OpenAI Codex CLI, and the existing Python Textual TUI.

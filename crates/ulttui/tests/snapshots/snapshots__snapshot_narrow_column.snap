@@ -4,3 +4,5 @@ expression: output
 ---
 Hello
 [ OK
+-- styles --
+1:0-4 fg=Rgb(205, 214, 244) bg=Rgb(69, 71, 90) mod=BOLD

@@ -7,7 +7,7 @@ use ratatui::Frame;
 
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
-use crate::vim::{VimConfig, VimHandler, VimResult};
+use crate::vim::{KeyParser, VimConfig, VimHandler, VimResult};
 use crate::{impl_vim_ext, impl_vim_handler_accessors};
 use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimState};
 
@@ -189,6 +189,7 @@ pub struct TextInput {
     history: super::input_history::InputHistory,
     vim_state: VimState,
     vim_config: VimConfig,
+    key_parser: KeyParser,
 }
 
 impl Default for TextInput {
@@ -204,6 +205,7 @@ impl Default for TextInput {
             history: Default::default(),
             vim_state: VimState::new(),
             vim_config: VimConfig::for_text_input(),
+            key_parser: KeyParser::new(),
         }
     }
 }
@@ -224,7 +226,7 @@ impl TextInput {
 
     pub fn value(mut self, value: impl Into<String>) -> Self {
         self.value = value.into();
-        self.cursor = self.value.len();
+        self.cursor = self.value.chars().count();
         self
     }
 
@@ -293,6 +295,7 @@ impl TextInput {
     fn move_cursor(&mut self, motion: &VimMotion, count: usize) {
         let chars: Vec<char> = self.value.chars().collect();
         let len = chars.len();
+        self.cursor = self.cursor.min(len);
 
         for _ in 0..count {
             match motion {
@@ -350,23 +353,23 @@ impl TextInput {
                     self.cursor = self.move_to_line(&chars, self.cursor, -1);
                 }
                 VimMotion::FindChar(c) => {
-                    if let Some(pos) = chars[self.cursor + 1..].iter().position(|ch| ch == c) {
-                        self.cursor = self.cursor + 1 + pos;
+                    if let Some(found) = find_char_after(&chars, self.cursor, *c) {
+                        self.cursor = found;
                     }
                 }
                 VimMotion::FindCharBack(c) => {
-                    if let Some(pos) = chars[..self.cursor].iter().rposition(|ch| ch == c) {
-                        self.cursor = pos;
+                    if let Some(found) = find_char_before(&chars, self.cursor, *c) {
+                        self.cursor = found;
                     }
                 }
                 VimMotion::TillChar(c) => {
-                    if let Some(pos) = chars[self.cursor + 1..].iter().position(|ch| ch == c) {
-                        self.cursor += pos;
+                    if let Some(found) = find_char_after(&chars, self.cursor, *c) {
+                        self.cursor = found - 1;
                     }
                 }
                 VimMotion::TillCharBack(c) => {
-                    if let Some(pos) = chars[..self.cursor].iter().rposition(|ch| ch == c) {
-                        self.cursor = pos + 1;
+                    if let Some(found) = find_char_before(&chars, self.cursor, *c) {
+                        self.cursor = found + 1;
                     }
                 }
                 _ => {}
@@ -435,6 +438,7 @@ impl TextInput {
     }
 
     fn find_line_start(&self, chars: &[char], pos: usize) -> usize {
+        let pos = pos.min(chars.len());
         chars[..pos]
             .iter()
             .rposition(|c| *c == '\n')
@@ -443,6 +447,7 @@ impl TextInput {
     }
 
     fn find_line_end(&self, chars: &[char], pos: usize) -> usize {
+        let pos = pos.min(chars.len());
         chars[pos..]
             .iter()
             .position(|c| *c == '\n')
@@ -481,12 +486,23 @@ impl TextInput {
 
     fn delete_range(&mut self, start: usize, end: usize) -> String {
         let chars: Vec<char> = self.value.chars().collect();
+        let (start, end) = clamp_range(start, end, chars.len());
         let deleted: String = chars[start..end].iter().collect();
         self.value = chars[..start].iter().chain(chars[end..].iter()).collect();
         if self.cursor > start {
             self.cursor = start;
         }
         deleted
+    }
+
+    /// Replace `start..end` (clamped to the value) with `map` applied to it.
+    fn map_range(&mut self, start: usize, end: usize, map: impl Fn(char) -> String) {
+        let chars: Vec<char> = self.value.chars().collect();
+        let (start, end) = clamp_range(start, end, chars.len());
+        let mapped: String = chars[start..end].iter().map(|c| map(*c)).collect();
+        self.value = chars[..start].iter().collect::<String>()
+            + &mapped
+            + &chars[end..].iter().collect::<String>();
     }
 
     fn apply_operator(&mut self, operator: &VimOperator, start: usize, end: usize) -> VimResult {
@@ -508,25 +524,11 @@ impl TextInput {
             }
             VimOperator::Yank => VimResult::Handled,
             VimOperator::Uppercase => {
-                let chars: Vec<char> = self.value.chars().collect();
-                let upper: String = chars[start..end]
-                    .iter()
-                    .flat_map(|c| c.to_uppercase())
-                    .collect();
-                self.value = chars[..start].iter().collect::<String>()
-                    + &upper
-                    + &chars[end..].iter().collect::<String>();
+                self.map_range(start, end, |c| c.to_uppercase().collect());
                 VimResult::Handled
             }
             VimOperator::Lowercase => {
-                let chars: Vec<char> = self.value.chars().collect();
-                let lower: String = chars[start..end]
-                    .iter()
-                    .flat_map(|c| c.to_lowercase())
-                    .collect();
-                self.value = chars[..start].iter().collect::<String>()
-                    + &lower
-                    + &chars[end..].iter().collect::<String>();
+                self.map_range(start, end, |c| c.to_lowercase().collect());
                 VimResult::Handled
             }
             _ => VimResult::Ignored,
@@ -594,7 +596,7 @@ impl View for TextInput {
     }
 
     fn content(&self) -> ultty_protocol::Content {
-        let is_focused = super::register_and_check_focus(self.widget_id());
+        let is_focused = super::is_widget_focused(self.widget_id());
         let focus_prefix = if is_focused { ">> " } else { "" };
         let mode_indicator = self.mode_indicator();
         ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(
@@ -616,14 +618,7 @@ impl View for TextInput {
         use ratatui::text::Span;
         use ratatui::widgets::{Block, Borders};
 
-        // Register with focus manager if we have an ID
-        if let Some(id) = self.widget_id() {
-            crate::focus::FocusManager::with_current_mut(|fm| fm.register(id.to_string()));
-        }
-        let is_focused = self
-            .widget_id()
-            .map(|id| crate::focus::FocusManager::with_current(|fm| fm.is_focused(id)))
-            .unwrap_or(false);
+        let is_focused = super::is_widget_focused(self.widget_id());
 
         let theme = Theme::current();
         let (display_text, style) = if self.value.is_empty() {
@@ -666,18 +661,21 @@ impl View for TextInput {
     fn on_key(&mut self, key: &crate::event::KeyEvent) -> Option<super::FocusAction> {
         use crate::event::Key;
 
+        match key.key {
+            Key::Tab if key.modifiers.shift => return Some(super::FocusAction::Previous),
+            Key::Tab => return Some(super::FocusAction::Next),
+            _ => {}
+        }
+
         if self.vim_state.mode == VimMode::Insert {
             match key.key {
-                Key::Escape => {
-                    self.vim_state.mode = VimMode::Normal;
-                    return Some(super::FocusAction::Consumed);
-                }
                 Key::Char(c) => {
                     let chars: Vec<char> = self.value.chars().collect();
-                    let before: String = chars[..self.cursor].iter().collect();
-                    let after: String = chars[self.cursor..].iter().collect();
+                    let at = self.cursor.min(chars.len());
+                    let before: String = chars[..at].iter().collect();
+                    let after: String = chars[at..].iter().collect();
                     self.value = format!("{}{}{}", before, c, after);
-                    self.cursor += 1;
+                    self.cursor = at + 1;
                     self.history.reset();
                     return Some(super::FocusAction::Consumed);
                 }
@@ -698,22 +696,18 @@ impl View for TextInput {
                 {
                     return Some(super::FocusAction::Consumed);
                 }
-                Key::Tab if key.modifiers.shift => return Some(super::FocusAction::Previous),
-                Key::Tab => return Some(super::FocusAction::Next),
-                _ => {}
-            }
-        } else {
-            match key.key {
-                Key::Char('i') => {
-                    self.vim_state.mode = VimMode::Insert;
-                    return Some(super::FocusAction::Consumed);
-                }
-                Key::Tab if key.modifiers.shift => return Some(super::FocusAction::Previous),
-                Key::Tab => return Some(super::FocusAction::Next),
                 _ => {}
             }
         }
-        None
+
+        // Normal, visual and search modes (and Escape in insert mode) go
+        // through the persistent vim parser so multi-key sequences such as
+        // `gg`, `dw`, `3l` and `f{c}` complete across key events.
+        let vim_key = crate::vim::to_vim_key(&key.key)?;
+        match self.handle_vim_key(&vim_key, crate::vim::to_vim_modifiers(key.modifiers)) {
+            VimResult::Ignored => None,
+            _ => Some(super::FocusAction::Consumed),
+        }
     }
 }
 
@@ -849,13 +843,32 @@ impl VimHandler for TextInput {
             return self.apply_operator(&command.operator, start_pos, self.cursor);
         }
 
-        self.vim_state.mode.is_visual();
-
         VimResult::Handled
     }
 }
 
 impl_vim_ext!(TextInput, VimConfig::for_text_input());
+
+/// Clamp `start..end` into `0..=len`, keeping `start <= end`.
+fn clamp_range(start: usize, end: usize, len: usize) -> (usize, usize) {
+    let start = start.min(len);
+    (start, end.min(len).max(start))
+}
+
+/// Index of the first `target` strictly after `cursor`, if any.
+fn find_char_after(chars: &[char], cursor: usize, target: char) -> Option<usize> {
+    let from = cursor.saturating_add(1).min(chars.len());
+    chars[from..]
+        .iter()
+        .position(|ch| *ch == target)
+        .map(|pos| from + pos)
+}
+
+/// Index of the last `target` strictly before `cursor`, if any.
+fn find_char_before(chars: &[char], cursor: usize, target: char) -> Option<usize> {
+    let to = cursor.min(chars.len());
+    chars[..to].iter().rposition(|ch| *ch == target)
+}
 
 #[cfg(test)]
 mod tests {
@@ -912,6 +925,145 @@ mod tests {
 
         input.move_cursor(&VimMotion::Right, 3);
         assert_eq!(input.selection(), Some((0, 3)));
+    }
+
+    #[test]
+    fn value_builder_counts_chars_not_bytes() {
+        let input = TextInput::new().value("héllo");
+        assert_eq!(input.cursor_position(), 5);
+    }
+
+    #[test]
+    fn motions_on_multibyte_value_do_not_panic() {
+        let motions = [
+            VimMotion::Left,
+            VimMotion::Right,
+            VimMotion::Word,
+            VimMotion::WordEnd,
+            VimMotion::WordBack,
+            VimMotion::LineStart,
+            VimMotion::LineEnd,
+            VimMotion::LineFirstNonBlank,
+            VimMotion::DocumentStart,
+            VimMotion::DocumentEnd,
+            VimMotion::Up,
+            VimMotion::Down,
+            VimMotion::FindChar('l'),
+            VimMotion::FindCharBack('h'),
+            VimMotion::TillChar('o'),
+            VimMotion::TillCharBack('é'),
+        ];
+        for motion in motions {
+            let mut input = TextInput::new().value("héllo").multiline();
+            input.move_cursor(&motion, 3);
+            assert!(input.cursor_position() <= 5, "{motion:?}");
+        }
+    }
+
+    #[test]
+    fn find_char_on_empty_input_does_not_panic() {
+        let mut input = TextInput::new();
+        input.move_cursor(&VimMotion::FindChar('x'), 1);
+        input.move_cursor(&VimMotion::TillChar('x'), 1);
+        input.move_cursor(&VimMotion::FindCharBack('x'), 1);
+        input.move_cursor(&VimMotion::TillCharBack('x'), 1);
+        assert_eq!(input.cursor_position(), 0);
+    }
+
+    #[test]
+    fn till_char_stops_before_match() {
+        let mut input = TextInput::new().value("héllo");
+        input.cursor = 0;
+        input.move_cursor(&VimMotion::TillChar('o'), 1);
+        assert_eq!(input.cursor_position(), 3);
+        input.move_cursor(&VimMotion::TillCharBack('h'), 1);
+        assert_eq!(input.cursor_position(), 1);
+    }
+
+    #[test]
+    fn range_operators_clamp_out_of_range_indices() {
+        let mut input = TextInput::new().value("héllo");
+        input.delete_range(3, 99);
+        assert_eq!(input.current_value(), "hél");
+
+        let mut input = TextInput::new().value("héllo");
+        input.apply_operator(&VimOperator::Uppercase, 2, 99);
+        assert_eq!(input.current_value(), "héLLO");
+
+        let mut input = TextInput::new().value("HÉLLO");
+        input.apply_operator(&VimOperator::Lowercase, 99, 2);
+        assert_eq!(input.current_value(), "HÉllo");
+        assert!(input.is_cursor_on_first_line());
+    }
+
+    #[test]
+    fn insert_with_stale_cursor_appends_at_end() {
+        let mut input = TextInput::new().value("ab");
+        input.vim_state.mode = VimMode::Insert;
+        input.cursor = 10;
+        input.on_key(&key_event(Key::Char('c')));
+        assert_eq!(input.current_value(), "abc");
+        assert_eq!(input.cursor_position(), 3);
+    }
+
+    #[test]
+    fn normal_mode_operator_motion_completes_across_key_events() {
+        let mut input = TextInput::new().value("hello world");
+        input.cursor = 0;
+        input.vim_state.mode = VimMode::Normal;
+
+        assert!(matches!(
+            input.on_key(&key_event(Key::Char('d'))),
+            Some(crate::widgets::FocusAction::Consumed)
+        ));
+        assert_eq!(input.current_value(), "hello world", "pending operator");
+        input.on_key(&key_event(Key::Char('w')));
+        assert_eq!(input.current_value(), "world");
+    }
+
+    #[test]
+    fn normal_mode_find_count_and_document_motions() {
+        let mut input = TextInput::new().value("hello world");
+        input.cursor = 0;
+        input.vim_state.mode = VimMode::Normal;
+
+        input.on_key(&key_event(Key::Char('f')));
+        assert_eq!(input.cursor_position(), 0, "f waits for its character");
+        input.on_key(&key_event(Key::Char('o')));
+        assert_eq!(input.cursor_position(), 4);
+
+        input.on_key(&key_event(Key::Char('3')));
+        input.on_key(&key_event(Key::Char('l')));
+        assert_eq!(input.cursor_position(), 7);
+
+        input.on_key(&key_event(Key::Char('g')));
+        assert_eq!(input.cursor_position(), 7, "lone g waits");
+        input.on_key(&key_event(Key::Char('g')));
+        assert_eq!(input.cursor_position(), 0);
+
+        input.on_key(&key_event(Key::Char('G')));
+        assert_eq!(input.cursor_position(), 11);
+    }
+
+    #[test]
+    fn insert_and_normal_mode_switch_through_parser() {
+        let mut input = TextInput::new().value("abc");
+        input.vim_state.mode = VimMode::Normal;
+        assert!(matches!(
+            input.on_key(&key_event(Key::Char('i'))),
+            Some(crate::widgets::FocusAction::Consumed)
+        ));
+        assert_eq!(input.vim_state.mode, VimMode::Insert);
+
+        input.on_key(&key_event(Key::Char('x')));
+        assert!(input.current_value().contains('x'));
+
+        assert!(matches!(
+            input.on_key(&key_event(Key::Escape)),
+            Some(crate::widgets::FocusAction::Consumed)
+        ));
+        assert_eq!(input.vim_state.mode, VimMode::Normal);
+        assert!(input.on_key(&key_event(Key::Char('q'))).is_none());
     }
 
     #[test]

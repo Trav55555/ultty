@@ -72,6 +72,10 @@ impl<V: View> View for Inset<V> {
     fn is_focusable(&self) -> bool {
         self.child.is_focusable()
     }
+
+    fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
+        self.child.for_each_child(visit)
+    }
 }
 
 /// Flexible empty space that grows to fill available room.
@@ -159,7 +163,6 @@ impl View for Section {
                     parent,
                     next_id,
                     None,
-                    false,
                 )?));
             }
             // Title occupies index 0; children start at index 1
@@ -171,7 +174,6 @@ impl View for Section {
                     parent,
                     next_id,
                     None,
-                    false,
                 )?))
             } else {
                 Ok(None)
@@ -183,10 +185,15 @@ impl View for Section {
                 parent,
                 next_id,
                 None,
-                false,
             )?))
         } else {
             Ok(None)
+        }
+    }
+
+    fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
+        for child in &self.children {
+            visit(child.as_ref());
         }
     }
 
@@ -318,10 +325,15 @@ impl View for Card {
                 parent,
                 next_id,
                 None,
-                false,
             )?))
         } else {
             Ok(None)
+        }
+    }
+
+    fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
+        for child in &self.children {
+            visit(child.as_ref());
         }
     }
 

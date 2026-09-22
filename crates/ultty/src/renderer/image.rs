@@ -8,6 +8,48 @@ use super::{CachedImageTexture, ImagePipeline, Renderer, Vertex};
 use crate::grid::{Terminal, TerminalImage};
 use wgpu::util::DeviceExt;
 
+/// Byte length of a tightly packed RGBA8 image, or `None` on overflow.
+fn rgba_byte_len(width: u32, height: u32) -> Option<usize> {
+    let pixels = u64::from(width).checked_mul(u64::from(height))?;
+    let bytes = pixels.checked_mul(4)?;
+    usize::try_from(bytes).ok()
+}
+
+/// Whether an RGBA image of the given size can be uploaded as one 2D texture.
+///
+/// Rejects zero or oversize dimensions (beyond the device limit) and pixel
+/// buffers that are shorter than the dimensions claim.
+fn image_upload_size_ok(
+    width: u32,
+    height: u32,
+    data_len: usize,
+    max_texture_dimension: u32,
+    label: &str,
+) -> bool {
+    if width == 0 || height == 0 {
+        return false;
+    }
+    if width > max_texture_dimension || height > max_texture_dimension {
+        tracing::warn!(
+            "{label}: image {width}x{height} exceeds device texture limit {max_texture_dimension}; not rendering"
+        );
+        return false;
+    }
+    match rgba_byte_len(width, height) {
+        Some(expected) if data_len >= expected => true,
+        Some(expected) => {
+            tracing::warn!(
+                "{label}: image {width}x{height} needs {expected} bytes but only {data_len} were supplied; not rendering"
+            );
+            false
+        }
+        None => {
+            tracing::warn!("{label}: image {width}x{height} byte size overflows; not rendering");
+            false
+        }
+    }
+}
+
 impl Renderer {
     /// Upload a native protocol ImageWidget to the GPU, caching by region ID.
     /// Returns true if the texture is ready for rendering.
@@ -25,10 +67,13 @@ impl Renderer {
             self.native_image_cache.remove(&region_id);
         }
 
-        if img.width == 0
-            || img.height == 0
-            || img.data.len() < (img.width * img.height * 4) as usize
-        {
+        if !image_upload_size_ok(
+            img.width,
+            img.height,
+            img.data.len(),
+            self.device.limits().max_texture_dimension_2d,
+            "native image",
+        ) {
             return false;
         }
 
@@ -108,6 +153,16 @@ impl Renderer {
     fn upload_image(&mut self, image: &TerminalImage) -> bool {
         if self.image_cache.contains_key(&image.id) {
             return true;
+        }
+
+        if !image_upload_size_ok(
+            image.width,
+            image.height,
+            image.data.len(),
+            self.device.limits().max_texture_dimension_2d,
+            "terminal image",
+        ) {
+            return false;
         }
 
         // Evict oldest entries if cache exceeds limit (64 textures)
@@ -334,13 +389,11 @@ impl Renderer {
             self.create_image_pipeline();
         }
 
-        // Upload any new images to GPU
+        // Upload any new image, then render each one with its own texture
         for image in terminal.images().images() {
-            self.upload_image(image);
-        }
-
-        // For each image, render it with its own texture
-        for image in terminal.images().images() {
+            if !self.upload_image(image) {
+                continue;
+            }
             let Some(cached) = self.image_cache.get(&image.id) else {
                 continue;
             };
@@ -425,5 +478,29 @@ impl Renderer {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rgba_byte_len_rejects_overflow() {
+        assert_eq!(rgba_byte_len(2, 3), Some(24));
+        assert_eq!(rgba_byte_len(u32::MAX, u32::MAX), None);
+        assert_eq!(rgba_byte_len(0, 10), Some(0));
+    }
+
+    #[test]
+    fn upload_size_check_rejects_oversize_and_short_buffers() {
+        assert!(image_upload_size_ok(4, 4, 64, 8192, "t"));
+        assert!(!image_upload_size_ok(0, 4, 0, 8192, "t"));
+        assert!(!image_upload_size_ok(8193, 1, 8193 * 4, 8192, "t"));
+        assert!(!image_upload_size_ok(1, 8193, 8193 * 4, 8192, "t"));
+        assert!(!image_upload_size_ok(4, 4, 63, 8192, "t"));
+        // width * height * 4 would overflow u32 but not the u64 check;
+        // the buffer is far too short so it is still rejected.
+        assert!(!image_upload_size_ok(65536, 65536, 16, u32::MAX, "t"));
     }
 }

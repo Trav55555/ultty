@@ -6,6 +6,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
+  # Pinned to match rust-toolchain.toml and ci.yml. Bump all three together.
+  RUST_TOOLCHAIN: 1.98.1
 
 jobs:
   live-smoke:
@@ -15,7 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@v2
 
@@ -56,4 +60,4 @@ jobs:
         with:
           name: ultty-live-smoke-${{ github.run_id }}
           path: ${{ runner.temp }}/ultty-live-smoke
-          if-no-files-found: warn
+          if-no-files-found: error

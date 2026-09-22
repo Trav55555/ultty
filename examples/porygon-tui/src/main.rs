@@ -1,8 +1,17 @@
+//! Porygon TUI: a chat front end for the Porygon agent daemon.
+//!
+//! Configuration (environment variables):
+//! - `PORYGON_URL`: daemon base URL (default `http://localhost:18789`).
+//! - `PORYGON_WEATHER=1`: opt in to the sidebar weather panel. When set, the
+//!   app calls `https://ipapi.co/json/` (which sees your public IP) to
+//!   geolocate you and then `https://api.open-meteo.com` for the forecast, at
+//!   startup and every 30 minutes. It is off by default and no network
+//!   request to either service is made unless you opt in.
+
 use std::time::{Duration, Instant};
 
 use ulttui::prelude::*;
 use ulttui::theme::{ButtonTheme, ControlTheme, DesignTokens, InputTheme, SelectionTheme, Theme};
-use ultty_protocol::Color;
 
 mod commands;
 mod daemon;
@@ -96,6 +105,8 @@ pub(crate) struct PorygonTui {
     pub(crate) pending_approval: Option<ApprovalRequest>,
     pub(crate) show_approval_modal: bool,
     pub(crate) weather: Option<WeatherData>,
+    /// Opt-in flag for the weather panel (see the crate docs).
+    pub(crate) weather_enabled: bool,
     pub(crate) clock_text: String,
     pub(crate) terminal_width: u16,
     pub(crate) terminal_height: u16,
@@ -164,6 +175,7 @@ impl PorygonTui {
             pending_approval: None,
             show_approval_modal: false,
             weather: None,
+            weather_enabled: weather_enabled_from_env(),
             clock_text: format_clock(),
             terminal_width: 200,
             terminal_height: 50,
@@ -282,8 +294,10 @@ impl Application for PorygonTui {
             Sub::every(Duration::from_secs(2), || Msg::PollStatus),
             Sub::every(Duration::from_millis(500), || Msg::PollApprovals),
             Sub::every(Duration::from_secs(1), || Msg::ClockTick),
-            Sub::every(Duration::from_secs(1800), || Msg::PollWeather),
         ];
+        if self.weather_enabled {
+            subs.push(Sub::every(Duration::from_secs(1800), || Msg::PollWeather));
+        }
         if !self.started {
             subs.push(Sub::every(Duration::from_millis(1), || Msg::Init));
         }
@@ -300,6 +314,11 @@ impl Application for PorygonTui {
     fn view(&self) -> impl View {
         self.render_view()
     }
+}
+
+/// Weather is opt-in because it reveals the user's IP to a geolocation service.
+fn weather_enabled_from_env() -> bool {
+    std::env::var("PORYGON_WEATHER").is_ok_and(|value| value == "1")
 }
 
 fn main() -> anyhow::Result<()> {

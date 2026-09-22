@@ -318,6 +318,33 @@ pub(super) struct ImagePipeline {
     pub(super) sampler: wgpu::Sampler,
 }
 
+/// Largest grid size in cells on either axis, whatever the window says.
+pub const MAX_GRID_DIMENSION: u16 = 4096;
+
+/// Compute grid columns/rows from pixel space and cell metrics, clamped to
+/// `1..=MAX_GRID_DIMENSION`. Non-finite or non-positive inputs yield 1.
+fn grid_dimensions_for(
+    width_px: f32,
+    height_px: f32,
+    cell_width: f32,
+    cell_height: f32,
+) -> (u16, u16) {
+    fn axis(px: f32, cell: f32) -> u16 {
+        if !px.is_finite() || !cell.is_finite() || cell <= 0.0 || px <= 0.0 {
+            return 1;
+        }
+        let cells = (px / cell).floor();
+        if !cells.is_finite() || cells < 1.0 {
+            1
+        } else if cells >= MAX_GRID_DIMENSION as f32 {
+            MAX_GRID_DIMENSION
+        } else {
+            cells as u16
+        }
+    }
+    (axis(width_px, cell_width), axis(height_px, cell_height))
+}
+
 impl Renderer {
     /// Create a new renderer with configuration.
     pub async fn with_config(
@@ -621,6 +648,7 @@ impl Renderer {
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
+        self.text_renderer.begin_frame();
 
         let mut encoder = self
             .device
@@ -681,6 +709,7 @@ impl Renderer {
             self.cell_width,
             self.cell_height,
             self.tab_bar_height,
+            overlay.cursor_blink_visible,
             &self.uniform_bind_group,
         )?;
 
@@ -738,11 +767,17 @@ impl Renderer {
     }
 
     /// Get terminal dimensions in cells for the current surface size.
+    ///
+    /// Always within `1..=MAX_GRID_DIMENSION` on each axis, whatever the
+    /// surface size or cell metrics.
     pub fn terminal_dimensions(&self) -> (u16, u16) {
-        let cols = (self.config.width as f32 / self.cell_width).floor() as u16;
         let available_height = self.config.height as f32 - self.tab_bar_height;
-        let rows = (available_height / self.cell_height).floor() as u16;
-        (cols.max(1), rows.max(1))
+        grid_dimensions_for(
+            self.config.width as f32,
+            available_height,
+            self.cell_width,
+            self.cell_height,
+        )
     }
 
     /// Set the tab bar height for dimension calculations.
@@ -874,6 +909,7 @@ impl Renderer {
     ) -> Result<(), wgpu::SurfaceError> {
         // Update tab bar height from overlay state
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
+        self.text_renderer.begin_frame();
 
         let output = surface.get_current_texture()?;
         let view = output
@@ -1040,6 +1076,7 @@ impl Renderer {
             self.cell_width,
             self.cell_height,
             self.tab_bar_height,
+            overlay.cursor_blink_visible,
             &self.uniform_bind_group,
         )?;
 
@@ -1216,6 +1253,7 @@ impl Renderer {
         native_search_index: usize,
     ) -> Result<(), wgpu::SurfaceError> {
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
+        self.text_renderer.begin_frame();
 
         let output = surface.get_current_texture()?;
         let view = output
@@ -1329,6 +1367,7 @@ impl Renderer {
                 self.cell_width,
                 self.cell_height,
                 self.tab_bar_height,
+                overlay.cursor_blink_visible,
                 &self.uniform_bind_group,
             )?;
         }
@@ -1726,9 +1765,12 @@ impl Renderer {
 
         // Draw cursor
         let cursor = terminal.buffer().grid().cursor();
-        // Only draw if visible and (not blinking or blink phase is visible)
-        let should_show_cursor =
-            cursor.visible && (!cursor.blinking || overlay.cursor_blink_visible);
+        // Only draw if visible, (not blinking or blink phase is visible) and
+        // the viewport is not scrolled back: the cursor's row is not on screen
+        // then and drawing it would mark an unrelated history row.
+        let should_show_cursor = cursor.visible
+            && (!cursor.blinking || overlay.cursor_blink_visible)
+            && !terminal.buffer().is_scrolled();
 
         if should_show_cursor {
             let cursor_color = self.color_scheme.cursor;
@@ -1806,8 +1848,18 @@ impl Renderer {
     }
 
     /// Check if there are active animations that require continuous redraw.
+    ///
+    /// Also true when the glyph atlas skipped a glyph this frame (it was
+    /// full and eviction is deferred to the next frame), so the caller
+    /// should draw another frame to fill it in.
     pub fn has_active_animations(&self) -> bool {
-        self.has_animations
+        self.has_animations || self.text_renderer.frame_incomplete()
+    }
+
+    /// True when the last frame skipped at least one glyph because the atlas
+    /// was full; the next frame will evict and draw it, so schedule one.
+    pub fn frame_incomplete(&self) -> bool {
+        self.text_renderer.frame_incomplete()
     }
 
     /// Reset animation flags for this frame. Call at the start of each render.
@@ -1818,6 +1870,28 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn grid_dimensions_are_clamped_to_sane_range() {
+        assert_eq!(
+            super::grid_dimensions_for(800.0, 600.0, 8.0, 16.0),
+            (100, 37)
+        );
+        assert_eq!(super::grid_dimensions_for(0.0, 0.0, 8.0, 16.0), (1, 1));
+        assert_eq!(super::grid_dimensions_for(800.0, 600.0, 0.0, 0.0), (1, 1));
+        assert_eq!(
+            super::grid_dimensions_for(800.0, -50.0, 8.0, 16.0),
+            (100, 1)
+        );
+        assert_eq!(
+            super::grid_dimensions_for(1.0e9, 1.0e9, 0.001, 0.001),
+            (super::MAX_GRID_DIMENSION, super::MAX_GRID_DIMENSION)
+        );
+        assert_eq!(
+            super::grid_dimensions_for(f32::NAN, 600.0, 8.0, 16.0),
+            (1, 37)
+        );
+    }
+
     use super::*;
 
     #[test]

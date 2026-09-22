@@ -3,3 +3,6 @@ source: crates/ulttui/tests/snapshots.rs
 expression: output
 ---
 [N] Hello world
+-- styles --
+0:0-3 fg=Reset bg=Reset mod=BOLD
+0:4-14 fg=Rgb(205, 214, 244) bg=Reset mod=NONE

@@ -5,11 +5,13 @@ mod detect;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
 mod native;
-mod native_diff;
+pub(crate) mod native_diff;
 
 use crate::event::Event;
 use crate::widgets::View;
 
+/// Terminal restore helpers for the ANSI backend.
+pub use ansi::{install_panic_hook, restore_terminal};
 /// Native Ultty protocol backend.
 pub use native::NativeBackend;
 

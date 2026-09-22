@@ -27,7 +27,7 @@ App declares constraints ──→ Binary protocol ──→ Terminal computes l
 
 **Retained scene graph** — The terminal owns a tree of regions. Apps create, update, and delete regions. Only diffs cross the wire.
 
-**Binary protocol** — Structured messages, no parsing overhead. `CreateRegion`, `SetContent`, `AppendContent`, `SetConstraints` instead of escape sequences.
+**Binary protocol** — A compact length-prefixed binary format carrying structured messages: `CreateRegion`, `SetContent`, `AppendContent`, `SetConstraints` instead of escape sequences. The decoder allocates; it is not zero-copy. The win is that the terminal never re-parses an escape-sequence stream to recover structure the app already knew.
 
 **Atomic frames** — `BeginFrame`/`EndFrame` batching prevents tearing. The terminal renders nothing until the frame is complete.
 
@@ -45,6 +45,24 @@ Platform status: Ultty is Unix-first today. Linux and macOS are the supported ru
 
 Linux desktop packages install `dist/ultty.desktop` and the Ultty app icon from the hicolor icon set. Brand asset usage is documented in [docs/brand.md](docs/brand.md).
 
+### Installing a release build
+
+Release tarballs, `.deb`, and `.rpm` packages are published from the
+[Release workflow](.github/workflows/release.yml), together with a `SHA256SUMS`
+file and a rendered Homebrew formula. Verify a download against `SHA256SUMS`
+before installing it.
+
+macOS binaries are not signed or notarized. Gatekeeper will quarantine them.
+After extracting the tarball, clear the quarantine attribute:
+
+```bash
+xattr -d com.apple.quarantine ./ultty ./ulttyctl
+```
+
+Or right-click the binary in Finder and choose Open, then confirm. Signing and
+notarization are tracked in
+[docs/ISSUE_BACKLOG_30_60_90.md](docs/ISSUE_BACKLOG_30_60_90.md).
+
 Useful runtime overlays:
 
 - `Ctrl+Shift+?` opens the keyboard shortcuts overlay.
@@ -55,13 +73,25 @@ Useful runtime overlays:
 From within an Ultty terminal:
 
 ```bash
-cargo run -p hello-native --bin hello-native  # Raw protocol demo
+cargo run -p hello-native   # Raw protocol demo, no framework
 cargo run -p counter-app    # Elm-architecture counter
 cargo run -p todo-app       # Todo list with vim navigation
 cargo run -p dashboard      # Multi-panel dashboard with live updates
+cargo run -p chat           # Streaming chat layout
+cargo run -p form-app       # Form widgets and focus traversal
+cargo run -p split-panes    # Nested split layout
+cargo run -p sysmon         # System monitor
+cargo run -p async-fetch    # Async command and subscription demo
 ```
 
-Native apps auto-detect whether they're running inside Ultty. Inside Ultty, they use the native protocol for zero-overhead rendering. Outside Ultty, they use ANSI mode via ratatui on supported Unix terminals.
+`examples/porygon-tui` is not a workspace member. Build and run it from its own
+manifest:
+
+```bash
+cargo run --manifest-path examples/porygon-tui/Cargo.toml
+```
+
+Native apps auto-detect whether they're running inside Ultty. Inside Ultty, they send the native protocol and the terminal does layout and rendering. Outside Ultty, they use ANSI mode via ratatui on supported Unix terminals.
 
 ## ANSI Compatibility
 
@@ -202,11 +232,10 @@ crates/
 │                     dual-mode rendering (Ultty-native + ANSI mode)
 └── ultty-protocol/   Wire protocol — Message definitions, layout types,
                       content types, shared between terminal and apps
-examples/
-├── hello-native/     Raw protocol usage (no framework)
-├── counter-app/      Framework counter demo
-├── todo-app/         Todo list with vim navigation
-└── dashboard/        Multi-panel dashboard with live updates
+examples/           Nine workspace example apps: hello-native, counter-app,
+                    todo-app, dashboard, chat, form-app, split-panes, sysmon,
+                    async-fetch. The porygon-tui example is excluded from the
+                    workspace and built from its own manifest.
 ```
 
 ## Status & Roadmap
@@ -232,10 +261,14 @@ examples/
 
 ## Documentation
 
+- [Contributing](CONTRIBUTING.md) — Toolchain, checks, and pull request expectations
 - [Getting Started](docs/GETTING_STARTED.md) — Installation and first app
 - [Architecture](docs/ARCHITECTURE.md) — System design and components
 - [Architecture Vocabulary](CONTEXT.md) — Stable terms for core seams
 - [Protocol Specification](docs/PROTOCOL_SPEC.md) — Native protocol details
+- [Layout Model](docs/LAYOUT_MODEL.md) — How terminal-side layout resolves constraints
+- [Widget Reference](docs/WIDGET_REFERENCE.md) — Every `ulttui` widget and its options
+- [North Star](docs/NORTH_STAR.md) — Project direction and decision filters
 - [Public Alpha Readiness](docs/alpha-readiness.md) — Dogfood, alpha, and general-use release gates
 - [Performance Reports](docs/perf/README.md) — Dated benchmark and live-gate evidence
 - [Visual Regression](docs/visual-regression.md) — Renderer screenshot smoke path
@@ -248,6 +281,7 @@ examples/
 - [Testing Strategy](docs/TESTING_STRATEGY.md) — How to test
 - [30/60/90 Execution Plan](docs/ROADMAP_30_60_90.md) — Milestones, ticket map, and acceptance criteria
 - [30/60/90 Issue Backlog](docs/ISSUE_BACKLOG_30_60_90.md) — Copy-paste issue templates with dependencies
+- [Archive](docs/archive/) — Historical plans and reports, no longer maintained
 
 ## Development
 
@@ -260,4 +294,5 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## License
 
-MIT
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.

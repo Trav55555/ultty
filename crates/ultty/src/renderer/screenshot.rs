@@ -236,6 +236,7 @@ impl Renderer {
 
         // Update tab bar height from overlay state
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
+        self.text_renderer.begin_frame();
 
         // Create encoder
         let mut encoder = self
@@ -307,6 +308,7 @@ impl Renderer {
             self.cell_width,
             self.cell_height,
             self.tab_bar_height,
+            overlay.cursor_blink_visible,
             &self.uniform_bind_group,
         );
 
@@ -418,6 +420,7 @@ impl Renderer {
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
+        self.text_renderer.begin_frame();
 
         let mut encoder = self
             .device
@@ -477,6 +480,7 @@ impl Renderer {
             self.cell_width,
             self.cell_height,
             self.tab_bar_height,
+            overlay.cursor_blink_visible,
             &self.uniform_bind_group,
         );
 

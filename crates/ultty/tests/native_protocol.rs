@@ -16,19 +16,48 @@ use ultty_protocol::{
     EVENT_SCROLL, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
-fn temp_socket_path() -> PathBuf {
-    let id = std::process::id();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    PathBuf::from(format!("/tmp/ultty-test-{}-{}.sock", id, ts))
+use ultty::protocol::ProtocolServer;
+use ultty::terminal_manager::TabId;
+
+const TAB_A: TabId = TabId::new(0);
+const TAB_B: TabId = TabId::new(1);
+
+/// Per-test socket directory, removed with its contents on drop.
+struct TestDir(PathBuf);
+
+impl TestDir {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        // Keep the name short: the socket path must fit in sun_path (104
+        // bytes on macOS) and the macOS temp dir alone is ~50 bytes.
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        Self(std::env::temp_dir().join(format!("ultty-it-{pid}-{id}")))
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Server with one open, active tab (`TAB_A`).
+///
+/// Returns the server, that tab's socket path, and the directory guard,
+/// which the test must keep alive (bind it as `_dir`).
+fn start_server() -> (ProtocolServer, PathBuf, TestDir) {
+    let dir = TestDir::new();
+    let mut server = ProtocolServer::new(&dir.0).unwrap();
+    let socket_path = server.open_tab(TAB_A).unwrap();
+    server.set_active_tab(Some(TAB_A));
+    (server, socket_path, dir)
 }
 
 #[test]
 fn test_protocol_server_accepts_connections() {
-    let socket_path = temp_socket_path();
-    let server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (server, socket_path, _dir) = start_server();
 
     assert_eq!(server.session_count(), 0);
     assert!(socket_path.exists());
@@ -43,8 +72,7 @@ fn test_protocol_server_accepts_connections() {
 
 #[test]
 fn test_client_hello_handshake() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
 
     let mut client = UnixStream::connect(&socket_path).unwrap();
     client.set_nonblocking(false).unwrap();
@@ -102,8 +130,7 @@ fn test_client_hello_handshake() {
 
 #[test]
 fn test_future_client_version_negotiates_to_current_protocol() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
 
     let mut client = UnixStream::connect(&socket_path).unwrap();
     client.set_nonblocking(false).unwrap();
@@ -143,8 +170,7 @@ fn test_future_client_version_negotiates_to_current_protocol() {
 
 #[test]
 fn test_unknown_capability_bits_are_masked_during_handshake() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
 
     let mut client = UnixStream::connect(&socket_path).unwrap();
     client.set_nonblocking(false).unwrap();
@@ -182,8 +208,7 @@ fn test_unknown_capability_bits_are_masked_during_handshake() {
 
 #[test]
 fn test_legacy_client_version_gets_error_without_panic() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
 
     let mut client = UnixStream::connect(&socket_path).unwrap();
     client.set_nonblocking(false).unwrap();
@@ -217,8 +242,7 @@ fn test_legacy_client_version_gets_error_without_panic() {
 
 #[test]
 fn test_create_region_and_layout() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let mut client = UnixStream::connect(&socket_path).unwrap();
@@ -332,8 +356,7 @@ fn test_create_region_and_layout() {
 
 #[test]
 fn test_disconnect() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
 
     let mut client = UnixStream::connect(&socket_path).unwrap();
     client.set_nonblocking(false).unwrap();
@@ -413,8 +436,7 @@ fn send_frame(
 
 #[test]
 fn test_set_content_round_trip() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -463,8 +485,7 @@ fn test_set_content_round_trip() {
 
 #[test]
 fn test_set_widget_content_round_trip() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -511,8 +532,7 @@ fn test_set_widget_content_round_trip() {
 
 #[test]
 fn test_key_event_delivery() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
@@ -556,8 +576,7 @@ fn test_key_event_delivery() {
 
 #[test]
 fn test_key_up_event_delivery() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
@@ -601,8 +620,7 @@ fn test_key_up_event_delivery() {
 
 #[test]
 fn test_resize_event_delivery() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
@@ -634,8 +652,7 @@ fn test_resize_event_delivery() {
 
 #[test]
 fn test_error_for_unknown_region() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
@@ -684,8 +701,7 @@ fn test_error_for_unknown_region() {
 
 #[test]
 fn test_error_for_end_frame_mismatch() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
@@ -731,8 +747,7 @@ fn test_error_for_end_frame_mismatch() {
 
 #[test]
 fn test_error_for_decode_failure() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
@@ -771,8 +786,7 @@ fn test_error_for_decode_failure() {
 
 #[test]
 fn test_focus_event_delivery() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -855,8 +869,7 @@ fn test_focus_event_delivery() {
 
 #[test]
 fn test_focus_key_routing() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -929,8 +942,7 @@ fn test_focus_key_routing() {
 
 #[test]
 fn test_scroll_immediate() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -980,8 +992,7 @@ fn test_scroll_immediate() {
 
 #[test]
 fn test_scroll_animated_converges() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -1049,8 +1060,7 @@ fn test_scroll_animated_converges() {
 
 #[test]
 fn test_reparent_region() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -1150,8 +1160,7 @@ fn test_reparent_region() {
 
 #[test]
 fn test_widget_content_snapshot_progress() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -1197,8 +1206,7 @@ fn test_widget_content_snapshot_progress() {
 
 #[test]
 fn test_widget_content_snapshot_spinner() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -1242,8 +1250,7 @@ fn test_widget_content_snapshot_spinner() {
 
 #[test]
 fn test_widget_content_snapshot_markdown() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -1286,8 +1293,7 @@ fn test_widget_content_snapshot_markdown() {
 
 #[test]
 fn test_widget_content_snapshot_code() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -1336,8 +1342,7 @@ fn test_widget_content_snapshot_code() {
 
 #[test]
 fn test_mouse_event_delivery() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
@@ -1388,8 +1393,7 @@ fn test_mouse_event_delivery() {
 
 #[test]
 fn test_unsubscribe_stops_events() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
@@ -1445,8 +1449,7 @@ fn test_unsubscribe_stops_events() {
 
 #[test]
 fn test_rich_text_round_trip() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -1507,8 +1510,7 @@ fn test_rich_text_round_trip() {
 
 #[test]
 fn test_input_widget_round_trip() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -1556,8 +1558,7 @@ fn test_input_widget_round_trip() {
 
 #[test]
 fn test_rich_text_snapshot() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -1619,8 +1620,7 @@ fn test_rich_text_snapshot() {
 
 #[test]
 fn test_input_widget_snapshot() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -1670,8 +1670,7 @@ fn test_input_widget_snapshot() {
 
 #[test]
 fn test_text_input_delivery() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
@@ -1716,8 +1715,7 @@ fn test_text_input_delivery() {
 
 #[test]
 fn test_scroll_event_notifies_subscriber() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -1792,8 +1790,7 @@ fn test_scroll_event_notifies_subscriber() {
 
 #[test]
 fn test_clipboard_set_and_get() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
 
     // Handshake
     let (mut client, _root_id) = handshake(&mut server, &socket_path);
@@ -1855,8 +1852,7 @@ fn test_clipboard_set_and_get() {
 
 #[test]
 fn test_border_style_rendered() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, root) = handshake(&mut server, &socket_path);
@@ -1903,8 +1899,7 @@ fn test_border_style_rendered() {
 
 #[test]
 fn test_keepalive_ping_pong() {
-    let socket_path = temp_socket_path();
-    let mut server = ultty::protocol::ProtocolServer::new(&socket_path).unwrap();
+    let (mut server, socket_path, _dir) = start_server();
     server.set_viewport(80.0, 24.0);
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
@@ -1937,4 +1932,396 @@ fn test_keepalive_ping_pong() {
         matches!(decoded, TerminalMessage::Ping),
         "Expected Ping message"
     );
+}
+
+// ========================================================================
+// Input routing, clipboard gating, resize relayout, frame recovery
+// ========================================================================
+
+/// Read everything the server has queued for `client` (empty if nothing
+/// arrives within the read timeout).
+fn read_messages(client: &mut UnixStream) -> Vec<TerminalMessage> {
+    let mut response = vec![0u8; 65536];
+    let n = match client.read(&mut response) {
+        Ok(n) => n,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            0
+        }
+        Err(e) => panic!("read failed: {}", e),
+    };
+    let mut cursor = &response[..n];
+    let mut out = Vec::new();
+    while !cursor.is_empty() {
+        out.push(TerminalMessage::decode(&mut cursor).expect("valid message"));
+    }
+    out
+}
+
+fn subscribe_root_keys(client: &mut UnixStream, server: &mut ProtocolServer) {
+    let mut buf = BytesMut::new();
+    AppMessage::Subscribe {
+        id: RegionId::ROOT,
+        events: EVENT_KEY,
+    }
+    .encode(&mut buf);
+    client.write_all(&buf).unwrap();
+    server.poll(Some(Duration::from_millis(10))).unwrap();
+}
+
+fn key_downs(messages: &[TerminalMessage]) -> Vec<Key> {
+    messages
+        .iter()
+        .filter_map(|m| match m {
+            TerminalMessage::Input(input) => match &input.event_type {
+                InputType::KeyDown { key, .. } => Some(key.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn subscribe_root_mouse(client: &mut UnixStream, server: &mut ProtocolServer) {
+    let mut buf = BytesMut::new();
+    AppMessage::Subscribe {
+        id: RegionId::ROOT,
+        events: EVENT_MOUSE,
+    }
+    .encode(&mut buf);
+    client.write_all(&buf).unwrap();
+    server.poll(Some(Duration::from_millis(10))).unwrap();
+}
+
+fn short_read_timeout(client: &UnixStream) {
+    client
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+}
+
+#[test]
+fn test_keys_route_only_to_sessions_of_the_active_tab() {
+    let (mut server, path_a, _dir) = start_server();
+    let path_b = server.open_tab(TAB_B).unwrap();
+    server.set_viewport(80.0, 24.0);
+
+    let (mut on_a, _) = handshake(&mut server, &path_a);
+    let (mut on_b, _) = handshake(&mut server, &path_b);
+    subscribe_root_keys(&mut on_a, &mut server);
+    subscribe_root_keys(&mut on_b, &mut server);
+    short_read_timeout(&on_a);
+    short_read_timeout(&on_b);
+
+    // Tab A is active: only its session sees keystrokes, even though the
+    // session on tab B connected more recently.
+    assert_eq!(server.active_tab(), Some(TAB_A));
+    assert!(server.has_key_subscribers());
+    server.broadcast_key(Key::Char('a'), Modifiers::NONE);
+    assert_eq!(key_downs(&read_messages(&mut on_a)), vec![Key::Char('a')]);
+    assert!(
+        key_downs(&read_messages(&mut on_b)).is_empty(),
+        "a session in a background tab must not see keystrokes"
+    );
+
+    // Switch to tab B: keys, key-ups and text input go there instead.
+    server.set_active_tab(Some(TAB_B));
+    server.broadcast_key(Key::Char('b'), Modifiers::NONE);
+    server.broadcast_key_up(Key::Char('b'), Modifiers::NONE);
+    server.broadcast_text_input("txt".to_string());
+    let b_msgs = read_messages(&mut on_b);
+    assert_eq!(key_downs(&b_msgs), vec![Key::Char('b')]);
+    assert!(b_msgs.iter().any(|m| matches!(
+        m,
+        TerminalMessage::Input(input) if matches!(&input.event_type, InputType::KeyUp { key, .. } if *key == Key::Char('b'))
+    )));
+    assert!(b_msgs.iter().any(|m| matches!(
+        m,
+        TerminalMessage::Input(input) if matches!(&input.event_type, InputType::TextInput { text } if text == "txt")
+    )));
+    assert!(read_messages(&mut on_a).is_empty());
+
+    // Two sessions in the same tab both receive input (the user's choice).
+    let (mut second_on_a, _) = handshake(&mut server, &path_a);
+    subscribe_root_keys(&mut second_on_a, &mut server);
+    short_read_timeout(&second_on_a);
+    server.set_active_tab(Some(TAB_A));
+    server.broadcast_key(Key::Char('c'), Modifiers::NONE);
+    assert_eq!(key_downs(&read_messages(&mut on_a)), vec![Key::Char('c')]);
+    assert_eq!(
+        key_downs(&read_messages(&mut second_on_a)),
+        vec![Key::Char('c')]
+    );
+    assert!(read_messages(&mut on_b).is_empty());
+
+    // No active tab: nobody receives keys.
+    server.set_active_tab(None);
+    assert!(!server.has_key_subscribers());
+    server.broadcast_key(Key::Char('d'), Modifiers::NONE);
+    assert!(read_messages(&mut on_a).is_empty());
+    assert!(read_messages(&mut second_on_a).is_empty());
+    assert!(read_messages(&mut on_b).is_empty());
+}
+
+#[test]
+fn test_mouse_routes_only_to_sessions_of_the_active_tab() {
+    let (mut server, _path_a, _dir) = start_server();
+    let path_b = server.open_tab(TAB_B).unwrap();
+    server.set_viewport(80.0, 24.0);
+
+    let (mut on_b, _) = handshake(&mut server, &path_b);
+    subscribe_root_mouse(&mut on_b, &mut server);
+    short_read_timeout(&on_b);
+
+    let click = || InputType::MouseDown {
+        button: MouseButton::Left,
+    };
+    server.broadcast_mouse(click(), 5.0, 3.0, Modifiers::NONE);
+    assert!(
+        read_messages(&mut on_b).is_empty(),
+        "a click on the visible tab must not reach a hidden tab's app"
+    );
+
+    server.set_active_tab(Some(TAB_B));
+    server.broadcast_mouse(click(), 5.0, 3.0, Modifiers::NONE);
+    let msgs = read_messages(&mut on_b);
+    assert!(msgs.iter().any(|m| matches!(
+        m,
+        TerminalMessage::Input(input) if matches!(input.event_type, InputType::MouseDown { .. })
+    )));
+}
+
+#[test]
+fn test_clipboard_get_is_denied_for_inactive_tab() {
+    let (mut server, path_a, _dir) = start_server();
+    let path_b = server.open_tab(TAB_B).unwrap();
+
+    let (mut on_a, _) = handshake(&mut server, &path_a);
+    let (mut on_b, _) = handshake(&mut server, &path_b);
+    short_read_timeout(&on_a);
+    short_read_timeout(&on_b);
+
+    let mut buf = BytesMut::new();
+    AppMessage::ClipboardGet.encode(&mut buf);
+    on_a.write_all(&buf).unwrap();
+    on_b.write_all(&buf).unwrap();
+    server.poll(Some(Duration::from_millis(10))).unwrap();
+    server.poll(Some(Duration::from_millis(10))).unwrap();
+
+    let gets = server.pending_clipboard_gets();
+    assert_eq!(gets.len(), 1, "only the active tab's request is honored");
+    server.send_clipboard_content(gets[0], Some("secret".to_string()));
+
+    let a_msgs = read_messages(&mut on_a);
+    assert!(
+        a_msgs.contains(&TerminalMessage::ClipboardContent {
+            text: Some("secret".to_string())
+        }),
+        "active tab's session receives the clipboard: {:?}",
+        a_msgs
+    );
+    let b_msgs = read_messages(&mut on_b);
+    assert!(
+        b_msgs.contains(&TerminalMessage::ClipboardContent { text: None }),
+        "inactive tab's session is answered with an empty clipboard: {:?}",
+        b_msgs
+    );
+    assert!(!b_msgs
+        .iter()
+        .any(|m| matches!(m, TerminalMessage::ClipboardContent { text: Some(_) })));
+}
+
+#[test]
+fn test_closing_a_tab_unlinks_its_socket_and_disconnects_its_sessions() {
+    let (mut server, path_a, _dir) = start_server();
+    let path_b = server.open_tab(TAB_B).unwrap();
+
+    let (mut on_a, _) = handshake(&mut server, &path_a);
+    let (mut on_b, _) = handshake(&mut server, &path_b);
+    short_read_timeout(&on_a);
+    short_read_timeout(&on_b);
+    assert_eq!(server.session_count(), 2);
+
+    server.close_tab(TAB_B);
+
+    assert!(!path_b.exists(), "closed tab's socket file is unlinked");
+    assert!(
+        UnixStream::connect(&path_b).is_err(),
+        "nothing listens for the closed tab any more"
+    );
+    assert_eq!(server.session_count(), 1);
+    assert!(server.sessions().all(|s| s.tab_id() == TAB_A));
+
+    // The closed tab's client sees EOF; the other tab's client is untouched.
+    let mut buf = [0u8; 16];
+    assert_eq!(
+        on_b.read(&mut buf).unwrap(),
+        0,
+        "session on closed tab is hung up"
+    );
+    assert!(path_a.exists());
+    server.set_viewport(80.0, 24.0);
+    subscribe_root_keys(&mut on_a, &mut server);
+    server.broadcast_key(Key::Char('x'), Modifiers::NONE);
+    assert_eq!(key_downs(&read_messages(&mut on_a)), vec![Key::Char('x')]);
+}
+
+#[test]
+fn test_resize_sends_layout_computed_to_sessions_with_scene() {
+    let (mut server, socket_path, _dir) = start_server();
+    server.set_viewport(80.0, 24.0);
+
+    let (mut with_scene, root) = handshake(&mut server, &socket_path);
+    let (mut empty, _) = handshake(&mut server, &socket_path);
+    with_scene
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    empty
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+
+    send_frame(
+        &mut with_scene,
+        &mut server,
+        1,
+        vec![AppMessage::CreateRegion {
+            id: RegionId::new(1),
+            parent: root,
+            insert_index: -1,
+            constraints: Constraints {
+                width: Dimension::Percent(100.0),
+                height: Dimension::Cells(3.0),
+                ..Default::default()
+            },
+            style: Style::default(),
+        }],
+    );
+    // Drain the frame's LayoutComputed.
+    let _ = read_messages(&mut with_scene);
+
+    server.broadcast_resize(120, 40);
+
+    let msgs = read_messages(&mut with_scene);
+    let resize_index = msgs
+        .iter()
+        .position(|m| matches!(m, TerminalMessage::Resize(_)))
+        .expect("resize event");
+    let layout_index = msgs
+        .iter()
+        .position(|m| matches!(m, TerminalMessage::LayoutComputed { .. }))
+        .expect("layout after resize");
+    assert!(
+        resize_index < layout_index,
+        "Resize precedes LayoutComputed"
+    );
+    match &msgs[layout_index] {
+        TerminalMessage::LayoutComputed {
+            frame_id,
+            trigger,
+            regions,
+        } => {
+            assert_eq!(*frame_id, None);
+            assert_eq!(*trigger, ultty_protocol::LayoutTrigger::Resize);
+            let root_layout = regions.iter().find(|r| r.id == root).unwrap();
+            assert_eq!((root_layout.width, root_layout.height), (120.0, 40.0));
+            let child = regions.iter().find(|r| r.id == RegionId::new(1)).unwrap();
+            assert_eq!(child.width, 120.0);
+        }
+        other => panic!("unexpected {:?}", other),
+    }
+
+    let empty_msgs = read_messages(&mut empty);
+    assert!(empty_msgs
+        .iter()
+        .any(|m| matches!(m, TerminalMessage::Resize(_))));
+    assert!(
+        !empty_msgs
+            .iter()
+            .any(|m| matches!(m, TerminalMessage::LayoutComputed { .. })),
+        "a session without a scene gets no layout"
+    );
+}
+
+#[test]
+fn test_end_frame_mismatch_then_next_frame_renders() {
+    let (mut server, socket_path, _dir) = start_server();
+    server.set_viewport(80.0, 24.0);
+
+    let (mut client, root) = handshake(&mut server, &socket_path);
+    client
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+
+    let mut buf = BytesMut::new();
+    AppMessage::BeginFrame {
+        frame_id: FrameId(1),
+    }
+    .encode(&mut buf);
+    AppMessage::EndFrame {
+        frame_id: FrameId(2),
+    }
+    .encode(&mut buf);
+    client.write_all(&buf).unwrap();
+    server.poll(Some(Duration::from_millis(10))).unwrap();
+    let msgs = read_messages(&mut client);
+    assert!(msgs
+        .iter()
+        .any(|m| matches!(m, TerminalMessage::Error { code: 400, .. })));
+
+    send_frame(
+        &mut client,
+        &mut server,
+        3,
+        vec![
+            AppMessage::CreateRegion {
+                id: RegionId::new(1),
+                parent: root,
+                insert_index: -1,
+                constraints: Constraints::default(),
+                style: Style::default(),
+            },
+            AppMessage::SetContent {
+                id: RegionId::new(1),
+                content: Content::Text(TextContent::new("after mismatch")),
+            },
+        ],
+    );
+    let msgs = read_messages(&mut client);
+    assert!(
+        !msgs
+            .iter()
+            .any(|m| matches!(m, TerminalMessage::Error { .. })),
+        "second frame must be clean: {:?}",
+        msgs
+    );
+    assert!(msgs.iter().any(|m| matches!(
+        m,
+        TerminalMessage::LayoutComputed {
+            frame_id: Some(FrameId(3)),
+            ..
+        }
+    )));
+
+    // Content-only follow-up frame is answered too.
+    send_frame(
+        &mut client,
+        &mut server,
+        4,
+        vec![AppMessage::SetContent {
+            id: RegionId::new(1),
+            content: Content::Text(TextContent::new("content only")),
+        }],
+    );
+    let msgs = read_messages(&mut client);
+    assert!(msgs.iter().any(|m| matches!(
+        m,
+        TerminalMessage::LayoutComputed {
+            frame_id: Some(FrameId(4)),
+            trigger: ultty_protocol::LayoutTrigger::ContentChange,
+            ..
+        }
+    )));
 }

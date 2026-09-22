@@ -6,3 +6,7 @@ TITLE
 Some bold and italic text.
 • Item 1
 • Item 2
+-- styles --
+0:0-4 fg=Reset bg=Reset mod=BOLD
+1:5-8 fg=Reset bg=Reset mod=BOLD
+1:14-19 fg=Reset bg=Reset mod=ITALIC

@@ -6,3 +6,5 @@ expression: output
     Child A
   ▾ Child B
       Grandchild
+-- styles --
+0:0-5 fg=Rgb(255, 255, 255) bg=Rgb(97, 175, 239) mod=BOLD

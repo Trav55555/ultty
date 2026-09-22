@@ -8,3 +8,16 @@ expression: output
    1 |    1  unchanged
    2 |      -old line
      |    2 +new line
+-- styles --
+0:0-10 fg=Rgb(108, 112, 134) bg=Reset mod=DIM
+0:11-25 fg=Rgb(0, 200, 200) bg=Reset mod=BOLD
+1:0-10 fg=Rgb(108, 112, 134) bg=Reset mod=DIM
+1:11-25 fg=Rgb(0, 200, 200) bg=Reset mod=BOLD
+2:0-10 fg=Rgb(108, 112, 134) bg=Reset mod=DIM
+2:11-26 fg=Rgb(0, 200, 200) bg=Reset mod=BOLD
+3:0-10 fg=Rgb(108, 112, 134) bg=Reset mod=DIM
+3:11-21 fg=Rgb(205, 214, 244) bg=Reset mod=DIM
+4:0-10 fg=Rgb(108, 112, 134) bg=Reset mod=DIM
+4:11-20 fg=Rgb(200, 0, 0) bg=Rgb(45, 20, 20) mod=NONE
+5:0-10 fg=Rgb(108, 112, 134) bg=Reset mod=DIM
+5:11-20 fg=Rgb(0, 200, 0) bg=Rgb(20, 45, 20) mod=NONE

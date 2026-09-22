@@ -321,6 +321,12 @@ impl View for Modal {
         }
     }
 
+    fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
+        if let (true, Some(body_view)) = (self.visible, &self.body_view) {
+            visit(body_view.as_ref());
+        }
+    }
+
     fn is_focusable(&self) -> bool {
         self.visible
     }
@@ -456,15 +462,6 @@ mod tests {
         assert_eq!(modal.selected_button_index(), 0);
         modal.select_prev_button();
         assert_eq!(modal.selected_button_index(), 2);
-    }
-
-    #[test]
-    fn modal_debug_format() {
-        let modal = Modal::new().title("Test").visible(true);
-        let debug = format!("{:?}", modal);
-        assert!(debug.contains("Modal"));
-        assert!(debug.contains("Test"));
-        assert!(debug.contains("visible"));
     }
 
     #[test]

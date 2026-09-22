@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d9c3769a0a349592aaf05c29e735f4fdf37ac286418538d6a58eca34428f5402 # shrinks to initial = (1, 3), steps = [([48, 48, 48, 27, 91, 63, 49, 48, 52, 57, 104], Some(Dimensions { cols: 200, rows: 1 })), ([27, 91, 63, 49, 48, 52, 57, 108], None)]
+cc 761dc9a4da5077605e94002c4f0531466b2c97566590878afcf5287288839115 # shrinks to initial = (1, 1), steps = [([230, 188, 162], None)]

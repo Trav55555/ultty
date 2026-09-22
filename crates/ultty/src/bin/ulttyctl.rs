@@ -2,7 +2,9 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use ultty_protocol::control::{control_socket_path, ControlEnvelope, ControlRequest, OutputFormat};
+use ultty_protocol::control::{
+    auth_token_path, control_socket_path, ControlEnvelope, ControlRequest, OutputFormat,
+};
 use ultty_protocol::{Key, Modifiers};
 
 fn main() {
@@ -40,6 +42,7 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let request = with_auth_token(request, read_auth_token());
     let envelope = ControlEnvelope {
         output_format: if use_json {
             OutputFormat::Json
@@ -59,6 +62,39 @@ fn main() {
             eprintln!("error: {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+/// Read the control auth token ultty wrote at startup, if any.
+///
+/// `ULTTY_AUTH_TOKEN` overrides the file so scripts can pass a token in
+/// explicitly.
+fn read_auth_token() -> Option<String> {
+    if let Ok(token) = std::env::var("ULTTY_AUTH_TOKEN") {
+        let token = token.trim().to_string();
+        if !token.is_empty() {
+            return Some(token);
+        }
+    }
+    std::fs::read_to_string(auth_token_path())
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+/// Wrap a request so it authenticates in the same round trip.
+///
+/// An explicit `auth` command is sent as-is, and without a token the
+/// request goes out unwrapped (the server will reject it with a clear
+/// error rather than ulttyctl guessing).
+fn with_auth_token(request: ControlRequest, token: Option<String>) -> ControlRequest {
+    match (request, token) {
+        (request @ ControlRequest::Authenticate { .. }, _) => request,
+        (request, Some(token)) => ControlRequest::WithToken {
+            token,
+            request: Box::new(request),
+        },
+        (request, None) => request,
     }
 }
 
@@ -395,7 +431,10 @@ EXECUTION:
     run <command> [args]    Run a command in current tab
 
 AUTHENTICATION:
-    auth <token>            Authenticate with token
+    Every command is authenticated automatically with the token ultty writes
+    to $XDG_RUNTIME_DIR/ultty-auth.token at startup (override with the
+    ULTTY_AUTH_TOKEN environment variable).
+    auth <token>            Check a token explicitly
 
 OTHER:
     ping                    Test connection
@@ -427,7 +466,9 @@ EXAMPLES:
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cli_request, read_response, should_print_version, version_output};
+    use super::{
+        parse_cli_request, read_response, should_print_version, version_output, with_auth_token,
+    };
 
     use std::io::Write;
     use std::os::unix::net::UnixStream;
@@ -514,6 +555,39 @@ mod tests {
                     "printf 'hello world\\n'".to_string(),
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn requests_are_wrapped_with_the_auth_token() {
+        let wrapped = with_auth_token(ControlRequest::GetInfo, Some("secret".to_string()));
+
+        assert_eq!(
+            wrapped,
+            ControlRequest::WithToken {
+                token: "secret".to_string(),
+                request: Box::new(ControlRequest::GetInfo),
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_auth_command_is_not_wrapped() {
+        let request = ControlRequest::Authenticate {
+            token: "given".to_string(),
+        };
+
+        assert_eq!(
+            with_auth_token(request.clone(), Some("secret".to_string())),
+            request
+        );
+    }
+
+    #[test]
+    fn requests_without_a_token_are_sent_unwrapped() {
+        assert_eq!(
+            with_auth_token(ControlRequest::Ping, None),
+            ControlRequest::Ping
         );
     }
 

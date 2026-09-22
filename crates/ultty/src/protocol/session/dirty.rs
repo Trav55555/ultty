@@ -1,14 +1,15 @@
 //! Native session dirty-state transitions.
 
-use ultty_protocol::RegionId;
+use ultty_protocol::{LayoutTrigger, RegionId};
 
 use super::NativeSession;
 
 impl NativeSession {
-    /// Mark a whole-scene rebuild where layout constraints changed.
+    /// Mark a whole-scene rebuild where the region tree changed shape.
     pub(super) fn mark_full_scene_rebuild(&mut self) {
         self.scene_dirty = true;
         self.constraints_dirty = true;
+        self.tree_dirty = true;
         self.render_dirty = true;
     }
 
@@ -56,6 +57,18 @@ impl NativeSession {
     /// Clear layout-scene dirty flags after layout has been computed.
     pub(super) fn mark_scene_layout_clean(&mut self) {
         self.constraints_dirty = false;
+        self.tree_dirty = false;
         self.scene_dirty = false;
+    }
+
+    /// Why the pending scene change needs a layout pass, most structural first.
+    pub(super) fn layout_trigger_for_scene_change(&self) -> LayoutTrigger {
+        if self.tree_dirty {
+            LayoutTrigger::TreeChange
+        } else if self.constraints_dirty {
+            LayoutTrigger::ConstraintChange
+        } else {
+            LayoutTrigger::ContentChange
+        }
     }
 }

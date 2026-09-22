@@ -44,6 +44,12 @@ pub trait VimHandler {
     /// Get mutable vim state.
     fn vim_state_mut(&mut self) -> &mut VimState;
 
+    /// The widget's persistent key-sequence parser.
+    ///
+    /// It must live with the widget so multi-key sequences (`gg`, `dw`,
+    /// `f{c}`, counts) can complete across separate key events.
+    fn key_parser_mut(&mut self) -> &mut KeyParser;
+
     /// Handle a vim action (immediate actions like 'i', 'a', 'x', etc.).
     fn handle_vim_action(&mut self, action: &VimAction) -> VimResult;
 
@@ -53,8 +59,12 @@ pub trait VimHandler {
     /// Handle raw key input, parsing it through vim state machine.
     /// Returns the result of handling.
     fn handle_vim_key(&mut self, key: &Key, modifiers: Modifiers) -> VimResult {
-        let mut parser = KeyParser::new();
-        match parser.parse_key(self.vim_state_mut(), key, modifiers) {
+        // Take the parser out so it and the vim state can be borrowed
+        // mutably at the same time, then put it back with its pending state.
+        let mut parser = std::mem::take(self.key_parser_mut());
+        let parsed = parser.parse_key(self.vim_state_mut(), key, modifiers);
+        *self.key_parser_mut() = parser;
+        match parsed {
             Some(ParseResult::Action(action)) => {
                 let result = self.handle_vim_action(&action);
                 // Update mode if action changes it
@@ -155,10 +165,11 @@ pub trait VimExt: Sized {
     fn vim_with_config(self, config: VimConfig) -> Self;
 }
 
-/// Generates `vim_state()` and `vim_state_mut()` for a `VimHandler` impl.
+/// Generates `vim_state()`, `vim_state_mut()` and `key_parser_mut()` for a
+/// `VimHandler` impl.
 ///
 /// Usage: `impl_vim_handler_accessors!(MyWidget);`
-/// Assumes the type has `vim_state: VimState` field.
+/// Assumes the type has `vim_state: VimState` and `key_parser: KeyParser` fields.
 #[macro_export]
 macro_rules! impl_vim_handler_accessors {
     ($ty:ty) => {
@@ -169,7 +180,52 @@ macro_rules! impl_vim_handler_accessors {
         fn vim_state_mut(&mut self) -> &mut $crate::vim::VimState {
             &mut self.vim_state
         }
+
+        fn key_parser_mut(&mut self) -> &mut $crate::vim::KeyParser {
+            &mut self.key_parser
+        }
     };
+}
+
+/// Map a framework key onto the protocol key the vim parser understands.
+pub fn to_vim_key(key: &crate::event::Key) -> Option<Key> {
+    use crate::event::Key as K;
+    Some(match key {
+        K::Char(c) => Key::Char(*c),
+        K::F(n) => Key::Function(*n),
+        K::Enter => Key::Enter,
+        K::Escape => Key::Escape,
+        K::Backspace => Key::Backspace,
+        K::Tab => Key::Tab,
+        K::Up => Key::Up,
+        K::Down => Key::Down,
+        K::Left => Key::Left,
+        K::Right => Key::Right,
+        K::Home => Key::Home,
+        K::End => Key::End,
+        K::PageUp => Key::PageUp,
+        K::PageDown => Key::PageDown,
+        K::Delete => Key::Delete,
+        K::Insert => Key::Insert,
+    })
+}
+
+/// Map framework modifiers onto protocol modifiers.
+pub fn to_vim_modifiers(modifiers: crate::event::Modifiers) -> Modifiers {
+    let mut out = Modifiers::NONE;
+    if modifiers.shift {
+        out = out.union(Modifiers::SHIFT);
+    }
+    if modifiers.ctrl {
+        out = out.union(Modifiers::CTRL);
+    }
+    if modifiers.alt {
+        out = out.union(Modifiers::ALT);
+    }
+    if modifiers.meta {
+        out = out.union(Modifiers::META);
+    }
+    out
 }
 
 /// Generates a `VimExt` impl that sets `vim_config` (and optionally initializes

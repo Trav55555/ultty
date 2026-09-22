@@ -317,6 +317,17 @@ impl Buffer {
                 continue;
             }
 
+            if new_cols == 0 {
+                // Nothing can be placed in a zero-width row; keep one row per
+                // logical line so row counts stay meaningful.
+                if found_cursor && line_idx == cursor_logical_line {
+                    new_cursor_abs_row = Some(all_rows.len());
+                    new_cursor_col = 0;
+                }
+                all_rows.push(Row::new(0));
+                continue;
+            }
+
             let mut pos = 0;
             while pos < line.len() {
                 let row_start = pos;
@@ -334,7 +345,20 @@ impl Buffer {
 
                     // Wide char needs 2 columns; if only 1 remains, wrap to next row
                     if cell.is_wide() && col + 1 >= new_cols {
-                        break;
+                        if col > 0 {
+                            break;
+                        }
+                        // The row is empty and the wide char can never fit
+                        // (single-column terminal): emit a blank placeholder
+                        // so `pos` always advances and the loop terminates.
+                        if let Some(dest) = new_row.get_mut(col) {
+                            *dest = *cell;
+                            dest.set_char(' ');
+                            dest.unset_flag(CellFlags::WIDE_CHAR);
+                        }
+                        col += 1;
+                        pos += 1;
+                        continue;
                     }
 
                     if let Some(dest) = new_row.get_mut(col) {
@@ -422,11 +446,7 @@ impl Buffer {
         let cursor_row = self.grid.cursor().position.row;
         let wrap_pending = self.grid.cursor().wrap_pending;
         let auto_wrap = self.grid.auto_wrap();
-        let scroll_bottom = self
-            .grid
-            .scroll_region()
-            .map(|r| r.bottom)
-            .unwrap_or(self.grid.dimensions().rows.saturating_sub(1));
+        let scroll_bottom = self.grid.effective_scroll_region().bottom;
         let max_col = self.grid.dimensions().cols;
         let char_width = c.width().unwrap_or(0) as u16;
 
@@ -437,10 +457,14 @@ impl Buffer {
         //   wrap_pending but doesn't actually scroll (scroll happens on NEXT char)
         // - Wide chars that don't fit (width > 1 and col + width > cols) wrap before writing
         // - If auto_wrap is off, no wrapping ever happens
+        // A wide char that can never fit (grid narrower than the char) is
+        // written as a placeholder without wrapping, so it never scrolls.
+        let wide_wraps =
+            char_width > 1 && max_col >= char_width && cursor_col + char_width > max_col;
         let will_scroll = if char_width == 0 || !auto_wrap {
             false
-        } else if wrap_pending || (char_width > 1 && cursor_col + char_width > max_col) {
-            cursor_row >= scroll_bottom
+        } else if wrap_pending || wide_wraps {
+            cursor_row == scroll_bottom
         } else {
             false
         };
@@ -522,13 +546,9 @@ impl Buffer {
     pub fn newline(&mut self) {
         self.grid.cursor_mut().wrap_pending = false;
         let cursor_row = self.grid.cursor().position.row;
-        let scroll_bottom = self
-            .grid
-            .scroll_region()
-            .map(|r| r.bottom)
-            .unwrap_or(self.grid.dimensions().rows.saturating_sub(1));
+        let scroll_bottom = self.grid.effective_scroll_region().bottom;
 
-        if cursor_row >= scroll_bottom {
+        if cursor_row == scroll_bottom {
             if self.grid.scroll_region().is_none() {
                 // Full-screen scroll — save top row to history
                 self.scroll_grid_up(1);
@@ -703,6 +723,55 @@ mod tests {
         // Content should now fit on one row
         assert_eq!(buf.grid().row(0).unwrap().text_trimmed(), text);
         assert!(!buf.grid().row(0).unwrap().is_wrapped());
+    }
+
+    #[test]
+    fn reflow_wide_char_at_boundary_wraps_to_next_row() {
+        // 4-column grid: "A" + wide '中' (cols 1-2) + "B" (col 3)
+        let mut buf = Buffer::new(Dimensions::new(4, 3));
+        buf.write_char('A');
+        buf.write_char('中');
+        buf.write_char('B');
+
+        // After placing 'A' at col 0, '中' needs 2 cols but only 1 remains.
+        buf.resize(Dimensions::new(2, 3));
+
+        let grid = buf.grid();
+        assert_eq!(grid.cell(0, 0).unwrap().char(), 'A');
+        assert!(!grid.cell(1, 0).unwrap().is_wide());
+        assert!(grid.cell(0, 1).unwrap().is_wide());
+        assert!(grid.cell(1, 1).unwrap().is_wide_spacer());
+        assert_eq!(grid.cell(0, 2).unwrap().char(), 'B');
+    }
+
+    #[test]
+    fn reflow_wide_char_to_one_column_terminates() {
+        let mut buf = Buffer::new(Dimensions::new(10, 3));
+        buf.write_char('漢');
+        buf.write_char('字');
+        buf.write_char('x');
+
+        buf.resize(Dimensions::new(1, 3));
+
+        assert_eq!(buf.dimensions().cols, 1);
+        // Wide chars became single-cell placeholders; the ASCII char survived.
+        let text: String = (0..buf.total_lines())
+            .filter_map(|i| buf.row_at(i))
+            .map(|row| row.text())
+            .collect();
+        assert!(text.contains('x'));
+    }
+
+    #[test]
+    fn reflow_to_zero_columns_terminates() {
+        let mut buf = Buffer::new(Dimensions::new(10, 3));
+        buf.write_char('a');
+        buf.write_char('b');
+
+        buf.resize(Dimensions::new(0, 3));
+
+        assert_eq!(buf.dimensions().cols, 0);
+        assert_eq!(buf.grid().rows().count(), 3);
     }
 
     #[test]

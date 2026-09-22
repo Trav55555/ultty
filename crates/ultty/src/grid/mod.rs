@@ -7,7 +7,7 @@
 //! - [`Grid`] - The visible terminal grid
 //! - [`Buffer`] - Grid with scrollback history
 //! - [`Terminal`] - Full terminal state with alternate screen and selection
-//! - [`Handler`] - Applies ANSI parser actions to the terminal
+//! - [`TerminalHandler`] - Applies ANSI parser actions to the terminal
 //! - [`ImageStore`] - Storage for inline images (Sixel, etc.)
 //!
 //! # Example
@@ -29,7 +29,6 @@
 
 mod buffer;
 mod cell;
-mod handler;
 mod image;
 mod row;
 mod term_handler;
@@ -37,7 +36,6 @@ mod terminal;
 
 pub use buffer::Buffer;
 pub use cell::{Cell, CellFlags, Color};
-pub use handler::Handler;
 pub use image::{decode_sixel, ImageId, ImageStore, TerminalImage};
 pub use row::Row;
 pub use term_handler::TerminalHandler;
@@ -47,6 +45,12 @@ pub use terminal::{
 };
 
 use std::ops::{Index, IndexMut};
+
+/// Maximum number of combining marks stored for a single cell.
+///
+/// PTY output can attach an unbounded run of zero-width marks to one cell;
+/// anything beyond this many is dropped.
+pub const MAX_COMBINING_PER_CELL: usize = 8;
 
 /// Terminal grid dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +202,10 @@ pub struct Grid {
     insert_mode: bool,
     /// Last printed character (for REP — CSI b)
     last_char: char,
+    /// Incremented every time cell content changes (writes, scrolls, erases,
+    /// resizes). Pure cursor moves do not bump it. Used to invalidate
+    /// selections that refer to content which no longer exists.
+    content_version: u64,
 }
 
 impl Grid {
@@ -220,12 +228,20 @@ impl Grid {
             auto_wrap: true,
             insert_mode: false,
             last_char: ' ',
+            content_version: 0,
         }
     }
 
     /// Get grid dimensions.
     pub fn dimensions(&self) -> Dimensions {
         self.dims
+    }
+
+    /// Version counter that changes whenever cell content is mutated.
+    ///
+    /// Cursor movement and viewport scrolling leave it untouched.
+    pub fn content_version(&self) -> u64 {
+        self.content_version
     }
 
     /// Get cursor state.
@@ -253,7 +269,11 @@ impl Grid {
     /// can update TerminalModes accordingly.
     pub fn restore_cursor(&mut self) -> Option<bool> {
         if let Some(state) = self.cursor.saved {
-            self.cursor.position = state.position;
+            // The grid may have shrunk since DECSC; never restore out of bounds
+            self.cursor.position = CursorPosition::new(
+                state.position.col.min(self.dims.cols.saturating_sub(1)),
+                state.position.row.min(self.dims.rows.saturating_sub(1)),
+            );
             self.cursor.wrap_pending = false;
             self.attrs = state.attrs;
             self.auto_wrap = state.auto_wrap;
@@ -331,8 +351,11 @@ impl Grid {
             cell.set_flag(CellFlags::HAS_COMBINING);
         }
 
-        // Add to the combining map
-        self.combining.entry((row, col)).or_default().push(c);
+        // Add to the combining map, dropping marks beyond the per-cell cap
+        let marks = self.combining.entry((row, col)).or_default();
+        if marks.len() < MAX_COMBINING_PER_CELL {
+            marks.push(c);
+        }
     }
 
     /// Get combining characters for a cell.
@@ -434,23 +457,7 @@ impl Grid {
 
         // If wrap is pending, perform the wrap now before writing
         if self.cursor.wrap_pending {
-            // Mark current row as wrapped (soft wrap)
-            let row = self.cursor.position.row;
-            if let Some(r) = self.rows.get_mut(row as usize) {
-                r.set_wrapped(true);
-            }
-            // Move to next line, respecting scroll region
-            let bottom = self
-                .scroll_region
-                .map(|r| r.bottom)
-                .unwrap_or(self.dims.rows.saturating_sub(1));
-            self.cursor.position.col = 0;
-            self.cursor.position.row += 1;
-            if self.cursor.position.row > bottom {
-                self.scroll_up(1);
-                self.cursor.position.row = bottom;
-            }
-            self.cursor.wrap_pending = false;
+            self.wrap_pending_cursor();
         }
 
         let col = self.cursor.position.col;
@@ -466,31 +473,15 @@ impl Grid {
             if let Some(cell) = self.cell_mut(col, row) {
                 cell.set_char(' ');
             }
-            self.cursor.position.col = col + 1;
-            if self.cursor.position.col >= self.dims.cols {
-                self.cursor.wrap_pending = true;
-            }
-            self.mark_dirty(row);
+            self.last_char = ' ';
+            self.advance_cursor(1);
             return;
         }
 
         // Check if wide char would wrap (needs 2 columns but only 1 left)
         if width > 1 && col + width > self.dims.cols {
-            // Mark current row as wrapped (soft wrap)
-            if let Some(r) = self.row_mut(row) {
-                r.set_wrapped(true);
-            }
             // Wrap to next line before writing, respecting scroll region
-            let bottom = self
-                .scroll_region
-                .map(|r| r.bottom)
-                .unwrap_or(self.dims.rows.saturating_sub(1));
-            self.cursor.position.col = 0;
-            self.cursor.position.row += 1;
-            if self.cursor.position.row > bottom {
-                self.scroll_up(1);
-                self.cursor.position.row = bottom;
-            }
+            self.wrap_pending_cursor();
         }
 
         let col = self.cursor.position.col;
@@ -552,8 +543,13 @@ impl Grid {
         // Track last printed char for REP (CSI b)
         self.last_char = c;
 
-        // Advance cursor by character width
-        self.cursor.position.col += width;
+        self.advance_cursor(width);
+    }
+
+    /// Advance the cursor after printing `width` columns, parking it on the
+    /// last column with a pending wrap when it would run off the row.
+    fn advance_cursor(&mut self, width: u16) {
+        self.cursor.position.col = self.cursor.position.col.saturating_add(width);
 
         // Check if we're now at or past the last column
         if self.cursor.position.col >= self.dims.cols {
@@ -625,23 +621,34 @@ impl Grid {
         }
     }
 
+    /// Perform a deferred auto-wrap: mark the current row soft-wrapped and
+    /// move the cursor to column 0 of the next line (scrolling if needed).
     fn wrap_pending_cursor(&mut self) {
         let row = self.cursor.position.row;
         if let Some(r) = self.rows.get_mut(row as usize) {
             r.set_wrapped(true);
         }
 
-        let bottom = self
-            .scroll_region
-            .map(|r| r.bottom)
-            .unwrap_or(self.dims.rows.saturating_sub(1));
         self.cursor.position.col = 0;
-        self.cursor.position.row += 1;
-        if self.cursor.position.row > bottom {
-            self.scroll_up(1);
-            self.cursor.position.row = bottom;
-        }
+        self.line_feed();
         self.cursor.wrap_pending = false;
+    }
+
+    /// Move the cursor down one line, scrolling the region when the cursor
+    /// sits on its bottom margin (IND semantics).
+    ///
+    /// A cursor outside the scroll region moves down without scrolling and
+    /// stops at the last screen row, matching `cursor_down`.
+    fn line_feed(&mut self) {
+        let region = self.effective_scroll_region();
+        let row = self.cursor.position.row;
+        if row == region.bottom {
+            self.scroll_up(1);
+        } else if row < region.bottom {
+            self.cursor.position.row = row + 1;
+        } else {
+            self.cursor.position.row = (row + 1).min(self.dims.rows.saturating_sub(1));
+        }
     }
 
     fn clear_wide_orphans_for_ascii_span(&mut self, row: u16, start_col: u16, end_col: u16) {
@@ -743,16 +750,7 @@ impl Grid {
     /// Newline - move cursor down, scrolling if needed.
     pub fn newline(&mut self) {
         self.cursor.wrap_pending = false;
-        let bottom = self
-            .scroll_region
-            .map(|r| r.bottom)
-            .unwrap_or(self.dims.rows.saturating_sub(1));
-
-        if self.cursor.position.row >= bottom {
-            self.scroll_up(1);
-        } else {
-            self.cursor.position.row += 1;
-        }
+        self.line_feed();
     }
 
     /// Backspace - move cursor left by one.
@@ -861,9 +859,19 @@ impl Grid {
     }
 
     /// Get the effective scroll region (returns full screen if none set).
+    ///
+    /// The result is always clamped to the current grid height so callers can
+    /// index rows with it even if a stale region outlives a resize.
     pub fn effective_scroll_region(&self) -> ScrollRegion {
-        self.scroll_region
-            .unwrap_or(ScrollRegion::new(0, self.dims.rows.saturating_sub(1)))
+        let last_row = self.dims.rows.saturating_sub(1);
+        match self.scroll_region {
+            Some(region) => {
+                let bottom = region.bottom.min(last_row);
+                let top = region.top.min(bottom);
+                ScrollRegion::new(top, bottom)
+            }
+            None => ScrollRegion::new(0, last_row),
+        }
     }
 
     /// Scroll the grid up by n lines (within scroll region).
@@ -1178,18 +1186,24 @@ impl Grid {
         self.mark_dirty(r);
     }
 
-    /// Resize the grid with reflow.
+    /// Resize the grid without reflow: rows are truncated or padded in place.
+    ///
+    /// Width-changing resizes with reflow go through [`Buffer::resize`], which
+    /// re-wraps history and grid together and hands the result to
+    /// [`Grid::set_rows`].
     pub fn resize(&mut self, new_dims: Dimensions) {
         if new_dims == self.dims {
             return;
         }
 
-        let old_cols = self.dims.cols;
         let new_cols = new_dims.cols;
 
-        // Perform reflow if width changed
-        if old_cols != new_cols {
-            self.reflow(new_cols);
+        if new_cols != self.dims.cols {
+            // Cell coordinates beyond the new width are gone
+            self.combining.retain(|&(_, col), _| col < new_cols);
+            for row in &mut self.rows {
+                row.resize(new_cols);
+            }
         }
 
         // Add or remove rows
@@ -1197,6 +1211,7 @@ impl Grid {
             self.rows.push(Row::new(new_cols));
         }
         self.rows.truncate(new_dims.rows as usize);
+        self.combining.retain(|&(row, _), _| row < new_dims.rows);
 
         // Clamp cursor
         self.cursor.position.col = self
@@ -1227,109 +1242,19 @@ impl Grid {
 
         self.dims = new_dims;
         self.dirty = vec![true; new_dims.rows as usize];
-    }
-
-    /// Reflow lines to a new width.
-    ///
-    /// This handles soft-wrapped lines by joining them together and re-wrapping
-    /// to the new width. Hard line breaks (actual newlines) are preserved.
-    fn reflow(&mut self, new_cols: u16) {
-        use crate::grid::cell::Cell;
-
-        if self.rows.is_empty() {
-            return;
-        }
-
-        // Combining chars are keyed by (row, col) which become invalid after reflow
-        self.combining.clear();
-
-        // Collect all logical lines (sequences of wrapped rows form one logical line)
-        let mut logical_lines: Vec<Vec<Cell>> = Vec::new();
-        let mut current_line: Vec<Cell> = Vec::new();
-
-        for row in self.rows.drain(..) {
-            // Append this row's non-blank cells to current logical line
-            for cell in row.cells() {
-                current_line.push(*cell);
-            }
-
-            // If this row wasn't wrapped, this logical line ends here
-            if !row.is_wrapped() {
-                // Trim trailing empty cells
-                while current_line.last().is_some_and(|c| c.is_blank()) {
-                    current_line.pop();
-                }
-                logical_lines.push(std::mem::take(&mut current_line));
-            }
-        }
-
-        // Don't forget any remaining cells
-        if !current_line.is_empty() {
-            while current_line.last().is_some_and(|c| c.is_blank()) {
-                current_line.pop();
-            }
-            logical_lines.push(current_line);
-        }
-
-        // Now re-wrap each logical line to new width
-        for line in logical_lines {
-            if line.is_empty() {
-                // Empty line - just add an empty row
-                self.rows.push(Row::new(new_cols));
-                continue;
-            }
-
-            let mut pos = 0;
-            while pos < line.len() {
-                let mut new_row = Row::new(new_cols);
-                let mut col = 0u16;
-
-                while col < new_cols && pos < line.len() {
-                    let cell = &line[pos];
-
-                    // Skip spacer cells from the old layout — they will be
-                    // regenerated when we place the wide char below.
-                    if cell.is_wide_spacer() {
-                        pos += 1;
-                        continue;
-                    }
-
-                    // A wide char needs two columns. If only one column
-                    // remains on this row, leave it blank and wrap the
-                    // wide char to the next row.
-                    if cell.is_wide() && col + 1 >= new_cols {
-                        break;
-                    }
-
-                    if let Some(dest) = new_row.get_mut(col) {
-                        *dest = *cell;
-                    }
-                    col += 1;
-                    pos += 1;
-
-                    // After placing a wide char, insert its spacer cell.
-                    if cell.is_wide() {
-                        if let Some(spacer) = new_row.get_mut(col) {
-                            spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
-                        }
-                        col += 1;
-                    }
-                }
-
-                // If there's more content, mark this row as wrapped
-                if pos < line.len() {
-                    new_row.set_wrapped(true);
-                }
-
-                self.rows.push(new_row);
-            }
-        }
+        self.content_version = self.content_version.wrapping_add(1);
     }
 
     /// Set rows directly (used by Buffer during reflow).
     pub fn set_rows(&mut self, rows: Vec<Row>, new_dims: Dimensions) {
         self.rows = rows;
         self.dims = new_dims;
+
+        // Row indices changed, so any scroll region is meaningless now.
+        // Apps that need one re-set it after SIGWINCH (xterm does the same).
+        self.scroll_region = None;
+        // Combining marks are keyed by (row, col) which the reflow invalidated
+        self.combining.clear();
 
         // Ensure correct number of rows
         while self.rows.len() < new_dims.rows as usize {
@@ -1351,6 +1276,7 @@ impl Grid {
 
         // Mark all dirty
         self.dirty = vec![true; new_dims.rows as usize];
+        self.content_version = self.content_version.wrapping_add(1);
     }
 
     /// Prepend rows at the top (used when growing viewport to pull from history).
@@ -1400,6 +1326,7 @@ impl Grid {
 
     /// Mark a row as dirty (needs redrawing).
     fn mark_dirty(&mut self, row: u16) {
+        self.content_version = self.content_version.wrapping_add(1);
         if let Some(d) = self.dirty.get_mut(row as usize) {
             *d = true;
         }
@@ -1407,9 +1334,8 @@ impl Grid {
 
     /// Mark all rows as dirty.
     fn mark_all_dirty(&mut self) {
-        for d in &mut self.dirty {
-            *d = true;
-        }
+        self.content_version = self.content_version.wrapping_add(1);
+        self.dirty.fill(true);
     }
 
     /// Check if a row is dirty.
@@ -1419,9 +1345,7 @@ impl Grid {
 
     /// Clear dirty flags after rendering.
     pub fn clear_dirty(&mut self) {
-        for d in &mut self.dirty {
-            *d = false;
-        }
+        self.dirty.fill(false);
     }
 
     /// Check if any row is dirty.
@@ -1567,38 +1491,31 @@ mod tests {
     }
 
     #[test]
-    fn reflow_on_narrow() {
-        // Create a 10-column grid and write 15 characters
-        let mut grid = Grid::new(Dimensions::new(10, 5));
-        for c in "Hello World!!!!".chars() {
-            grid.write_char(c);
-        }
-        // Content should be on rows 0 and 1 (wrapped at col 10)
-        assert!(grid.row(0).unwrap().is_wrapped()); // First row wrapped
-
-        // Now widen to 20 columns
-        grid.resize(Dimensions::new(20, 5));
-        // Content should now fit on one row
-        let row0_text = grid.row(0).unwrap().text_trimmed();
-        assert_eq!(row0_text, "Hello World!!!!");
-        assert!(!grid.row(0).unwrap().is_wrapped());
-    }
-
-    #[test]
-    fn reflow_on_widen() {
-        // Create a 20-column grid with content
+    fn resize_narrower_truncates_rows_without_reflow() {
         let mut grid = Grid::new(Dimensions::new(20, 5));
         for c in "Hello World!!!!".chars() {
             grid.write_char(c);
         }
-        assert_eq!(grid.row(0).unwrap().text_trimmed(), "Hello World!!!!");
 
-        // Narrow to 10 columns - should wrap
         grid.resize(Dimensions::new(10, 5));
-        // Content should now be split across two rows
-        assert!(grid.row(0).unwrap().is_wrapped());
+
+        assert_eq!(grid.row(0).unwrap().width(), 10);
         assert_eq!(grid.row(0).unwrap().text_trimmed(), "Hello Worl");
-        assert_eq!(grid.row(1).unwrap().text_trimmed(), "d!!!!");
+        assert_eq!(grid.row(1).unwrap().text_trimmed(), "");
+        assert!(!grid.row(0).unwrap().is_wrapped());
+    }
+
+    #[test]
+    fn resize_wider_pads_rows() {
+        let mut grid = Grid::new(Dimensions::new(5, 2));
+        grid.write_char('A');
+
+        grid.resize(Dimensions::new(8, 3));
+
+        assert_eq!(grid.row(0).unwrap().width(), 8);
+        assert_eq!(grid.row(2).unwrap().width(), 8);
+        assert_eq!(grid.cell(0, 0).unwrap().char(), 'A');
+        assert_eq!(grid.cell(7, 2).unwrap().char(), ' ');
     }
 
     #[test]
@@ -1652,6 +1569,20 @@ mod tests {
 
         assert_eq!(grid.cursor().position.row, 9);
         assert_eq!(grid.cursor().position.col, 19);
+    }
+
+    #[test]
+    fn restore_cursor_clamps_to_current_dimensions() {
+        let mut grid = Grid::new(Dimensions::new(10, 5));
+        grid.set_cursor_position(5, 9);
+        grid.save_cursor(false);
+
+        let rows: Vec<Row> = (0..2).map(|_| Row::new(4)).collect();
+        grid.set_rows(rows, Dimensions::new(4, 2));
+        grid.restore_cursor();
+
+        assert_eq!(grid.cursor().position.row, 1);
+        assert_eq!(grid.cursor().position.col, 3);
     }
 
     #[test]
@@ -2130,25 +2061,111 @@ mod tests {
     }
 
     #[test]
-    fn reflow_wide_char_at_boundary() {
-        // 4-column grid: write "A" + wide char '中' + "B"
-        let mut grid = Grid::new(Dimensions::new(4, 3));
-        grid.write_char('A');
-        grid.write_char('中'); // takes cols 1-2
-        grid.write_char('B'); // col 3
+    fn newline_below_scroll_region_moves_to_screen_bottom_without_scrolling() {
+        let mut grid = Grid::new(Dimensions::new(10, 24));
+        for row in 0..10u16 {
+            grid.set_cursor_position(row + 1, 1);
+            grid.write_char((b'a' + row as u8) as char);
+        }
+        // DECSTBM 1..10 (rows 0..9), then move below the region.
+        grid.set_scroll_region(1, 10);
+        grid.set_cursor_position(20, 1);
+        assert_eq!(grid.cursor().position.row, 19);
 
-        // Reflow to 2 columns — after placing 'A' at col 0,
-        // '中' needs 2 cols but only 1 remains, so it wraps.
-        grid.reflow(2);
+        grid.newline();
+        grid.newline();
+        grid.newline();
+        assert_eq!(grid.cursor().position.row, 22);
 
-        // Row 0: 'A' then blank (wide char doesn't fit)
-        assert_eq!(grid.cell(0, 0).unwrap().char(), 'A');
-        assert!(!grid.cell(1, 0).unwrap().is_wide());
-        // Row 1: '中' + spacer
-        assert!(grid.cell(0, 1).unwrap().is_wide());
-        assert!(grid.cell(1, 1).unwrap().is_wide_spacer());
-        // Row 2: 'B'
-        assert_eq!(grid.cell(0, 2).unwrap().char(), 'B');
+        // Further newlines clamp at the last screen row and never scroll.
+        grid.newline();
+        grid.newline();
+        assert_eq!(grid.cursor().position.row, 23);
+
+        for row in 0..10u16 {
+            assert_eq!(
+                grid.cell(0, row).unwrap().char(),
+                (b'a' + row as u8) as char,
+                "row {row} inside the region must be untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn autowrap_below_scroll_region_does_not_scroll_region() {
+        let mut grid = Grid::new(Dimensions::new(4, 6));
+        grid.set_cursor_position(1, 1);
+        grid.write_char('T');
+        grid.set_scroll_region(1, 2);
+        grid.set_cursor_position(6, 1);
+        for c in "abcdefgh".chars() {
+            grid.write_char(c);
+        }
+
+        // Wrapped past the last screen row: the cursor stays on it and the
+        // region above is untouched.
+        assert_eq!(grid.cursor().position.row, 5);
+        assert_eq!(grid.cell(0, 0).unwrap().char(), 'T');
+    }
+
+    #[test]
+    fn effective_scroll_region_is_clamped_to_current_height() {
+        let mut grid = Grid::new(Dimensions::new(80, 40));
+        grid.set_scroll_region(32, 40);
+        assert_eq!(grid.effective_scroll_region(), ScrollRegion::new(31, 39));
+
+        // Simulate a reflow-driven height change that bypasses `resize`.
+        let rows: Vec<Row> = (0..20).map(|_| Row::new(60)).collect();
+        grid.set_rows(rows, Dimensions::new(60, 20));
+
+        assert_eq!(grid.scroll_region(), None);
+        assert_eq!(grid.effective_scroll_region(), ScrollRegion::new(0, 19));
+        // Exercise the paths that index by region bounds
+        grid.scroll_up(1);
+        grid.scroll_down(1);
+        grid.newline();
+    }
+
+    #[test]
+    fn wide_char_on_one_column_grid_keeps_cursor_in_bounds() {
+        let mut grid = Grid::new(Dimensions::new(1, 1));
+        grid.write_char('漢');
+        assert_eq!(grid.cursor().position.col, 0);
+        assert!(grid.cursor().wrap_pending);
+        grid.write_char('字');
+        assert_eq!(grid.cursor().position.col, 0);
+        assert_eq!(grid.cursor().position.row, 0);
+    }
+
+    #[test]
+    fn combining_marks_are_capped_per_cell() {
+        let mut grid = Grid::new(Dimensions::new(10, 2));
+        grid.write_char('e');
+        for _ in 0..(MAX_COMBINING_PER_CELL * 4) {
+            grid.write_char('\u{0301}');
+        }
+
+        let marks = grid.combining_chars(0, 0).unwrap();
+        assert_eq!(marks.len(), MAX_COMBINING_PER_CELL);
+    }
+
+    #[test]
+    fn content_version_changes_on_writes_but_not_cursor_moves() {
+        let mut grid = Grid::new(Dimensions::new(10, 5));
+        let v0 = grid.content_version();
+
+        grid.cursor_down(2);
+        grid.cursor_right(3);
+        grid.set_cursor_position(1, 1);
+        grid.carriage_return();
+        assert_eq!(grid.content_version(), v0);
+
+        grid.write_char('x');
+        let v1 = grid.content_version();
+        assert_ne!(v1, v0);
+
+        grid.scroll_up(1);
+        assert_ne!(grid.content_version(), v1);
     }
 
     #[test]

@@ -3,6 +3,13 @@ source: crates/ulttui/tests/snapshots.rs
 expression: output
 ---
 ┌Table─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│A                       B                       C                      D                       E                      │
-│                                                                                                                      │
+│A                    B                    C                    D                    E                                 │
+│data1                data2                data3                data4                data5                             │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+-- styles --
+1:1-20 fg=Rgb(97, 175, 239) bg=Reset mod=BOLD
+1:22-41 fg=Rgb(97, 175, 239) bg=Reset mod=BOLD
+1:43-62 fg=Rgb(97, 175, 239) bg=Reset mod=BOLD
+1:64-83 fg=Rgb(97, 175, 239) bg=Reset mod=BOLD
+1:85-104 fg=Rgb(97, 175, 239) bg=Reset mod=BOLD
+2:1-118 fg=Rgb(30, 30, 46) bg=Rgb(97, 175, 239) mod=BOLD

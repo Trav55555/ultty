@@ -7,6 +7,7 @@ TARBALLS=()
 DEBS=()
 RPMS=()
 FORMULAS=()
+RENDERED_FORMULAS=()
 
 usage() {
   cat <<'USAGE'
@@ -21,6 +22,9 @@ OPTIONS:
   --deb <path>                 Verify a .deb package
   --rpm <path>                 Verify an .rpm package
   --homebrew <path>            Verify the Homebrew formula test/install metadata
+  --homebrew-rendered <path>   Verify a rendered formula: metadata plus no
+                               leftover VERSION/SHA256_ placeholders and
+                               64-hex-character sha256 values
   --run-binaries               Run extracted ultty and ulttyctl --version checks
   -h, --help                   Show this help
 USAGE
@@ -48,6 +52,10 @@ while [[ $# -gt 0 ]]; do
       FORMULAS+=("${2:?missing value for --homebrew}")
       shift 2
       ;;
+    --homebrew-rendered)
+      RENDERED_FORMULAS+=("${2:?missing value for --homebrew-rendered}")
+      shift 2
+      ;;
     --run-binaries)
       RUN_BINARIES=1
       shift
@@ -73,7 +81,8 @@ if [[ -z "$EXPECTED_VERSION" ]]; then
   exit 1
 fi
 
-if [[ "${#TARBALLS[@]}" -eq 0 && "${#DEBS[@]}" -eq 0 && "${#RPMS[@]}" -eq 0 && "${#FORMULAS[@]}" -eq 0 ]]; then
+if [[ "${#TARBALLS[@]}" -eq 0 && "${#DEBS[@]}" -eq 0 && "${#RPMS[@]}" -eq 0 \
+  && "${#FORMULAS[@]}" -eq 0 && "${#RENDERED_FORMULAS[@]}" -eq 0 ]]; then
   echo "no artifacts supplied" >&2
   usage >&2
   exit 2
@@ -230,6 +239,44 @@ verify_homebrew_formula() {
   }
 }
 
+verify_rendered_homebrew_formula() {
+  local formula="$1"
+  local label="rendered homebrew formula $formula"
+
+  verify_homebrew_formula "$formula"
+
+  if grep -nE '(^|[^A-Za-z0-9_])(VERSION|SHA256_[A-Z0-9_]+)([^A-Za-z0-9_]|$)' "$formula" >&2; then
+    echo "$label still contains template placeholders" >&2
+    exit 1
+  fi
+
+  local sha_lines
+  sha_lines="$(grep -c '^[[:space:]]*sha256 ' "$formula" || true)"
+  if [[ "$sha_lines" -lt 3 ]]; then
+    echo "$label must declare a sha256 for each published tarball, found $sha_lines" >&2
+    exit 1
+  fi
+
+  local line
+  while IFS= read -r line; do
+    if [[ ! "$line" =~ ^[[:space:]]*sha256\ \"[0-9a-f]{64}\"[[:space:]]*$ ]]; then
+      echo "$label has a sha256 that is not 64 hex characters: $line" >&2
+      exit 1
+    fi
+  done < <(grep '^[[:space:]]*sha256 ' "$formula")
+
+  local version
+  version="$(sed -n 's/^[[:space:]]*version "\(.*\)"[[:space:]]*$/\1/p' "$formula" | head -n1)"
+  if [[ -z "$version" ]]; then
+    echo "$label does not declare a version" >&2
+    exit 1
+  fi
+  if [[ -n "$EXPECTED_VERSION" && "$version" != "$EXPECTED_VERSION" ]]; then
+    echo "$label declares version $version, expected $EXPECTED_VERSION" >&2
+    exit 1
+  fi
+}
+
 for artifact in "${TARBALLS[@]}"; do
   verify_tarball "$artifact"
 done
@@ -244,6 +291,10 @@ done
 
 for formula in "${FORMULAS[@]}"; do
   verify_homebrew_formula "$formula"
+done
+
+for formula in "${RENDERED_FORMULAS[@]}"; do
+  verify_rendered_homebrew_formula "$formula"
 done
 
 echo "release artifact smoke passed"
