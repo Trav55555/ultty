@@ -1,6 +1,6 @@
 # Ultty Readiness Issue Backlog
 
-**Updated:** 2026-09-22
+**Updated:** 2026-11-05
 **Source plan:** [Ultty Readiness Roadmap](ROADMAP_30_60_90.md)
 **Readiness gates:** [Public Alpha Readiness](alpha-readiness.md)
 
@@ -104,6 +104,46 @@ enough along that the advisory ignore list is stable.
 - `cargo deny check` passes locally and in CI.
 - The allowed license set is explicit and matches `MIT OR Apache-2.0` plus the
   licenses of the current dependency tree.
+
+### 5. Run-level text shaping (ligatures)
+
+**Problem.** `TextRenderer` shapes each cell's character on its own and
+caches the result per `(char, style)`. Multi-cell ligatures can therefore
+never form, so `font.ligatures = true` only selects full shaping per cell.
+
+**Scope.** Shape runs of same-style cells on a row, map each glyph back to
+its cell through the glyph's source byte range, and cache shaped runs by
+(text, style) so unchanged rows are not reshaped every frame. Break runs at
+the cursor and at selection edges.
+
+**Validation.** A screenshot test with a ligature font showing `=>` as one
+glyph; `cargo bench -p ultty --bench render` within 10% of today.
+
+### 6. Render from a snapshot instead of under the terminal lock
+
+**Problem.** The renderer builds vertices while holding the terminal lock,
+so the PTY I/O thread waits for every frame's build. On a 2560x1400 window
+this costs about a third of `cat` throughput (82 vs 125 MiB/s headless).
+
+**Scope.** Under the lock, copy only what a frame reads (visible rows,
+cursor, selection, modes, the images and hyperlinks in view) into a reused
+snapshot, release the lock, then build vertices from the snapshot.
+
+**Validation.** Rerun the 64 MiB `cat` measurement described in
+the I/O thread commit; the large window should be within 10% of headless.
+
+### 7. Hand displaced rows from the grid to scrollback
+
+**Problem.** `Buffer` predicts whether a write will scroll and copies the
+top row into history before the grid scrolls; the copy is about 13% of
+instructions when parsing plain text.
+
+**Scope.** Let `Grid::scroll_up` move displaced rows out (replacing them with
+recycled rows from evicted history) and have `Buffer` collect them, removing
+both the prediction and the copy.
+
+**Validation.** `cargo test -p ultty-vt` including the integrity property
+test at `PROPTEST_CASES=20000`; `examples/throughput` on plain text.
 
 ## Recently Completed Readiness Work
 

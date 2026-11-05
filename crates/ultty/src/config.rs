@@ -471,7 +471,14 @@ pub struct FontConfig {
     pub size: f32,
     /// Line height multiplier
     pub line_height: f32,
-    /// Enable ligatures
+    /// Use full OpenType shaping (rustybuzz) for each cell instead of basic
+    /// glyph lookup.
+    ///
+    /// Cells are shaped one at a time, so ligatures that span several cells
+    /// (`=>`, `!=` in Fira Code and similar) are not drawn yet even when this
+    /// is on; see "Run-level text shaping" in
+    /// docs/ISSUE_BACKLOG_30_60_90.md. Multi-codepoint graphemes (combining
+    /// marks, emoji sequences) always get full shaping.
     pub ligatures: bool,
 }
 

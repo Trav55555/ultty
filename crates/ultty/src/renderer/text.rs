@@ -11,7 +11,6 @@ use cosmic_text::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use wgpu::util::DeviceExt;
 
 /// Character plus the shaping-relevant style bits (see [`shaping_cache_key`]).
 type ShapingCacheKey = (char, u8);
@@ -196,6 +195,36 @@ pub struct TextRenderer {
     shaping_cache: HashMap<ShapingCacheKey, ShapedGlyph>,
     styled_text_buffer: Buffer,
     byte_to_char_offsets: Vec<usize>,
+    queue: Arc<wgpu::Queue>,
+    /// Vertex/index buffers for the grid draws of the current frame, reused
+    /// across frames. Each draw in a frame gets its own slot: writes land at
+    /// the next submit, so two draws sharing a buffer would both see the
+    /// last write.
+    grid_buffers: Vec<GridBuffers>,
+    grid_buffers_used: usize,
+}
+
+/// One reusable vertex + index buffer pair.
+struct GridBuffers {
+    vertex: wgpu::Buffer,
+    index: wgpu::Buffer,
+}
+
+/// Smallest buffer the pool allocates, so ordinary frames never regrow.
+const MIN_GRID_BUFFER_BYTES: u64 = 64 * 1024;
+
+fn grid_buffer(
+    device: &wgpu::Device,
+    label: &str,
+    usage: wgpu::BufferUsages,
+    len: u64,
+) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: len.max(MIN_GRID_BUFFER_BYTES).next_power_of_two(),
+        usage: usage | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 impl TextRenderer {
@@ -221,7 +250,7 @@ impl TextRenderer {
             Self::measure_cell_with_font(&mut font_system, metrics, &font_family);
 
         // Create glyph atlas
-        let atlas = GlyphAtlas::new(device.clone(), queue);
+        let atlas = GlyphAtlas::new(device.clone(), Arc::clone(&queue));
 
         // Create text pipeline
         let pipeline = TextPipeline::new(
@@ -251,6 +280,9 @@ impl TextRenderer {
             shaping_cache: HashMap::with_capacity(256),
             styled_text_buffer,
             byte_to_char_offsets: Vec::with_capacity(256),
+            queue,
+            grid_buffers: Vec::new(),
+            grid_buffers_used: 0,
         };
         renderer.decoration = renderer.measure_decoration_metrics(baseline);
         Ok(renderer)
@@ -392,6 +424,52 @@ impl TextRenderer {
     /// because this is the only point at which atlas slots are evicted.
     pub fn begin_frame(&mut self) {
         self.atlas.begin_frame();
+        self.grid_buffers_used = 0;
+    }
+
+    /// Upload this draw's vertices and indices into the next pooled slot,
+    /// growing it if needed, and return the slot.
+    fn upload_grid(&mut self, vertices: &[Vertex], indices: &[u32]) -> usize {
+        let vertex_bytes: &[u8] = bytemuck::cast_slice(vertices);
+        let index_bytes: &[u8] = bytemuck::cast_slice(indices);
+        let slot = self.grid_buffers_used;
+        self.grid_buffers_used += 1;
+        if slot == self.grid_buffers.len() {
+            self.grid_buffers.push(GridBuffers {
+                vertex: grid_buffer(
+                    &self.device,
+                    "text_vertex_buffer",
+                    wgpu::BufferUsages::VERTEX,
+                    vertex_bytes.len() as u64,
+                ),
+                index: grid_buffer(
+                    &self.device,
+                    "text_index_buffer",
+                    wgpu::BufferUsages::INDEX,
+                    index_bytes.len() as u64,
+                ),
+            });
+        }
+        let buffers = &mut self.grid_buffers[slot];
+        if buffers.vertex.size() < vertex_bytes.len() as u64 {
+            buffers.vertex = grid_buffer(
+                &self.device,
+                "text_vertex_buffer",
+                wgpu::BufferUsages::VERTEX,
+                vertex_bytes.len() as u64,
+            );
+        }
+        if buffers.index.size() < index_bytes.len() as u64 {
+            buffers.index = grid_buffer(
+                &self.device,
+                "text_index_buffer",
+                wgpu::BufferUsages::INDEX,
+                index_bytes.len() as u64,
+            );
+        }
+        self.queue.write_buffer(&buffers.vertex, 0, vertex_bytes);
+        self.queue.write_buffer(&buffers.index, 0, index_bytes);
+        slot
     }
 
     /// Whether a glyph was skipped this frame because the atlas was full;
@@ -655,22 +733,10 @@ impl TextRenderer {
             return Ok(());
         }
 
-        // Create vertex/index buffers
-        let vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("text_vertex_buffer"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
-        let index_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("text_index_buffer"),
-                contents: bytemuck::cast_slice(&indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
+        let slot = self.upload_grid(&vertices, &indices);
+        let vertex_bytes = std::mem::size_of_val(vertices.as_slice()) as u64;
+        let index_bytes = std::mem::size_of_val(indices.as_slice()) as u64;
+        let buffers = &self.grid_buffers[slot];
 
         // Render pass for text
         {
@@ -692,8 +758,11 @@ impl TextRenderer {
             render_pass.set_pipeline(self.pipeline.pipeline());
             render_pass.set_bind_group(0, uniform_bind_group, &[]);
             render_pass.set_bind_group(1, self.atlas.bind_group(), &[]);
-            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.set_vertex_buffer(0, buffers.vertex.slice(..vertex_bytes));
+            render_pass.set_index_buffer(
+                buffers.index.slice(..index_bytes),
+                wgpu::IndexFormat::Uint32,
+            );
             render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
         }
 
