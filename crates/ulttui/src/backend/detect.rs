@@ -9,6 +9,10 @@
 //! the program in between, so the app's own terminal must match `ULTTY_TTY`.
 //!
 //! `ULTTY_FORCE_NATIVE=1` skips the terminal check.
+//!
+//! Without a usable socket, an app on a terminal probes for the in-band
+//! transport (ADR 0018), which reaches Ultty over ssh, sudo, containers, and
+//! recorders. `ULTTY_IN_BAND=0` skips the probe.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -26,6 +30,27 @@ pub fn socket_path() -> Option<PathBuf> {
         std::env::var_os("ULTTY_FORCE_NATIVE").is_some_and(|v| v == "1"),
         controlling_terminal,
     )
+}
+
+/// Whether to probe for in-band native mode: stdin and stdout are a
+/// terminal that might be Ultty.
+pub fn in_band_candidate() -> bool {
+    // SAFETY: isatty only inspects the fd.
+    let on_tty = unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 };
+    on_tty
+        && probe_allowed(
+            std::env::var_os("ULTTY_IN_BAND").as_deref(),
+            std::env::var_os("TERM").as_deref(),
+        )
+}
+
+fn probe_allowed(opt: Option<&std::ffi::OsStr>, term: Option<&std::ffi::OsStr>) -> bool {
+    if opt.is_some_and(|v| v == "0") {
+        return false;
+    }
+    // A dumb terminal has no escape sequences, and the Linux console prints
+    // an unknown APC string instead of ignoring it.
+    !matches!(term.and_then(|t| t.to_str()), Some("dumb" | "linux"))
 }
 
 fn native_socket(
@@ -122,6 +147,18 @@ mod tests {
             native_socket(socket(), expected(), true, || None),
             Some(PathBuf::from("/run/ultty.sock"))
         );
+    }
+
+    #[test]
+    fn in_band_probe_is_skipped_when_disabled_or_unsafe() {
+        use std::ffi::OsStr;
+        let xterm = Some(OsStr::new("xterm-256color"));
+        assert!(probe_allowed(None, xterm));
+        assert!(probe_allowed(None, None));
+        assert!(probe_allowed(Some(OsStr::new("1")), xterm));
+        assert!(!probe_allowed(Some(OsStr::new("0")), xterm));
+        assert!(!probe_allowed(None, Some(OsStr::new("dumb"))));
+        assert!(!probe_allowed(None, Some(OsStr::new("linux"))));
     }
 
     #[test]

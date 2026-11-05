@@ -32,9 +32,14 @@ impl Backend {
     /// This creates a backend based on environment detection, but the actual
     /// connection (for native) is deferred to `init()` so we can fall back to
     /// ANSI if the native connection fails.
+    ///
+    /// Order: the tab's socket when this process runs on the Ultty tab that
+    /// owns it, then the in-band probe on any terminal, then ANSI.
     pub fn detect() -> Self {
         if detect::is_ultty() {
             Backend::Native(native::NativeBackend::new())
+        } else if detect::in_band_candidate() {
+            Backend::Native(native::NativeBackend::new_in_band())
         } else {
             Backend::Ansi(ansi::AnsiBackend::new())
         }
@@ -48,10 +53,15 @@ impl Backend {
             Backend::Native(b) => match b.init() {
                 Ok(()) => Ok(()),
                 Err(e) => {
-                    tracing::warn!(
-                        "Native backend initialization failed: {}. Falling back to ANSI.",
-                        e
-                    );
+                    if b.prefers_in_band() {
+                        // The normal outcome on any terminal that is not Ultty.
+                        tracing::debug!("in-band probe: {e}; using ANSI");
+                    } else {
+                        tracing::warn!(
+                            "Native backend initialization failed: {}. Falling back to ANSI.",
+                            e
+                        );
+                    }
                     let mut ansi = ansi::AnsiBackend::new();
                     ansi.init()?;
                     *self = Backend::Ansi(ansi);
