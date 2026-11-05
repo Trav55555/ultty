@@ -120,14 +120,16 @@ jobs:
         with:
           workspaces: fuzz
       - run: cargo install cargo-fuzz --version 0.12.0 --locked
+      # fuzz/ inherits the repository's pinned stable rust-toolchain.toml, so
+      # each run names nightly; cargo-fuzz needs -Z sanitizer flags.
       - name: VT parser and grid
         working-directory: fuzz
-        run: cargo fuzz run vt_terminal -- -max_total_time=120 -max_len=4096
+        run: cargo +nightly fuzz run vt_terminal -- -max_total_time=120 -max_len=4096
       - name: Protocol decoders
         working-directory: fuzz
         run: |
-          cargo fuzz run decode_app -- -max_total_time=30
-          cargo fuzz run decode_terminal -- -max_total_time=30
+          cargo +nightly fuzz run decode_app -- -max_total_time=30
+          cargo +nightly fuzz run decode_terminal -- -max_total_time=30
       - name: In-band stream splitter
         working-directory: fuzz
-        run: cargo fuzz run in_band_split -- -max_total_time=60 -max_len=4096
+        run: cargo +nightly fuzz run in_band_split -- -max_total_time=60 -max_len=4096

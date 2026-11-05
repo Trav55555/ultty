@@ -30,6 +30,15 @@ former `RUSTSEC-2026-0097` ignore), and `quick-xml` (via `wayland-scanner` and
 `notify-rust`, which closed `RUSTSEC-2026-0194` and `RUSTSEC-2026-0195`).
 Prefer that path whenever a patched release is inside the parent's range.
 
+On 2026-11-05 three more were resolved by targeted updates that stay within
+the 1.85 MSRV:
+- `tokio` 1.51.6 closes `RUSTSEC-2026-0386`, an unsound `AsyncFd::new`.
+- `futures-util` 0.3.34 drops `pin-utils`, closing `RUSTSEC-2026-0441`.
+- `clipboard-win` moves from a yanked release to 5.4.3.
+
+A full `cargo update` was not used: it pulls `notify-rust` 4.18.2, which
+needs Rust 1.89.
+
 `examples/porygon-tui` is excluded from the workspace, so `cargo audit` covers
 the workspace lockfile only. The `tokio-tungstenite` path above comes from
 `ulttui` itself, not from porygon-tui, so the exclusion does not change this
