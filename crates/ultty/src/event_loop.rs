@@ -457,24 +457,23 @@ impl EventLoop {
     /// `frames` as in-band strings, then the query replies held behind them.
     pub fn finish_in_band(&self, frames: &[u8]) -> io::Result<()> {
         let wire = ultty_protocol::in_band::encode_to_vec(frames);
-        let mut state = self.shared.lock();
-        state.in_band_open = false;
-        let held = if state.holds_responses() {
-            // More in-band data arrived after the take. The held replies may
-            // include ones it caused, and those must follow the next answer.
-            // Holding them all is safe; sending any early is not.
-            Vec::new()
-        } else {
-            std::mem::take(&mut state.held_responses)
-        };
-        drop(state);
-        let len = wire.len() + held.len();
+        // Clearing `in_band_open`, choosing the held replies, and queueing
+        // them must happen under one lock. Otherwise the I/O thread could
+        // see nothing held in between and send a newer reply first.
         self.enqueue(
             |state| {
+                state.in_band_open = false;
                 state.outbound.extend_from_slice(&wire);
-                state.outbound.extend_from_slice(&held);
+                // If more in-band data arrived after the take, the held
+                // replies may include ones it caused, which must follow the
+                // next answer. Holding them all is safe; sending any early
+                // is not.
+                if !state.holds_responses() {
+                    let held = std::mem::take(&mut state.held_responses);
+                    state.outbound.extend_from_slice(&held);
+                }
             },
-            len,
+            wire.len(),
         )
     }
 
@@ -495,8 +494,9 @@ impl EventLoop {
         (pgrp > 0).then_some(pgrp)
     }
 
-    /// Processes in this PTY's foreground process group. Empty when it
-    /// cannot be determined (no `/proc`).
+    /// Processes in this PTY's foreground process group other than shells:
+    /// the candidates for the program running there. Empty when it cannot
+    /// be determined (no `/proc`).
     pub fn foreground_pids(&self) -> Vec<i32> {
         self.foreground_pgrp()
             .map(pids_in_group)
@@ -579,6 +579,11 @@ impl EventLoop {
     {
         loop {
             let events = self.wait(Duration::from_millis(16))?; // ~60fps
+                                                                // No protocol server here: answer in-band data with nothing so
+                                                                // held query replies go out.
+            if self.take_in_band().is_some() {
+                self.finish_in_band(&[])?;
+            }
 
             for event in events {
                 let should_continue = callback(self, event.clone());
@@ -764,6 +769,7 @@ fn flush_outbound(pty: &Pty, shared: &Shared) -> Result<(), PtyError> {
             Ok(0) => break,
             Ok(n) => state.outbound.advance(n),
             Err(PtyError::Closed) => return Err(PtyError::Closed),
+            Err(PtyError::WriteFailed(err)) if err.kind() == io::ErrorKind::Interrupted => {}
             Err(err) => {
                 tracing::warn!("PTY write failed, dropping queued input: {err}");
                 state.outbound.clear();
@@ -970,7 +976,7 @@ fn pids_in_group(pgrp: i32) -> Vec<i32> {
         .filter(|entry| entry.file_name().to_string_lossy().parse::<i32>().is_ok())
         .filter_map(|entry| fs::read_to_string(entry.path().join("stat")).ok())
         .filter_map(|stat| parse_proc_stat(&stat))
-        .filter(|process| process.pgrp == pgrp)
+        .filter(|process| process.pgrp == pgrp && !is_shell_process(&process.name))
         .map(|process| process.pid)
         .collect()
 }

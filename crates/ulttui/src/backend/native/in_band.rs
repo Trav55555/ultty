@@ -30,6 +30,8 @@ struct Restore {
     fd_in: RawFd,
     fd_out: RawFd,
     saved: libc::termios,
+    /// The thread that opened the session, which runs the app's event loop.
+    owner: std::thread::ThreadId,
 }
 
 /// Terminal state to restore if the process panics or exits while in-band.
@@ -72,6 +74,7 @@ impl InBandTty {
             fd_in,
             fd_out,
             saved,
+            owner: std::thread::current().id(),
         });
         Ok(Self {
             fd_in,
@@ -196,12 +199,25 @@ fn install_exit_hooks() {
     INSTALLED.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            disconnect_and_restore();
+            // With unwinding, a panic on another thread (a background task,
+            // whose panic its runtime catches) leaves the app running; only
+            // the event loop's own thread ends the session. With abort, any
+            // panic ends the process.
+            if cfg!(panic = "abort") || owns_session() {
+                disconnect_and_restore();
+            }
             previous(info);
         }));
         // SAFETY: registers a plain `extern "C"` function with no state.
         unsafe { libc::atexit(disconnect_at_exit) };
     });
+}
+
+fn owns_session() -> bool {
+    EXIT_RESTORE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_some_and(|r| r.owner == std::thread::current().id())
 }
 
 extern "C" fn disconnect_at_exit() {

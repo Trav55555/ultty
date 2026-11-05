@@ -138,6 +138,14 @@ Building and running it changed five things.
   a remote host or a `cat`ed file. In-band sessions cannot read the
   clipboard.
 
+Known costs:
+- A remote app that dies without `Disconnect` leaves its scene up for up to
+  10 s. Keys typed meanwhile are sent as in-band strings into the remote
+  shell's input, where they show up as junk on the command line.
+- A `cat`ed file holding a valid `ClientHello` opens a session that blanks
+  the tab until the idle timeout. A remote host could already clear the
+  screen with ANSI, so this adds no new capability.
+
 ## Follow-ups
 
 - `ultty-client` (used by `hello-native` and `split-panes`) gains the

@@ -67,8 +67,11 @@ ESC _ U <base64url of the chunk, no padding> ESC \
 **Probe.** An app writes `ClientHello` as an in-band string and then DA1
 (`ESC [ c`). A terminal that supports in-band answers with a frame, normally
 `ServerHello`, before its DA1 reply; any other terminal ignores the APC
-string and answers only DA1. The terminal must deliver query replies in
-request order relative to its in-band answers. An app that sees the DA1
+string and answers only DA1. A terminal must send its reply to a query
+that follows an in-band string only after its answer to that string. Ultty
+applies this per read from the PTY, so it may also delay replies to queries
+made just before the string; apps must send the hello first. An app that
+sees the DA1
 reply first, or nothing within a timeout (`ulttui`: 1 s), uses ANSI.
 
 - Apps keep their tty in raw mode, without echo, for the whole session.

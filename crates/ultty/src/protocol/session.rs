@@ -132,7 +132,7 @@ enum Link {
         outgoing: Vec<u8>,
         /// Foreground process group of the PTY when the session started.
         pgrp: Option<i32>,
-        /// Processes in that group then. One of them is the app.
+        /// Non-shell processes in that group then. One of them is the app.
         pids: Vec<i32>,
     },
 }
@@ -668,21 +668,25 @@ impl NativeSession {
     }
 
     /// Whether the in-band app still runs, judged from outside: the PTY's
-    /// foreground group is still `pgrp`'s and every process that was in it
-    /// at hello is alive.
+    /// foreground group is still the one at hello, and at least one of the
+    /// non-shell processes that were in it then is alive.
     ///
     /// The group check catches an app exiting under a job-control shell.
     /// The process check catches it without job control (a script, `bash -c`,
-    /// `script`), where the group stays the same after the app dies. Neither
-    /// sees a remote app over ssh; that relies on `Disconnect` and the idle
-    /// timeout.
+    /// `script`), where the group stays the same after the app dies; shells
+    /// are left out because a wrapper script outlives the app. Requiring
+    /// only one survivor means a helper the app ran exiting does not end the
+    /// session. Neither check sees a remote app over ssh; that relies on
+    /// `Disconnect` and the idle timeout.
     pub fn in_band_app_alive(&self, pgrp: Option<i32>) -> bool {
         match &self.link {
             Link::InBand {
                 pgrp: started,
                 pids,
                 ..
-            } => *started == pgrp && pids.iter().all(|&pid| process_exists(pid)),
+            } => {
+                *started == pgrp && (pids.is_empty() || pids.iter().any(|&pid| process_exists(pid)))
+            }
             Link::Socket(_) => true,
         }
     }
@@ -1858,16 +1862,31 @@ mod tests {
 
     #[test]
     fn in_band_app_is_gone_when_its_group_changes_or_a_process_exits() {
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        let pid = child.id() as i32;
-        let session = NativeSession::new_in_band(1, TabId::new(0), Some(5), vec![pid]);
+        let spawn = || {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap()
+        };
+        let (mut app, mut helper) = (spawn(), spawn());
+        let pids = vec![app.id() as i32, helper.id() as i32];
+        let session = NativeSession::new_in_band(1, TabId::new(0), Some(5), pids);
         assert!(session.in_band_app_alive(Some(5)));
         assert!(!session.in_band_app_alive(Some(6)), "new foreground group");
-        child.kill().unwrap();
-        child.wait().unwrap();
-        assert!(!session.in_band_app_alive(Some(5)), "process exited");
+        helper.kill().unwrap();
+        helper.wait().unwrap();
+        assert!(
+            session.in_band_app_alive(Some(5)),
+            "a helper exiting is not the app"
+        );
+        app.kill().unwrap();
+        app.wait().unwrap();
+        assert!(!session.in_band_app_alive(Some(5)), "every process exited");
+
+        let unknown = NativeSession::new_in_band(2, TabId::new(0), Some(5), Vec::new());
+        assert!(
+            unknown.in_band_app_alive(Some(5)),
+            "no pids: group check only"
+        );
     }
 }
