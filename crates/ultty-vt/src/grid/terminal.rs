@@ -397,10 +397,8 @@ impl Terminal {
                             max_col
                         };
 
-                        for col in start_col..=end_col {
-                            if let Some(cell) = row.get(col as u16) {
-                                text.push(cell.char());
-                            }
+                        if start_col <= end_col {
+                            text.push_str(&row.copy_text(start_col as u16, end_col as u16));
                         }
 
                         // Add newline between rows (except last)
@@ -414,7 +412,7 @@ impl Terminal {
                 // Line-wise selection
                 for row_idx in first_row..=last_row {
                     if let Some(row) = buffer.visible_row(row_idx as u16) {
-                        text.push_str(&row.text_trimmed());
+                        text.push_str(row.copy_text(0, row.width()).trim_end());
                         if row_idx < last_row {
                             text.push('\n');
                         }
@@ -431,10 +429,8 @@ impl Terminal {
 
                 for row_idx in first_row..=last_row {
                     if let Some(row) = buffer.visible_row(row_idx as u16) {
-                        for col in left..=right {
-                            if let Some(cell) = row.get(col as u16) {
-                                text.push(cell.char());
-                            }
+                        if left <= right {
+                            text.push_str(&row.copy_text(left as u16, right as u16));
                         }
                         if row_idx < last_row {
                             text.push('\n');

@@ -734,21 +734,14 @@ impl Grid {
             let available = self.dims.cols.saturating_sub(col).max(1) as usize;
             let write_len = available.min(remaining.len());
             let end_col = col + write_len as u16;
-            let attrs = self.attrs;
+            let mut template = self.attrs;
+            template.unset_flag(CellFlags::HAS_COMBINING);
+            template.unset_flag(CellFlags::WIDE_CHAR);
+            template.unset_flag(CellFlags::WIDE_CHAR_SPACER);
 
-            self.clear_combining_range(row, col, end_col);
             self.clear_wide_orphans_for_ascii_span(row, col, end_col);
-
             if let Some(row_cells) = self.rows.get_mut(row as usize) {
-                for (offset, &byte) in remaining[..write_len].iter().enumerate() {
-                    if let Some(cell) = row_cells.get_mut(col + offset as u16) {
-                        cell.set_char(byte as char);
-                        cell.copy_attrs_from(&attrs);
-                        cell.unset_flag(CellFlags::HAS_COMBINING);
-                        cell.unset_flag(CellFlags::WIDE_CHAR);
-                        cell.unset_flag(CellFlags::WIDE_CHAR_SPACER);
-                    }
-                }
+                row_cells.write_ascii(col, &remaining[..write_len], template);
             }
             self.mark_dirty(row);
 
@@ -816,22 +809,8 @@ impl Grid {
             }
         }
 
-        for col in start_col..end_col {
-            let is_wide = self.cell(col, row).is_some_and(|cell| cell.is_wide());
-            let is_spacer = self
-                .cell(col, row)
-                .is_some_and(|cell| cell.is_wide_spacer());
-            if is_wide && col + 1 < self.dims.cols {
-                if let Some(spacer) = self.cell_mut(col + 1, row) {
-                    spacer.clear();
-                }
-            }
-            if is_spacer && col > 0 {
-                if let Some(primary) = self.cell_mut(col - 1, row) {
-                    primary.clear();
-                }
-            }
-        }
+        // Every cell in start_col..end_col is overwritten, so a wide char
+        // can only be split at the two edges handled above.
     }
 
     /// Move cursor up, stopping at scroll region top if inside region.

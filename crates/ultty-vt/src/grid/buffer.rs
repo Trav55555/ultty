@@ -126,6 +126,29 @@ impl Buffer {
         self.scroll_offset = 0;
     }
 
+    /// Copy the top `n` grid rows into history.
+    ///
+    /// Once history is full, the evicted oldest row's allocation is reused
+    /// for the copy, so steady-state scrolling allocates nothing.
+    fn save_top_rows(&mut self, n: usize) {
+        if self.max_history == 0 {
+            return;
+        }
+        for index in 0..n.min(self.grid.dimensions().rows as usize) {
+            let Some(source) = self.grid.row(index as u16) else {
+                break;
+            };
+            let row = if self.history.len() >= self.max_history {
+                let mut recycled = self.history.pop_front().unwrap_or_else(|| Row::new(0));
+                recycled.copy_from(source);
+                recycled
+            } else {
+                source.clone()
+            };
+            self.history.push_back(row);
+        }
+    }
+
     /// Push lines from grid top into history (called when grid scrolls up).
     pub fn push_to_history(&mut self, rows: Vec<Row>) {
         if self.max_history == 0 {
@@ -516,10 +539,7 @@ impl Buffer {
             // since scroll regions are used by apps on the alternate screen which
             // has no meaningful scrollback.
             if self.grid.scroll_region().is_none() {
-                let top_row = self.grid.row(0).cloned();
-                if let Some(row) = top_row {
-                    self.push_to_history(vec![row]);
-                }
+                self.save_top_rows(1);
             }
         }
 
@@ -545,9 +565,7 @@ impl Buffer {
             if self.grid.cursor().wrap_pending && self.grid.scroll_region().is_none() {
                 let scroll_bottom = self.grid.dimensions().rows.saturating_sub(1);
                 if self.grid.cursor().position.row >= scroll_bottom {
-                    if let Some(row) = self.grid.row(0).cloned() {
-                        self.push_to_history(vec![row]);
-                    }
+                    self.save_top_rows(1);
                 }
             }
 
@@ -573,8 +591,7 @@ impl Buffer {
 
         if self.grid.scroll_region().is_none() {
             // Full-screen scroll — save top rows to history
-            let rows_to_save: Vec<Row> = self.grid.rows().take(n_usize).cloned().collect();
-            self.push_to_history(rows_to_save);
+            self.save_top_rows(n_usize);
         }
         // With a scroll region, rows displaced from region.top are discarded
         // (scroll regions are used by apps on the alternate screen which has

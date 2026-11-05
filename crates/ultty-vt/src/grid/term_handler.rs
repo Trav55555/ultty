@@ -866,6 +866,23 @@ mod tests {
     }
 
     #[test]
+    fn copied_text_keeps_graphemes_and_skips_wide_spacers() {
+        use crate::grid::{SelectionMode, SelectionPoint};
+
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(
+            &mut term,
+            "e\u{301}\u{4e2d}\u{6587}\u{2764}\u{fe0f}!".as_bytes(),
+        );
+        term.start_selection(SelectionPoint::new(0, 0), SelectionMode::Normal);
+        term.update_selection(SelectionPoint::new(19, 0));
+        assert_eq!(
+            term.selected_text().as_deref(),
+            Some("e\u{301}\u{4e2d}\u{6587}\u{2764}\u{fe0f}!")
+        );
+    }
+
+    #[test]
     fn combining_mark_survives_scroll() {
         let mut term = Terminal::new(Dimensions::new(10, 3));
         process(&mut term, "a\r\ne\u{301}\r\nx\r\ny".as_bytes());

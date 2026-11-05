@@ -63,6 +63,29 @@ impl Row {
         }
     }
 
+    /// Write printable ASCII `bytes` starting at `col`, each cell a copy of
+    /// `template` with its character replaced. The caller has already
+    /// resolved any wide character straddling the span's edges; the span
+    /// must fit on the row.
+    pub fn write_ascii(&mut self, col: u16, bytes: &[u8], template: Cell) {
+        let start = col as usize;
+        let end = start + bytes.len();
+        self.drop_grapheme_entries(col, end as u16);
+        for (cell, &byte) in self.cells[start..end].iter_mut().zip(bytes) {
+            *cell = template;
+            cell.set_char(byte as char);
+        }
+        self.dirty = true;
+    }
+
+    /// Make this row a copy of `other`, reusing this row's allocations.
+    pub fn copy_from(&mut self, other: &Row) {
+        self.cells.clone_from(&other.cells);
+        self.graphemes.clone_from(&other.graphemes);
+        self.wrapped = other.wrapped;
+        self.dirty = true;
+    }
+
     /// Codepoints following the base character of the cluster at `col`, if
     /// the cell holds a multi-codepoint grapheme.
     pub fn grapheme_extra(&self, col: u16) -> Option<&[char]> {
@@ -199,9 +222,7 @@ impl Row {
 
     /// Clear all cells in the row.
     pub fn clear(&mut self) {
-        for cell in &mut self.cells {
-            cell.clear();
-        }
+        self.cells.fill(Cell::default());
         self.graphemes.clear();
         self.wrapped = false;
         self.dirty = true;
@@ -209,9 +230,9 @@ impl Row {
 
     /// Erase all cells per ECMA-48: reset to space, preserve given background.
     pub fn erase(&mut self, bg: super::cell::Color) {
-        for cell in &mut self.cells {
-            cell.erase(bg);
-        }
+        let mut blank = Cell::default();
+        blank.set_bg(bg);
+        self.cells.fill(blank);
         self.graphemes.clear();
         self.wrapped = false;
         self.dirty = true;
@@ -264,6 +285,28 @@ impl Row {
         for (col, cell) in self.cells.iter().enumerate() {
             text.push(cell.char());
             if let Some(extra) = self.grapheme_extra(col as u16) {
+                text.extend(extra);
+            }
+        }
+        text
+    }
+
+    /// Text of columns `start..=end` as a user would copy it: each cell's
+    /// whole grapheme, with the spacer half of wide characters skipped.
+    ///
+    /// Unlike [`Row::text`], the result does not map one char per column.
+    pub fn copy_text(&self, start: u16, end: u16) -> String {
+        let mut text = String::new();
+        let end = end.min(self.width().saturating_sub(1));
+        for col in start..=end {
+            let Some(cell) = self.cells.get(col as usize) else {
+                break;
+            };
+            if cell.is_wide_spacer() {
+                continue;
+            }
+            text.push(cell.char());
+            if let Some(extra) = self.grapheme_extra(col) {
                 text.extend(extra);
             }
         }
