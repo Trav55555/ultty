@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use super::{CellFlags, Dimensions, Grid, Row};
+use super::{Cell, CellFlags, Dimensions, Grid, Row};
 
 /// Default scrollback buffer size (lines).
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
@@ -21,6 +21,16 @@ pub struct Buffer {
     max_history: usize,
     /// Current scroll offset (0 = at bottom, >0 = scrolled up)
     scroll_offset: usize,
+}
+
+/// A cell being re-wrapped, plus the extra codepoints of its grapheme.
+type ReflowCell = (Cell, Option<Vec<char>>);
+
+fn push_reflow_cells(line: &mut Vec<ReflowCell>, row: &Row) {
+    for (col, cell) in row.cells().enumerate() {
+        let extra = row.grapheme_extra(col as u16).map(<[char]>::to_vec);
+        line.push((*cell, extra));
+    }
 }
 
 impl Buffer {
@@ -212,8 +222,6 @@ impl Buffer {
     /// Tracks cursor position through the reflow so it stays on the same
     /// logical content after re-wrapping.
     fn reflow_all(&mut self, new_dims: Dimensions) {
-        use crate::grid::cell::Cell;
-
         let new_cols = new_dims.cols;
         let new_rows = new_dims.rows as usize;
         let old_cursor_row = self.grid.cursor().position.row as usize;
@@ -224,18 +232,17 @@ impl Buffer {
         let mut cursor_logical_col: usize = 0;
         let mut found_cursor = false;
 
-        // Collect all logical lines from history and grid
-        let mut logical_lines: Vec<Vec<Cell>> = Vec::new();
-        let mut current_line: Vec<Cell> = Vec::new();
+        // Collect all logical lines from history and grid. Each cell carries
+        // the extra codepoints of its grapheme cluster so reflow keeps them.
+        let mut logical_lines: Vec<Vec<ReflowCell>> = Vec::new();
+        let mut current_line: Vec<ReflowCell> = Vec::new();
         let mut current_logical_idx: usize = 0;
 
         // Process history rows
         for row in self.history.drain(..) {
-            for cell in row.cells() {
-                current_line.push(*cell);
-            }
+            push_reflow_cells(&mut current_line, &row);
             if !row.is_wrapped() {
-                while current_line.last().is_some_and(|c| c.is_blank()) {
+                while current_line.last().is_some_and(|(c, _)| c.is_blank()) {
                     current_line.pop();
                 }
                 logical_lines.push(std::mem::take(&mut current_line));
@@ -263,9 +270,7 @@ impl Buffer {
             }
 
             let cells_before = current_line.len();
-            for cell in row.cells() {
-                current_line.push(*cell);
-            }
+            push_reflow_cells(&mut current_line, row);
 
             // Track cursor: it's on this grid row
             if idx == old_cursor_row && !found_cursor {
@@ -275,7 +280,7 @@ impl Buffer {
             }
 
             if !row.is_wrapped() {
-                while current_line.last().is_some_and(|c| c.is_blank()) {
+                while current_line.last().is_some_and(|(c, _)| c.is_blank()) {
                     current_line.pop();
                 }
                 // Clamp cursor col if it fell in trimmed blanks
@@ -289,7 +294,7 @@ impl Buffer {
         }
 
         if !current_line.is_empty() {
-            while current_line.last().is_some_and(|c| c.is_blank()) {
+            while current_line.last().is_some_and(|(c, _)| c.is_blank()) {
                 current_line.pop();
             }
             if found_cursor && cursor_logical_line == current_logical_idx {
@@ -335,7 +340,7 @@ impl Buffer {
                 let mut col = 0u16;
 
                 while col < new_cols && pos < line.len() {
-                    let cell = &line[pos];
+                    let (cell, extra) = &line[pos];
 
                     // Skip spacer cells from old layout — regenerated when placing wide chars
                     if cell.is_wide_spacer() {
@@ -355,6 +360,7 @@ impl Buffer {
                             *dest = *cell;
                             dest.set_char(' ');
                             dest.unset_flag(CellFlags::WIDE_CHAR);
+                            dest.unset_flag(CellFlags::HAS_COMBINING);
                         }
                         col += 1;
                         pos += 1;
@@ -363,6 +369,9 @@ impl Buffer {
 
                     if let Some(dest) = new_row.get_mut(col) {
                         *dest = *cell;
+                    }
+                    if let Some(extra) = extra {
+                        new_row.set_grapheme_extra(col, extra);
                     }
                     col += 1;
                     pos += 1;
@@ -448,7 +457,13 @@ impl Buffer {
         let auto_wrap = self.grid.auto_wrap();
         let scroll_bottom = self.grid.effective_scroll_region().bottom;
         let max_col = self.grid.dimensions().cols;
-        let char_width = c.width().unwrap_or(0) as u16;
+        // A codepoint that joins the previous grapheme cluster takes no new
+        // column, so it can never wrap or scroll.
+        let char_width = if self.grid.continues_cluster(c) {
+            0
+        } else {
+            c.width().unwrap_or(0) as u16
+        };
 
         // Determine if this write will cause scrolling.
         // With pending wrap behavior:

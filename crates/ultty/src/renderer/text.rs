@@ -336,6 +336,20 @@ impl TextRenderer {
         style: CellStyle,
     ) -> Option<ShapedGlyph> {
         let shaping = self.get_shaping();
+        self.shape_text(buffer, text, style, shaping)
+            .into_iter()
+            .next()
+    }
+
+    /// Shape `text` and return every glyph of its first layout run, each
+    /// positioned relative to the start of the run.
+    fn shape_text(
+        &mut self,
+        buffer: &mut Buffer,
+        text: &str,
+        style: CellStyle,
+        shaping: Shaping,
+    ) -> Vec<ShapedGlyph> {
         let mut attrs = font_attrs(&self.font_family);
         if style.bold {
             attrs = attrs.weight(Weight::BOLD);
@@ -345,27 +359,33 @@ impl TextRenderer {
         }
         buffer.set_text(&mut self.font_system, text, attrs, shaping);
 
-        let run = buffer.layout_runs().next()?;
-        let glyph = run.glyphs.first()?;
-        let face = self
-            .font_system
-            .db()
-            .face(glyph.font_id)
-            .map(|face| (face.weight, face.style));
-        let (synthetic_bold, fake_italic) = synthesized_styles(style, face);
+        let Some(run) = buffer.layout_runs().next() else {
+            return Vec::new();
+        };
+        let line_y = run.line_y;
+        let mut shaped = Vec::with_capacity(run.glyphs.len());
+        for glyph in run.glyphs {
+            let face = self
+                .font_system
+                .db()
+                .face(glyph.font_id)
+                .map(|face| (face.weight, face.style));
+            let (synthetic_bold, fake_italic) = synthesized_styles(style, face);
 
-        let mut physical = glyph.physical((0.0, 0.0), 1.0);
-        if fake_italic {
-            physical.cache_key.flags |= CacheKeyFlags::FAKE_ITALIC;
+            let mut physical = glyph.physical((0.0, 0.0), 1.0);
+            if fake_italic {
+                physical.cache_key.flags |= CacheKeyFlags::FAKE_ITALIC;
+            }
+
+            shaped.push(ShapedGlyph {
+                cache_key: physical.cache_key,
+                x_offset: physical.x as f32,
+                y_offset: physical.y as f32,
+                line_y,
+                synthetic_bold,
+            });
         }
-
-        Some(ShapedGlyph {
-            cache_key: physical.cache_key,
-            x_offset: physical.x as f32,
-            y_offset: physical.y as f32,
-            line_y: run.line_y,
-            synthetic_bold,
-        })
+        shaped
     }
 
     /// Start a frame. Must precede any quad that samples the glyph atlas,
@@ -759,31 +779,34 @@ impl TextRenderer {
                     continue;
                 }
 
-                let shaped_glyph = if !cell.has_flag(CellFlags::HAS_COMBINING) {
-                    let cache_key_lookup = shaping_cache_key(ch, self.ligatures, style);
-                    if let Some(&cached) = self.shaping_cache.get(&cache_key_lookup) {
-                        Some(cached)
-                    } else {
-                        let shaped = self.shape_cell(&mut buffer, &ch.to_string(), style);
-                        if let Some(shaped) = shaped {
-                            self.shaping_cache.insert(cache_key_lookup, shaped);
-                        }
-                        shaped
-                    }
+                // Multi-codepoint graphemes (combining marks, ZWJ emoji,
+                // flags) live on the row itself, so history rows render them
+                // too. They are always shaped with full shaping so the font's
+                // composition rules apply, and every resulting glyph is drawn.
+                let cluster_glyphs: Vec<ShapedGlyph>;
+                let single_glyph: Option<ShapedGlyph>;
+                let glyphs: &[ShapedGlyph] = if let Some(extra) = row.grapheme_extra(col_idx) {
+                    let mut text = String::with_capacity(4 * (1 + extra.len()));
+                    text.push(ch);
+                    text.extend(extra);
+                    cluster_glyphs = self.shape_text(&mut buffer, &text, style, Shaping::Advanced);
+                    &cluster_glyphs
                 } else {
-                    // Combining marks are stored per grid row; when the
-                    // viewport is scrolled back, visual rows above the
-                    // scroll offset are history rows with no grapheme data.
-                    let scroll_offset = term_buffer.scroll_offset();
-                    let grapheme = usize::from(row_idx)
-                        .checked_sub(scroll_offset)
-                        .and_then(|grid_row| u16::try_from(grid_row).ok())
-                        .and_then(|grid_row| terminal.grid().grapheme(grid_row, col_idx))
-                        .unwrap_or_else(|| ch.to_string());
-                    self.shape_cell(&mut buffer, &grapheme, style)
+                    let cache_key_lookup = shaping_cache_key(ch, self.ligatures, style);
+                    single_glyph = match self.shaping_cache.get(&cache_key_lookup) {
+                        Some(&cached) => Some(cached),
+                        None => {
+                            let shaped = self.shape_cell(&mut buffer, &ch.to_string(), style);
+                            if let Some(shaped) = shaped {
+                                self.shaping_cache.insert(cache_key_lookup, shaped);
+                            }
+                            shaped
+                        }
+                    };
+                    single_glyph.as_slice()
                 };
 
-                if let Some(shaped) = shaped_glyph {
+                for &shaped in glyphs {
                     if let Some(glyph_info) = self
                         .atlas
                         .get_glyph(&mut self.font_system, shaped.cache_key)

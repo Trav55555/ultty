@@ -1,6 +1,7 @@
 //! Terminal row representation.
 
-use super::cell::Cell;
+use super::cell::{Cell, CellFlags};
+use std::collections::BTreeMap;
 use std::ops::{Index, IndexMut};
 
 /// A row of terminal cells.
@@ -14,6 +15,14 @@ pub struct Row {
     dirty: bool,
     /// Whether this row is wrapped (continues on next line due to soft wrap)
     wrapped: bool,
+    /// Codepoints after the base character of a multi-codepoint grapheme
+    /// cluster (combining marks, ZWJ sequences, variation selectors), keyed by
+    /// column. An entry is only meaningful while the cell at that column has
+    /// [`CellFlags::HAS_COMBINING`]; cell writes and erases clear the flag, so
+    /// a stale entry is never read. Storing them on the row (rather than by
+    /// screen coordinate) keeps them attached through scrolling, history,
+    /// and reflow.
+    graphemes: BTreeMap<u16, Vec<char>>,
 }
 
 impl Row {
@@ -23,6 +32,109 @@ impl Row {
             cells: vec![Cell::default(); width as usize],
             dirty: true,
             wrapped: false,
+            graphemes: BTreeMap::new(),
+        }
+    }
+
+    /// Codepoints following the base character of the cluster at `col`, if
+    /// the cell holds a multi-codepoint grapheme.
+    pub fn grapheme_extra(&self, col: u16) -> Option<&[char]> {
+        let cell = self.cells.get(col as usize)?;
+        if !cell.has_flag(CellFlags::HAS_COMBINING) {
+            return None;
+        }
+        self.graphemes.get(&col).map(Vec::as_slice)
+    }
+
+    /// The full grapheme at `col`: base character plus any extra codepoints.
+    pub fn grapheme(&self, col: u16) -> Option<String> {
+        let cell = self.cells.get(col as usize)?;
+        let mut s = String::new();
+        s.push(cell.char());
+        if let Some(extra) = self.grapheme_extra(col) {
+            s.extend(extra);
+        }
+        Some(s)
+    }
+
+    /// Append a codepoint to the grapheme cluster at `col`.
+    ///
+    /// At most `cap` extra codepoints are kept per cell; the rest are dropped
+    /// so hostile output cannot grow a cell without bound.
+    pub fn push_grapheme_char(&mut self, col: u16, c: char, cap: usize) {
+        let Some(cell) = self.cells.get_mut(col as usize) else {
+            return;
+        };
+        if !cell.has_flag(CellFlags::HAS_COMBINING) {
+            // Whatever is stored for this column belonged to earlier content.
+            self.graphemes.remove(&col);
+            cell.set_flag(CellFlags::HAS_COMBINING);
+        }
+        let extra = self.graphemes.entry(col).or_default();
+        if extra.len() < cap {
+            extra.push(c);
+        }
+        self.dirty = true;
+    }
+
+    /// Set the extra codepoints of the cluster at `col` (used by reflow).
+    pub fn set_grapheme_extra(&mut self, col: u16, extra: &[char]) {
+        let Some(cell) = self.cells.get_mut(col as usize) else {
+            return;
+        };
+        if extra.is_empty() {
+            cell.unset_flag(CellFlags::HAS_COMBINING);
+            self.graphemes.remove(&col);
+        } else {
+            cell.set_flag(CellFlags::HAS_COMBINING);
+            self.graphemes.insert(col, extra.to_vec());
+        }
+        self.dirty = true;
+    }
+
+    /// Drop grapheme data for columns in `start..end` and clear their flags.
+    pub fn clear_graphemes(&mut self, start: u16, end: u16) {
+        if start >= end {
+            return;
+        }
+        self.drop_grapheme_entries(start, end);
+        let end = (end as usize).min(self.cells.len());
+        for cell in self
+            .cells
+            .get_mut(start as usize..end)
+            .into_iter()
+            .flatten()
+        {
+            cell.unset_flag(CellFlags::HAS_COMBINING);
+        }
+        self.dirty = true;
+    }
+
+    /// Remove stored grapheme data for `start..end` without touching cells.
+    fn drop_grapheme_entries(&mut self, start: u16, end: u16) {
+        if self.graphemes.is_empty() || start >= end {
+            return;
+        }
+        let mut tail = self.graphemes.split_off(&start);
+        let mut keep = tail.split_off(&end);
+        self.graphemes.append(&mut keep);
+        drop(tail);
+    }
+
+    /// Shift grapheme entries so they follow their cells after a horizontal
+    /// move: entries at `from..` move by `delta`, and entries that land
+    /// outside the row are dropped.
+    fn shift_graphemes(&mut self, from: u16, delta: i32) {
+        if self.graphemes.is_empty() {
+            return;
+        }
+        let width = self.cells.len() as i32;
+        let moved = self.graphemes.split_off(&from);
+        for (col, extra) in moved {
+            let dest = col as i32 + delta;
+            if (0..width).contains(&dest) {
+                self.graphemes.insert(dest as u16, extra);
+            }
         }
     }
 
@@ -63,6 +175,7 @@ impl Row {
         for cell in &mut self.cells {
             cell.clear();
         }
+        self.graphemes.clear();
         self.wrapped = false;
         self.dirty = true;
     }
@@ -72,6 +185,7 @@ impl Row {
         for cell in &mut self.cells {
             cell.erase(bg);
         }
+        self.graphemes.clear();
         self.wrapped = false;
         self.dirty = true;
     }
@@ -79,6 +193,7 @@ impl Row {
     /// Resize the row.
     pub fn resize(&mut self, new_width: u16) {
         self.cells.resize(new_width as usize, Cell::default());
+        self.graphemes.retain(|&col, _| col < new_width);
         self.dirty = true;
     }
 
@@ -118,7 +233,14 @@ impl Row {
 
     /// Get the text content of the row as a string.
     pub fn text(&self) -> String {
-        self.cells.iter().map(|c| c.char()).collect()
+        let mut text = String::with_capacity(self.cells.len());
+        for (col, cell) in self.cells.iter().enumerate() {
+            text.push(cell.char());
+            if let Some(extra) = self.grapheme_extra(col as u16) {
+                text.extend(extra);
+            }
+        }
+        text
     }
 
     /// Get the trimmed text content (trailing spaces removed).
@@ -154,6 +276,7 @@ impl Row {
         if at < src_end {
             self.cells.copy_within(at..src_end, at + count);
         }
+        self.shift_graphemes(at as u16, count as i32);
 
         // Fill inserted cells with background color
         for i in at..(at + count).min(len) {
@@ -190,6 +313,8 @@ impl Row {
         if src_start < len {
             self.cells.copy_within(src_start..len, at);
         }
+        self.drop_grapheme_entries(at as u16, src_start as u16);
+        self.shift_graphemes(src_start as u16, -(count as i32));
 
         // Fill vacated cells at end with background color
         for i in len.saturating_sub(count)..len {
@@ -204,6 +329,7 @@ impl Row {
         for i in from as usize..self.cells.len() {
             self.cells[i].clear();
         }
+        self.clear_graphemes(from, self.width());
         self.dirty = true;
     }
 
@@ -214,6 +340,7 @@ impl Row {
                 self.cells[i].clear();
             }
         }
+        self.clear_graphemes(0, to.saturating_add(1));
         self.dirty = true;
     }
 }

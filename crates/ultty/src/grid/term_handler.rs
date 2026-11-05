@@ -507,7 +507,13 @@ impl<'a> TerminalHandler<'a> {
                             2
                         }
                     }
-                    2027 => 2, // Unicode core spec - not implemented
+                    2027 => {
+                        if self.terminal.grid().grapheme_clustering() {
+                            1
+                        } else {
+                            2
+                        }
+                    }
                     // Mode not recognized
                     _ => 0,
                 };
@@ -520,6 +526,7 @@ impl<'a> TerminalHandler<'a> {
 
             // Full reset (RIS — ESC c)
             Action::FullReset => {
+                self.terminal.set_grapheme_clustering(true);
                 self.terminal.grid_mut().clear();
                 self.terminal.grid_mut().reset_attrs();
                 self.terminal.grid_mut().set_scroll_region(0, 0);
@@ -737,6 +744,9 @@ impl<'a> TerminalHandler<'a> {
                 // defers rendering until the mode is disabled (ESU received).
                 self.terminal.modes_mut().synchronized_update = enabled;
             }
+            Mode::GraphemeClustering => {
+                self.terminal.set_grapheme_clustering(enabled);
+            }
         }
     }
 
@@ -840,6 +850,124 @@ mod tests {
         let mut parser = AnsiParser::new();
         let mut handler = TerminalHandler::new(terminal);
         parser.feed(input, |action| handler.handle(action));
+    }
+
+    fn cursor_col(term: &Terminal) -> u16 {
+        term.grid().cursor().position.col
+    }
+
+    #[test]
+    fn combining_mark_survives_scroll() {
+        let mut term = Terminal::new(Dimensions::new(10, 3));
+        process(&mut term, "a\r\ne\u{301}\r\nx\r\ny".as_bytes());
+        // One line scrolled off; the accented line is now the top row.
+        assert_eq!(term.grid().grapheme(0, 0).as_deref(), Some("e\u{301}"));
+    }
+
+    #[test]
+    fn combining_mark_survives_into_scrollback_and_reflow() {
+        let mut term = Terminal::new(Dimensions::new(10, 2));
+        process(&mut term, "e\u{301}\r\nx\r\ny".as_bytes());
+        let mut history = term.buffer().clone();
+        history.scroll_up(1);
+        let top = history.visible_row(0).expect("history row");
+        assert_eq!(top.grapheme(0).as_deref(), Some("e\u{301}"));
+        assert_eq!(top.text_trimmed(), "e\u{301}");
+
+        term.resize(Dimensions::new(6, 2));
+        let mut history = term.buffer().clone();
+        history.scroll_up(1);
+        let top = history.visible_row(0).expect("history row after reflow");
+        assert_eq!(top.grapheme(0).as_deref(), Some("e\u{301}"));
+    }
+
+    #[test]
+    fn insert_and_delete_chars_move_combining_marks() {
+        let mut term = Terminal::new(Dimensions::new(10, 2));
+        process(&mut term, "ae\u{301}".as_bytes());
+        process(&mut term, b"\x1b[1G\x1b[@"); // ICH 1 at column 0
+        assert_eq!(term.grid().grapheme(0, 2).as_deref(), Some("e\u{301}"));
+        assert_eq!(term.grid().grapheme(0, 1).as_deref(), Some("a"));
+        process(&mut term, b"\x1b[1G\x1b[2P"); // DCH 2 at column 0
+        assert_eq!(term.grid().grapheme(0, 0).as_deref(), Some("e\u{301}"));
+        assert!(term.grid().combining_chars(0, 2).is_none());
+    }
+
+    #[test]
+    fn zwj_sequence_occupies_one_wide_cell() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(&mut term, family.as_bytes());
+        assert_eq!(cursor_col(&term), 2);
+        assert_eq!(term.grid().grapheme(0, 0).as_deref(), Some(family));
+        assert!(term.grid().cell(1, 0).unwrap().is_wide_spacer());
+    }
+
+    #[test]
+    fn emoji_presentation_selector_widens_narrow_base() {
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(&mut term, "\u{2764}\u{fe0f}x".as_bytes());
+        assert!(term.grid().cell(0, 0).unwrap().is_wide());
+        assert!(term.grid().cell(1, 0).unwrap().is_wide_spacer());
+        assert_eq!(term.grid().cell(2, 0).unwrap().char(), 'x');
+        assert_eq!(cursor_col(&term), 3);
+    }
+
+    #[test]
+    fn regional_indicators_pair_into_flags() {
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        // Two flags: US then DE.
+        process(&mut term, "\u{1f1fa}\u{1f1f8}\u{1f1e9}\u{1f1ea}".as_bytes());
+        assert_eq!(cursor_col(&term), 4);
+        assert_eq!(
+            term.grid().grapheme(0, 0).as_deref(),
+            Some("\u{1f1fa}\u{1f1f8}")
+        );
+        assert_eq!(
+            term.grid().grapheme(0, 2).as_deref(),
+            Some("\u{1f1e9}\u{1f1ea}")
+        );
+    }
+
+    #[test]
+    fn skin_tone_modifier_joins_its_base() {
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(&mut term, "\u{1f44d}\u{1f3fd}".as_bytes());
+        assert_eq!(cursor_col(&term), 2);
+    }
+
+    #[test]
+    fn cursor_motion_breaks_the_cluster() {
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(&mut term, "\u{1f1fa}\x1b[1;6H\u{1f1f8}".as_bytes());
+        assert_eq!(term.grid().grapheme(0, 0).as_deref(), Some("\u{1f1fa}"));
+        assert_eq!(term.grid().grapheme(0, 5).as_deref(), Some("\u{1f1f8}"));
+    }
+
+    #[test]
+    fn cluster_continuation_at_right_margin_does_not_wrap() {
+        let mut term = Terminal::new(Dimensions::new(4, 2));
+        process(&mut term, "ab\u{1f468}\u{200d}\u{1f469}".as_bytes());
+        assert_eq!(term.grid().cursor().position.row, 0);
+        assert_eq!(
+            term.grid().grapheme(0, 2).as_deref(),
+            Some("\u{1f468}\u{200d}\u{1f469}")
+        );
+    }
+
+    #[test]
+    fn mode_2027_reset_restores_per_codepoint_widths() {
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(&mut term, b"\x1b[?2027$p");
+        assert_eq!(term.take_responses(), vec![b"\x1b[?2027;1$y".to_vec()]);
+
+        process(&mut term, b"\x1b[?2027l\x1b[?2027$p");
+        assert_eq!(term.take_responses(), vec![b"\x1b[?2027;2$y".to_vec()]);
+        process(&mut term, "\u{1f468}\u{200d}\u{1f469}".as_bytes());
+        assert_eq!(cursor_col(&term), 4);
+
+        process(&mut term, b"\x1bc");
+        assert!(term.grid().grapheme_clustering());
     }
 
     #[test]

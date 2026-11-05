@@ -61,6 +61,7 @@ open = "5.0"
 
 # Unicode
 unicode-width = { workspace = true }
+unicode-segmentation = "1.12"
 
 # Encoding
 base64 = "0.21"

@@ -289,6 +289,13 @@ impl Terminal {
         &mut self.modes
     }
 
+    /// Enable or disable grapheme cluster processing (mode 2027) on both
+    /// the main and alternate screens.
+    pub fn set_grapheme_clustering(&mut self, enabled: bool) {
+        self.main.grid_mut().set_grapheme_clustering(enabled);
+        self.alternate.grid_mut().set_grapheme_clustering(enabled);
+    }
+
     /// Get current selection.
     ///
     /// Returns `None` once the selected content has been mutated (text
