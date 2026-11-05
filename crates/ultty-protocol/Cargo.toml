@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 taffy = { workspace = true }

@@ -28,6 +28,7 @@ repository = "https://github.com/Trav55555/ultty"
 rust-version = "1.85"
 
 [workspace.dependencies]
+base64 = "0.21"
 # Protocol & Serialization
 bytes = "1.5"
 
