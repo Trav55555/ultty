@@ -170,6 +170,36 @@ pub struct Terminal {
 }
 
 impl Terminal {
+    /// Check every structural invariant of the terminal state.
+    ///
+    /// Returns a description of the first violation. Nothing in normal
+    /// operation calls this; it exists so tests and fuzzers can assert that
+    /// arbitrary input never leaves the state inconsistent.
+    pub fn check_integrity(&self) -> Result<(), String> {
+        self.main
+            .check_integrity()
+            .map_err(|e| format!("main screen: {e}"))?;
+        self.alternate
+            .check_integrity()
+            .map_err(|e| format!("alternate screen: {e}"))?;
+        if self.hyperlinks.len() > MAX_HYPERLINKS {
+            return Err(format!(
+                "{} hyperlinks stored, limit is {MAX_HYPERLINKS}",
+                self.hyperlinks.len()
+            ));
+        }
+        if self.images.len() > super::image::MAX_IMAGE_STORE_COUNT
+            || self.images.total_bytes() > super::image::MAX_IMAGE_STORE_BYTES
+        {
+            return Err(format!(
+                "image store holds {} images / {} bytes, beyond its limits",
+                self.images.len(),
+                self.images.total_bytes()
+            ));
+        }
+        Ok(())
+    }
+
     /// Create a new terminal with the given dimensions.
     pub fn new(dims: Dimensions) -> Self {
         Self {

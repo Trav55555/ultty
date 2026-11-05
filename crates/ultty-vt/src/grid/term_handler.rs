@@ -116,42 +116,10 @@ impl<'a> TerminalHandler<'a> {
                 _ => {}
             },
             Action::EraseCharacters(n) => {
-                let col = self.terminal.grid().cursor().position.col;
-                let row = self.terminal.grid().cursor().position.row;
-                let cols = self.terminal.grid().dimensions().cols;
-                let bg = self.terminal.grid().attrs().bg();
-                let end = col.saturating_add(n).min(cols);
-
-                // Check for orphaned wide char at the start boundary
-                if col > 0
-                    && self
-                        .terminal
-                        .grid()
-                        .cell(col, row)
-                        .is_some_and(|c| c.is_wide_spacer())
-                {
-                    if let Some(primary) = self.terminal.grid_mut().cell_mut(col - 1, row) {
-                        primary.erase(bg);
-                    }
-                }
-                // Check for orphaned wide char spacer at the end boundary
-                if end < cols
-                    && self
-                        .terminal
-                        .grid()
-                        .cell(end, row)
-                        .is_some_and(|c| c.is_wide_spacer())
-                {
-                    if let Some(spacer) = self.terminal.grid_mut().cell_mut(end, row) {
-                        spacer.erase(bg);
-                    }
-                }
-
-                for c in col..end {
-                    if let Some(cell) = self.terminal.grid_mut().cell_mut(c, row) {
-                        cell.erase(bg);
-                    }
-                }
+                let pos = self.terminal.grid().cursor().position;
+                self.terminal
+                    .grid_mut()
+                    .erase_cells(pos.row, pos.col, pos.col.saturating_add(n));
             }
 
             // Line operations
@@ -854,6 +822,47 @@ mod tests {
 
     fn cursor_col(term: &Terminal) -> u16 {
         term.grid().cursor().position.col
+    }
+
+    #[test]
+    fn maximal_cursor_motion_parameters_clamp_instead_of_overflowing() {
+        let mut term = Terminal::new(Dimensions::new(10, 5));
+        process(&mut term, b"\x1b[3;3H\x1b[65535B\x1b[65535C");
+        assert_eq!(term.grid().cursor().position.row, 4);
+        assert_eq!(term.grid().cursor().position.col, 9);
+    }
+
+    #[test]
+    fn screen_alignment_replaces_wide_chars_with_plain_cells() {
+        let mut term = Terminal::new(Dimensions::new(3, 2));
+        process(&mut term, "\x1b[2G\u{4e2d}\x1b#8\u{4e2d}".as_bytes());
+        assert_eq!(term.check_integrity(), Ok(()));
+        assert_eq!(term.grid().cell(2, 0).unwrap().char(), 'E');
+    }
+
+    #[test]
+    fn wide_char_overlapping_the_next_wide_char_clears_its_spacer() {
+        let mut term = Terminal::new(Dimensions::new(6, 1));
+        // Wide char at cols 1-2, then a wide char at cols 0-1 overwrites its
+        // first half; col 2 must not keep a spacer with no primary.
+        process(&mut term, "a\u{4e2d}\r\u{4e2d}".as_bytes());
+        assert_eq!(term.check_integrity(), Ok(()));
+        assert_eq!(term.grid().cell(2, 0).unwrap().char(), ' ');
+    }
+
+    #[test]
+    fn partial_erases_never_split_a_wide_char() {
+        // Cursor on the spacer of a wide char at cols 2-3.
+        for erase in [&b"\x1b[J"[..], b"\x1b[K", b"\x1b[1K", b"\x1b[1J", b"\x1b[X"] {
+            let mut term = Terminal::new(Dimensions::new(6, 2));
+            process(&mut term, "ab\u{4e2d}cd\x1b[1;4H".as_bytes());
+            process(&mut term, erase);
+            assert_eq!(term.check_integrity(), Ok(()), "after {erase:?}");
+            assert!(
+                !term.grid().cell(2, 0).unwrap().is_wide(),
+                "after {erase:?}"
+            );
+        }
     }
 
     #[test]

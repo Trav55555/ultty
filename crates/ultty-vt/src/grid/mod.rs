@@ -327,10 +327,12 @@ impl Grid {
         let rows = self.dims.rows;
         for row_idx in 0..rows {
             if let Some(row) = self.row_mut(row_idx) {
+                // Start from blank cells so no wide-char, spacer, grapheme,
+                // or style flags from earlier content survive the fill.
+                row.clear();
                 for col in 0..cols {
                     row[col].set_char(c);
                 }
-                row.mark_dirty();
             }
         }
     }
@@ -386,6 +388,48 @@ impl Grid {
             r.clear_graphemes(start_col, end_col);
         }
         self.mark_dirty(row);
+    }
+
+    /// Check the grid's structural invariants: row count and widths match
+    /// the dimensions, the cursor and scroll region are in bounds, and every
+    /// row is internally consistent (see [`Row::check_integrity`]).
+    pub fn check_integrity(&self) -> Result<(), String> {
+        let Dimensions { cols, rows } = self.dims;
+        if self.rows.len() != rows as usize {
+            return Err(format!(
+                "grid has {} rows, dimensions say {rows}",
+                self.rows.len()
+            ));
+        }
+        if self.dirty.len() != rows as usize {
+            return Err(format!(
+                "dirty map has {} rows, grid has {rows}",
+                self.dirty.len()
+            ));
+        }
+        let pos = self.cursor.position;
+        if rows > 0 && pos.row >= rows {
+            return Err(format!("cursor row {} outside {rows} rows", pos.row));
+        }
+        if cols > 0 && pos.col >= cols {
+            return Err(format!("cursor col {} outside {cols} cols", pos.col));
+        }
+        if let Some(region) = self.scroll_region {
+            if region.top > region.bottom || region.bottom >= rows {
+                return Err(format!("scroll region {region:?} outside {rows} rows"));
+            }
+        }
+        for (index, row) in self.rows.iter().enumerate() {
+            if row.width() != cols {
+                return Err(format!(
+                    "row {index} is {} wide, grid is {cols}",
+                    row.width()
+                ));
+            }
+            row.check_integrity(MAX_COMBINING_PER_CELL)
+                .map_err(|e| format!("row {index}: {e}"))?;
+        }
+        Ok(())
     }
 
     /// Get a row by index.
@@ -602,6 +646,16 @@ impl Grid {
                 primary.clear();
             }
         }
+        // A wide char's spacer overwrites the next cell; if that cell starts
+        // another wide char, that char's own spacer would be orphaned.
+        if width > 1
+            && col + 2 < self.dims.cols
+            && self.cell(col + 1, row).is_some_and(|c| c.is_wide())
+        {
+            if let Some(orphan) = self.cell_mut(col + 2, row) {
+                orphan.clear();
+            }
+        }
 
         // Write the character
         if let Some(cell) = self.cell_mut(col, row) {
@@ -805,7 +859,7 @@ impl Grid {
         } else {
             self.dims.rows.saturating_sub(1)
         };
-        self.cursor.position.row = (self.cursor.position.row + n).min(bottom);
+        self.cursor.position.row = self.cursor.position.row.saturating_add(n).min(bottom);
     }
 
     /// Move cursor left, stopping at left edge.
@@ -817,8 +871,12 @@ impl Grid {
     /// Move cursor right, stopping at right edge.
     pub fn cursor_right(&mut self, n: u16) {
         self.cursor.wrap_pending = false;
-        self.cursor.position.col =
-            (self.cursor.position.col + n).min(self.dims.cols.saturating_sub(1));
+        self.cursor.position.col = self
+            .cursor
+            .position
+            .col
+            .saturating_add(n)
+            .min(self.dims.cols.saturating_sub(1));
     }
 
     /// Set absolute cursor position (1-based like ANSI).
@@ -1144,19 +1202,7 @@ impl Grid {
     pub fn erase_below(&mut self) {
         let r = self.cursor.position.row;
         let bg = self.attrs.bg();
-        // Rows below are erased whole (which drops their graphemes); only the
-        // partial cursor row needs explicit clearing.
-        self.clear_combining_range(r, self.cursor.position.col, self.dims.cols);
-
-        // Erase from cursor to end of current line
-        if let Some(row) = self.rows.get_mut(r as usize) {
-            for i in self.cursor.position.col..self.dims.cols {
-                if let Some(cell) = row.get_mut(i) {
-                    cell.erase(bg);
-                }
-            }
-        }
-        self.mark_dirty(r);
+        self.erase_cells(r, self.cursor.position.col, self.dims.cols);
 
         // Erase all lines below cursor
         for row_idx in (r + 1)..self.dims.rows {
@@ -1171,8 +1217,6 @@ impl Grid {
     pub fn erase_above(&mut self) {
         let r = self.cursor.position.row;
         let bg = self.attrs.bg();
-        // Rows above are erased whole; clear the partial cursor row.
-        self.clear_combining_range(r, 0, self.cursor.position.col.saturating_add(1));
 
         // Erase all lines above cursor
         for row_idx in 0..r {
@@ -1183,14 +1227,37 @@ impl Grid {
         }
 
         // Erase from start of current line to cursor
-        if let Some(row) = self.rows.get_mut(r as usize) {
-            for i in 0..=self.cursor.position.col {
-                if let Some(cell) = row.get_mut(i) {
+        self.erase_cells(r, 0, self.cursor.position.col.saturating_add(1));
+    }
+
+    /// Erase cells `start..end` of `row` with the current background.
+    ///
+    /// A wide char that straddles either boundary is erased whole, so the
+    /// row never keeps half of one (xterm behaves the same way).
+    pub fn erase_cells(&mut self, row: u16, start: u16, end: u16) {
+        let cols = self.dims.cols;
+        let end = end.min(cols);
+        if start >= end {
+            return;
+        }
+        let mut start = start;
+        let mut end = end;
+        if start > 0 && self.cell(start, row).is_some_and(|c| c.is_wide_spacer()) {
+            start -= 1;
+        }
+        if end < cols && self.cell(end - 1, row).is_some_and(|c| c.is_wide()) {
+            end += 1;
+        }
+        let bg = self.attrs.bg();
+        if let Some(r) = self.rows.get_mut(row as usize) {
+            r.clear_graphemes(start, end);
+            for col in start..end {
+                if let Some(cell) = r.get_mut(col) {
                     cell.erase(bg);
                 }
             }
         }
-        self.mark_dirty(r);
+        self.mark_dirty(row);
     }
 
     /// Erase entire display.
@@ -1205,14 +1272,8 @@ impl Grid {
     /// Erase from cursor to end of line.
     pub fn erase_line_right(&mut self) {
         let r = self.cursor.position.row;
-        let bg = self.attrs.bg();
-        self.clear_combining_range(r, self.cursor.position.col, self.dims.cols);
+        self.erase_cells(r, self.cursor.position.col, self.dims.cols);
         if let Some(row) = self.rows.get_mut(r as usize) {
-            for i in self.cursor.position.col..self.dims.cols {
-                if let Some(cell) = row.get_mut(i) {
-                    cell.erase(bg);
-                }
-            }
             // Erasing to end of line means this line ends here (hard break),
             // so clear the wrapped flag. This is important for proper reflow
             // when resizing - content after an erase-to-EOL should not be
@@ -1225,16 +1286,7 @@ impl Grid {
     /// Erase from start of line to cursor.
     pub fn erase_line_left(&mut self) {
         let r = self.cursor.position.row;
-        let bg = self.attrs.bg();
-        self.clear_combining_range(r, 0, self.cursor.position.col.saturating_add(1));
-        if let Some(row) = self.rows.get_mut(r as usize) {
-            for i in 0..=self.cursor.position.col {
-                if let Some(cell) = row.get_mut(i) {
-                    cell.erase(bg);
-                }
-            }
-        }
-        self.mark_dirty(r);
+        self.erase_cells(r, 0, self.cursor.position.col.saturating_add(1));
     }
 
     /// Erase entire current line.

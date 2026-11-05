@@ -34,6 +34,32 @@ fn push_reflow_cells(line: &mut Vec<ReflowCell>, row: &Row) {
 }
 
 impl Buffer {
+    /// Check the buffer's invariants: the grid's own (see
+    /// [`Grid::check_integrity`]), scrollback within its limit, a viewport
+    /// offset that points into history, and consistent history rows.
+    pub fn check_integrity(&self) -> Result<(), String> {
+        self.grid.check_integrity()?;
+        if self.history.len() > self.max_history {
+            return Err(format!(
+                "history holds {} rows, limit is {}",
+                self.history.len(),
+                self.max_history
+            ));
+        }
+        if self.scroll_offset > self.history.len() {
+            return Err(format!(
+                "viewport offset {} beyond {} history rows",
+                self.scroll_offset,
+                self.history.len()
+            ));
+        }
+        for (index, row) in self.history.iter().enumerate() {
+            row.check_integrity(super::MAX_COMBINING_PER_CELL)
+                .map_err(|e| format!("history row {index}: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// Create a new buffer with the given dimensions.
     pub fn new(dims: Dimensions) -> Self {
         Self::with_scrollback(dims, DEFAULT_SCROLLBACK)

@@ -93,3 +93,38 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
       - run: cargo check --workspace --all-targets
+
+  vt-integrity:
+    name: VT integrity (deep property run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p ultty-vt --test integrity
+        env:
+          PROPTEST_CASES: "20000"
+
+  fuzz:
+    name: Fuzz (smoke)
+    runs-on: ubuntu-latest
+    env:
+      # cargo-fuzz supplies its own sanitizer and coverage flags.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --version 0.12.0 --locked
+      - name: VT parser and grid
+        working-directory: fuzz
+        run: cargo fuzz run vt_terminal -- -max_total_time=120 -max_len=4096
+      - name: Protocol decoders
+        working-directory: fuzz
+        run: |
+          cargo fuzz run decode_app -- -max_total_time=30
+          cargo fuzz run decode_terminal -- -max_total_time=30

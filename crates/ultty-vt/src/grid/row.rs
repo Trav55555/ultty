@@ -26,6 +26,33 @@ pub struct Row {
 }
 
 impl Row {
+    /// Check the row's structural invariants: every wide cell is followed by
+    /// its spacer, every spacer follows a wide cell, and no cell carries more
+    /// grapheme codepoints than `max_extra`.
+    pub fn check_integrity(&self, max_extra: usize) -> Result<(), String> {
+        let cells = &self.cells;
+        for (col, cell) in cells.iter().enumerate() {
+            if cell.is_wide() && cell.is_wide_spacer() {
+                return Err(format!("cell at col {col} is both wide and a spacer"));
+            }
+            if cell.is_wide() && !cells.get(col + 1).is_some_and(Cell::is_wide_spacer) {
+                return Err(format!("wide cell at col {col} has no spacer after it"));
+            }
+            if cell.is_wide_spacer() && !(col > 0 && cells[col - 1].is_wide()) {
+                return Err(format!("spacer at col {col} does not follow a wide cell"));
+            }
+            if let Some(extra) = self.grapheme_extra(col as u16) {
+                if extra.len() > max_extra {
+                    return Err(format!(
+                        "cell at col {col} holds {} grapheme codepoints (max {max_extra})",
+                        extra.len()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Create a new row with the given width.
     pub fn new(width: u16) -> Self {
         Self {
@@ -259,16 +286,20 @@ impl Row {
             return;
         }
 
-        // If inserting at a wide char spacer, clear the orphaned primary cell
+        // Inserting at a wide char's spacer splits the pair: the primary
+        // stays put and the spacer would be shifted away from it, so both
+        // halves are cleared.
         if at > 0 && self.cells[at].is_wide_spacer() {
             self.cells[at - 1].clear();
+            self.cells[at].clear();
         }
 
-        // If the cell that will be pushed off-screen is a wide char,
-        // clear its spacer to avoid orphaning it
-        let pushed = len.saturating_sub(count);
-        if pushed < len && self.cells[pushed].is_wide() && pushed + 1 < len {
-            self.cells[pushed + 1].clear();
+        // The last cell that stays on the row lands in the final column. If
+        // it is a wide char, its spacer is the first cell pushed off, so it
+        // would be left without one.
+        let first_pushed = len.saturating_sub(count);
+        if first_pushed > at && self.cells[first_pushed - 1].is_wide() {
+            self.cells[first_pushed - 1].clear();
         }
 
         // Shift cells right using bulk copy
@@ -316,8 +347,9 @@ impl Row {
         self.drop_grapheme_entries(at as u16, src_start as u16);
         self.shift_graphemes(src_start as u16, -(count as i32));
 
-        // Fill vacated cells at end with background color
-        for i in len.saturating_sub(count)..len {
+        // Fill vacated cells at end with background color. A count running
+        // past the end of the row vacates only cells from `at` onward.
+        for i in len.saturating_sub(count).max(at)..len {
             self.cells[i].erase(bg);
         }
 
@@ -428,6 +460,55 @@ mod tests {
         assert_eq!(row[2].char(), ' ');
         assert_eq!(row[3].char(), 'B');
         assert_eq!(row[4].char(), 'C');
+    }
+
+    fn wide_at(row: &mut Row, col: usize, c: char) {
+        row.cells[col].set_char(c);
+        row.cells[col].set_flag(CellFlags::WIDE_CHAR);
+        row.cells[col + 1].set_flag(CellFlags::WIDE_CHAR_SPACER);
+    }
+
+    #[test]
+    fn insert_at_wide_spacer_clears_both_halves() {
+        let mut row = Row::new(5);
+        wide_at(&mut row, 0, '\u{4e2d}');
+        row.insert_cells(1, 1, crate::grid::cell::Color::Default);
+        assert!(
+            row.check_integrity(16).is_ok(),
+            "{:?}",
+            row.check_integrity(16)
+        );
+        assert!(row.cells().all(|c| !c.is_wide() && !c.is_wide_spacer()));
+    }
+
+    #[test]
+    fn insert_that_pushes_off_a_spacer_clears_its_wide_char() {
+        let mut row = Row::new(4);
+        row.cells[0].set_char('a');
+        wide_at(&mut row, 2, '\u{4e2d}');
+        row.insert_cells(0, 1, crate::grid::cell::Color::Default);
+        // The wide char would land in the last column with no room for its
+        // spacer, so it is cleared instead.
+        assert!(
+            row.check_integrity(16).is_ok(),
+            "{:?}",
+            row.check_integrity(16)
+        );
+        assert_eq!(row[1].char(), 'a');
+        assert!(!row[3].is_wide());
+    }
+
+    #[test]
+    fn delete_past_end_of_row_leaves_cells_before_cursor() {
+        let mut row = Row::new(5);
+        wide_at(&mut row, 0, '\u{4e2d}');
+        row.delete_cells(2, 4, crate::grid::cell::Color::Default);
+        assert!(
+            row.check_integrity(16).is_ok(),
+            "{:?}",
+            row.check_integrity(16)
+        );
+        assert!(row[0].is_wide());
     }
 
     #[test]
