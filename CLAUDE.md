@@ -64,7 +64,7 @@ examples/*                ←─depends─  ulttui
 ### Dual-Mode Rendering
 
 Apps built with `ulttui` auto-detect their environment:
-- **Inside Ultty**: Native binary protocol over Unix socket → terminal-side layout → GPU rendering
+- **Inside Ultty**: Native binary protocol over the tab's Unix socket, or in-band as APC strings in the PTY stream (ssh, sudo, `script`; spec §1.3) → terminal-side layout → GPU rendering
 - **Any supported Unix terminal**: ANSI mode via ratatui → traditional character-cell rendering
 
 Same binary works in both modes. Widgets implement both `render_child_native()` and `render_ansi()`.

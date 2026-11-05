@@ -91,7 +91,7 @@ manifest:
 cargo run --manifest-path examples/porygon-tui/Cargo.toml
 ```
 
-Native apps auto-detect whether they're running directly on an Ultty tab. There, they send the native protocol and the terminal does layout and rendering. Everywhere else they use ANSI mode via ratatui on supported Unix terminals, including inside tmux, screen, or zellij started from an Ultty tab, under `script`, and over ssh: the native protocol travels over a local socket, so it only reaches the tab's own terminal.
+Native apps auto-detect whether they're talking to Ultty. On an Ultty tab's own terminal they use the tab's socket. Anywhere else they probe the terminal, and if it is Ultty they carry the native protocol in-band in the terminal byte stream. That covers ssh, `sudo`, containers, and `script` recordings. In both cases the terminal does layout and rendering. Everywhere else they use ANSI mode via ratatui on supported Unix terminals. That includes tmux, screen, and zellij, where Ultty cannot know where a pane sits, so the probe is skipped or dropped. Set `ULTTY_IN_BAND=0` to skip the probe. See [spec §1.3](docs/PROTOCOL_SPEC.md) and [ADR 0018](docs/adr/0018-in-band-native-transport.md).
 
 ## ANSI Compatibility
 
