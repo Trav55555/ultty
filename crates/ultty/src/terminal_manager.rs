@@ -1140,6 +1140,28 @@ impl ManagedTerminal {
 mod tests {
     use super::*;
 
+    /// A manager whose only tab runs a shell that prints nothing.
+    ///
+    /// The I/O thread parses child output as it arrives, so a login shell's
+    /// prompt (which on many systems sets the window title) would race with
+    /// tests that set terminal state directly. `sh` stays a shell, so the
+    /// foreground-process name does not stand in for the title either.
+    fn quiet_manager() -> TerminalManager {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let first = manager.active_tab().unwrap().id;
+        manager
+            .create_tab_with_command(
+                "/bin/sh",
+                &["-c".to_string(), "read never".to_string()],
+                None,
+                None,
+                &mut no_tab_env,
+            )
+            .unwrap();
+        manager.close_tab(first);
+        manager
+    }
+
     #[test]
     fn create_manager() {
         let manager = TerminalManager::new(80, 24).unwrap();
@@ -1162,7 +1184,7 @@ mod tests {
 
     #[test]
     fn tab_display_title_uses_osc_title_for_default_tabs() {
-        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let mut manager = quiet_manager();
         let tab_id = manager.active_tab().unwrap().id;
         manager.terminals[0]
             .event_loop
@@ -1174,7 +1196,7 @@ mod tests {
 
     #[test]
     fn tab_display_title_falls_back_to_working_directory_for_shell_titles() {
-        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let mut manager = quiet_manager();
         let tab_id = manager.active_tab().unwrap().id;
         {
             let mut terminal = manager.terminals[0].event_loop.terminal_mut();

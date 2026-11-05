@@ -614,7 +614,10 @@ mod tests {
         let (client_side, server_side) = UnixStream::pair().unwrap();
         let handle = thread::spawn(move || {
             let mut terminal = FakeTerminal::new(server_side);
-            assert!(matches!(terminal.read_one(), AppMessage::ClientHello { .. }));
+            assert!(matches!(
+                terminal.read_one(),
+                AppMessage::ClientHello { .. }
+            ));
             // The client rejects this and hangs up, so nothing may follow it:
             // a SessionReady written after the hangup fails with EPIPE.
             terminal.send(&TerminalMessage::ServerHello {
