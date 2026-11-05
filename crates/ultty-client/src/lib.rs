@@ -614,7 +614,13 @@ mod tests {
         let (client_side, server_side) = UnixStream::pair().unwrap();
         let handle = thread::spawn(move || {
             let mut terminal = FakeTerminal::new(server_side);
-            terminal.answer_handshake(MIN_PROTOCOL_VERSION.saturating_sub(1));
+            assert!(matches!(terminal.read_one(), AppMessage::ClientHello { .. }));
+            // The client rejects this and hangs up, so nothing may follow it:
+            // a SessionReady written after the hangup fails with EPIPE.
+            terminal.send(&TerminalMessage::ServerHello {
+                version: MIN_PROTOCOL_VERSION.saturating_sub(1),
+                capabilities: CLIENT_DEFAULT_CAPABILITIES,
+            });
         });
         let err = match UlttyClient::from_stream(client_side) {
             Ok(_) => panic!("handshake must fail for an unsupported server version"),
