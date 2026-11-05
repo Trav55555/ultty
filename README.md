@@ -172,6 +172,7 @@ Current dated reports:
 - [ASCII span and grid write path](docs/perf/2026-05-14-ascii-span.md)
 - [Live pipeline trace and PTY readiness wakeups](docs/perf/2026-05-14-live-pipeline-trace.md)
 - [PTY throughput after the I/O thread](docs/perf/2026-11-05-io-thread.md)
+- [In-band transport prototype benchmark](docs/perf/2026-11-05-in-band-transport.md)
 - [Visual regression smoke](docs/visual-regression.md)
 
 | Metric | Target |

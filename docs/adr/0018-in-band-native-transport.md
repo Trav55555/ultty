@@ -6,8 +6,12 @@
   The terminal's markdown and syntax renderers are removed; the tags still
   decode and draw as verbatim source. Moving `Input`, `Button`, `Progress`
   and `Spinner` into `ulttui` is accepted in direction, one slice at a time.
-- Transport (proposal 1): Proposed. Decided by the prototype benchmark in
-  [docs/perf/2026-11-05-in-band-transport.md](../perf/2026-11-05-in-band-transport.md).
+- Transport (proposal 1): Proposed, with the benchmark done
+  ([docs/perf/2026-11-05-in-band-transport.md](../perf/2026-11-05-in-band-transport.md)).
+  On real app traffic in-band costs +35% bytes, a few microseconds of
+  terminal CPU per session, and +6 to +14 µs round-trip latency at p50.
+  A 1 MiB image takes 3 ms against 0.13 ms over the socket. The benchmark
+  recommends adopting it, with the socket kept as the local fast path.
 
 ## Context
 
@@ -57,11 +61,18 @@ inside APC strings on the PTY:
 - base64 costs about 33% of payload size, which matters only for images. The
   socket stays as a local fast path, used when `ULTTY_TTY` matches.
 
-Multiplexers: tmux forwards app-to-terminal APC only with `allow-passthrough`
-and DCS wrapping, and does not forward terminal replies to panes at all. So
-native mode stays off under multiplexers, as kitty graphics do. This
-proposal does not solve that; it solves ssh, sudo, containers, and
-recording.
+Multiplexers (measured with tmux 3.6):
+- tmux drops bare APC whether passthrough is on or off. It forwards
+  DCS-wrapped APC only with `allow-passthrough on`, and only up to 1 MiB.
+- It does forward APC written to its input to the active pane.
+
+Ultty cannot know where a tmux pane sits in its tab, so native mode must
+stay off under multiplexers. The probe enforces this: apps send it bare
+and never DCS-wrap it, so tmux drops it and the app falls back to ANSI.
+Frames are chunked into APCs well under 1 MiB (64 KiB), which also bounds
+what the parser buffers. This proposal does not make native mode work
+under multiplexers; it makes it work over ssh, under sudo, in containers,
+and in recordings.
 
 ### 2. Keep the wire vocabulary primitive
 
