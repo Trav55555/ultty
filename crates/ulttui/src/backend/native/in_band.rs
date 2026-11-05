@@ -32,8 +32,8 @@ struct Restore {
     saved: libc::termios,
 }
 
-/// Terminal state to restore if the process panics while in-band.
-static PANIC_RESTORE: Mutex<Option<Restore>> = Mutex::new(None);
+/// Terminal state to restore if the process panics or exits while in-band.
+static EXIT_RESTORE: Mutex<Option<Restore>> = Mutex::new(None);
 
 /// The app's terminal, in raw mode, carrying in-band strings.
 pub(super) struct InBandTty {
@@ -67,8 +67,8 @@ impl InBandTty {
         if unsafe { libc::tcsetattr(fd_in, libc::TCSANOW, &raw) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        install_panic_hook();
-        *PANIC_RESTORE.lock().unwrap_or_else(PoisonError::into_inner) = Some(Restore {
+        install_exit_hooks();
+        *EXIT_RESTORE.lock().unwrap_or_else(PoisonError::into_inner) = Some(Restore {
             fd_in,
             fd_out,
             saved,
@@ -157,7 +157,7 @@ impl InBandTty {
 
 impl Drop for InBandTty {
     fn drop(&mut self) {
-        *PANIC_RESTORE.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        *EXIT_RESTORE.lock().unwrap_or_else(PoisonError::into_inner) = None;
         // SAFETY: `fd_in` is still open and `saved` came from tcgetattr.
         unsafe { libc::tcsetattr(self.fd_in, libc::TCSANOW, &self.saved) };
     }
@@ -184,32 +184,45 @@ fn poll_readable(fd: RawFd, timeout: Duration) -> io::Result<bool> {
     }
 }
 
-/// On panic, tell the terminal the session is over and restore the tty.
+/// End the session and restore the tty if the process leaves without
+/// shutting the backend down: a panic, or `std::process::exit`.
 ///
-/// Release builds use `panic = "abort"`, so `Drop` never runs on a panic.
-/// Without this the terminal would keep showing the dead app's scene until
-/// it noticed the silence.
-fn install_panic_hook() {
+/// Release builds use `panic = "abort"`, and `process::exit` skips `Drop`,
+/// so neither reaches [`InBandTty`]'s destructor. Without these hooks the
+/// terminal would keep showing the dead app's scene until it noticed the
+/// silence.
+fn install_exit_hooks() {
     static INSTALLED: Once = Once::new();
     INSTALLED.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let restore = PANIC_RESTORE
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take();
-            if let Some(r) = restore {
-                let wire = in_band::encode_to_vec(&AppMessage::Disconnect.encode_to_bytes());
-                // SAFETY: writes from a valid buffer, then restores settings
-                // that came from tcgetattr. Both only touch the recorded fds.
-                unsafe {
-                    libc::write(r.fd_out, wire.as_ptr().cast(), wire.len());
-                    libc::tcsetattr(r.fd_in, libc::TCSANOW, &r.saved);
-                }
-            }
+            disconnect_and_restore();
             previous(info);
         }));
+        // SAFETY: registers a plain `extern "C"` function with no state.
+        unsafe { libc::atexit(disconnect_at_exit) };
     });
+}
+
+extern "C" fn disconnect_at_exit() {
+    disconnect_and_restore();
+}
+
+/// Send `Disconnect` and restore the tty, once, if a session is still open.
+fn disconnect_and_restore() {
+    let restore = EXIT_RESTORE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    if let Some(r) = restore {
+        let wire = in_band::encode_to_vec(&AppMessage::Disconnect.encode_to_bytes());
+        // SAFETY: writes from a valid buffer, then restores settings that
+        // came from tcgetattr. Both only touch the recorded fds.
+        unsafe {
+            libc::write(r.fd_out, wire.as_ptr().cast(), wire.len());
+            libc::tcsetattr(r.fd_in, libc::TCSANOW, &r.saved);
+        }
+    }
 }
 
 /// Finds a DA1 reply (`ESC [ ? <digits and ;> c`) in stdin bytes that may

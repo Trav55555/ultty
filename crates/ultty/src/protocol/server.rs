@@ -408,12 +408,20 @@ impl ProtocolServer {
 
     /// Feed in-band data that arrived on `tab_id`'s PTY, whose foreground
     /// process group is now `pgrp`. `broken` means some of the stream was
-    /// malformed or lost; it ends the tab's in-band session.
+    /// malformed or lost; it ends the tab's in-band session. `pids` lists
+    /// the group's processes; it is called only when a session opens.
     ///
     /// Replies are queued; collect them with
     /// [`ProtocolServer::take_in_band_output`].
-    pub fn in_band_input(&mut self, tab_id: TabId, pgrp: Option<i32>, bytes: &[u8], broken: bool) {
-        self.end_in_band_if_foreground_changed(tab_id, pgrp);
+    pub fn in_band_input(
+        &mut self,
+        tab_id: TabId,
+        pgrp: Option<i32>,
+        pids: impl FnOnce() -> Vec<i32>,
+        bytes: &[u8],
+        broken: bool,
+    ) {
+        self.end_in_band_if_app_gone(tab_id, pgrp);
         let key = self.in_band_session_key(tab_id);
         if broken {
             self.in_band_openers.remove(&tab_id);
@@ -447,7 +455,7 @@ impl ProtocolServer {
                     session_id,
                     tab_id.raw()
                 );
-                let mut session = NativeSession::new_in_band(session_id, tab_id, pgrp);
+                let mut session = NativeSession::new_in_band(session_id, tab_id, pgrp, pids());
                 session.set_viewport(self.viewport_width, self.viewport_height);
                 let key = self.allocate_key();
                 self.sessions.insert(key, session);
@@ -476,14 +484,14 @@ impl ProtocolServer {
         }
     }
 
-    /// End `tab_id`'s in-band session if the PTY's foreground process group
-    /// is no longer the one that started it: the app exited or was
-    /// suspended, and whatever runs now did not open the session.
-    pub fn end_in_band_if_foreground_changed(&mut self, tab_id: TabId, pgrp: Option<i32>) {
+    /// End `tab_id`'s in-band session if its app no longer runs: the PTY's
+    /// foreground process group (now `pgrp`) changed, or a process that was
+    /// in it at hello has exited. See [`NativeSession::in_band_app_alive`].
+    pub fn end_in_band_if_app_gone(&mut self, tab_id: TabId, pgrp: Option<i32>) {
         if let Some(key) = self.in_band_session_key(tab_id) {
-            if self.sessions[&key].in_band_pgrp() != pgrp {
+            if !self.sessions[&key].in_band_app_alive(pgrp) {
                 info!(
-                    "In-band session {} ended: foreground process changed",
+                    "In-band session {} ended: its app is no longer running",
                     self.sessions[&key].session_id()
                 );
                 self.remove_session(key);
@@ -1317,9 +1325,9 @@ mod tests {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
         let hello = hello_bytes();
-        server.in_band_input(TAB_A, Some(42), &hello[..5], false);
+        server.in_band_input(TAB_A, Some(42), Vec::new, &hello[..5], false);
         assert_eq!(server.session_count(), 0);
-        server.in_band_input(TAB_A, Some(42), &hello[5..], false);
+        server.in_band_input(TAB_A, Some(42), Vec::new, &hello[5..], false);
         assert_eq!(server.session_count(), 1);
         assert_eq!(server.in_band_tabs(), vec![TAB_A]);
 
@@ -1342,11 +1350,11 @@ mod tests {
         let begin = encode(&AppMessage::BeginFrame {
             frame_id: ultty_protocol::FrameId(1),
         });
-        server.in_band_input(TAB_A, Some(42), &begin, false);
-        server.in_band_input(TAB_A, Some(42), b"garbage", false);
+        server.in_band_input(TAB_A, Some(42), Vec::new, &begin, false);
+        server.in_band_input(TAB_A, Some(42), Vec::new, b"garbage", false);
         assert_eq!(server.session_count(), 0);
         // A real hello afterwards still works.
-        server.in_band_input(TAB_A, Some(42), &hello_bytes(), false);
+        server.in_band_input(TAB_A, Some(42), Vec::new, &hello_bytes(), false);
         assert_eq!(server.session_count(), 1);
     }
 
@@ -1355,18 +1363,24 @@ mod tests {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
 
-        server.in_band_input(TAB_A, Some(42), &hello_bytes(), false);
-        server.in_band_input(TAB_A, Some(42), &encode(&AppMessage::Disconnect), false);
+        server.in_band_input(TAB_A, Some(42), Vec::new, &hello_bytes(), false);
+        server.in_band_input(
+            TAB_A,
+            Some(42),
+            Vec::new,
+            &encode(&AppMessage::Disconnect),
+            false,
+        );
         assert_eq!(server.session_count(), 0, "disconnect");
 
-        server.in_band_input(TAB_A, Some(42), &hello_bytes(), false);
-        server.in_band_input(TAB_A, Some(42), &[], true);
+        server.in_band_input(TAB_A, Some(42), Vec::new, &hello_bytes(), false);
+        server.in_band_input(TAB_A, Some(42), Vec::new, &[], true);
         assert_eq!(server.session_count(), 0, "broken stream");
 
-        server.in_band_input(TAB_A, Some(42), &hello_bytes(), false);
-        server.end_in_band_if_foreground_changed(TAB_A, Some(42));
+        server.in_band_input(TAB_A, Some(42), Vec::new, &hello_bytes(), false);
+        server.end_in_band_if_app_gone(TAB_A, Some(42));
         assert_eq!(server.session_count(), 1, "same foreground keeps it");
-        server.end_in_band_if_foreground_changed(TAB_A, Some(7));
+        server.end_in_band_if_app_gone(TAB_A, Some(7));
         assert_eq!(server.session_count(), 0, "new foreground");
     }
 
@@ -1375,8 +1389,8 @@ mod tests {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
         server.open_tab(TAB_B).unwrap();
-        server.in_band_input(TAB_A, Some(1), &hello_bytes(), false);
-        server.in_band_input(TAB_B, Some(2), &hello_bytes(), false);
+        server.in_band_input(TAB_A, Some(1), Vec::new, &hello_bytes(), false);
+        server.in_band_input(TAB_B, Some(2), Vec::new, &hello_bytes(), false);
         assert_eq!(server.session_count(), 2);
         let mut tabs = server.in_band_tabs();
         tabs.sort_by_key(|t| t.raw());
@@ -1389,10 +1403,16 @@ mod tests {
     fn in_band_sessions_may_not_read_the_clipboard() {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
-        server.in_band_input(TAB_A, Some(42), &hello_bytes(), false);
+        server.in_band_input(TAB_A, Some(42), Vec::new, &hello_bytes(), false);
         let _ = in_band_output(&mut server, TAB_A);
 
-        server.in_band_input(TAB_A, Some(42), &encode(&AppMessage::ClipboardGet), false);
+        server.in_band_input(
+            TAB_A,
+            Some(42),
+            Vec::new,
+            &encode(&AppMessage::ClipboardGet),
+            false,
+        );
         assert!(server.pending_clipboard_gets().is_empty());
         let replies = in_band_output(&mut server, TAB_A);
         assert!(

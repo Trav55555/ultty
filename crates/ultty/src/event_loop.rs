@@ -495,6 +495,14 @@ impl EventLoop {
         (pgrp > 0).then_some(pgrp)
     }
 
+    /// Processes in this PTY's foreground process group. Empty when it
+    /// cannot be determined (no `/proc`).
+    pub fn foreground_pids(&self) -> Vec<i32> {
+        self.foreground_pgrp()
+            .map(pids_in_group)
+            .unwrap_or_default()
+    }
+
     fn enqueue(&self, push: impl FnOnce(&mut State), len: usize) -> io::Result<()> {
         {
             let mut state = self.shared.lock();
@@ -950,6 +958,26 @@ fn process_name_for_group(pgrp: i32) -> Option<String> {
     }
 
     fallback
+}
+
+#[cfg(target_os = "linux")]
+fn pids_in_group(pgrp: i32) -> Vec<i32> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().parse::<i32>().is_ok())
+        .filter_map(|entry| fs::read_to_string(entry.path().join("stat")).ok())
+        .filter_map(|stat| parse_proc_stat(&stat))
+        .filter(|process| process.pgrp == pgrp)
+        .map(|process| process.pid)
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pids_in_group(_pgrp: i32) -> Vec<i32> {
+    Vec::new()
 }
 
 #[cfg(target_os = "linux")]

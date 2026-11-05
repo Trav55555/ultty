@@ -132,7 +132,16 @@ enum Link {
         outgoing: Vec<u8>,
         /// Foreground process group of the PTY when the session started.
         pgrp: Option<i32>,
+        /// Processes in that group then. One of them is the app.
+        pids: Vec<i32>,
     },
+}
+
+fn process_exists(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists and may be
+    // signalled; nothing is sent.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Tracks an in-progress style transition for a region.
@@ -163,12 +172,14 @@ impl NativeSession {
     }
 
     /// Create a session whose app talks in-band on `tab_id`'s PTY, which had
-    /// `pgrp` in the foreground when the app said hello.
-    pub fn new_in_band(session_id: u64, tab_id: TabId, pgrp: Option<i32>) -> Self {
+    /// process group `pgrp`, holding `pids`, in the foreground when the app
+    /// said hello.
+    pub fn new_in_band(session_id: u64, tab_id: TabId, pgrp: Option<i32>, pids: Vec<i32>) -> Self {
         Self::with_link(
             Link::InBand {
                 outgoing: Vec::new(),
                 pgrp,
+                pids,
             },
             session_id,
             tab_id,
@@ -653,6 +664,26 @@ impl NativeSession {
         match self.link {
             Link::InBand { pgrp, .. } => pgrp,
             Link::Socket(_) => None,
+        }
+    }
+
+    /// Whether the in-band app still runs, judged from outside: the PTY's
+    /// foreground group is still `pgrp`'s and every process that was in it
+    /// at hello is alive.
+    ///
+    /// The group check catches an app exiting under a job-control shell.
+    /// The process check catches it without job control (a script, `bash -c`,
+    /// `script`), where the group stays the same after the app dies. Neither
+    /// sees a remote app over ssh; that relies on `Disconnect` and the idle
+    /// timeout.
+    pub fn in_band_app_alive(&self, pgrp: Option<i32>) -> bool {
+        match &self.link {
+            Link::InBand {
+                pgrp: started,
+                pids,
+                ..
+            } => *started == pgrp && pids.iter().all(|&pid| process_exists(pid)),
+            Link::Socket(_) => true,
         }
     }
 
@@ -1810,7 +1841,7 @@ mod tests {
 
     #[test]
     fn in_band_session_times_out_without_ever_pinging() {
-        let mut session = NativeSession::new_in_band(1, TabId::new(0), Some(9));
+        let mut session = NativeSession::new_in_band(1, TabId::new(0), Some(9), Vec::new());
         assert!(session.is_in_band());
         assert_eq!(session.in_band_pgrp(), Some(9));
 
@@ -1823,5 +1854,20 @@ mod tests {
             std::time::Instant::now() - IN_BAND_IDLE_TIMEOUT - std::time::Duration::from_secs(1);
         assert!(!session.check_keepalive().unwrap());
         assert!(session.take_in_band_output().is_empty());
+    }
+
+    #[test]
+    fn in_band_app_is_gone_when_its_group_changes_or_a_process_exits() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let session = NativeSession::new_in_band(1, TabId::new(0), Some(5), vec![pid]);
+        assert!(session.in_band_app_alive(Some(5)));
+        assert!(!session.in_band_app_alive(Some(6)), "new foreground group");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!session.in_band_app_alive(Some(5)), "process exited");
     }
 }

@@ -252,6 +252,12 @@ impl Drop for Child {
     }
 }
 
+/// Variables a tmux or screen session sets for programs running inside it.
+/// Ultty may be started from such a session, but its tabs are not inside
+/// it, and programs that see these variables behave as if they were: ulttui
+/// skips its in-band probe, for one.
+const INHERITED_MULTIPLEXER_VARS: [&str; 4] = ["TMUX", "TMUX_PANE", "STY", "WINDOW"];
+
 struct ChildExec {
     program: CString,
     _args: Vec<CString>,
@@ -286,6 +292,7 @@ impl ChildExec {
         for (key, value) in std::env::vars_os() {
             if key == "TERM"
                 || key == "COLORTERM"
+                || INHERITED_MULTIPLEXER_VARS.iter().any(|var| key == *var)
                 || extra_env.iter().any(|(extra_key, _)| *extra_key == key)
             {
                 continue;
@@ -613,6 +620,16 @@ mod tests {
                 "set without a socket: {output:?}"
             );
         }
+    }
+
+    #[test]
+    fn multiplexer_variables_are_not_inherited() {
+        // Only meaningful when the test itself runs inside tmux or screen.
+        if std::env::var_os("TMUX").is_none() && std::env::var_os("STY").is_none() {
+            return;
+        }
+        let output = run_in_pty("echo \"mux=[$TMUX$STY$TMUX_PANE]\"; echo DONE");
+        assert!(output.contains("mux=[]"), "leaked: {output:?}");
     }
 
     #[test]

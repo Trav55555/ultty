@@ -71,6 +71,7 @@ impl App {
                         server.in_band_input(
                             tab_id,
                             event_loop.foreground_pgrp(),
+                            || event_loop.foreground_pids(),
                             &input.bytes,
                             input.broken,
                         );
@@ -105,7 +106,7 @@ impl App {
                 continue;
             };
             let event_loop = &terminal.event_loop;
-            server.end_in_band_if_foreground_changed(tab_id, event_loop.foreground_pgrp());
+            server.end_in_band_if_app_gone(tab_id, event_loop.foreground_pgrp());
             let out = server.take_tab_in_band_output(tab_id);
             if let Err(e) = event_loop.send_in_band(&out) {
                 tracing::warn!("Failed to send in-band data to tab {}: {}", tab_id.raw(), e);

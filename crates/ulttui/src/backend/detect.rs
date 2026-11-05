@@ -37,7 +37,9 @@ pub fn socket_path() -> Option<PathBuf> {
 pub fn in_band_candidate() -> bool {
     // SAFETY: isatty only inspects the fd.
     let on_tty = unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 };
+    let multiplexer = std::env::var_os("TMUX").is_some() || std::env::var_os("STY").is_some();
     on_tty
+        && !multiplexer
         && probe_allowed(
             std::env::var_os("ULTTY_IN_BAND").as_deref(),
             std::env::var_os("TERM").as_deref(),
@@ -48,9 +50,13 @@ fn probe_allowed(opt: Option<&std::ffi::OsStr>, term: Option<&std::ffi::OsStr>) 
     if opt.is_some_and(|v| v == "0") {
         return false;
     }
+    let term = term.and_then(|t| t.to_str()).unwrap_or("");
     // A dumb terminal has no escape sequences, and the Linux console prints
-    // an unknown APC string instead of ignoring it.
-    !matches!(term.and_then(|t| t.to_str()), Some("dumb" | "linux"))
+    // an unknown APC string instead of ignoring it. tmux takes an APC string
+    // as a pane title and GNU screen as its hardstatus line, so the probe
+    // would rename the pane; their TERM values survive ssh, unlike the TMUX
+    // and STY variables.
+    !(matches!(term, "dumb" | "linux") || term.starts_with("tmux") || term.starts_with("screen"))
 }
 
 fn native_socket(
@@ -159,6 +165,11 @@ mod tests {
         assert!(!probe_allowed(Some(OsStr::new("0")), xterm));
         assert!(!probe_allowed(None, Some(OsStr::new("dumb"))));
         assert!(!probe_allowed(None, Some(OsStr::new("linux"))));
+        assert!(!probe_allowed(None, Some(OsStr::new("tmux-256color"))));
+        assert!(!probe_allowed(
+            None,
+            Some(OsStr::new("screen.xterm-256color"))
+        ));
     }
 
     #[test]
