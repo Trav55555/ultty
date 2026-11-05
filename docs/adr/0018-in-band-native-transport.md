@@ -167,5 +167,12 @@ Known costs:
   - server lifecycle and clipboard tests;
   - probe tests against a fake terminal on a real PTY.
 - Fuzzing ran clean: `in_band_split` 7.9M runs, `vt_terminal` 540K runs.
-- Not yet done: a native session over ssh. The transport crossed ssh intact
-  in the benchmark, but no app has yet run natively end to end that way.
+- Over ssh, 2026-11-05. A local Ultty tab ran `ssh -t` to a throwaway
+  Ubuntu 24.04 EC2 host (us-east-1, torn down afterwards), with no socket on
+  the remote side:
+  - The remote `counter-app` ran natively.
+  - It stayed up through 15 s of idle on heartbeats alone.
+  - Keys reached it.
+  - `q` ended the session through `Disconnect`.
+  - After a remote `kill -9`, the session ended at the 10 s silence timeout
+    (9.9 s measured) and the shell came back.
