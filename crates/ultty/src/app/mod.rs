@@ -156,7 +156,7 @@ pub struct App {
     /// Control wait requests that are checked after terminal output is drained.
     pending_control_waits: Vec<control_wait::PendingControlWait>,
     /// Cross-thread wakeups from PTY readiness into winit.
-    pty_wakeup: wakeup::PtyWakeup,
+    socket_wakeup: wakeup::SocketWakeup,
     /// Search matches for native protocol regions
     native_search_matches: Vec<ultty::scene::SearchMatch>,
     /// Whether native search overlay is active
@@ -250,9 +250,17 @@ impl App {
         let control_server = Self::start_control_server();
 
         // Create terminal manager - with launch profile if configured
-        let terminal_manager =
+        let mut terminal_manager =
             Self::create_terminal_manager(&config, cols, rows, &mut protocol_server)?;
-        let pty_wakeup = wakeup::PtyWakeup::new(event_proxy);
+        // Each terminal's I/O thread parses on its own and pokes the UI
+        // through this proxy when there is something new to draw.
+        let pty_proxy = std::sync::Mutex::new(event_proxy.clone());
+        terminal_manager.set_waker(std::sync::Arc::new(move || {
+            if let Ok(proxy) = pty_proxy.lock() {
+                let _ = proxy.send_event(AppEvent::RuntimeReadable);
+            }
+        }));
+        let socket_wakeup = wakeup::SocketWakeup::new(event_proxy);
 
         // Try to create clipboard
         let clipboard = Clipboard::new().ok();
@@ -321,7 +329,7 @@ impl App {
             protocol_server,
             control_server,
             pending_control_waits: Vec::new(),
-            pty_wakeup,
+            socket_wakeup,
             native_search_matches: Vec::new(),
             native_search_active: false,
             native_search_query: String::new(),
@@ -608,14 +616,14 @@ impl App {
     }
 
     /// Get the terminal state of the focused terminal.
-    fn terminal(&self) -> Option<&ultty::grid::Terminal> {
+    fn terminal(&self) -> Option<ultty::event_loop::TerminalGuard<'_>> {
         self.terminal_manager
             .focused_terminal()
             .map(|t| t.event_loop.terminal())
     }
 
     /// Get mutable terminal state of the focused terminal.
-    fn terminal_mut(&mut self) -> Option<&mut ultty::grid::Terminal> {
+    fn terminal_mut(&mut self) -> Option<ultty::event_loop::TerminalGuard<'_>> {
         self.terminal_manager
             .focused_terminal_mut()
             .map(|t| t.event_loop.terminal_mut())
@@ -704,15 +712,17 @@ impl App {
         }
     }
 
+    /// Socket fds the wakeup bridge watches. PTYs are not among them: each
+    /// terminal's I/O thread wakes the UI itself.
     fn refresh_runtime_wakeup_fds(&mut self) {
-        let mut fds = self.terminal_manager.pty_fds();
+        let mut fds = Vec::new();
         if let Some(server) = self.protocol_server.as_ref() {
             fds.extend(server.readiness_fds());
         }
         if let Some(server) = self.control_server.as_ref() {
             fds.extend(server.readiness_fds());
         }
-        self.pty_wakeup.set_fds(fds);
+        self.socket_wakeup.set_fds(fds);
     }
 
     /// Extract text from a vim selection.
@@ -739,10 +749,8 @@ impl App {
                             grid_row.width() as usize - 1
                         };
 
-                        for col in sc..=ec {
-                            if let Some(cell) = grid_row.get(col as u16) {
-                                text.push(cell.char());
-                            }
+                        if sc <= ec {
+                            text.push_str(&grid_row.copy_text(sc as u16, ec as u16));
                         }
                         if row < *end_row {
                             text.push('\n');
@@ -753,7 +761,7 @@ impl App {
             VimSelection::Line { start_row, end_row } => {
                 for row in *start_row..=*end_row {
                     if let Some(grid_row) = buffer.visible_row(row as u16) {
-                        text.push_str(&grid_row.text_trimmed());
+                        text.push_str(grid_row.copy_text(0, grid_row.width()).trim_end());
                         if row < *end_row {
                             text.push('\n');
                         }
@@ -768,10 +776,8 @@ impl App {
             } => {
                 for row in *start_row..=*end_row {
                     if let Some(grid_row) = buffer.visible_row(row as u16) {
-                        for col in *start_col..=*end_col {
-                            if let Some(cell) = grid_row.get(col as u16) {
-                                text.push(cell.char());
-                            }
+                        if start_col <= end_col {
+                            text.push_str(&grid_row.copy_text(*start_col as u16, *end_col as u16));
                         }
                         if row < *end_row {
                             text.push('\n');
@@ -808,6 +814,8 @@ impl App {
                 }
             }
         }
+
+        drop(terminal);
 
         tracing::debug!("Search '{}': found {} matches", query, matches.len());
         let has_matches = !matches.is_empty();

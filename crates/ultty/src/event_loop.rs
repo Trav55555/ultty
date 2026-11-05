@@ -1,17 +1,22 @@
 //! Event loop for the terminal emulator.
 //!
-//! This module provides the core event loop that coordinates:
-//! - Reading from the PTY (shell output)
-//! - Parsing ANSI sequences
-//! - Updating terminal state
-//! - Handling user input
+//! Each [`EventLoop`] drives one PTY child. A dedicated I/O thread reads the
+//! child's output as fast as it arrives, parses it into the shared
+//! [`Terminal`], and answers terminal queries (DSR, DA, DECRQM) directly on
+//! the PTY. The UI thread never parses: it locks the terminal to render,
+//! writes input, resizes, and collects [`TerminalEvent`]s with
+//! [`EventLoop::process`]. Parsing is therefore never paced by frames, and a
+//! flood of output cannot stall input or rendering.
 
 use std::cell::RefCell;
 #[cfg(target_os = "linux")]
 use std::fs;
 use std::io;
-use std::os::fd::RawFd;
-use std::sync::OnceLock;
+use std::ops::{Deref, DerefMut};
+use std::os::fd::{AsFd, RawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// How long a foreground-process-name lookup stays valid before `/proc` is
@@ -19,15 +24,38 @@ use std::time::{Duration, Instant};
 /// through this cache.
 const FOREGROUND_NAME_TTL: Duration = Duration::from_millis(500);
 
-/// Maximum PTY bytes drained per `process()` call so rendering and input
-/// handling are never starved by a process that floods its terminal.
-pub const PTY_DRAIN_BUDGET: usize = 1024 * 1024;
+/// Bytes the I/O thread reads (and parses under one lock) at a time. Small
+/// enough that the renderer never waits long for the lock, large enough to
+/// amortize the syscall and lock.
+const READ_CHUNK: usize = 64 * 1024;
+
+/// Events kept for the UI between two [`EventLoop::process`] calls. Bells,
+/// titles, and notifications beyond this are dropped rather than queued
+/// without bound while the UI is not collecting them.
+const MAX_PENDING_EVENTS: usize = 1024;
+
+/// Minimum spacing between wakes for plain output. The UI renders at most
+/// once per frame, so waking it for every chunk of a flood only makes it
+/// contend for the terminal lock. Events (bell, title, exit) wake at once,
+/// and output whose wake was skipped is always flushed by a trailing wake.
+const OUTPUT_WAKE_INTERVAL: Duration = Duration::from_millis(4);
+
+/// After the PTY closes, how often and how many times the I/O thread pokes
+/// the UI so it can reap the child once the kernel reports the exit.
+const EXIT_POKE_INTERVAL: Duration = Duration::from_millis(20);
+const EXIT_POKES: usize = 250;
 
 use polling::{Event, Events, Poller};
 
 use crate::grid::{Dimensions, Terminal, TerminalHandler};
 use crate::protocol::ansi::AnsiParser;
-use crate::pty::{Child, PtySize};
+use crate::pty::{Child, Pty, PtyError, PtySize};
+
+/// Called by the I/O thread when new terminal state or events are ready.
+///
+/// It runs on the I/O thread, so it must only schedule work (for example,
+/// post a user event to the windowing event loop).
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
 /// Events produced by the terminal event loop.
 #[derive(Debug, Clone)]
@@ -56,28 +84,124 @@ pub enum TerminalEvent {
     },
 }
 
+/// State shared between the UI thread and a terminal's I/O thread.
+struct State {
+    terminal: Terminal,
+    events: Vec<TerminalEvent>,
+    /// Output was parsed since the UI last collected events.
+    output_pending: bool,
+    bytes_since_collect: usize,
+    /// The PTY reported end of file or an error; the reader has stopped.
+    closed: bool,
+    /// Bumped on every parsed chunk and on close, for [`EventLoop::wait`].
+    generation: u64,
+}
+
+struct Shared {
+    state: Mutex<State>,
+    changed: Condvar,
+    /// Set when the I/O thread wakes the UI and cleared when the UI collects
+    /// events, so at most one wake is outstanding per terminal.
+    wake_pending: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+    stop: AtomicBool,
+}
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        // The I/O thread never panics while holding the lock in practice; if
+        // it did, the terminal state is still the best we have.
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Tell waiters and the UI that something changed.
+    fn notify(&self) {
+        self.changed.notify_all();
+        if !self.wake_pending.swap(true, Ordering::AcqRel) {
+            let waker = self
+                .waker
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if let Some(waker) = waker {
+                waker();
+            }
+        }
+    }
+}
+
+/// Locked access to a terminal driven by an [`EventLoop`].
+///
+/// While a guard is alive the I/O thread cannot parse into this terminal,
+/// so hold it only as long as needed (one frame's render, one query). Taking
+/// a second guard on the same terminal from the same thread would deadlock;
+/// debug builds panic instead.
+pub struct TerminalGuard<'a> {
+    state: MutexGuard<'a, State>,
+    #[cfg(debug_assertions)]
+    _held: reentry::Held,
+}
+
+impl Deref for TerminalGuard<'_> {
+    type Target = Terminal;
+
+    fn deref(&self) -> &Terminal {
+        &self.state.terminal
+    }
+}
+
+impl DerefMut for TerminalGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Terminal {
+        &mut self.state.terminal
+    }
+}
+
+/// Debug-only detection of a thread locking the same terminal twice.
+#[cfg(debug_assertions)]
+mod reentry {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HELD: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) struct Held(usize);
+
+    impl Held {
+        pub(super) fn acquire(id: usize) -> Self {
+            HELD.with(|held| {
+                let mut held = held.borrow_mut();
+                assert!(
+                    !held.contains(&id),
+                    "terminal locked twice on one thread; this deadlocks in release builds"
+                );
+                held.push(id);
+            });
+            Held(id)
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            HELD.with(|held| held.borrow_mut().retain(|&id| id != self.0));
+        }
+    }
+}
+
 /// The terminal event loop.
 ///
-/// Coordinates PTY I/O, parsing, and terminal state updates.
+/// Owns the PTY child and the I/O thread that parses its output.
 pub struct EventLoop {
     /// Child process with PTY
     child: Child,
-    /// Terminal state
-    terminal: Terminal,
-    /// ANSI parser
-    parser: AnsiParser,
-    /// Read buffer
-    read_buf: Vec<u8>,
-    /// Pending events
-    events: Vec<TerminalEvent>,
-    /// Poller for I/O events
-    poller: Poller,
+    shared: Arc<Shared>,
+    /// Wakes the I/O thread's poll so it can observe `stop`.
+    reader_poller: Arc<Poller>,
+    reader: Option<JoinHandle<()>>,
     /// Cached foreground process name and when it was looked up
     foreground_name_cache: RefCell<Option<(Instant, Option<String>)>>,
-    /// Bytes drained by the most recent `process()` call
+    /// Bytes parsed between the two most recent [`EventLoop::process`] calls
     last_drain_bytes: usize,
-    /// The last `process()` stopped at the drain budget with data left
-    drain_pending: bool,
 }
 
 impl EventLoop {
@@ -107,40 +231,80 @@ impl EventLoop {
     /// Use this when the child needs spawn options the convenience
     /// constructors do not take, such as per-child environment variables.
     pub fn from_child(child: Child, cols: u16, rows: u16) -> io::Result<Self> {
-        let terminal = Terminal::new(Dimensions::new(cols, rows));
-        let parser = AnsiParser::new();
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State {
+                terminal: Terminal::new(Dimensions::new(cols, rows)),
+                events: Vec::new(),
+                output_pending: false,
+                bytes_since_collect: 0,
+                closed: false,
+                generation: 0,
+            }),
+            changed: Condvar::new(),
+            wake_pending: AtomicBool::new(false),
+            waker: Mutex::new(None),
+            stop: AtomicBool::new(false),
+        });
 
-        let poller = Poller::new()?;
-
-        // Register PTY fd for reading
-        // SAFETY: The PTY file descriptor is valid and owned by `child` for the
-        // lifetime of this EventLoop. The poller only uses it for edge-triggered
-        // notifications, not for reading/writing.
+        let reader_pty = child.pty().try_clone().map_err(io::Error::other)?;
+        let poller = Arc::new(Poller::new()?);
+        // SAFETY: `reader_pty` owns the registered fd and is moved into the
+        // I/O thread, which deletes the registration before dropping it.
         unsafe {
-            poller.add(child.pty().as_raw_fd(), Event::readable(0))?;
+            poller.add(&reader_pty, Event::readable(0))?;
         }
+
+        let reader = std::thread::Builder::new()
+            .name(format!("ultty-pty-{}", child.pid()))
+            .spawn({
+                let shared = Arc::clone(&shared);
+                let poller = Arc::clone(&poller);
+                move || run_reader(reader_pty, &shared, &poller)
+            })?;
 
         Ok(Self {
             child,
-            terminal,
-            parser,
-            read_buf: vec![0u8; 65536], // 64KB read buffer
-            events: Vec::new(),
-            poller,
+            shared,
+            reader_poller: poller,
+            reader: Some(reader),
             foreground_name_cache: RefCell::new(None),
             last_drain_bytes: 0,
-            drain_pending: false,
         })
     }
 
-    /// Get the terminal state.
-    pub fn terminal(&self) -> &Terminal {
-        &self.terminal
+    /// Register the callback the I/O thread uses to wake the UI.
+    ///
+    /// If output is already waiting, the waker is called right away.
+    pub fn set_waker(&self, waker: Waker) {
+        *self
+            .shared
+            .waker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(waker);
+        // Drop any wake that fired before a waker existed so this call
+        // re-delivers it.
+        self.shared.wake_pending.store(false, Ordering::Release);
+        let pending = {
+            let state = self.shared.lock();
+            state.output_pending || !state.events.is_empty() || state.closed
+        };
+        if pending {
+            self.shared.notify();
+        }
     }
 
-    /// Get mutable terminal state.
-    pub fn terminal_mut(&mut self) -> &mut Terminal {
-        &mut self.terminal
+    /// Lock and return the terminal state.
+    pub fn terminal(&self) -> TerminalGuard<'_> {
+        TerminalGuard {
+            #[cfg(debug_assertions)]
+            _held: reentry::Held::acquire(Arc::as_ptr(&self.shared) as usize),
+            state: self.shared.lock(),
+        }
+    }
+
+    /// Lock and return the terminal state for mutation.
+    pub fn terminal_mut(&mut self) -> TerminalGuard<'_> {
+        self.terminal()
     }
 
     /// Check if the child process has exited.
@@ -148,7 +312,7 @@ impl EventLoop {
         self.child.has_exited()
     }
 
-    /// Get the PTY master file descriptor for readiness wakeups.
+    /// Get the PTY master file descriptor.
     pub fn pty_fd(&self) -> RawFd {
         self.child.pty_fd()
     }
@@ -174,15 +338,10 @@ impl EventLoop {
         name
     }
 
-    /// Bytes drained from the PTY by the most recent [`EventLoop::process`].
+    /// Bytes the I/O thread parsed between the two most recent
+    /// [`EventLoop::process`] calls.
     pub fn last_drain_bytes(&self) -> usize {
         self.last_drain_bytes
-    }
-
-    /// Whether the most recent [`EventLoop::process`] stopped at
-    /// [`PTY_DRAIN_BUDGET`] with more output still queued in the PTY.
-    pub fn drain_pending(&self) -> bool {
-        self.drain_pending
     }
 
     /// Best-effort current working directory of the PTY child.
@@ -196,11 +355,14 @@ impl EventLoop {
     }
 
     /// Resize the terminal.
+    ///
+    /// The grid is resized before the PTY, so output the child produces in
+    /// response to SIGWINCH is always parsed at the new size.
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
-        let size = PtySize::new(cols, rows);
-        self.child.resize(size).map_err(io::Error::other)?;
-        self.terminal.resize(Dimensions::new(cols, rows));
-        Ok(())
+        self.terminal().resize(Dimensions::new(cols, rows));
+        self.child
+            .resize(PtySize::new(cols, rows))
+            .map_err(io::Error::other)
     }
 
     /// Send input to the shell.
@@ -213,193 +375,50 @@ impl EventLoop {
         self.send_input(key.as_bytes())
     }
 
-    /// Process pending PTY output (non-blocking).
+    /// Collect what happened since the last call (non-blocking).
     ///
-    /// Returns events that occurred during processing.
+    /// Returns one [`TerminalEvent::Redraw`] if any output was parsed,
+    /// followed by bells, titles, clipboard, and notification events in the
+    /// order they arrived, and [`TerminalEvent::ChildExited`] once the child
+    /// has exited.
     pub fn process(&mut self) -> io::Result<Vec<TerminalEvent>> {
-        self.process_with_budget(PTY_DRAIN_BUDGET)
-    }
-
-    /// Process pending PTY output, draining at most `budget` bytes.
-    ///
-    /// When the budget is exhausted [`EventLoop::drain_pending`] is set and
-    /// the next [`EventLoop::wait`] resumes draining without blocking.
-    pub fn process_with_budget(&mut self, budget: usize) -> io::Result<Vec<TerminalEvent>> {
-        self.events.clear();
-        let trace = pipeline_trace_enabled();
-        let process_start = trace.then(Instant::now);
-        let mut read_batches = 0usize;
-        let mut read_bytes = 0usize;
-
-        // Read available data from PTY FIRST (before checking child exit)
-        // This ensures we don't miss output from fast-exiting processes like `echo`.
-        // Stop after PTY_DRAIN_BUDGET bytes; the fd stays readable so the
-        // next tick picks up the rest after a render/input pass.
-        self.drain_pending = false;
-        loop {
-            let remaining = budget.saturating_sub(read_bytes);
-            if remaining == 0 {
-                self.drain_pending = true;
-                break;
+        self.shared.wake_pending.store(false, Ordering::Release);
+        let mut events = Vec::new();
+        let closed = {
+            let mut state = self.shared.lock();
+            if state.output_pending {
+                state.output_pending = false;
+                events.push(TerminalEvent::Redraw);
             }
-            let read_len = remaining.min(self.read_buf.len());
-            match self.child.read(&mut self.read_buf[..read_len]) {
-                Ok(0) => break,
-                Ok(n) => {
-                    read_batches += 1;
-                    read_bytes += n;
-                    let buf = std::mem::take(&mut self.read_buf);
-                    self.process_bytes(&buf[..n]);
-                    self.read_buf = buf;
-                    self.events.push(TerminalEvent::Redraw);
-                }
-                Err(crate::pty::PtyError::Closed) => {
-                    self.child.try_wait().ok();
-                    if let Some(status) = self.child.exit_status() {
-                        self.events.push(TerminalEvent::ChildExited { status });
-                    }
-                    break;
-                }
-                Err(e) => {
-                    return Err(io::Error::other(e));
-                }
-            }
-        }
+            events.append(&mut state.events);
+            self.last_drain_bytes = std::mem::take(&mut state.bytes_since_collect);
+            state.closed
+        };
 
-        self.last_drain_bytes = read_bytes;
-
-        if let Some(start) = process_start {
-            if read_bytes > 0 {
-                tracing::info!(
-                    target: "ultty::perf",
-                    read_batches,
-                    read_bytes,
-                    elapsed_us = start.elapsed().as_micros(),
-                    "pipeline_pty_drain"
-                );
-            }
-        }
-
-        // Check for child exit AFTER reading all available data
-        if self.child.try_wait().map_err(io::Error::other)? {
+        if (closed || !self.child.has_exited())
+            && self.child.try_wait().map_err(io::Error::other)?
+        {
             if let Some(status) = self.child.exit_status() {
-                if !self
-                    .events
-                    .iter()
-                    .any(|e| matches!(e, TerminalEvent::ChildExited { .. }))
-                {
-                    self.events.push(TerminalEvent::ChildExited { status });
-                }
+                events.push(TerminalEvent::ChildExited { status });
             }
         }
-
-        Ok(std::mem::take(&mut self.events))
+        Ok(events)
     }
 
-    /// Wait for events with timeout.
-    ///
-    /// Returns events that occurred, or empty vec on timeout.
+    /// Wait up to `timeout` for output or an exit, then [`EventLoop::process`].
     pub fn wait(&mut self, timeout: Duration) -> io::Result<Vec<TerminalEvent>> {
-        if self.drain_pending {
-            // The previous tick hit the drain budget; data is still queued.
-            return self.process();
-        }
-
-        let mut poll_events = Events::new();
-
-        // Wait for PTY to be readable
-        self.poller.wait(&mut poll_events, Some(timeout))?;
-
-        if poll_events.is_empty() {
-            // Timeout - still check for child exit
-            if self.child.try_wait().unwrap_or(false) {
-                if let Some(status) = self.child.exit_status() {
-                    return Ok(vec![TerminalEvent::ChildExited { status }]);
-                }
+        {
+            let state = self.shared.lock();
+            let ready = |s: &State| s.output_pending || !s.events.is_empty() || s.closed;
+            if !ready(&state) {
+                let _ = self
+                    .shared
+                    .changed
+                    .wait_timeout_while(state, timeout, |s| !ready(s))
+                    .unwrap_or_else(PoisonError::into_inner);
             }
-            return Ok(Vec::new());
         }
-
-        // Process available data
         self.process()
-    }
-
-    /// Process a chunk of bytes from the PTY.
-    fn process_bytes(&mut self, data: &[u8]) {
-        use crate::protocol::ansi::{Action, AnsiOutput};
-
-        let mut handler = TerminalHandler::new(&mut self.terminal);
-        let events = &mut self.events;
-        let trace = pipeline_trace_enabled();
-        let start = trace.then(Instant::now);
-        let mut actions = 0usize;
-        let mut print_actions = 0usize;
-
-        self.parser
-            .feed_with_ascii_spans(data, |output| match output {
-                AnsiOutput::Action(action) => {
-                    if trace {
-                        actions += 1;
-                        if matches!(action, Action::Print(_)) {
-                            print_actions += 1;
-                        }
-                    }
-                    // Check for actions that produce events before handling
-                    match &action {
-                        Action::Bell => {
-                            events.push(TerminalEvent::Bell);
-                        }
-                        Action::SetTitle(title) => {
-                            events.push(TerminalEvent::TitleChanged(title.clone()));
-                        }
-                        Action::SetClipboard { clipboard, data } => {
-                            events.push(TerminalEvent::SetClipboard {
-                                clipboard: *clipboard,
-                                data: data.clone(),
-                            });
-                        }
-                        Action::Notification { title, body } => {
-                            events.push(TerminalEvent::Notification {
-                                title: title.clone(),
-                                body: body.clone(),
-                            });
-                        }
-                        _ => {}
-                    }
-                    handler.handle(action);
-                }
-                AnsiOutput::PrintAscii(bytes) => {
-                    if trace {
-                        actions += 1;
-                        print_actions += bytes.len();
-                    }
-                    handler.handle_ascii_span(bytes);
-                }
-            });
-
-        if let Some(start) = start {
-            tracing::info!(
-                target: "ultty::perf",
-                bytes = data.len(),
-                actions,
-                print_actions,
-                elapsed_us = start.elapsed().as_micros(),
-                "pipeline_parse_grid"
-            );
-        }
-
-        // Send any pending responses back to the PTY
-        self.send_pending_responses();
-    }
-
-    /// Send any pending terminal responses to the PTY.
-    fn send_pending_responses(&mut self) {
-        let responses = self.terminal.take_responses();
-        for response in responses {
-            if let Err(e) = self.child.write_all(&response) {
-                tracing::warn!("Failed to send terminal response: {}", e);
-            }
-        }
     }
 
     /// Run the event loop with a callback.
@@ -417,13 +436,276 @@ impl EventLoop {
                 if !should_continue {
                     return Ok(self.child.exit_status().unwrap_or(0));
                 }
-
                 if let TerminalEvent::ChildExited { status } = event {
                     return Ok(status);
                 }
             }
         }
     }
+}
+
+impl Drop for EventLoop {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::Release);
+        let _ = self.reader_poller.notify();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+/// The I/O thread: read, parse, answer queries, wake the UI, repeat.
+fn run_reader(pty: Pty, shared: &Shared, poller: &Poller) {
+    let mut parser = AnsiParser::new();
+    let mut buf = vec![0u8; READ_CHUNK];
+    let mut poll_events = Events::new();
+    let mut wakes = WakeThrottle::default();
+
+    loop {
+        if shared.stop.load(Ordering::Acquire) {
+            break;
+        }
+        match drain(&pty, &mut parser, &mut buf, shared, &mut wakes) {
+            Ok(()) => {}
+            Err(err) => {
+                if !matches!(err, PtyError::Closed) {
+                    tracing::warn!("PTY read failed: {err}");
+                }
+                close(shared);
+                break;
+            }
+        }
+
+        // Readiness is one-shot; re-arm before sleeping. If an output wake
+        // was skipped, sleep no longer than it takes to become due.
+        poll_events.clear();
+        let timeout = wakes.flush_due_in();
+        if let Err(err) = poller
+            .modify(pty.as_fd(), Event::readable(0))
+            .and_then(|()| poller.wait(&mut poll_events, timeout))
+        {
+            tracing::warn!("PTY poll failed: {err}");
+            close(shared);
+            break;
+        }
+        // Readable with nothing to read means the other side hung up on
+        // platforms that report EOF as a zero-length read.
+        if !poll_events.is_empty() && hung_up(&pty) && !has_pending_input(&pty) {
+            close(shared);
+            break;
+        }
+        wakes.flush_if_due(shared);
+    }
+    let _ = poller.delete(pty.as_fd());
+
+    // The UI reaps the child; keep nudging it until it has, or we are told
+    // to stop. A stopped UI drops the EventLoop, which sets `stop`.
+    for _ in 0..EXIT_POKES {
+        if shared.stop.load(Ordering::Acquire) {
+            return;
+        }
+        std::thread::sleep(EXIT_POKE_INTERVAL);
+        shared.notify();
+    }
+}
+
+/// Read and parse everything currently available.
+fn drain(
+    pty: &Pty,
+    parser: &mut AnsiParser,
+    buf: &mut [u8],
+    shared: &Shared,
+    wakes: &mut WakeThrottle,
+) -> Result<(), PtyError> {
+    let trace = pipeline_trace_enabled();
+    let start = trace.then(Instant::now);
+    let mut read_batches = 0usize;
+    let mut read_bytes = 0usize;
+    loop {
+        let n = pty.read(buf)?;
+        if n == 0 {
+            if let Some(start) = start.filter(|_| read_bytes > 0) {
+                tracing::info!(
+                    target: "ultty::perf",
+                    read_batches,
+                    read_bytes,
+                    elapsed_us = start.elapsed().as_micros(),
+                    "pipeline_pty_drain"
+                );
+            }
+            return Ok(());
+        }
+        read_batches += 1;
+        read_bytes += n;
+        let (responses, has_events) = {
+            let mut state = shared.lock();
+            parse_into(&mut state, parser, &buf[..n]);
+            (state.terminal.take_responses(), !state.events.is_empty())
+        };
+        for response in responses {
+            if let Err(err) = pty.write_all(&response) {
+                tracing::warn!("Failed to send terminal response: {err}");
+            }
+        }
+        wakes.output(shared, has_events);
+    }
+}
+
+/// Rate limit for output wakes; see [`OUTPUT_WAKE_INTERVAL`].
+#[derive(Default)]
+struct WakeThrottle {
+    last_wake: Option<Instant>,
+    /// Output arrived whose wake was skipped.
+    pending: bool,
+}
+
+impl WakeThrottle {
+    /// New output was parsed; `urgent` if it also queued events.
+    fn output(&mut self, shared: &Shared, urgent: bool) {
+        let due = self
+            .last_wake
+            .is_none_or(|at| at.elapsed() >= OUTPUT_WAKE_INTERVAL);
+        if urgent || due {
+            self.wake(shared);
+        } else {
+            // Waiters in `EventLoop::wait` still see progress immediately.
+            shared.changed.notify_all();
+            self.pending = true;
+        }
+    }
+
+    fn wake(&mut self, shared: &Shared) {
+        shared.notify();
+        self.last_wake = Some(Instant::now());
+        self.pending = false;
+    }
+
+    /// How long the reader may sleep before a skipped wake must go out.
+    fn flush_due_in(&self) -> Option<Duration> {
+        self.pending.then(|| {
+            self.last_wake.map_or(Duration::ZERO, |at| {
+                OUTPUT_WAKE_INTERVAL.saturating_sub(at.elapsed())
+            })
+        })
+    }
+
+    fn flush_if_due(&mut self, shared: &Shared) {
+        if self.flush_due_in() == Some(Duration::ZERO) {
+            self.wake(shared);
+        }
+    }
+}
+
+fn close(shared: &Shared) {
+    {
+        let mut state = shared.lock();
+        state.closed = true;
+        state.generation = state.generation.wrapping_add(1);
+    }
+    shared.notify();
+}
+
+/// Whether the PTY master reports a hangup.
+fn hung_up(pty: &Pty) -> bool {
+    poll_revents(pty, libc::POLLIN) & libc::POLLHUP != 0
+}
+
+/// Whether bytes are still queued (a HUP can arrive with output pending).
+fn has_pending_input(pty: &Pty) -> bool {
+    let mut pending: libc::c_int = 0;
+    // SAFETY: FIONREAD writes one c_int to `pending`; the fd is open for the
+    // duration of the call because `pty` is borrowed.
+    let rc = unsafe {
+        libc::ioctl(
+            std::os::fd::AsRawFd::as_raw_fd(pty),
+            libc::FIONREAD,
+            &mut pending,
+        )
+    };
+    rc == 0 && pending > 0
+}
+
+fn poll_revents(pty: &Pty, events: libc::c_short) -> libc::c_short {
+    let mut pollfd = libc::pollfd {
+        fd: std::os::fd::AsRawFd::as_raw_fd(pty),
+        events,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd entry, zero timeout; `pty` keeps the fd open.
+    let ready = unsafe { libc::poll(&mut pollfd, 1, 0) };
+    if ready <= 0 {
+        0
+    } else {
+        pollfd.revents
+    }
+}
+
+/// Parse one chunk of PTY output into the shared state.
+fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
+    use crate::protocol::ansi::{Action, AnsiOutput};
+
+    let State {
+        terminal, events, ..
+    } = state;
+    let mut handler = TerminalHandler::new(terminal);
+    let trace = pipeline_trace_enabled();
+    let start = trace.then(Instant::now);
+    let mut actions = 0usize;
+    let mut print_actions = 0usize;
+
+    parser.feed_with_ascii_spans(data, |output| match output {
+        AnsiOutput::Action(action) => {
+            if trace {
+                actions += 1;
+                if matches!(action, Action::Print(_)) {
+                    print_actions += 1;
+                }
+            }
+            let event = match &action {
+                Action::Bell => Some(TerminalEvent::Bell),
+                Action::SetTitle(title) => Some(TerminalEvent::TitleChanged(title.clone())),
+                Action::SetClipboard { clipboard, data } => Some(TerminalEvent::SetClipboard {
+                    clipboard: *clipboard,
+                    data: data.clone(),
+                }),
+                Action::Notification { title, body } => Some(TerminalEvent::Notification {
+                    title: title.clone(),
+                    body: body.clone(),
+                }),
+                _ => None,
+            };
+            if let Some(event) = event {
+                let repeat_bell = matches!(event, TerminalEvent::Bell)
+                    && matches!(events.last(), Some(TerminalEvent::Bell));
+                if !repeat_bell && events.len() < MAX_PENDING_EVENTS {
+                    events.push(event);
+                }
+            }
+            handler.handle(action);
+        }
+        AnsiOutput::PrintAscii(bytes) => {
+            if trace {
+                actions += 1;
+                print_actions += bytes.len();
+            }
+            handler.handle_ascii_span(bytes);
+        }
+    });
+
+    if let Some(start) = start {
+        tracing::info!(
+            target: "ultty::perf",
+            bytes = data.len(),
+            actions,
+            print_actions,
+            elapsed_us = start.elapsed().as_micros(),
+            "pipeline_parse_grid"
+        );
+    }
+
+    state.output_pending = true;
+    state.bytes_since_collect += data.len();
+    state.generation = state.generation.wrapping_add(1);
 }
 
 #[cfg(target_os = "linux")]
@@ -615,56 +897,103 @@ mod tests {
         assert!(!events.is_empty());
 
         // Check terminal has content
-        let row = event_loop.terminal().grid().row(0).unwrap();
-        let text = row.text_trimmed();
+        let text = row_text(&event_loop.terminal(), 0);
         assert!(text.contains("hello"), "Expected 'hello', got: {}", text);
     }
 
+    /// Poll `check` against the terminal until it passes or 5s elapse,
+    /// without ever calling `process` (the I/O thread must do the work).
+    fn eventually(event_loop: &EventLoop, check: impl Fn(&Terminal) -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if check(&event_loop.terminal()) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    fn row_text(terminal: &Terminal, row: u16) -> String {
+        terminal.grid().row(row).unwrap().text_trimmed()
+    }
+
     #[test]
-    fn process_drains_at_most_the_byte_budget_per_call() {
-        let mut event_loop = EventLoop::with_command(
+    fn output_is_parsed_by_the_io_thread_without_process_calls() {
+        let event_loop = EventLoop::with_command(
             "/bin/sh",
             &[
                 "/bin/sh",
                 "-c",
-                "printf 'abcdefghijklmnopqrstuvwxyz0123456789'",
+                "printf 'abcdefghijklmnopqrstuvwxyz0123456789'; sleep 5",
             ],
             80,
             24,
         )
-        .expect("Failed to spawn printf");
+        .expect("spawn printf");
+        assert!(eventually(&event_loop, |t| row_text(t, 0)
+            == "abcdefghijklmnopqrstuvwxyz0123456789"));
+    }
 
-        // Let the 36 bytes land in the PTY before draining with a tiny budget.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut first = None;
-        while Instant::now() < deadline && first.is_none() {
-            let mut poll_events = Events::new();
-            event_loop
-                .poller
-                .wait(&mut poll_events, Some(Duration::from_millis(50)))
-                .unwrap();
-            if !poll_events.is_empty() {
-                event_loop.process_with_budget(10).unwrap();
-                first = Some(event_loop.last_drain_bytes());
-            }
-        }
-
-        assert_eq!(
-            first,
-            Some(10),
-            "first call must stop exactly at the budget"
+    #[test]
+    fn terminal_queries_are_answered_by_the_io_thread() {
+        // The child asks for the cursor position and prints the reply's
+        // row;col. Nothing on this side calls `process`.
+        let event_loop = EventLoop::with_command(
+            "/bin/bash",
+            &[
+                "/bin/bash",
+                "-c",
+                "stty -echo; printf '\\033[6n'; IFS= read -r -s -d R reply; \
+                 printf '\\rgot:%s' \"${reply#*[}\"; sleep 5",
+            ],
+            80,
+            24,
+        )
+        .expect("spawn bash");
+        assert!(
+            eventually(&event_loop, |t| row_text(t, 0).starts_with("got:1;1")),
+            "row 0 was {:?}",
+            row_text(&event_loop.terminal(), 0)
         );
-        assert!(event_loop.drain_pending());
+    }
 
-        let mut total = 10;
-        while event_loop.drain_pending() {
-            event_loop.process_with_budget(10).unwrap();
-            assert!(event_loop.last_drain_bytes() <= 10);
-            total += event_loop.last_drain_bytes();
-        }
-        assert_eq!(total, 36);
+    #[test]
+    fn wakes_coalesce_until_events_are_collected() {
+        use std::sync::atomic::AtomicUsize;
 
-        let text = event_loop.terminal().grid().row(0).unwrap().text_trimmed();
-        assert_eq!(text, "abcdefghijklmnopqrstuvwxyz0123456789");
+        let mut event_loop = EventLoop::with_command(
+            "/bin/sh",
+            &["/bin/sh", "-c", "yes line | head -c 2000000; sleep 5"],
+            80,
+            24,
+        )
+        .expect("spawn yes");
+        let wakes = Arc::new(AtomicUsize::new(0));
+        event_loop.set_waker({
+            let wakes = Arc::clone(&wakes);
+            Arc::new(move || {
+                wakes.fetch_add(1, Ordering::SeqCst);
+            })
+        });
+
+        assert!(eventually(&event_loop, |_| wakes.load(Ordering::SeqCst) > 0));
+        // Megabytes of output keep arriving, but until the UI collects
+        // events the I/O thread must not wake it again.
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+
+        let events = event_loop.process().expect("process");
+        assert!(matches!(events.first(), Some(TerminalEvent::Redraw)));
+        assert!(event_loop.last_drain_bytes() > 0);
+    }
+
+    #[test]
+    fn dropping_the_event_loop_stops_its_io_thread_promptly() {
+        let event_loop =
+            EventLoop::with_command("/bin/cat", &["/bin/cat"], 80, 24).expect("spawn cat");
+        let started = Instant::now();
+        drop(event_loop);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

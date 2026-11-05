@@ -14,7 +14,7 @@ impl Renderer {
     /// Render multiple terminal panes.
     pub fn render_panes(
         &mut self,
-        surface: &wgpu::Surface,
+        output: wgpu::SurfaceTexture,
         panes: &[(&Terminal, PaneInfo)],
         overlay: &OverlayState,
     ) -> Result<(), wgpu::SurfaceError> {
@@ -22,7 +22,6 @@ impl Renderer {
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
         self.text_renderer.begin_frame();
 
-        let output = surface.get_current_texture()?;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());

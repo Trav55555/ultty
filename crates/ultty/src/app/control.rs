@@ -238,11 +238,11 @@ impl App {
                     let term = terminal.event_loop.terminal();
                     let dims = term.grid().dimensions();
                     let mut text = String::new();
+                    // One char per column (wide-char spacers print as
+                    // spaces) plus any extra codepoints of each grapheme.
                     for row in 0..dims.rows {
-                        for col in 0..dims.cols {
-                            if let Some(cell) = term.grid().cell(col, row) {
-                                text.push(cell.char());
-                            }
+                        if let Some(grid_row) = term.grid().row(row) {
+                            text.push_str(&grid_row.text());
                         }
                         text.push('\n');
                     }
@@ -433,7 +433,7 @@ impl App {
             ControlRequest::Screenshot { path } => {
                 if let Some(terminal) = self.terminal_manager.focused_terminal() {
                     let term = terminal.event_loop.terminal();
-                    let overlay_state = self.build_screenshot_overlay_state(term);
+                    let overlay_state = self.build_screenshot_overlay_state(&term);
                     let overlay = overlay_state.as_overlay();
 
                     let native_sessions: Vec<&ultty::protocol::NativeSession> = self
@@ -448,7 +448,7 @@ impl App {
                             let _ = std::fs::create_dir_all(parent);
                         }
                         match self.renderer.capture_screenshot_with_native(
-                            term,
+                            &term,
                             &overlay,
                             &path,
                             &native_sessions,
@@ -471,7 +471,7 @@ impl App {
                             let _ = std::fs::create_dir_all(parent);
                         }
                         match self.renderer.capture_screenshot_with_native(
-                            term,
+                            &term,
                             &overlay,
                             &path,
                             &native_sessions,
@@ -519,13 +519,14 @@ impl App {
                         None
                     };
 
-                    let buffer = terminal.event_loop.terminal().buffer();
+                    let term = terminal.event_loop.terminal();
+                    let buffer = term.buffer();
                     let mut matches = Vec::new();
 
                     let line_count = if include_scrollback {
                         buffer.total_lines()
                     } else {
-                        terminal.event_loop.terminal().dimensions().rows as usize
+                        term.dimensions().rows as usize
                     };
 
                     for row in 0..line_count {
@@ -721,7 +722,8 @@ impl App {
 
     fn find_wait_match(&self, matcher: &WaitMatcher) -> Option<(usize, usize)> {
         let terminal = self.terminal_manager.focused_terminal()?;
-        let buffer = terminal.event_loop.terminal().buffer();
+        let term = terminal.event_loop.terminal();
+        let buffer = term.buffer();
         let total_lines = buffer.total_lines();
 
         for row in 0..total_lines {

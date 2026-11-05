@@ -417,7 +417,7 @@ impl App {
                 if self.click_count == 2 && !self.modifiers.alt_key() {
                     // Word selection - find word boundaries (not in block mode)
                     self.select_word(col, row);
-                } else if let Some(t) = self.terminal_mut() {
+                } else if let Some(mut t) = self.terminal_mut() {
                     t.start_selection(point, mode);
                 }
 
@@ -530,7 +530,7 @@ impl App {
         let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
         let point = SelectionPoint::new(col as i32, row as i32);
 
-        if let Some(t) = self.terminal_mut() {
+        if let Some(mut t) = self.terminal_mut() {
             t.update_selection(point);
         }
         self.needs_redraw = true;
@@ -571,9 +571,9 @@ impl App {
         let Some(terminal) = self.terminal() else {
             return;
         };
-        let buffer = terminal.buffer();
-        let total_lines = buffer.total_lines();
+        let total_lines = terminal.buffer().total_lines();
         let viewport_rows = terminal.dimensions().rows as usize;
+        drop(terminal);
 
         let Some(target_offset) = scrollbar_target_offset(
             y,
@@ -586,7 +586,7 @@ impl App {
         };
 
         // Apply scroll
-        let Some(t) = self.terminal_mut() else {
+        let Some(mut t) = self.terminal_mut() else {
             return;
         };
         let buffer = t.buffer_mut();
@@ -596,6 +596,7 @@ impl App {
         } else if target_offset < current {
             buffer.scroll_down(current - target_offset);
         }
+        drop(t);
 
         self.needs_redraw = true;
     }
@@ -650,10 +651,10 @@ impl App {
         if let Some((start_col, end_col)) = word_bounds {
             let start = SelectionPoint::new(start_col as i32, row as i32);
             let end = SelectionPoint::new(end_col as i32, row as i32);
-            if let Some(t) = self.terminal_mut() {
+            if let Some(mut t) = self.terminal_mut() {
                 t.start_selection(start, SelectionMode::Normal);
             }
-            if let Some(t) = self.terminal_mut() {
+            if let Some(mut t) = self.terminal_mut() {
                 t.update_selection(end);
             }
         }
@@ -790,7 +791,7 @@ impl App {
         }
 
         // Normal mode: scroll the scrollback buffer
-        let Some(t) = self.terminal_mut() else {
+        let Some(mut t) = self.terminal_mut() else {
             return;
         };
         let buffer = t.buffer_mut();
@@ -807,6 +808,7 @@ impl App {
         } else {
             buffer.scroll_down((-lines) as usize);
         }
+        drop(t);
 
         self.needs_redraw = true;
     }
@@ -1061,7 +1063,7 @@ impl App {
             event.logical_key,
             Key::Named(NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super)
         ) {
-            if let Some(t) = self.terminal_mut() {
+            if let Some(mut t) = self.terminal_mut() {
                 t.clear_selection();
             }
         }
@@ -1439,6 +1441,7 @@ impl App {
         let total_rows = buffer.total_lines();
         let viewport_rows = dims.rows as usize;
         let viewport_cols = dims.cols as usize;
+        drop(terminal);
 
         self.copy_mode
             .enter(total_rows, viewport_rows, viewport_cols);
@@ -1455,6 +1458,7 @@ impl App {
         let total_rows = buffer.total_lines();
         let viewport_rows = dims.rows as usize;
         let viewport_cols = dims.cols as usize;
+        drop(terminal);
 
         self.copy_mode
             .enter_search(total_rows, viewport_rows, viewport_cols);

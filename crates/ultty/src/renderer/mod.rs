@@ -894,16 +894,16 @@ impl Renderer {
     /// Render the terminal to a surface.
     pub fn render(
         &mut self,
-        surface: &wgpu::Surface,
+        output: wgpu::SurfaceTexture,
         terminal: &Terminal,
     ) -> Result<(), wgpu::SurfaceError> {
-        self.render_with_overlay(surface, terminal, &OverlayState::default())
+        self.render_with_overlay(output, terminal, &OverlayState::default())
     }
 
     /// Render the terminal with overlay state (vim mode, URL highlights).
     pub fn render_with_overlay(
         &mut self,
-        surface: &wgpu::Surface,
+        output: wgpu::SurfaceTexture,
         terminal: &Terminal,
         overlay: &OverlayState,
     ) -> Result<(), wgpu::SurfaceError> {
@@ -911,7 +911,6 @@ impl Renderer {
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
         self.text_renderer.begin_frame();
 
-        let output = surface.get_current_texture()?;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1245,7 +1244,7 @@ impl Renderer {
 
     pub fn render_with_native_sessions<'a>(
         &mut self,
-        surface: &wgpu::Surface,
+        output: wgpu::SurfaceTexture,
         terminal: &Terminal,
         overlay: &OverlayState,
         sessions: impl Iterator<Item = &'a crate::protocol::NativeSession>,
@@ -1255,7 +1254,6 @@ impl Renderer {
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
         self.text_renderer.begin_frame();
 
-        let output = surface.get_current_texture()?;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());

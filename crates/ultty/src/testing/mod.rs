@@ -47,7 +47,7 @@ pub fn short_socket_test_dir(tag: &str) -> std::path::PathBuf {
 }
 
 use crate::event_loop::EventLoop;
-use crate::grid::{MouseMode, Terminal};
+use crate::grid::MouseMode;
 use std::time::{Duration, Instant};
 
 /// A headless terminal instance for testing.
@@ -181,13 +181,14 @@ impl TestTerminal {
     }
 
     /// Get the terminal state.
-    pub fn terminal(&self) -> &Terminal {
+    pub fn terminal(&self) -> crate::event_loop::TerminalGuard<'_> {
         self.event_loop.terminal()
     }
 
     /// Capture the current terminal text content.
     pub fn capture_text(&self) -> String {
-        let grid = self.terminal().grid();
+        let terminal = self.terminal();
+        let grid = terminal.grid();
         let dims = grid.dimensions();
         let mut output = String::new();
 
@@ -206,7 +207,8 @@ impl TestTerminal {
 
     /// Capture terminal content as a grid representation.
     pub fn capture_grid(&self) -> Vec<String> {
-        let grid = self.terminal().grid();
+        let terminal = self.terminal();
+        let grid = terminal.grid();
         let dims = grid.dimensions();
         let mut lines = Vec::new();
 
@@ -231,7 +233,8 @@ impl TestTerminal {
 
     /// Check if a specific row contains text.
     pub fn row_contains(&self, row: u16, needle: &str) -> bool {
-        let grid = self.terminal().grid();
+        let terminal = self.terminal();
+        let grid = terminal.grid();
         if let Some(r) = grid.row(row) {
             let mut line = String::new();
             for col in 0..grid.dimensions().cols {
@@ -246,8 +249,8 @@ impl TestTerminal {
 
     /// Get cursor position.
     pub fn cursor_position(&self) -> (u16, u16) {
-        let cursor = self.terminal().grid().cursor();
-        (cursor.position.col, cursor.position.row)
+        let position = self.terminal().grid().cursor().position;
+        (position.col, position.row)
     }
 
     /// Check if terminal is in alternate screen mode.
@@ -293,12 +296,12 @@ impl TestTerminal {
 
     /// Capture a snapshot of the current terminal state.
     pub fn snapshot(&self) -> TerminalSnapshot {
-        TerminalSnapshot::capture(self.terminal())
+        TerminalSnapshot::capture(&self.terminal())
     }
 
     /// Get a verifier for making assertions about terminal state.
-    pub fn verify(&self) -> TerminalVerifier<'_> {
-        TerminalVerifier::new(self.terminal())
+    pub fn verify(&self) -> TerminalVerifier {
+        TerminalVerifier::new(&self.terminal())
     }
 
     /// Print debug info about current terminal state.

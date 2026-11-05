@@ -206,22 +206,18 @@ pub struct SnapshotDiff {
 }
 
 /// Verify terminal behavior with assertions.
-pub struct TerminalVerifier<'a> {
+///
+/// Works on a snapshot taken at construction, so holding a verifier never
+/// keeps the live terminal locked.
+pub struct TerminalVerifier {
     snapshot: TerminalSnapshot,
-    terminal: &'a Terminal,
 }
 
-impl<'a> TerminalVerifier<'a> {
-    pub fn new(terminal: &'a Terminal) -> Self {
+impl TerminalVerifier {
+    pub fn new(terminal: &Terminal) -> Self {
         Self {
             snapshot: TerminalSnapshot::capture(terminal),
-            terminal,
         }
-    }
-
-    /// Refresh the snapshot.
-    pub fn refresh(&mut self) {
-        self.snapshot = TerminalSnapshot::capture(self.terminal);
     }
 
     /// Print debug info.

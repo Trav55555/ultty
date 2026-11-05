@@ -324,7 +324,7 @@ impl App {
             return;
         };
 
-        let overlay_state = self.build_screenshot_overlay_state(terminal);
+        let overlay_state = self.build_screenshot_overlay_state(&terminal);
         let overlay = overlay_state.as_overlay();
 
         let native_sessions: Vec<&ultty::protocol::NativeSession> = self
@@ -334,7 +334,7 @@ impl App {
             .unwrap_or_default();
 
         match self.renderer.capture_screenshot_with_native(
-            terminal,
+            &terminal,
             &overlay,
             &path,
             &native_sessions,

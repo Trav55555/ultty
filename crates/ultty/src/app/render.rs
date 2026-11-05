@@ -14,11 +14,16 @@ impl App {
         let trace_start = pipeline_trace_enabled().then(Instant::now);
         let pane_count = self.terminal_manager.pane_count();
 
-        let result = if pane_count > 1 {
-            self.render_multi_pane()
-        } else {
-            self.render_single_pane()
-        };
+        // Acquire the frame before locking any terminal: this can block
+        // until the next vsync, and the terminals' I/O threads must keep
+        // parsing meanwhile.
+        let result = self.surface.get_current_texture().and_then(|output| {
+            if pane_count > 1 {
+                self.render_multi_pane(output)
+            } else {
+                self.render_single_pane(output)
+            }
+        });
 
         match result {
             Ok(()) => {
@@ -66,7 +71,10 @@ impl App {
     }
 
     /// Render a single terminal pane.
-    fn render_single_pane(&mut self) -> Result<(), wgpu::SurfaceError> {
+    fn render_single_pane(
+        &mut self,
+        output: wgpu::SurfaceTexture,
+    ) -> Result<(), wgpu::SurfaceError> {
         let Some(terminal) = self
             .terminal_manager
             .focused_terminal()
@@ -145,8 +153,8 @@ impl App {
                 self.renderer.retain_native_images(&live_regions);
 
                 return self.renderer.render_with_native_sessions(
-                    &self.surface,
-                    terminal,
+                    output,
+                    &terminal,
                     &overlay,
                     server.active_tab_sessions(),
                     search_matches,
@@ -156,11 +164,14 @@ impl App {
         }
 
         self.renderer
-            .render_with_overlay(&self.surface, terminal, &overlay)
+            .render_with_overlay(output, &terminal, &overlay)
     }
 
     /// Render multiple panes.
-    fn render_multi_pane(&mut self) -> Result<(), wgpu::SurfaceError> {
+    fn render_multi_pane(
+        &mut self,
+        output: wgpu::SurfaceTexture,
+    ) -> Result<(), wgpu::SurfaceError> {
         use ultty::renderer::PaneInfo;
         use ultty::terminal_manager::SplitDirection;
 
@@ -181,7 +192,10 @@ impl App {
 
         // Calculate pane bounds based on split direction and ratios
         let ratios = self.terminal_manager.pane_ratios();
-        let panes: Vec<(&ultty::grid::Terminal, PaneInfo)> = {
+        // One lock per pane, held for this frame. Everything below reads the
+        // panes through these guards; locking a pane's terminal again here
+        // would deadlock.
+        let locked: Vec<(ultty::event_loop::TerminalGuard<'_>, PaneInfo)> = {
             let mut offset = 0.0f32;
             terminals
                 .iter()
@@ -208,17 +222,24 @@ impl App {
                 .collect()
         };
 
-        // Calculate scrollbar state from focused terminal
-        let scrollbar = self.terminal_manager.focused_terminal().map(|t| {
-            let terminal = t.event_loop.terminal();
-            let buffer = terminal.buffer();
-            let dims = terminal.dimensions();
-            ScrollbarState::new(
-                buffer.total_lines(),
-                dims.rows as usize,
-                buffer.scroll_offset(),
-            )
-        });
+        let panes: Vec<(&ultty::grid::Terminal, PaneInfo)> = locked
+            .iter()
+            .map(|(terminal, pane)| (&**terminal, *pane))
+            .collect();
+
+        // Calculate scrollbar state from the focused pane
+        let scrollbar = panes
+            .iter()
+            .find(|(_, pane)| pane.is_focused)
+            .map(|(terminal, _)| {
+                let buffer = terminal.buffer();
+                let dims = terminal.dimensions();
+                ScrollbarState::new(
+                    buffer.total_lines(),
+                    dims.rows as usize,
+                    buffer.scroll_offset(),
+                )
+            });
 
         // Check if bell is still active
         let bell_active = self
@@ -257,6 +278,6 @@ impl App {
             cursor_blink_visible: self.cursor_blink_visible,
         };
 
-        self.renderer.render_panes(&self.surface, &panes, &overlay)
+        self.renderer.render_panes(output, &panes, &overlay)
     }
 }

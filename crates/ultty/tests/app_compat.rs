@@ -19,7 +19,6 @@
 
 use std::time::Duration;
 use ultty::event_loop::{EventLoop, TerminalEvent};
-use ultty::grid::Terminal;
 
 /// Test harness for running terminal applications headlessly.
 pub struct AppTester {
@@ -161,7 +160,7 @@ impl AppTester {
     }
 
     /// Get the terminal state.
-    pub fn terminal(&self) -> &Terminal {
+    pub fn terminal(&self) -> ultty::event_loop::TerminalGuard<'_> {
         self.event_loop.terminal()
     }
 
@@ -249,8 +248,8 @@ impl AppTester {
     }
 
     /// Get the terminal title.
-    pub fn title(&self) -> &str {
-        self.terminal().title()
+    pub fn title(&self) -> String {
+        self.terminal().title().to_string()
     }
 
     /// Check if application has exited.
