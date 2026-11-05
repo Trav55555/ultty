@@ -61,6 +61,7 @@ cd scripts/inband-bench
 ./capture.sh && python3 corpus.py
 cargo run --release -p ultty --example inband_transport -- corpus.bin
 python3 tmux_passthrough.py
+python3 ssh_roundtrip.py local corpus.bin ssh -i <key> <user>@<host>
 ```
 
 ## Numbers (second run)
@@ -120,7 +121,7 @@ a PTY held by the test script (`scripts/inband-bench/tmux_passthrough.py`).
 | tmux, DCS-wrapped APC, `allow-passthrough off` | Dropped |
 | tmux, DCS-wrapped APC, `allow-passthrough on` | Delivered, up to 1,048,000 B; a 1,049,000 B frame is dropped (1 MiB cap) |
 | tmux, APC written into the outer terminal's input | Delivered verbatim to the active pane |
-| ssh | Not tested: no sshd on this machine |
+| ssh to EC2 (see below) | All 114 frames verbatim, both directions, up to 1.4 MB unchunked |
 
 Three things follow for the design:
 
@@ -133,6 +134,32 @@ Three things follow for the design:
    64 KiB. This also bounds what the VT parser must buffer for one string.
 3. **Images stay on the socket when it is available.** In-band is for
    reach, not bandwidth.
+
+## Over a real ssh hop (2026-11-05)
+
+`scripts/inband-bench/ssh_roundtrip.py` ran against a throwaway t4g.nano
+(Amazon Linux 2023, us-east-1), which was torn down afterwards. The client
+was a home connection; TCP connect round trip was 25-37 ms. The app side ran
+on the instance with its tty in raw mode. The terminal side ran `ssh -tt`
+on a local PTY, as Ultty runs a shell in a tab. Every frame carried a
+SHA-256 of its data, and each side checked the other's.
+
+- **Integrity, app to terminal: 54 of 54 frames verified.** These were all
+  recorded app updates, 1 MiB in 64 KiB chunks, and one 1.4 MB frame.
+- **Integrity, terminal to app: 60 of 60 frames verified.** These were all
+  recorded replies, the same chunked 1 MiB, and one 1.4 MB frame.
+- **Round trip (ms, two runs):**
+
+| exchange | run 1 p50 / p99 | run 2 p50 / p99 |
+|---|---:|---:|
+| median real update (24 B -> 28 B), APC | 38.9 / 43.2 | 49.3 / 162.8 |
+| largest real update (2,178 B -> 721 B), APC | 23.5 / 62.9 | 28.8 / 75.8 |
+| raw 1 byte -> 1 byte, no framing | 39.7 / 57.5 | 40.6 / 42.6 |
+
+The network sets these numbers. The framed and unframed cases swap places
+between runs, and the same bulk transfer took 0.85 s in one run and 6.2 s in
+the other. Against a 25-40 ms round trip, the 6-14 µs local cost of APC
+framing cannot be measured. ssh carried every frame byte for byte.
 
 ## Side findings
 

@@ -10,8 +10,11 @@
   ([docs/perf/2026-11-05-in-band-transport.md](../perf/2026-11-05-in-band-transport.md)).
   On real app traffic in-band costs +35% bytes, a few microseconds of
   terminal CPU per session, and +6 to +14 µs round-trip latency at p50.
-  A 1 MiB image takes 3 ms against 0.13 ms over the socket. The benchmark
-  recommends adopting it, with the socket kept as the local fast path.
+  A 1 MiB image takes 3 ms against 0.13 ms over the socket. Over a real ssh
+  hop to EC2, every frame crossed intact in both directions, including
+  1.4 MB unchunked frames, and the framing cost was lost in network noise.
+  The benchmark recommends adopting it, with the socket kept as the local
+  fast path.
 
 ## Context
 
