@@ -3787,7 +3787,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ultty-protocol",
- "unicode-segmentation",
+ "ultty-vt",
  "unicode-width 0.2.0",
  "wgpu",
  "winit",
@@ -3814,6 +3814,16 @@ dependencies = [
  "serde_json",
  "taffy",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "ultty-vt"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tracing",
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

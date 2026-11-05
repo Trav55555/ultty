@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust
-//! use ultty::protocol::ansi::{AnsiParser, Action};
+//! use ultty_vt::ansi::{AnsiParser, Action};
 //!
 //! let mut parser = AnsiParser::new();
 //! let mut actions = Vec::new();

@@ -1,7 +1,7 @@
 //! Handler that applies ANSI parser actions to the Terminal.
 
+use crate::ansi::{Action, Attribute, Color as AnsiColor, Mode, NamedColor};
 use crate::grid::{decode_sixel, CellFlags, MouseEncoding, MouseMode, Terminal, TerminalImage};
-use crate::protocol::ansi::{Action, Attribute, Color as AnsiColor, Mode, NamedColor};
 
 use super::cell::Color;
 
@@ -843,8 +843,8 @@ fn convert_named_color(named: NamedColor) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ansi::AnsiParser;
     use crate::grid::{cell::Color, Dimensions};
-    use crate::protocol::ansi::AnsiParser;
 
     fn process(terminal: &mut Terminal, input: &[u8]) {
         let mut parser = AnsiParser::new();

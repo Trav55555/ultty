@@ -7,10 +7,11 @@ For the canonical project vocabulary used in architecture work, see
 [`docs/adr/`](adr/). For the immediate-output / retained-internals
 layout contract, see [`docs/LAYOUT_MODEL.md`](LAYOUT_MODEL.md).
 
-Ultty is composed of three main crates:
+Ultty is composed of these main crates:
 
 | Crate | Purpose | Users |
 |-------|---------|-------|
+| `ultty-vt` | Terminal emulation core (VT parser, grid, scrollback); no I/O | `ultty`, fuzzers, embedders |
 | `ultty` | Terminal emulator binary | End users |
 | `ulttui` | TUI framework library | App developers |
 | `ultty-protocol` | Wire protocol definitions | Both above |

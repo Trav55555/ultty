@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```
-//! use ultty::grid::{Grid, Dimensions, Terminal};
+//! use ultty_vt::grid::{Grid, Dimensions, Terminal};
 //!
 //! // Create a terminal
 //! let mut term = Terminal::new(Dimensions::new(80, 24));

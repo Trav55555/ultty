@@ -40,7 +40,8 @@ compile_error!(
 pub mod config;
 pub mod config_watcher;
 pub mod control;
-pub mod grid;
+/// The terminal screen model, re-exported from [`ultty_vt`].
+pub use ultty_vt::grid;
 pub mod platform;
 pub mod protocol;
 pub mod pty;

@@ -1,6 +1,7 @@
 //! Protocol handling for both native and ANSI.
 
-pub mod ansi;
+/// The VT/xterm parser, re-exported from [`ultty_vt`].
+pub use ultty_vt::ansi;
 pub mod server;
 pub mod session;
 

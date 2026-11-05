@@ -11,6 +11,7 @@ cargo build --workspace --release    # Release build (LTO, codegen-units=1, pani
 
 # Test
 cargo test --workspace               # All tests
+cargo test -p ultty-vt               # VT parser + grid core (no I/O, fast)
 cargo test -p ultty --lib            # Terminal emulator tests only
 cargo test -p ulttui --lib           # Framework tests only
 cargo test -p ulttui --test snapshots # Snapshot tests (uses insta)
@@ -44,6 +45,7 @@ an MSRV job; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```
 ultty (terminal binary)  ←─depends─  ultty-protocol (wire format)
+ultty (terminal binary)  ←─depends─  ultty-vt (VT parser + grid, no I/O)
 ulttui (TUI framework)   ←─depends─  ultty-protocol
 ultty-client (low-level)  ←─depends─  ultty-protocol
 examples/*                ←─depends─  ulttui
@@ -53,7 +55,8 @@ examples/*                ←─depends─  ulttui
 
 | Crate | Role |
 |-------|------|
-| `ultty` | Terminal emulator binary. GPU renderer (wgpu), ANSI parser, native protocol server, scene graph, tabs/splits. Also produces `ulttyctl` CLI tool. |
+| `ultty-vt` | Terminal emulation core: ANSI/VT parser (`ansi`), cells, rows with grapheme clusters, scrollback, reflow, modes (`grid`). No I/O, GPU, or async deps. `ultty` re-exports it as `ultty::grid` and `ultty::protocol::ansi`. |
+| `ultty` | Terminal emulator binary. GPU renderer (wgpu), PTY, native protocol server, scene graph, tabs/splits. Also produces `ulttyctl` CLI tool. |
 | `ulttui` | TUI application framework. Elm architecture (Application trait with update/view/on_event), 28 widget modules, dual-mode rendering. |
 | `ultty-protocol` | Wire protocol codec. Binary message encode/decode, layout constraint types (wraps Taffy), content types, event types. |
 | `ultty-client` | Low-level client SDK for apps that want raw protocol access without the framework. |
