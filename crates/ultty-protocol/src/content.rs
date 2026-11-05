@@ -139,9 +139,10 @@ pub struct Span {
 pub enum WidgetContent {
     /// Text input field.
     Input(InputWidget),
-    /// Markdown rendering.
+    /// Deprecated: terminals show the source verbatim. Send `RichText`.
     Markdown(MarkdownWidget),
-    /// Syntax-highlighted code.
+    /// Deprecated: terminals show the source verbatim, without highlighting
+    /// or line numbers. Send `RichText`.
     Code(CodeWidget),
     /// Progress bar.
     Progress(ProgressWidget),

@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use ultty_client::UlttyClient;
 use ultty_protocol::{
-    CodeWidget, Color, Constraints, Content, Dimension, Display, FlexDirection, MarkdownWidget,
-    NamedColor, ProgressWidget, SpinnerWidget, Style, TerminalMessage, TextAlign, TextContent,
-    TextOverflow, TextWrap, WidgetContent, EVENT_KEY,
+    Color, Constraints, Content, Dimension, Display, FlexDirection, NamedColor, ProgressWidget,
+    RichText, SpinnerWidget, Style, TerminalMessage, TextAlign, TextContent, TextOverflow,
+    TextWrap, WidgetContent, EVENT_KEY,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -122,12 +122,13 @@ fn main() -> anyhow::Result<()> {
         })),
     )?;
 
-    // --- Markdown ---
-    let markdown_region = client.create_region(
+    // --- Rich text ---
+    // Apps style text themselves; the terminal draws spans (ADR 0018).
+    let rich_region = client.create_region(
         body,
         Constraints {
             width: Dimension::Percent(100.0),
-            height: Dimension::Cells(6.0),
+            height: Dimension::Cells(4.0),
             flex_shrink: 0.0,
             ..Default::default()
         },
@@ -135,10 +136,26 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     client.set_content(
-        markdown_region,
-        Content::Widget(WidgetContent::Markdown(MarkdownWidget {
-            source: "# Hello Markdown\n\nThis is **bold** and *italic* text rendered via the native protocol.\n\n- Item one\n- Item two".to_string(),
-        })),
+        rich_region,
+        Content::RichText(
+            RichText::new()
+                .bold("Hello rich text\n\n")
+                .text("This is ")
+                .bold("bold")
+                .text(" and ")
+                .span(
+                    "italic",
+                    Style {
+                        italic: true,
+                        ..Style::new()
+                    },
+                )
+                .text(" text sent as styled spans.\n")
+                .span(
+                    "Spans carry their own colors.",
+                    Style::new().fg(Color::Named(NamedColor::Cyan)),
+                ),
+        ),
     )?;
 
     // --- Code block ---
@@ -154,11 +171,16 @@ fn main() -> anyhow::Result<()> {
 
     client.set_content(
         code_region,
-        Content::Widget(WidgetContent::Code(CodeWidget {
-            source: "fn main() {\n    println!(\"Hello from native protocol!\");\n}".to_string(),
-            language: "rust".to_string(),
-            line_numbers: true,
-        })),
+        Content::RichText(
+            RichText::new()
+                .span("fn", Style::new().fg(Color::Named(NamedColor::Magenta)))
+                .text(" main() {\n    println!(")
+                .span(
+                    "\"Hello from native protocol!\"",
+                    Style::new().fg(Color::Named(NamedColor::Green)),
+                )
+                .text(");\n}"),
+        ),
     )?;
 
     let footer = client.create_region(

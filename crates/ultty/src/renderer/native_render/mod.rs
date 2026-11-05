@@ -8,14 +8,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 mod borders;
 mod cache;
-mod code;
-mod code_spans;
 mod geometry;
 mod images;
-mod markdown;
-mod markdown_blocks;
-mod markdown_inline;
-pub(super) mod syntax;
 mod widgets;
 
 /// Word-wrap a line to fit within `max_cols` columns.

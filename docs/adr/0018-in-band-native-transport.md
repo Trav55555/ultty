@@ -2,8 +2,12 @@
 
 ## Status
 
-Proposed (2026-11-05). Needs a maintainer decision on the two questions under
-"Open decisions" before any implementation starts.
+- Widgets (proposal 2): Accepted 2026-11-05 for `Markdown` and `Code`.
+  The terminal's markdown and syntax renderers are removed; the tags still
+  decode and draw as verbatim source. Moving `Input`, `Button`, `Progress`
+  and `Spinner` into `ulttui` is accepted in direction, one slice at a time.
+- Transport (proposal 1): Proposed. Decided by the prototype benchmark in
+  [docs/perf/2026-11-05-in-band-transport.md](../perf/2026-11-05-in-band-transport.md).
 
 ## Context
 

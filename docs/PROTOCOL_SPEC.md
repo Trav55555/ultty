@@ -293,14 +293,20 @@ A `Dimension` is a `u8` tag followed immediately by an `f32` LE value only for t
 | Tag | Widget | Fields in encoding order |
 |-----|--------|--------------------------|
 | 0 | Input | value string, placeholder string, flags u8 (`multiline=1`, `password=2`) |
-| 1 | Markdown | source string |
-| 2 | Code | source string, language string, line_numbers u8 |
+| 1 | Markdown (deprecated) | source string |
+| 2 | Code (deprecated) | source string, language string, line_numbers u8 |
 | 3 | Progress | value f32, label Option<string>, animated u8, indeterminate u8 |
 | 4 | Spinner | label Option<string>, style u8 (`Braille=0`, `Dots=1`, `Line=2`, `Bounce=3`) |
 | 5 | Image | width u32, height u32, scale u8, data_len u32, bytes |
 | 6 | Button | label string, style u8 (`Default=0`, `Primary=1`, `Danger=2`, `Success=3`) |
 
 Image scale is `Fit=0`, `Fill=1`, `Stretch=2`, `None=3`.
+
+`Markdown` and `Code` are deprecated ([ADR 0018](adr/0018-in-band-native-transport.md)).
+Terminals still decode them, but draw the source verbatim, one line per row,
+without parsing markdown or highlighting. Apps should send `RichText` and do
+their own styling; `ulttui`'s `MarkdownView` already does. Tags 1 and 2 will
+be removed in a later protocol version.
 
 ---
 

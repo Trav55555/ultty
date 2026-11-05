@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use ultty_client::UlttyClient;
 use ultty_protocol::{
-    BorderStyle, CodeWidget, Color, Constraints, Content, Dimension, Display, FlexDirection,
-    InputType, Key, NamedColor, RegionId, Style, TerminalMessage, TextAlign, TextContent,
-    TextOverflow, TextWrap, WidgetContent, EVENT_KEY,
+    BorderStyle, Color, Constraints, Content, Dimension, Display, FlexDirection, InputType, Key,
+    NamedColor, RegionId, Style, TerminalMessage, TextAlign, TextContent, TextOverflow, TextWrap,
+    EVENT_KEY,
 };
 
 /// Which pane currently has focus.
@@ -248,8 +248,8 @@ fn main() -> anyhow::Result<()> {
     )?;
     client.set_content(
         main_body,
-        Content::Widget(WidgetContent::Code(CodeWidget {
-            source: r#"use std::collections::HashMap;
+        Content::Text(TextContent {
+            text: r#"use std::collections::HashMap;
 
 /// Application configuration loaded from disk.
 #[derive(Debug, Clone)]
@@ -284,9 +284,10 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }"#
             .to_string(),
-            language: "rust".to_string(),
-            line_numbers: true,
-        })),
+            wrap: TextWrap::None,
+            align: TextAlign::Left,
+            overflow: TextOverflow::Clip,
+        }),
     )?;
 
     // ── Right sidebar (outline) ─────────────────────────────────────
