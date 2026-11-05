@@ -491,6 +491,26 @@ impl ProtocolServer {
         }
     }
 
+    /// Frame bytes queued for `tab_id`'s in-band app since the last call.
+    pub fn take_tab_in_band_output(&mut self, tab_id: TabId) -> Vec<u8> {
+        self.in_band_session_key(tab_id)
+            .and_then(|key| self.sessions.get_mut(&key))
+            .map(NativeSession::take_in_band_output)
+            .unwrap_or_default()
+    }
+
+    /// End `tab_id`'s in-band session, if it has one.
+    pub fn end_in_band_session(&mut self, tab_id: TabId) {
+        self.in_band_openers.remove(&tab_id);
+        if let Some(key) = self.in_band_session_key(tab_id) {
+            info!(
+                "In-band session {} ended by the terminal",
+                self.sessions[&key].session_id()
+            );
+            self.remove_session(key);
+        }
+    }
+
     /// Frame bytes queued for in-band apps, per tab, since the last call.
     pub fn take_in_band_output(&mut self) -> Vec<(TabId, Vec<u8>)> {
         self.sessions

@@ -38,6 +38,82 @@ impl App {
         render_delay_for_sync_state(sync_active)
     }
 
+    /// Move in-band protocol data between each tab's PTY and the protocol
+    /// server (ADR 0018).
+    ///
+    /// Only a tab with a single pane can host an in-band session: the
+    /// native scene covers the whole tab, and a pane's app cannot own it.
+    /// Data from any other pane is answered with nothing, which releases the
+    /// held query replies so the app's probe sees DA1 first and falls back
+    /// to ANSI.
+    fn pump_in_band(&mut self) {
+        let tabs: Vec<(
+            ultty::terminal_manager::TabId,
+            Vec<ultty::terminal_manager::TerminalId>,
+        )> = self
+            .terminal_manager
+            .tabs()
+            .iter()
+            .map(|tab| (tab.id, tab.terminals.clone()))
+            .collect();
+        for (tab_id, terminals) in tabs {
+            let single = terminals.len() == 1;
+            for terminal_id in terminals {
+                let Some(terminal) = self.terminal_manager.terminal(terminal_id) else {
+                    continue;
+                };
+                let event_loop = &terminal.event_loop;
+                let Some(input) = event_loop.take_in_band() else {
+                    continue;
+                };
+                let reply = match self.protocol_server.as_mut() {
+                    Some(server) if single => {
+                        server.in_band_input(
+                            tab_id,
+                            event_loop.foreground_pgrp(),
+                            &input.bytes,
+                            input.broken,
+                        );
+                        server.take_tab_in_band_output(tab_id)
+                    }
+                    _ => Vec::new(),
+                };
+                if let Err(e) = event_loop.finish_in_band(&reply) {
+                    tracing::warn!(
+                        "Failed to answer in-band data on tab {}: {}",
+                        tab_id.raw(),
+                        e
+                    );
+                }
+            }
+        }
+
+        let Some(server) = self.protocol_server.as_mut() else {
+            return;
+        };
+        for tab_id in server.in_band_tabs() {
+            let terminal = self
+                .terminal_manager
+                .tabs()
+                .iter()
+                .find(|tab| tab.id == tab_id)
+                .filter(|tab| tab.terminals.len() == 1)
+                .and_then(|tab| self.terminal_manager.terminal(tab.terminals[0]));
+            let Some(terminal) = terminal else {
+                // The tab was split or closed under the session.
+                server.end_in_band_session(tab_id);
+                continue;
+            };
+            let event_loop = &terminal.event_loop;
+            server.end_in_band_if_foreground_changed(tab_id, event_loop.foreground_pgrp());
+            let out = server.take_tab_in_band_output(tab_id);
+            if let Err(e) = event_loop.send_in_band(&out) {
+                tracing::warn!("Failed to send in-band data to tab {}: {}", tab_id.raw(), e);
+                server.end_in_band_session(tab_id);
+            }
+        }
+    }
+
     fn sync_update_active(&self) -> bool {
         self.terminal_manager
             .focused_terminal()
@@ -88,6 +164,8 @@ impl App {
                 }
             }
         }
+
+        self.pump_in_band();
 
         if let Some(ref mut server) = self.control_server {
             if let Err(e) = server.poll(Some(Duration::ZERO)) {
