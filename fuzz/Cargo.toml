@@ -35,3 +35,10 @@ path = "fuzz_targets/vt_terminal.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "in_band_split"
+path = "fuzz_targets/in_band_split.rs"
+test = false
+doc = false
+bench = false

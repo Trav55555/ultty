@@ -128,3 +128,6 @@ jobs:
         run: |
           cargo fuzz run decode_app -- -max_total_time=30
           cargo fuzz run decode_terminal -- -max_total_time=30
+      - name: In-band stream splitter
+        working-directory: fuzz
+        run: cargo fuzz run in_band_split -- -max_total_time=60 -max_len=4096
