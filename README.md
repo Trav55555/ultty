@@ -171,6 +171,7 @@ Current dated reports:
 - [Baseline benchmarks](docs/perf/2026-05-14-baseline.md)
 - [ASCII span and grid write path](docs/perf/2026-05-14-ascii-span.md)
 - [Live pipeline trace and PTY readiness wakeups](docs/perf/2026-05-14-live-pipeline-trace.md)
+- [PTY throughput after the I/O thread](docs/perf/2026-11-05-io-thread.md)
 - [Visual regression smoke](docs/visual-regression.md)
 
 | Metric | Target |
