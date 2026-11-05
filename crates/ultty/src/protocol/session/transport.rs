@@ -7,13 +7,17 @@ use tracing::{debug, warn};
 use ultty_protocol::{AppMessage, Decode, Encode, TerminalMessage, FRAME_MAGIC};
 
 use super::errors::NativeProtocolError;
-use super::{NativeSession, MAX_READ_BUF};
+use super::{Link, NativeSession, MAX_READ_BUF};
 
 impl NativeSession {
     /// Read data from socket into the session read buffer.
     pub(super) fn read_from_socket(&mut self) -> io::Result<usize> {
+        let Link::Socket(stream) = &mut self.link else {
+            // In-band input is pushed by the server, never read here.
+            return Err(io::ErrorKind::WouldBlock.into());
+        };
         let mut temp = [0u8; 4096];
-        let n = self.stream.read(&mut temp)?;
+        let n = stream.read(&mut temp)?;
         if n > 0 {
             self.read_buf.extend_from_slice(&temp[..n]);
             self.last_activity = std::time::Instant::now();
@@ -116,10 +120,19 @@ impl NativeSession {
         Ok(())
     }
 
-    /// Flush pending writes to the session socket.
+    /// Flush pending writes to the session socket, or for an in-band
+    /// session, move them to its outgoing queue.
     pub(super) fn flush_writes(&mut self) -> io::Result<()> {
+        let stream = match &mut self.link {
+            Link::Socket(stream) => stream,
+            Link::InBand { outgoing, .. } => {
+                outgoing.extend_from_slice(&self.write_buf);
+                self.write_buf.clear();
+                return Ok(());
+            }
+        };
         while !self.write_buf.is_empty() {
-            match self.stream.write(&self.write_buf) {
+            match stream.write(&self.write_buf) {
                 Ok(0) => {
                     return Err(io::Error::new(
                         io::ErrorKind::WriteZero,

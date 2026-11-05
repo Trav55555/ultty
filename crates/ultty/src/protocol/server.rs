@@ -5,6 +5,17 @@
 //! tab whose socket accepted it, which is what lets the server route input
 //! and clipboard access to the tab the user is looking at rather than to
 //! whichever process connected most recently.
+//!
+//! Apps can also talk in-band on a tab's PTY (ADR 0018). The app layer feeds
+//! that data in with [`ProtocolServer::in_band_input`] and writes what
+//! [`ProtocolServer::take_in_band_output`] returns back to the PTY. A tab
+//! has at most one in-band session. It starts only on a well-formed
+//! `ClientHello`, so stray in-band strings (a `cat`ed file, say) cannot
+//! open one, and it ends when the app disconnects, falls silent for 10 s
+//! (`IN_BAND_IDLE_TIMEOUT`), or the PTY's foreground process group changes.
+//!
+//! Anything that can write to the tab can send in-band data, including a
+//! remote host over ssh, so in-band sessions never read the clipboard.
 
 use std::collections::HashMap;
 use std::fs;
@@ -22,9 +33,16 @@ use tracing::{error, info, warn};
 use super::session::NativeSession;
 use crate::platform::socket::{peer_uid, set_cloexec, tab_socket_file_name};
 use crate::terminal_manager::TabId;
+use ultty_protocol::FRAME_MAGIC;
 
 /// Session identifier assigned by the server on accept.
 pub type SessionId = u64;
+
+/// Type code of `ClientHello`, the only frame that may open an in-band session.
+const CLIENT_HELLO_TYPE: u16 = 0x0001;
+
+/// Largest `ClientHello` payload accepted when opening an in-band session.
+const MAX_CLIENT_HELLO_PAYLOAD: usize = 64;
 
 /// Permissions applied to each listening socket file: owner only.
 const SOCKET_FILE_MODE: u32 = 0o600;
@@ -55,6 +73,46 @@ pub struct ProtocolServer {
     /// `None` withholds input from every session. The app layer keeps this
     /// in sync with the visible tab via `set_active_tab`.
     active_tab: Option<TabId>,
+    /// In-band bytes per tab that may be the start of a `ClientHello`.
+    in_band_openers: HashMap<TabId, Vec<u8>>,
+}
+
+/// Whether `bytes` are, or may become, a complete `ClientHello` frame.
+enum HelloCheck {
+    /// A whole `ClientHello` frame starts the buffer.
+    Complete,
+    /// A prefix of one; wait for more bytes.
+    Partial,
+    /// Not a `ClientHello`.
+    No,
+}
+
+fn check_client_hello(bytes: &[u8]) -> HelloCheck {
+    let header = [
+        FRAME_MAGIC[0],
+        FRAME_MAGIC[1],
+        CLIENT_HELLO_TYPE.to_le_bytes()[0],
+        CLIENT_HELLO_TYPE.to_le_bytes()[1],
+    ];
+    let known = bytes.len().min(header.len());
+    if bytes[..known] != header[..known] {
+        return HelloCheck::No;
+    }
+    if bytes.len() < 8 {
+        return HelloCheck::Partial;
+    }
+    let payload_len = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    if payload_len > MAX_CLIENT_HELLO_PAYLOAD {
+        return HelloCheck::No;
+    }
+    if bytes.len() < 8 + payload_len {
+        return HelloCheck::Partial;
+    }
+    use ultty_protocol::Decode;
+    match ultty_protocol::AppMessage::decode(&mut &bytes[..8 + payload_len]) {
+        Ok(ultty_protocol::AppMessage::ClientHello { .. }) => HelloCheck::Complete,
+        _ => HelloCheck::No,
+    }
 }
 
 impl ProtocolServer {
@@ -76,6 +134,7 @@ impl ProtocolServer {
             viewport_width: 80.0,
             viewport_height: 24.0,
             active_tab: None,
+            in_band_openers: HashMap::new(),
         })
     }
 
@@ -133,6 +192,7 @@ impl ProtocolServer {
     /// Stop listening for `tab_id`: unlink its socket and disconnect its
     /// sessions. A tab that was never opened is ignored.
     pub fn close_tab(&mut self, tab_id: TabId) {
+        self.in_band_openers.remove(&tab_id);
         if let Some(key) = self.listener_key(tab_id) {
             if let Some(tab) = self.listeners.remove(&key) {
                 let _ = self.poller.delete(&tab.listener);
@@ -215,7 +275,9 @@ impl ProtocolServer {
 
     fn remove_session(&mut self, key: usize) {
         if let Some(session) = self.sessions.remove(&key) {
-            let _ = self.poller.delete(session.stream_fd());
+            if let Some(fd) = session.stream_fd() {
+                let _ = self.poller.delete(fd);
+            }
         }
     }
 
@@ -226,7 +288,7 @@ impl ProtocolServer {
         fds.extend(
             self.sessions
                 .values()
-                .map(|session| session.stream_fd().as_raw_fd()),
+                .filter_map(|session| session.stream_fd().map(|fd| fd.as_raw_fd())),
         );
         fds
     }
@@ -297,11 +359,10 @@ impl ProtocolServer {
     }
 
     fn register_session(&mut self, key: usize) -> io::Result<()> {
-        if let Some(session) = self.sessions.get(&key) {
+        if let Some(fd) = self.sessions.get(&key).and_then(NativeSession::stream_fd) {
             // SAFETY: session stream fd is valid and maintained for this session's lifetime
             unsafe {
-                self.poller
-                    .add(&session.stream_fd(), Event::readable(key))?;
+                self.poller.add(&fd, Event::readable(key))?;
             }
         }
         Ok(())
@@ -316,7 +377,9 @@ impl ProtocolServer {
                     } else {
                         Event::readable(key)
                     };
-                    self.poller.modify(session.stream_fd(), interest)?;
+                    if let Some(fd) = session.stream_fd() {
+                        self.poller.modify(fd, interest)?;
+                    }
                     false
                 }
                 Ok(false) => {
@@ -341,6 +404,119 @@ impl ProtocolServer {
         }
 
         Ok(())
+    }
+
+    /// Feed in-band data that arrived on `tab_id`'s PTY, whose foreground
+    /// process group is now `pgrp`. `broken` means some of the stream was
+    /// malformed or lost; it ends the tab's in-band session.
+    ///
+    /// Replies are queued; collect them with
+    /// [`ProtocolServer::take_in_band_output`].
+    pub fn in_band_input(&mut self, tab_id: TabId, pgrp: Option<i32>, bytes: &[u8], broken: bool) {
+        self.end_in_band_if_foreground_changed(tab_id, pgrp);
+        let key = self.in_band_session_key(tab_id);
+        if broken {
+            self.in_band_openers.remove(&tab_id);
+            if let Some(key) = key {
+                warn!(
+                    "In-band stream on tab {} was malformed; ending its session",
+                    tab_id.raw()
+                );
+                self.remove_session(key);
+            }
+            return;
+        }
+
+        let key = match key {
+            Some(key) => key,
+            None => {
+                let opener = self.in_band_openers.entry(tab_id).or_default();
+                opener.extend_from_slice(bytes);
+                match check_client_hello(opener) {
+                    HelloCheck::Partial => return,
+                    HelloCheck::No => {
+                        self.in_band_openers.remove(&tab_id);
+                        return;
+                    }
+                    HelloCheck::Complete => {}
+                }
+                let opener = self.in_band_openers.remove(&tab_id).unwrap_or_default();
+                let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst);
+                info!(
+                    "In-band session {} started on tab {}",
+                    session_id,
+                    tab_id.raw()
+                );
+                let mut session = NativeSession::new_in_band(session_id, tab_id, pgrp);
+                session.set_viewport(self.viewport_width, self.viewport_height);
+                let key = self.allocate_key();
+                self.sessions.insert(key, session);
+                self.feed_session(key, &opener);
+                return;
+            }
+        };
+        self.feed_session(key, bytes);
+    }
+
+    fn feed_session(&mut self, key: usize, bytes: &[u8]) {
+        let Some(session) = self.sessions.get_mut(&key) else {
+            return;
+        };
+        let alive = session.feed_in_band(bytes).and_then(|()| session.poll());
+        match alive {
+            Ok(true) => {}
+            Ok(false) => {
+                info!("In-band session {} ended", session.session_id());
+                self.remove_session(key);
+            }
+            Err(e) => {
+                warn!("In-band session {} failed: {}", session.session_id(), e);
+                self.remove_session(key);
+            }
+        }
+    }
+
+    /// End `tab_id`'s in-band session if the PTY's foreground process group
+    /// is no longer the one that started it: the app exited or was
+    /// suspended, and whatever runs now did not open the session.
+    pub fn end_in_band_if_foreground_changed(&mut self, tab_id: TabId, pgrp: Option<i32>) {
+        if let Some(key) = self.in_band_session_key(tab_id) {
+            if self.sessions[&key].in_band_pgrp() != pgrp {
+                info!(
+                    "In-band session {} ended: foreground process changed",
+                    self.sessions[&key].session_id()
+                );
+                self.remove_session(key);
+            }
+        }
+    }
+
+    /// Frame bytes queued for in-band apps, per tab, since the last call.
+    pub fn take_in_band_output(&mut self) -> Vec<(TabId, Vec<u8>)> {
+        self.sessions
+            .values_mut()
+            .filter(|session| session.is_in_band())
+            .filter_map(|session| {
+                let out = session.take_in_band_output();
+                (!out.is_empty()).then(|| (session.tab_id(), out))
+            })
+            .collect()
+    }
+
+    /// Tabs that have an in-band session.
+    pub fn in_band_tabs(&self) -> Vec<TabId> {
+        self.sessions
+            .values()
+            .filter(|session| session.is_in_band())
+            .map(NativeSession::tab_id)
+            .collect()
+    }
+
+    fn in_band_session_key(&self, tab_id: TabId) -> Option<usize> {
+        self.sessions
+            .iter()
+            .find(|(_, session)| session.is_in_band() && session.tab_id() == tab_id)
+            .map(|(&key, _)| key)
     }
 
     /// Returns the number of currently connected native sessions.
@@ -468,7 +644,20 @@ impl ProtocolServer {
             if !session.take_clipboard_get() {
                 continue;
             }
-            if Some(session.tab_id()) == self.active_tab {
+            if session.is_in_band() {
+                warn!(
+                    "In-band session {} requested the clipboard; in-band sessions may not read it",
+                    session.session_id()
+                );
+                if let Err(e) = session.send_clipboard_content(None) {
+                    warn!(
+                        "Failed to send clipboard denial to session {}: {}",
+                        session.session_id(),
+                        e
+                    );
+                }
+                denied = true;
+            } else if Some(session.tab_id()) == self.active_tab {
                 gets.push(key);
             } else {
                 warn!(
@@ -1059,5 +1248,138 @@ mod tests {
         let _c1 = connect(&mut server, &path);
 
         assert_eq!(server.sessions().count(), 1);
+    }
+
+    // ---------------------------------------------------------------
+    // In-band sessions
+    // ---------------------------------------------------------------
+
+    fn hello_bytes() -> Vec<u8> {
+        use ultty_protocol::Encode;
+        AppMessage::ClientHello {
+            version: ultty_protocol::PROTOCOL_VERSION,
+            requested_capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
+        }
+        .encode_to_bytes()
+        .to_vec()
+    }
+
+    fn encode(msg: &AppMessage) -> Vec<u8> {
+        use ultty_protocol::Encode;
+        msg.encode_to_bytes().to_vec()
+    }
+
+    fn decode_all(mut bytes: &[u8]) -> Vec<ultty_protocol::TerminalMessage> {
+        use ultty_protocol::Decode;
+        let mut out = Vec::new();
+        while !bytes.is_empty() {
+            out.push(ultty_protocol::TerminalMessage::decode(&mut bytes).expect("decode"));
+        }
+        out
+    }
+
+    fn in_band_output(
+        server: &mut ProtocolServer,
+        tab: TabId,
+    ) -> Vec<ultty_protocol::TerminalMessage> {
+        server
+            .take_in_band_output()
+            .into_iter()
+            .filter(|(t, _)| *t == tab)
+            .flat_map(|(_, bytes)| decode_all(&bytes))
+            .collect()
+    }
+
+    use ultty_protocol::{AppMessage, TerminalMessage};
+
+    #[test]
+    fn in_band_hello_split_across_calls_opens_a_session() {
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
+        let hello = hello_bytes();
+        server.in_band_input(TAB_A, Some(42), &hello[..5], false);
+        assert_eq!(server.session_count(), 0);
+        server.in_band_input(TAB_A, Some(42), &hello[5..], false);
+        assert_eq!(server.session_count(), 1);
+        assert_eq!(server.in_band_tabs(), vec![TAB_A]);
+
+        let replies = in_band_output(&mut server, TAB_A);
+        assert!(matches!(
+            replies.first(),
+            Some(TerminalMessage::ServerHello { .. })
+        ));
+        assert!(matches!(
+            replies.get(1),
+            Some(TerminalMessage::SessionReady { .. })
+        ));
+        assert!(server.sessions().next().unwrap().stream_fd().is_none());
+    }
+
+    #[test]
+    fn in_band_data_that_is_not_a_hello_opens_nothing() {
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
+        let begin = encode(&AppMessage::BeginFrame {
+            frame_id: ultty_protocol::FrameId(1),
+        });
+        server.in_band_input(TAB_A, Some(42), &begin, false);
+        server.in_band_input(TAB_A, Some(42), b"garbage", false);
+        assert_eq!(server.session_count(), 0);
+        // A real hello afterwards still works.
+        server.in_band_input(TAB_A, Some(42), &hello_bytes(), false);
+        assert_eq!(server.session_count(), 1);
+    }
+
+    #[test]
+    fn in_band_session_ends_on_disconnect_broken_stream_or_new_foreground() {
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
+
+        server.in_band_input(TAB_A, Some(42), &hello_bytes(), false);
+        server.in_band_input(TAB_A, Some(42), &encode(&AppMessage::Disconnect), false);
+        assert_eq!(server.session_count(), 0, "disconnect");
+
+        server.in_band_input(TAB_A, Some(42), &hello_bytes(), false);
+        server.in_band_input(TAB_A, Some(42), &[], true);
+        assert_eq!(server.session_count(), 0, "broken stream");
+
+        server.in_band_input(TAB_A, Some(42), &hello_bytes(), false);
+        server.end_in_band_if_foreground_changed(TAB_A, Some(42));
+        assert_eq!(server.session_count(), 1, "same foreground keeps it");
+        server.end_in_band_if_foreground_changed(TAB_A, Some(7));
+        assert_eq!(server.session_count(), 0, "new foreground");
+    }
+
+    #[test]
+    fn in_band_sessions_are_one_per_tab_and_stay_on_their_tab() {
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
+        server.open_tab(TAB_B).unwrap();
+        server.in_band_input(TAB_A, Some(1), &hello_bytes(), false);
+        server.in_band_input(TAB_B, Some(2), &hello_bytes(), false);
+        assert_eq!(server.session_count(), 2);
+        let mut tabs = server.in_band_tabs();
+        tabs.sort_by_key(|t| t.raw());
+        assert_eq!(tabs, vec![TAB_A, TAB_B]);
+        server.close_tab(TAB_B);
+        assert_eq!(server.in_band_tabs(), vec![TAB_A]);
+    }
+
+    #[test]
+    fn in_band_sessions_may_not_read_the_clipboard() {
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
+        server.in_band_input(TAB_A, Some(42), &hello_bytes(), false);
+        let _ = in_band_output(&mut server, TAB_A);
+
+        server.in_band_input(TAB_A, Some(42), &encode(&AppMessage::ClipboardGet), false);
+        assert!(server.pending_clipboard_gets().is_empty());
+        let replies = in_band_output(&mut server, TAB_A);
+        assert!(
+            replies
+                .iter()
+                .any(|m| matches!(m, TerminalMessage::ClipboardContent { text: None })),
+            "denial sent: {replies:?}"
+        );
     }
 }
