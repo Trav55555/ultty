@@ -264,6 +264,12 @@ pub enum Action {
     /// Screen alignment pattern (DECALN — ESC # 8)
     ScreenAlignmentPattern,
 
+    /// Ultty in-band protocol data: the base64url text of an
+    /// `ESC _ U ... ESC \` string, without the `U`. Undecoded, so this crate
+    /// stays free of protocol dependencies. Strings longer than
+    /// [`MAX_IN_BAND_APC`] are dropped.
+    InBand(Vec<u8>),
+
     /// Application keypad mode (DECKPAM — ESC =)
     ApplicationKeypadMode,
 
@@ -449,6 +455,24 @@ pub(super) enum State {
 /// The parser processes bytes incrementally and emits [`Action`] values
 /// through a callback. It maintains internal state to handle multi-byte
 /// escape sequences.
+/// Longest in-band APC string kept, in base64 bytes. Senders split frames
+/// into strings of at most 64 KiB of data (87,382 base64 bytes); this leaves
+/// room for senders that pick a slightly larger chunk.
+pub const MAX_IN_BAND_APC: usize = 128 * 1024;
+
+/// Classification of the APC string being parsed, from its first byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ApcKind {
+    /// No byte seen yet.
+    Unknown,
+    /// `U`: Ultty in-band protocol data, collected.
+    InBand,
+    /// An in-band string that exceeded [`MAX_IN_BAND_APC`]; dropped.
+    Oversized,
+    /// Any other APC (kitty graphics and so on); consumed and ignored.
+    Other,
+}
+
 pub struct AnsiParser {
     pub(super) state: State,
     pub(super) params: Vec<u16>,
@@ -459,6 +483,10 @@ pub struct AnsiParser {
     pub(super) osc_buffer: Vec<u8>,
     pub(super) dcs_buffer: Vec<u8>,
     pub(super) dcs_params: Vec<u16>,
+    /// What the current APC string is; see [`ApcKind`].
+    pub(super) apc_kind: ApcKind,
+    /// Text of an in-band APC string being collected.
+    pub(super) apc_buffer: Vec<u8>,
     /// Buffer for accumulating UTF-8 multi-byte sequences
     utf8_buffer: Vec<u8>,
     /// Number of remaining bytes expected in current UTF-8 sequence
@@ -483,6 +511,8 @@ impl AnsiParser {
             osc_buffer: Vec::new(),
             dcs_buffer: Vec::new(),
             dcs_params: Vec::new(),
+            apc_kind: ApcKind::Unknown,
+            apc_buffer: Vec::new(),
             utf8_buffer: Vec::with_capacity(4),
             utf8_remaining: 0,
             g0_charset_graphics: false,
@@ -516,6 +546,18 @@ impl AnsiParser {
     {
         let mut index = 0;
         while index < data.len() {
+            // In-band payloads are long runs without ESC; copy them whole.
+            if self.state == State::ApcString && self.apc_kind != ApcKind::Unknown {
+                let run = data[index..]
+                    .iter()
+                    .position(|&b| b == 0x1B)
+                    .unwrap_or(data.len() - index);
+                if run > 0 {
+                    self.apc_extend(&data[index..index + run]);
+                    index += run;
+                    continue;
+                }
+            }
             if self.can_emit_ascii_span() && is_printable_ascii(data[index]) {
                 let start = index;
                 index += 1;
@@ -554,7 +596,7 @@ impl AnsiParser {
             State::DcsString => self.dcs_string(byte, callback),
             State::DcsStringEsc => self.dcs_string_esc(byte, callback),
             State::ApcString => self.apc_string(byte),
-            State::ApcStringEsc => self.apc_string_esc(byte),
+            State::ApcStringEsc => self.apc_string_esc(byte, callback),
             State::PmString => self.ignored_string(byte, State::PmStringEsc),
             State::PmStringEsc => self.ignored_string_esc(byte, State::PmString),
             State::SosString => self.ignored_string(byte, State::SosStringEsc),
@@ -771,6 +813,8 @@ impl AnsiParser {
             // Used by Kitty graphics protocol
             b'_' => {
                 self.state = State::ApcString;
+                self.apc_kind = ApcKind::Unknown;
+                self.apc_buffer.clear();
             }
             // PM - Privacy Message (ESC ^)
             b'^' => {

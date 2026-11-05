@@ -35,6 +35,9 @@ impl<'a> TerminalHandler<'a> {
                 // C0 controls handled separately
             }
 
+            // Protocol data for the embedder; it does not touch the grid.
+            Action::InBand(_) => {}
+
             // Cursor movement
             Action::CursorUp(n) => self.terminal.grid_mut().cursor_up(n),
             Action::CursorDown(n) => self.terminal.grid_mut().cursor_down(n),
