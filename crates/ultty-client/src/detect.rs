@@ -1,4 +1,4 @@
-//! Backend detection logic.
+//! Finding the terminal: the tab's socket, or the in-band transport.
 //!
 //! Native mode is used only when the app runs directly on an Ultty tab's
 //! terminal. Ultty gives each tab's shell `ULTTY_SOCKET` (the tab's protocol
@@ -17,6 +17,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+/// Whether this process runs on the Ultty tab that owns `ULTTY_SOCKET`.
 pub fn is_ultty() -> bool {
     socket_path().is_some()
 }

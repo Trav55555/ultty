@@ -47,6 +47,7 @@ an MSRV job; see [CONTRIBUTING.md](CONTRIBUTING.md).
 ultty (terminal binary)  ←─depends─  ultty-protocol (wire format)
 ultty (terminal binary)  ←─depends─  ultty-vt (VT parser + grid, no I/O)
 ulttui (TUI framework)   ←─depends─  ultty-protocol
+ulttui (TUI framework)   ←─depends─  ultty-client (detection + in-band tty)
 ultty-client (low-level)  ←─depends─  ultty-protocol
 examples/*                ←─depends─  ulttui
 ```
@@ -59,7 +60,7 @@ examples/*                ←─depends─  ulttui
 | `ultty` | Terminal emulator binary. GPU renderer (wgpu), PTY, native protocol server, scene graph, tabs/splits. Also produces `ulttyctl` CLI tool. |
 | `ulttui` | TUI application framework. Elm architecture (Application trait with update/view/on_event), 28 widget modules, dual-mode rendering. |
 | `ultty-protocol` | Wire protocol codec. Binary message encode/decode, layout constraint types (wraps Taffy), content types, event types. |
-| `ultty-client` | Low-level client SDK for apps that want raw protocol access without the framework. |
+| `ultty-client` | Low-level client SDK for apps that want raw protocol access without the framework. Owns terminal detection (`detect`) and the in-band tty transport (`in_band`), which `ulttui` also uses. |
 
 ### Dual-Mode Rendering
 

@@ -165,9 +165,13 @@ framing cannot be measured. ssh carried every frame byte for byte.
 
 - **Empty updates.** 11 of the 27 recorded `BeginFrame..EndFrame` pairs
   were empty: a 24-byte frame with nothing between begin and end. `ulttui`
-  sends a frame even when its diff is empty. Skipping those is a cheap
-  win on either transport.
-- **sysmon stalls under the proxy.** Through the recording proxy, `sysmon`
-  completed the handshake (`ClientHello`, `ServerHello`, `SessionReady`) and
-  then sent nothing for 15 s. It renders when run directly. The cause is not
-  yet known. The other five apps behave the same with and without the proxy.
+  sent a frame even when its diff was empty. Fixed 2026-11-06: an
+  unchanged view now sends nothing.
+- **sysmon stalled under the proxy (fixed 2026-11-06).** The cause was a
+  ulttui bug that affected every app on the socket. During the handshake
+  the socket's read timeout was 2 s, and `read_available` reads until a
+  read times out. Once `SessionReady` had arrived, the app therefore waited
+  2 s more before using it. Measured in Ultty, hello to first frame was
+  2,015 ms for counter-app and is now 19 ms. Under the proxy the delay
+  became a complete stall for `sysmon`; why is not established, but with
+  the fix it sends 144 frames in 15 s through the proxy.

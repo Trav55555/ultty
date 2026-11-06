@@ -3753,6 +3753,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "ulttui",
+ "ultty-client",
  "ultty-protocol",
  "unicode-width 0.2.0",
 ]
@@ -3803,6 +3804,7 @@ name = "ultty-client"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "libc",
  "thiserror 1.0.69",
  "tracing",
  "ultty-protocol",

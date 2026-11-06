@@ -1,11 +1,12 @@
 //! Rendering backends.
 
 mod ansi;
-mod detect;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
 mod native;
 pub(crate) mod native_diff;
+
+use ultty_client::detect;
 
 use crate::event::Event;
 use crate::widgets::View;

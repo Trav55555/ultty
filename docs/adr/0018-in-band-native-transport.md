@@ -6,8 +6,9 @@
   The terminal's markdown and syntax renderers are removed; the tags still
   decode and draw as verbatim source. Moving `Input`, `Button`, `Progress`
   and `Spinner` into `ulttui` is accepted in direction, one slice at a time.
-- Transport (proposal 1): Accepted 2026-11-05 and implemented in Ultty and
-  `ulttui`; `ultty-client` still speaks only the socket. The benchmark
+- Transport (proposal 1): Accepted 2026-11-05 and implemented in Ultty,
+  `ulttui`, and (2026-11-06) `ultty-client`, which now owns the shared
+  detection and in-band tty code. The benchmark
   ([docs/perf/2026-11-05-in-band-transport.md](../perf/2026-11-05-in-band-transport.md))
   measured +35% bytes and +6 to +14 µs round-trip latency at p50 on real
   app traffic. Every frame crossed a real ssh hop to EC2 intact. The design
@@ -148,8 +149,8 @@ Known costs:
 
 ## Follow-ups
 
-- `ultty-client` (used by `hello-native` and `split-panes`) gains the
-  in-band transport.
+- Done 2026-11-06: `ultty-client` gains the in-band transport, and
+  `UlttyClient::connect` applies the same `ULTTY_TTY` check as `ulttui`.
 - Image-heavy apps keep using the socket when it is available. In-band
   moves a 1 MiB image in about 3 ms.
 
