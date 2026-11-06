@@ -9,8 +9,8 @@ The repository pins a toolchain in `rust-toolchain.toml`. Install `rustup` and
 the pin installs itself the first time you build.
 
 - Pinned toolchain: **1.98.1**, with `rustfmt` and `clippy`.
-- MSRV: **1.85**, declared as `rust-version` in the root `Cargo.toml`. CI has an
-  `msrv` job that runs `cargo check --workspace --all-targets` on 1.85. If you
+- MSRV: **1.89**, declared as `rust-version` in the root `Cargo.toml`. CI has an
+  `msrv` job that runs `cargo check --workspace --all-targets` on 1.89. If you
   need a newer language feature, raise the MSRV in `Cargo.toml` and in CI in the
   same pull request, and say why.
 - Rust edition: 2021.
