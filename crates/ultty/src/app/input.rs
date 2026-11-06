@@ -791,6 +791,12 @@ impl App {
         }
 
         // Normal mode: scroll the scrollback buffer
+        self.scroll_scrollback(lines);
+    }
+
+    /// Move the viewport `lines` into scrollback (negative: back toward the
+    /// live screen).
+    fn scroll_scrollback(&mut self, lines: i32) {
         let Some(mut t) = self.terminal_mut() else {
             return;
         };
@@ -870,6 +876,26 @@ impl App {
             }
             self.needs_redraw = true;
             return;
+        }
+
+        // Page through scrollback (Shift+PageUp/PageDown) on the main screen.
+        // On the alternate screen there is no scrollback, so the key goes to
+        // the app, as in xterm.
+        let page_up =
+            self.check_keybinding(&event, &self.config.keybindings.scroll_page_up.clone());
+        if page_up
+            || self.check_keybinding(&event, &self.config.keybindings.scroll_page_down.clone())
+        {
+            let screen = self
+                .terminal()
+                .filter(|t| !t.is_alternate_screen())
+                .map(|t| t.dimensions().rows);
+            if let Some(rows) = screen {
+                // Keep one line of the previous page for context.
+                let page = i32::from(rows.saturating_sub(1).max(1));
+                self.scroll_scrollback(if page_up { page } else { -page });
+                return;
+            }
         }
 
         // Check for find/search (Ctrl+Shift+F)

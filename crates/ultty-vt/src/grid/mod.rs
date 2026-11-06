@@ -29,6 +29,7 @@
 
 mod buffer;
 mod cell;
+mod history;
 mod image;
 mod row;
 mod term_handler;

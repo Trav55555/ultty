@@ -231,22 +231,17 @@ impl App {
             }
 
             ControlRequest::GetText {
-                include_scrollback: _,
-                scrollback_lines: _,
+                include_scrollback,
+                scrollback_lines,
             } => {
                 if let Some(terminal) = self.terminal_manager.focused_terminal() {
                     let term = terminal.event_loop.terminal();
-                    let dims = term.grid().dimensions();
-                    let mut text = String::new();
-                    // One char per column (wide-char spacers print as
-                    // spaces) plus any extra codepoints of each grapheme.
-                    for row in 0..dims.rows {
-                        if let Some(grid_row) = term.grid().row(row) {
-                            text.push_str(&grid_row.text());
-                        }
-                        text.push('\n');
-                    }
-                    ControlResponse::Text(text)
+                    let history = if include_scrollback {
+                        scrollback_lines.unwrap_or(usize::MAX)
+                    } else {
+                        0
+                    };
+                    ControlResponse::Text(buffer_text(term.buffer(), history))
                 } else {
                     ControlResponse::Error {
                         code: 1,
@@ -853,6 +848,23 @@ fn control_request_requires_auth(request: &ultty_protocol::control::ControlReque
     }
 }
 
+/// The text of `buffer`: up to `history_lines` of the most recent scrollback,
+/// then the screen, one line per row. Each row has one char per column
+/// (wide-char spacers print as spaces) plus the extra codepoints of each
+/// grapheme. This ignores the viewport's scroll position.
+fn buffer_text(buffer: &ultty::grid::Buffer, history_lines: usize) -> String {
+    let history = buffer.history_len();
+    let first = history - history.min(history_lines);
+    let mut text = String::new();
+    for index in first..buffer.total_lines() {
+        if let Some(row) = buffer.row_at(index) {
+            text.push_str(&row.text());
+        }
+        text.push('\n');
+    }
+    text
+}
+
 /// Build a search match for `text[byte_start..byte_end]` with up to 20 chars
 /// of context on each side. Offsets must be char boundaries of `text`.
 fn plain_search_match(
@@ -1009,6 +1021,45 @@ fn build_command_line(command: &str, args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 6x2 buffer with five lines written: three in history, two on screen.
+    fn buffer_with_history() -> ultty::grid::Buffer {
+        let mut buffer = ultty::grid::Buffer::new(ultty::grid::Dimensions::new(6, 2));
+        for (i, line) in ["one", "two", "three", "four", "five"].iter().enumerate() {
+            buffer.write_ascii_span(line.as_bytes());
+            if i < 4 {
+                buffer.grid_mut().carriage_return();
+                buffer.newline();
+            }
+        }
+        buffer
+    }
+
+    fn lines(text: &str) -> Vec<&str> {
+        text.lines().map(str::trim_end).collect()
+    }
+
+    #[test]
+    fn text_without_scrollback_is_the_screen() {
+        let buffer = buffer_with_history();
+        assert_eq!(buffer.history_len(), 3);
+        assert_eq!(lines(&buffer_text(&buffer, 0)), ["four", "five"]);
+    }
+
+    #[test]
+    fn text_with_scrollback_includes_history_oldest_first() {
+        let buffer = buffer_with_history();
+        assert_eq!(
+            lines(&buffer_text(&buffer, usize::MAX)),
+            ["one", "two", "three", "four", "five"]
+        );
+    }
+
+    #[test]
+    fn text_with_a_scrollback_limit_keeps_the_most_recent_lines() {
+        let buffer = buffer_with_history();
+        assert_eq!(lines(&buffer_text(&buffer, 1)), ["three", "four", "five"]);
+    }
     use ultty_protocol::control::{ControlRequest, ControlResponse};
     use ultty_protocol::Key;
 

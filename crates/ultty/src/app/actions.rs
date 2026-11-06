@@ -117,6 +117,14 @@ impl App {
             (keybindings.close_pane.clone(), "Close pane".to_string()),
             (keybindings.vim_mode.clone(), "Toggle vim mode".to_string()),
             (
+                keybindings.scroll_page_up.clone(),
+                "Scroll back a page".to_string(),
+            ),
+            (
+                keybindings.scroll_page_down.clone(),
+                "Scroll forward a page".to_string(),
+            ),
+            (
                 keybindings.reload_config.clone(),
                 "Reload config".to_string(),
             ),

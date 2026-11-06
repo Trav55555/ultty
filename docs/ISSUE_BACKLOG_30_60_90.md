@@ -119,32 +119,13 @@ the cursor and at selection edges.
 **Validation.** A screenshot test with a ligature font showing `=>` as one
 glyph; `cargo bench -p ultty --bench render` within 10% of today.
 
-### 6. Compact scrollback storage
-
-**Problem.** Scrollback halves VT throughput. With 10,000 rows of history,
-headless parsing runs at 106-124 MiB/s at 120x40. On the alternate screen,
-which has no history, it runs at about 300 MiB/s. Each line is written into
-the oldest history row, and 10,000 rows of 20-byte cells do not fit in L2
-(see [docs/perf/2026-11-06-scrollback-cost.md](perf/2026-11-06-scrollback-cost.md)).
-This replaces two earlier items. Snapshot rendering is set aside, because
-the render lock is held only ~8% of the time. Handing rows to scrollback is
-subsumed, because moving rows was never the cost.
-
-**Scope.** Store history rows as text bytes plus style runs (and grapheme
-extras) instead of cells, about 100 bytes for a typical line. Decode on
-read: the renderer shows at most a screenful, and search and copy can
-stream. `visible_row` and `row_at` return a decoded row instead of a
-reference, so their callers change.
-
-**Validation.**
-- `cargo test -p ultty-vt`, including the integrity property test at
-  `PROPTEST_CASES=20000`, plus a property test that encode and decode round
-  trip any row.
-- `examples/throughput` on the main screen within 15% of the alternate
-  screen at 120x40.
-- Scrollback memory at 10,000 rows of typical output under 2 MiB.
-
 ## Recently Completed Readiness Work
+
+- **Compact scrollback storage (2026-11-06).** History rows are text plus
+  style runs. Memory for 10,000 typical 300-column lines fell from 57 MB to
+  2.4 MB, and VT throughput rose 10% at 120x40 and 24% at 300x75. The
+  remaining cost is per-cell style comparison; see
+  [docs/perf/2026-11-06-scrollback-cost.md](perf/2026-11-06-scrollback-cost.md).
 
 | Issue | Result | Evidence |
 |-------|--------|----------|
