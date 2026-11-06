@@ -266,11 +266,8 @@ impl App {
 
         tracing::info!("Font size: {:.1}pt", new_size);
 
-        // Terminal dimensions changed - resize all terminals
-        let (cols, rows) = self.renderer.terminal_dimensions();
-        if let Err(e) = self.terminal_manager.resize_all(cols, rows) {
-            tracing::warn!("Failed to resize terminals after font change: {}", e);
-        }
+        // Cell size changed: re-size every pane's grid.
+        self.relayout_terminals();
 
         self.needs_redraw = true;
     }
@@ -282,11 +279,8 @@ impl App {
 
         tracing::info!("Font size reset to: {:.1}pt", new_size);
 
-        // Terminal dimensions changed - resize all terminals
-        let (cols, rows) = self.renderer.terminal_dimensions();
-        if let Err(e) = self.terminal_manager.resize_all(cols, rows) {
-            tracing::warn!("Failed to resize terminals after font reset: {}", e);
-        }
+        // Cell size changed: re-size every pane's grid.
+        self.relayout_terminals();
 
         self.needs_redraw = true;
     }

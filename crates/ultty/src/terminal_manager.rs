@@ -191,6 +191,53 @@ impl Tab {
 }
 
 /// Manager for multiple terminals organized in tabs.
+/// The pixel area a tab's panes share, and the cell size that turns pixels
+/// into grid rows and columns.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PaneArea {
+    pub width: f32,
+    pub height: f32,
+    pub cell_width: f32,
+    pub cell_height: f32,
+}
+
+/// Pixel rectangles `(x, y, width, height)` of `count` panes side by side
+/// (Horizontal) or stacked (Vertical), sized by `ratios`; missing or
+/// mismatched ratios mean equal shares. Rendering and grid sizing both use
+/// this, so a pane's terminal always matches the space it is drawn in.
+pub fn pane_rects(
+    direction: SplitDirection,
+    ratios: &[f32],
+    count: usize,
+    width: f32,
+    height: f32,
+) -> Vec<(f32, f32, f32, f32)> {
+    let mut offset = 0.0;
+    (0..count)
+        .map(|i| {
+            let ratio = if ratios.len() == count {
+                ratios[i]
+            } else {
+                1.0 / count as f32
+            };
+            match direction {
+                SplitDirection::Horizontal => {
+                    let w = width * ratio;
+                    let rect = (offset, 0.0, w, height);
+                    offset += w;
+                    rect
+                }
+                SplitDirection::Vertical => {
+                    let h = height * ratio;
+                    let rect = (0.0, offset, width, h);
+                    offset += h;
+                    rect
+                }
+            }
+        })
+        .collect()
+}
+
 pub struct TerminalManager {
     /// All managed terminals
     terminals: Vec<ManagedTerminal>,
@@ -207,6 +254,9 @@ pub struct TerminalManager {
     default_rows: u16,
     /// Handed to every terminal so its I/O thread can wake the UI.
     waker: Option<Waker>,
+    /// Where panes are laid out, once the window has a size. Splits,
+    /// closes and divider drags re-lay panes out within it.
+    pane_area: Option<PaneArea>,
 }
 
 impl TerminalManager {
@@ -246,6 +296,7 @@ impl TerminalManager {
             default_cols: cols,
             default_rows: rows,
             waker: None,
+            pane_area: None,
         };
 
         // Create initial tab with terminal
@@ -494,6 +545,60 @@ impl TerminalManager {
     }
 
     /// Resize all terminals.
+    /// Size every pane's terminal to its share of `area`, in every tab, and
+    /// remember `area` so later splits, closes and divider drags keep panes
+    /// sized. A pane whose grid size is unchanged is left alone.
+    pub fn layout_panes(&mut self, area: PaneArea) -> io::Result<()> {
+        self.pane_area = Some(area);
+        let (cols, rows) = crate::renderer::grid_dimensions_for(
+            area.width,
+            area.height,
+            area.cell_width,
+            area.cell_height,
+        );
+        self.default_cols = cols;
+        self.default_rows = rows;
+
+        let mut sizes = Vec::new();
+        for tab in &self.tabs {
+            let rects = pane_rects(
+                tab.split_direction,
+                &tab.pane_ratios,
+                tab.terminals.len(),
+                area.width,
+                area.height,
+            );
+            for (terminal_id, (_, _, width, height)) in tab.terminals.iter().zip(rects) {
+                let grid = crate::renderer::grid_dimensions_for(
+                    width,
+                    height,
+                    area.cell_width,
+                    area.cell_height,
+                );
+                sizes.push((*terminal_id, grid));
+            }
+        }
+        for (terminal_id, (cols, rows)) in sizes {
+            let Some(terminal) = self.terminals.iter_mut().find(|t| t.id == terminal_id) else {
+                continue;
+            };
+            let current = terminal.event_loop.terminal().dimensions();
+            if (current.cols, current.rows) != (cols, rows) {
+                terminal.resize(cols, rows)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Lay panes out again after their number or ratios changed.
+    fn relayout(&mut self) {
+        if let Some(area) = self.pane_area {
+            if let Err(e) = self.layout_panes(area) {
+                tracing::warn!("Failed to resize panes: {}", e);
+            }
+        }
+    }
+
     pub fn resize_all(&mut self, cols: u16, rows: u16) -> io::Result<()> {
         self.default_cols = cols;
         self.default_rows = rows;
@@ -537,7 +642,7 @@ impl TerminalManager {
             .map(|t| t.id)
             .collect();
 
-        for terminal_id in exited {
+        for &terminal_id in &exited {
             // Find and update the tab
             if let Some(tab) = self
                 .tabs
@@ -557,6 +662,9 @@ impl TerminalManager {
         }
 
         self.repair_active_tab();
+        if !exited.is_empty() {
+            self.relayout();
+        }
     }
 
     fn repair_active_tab(&mut self) {
@@ -591,6 +699,7 @@ impl TerminalManager {
         if let Some(tab) = self.active_tab_mut() {
             tab.add_terminal(terminal_id);
         }
+        self.relayout();
 
         Ok(Some(terminal_id))
     }
@@ -612,6 +721,7 @@ impl TerminalManager {
         if let Some(tab) = self.active_tab_mut() {
             tab.add_terminal(terminal_id);
         }
+        self.relayout();
 
         Ok(Some(terminal_id))
     }
@@ -695,6 +805,7 @@ impl TerminalManager {
 
         // Remove the terminal itself
         self.terminals.retain(|t| t.id != focused_id);
+        self.relayout();
 
         true
     }
@@ -861,6 +972,7 @@ impl TerminalManager {
         let new_sum = new_left + new_right;
         tab.pane_ratios[divider_index] = new_left * old_sum / new_sum;
         tab.pane_ratios[divider_index + 1] = new_right * old_sum / new_sum;
+        self.relayout();
     }
 
     /// Given a click position in pixels relative to the content area (below tab bar),
@@ -996,6 +1108,7 @@ impl TerminalManager {
             default_cols: cols,
             default_rows: rows,
             waker: None,
+            pane_area: None,
         };
 
         for (i, tab_data) in session.tabs.iter().enumerate() {
@@ -1139,6 +1252,72 @@ impl ManagedTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_rects_share_the_area_by_direction_and_ratio() {
+        assert_eq!(
+            pane_rects(SplitDirection::Horizontal, &[], 2, 800.0, 600.0),
+            vec![(0.0, 0.0, 400.0, 600.0), (400.0, 0.0, 400.0, 600.0)]
+        );
+        assert_eq!(
+            pane_rects(SplitDirection::Vertical, &[0.25, 0.75], 2, 800.0, 600.0),
+            vec![(0.0, 0.0, 800.0, 150.0), (0.0, 150.0, 800.0, 450.0)]
+        );
+        // Ratios that do not match the pane count fall back to equal shares.
+        assert_eq!(
+            pane_rects(SplitDirection::Horizontal, &[1.0], 2, 800.0, 600.0)[1],
+            (400.0, 0.0, 400.0, 600.0)
+        );
+    }
+
+    fn grid(manager: &TerminalManager, id: TerminalId) -> (u16, u16) {
+        let terminal = manager.terminals.iter().find(|t| t.id == id).unwrap();
+        let dims = terminal.event_loop.terminal().dimensions();
+        (dims.cols, dims.rows)
+    }
+
+    /// 80 x 24 cells of 10 x 20 px.
+    const AREA: PaneArea = PaneArea {
+        width: 800.0,
+        height: 480.0,
+        cell_width: 10.0,
+        cell_height: 20.0,
+    };
+
+    #[test]
+    fn split_panes_get_grids_the_size_of_their_share() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let first = manager.focused_terminal_id().unwrap();
+        manager.layout_panes(AREA).unwrap();
+        assert_eq!(grid(&manager, first), (80, 24));
+
+        // Side by side: each pane gets half the columns, all the rows.
+        let second = manager.split_horizontal().unwrap().unwrap();
+        assert_eq!(grid(&manager, first), (40, 24));
+        assert_eq!(grid(&manager, second), (40, 24));
+
+        // A third pane: a third of the columns each, without being told.
+        let third = manager.split_horizontal().unwrap().unwrap();
+        assert_eq!(grid(&manager, third), (26, 24));
+
+        // Closing a pane gives its space back to the two that remain.
+        assert!(manager.close_focused_pane());
+        let remaining = manager.active_tab().unwrap().terminals.clone();
+        assert_eq!(remaining.len(), 2);
+        for id in remaining {
+            assert_eq!(grid(&manager, id), (40, 24));
+        }
+    }
+
+    #[test]
+    fn stacked_panes_split_the_rows() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let first = manager.focused_terminal_id().unwrap();
+        manager.layout_panes(AREA).unwrap();
+        let second = manager.split_vertical().unwrap().unwrap();
+        assert_eq!(grid(&manager, first), (80, 12));
+        assert_eq!(grid(&manager, second), (80, 12));
+    }
 
     /// A manager whose only tab runs a shell that prints nothing.
     ///

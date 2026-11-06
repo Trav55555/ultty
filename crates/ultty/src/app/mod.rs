@@ -701,11 +701,8 @@ impl App {
         if (new_height - old_height).abs() > 0.1 {
             self.renderer.set_tab_bar_height(new_height);
 
-            // Terminal dimensions may have changed - resize terminals
-            let (cols, rows) = self.renderer.terminal_dimensions();
-            if let Err(e) = self.terminal_manager.resize_all(cols, rows) {
-                tracing::warn!("Failed to resize terminals after tab bar change: {}", e);
-            }
+            // The area under the bar changed: re-size every pane's grid.
+            self.relayout_terminals();
         }
 
         self.refresh_runtime_wakeup_fds();
@@ -1127,6 +1124,23 @@ impl App {
     }
 
     /// Handle window resize.
+    /// Size every pane's terminal, in every tab, to the space it is drawn
+    /// in. Splits, pane closes and divider drags re-lay out from the same
+    /// area inside the terminal manager.
+    pub(super) fn relayout_terminals(&mut self) {
+        let (width, height) = self.renderer.terminal_area();
+        let (cell_width, cell_height) = self.renderer.cell_dimensions();
+        let area = ultty::terminal_manager::PaneArea {
+            width,
+            height,
+            cell_width,
+            cell_height,
+        };
+        if let Err(e) = self.terminal_manager.layout_panes(area) {
+            tracing::warn!("Failed to resize terminals: {}", e);
+        }
+    }
+
     fn handle_resize(&mut self, size: PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
             return;
@@ -1142,10 +1156,8 @@ impl App {
         let (cols, rows) = self.renderer.terminal_dimensions();
         tracing::debug!("Resize: {}x{}", cols, rows);
 
-        // Resize all terminals
-        if let Err(e) = self.terminal_manager.resize_all(cols, rows) {
-            tracing::warn!("Failed to resize terminals: {}", e);
-        }
+        // Size each pane's terminal to its own share of the window.
+        self.relayout_terminals();
 
         // Clamp copy mode cursor/scroll if active
         if self.copy_mode.is_active() {
@@ -1316,6 +1328,7 @@ impl ApplicationHandler<AppEvent> for AppHandler {
         match App::new(event_loop, self.proxy.clone()) {
             Ok(mut app) => {
                 app.update_tab_bar();
+                app.relayout_terminals();
                 event_loop.set_control_flow(ControlFlow::WaitUntil(
                     app.next_update_deadline(Instant::now()),
                 ));
