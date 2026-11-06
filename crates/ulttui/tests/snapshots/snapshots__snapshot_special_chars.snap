@@ -1,6 +1,5 @@
 ---
 source: crates/ulttui/tests/snapshots.rs
-assertion_line: 171
 expression: output
 ---
-Tabs:		Spaces   End
+Tabs:Spaces   End

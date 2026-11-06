@@ -36,8 +36,8 @@ bytes = "1.5"
 taffy = "0.15"
 
 # Terminal Backend (for fallback mode)
-crossterm = "0.28"
-ratatui = "0.29"
+crossterm = "0.29"
+ratatui = "0.30"
 
 # Async
 tokio = { version = "1.42", features = ["full"] }
