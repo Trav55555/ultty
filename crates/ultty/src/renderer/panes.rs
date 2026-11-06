@@ -11,19 +11,13 @@ use crate::grid::{CellFlags, CursorShape, Terminal};
 use wgpu::util::DeviceExt;
 
 impl Renderer {
-    /// Render multiple terminal panes.
+    /// Render multiple terminal panes to the surface and present.
     pub fn render_panes(
         &mut self,
         output: wgpu::SurfaceTexture,
         panes: &[(&Terminal, PaneInfo)],
         overlay: &OverlayState,
     ) {
-        // Update tab bar height from overlay state
-        self.tab_bar_height = overlay
-            .tab_bar
-            .map_or(crate::tabs::TERMINAL_TOP_PADDING, |tb| tb.content_top());
-        self.text_renderer.begin_frame();
-
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -34,6 +28,28 @@ impl Renderer {
                 label: Some("panes_render_encoder"),
             });
 
+        self.encode_panes(&mut encoder, &view, panes, overlay);
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        self.queue.present(output);
+    }
+
+    /// Record the whole multi-pane frame (clear, chrome, panes, borders,
+    /// overlays) into `encoder`, drawing onto `view`. The window and the
+    /// screenshot path both draw through this, so they stay pixel-identical.
+    pub(super) fn encode_panes(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        panes: &[(&Terminal, PaneInfo)],
+        overlay: &OverlayState,
+    ) {
+        // Update tab bar height from overlay state
+        self.tab_bar_height = overlay
+            .tab_bar
+            .map_or(crate::tabs::TERMINAL_TOP_PADDING, |tb| tb.content_top());
+        self.text_renderer.begin_frame();
+
         // Clear screen with background color
         // Convert sRGB colors to linear space for correct rendering in sRGB framebuffer
         let linear_bg = self.color_scheme.background.to_linear();
@@ -41,7 +57,7 @@ impl Renderer {
             encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -84,7 +100,7 @@ impl Renderer {
                 let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("tab_bar_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
+                        view,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
@@ -127,7 +143,7 @@ impl Renderer {
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("tab_title_pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
+                            view,
                             resolve_target: None,
                             depth_slice: None,
                             ops: wgpu::Operations {
@@ -177,7 +193,7 @@ impl Renderer {
                 let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("pane_bg_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
+                        view,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
@@ -200,8 +216,8 @@ impl Renderer {
 
             // Render pane text
             self.text_renderer.render_with_offset(
-                &mut encoder,
-                &view,
+                encoder,
+                view,
                 terminal,
                 &self.color_scheme,
                 self.cell_width,
@@ -235,7 +251,7 @@ impl Renderer {
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("pane_border_pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
+                            view,
                             resolve_target: None,
                             depth_slice: None,
                             ops: wgpu::Operations {
@@ -278,7 +294,7 @@ impl Renderer {
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("focused_border_pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
+                            view,
                             resolve_target: None,
                             depth_slice: None,
                             ops: wgpu::Operations {
@@ -333,7 +349,7 @@ impl Renderer {
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("indicator_bg_pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
+                            view,
                             resolve_target: None,
                             depth_slice: None,
                             ops: wgpu::Operations {
@@ -382,7 +398,7 @@ impl Renderer {
                         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: Some("indicator_text_pass"),
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &view,
+                                view,
                                 resolve_target: None,
                                 depth_slice: None,
                                 ops: wgpu::Operations {
@@ -410,18 +426,15 @@ impl Renderer {
         // Render keyboard shortcuts overlay if visible
         if overlay.shortcuts_visible {
             if let Some(keybindings) = overlay.keybindings {
-                self.render_shortcuts_overlay(&mut encoder, &view, keybindings);
+                self.render_shortcuts_overlay(encoder, view, keybindings);
             }
         }
         if let Some(rows) = overlay.protocol_status {
-            self.render_protocol_status_overlay(&mut encoder, &view, rows);
+            self.render_protocol_status_overlay(encoder, view, rows);
         }
         if let Some(tab_bar) = overlay.tab_bar {
-            self.render_main_menu(&mut encoder, &view, tab_bar);
+            self.render_main_menu(encoder, view, tab_bar);
         }
-
-        self.queue.submit(std::iter::once(encoder.finish()));
-        self.queue.present(output);
     }
 
     /// Build background vertices with pane offset.

@@ -417,7 +417,22 @@ impl App {
             }
 
             ControlRequest::Screenshot { path } => {
-                if let Some(terminal) = self.terminal_manager.focused_terminal() {
+                let path = match path {
+                    Some(path_str) => std::path::PathBuf::from(path_str),
+                    None => {
+                        let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+                        let filename = format!("ultty-screenshot-{}.png", timestamp);
+                        dirs::picture_dir()
+                            .map(|p| p.join("Screenshots").join(&filename))
+                            .unwrap_or_else(|| std::path::PathBuf::from(&filename))
+                    }
+                };
+                // Multi-pane tabs capture every pane as the window shows
+                // them. This must run before the focused terminal is locked
+                // below: the capture locks each pane itself.
+                let result = if self.terminal_manager.pane_count() > 1 {
+                    Some(self.capture_panes_screenshot(&path))
+                } else if let Some(terminal) = self.terminal_manager.focused_terminal() {
                     let term = terminal.event_loop.terminal();
                     let overlay_state = self.build_screenshot_overlay_state();
                     let overlay = overlay_state.as_overlay();
@@ -428,54 +443,30 @@ impl App {
                         .map(|s| s.sessions().collect())
                         .unwrap_or_default();
 
-                    if let Some(path_str) = path {
-                        let path = std::path::PathBuf::from(&path_str);
-                        if let Some(parent) = path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        match self.renderer.capture_screenshot_with_native(
-                            &term,
-                            &overlay,
-                            &path,
-                            &native_sessions,
-                        ) {
-                            Ok(()) => ControlResponse::Data(ControlData::ScreenshotSaved(
-                                path.display().to_string(),
-                            )),
-                            Err(e) => ControlResponse::Error {
-                                code: 5,
-                                message: format!("Screenshot failed: {}", e),
-                            },
-                        }
-                    } else {
-                        let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
-                        let filename = format!("ultty-screenshot-{}.png", timestamp);
-                        let path = dirs::picture_dir()
-                            .map(|p| p.join("Screenshots").join(&filename))
-                            .unwrap_or_else(|| std::path::PathBuf::from(&filename));
-                        if let Some(parent) = path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        match self.renderer.capture_screenshot_with_native(
-                            &term,
-                            &overlay,
-                            &path,
-                            &native_sessions,
-                        ) {
-                            Ok(()) => ControlResponse::Data(ControlData::ScreenshotSaved(
-                                path.display().to_string(),
-                            )),
-                            Err(e) => ControlResponse::Error {
-                                code: 5,
-                                message: format!("Screenshot failed: {}", e),
-                            },
-                        }
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
                     }
+                    Some(self.renderer.capture_screenshot_with_native(
+                        &term,
+                        &overlay,
+                        &path,
+                        &native_sessions,
+                    ))
                 } else {
-                    ControlResponse::Error {
+                    None
+                };
+                match result {
+                    Some(Ok(())) => ControlResponse::Data(ControlData::ScreenshotSaved(
+                        path.display().to_string(),
+                    )),
+                    Some(Err(e)) => ControlResponse::Error {
+                        code: 5,
+                        message: format!("Screenshot failed: {}", e),
+                    },
+                    None => ControlResponse::Error {
                         code: 1,
                         message: "No active terminal".to_string(),
-                    }
+                    },
                 }
             }
 

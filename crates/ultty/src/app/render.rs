@@ -4,7 +4,9 @@ use std::time::Instant;
 
 use super::update::pipeline_trace_enabled;
 use super::App;
-use ultty::renderer::OverlayState;
+use ultty::event_loop::TerminalGuard;
+use ultty::renderer::{OverlayState, PaneInfo};
+use ultty::terminal_manager::{pane_rects, SplitDirection, TerminalManager};
 
 impl App {
     /// Render the terminal.
@@ -163,47 +165,17 @@ impl App {
 
     /// Render multiple panes.
     fn render_multi_pane(&mut self, output: wgpu::SurfaceTexture) {
-        use ultty::renderer::PaneInfo;
-
-        let size = self.window.inner_size();
-        let tab_bar_height = self.tab_bar.content_top();
-        let available_width = size.width as f32;
-        let available_height = size.height as f32 - tab_bar_height;
-
-        let terminals = self.terminal_manager.active_tab_terminals();
-        let pane_count = terminals.len();
-
-        if pane_count == 0 {
-            return;
-        }
-
-        let focused_id = self.terminal_manager.focused_terminal_id();
-        let split_direction = self.terminal_manager.split_direction();
-
-        // Calculate pane bounds based on split direction and ratios
-        let ratios = self.terminal_manager.pane_ratios();
         // One lock per pane, held for this frame. Everything below reads the
         // panes through these guards; locking a pane's terminal again here
         // would deadlock.
-        // The same rectangles the terminal manager sizes each pane's grid to.
-        let rects = ultty::terminal_manager::pane_rects(
-            split_direction,
-            &ratios,
-            pane_count,
-            available_width,
-            available_height,
+        let locked = lock_active_panes(
+            &self.terminal_manager,
+            self.window.inner_size(),
+            self.tab_bar.content_top(),
         );
-        let locked: Vec<(ultty::event_loop::TerminalGuard<'_>, PaneInfo)> = terminals
-            .iter()
-            .zip(rects)
-            .map(|(managed, (x, y, w, h))| {
-                let is_focused = Some(managed.id) == focused_id;
-                (
-                    managed.event_loop.terminal(),
-                    PaneInfo::new(x, y, w, h, is_focused),
-                )
-            })
-            .collect();
+        if locked.is_empty() {
+            return;
+        }
 
         let panes: Vec<(&ultty::grid::Terminal, PaneInfo)> = locked
             .iter()
@@ -247,5 +219,86 @@ impl App {
         };
 
         self.renderer.render_panes(output, &panes, &overlay)
+    }
+}
+
+/// Panes of the active tab with their window rectangles and focus, as the
+/// window draws them and as multi-pane screenshots capture them.
+fn pane_infos(
+    direction: SplitDirection,
+    ratios: &[f32],
+    count: usize,
+    focused_index: Option<usize>,
+    width: f32,
+    height: f32,
+) -> Vec<PaneInfo> {
+    pane_rects(direction, ratios, count, width, height)
+        .into_iter()
+        .enumerate()
+        .map(|(i, (x, y, w, h))| PaneInfo::new(x, y, w, h, Some(i) == focused_index))
+        .collect()
+}
+
+/// Lock every pane of the active tab once, paired with its rectangle. The
+/// guards must be the only access to these terminals while they live:
+/// locking one again would deadlock.
+pub(super) fn lock_active_panes(
+    terminal_manager: &TerminalManager,
+    window_size: winit::dpi::PhysicalSize<u32>,
+    tab_bar_height: f32,
+) -> Vec<(TerminalGuard<'_>, PaneInfo)> {
+    let terminals = terminal_manager.active_tab_terminals();
+    let focused_id = terminal_manager.focused_terminal_id();
+    let infos = pane_infos(
+        terminal_manager.split_direction(),
+        &terminal_manager.pane_ratios(),
+        terminals.len(),
+        terminals.iter().position(|t| Some(t.id) == focused_id),
+        window_size.width as f32,
+        window_size.height as f32 - tab_bar_height,
+    );
+    terminals
+        .iter()
+        .zip(infos)
+        .map(|(managed, info)| (managed.event_loop.terminal(), info))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn side_by_side_panes_split_the_width_and_mark_focus() {
+        let infos = pane_infos(
+            SplitDirection::Horizontal,
+            &[0.25, 0.75],
+            2,
+            Some(1),
+            800.0,
+            560.0,
+        );
+        assert_eq!(infos.len(), 2);
+        assert_eq!((infos[0].x, infos[0].y), (0.0, 0.0));
+        assert_eq!((infos[0].width, infos[0].height), (200.0, 560.0));
+        assert_eq!((infos[1].x, infos[1].y), (200.0, 0.0));
+        assert_eq!((infos[1].width, infos[1].height), (600.0, 560.0));
+        assert!(!infos[0].is_focused);
+        assert!(infos[1].is_focused);
+    }
+
+    #[test]
+    fn stacked_panes_split_the_height_equally_without_ratios() {
+        let infos = pane_infos(SplitDirection::Vertical, &[], 2, Some(0), 800.0, 560.0);
+        assert_eq!((infos[0].x, infos[0].y), (0.0, 0.0));
+        assert_eq!((infos[0].width, infos[0].height), (800.0, 280.0));
+        assert_eq!((infos[1].x, infos[1].y), (0.0, 280.0));
+        assert!(infos[0].is_focused && !infos[1].is_focused);
+    }
+
+    #[test]
+    fn no_focused_index_marks_no_pane_focused() {
+        let infos = pane_infos(SplitDirection::Horizontal, &[], 3, None, 900.0, 100.0);
+        assert!(infos.iter().all(|p| !p.is_focused));
     }
 }
