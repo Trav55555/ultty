@@ -156,8 +156,7 @@ impl App {
         request: ultty_protocol::control::ControlRequest,
     ) -> ultty_protocol::control::ControlResponse {
         use ultty_protocol::control::{
-            ControlData, ControlRequest, ControlResponse, SearchMatch, TabInfo, TerminalInfo,
-            VersionInfo,
+            ControlData, ControlRequest, ControlResponse, SearchMatch, TabInfo, VersionInfo,
         };
 
         if let Some(response) = self.auth_error_for_request(client_key, &request) {
@@ -175,9 +174,6 @@ impl App {
 
             ControlRequest::GetInfo => {
                 if let Some(terminal) = self.terminal_manager.focused_terminal() {
-                    let term = terminal.event_loop.terminal();
-                    let dims = term.grid().dimensions();
-                    let cursor = term.grid().cursor();
                     let active_idx = self
                         .terminal_manager
                         .tabs()
@@ -188,16 +184,11 @@ impl App {
                                 .is_some_and(|a| a.id == t.id)
                         })
                         .unwrap_or(0);
-                    ControlResponse::Data(ControlData::Info(TerminalInfo {
-                        cols: dims.cols,
-                        rows: dims.rows,
-                        cursor_col: cursor.position.col,
-                        cursor_row: cursor.position.row,
-                        current_tab: active_idx,
-                        tab_count: self.terminal_manager.tab_count(),
-                        focused: true,
-                        cwd: terminal_working_directory(terminal),
-                    }))
+                    ControlResponse::Data(ControlData::Info(terminal_info(
+                        terminal,
+                        active_idx,
+                        self.terminal_manager.tab_count(),
+                    )))
                 } else {
                     ControlResponse::Error {
                         code: 1,
@@ -736,6 +727,32 @@ impl App {
     }
 }
 
+/// What `ulttyctl info` reports for `terminal`.
+///
+/// The terminal lock is released before the working directory is looked up,
+/// because that lookup takes the lock again; holding it deadlocked the UI
+/// thread on every `info` request.
+fn terminal_info(
+    terminal: &ultty::terminal_manager::ManagedTerminal,
+    current_tab: usize,
+    tab_count: usize,
+) -> ultty_protocol::control::TerminalInfo {
+    let (dims, cursor) = {
+        let term = terminal.event_loop.terminal();
+        (term.grid().dimensions(), term.grid().cursor().position)
+    };
+    ultty_protocol::control::TerminalInfo {
+        cols: dims.cols,
+        rows: dims.rows,
+        cursor_col: cursor.col,
+        cursor_row: cursor.row,
+        current_tab,
+        tab_count,
+        focused: true,
+        cwd: terminal_working_directory(terminal),
+    }
+}
+
 fn terminal_working_directory(
     terminal: &ultty::terminal_manager::ManagedTerminal,
 ) -> Option<String> {
@@ -1178,6 +1195,23 @@ mod tests {
         assert_eq!(result.text, "ready");
         assert_eq!(result.context_before, "aİé ");
         assert_eq!(result.context_after, "");
+    }
+
+    #[test]
+    fn info_does_not_lock_the_terminal_twice() {
+        // Debug builds panic on a re-entrant terminal lock (release builds
+        // deadlock), so this fails if terminal_info holds the lock while
+        // looking up the working directory.
+        let mut manager = ultty::terminal_manager::TerminalManager::new(80, 24).unwrap();
+        manager
+            .focused_terminal_mut()
+            .unwrap()
+            .event_loop
+            .terminal_mut()
+            .set_working_directory("/tmp/ultty-info-cwd".to_string());
+        let info = terminal_info(manager.focused_terminal().unwrap(), 0, 1);
+        assert_eq!((info.cols, info.rows), (80, 24));
+        assert_eq!(info.cwd.as_deref(), Some("/tmp/ultty-info-cwd"));
     }
 
     #[test]
