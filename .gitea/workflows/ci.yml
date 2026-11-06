@@ -174,10 +174,13 @@ jobs:
           # main-branch entry per job is all the runner keeps.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # lavapipe (mesa-vulkan-drivers) renders without a GPU; Xvfb is the
-      # display. Ultty runs for real and the live smokes drive it.
+      # display. Ultty runs for real and the live smokes drive it. winit
+      # loads the X11 client libraries at runtime, and the runner image
+      # lacks all but libX11.
       - run: >
           sudo apt-get update && sudo apt-get install -y
           libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libvulkan1
+          libx11-xcb1 libxcursor1 libxrandr2 libxi6
           xvfb mesa-vulkan-drivers fonts-dejavu-core
       - run: cargo build -p ultty -p hello-native -p counter-app --bins
       - run: scripts/ci-gui-smoke.sh "$RUNNER_TEMP/gui-smoke"
