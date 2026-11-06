@@ -132,6 +132,22 @@ enough along that the advisory ignore list is stable.
 
 ## Candidate Issues
 
+### Explore built-in sandboxing
+
+**Problem.** A tab runs its shell, and anything started from it (including AI
+coding agents), with the user's full filesystem and network access. Agent
+tools now sandbox their commands; a terminal could offer that per tab.
+
+**Scope (exploration).** Research is in
+[How agent tools sandbox the commands they run](research/sandboxing-2026-11.md)
+(Cursor, Codex, Antigravity, Apple, Claude Code). Prototype a per-tab sandbox
+that wraps the PTY child (bubblewrap plus seccomp on Linux, Seatbelt on
+macOS), keeps job control working, fails closed when unavailable, and denies
+the sandboxed process Ultty's own sockets and config. Decide whether the
+network allowlist proxy belongs in Ultty at all.
+
+**Not started.** Write up findings and a go/no-go before any code.
+
 ### Public Alpha: Fill Release Candidate Checklist
 
 ## Problem

@@ -198,14 +198,20 @@ impl App {
         tracing::info!("Loaded configuration");
 
         // Create window with transparency support if opacity < 1
-        let window = event_loop.create_window(
-            Window::default_attributes()
-                .with_title("Ultty")
-                .with_inner_size(LogicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT))
-                .with_min_inner_size(LogicalSize::new(200.0, 100.0))
-                .with_transparent(true)
-                .with_decorations(false),
-        )?;
+        let attributes = Window::default_attributes()
+            .with_title("Ultty")
+            .with_inner_size(LogicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT))
+            .with_min_inner_size(LogicalSize::new(200.0, 100.0))
+            .with_transparent(true)
+            .with_decorations(false);
+        // The Wayland app id and X11 WM_CLASS: desktops match it to
+        // ultty.desktop (StartupWMClass=ultty) to show Ultty's icon and name.
+        // Wayland had no app id at all, so GNOME showed a generic icon.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let attributes = winit::platform::wayland::WindowAttributesExtWayland::with_name(
+            attributes, "ultty", "ultty",
+        );
+        let window = event_loop.create_window(attributes)?;
         let window = Arc::new(window);
 
         let size = window.inner_size();
