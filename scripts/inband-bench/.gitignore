@@ -3,3 +3,4 @@
 *.png
 corpus.bin
 ultty.log
+__pycache__/
