@@ -306,7 +306,7 @@ impl GlyphAtlas {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -351,14 +351,14 @@ impl GlyphAtlas {
         // Solid white block for decoration quads; it lives in the reserved
         // rows so no glyph slot ever overwrites it.
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &[255u8; (RESERVED_ROWS * RESERVED_ROWS * 4) as usize],
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(RESERVED_ROWS * 4),
                 rows_per_image: Some(RESERVED_ROWS),
@@ -483,7 +483,7 @@ impl GlyphAtlas {
 
         // Upload to texture (4 bytes per pixel for Rgba8Unorm)
         self.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
@@ -494,7 +494,7 @@ impl GlyphAtlas {
                 aspect: wgpu::TextureAspect::All,
             },
             &data,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(image.placement.width * 4),
                 rows_per_image: Some(image.placement.height),

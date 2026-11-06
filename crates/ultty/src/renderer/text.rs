@@ -829,7 +829,7 @@ impl TextRenderer {
         y_offset: f32,
         cursor_blink_visible: bool,
         uniform_bind_group: &wgpu::BindGroup,
-    ) -> Result<(), wgpu::SurfaceError> {
+    ) {
         self.render_with_offset(
             encoder,
             view,
@@ -858,7 +858,7 @@ impl TextRenderer {
         y_offset: f32,
         cursor_blink_visible: bool,
         uniform_bind_group: &wgpu::BindGroup,
-    ) -> Result<(), wgpu::SurfaceError> {
+    ) {
         let (vertices, indices) = self.build_text_vertices_with_offset(
             terminal,
             color_scheme,
@@ -870,7 +870,7 @@ impl TextRenderer {
         );
 
         if vertices.is_empty() {
-            return Ok(());
+            return;
         }
 
         let slot = self.upload_grid(&vertices, &indices);
@@ -885,6 +885,7 @@ impl TextRenderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load, // Don't clear - draw over backgrounds
                         store: wgpu::StoreOp::Store,
@@ -893,6 +894,7 @@ impl TextRenderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             render_pass.set_pipeline(self.pipeline.pipeline());
@@ -905,8 +907,6 @@ impl TextRenderer {
             );
             render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
         }
-
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]

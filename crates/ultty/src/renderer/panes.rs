@@ -17,7 +17,7 @@ impl Renderer {
         output: wgpu::SurfaceTexture,
         panes: &[(&Terminal, PaneInfo)],
         overlay: &OverlayState,
-    ) -> Result<(), wgpu::SurfaceError> {
+    ) {
         // Update tab bar height from overlay state
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
         self.text_renderer.begin_frame();
@@ -41,6 +41,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         // Pre-multiplied alpha for transparency support
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -55,6 +56,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
         }
 
@@ -82,6 +84,7 @@ impl Renderer {
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &view,
                         resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Load,
                             store: wgpu::StoreOp::Store,
@@ -90,6 +93,7 @@ impl Renderer {
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
 
                 rp.set_pipeline(self.bg_pipeline.pipeline());
@@ -123,6 +127,7 @@ impl Renderer {
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &view,
                             resolve_target: None,
+                            depth_slice: None,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Load,
                                 store: wgpu::StoreOp::Store,
@@ -131,6 +136,7 @@ impl Renderer {
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
+                        multiview_mask: None,
                     });
 
                     rp.set_pipeline(self.text_renderer.pipeline());
@@ -171,6 +177,7 @@ impl Renderer {
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &view,
                         resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Load,
                             store: wgpu::StoreOp::Store,
@@ -179,6 +186,7 @@ impl Renderer {
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
 
                 rp.set_pipeline(self.bg_pipeline.pipeline());
@@ -200,7 +208,7 @@ impl Renderer {
                 self.pane_offset_y,
                 overlay.cursor_blink_visible,
                 &self.uniform_bind_group,
-            )?;
+            );
 
             // Draw pane border if not focused
             if !pane.is_focused {
@@ -227,6 +235,7 @@ impl Renderer {
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &view,
                             resolve_target: None,
+                            depth_slice: None,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Load,
                                 store: wgpu::StoreOp::Store,
@@ -235,6 +244,7 @@ impl Renderer {
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
+                        multiview_mask: None,
                     });
 
                     rp.set_pipeline(self.bg_pipeline.pipeline());
@@ -268,6 +278,7 @@ impl Renderer {
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &view,
                             resolve_target: None,
+                            depth_slice: None,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Load,
                                 store: wgpu::StoreOp::Store,
@@ -276,6 +287,7 @@ impl Renderer {
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
+                        multiview_mask: None,
                     });
 
                     rp.set_pipeline(self.bg_pipeline.pipeline());
@@ -321,6 +333,7 @@ impl Renderer {
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &view,
                             resolve_target: None,
+                            depth_slice: None,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Load,
                                 store: wgpu::StoreOp::Store,
@@ -329,6 +342,7 @@ impl Renderer {
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
+                        multiview_mask: None,
                     });
 
                     rp.set_pipeline(self.bg_pipeline.pipeline());
@@ -368,6 +382,7 @@ impl Renderer {
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                                 view: &view,
                                 resolve_target: None,
+                                depth_slice: None,
                                 ops: wgpu::Operations {
                                     load: wgpu::LoadOp::Load,
                                     store: wgpu::StoreOp::Store,
@@ -376,6 +391,7 @@ impl Renderer {
                             depth_stencil_attachment: None,
                             timestamp_writes: None,
                             occlusion_query_set: None,
+                            multiview_mask: None,
                         });
 
                         rp.set_pipeline(self.text_renderer.pipeline());
@@ -400,9 +416,7 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
-
-        Ok(())
+        self.queue.present(output);
     }
 
     /// Build background vertices with pane offset.

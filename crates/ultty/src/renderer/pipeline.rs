@@ -172,8 +172,8 @@ impl RenderPipeline {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("bg_pipeline_layout"),
-            bind_group_layouts: &[uniform_bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(uniform_bind_group_layout)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -181,12 +181,14 @@ impl RenderPipeline {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(Vertex::desc())],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -208,7 +210,8 @@ impl RenderPipeline {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
 
         Ok(Self { pipeline })
@@ -240,8 +243,11 @@ impl TextPipeline {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("text_pipeline_layout"),
-            bind_group_layouts: &[uniform_bind_group_layout, atlas_bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[
+                Some(uniform_bind_group_layout),
+                Some(atlas_bind_group_layout),
+            ],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -249,12 +255,14 @@ impl TextPipeline {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(Vertex::desc())],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -276,7 +284,8 @@ impl TextPipeline {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
 
         Ok(Self { pipeline })
