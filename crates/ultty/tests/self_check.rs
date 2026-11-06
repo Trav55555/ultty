@@ -1,7 +1,9 @@
 //! Self-checking tests for autonomous terminal verification.
 //!
 //! These tests can be run by Claude to verify terminal behavior without
-//! requiring visual inspection.
+//! requiring visual inspection. They run a shell without the user's rc
+//! files ([`TestTerminal::hermetic`]), so a machine's prompt setup cannot
+//! make them flaky.
 
 use std::time::Duration;
 use ultty::testing::{AppCheck, TestTerminal};
@@ -23,27 +25,20 @@ fn command_exists(cmd: &str) -> bool {
 
 #[test]
 fn self_check_basic_echo() {
-    let mut term = TestTerminal::with_size(80, 24).expect("create terminal");
-    term.wait_for_output(WAIT_SHORT).unwrap();
+    let mut term = TestTerminal::hermetic(80, 24).expect("create terminal");
 
-    // Send echo command
-    term.send("echo 'ULTTY_SELFCHECK_OK'\r").unwrap();
-    term.wait_until_stable(WAIT_SHORT, WAIT_LONG).unwrap();
-
-    // Verify output
-    let snapshot = term.snapshot();
-    println!("{}", snapshot.to_debug_string());
-
-    assert!(
-        snapshot.contains("ULTTY_SELFCHECK_OK"),
-        "Echo output should appear"
-    );
+    // The quotes split the marker as typed, so only the command's output
+    // matches, not the terminal's echo of the input.
+    term.send("echo ULTTY_SELF''CHECK_OK\r").unwrap();
+    let appeared = term.wait_for_text("ULTTY_SELFCHECK_OK", WAIT_LONG).unwrap();
+    println!("{}", term.snapshot().to_debug_string());
+    assert!(appeared, "Echo output should appear");
 }
 
 #[test]
 #[ignore]
 fn self_check_ansi_colors() {
-    let mut term = TestTerminal::with_size(80, 24).expect("create terminal");
+    let mut term = TestTerminal::hermetic(80, 24).expect("create terminal");
     term.wait_for_output(WAIT_SHORT).unwrap();
 
     // Print colored text
@@ -66,7 +61,7 @@ fn self_check_ansi_colors() {
 #[test]
 #[ignore]
 fn self_check_cursor_movement() {
-    let mut term = TestTerminal::with_size(80, 24).expect("create terminal");
+    let mut term = TestTerminal::hermetic(80, 24).expect("create terminal");
     term.wait_for_output(WAIT_SHORT).unwrap();
 
     // Move cursor to row 10, col 20 and print
@@ -86,7 +81,7 @@ fn self_check_cursor_movement() {
 #[test]
 #[ignore]
 fn self_check_alternate_screen() {
-    let mut term = TestTerminal::with_size(80, 24).expect("create terminal");
+    let mut term = TestTerminal::hermetic(80, 24).expect("create terminal");
     term.wait_for_output(WAIT_SHORT).unwrap();
 
     // Should start in main screen
@@ -108,7 +103,7 @@ fn self_check_alternate_screen() {
 #[test]
 #[ignore]
 fn self_check_mouse_tracking() {
-    let mut term = TestTerminal::with_size(80, 24).expect("create terminal");
+    let mut term = TestTerminal::hermetic(80, 24).expect("create terminal");
     term.wait_for_output(WAIT_SHORT).unwrap();
 
     // Should start with mouse tracking off
@@ -138,7 +133,7 @@ fn self_check_mouse_tracking() {
 
 #[test]
 fn self_check_unicode() {
-    let mut term = TestTerminal::with_size(80, 24).expect("create terminal");
+    let mut term = TestTerminal::hermetic(80, 24).expect("create terminal");
     term.wait_for_output(WAIT_SHORT).unwrap();
 
     // Print unicode
@@ -159,7 +154,7 @@ fn self_check_unicode() {
 #[test]
 #[ignore]
 fn self_check_scrolling() {
-    let mut term = TestTerminal::with_size(80, 24).expect("create terminal");
+    let mut term = TestTerminal::hermetic(80, 24).expect("create terminal");
     term.wait_for_output(WAIT_SHORT).unwrap();
 
     // Print 50 lines
@@ -176,7 +171,7 @@ fn self_check_scrolling() {
 
 #[test]
 fn self_check_clear_screen() {
-    let mut term = TestTerminal::with_size(80, 24).expect("create terminal");
+    let mut term = TestTerminal::hermetic(80, 24).expect("create terminal");
 
     // Wait for the output itself rather than for the screen to go quiet:
     // an interactive shell's prompt can keep redrawing (async prompts, a
@@ -210,7 +205,7 @@ fn self_check_nvim() {
         return;
     }
 
-    let mut term = TestTerminal::with_size(80, 24).expect("create terminal");
+    let mut term = TestTerminal::hermetic(80, 24).expect("create terminal");
     term.wait_for_output(WAIT_SHORT).unwrap();
 
     let result = term.test_app(
@@ -242,7 +237,7 @@ fn self_check_vim() {
         return;
     }
 
-    let mut term = TestTerminal::with_size(80, 24).expect("create terminal");
+    let mut term = TestTerminal::hermetic(80, 24).expect("create terminal");
     term.wait_for_output(WAIT_SHORT).unwrap();
 
     let result = term.test_app(
@@ -272,7 +267,7 @@ fn self_check_htop() {
         return;
     }
 
-    let mut term = TestTerminal::with_size(120, 40).expect("create terminal");
+    let mut term = TestTerminal::hermetic(120, 40).expect("create terminal");
     term.wait_for_output(WAIT_SHORT).unwrap();
 
     let result = term.test_app(
@@ -310,7 +305,7 @@ fn self_check_less() {
         return;
     }
 
-    let mut term = TestTerminal::with_size(80, 24).expect("create terminal");
+    let mut term = TestTerminal::hermetic(80, 24).expect("create terminal");
     term.wait_for_output(WAIT_SHORT).unwrap();
 
     // Pipe to less
@@ -340,7 +335,7 @@ fn self_check_less() {
 
 #[test]
 fn self_check_resize() {
-    let mut term = TestTerminal::with_size(80, 24).expect("create terminal");
+    let mut term = TestTerminal::hermetic(80, 24).expect("create terminal");
     term.wait_for_output(WAIT_SHORT).unwrap();
 
     // Print something
