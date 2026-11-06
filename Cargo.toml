@@ -54,7 +54,7 @@ winit = "0.30"
 bytemuck = { version = "1.14", features = ["derive"] }
 
 # Text Rendering
-cosmic-text = "0.11"
+cosmic-text = "0.19"
 
 # Utilities
 thiserror = "1.0"

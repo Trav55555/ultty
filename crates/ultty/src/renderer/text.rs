@@ -382,7 +382,8 @@ impl TextRenderer {
         font_family: &str,
     ) -> (f32, f32, f32) {
         let mut buffer = Buffer::new(font_system, metrics);
-        buffer.set_text(font_system, "M", font_attrs(font_family), Shaping::Advanced);
+        buffer.set_text("M", &font_attrs(font_family), Shaping::Advanced, None);
+        buffer.shape_until_scroll(font_system, false);
 
         // Get width and baseline from layout
         let run = buffer.layout_runs().next();
@@ -404,11 +405,7 @@ impl TextRenderer {
     /// thickness used to place underline and strikethrough quads.
     fn measure_decoration_metrics(&mut self, baseline: f32) -> DecorationMetrics {
         let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
-        buffer.set_size(
-            &mut self.font_system,
-            self.cell_width * 4.0,
-            self.cell_height * 2.0,
-        );
+        buffer.set_size(Some(self.cell_width * 4.0), Some(self.cell_height * 2.0));
         let x_height = self
             .shape_cell(&mut buffer, "x", CellStyle::default())
             .and_then(|shaped| {
@@ -462,7 +459,8 @@ impl TextRenderer {
         if style.italic {
             attrs = attrs.style(Style::Italic);
         }
-        buffer.set_text(&mut self.font_system, text, attrs, shaping);
+        buffer.set_text(text, &attrs, shaping, None);
+        buffer.shape_until_scroll(&mut self.font_system, false);
 
         let Some(run) = buffer.layout_runs().next() else {
             return Vec::new();
@@ -684,15 +682,11 @@ impl TextRenderer {
         let mut indices = Vec::new();
 
         let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
-        buffer.set_size(&mut self.font_system, 10000.0, self.cell_height * 2.0);
+        buffer.set_size(Some(10000.0), Some(self.cell_height * 2.0));
 
         let shaping = self.get_shaping();
-        buffer.set_text(
-            &mut self.font_system,
-            text,
-            font_attrs(&self.font_family),
-            shaping,
-        );
+        buffer.set_text(text, &font_attrs(&self.font_family), shaping, None);
+        buffer.shape_until_scroll(&mut self.font_system, false);
 
         // Build a char-index lookup from byte offsets so spaces (which produce
         // no glyphs in cosmic-text) are accounted for in positioning.
@@ -771,7 +765,7 @@ impl TextRenderer {
         indices: &mut Vec<u32>,
     ) -> f32 {
         self.styled_text_buffer
-            .set_size(&mut self.font_system, 10000.0, self.cell_height * 2.0);
+            .set_size(Some(10000.0), Some(self.cell_height * 2.0));
 
         let shaping = self.get_shaping();
         let mut attrs = font_attrs(&self.font_family);
@@ -784,7 +778,9 @@ impl TextRenderer {
         }
 
         self.styled_text_buffer
-            .set_text(&mut self.font_system, text, attrs, shaping);
+            .set_text(text, &attrs, shaping, None);
+        self.styled_text_buffer
+            .shape_until_scroll(&mut self.font_system, false);
 
         fill_byte_to_char_offsets(text, &mut self.byte_to_char_offsets);
         let total_advance = self.byte_to_char_offsets.len() as f32 * self.cell_width;
@@ -931,16 +927,15 @@ impl TextRenderer {
         let mut indices = Vec::with_capacity(est_glyphs * 6);
 
         let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
-        buffer.set_size(&mut self.font_system, cell_width * 4.0, cell_height * 2.0);
+        buffer.set_size(Some(cell_width * 4.0), Some(cell_height * 2.0));
         let block_cursor = block_cursor_cell(terminal, cursor_blink_visible);
         let solid_uv = self.atlas.solid_uv();
         // Ligature runs span up to a whole row; this buffer must not wrap.
         let mut run_buffer = Buffer::new(&mut self.font_system, self.metrics);
-        run_buffer.set_wrap(&mut self.font_system, cosmic_text::Wrap::None);
+        run_buffer.set_wrap(cosmic_text::Wrap::None);
         run_buffer.set_size(
-            &mut self.font_system,
-            cell_width * (f32::from(dims.cols) + 1.0),
-            cell_height * 2.0,
+            Some(cell_width * (f32::from(dims.cols) + 1.0)),
+            Some(cell_height * 2.0),
         );
 
         for row_idx in 0..dims.rows {
@@ -1208,14 +1203,10 @@ impl TextRenderer {
 
         let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
         // Set buffer size to allow layout
-        buffer.set_size(&mut self.font_system, max_width, self.cell_height * 2.0);
+        buffer.set_size(Some(max_width), Some(self.cell_height * 2.0));
         let shaping = self.get_shaping();
-        buffer.set_text(
-            &mut self.font_system,
-            text,
-            font_attrs(&self.font_family),
-            shaping,
-        );
+        buffer.set_text(text, &font_attrs(&self.font_family), shaping, None);
+        buffer.shape_until_scroll(&mut self.font_system, false);
 
         let max_x = x + max_width;
 
@@ -1274,18 +1265,15 @@ impl TextRenderer {
     ) {
         let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
         // Set buffer size to allow layout
-        buffer.set_size(
-            &mut self.font_system,
-            self.cell_width * 4.0,
-            self.cell_height * 2.0,
-        );
+        buffer.set_size(Some(self.cell_width * 4.0), Some(self.cell_height * 2.0));
         let shaping = self.get_shaping();
         buffer.set_text(
-            &mut self.font_system,
             &ch.to_string(),
-            font_attrs(&self.font_family),
+            &font_attrs(&self.font_family),
             shaping,
+            None,
         );
+        buffer.shape_until_scroll(&mut self.font_system, false);
 
         if let Some(run) = buffer.layout_runs().next() {
             if let Some(glyph) = run.glyphs.first() {
@@ -1365,7 +1353,8 @@ fn shape_run_glyphs(
     if style.italic {
         attrs = attrs.style(Style::Italic);
     }
-    buffer.set_text(font_system, text, attrs, Shaping::Advanced);
+    buffer.set_text(text, &attrs, Shaping::Advanced, None);
+    buffer.shape_until_scroll(font_system, false);
     let Some(run) = buffer.layout_runs().next() else {
         return Vec::new();
     };
@@ -1697,6 +1686,7 @@ mod tests {
             42,
             14.0,
             (0.0, 0.0),
+            cosmic_text::fontdb::Weight::NORMAL,
             cosmic_text::CacheKeyFlags::empty(),
         );
         let shaped = ShapedGlyph {
@@ -1819,8 +1809,8 @@ mod tests {
         let mut font_system = FontSystem::new();
         let metrics = Metrics::new(14.0, 18.0);
         let mut buffer = Buffer::new(&mut font_system, metrics);
-        buffer.set_wrap(&mut font_system, cosmic_text::Wrap::None);
-        buffer.set_size(&mut font_system, 1000.0, 40.0);
+        buffer.set_wrap(cosmic_text::Wrap::None);
+        buffer.set_size(Some(1000.0), Some(40.0));
         let text = "a=>b!=c";
         let glyphs = shape_run_glyphs(
             &mut font_system,
@@ -1862,8 +1852,8 @@ mod tests {
         let family = std::env::var("ULTTY_LIGATURE_FONT").unwrap_or_else(|_| "Miracode".into());
         let mut font_system = FontSystem::new();
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(14.0, 18.0));
-        buffer.set_wrap(&mut font_system, cosmic_text::Wrap::None);
-        buffer.set_size(&mut font_system, 1000.0, 40.0);
+        buffer.set_wrap(cosmic_text::Wrap::None);
+        buffer.set_size(Some(1000.0), Some(40.0));
         for text in ["=>", "!=", "->", "===", "<=>"] {
             let run: Vec<_> = shape_run_glyphs(
                 &mut font_system,
@@ -1895,32 +1885,20 @@ mod tests {
     }
 
     #[test]
-    fn cosmic_text_buffer_requires_set_size_for_layout() {
+    fn sized_cosmic_text_buffer_lays_out_glyphs() {
         let mut font_system = FontSystem::new();
         let metrics = Metrics::new(14.0, 18.0);
-
-        // Create buffer WITHOUT set_size - this was the bug
-        let mut buffer_without_size = Buffer::new(&mut font_system, metrics);
         let attrs = Attrs::new().family(Family::Monospace);
-        buffer_without_size.set_text(&mut font_system, "Hello", attrs, Shaping::Advanced);
 
-        // Without set_size, layout_runs() returns empty
-        let runs_without_size: Vec<_> = buffer_without_size.layout_runs().collect();
-        assert!(
-            runs_without_size.is_empty(),
-            "Expected no layout runs without set_size (this proves the bug existed)"
-        );
-
-        // Create buffer WITH set_size - this is the fix
         let mut buffer_with_size = Buffer::new(&mut font_system, metrics);
-        buffer_with_size.set_size(&mut font_system, 200.0, 50.0);
-        buffer_with_size.set_text(&mut font_system, "Hello", attrs, Shaping::Advanced);
+        buffer_with_size.set_size(Some(200.0), Some(50.0));
+        buffer_with_size.set_text("Hello", &attrs, Shaping::Advanced, None);
+        buffer_with_size.shape_until_scroll(&mut font_system, false);
 
-        // With set_size, layout_runs() returns runs
         let runs_with_size: Vec<_> = buffer_with_size.layout_runs().collect();
         assert!(
             !runs_with_size.is_empty(),
-            "Expected layout runs with set_size (the fix works)"
+            "Expected layout runs from a sized buffer"
         );
 
         // Verify we got glyphs
