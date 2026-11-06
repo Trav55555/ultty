@@ -1800,6 +1800,20 @@ mod tests {
         );
         let cells: Vec<u16> = glyphs.iter().map(|(cell, _)| *cell).collect();
         assert_eq!(cells, (0..text.len() as u16).collect::<Vec<_>>());
+
+        // Offsets only line up with cells in a monospaced face. A machine
+        // without the named font (CI runners) falls back to whatever it
+        // has, possibly proportional, and then only the mapping is checked.
+        let monospaced = glyphs.iter().all(|(_, glyph)| {
+            font_system
+                .db()
+                .face(glyph.cache_key.font_id)
+                .is_some_and(|face| face.monospaced)
+        });
+        if !monospaced {
+            eprintln!("no monospaced face matched; checked the cell mapping only");
+            return;
+        }
         for (cell, glyph) in &glyphs {
             assert!(
                 glyph.x_offset.abs() < 1.0,
