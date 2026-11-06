@@ -33,7 +33,7 @@ base64 = "0.21"
 bytes = "1.5"
 
 # Layout
-taffy = "0.5"
+taffy = "0.15"
 
 # Terminal Backend (for fallback mode)
 crossterm = "0.29"
