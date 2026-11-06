@@ -178,30 +178,22 @@ impl App {
         }
 
         let focused_id = self.terminal_manager.focused_terminal_id();
-        let split_direction = self.terminal_manager.split_direction();
-
-        // Calculate pane bounds based on split direction and ratios
-        let ratios = self.terminal_manager.pane_ratios();
         // One lock per pane, held for this frame. Everything below reads the
         // panes through these guards; locking a pane's terminal again here
-        // would deadlock.
-        // The same rectangles the terminal manager sizes each pane's grid to.
-        let rects = ultty::terminal_manager::pane_rects(
-            split_direction,
-            &ratios,
-            pane_count,
-            available_width,
-            available_height,
-        );
-        let locked: Vec<(ultty::event_loop::TerminalGuard<'_>, PaneInfo)> = terminals
-            .iter()
-            .zip(rects)
-            .map(|(managed, (x, y, w, h))| {
-                let is_focused = Some(managed.id) == focused_id;
-                (
+        // would deadlock. The rectangles are the ones the terminal manager
+        // sizes each pane's grid to.
+        let rects = self
+            .terminal_manager
+            .active_pane_rects(available_width, available_height);
+        let locked: Vec<(ultty::event_loop::TerminalGuard<'_>, PaneInfo)> = rects
+            .into_iter()
+            .filter_map(|(id, (x, y, w, h))| {
+                let managed = terminals.iter().find(|managed| managed.id == id)?;
+                let is_focused = Some(id) == focused_id;
+                Some((
                     managed.event_loop.terminal(),
                     PaneInfo::new(x, y, w, h, is_focused),
-                )
+                ))
             })
             .collect();
 

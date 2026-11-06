@@ -47,6 +47,7 @@ pub mod protocol;
 pub mod pty;
 
 pub mod event_loop;
+pub mod pane_layout;
 pub mod renderer;
 pub mod scene;
 pub mod session;

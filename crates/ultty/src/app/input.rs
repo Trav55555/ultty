@@ -339,30 +339,25 @@ impl App {
 
                 // In multi-pane mode, check for divider drag or pane focus
                 if button == MouseButton::Left && self.terminal_manager.pane_count() > 1 {
-                    let size = self.window.inner_size();
-                    let tab_h = self.tab_bar.content_top();
-                    let content_y = y - tab_h;
-                    let aw = size.width as f32;
-                    let ah = size.height as f32 - tab_h;
+                    let content_y = y - self.tab_bar.content_top();
+                    let (aw, ah) = self.renderer.terminal_area();
 
-                    // Check if clicking on a divider (4px tolerance)
-                    let dir = self.terminal_manager.split_direction();
-                    let (pos, total) = match dir {
-                        SplitDirection::Horizontal => (x, aw),
-                        SplitDirection::Vertical => (content_y, ah),
-                    };
-                    if let Some(div_idx) =
-                        self.terminal_manager.divider_at_position(pos, total, 4.0)
+                    // A divider within 4 px: start dragging it.
+                    if let Some(divider) =
+                        self.terminal_manager.divider_at(x, content_y, aw, ah, 4.0)
                     {
-                        self.divider_dragging = Some((div_idx, pos));
+                        let along = match divider.direction {
+                            SplitDirection::Horizontal => x,
+                            SplitDirection::Vertical => content_y,
+                        };
+                        self.divider_dragging = Some((divider, along));
                         return;
                     }
 
                     // Otherwise, focus the clicked pane
-                    if let Some(idx) = self.terminal_manager.pane_at_position(x, content_y, aw, ah)
-                    {
-                        if idx != self.terminal_manager.focused_pane_index() {
-                            self.terminal_manager.focus_pane(idx);
+                    if let Some(pane) = self.terminal_manager.pane_at(x, content_y, aw, ah) {
+                        if Some(pane) != self.terminal_manager.focused_terminal_id() {
+                            self.terminal_manager.focus_terminal(pane);
                             self.needs_redraw = true;
                         }
                     }
@@ -487,20 +482,15 @@ impl App {
         }
 
         // Handle pane divider dragging
-        if let Some((div_idx, last_pos)) = self.divider_dragging {
-            let size = self.window.inner_size();
-            let tab_h = self.tab_bar.content_top();
-            let dir = self.terminal_manager.split_direction();
-            let (current_pos, total) = match dir {
-                SplitDirection::Horizontal => (self.mouse_pos.x as f32, size.width as f32),
-                SplitDirection::Vertical => {
-                    (self.mouse_pos.y as f32 - tab_h, size.height as f32 - tab_h)
-                }
+        if let Some((divider, last_pos)) = self.divider_dragging {
+            let current_pos = match divider.direction {
+                SplitDirection::Horizontal => self.mouse_pos.x as f32,
+                SplitDirection::Vertical => self.mouse_pos.y as f32 - self.tab_bar.content_top(),
             };
             let delta = current_pos - last_pos;
             if delta.abs() > 1.0 {
-                self.terminal_manager.resize_pane(div_idx, delta, total);
-                self.divider_dragging = Some((div_idx, current_pos));
+                self.terminal_manager.drag_divider(&divider, delta);
+                self.divider_dragging = Some((divider, current_pos));
                 self.needs_redraw = true;
             }
             return;
@@ -976,32 +966,26 @@ impl App {
             return;
         }
 
-        // Pane navigation — direction-aware based on split orientation
+        // Pane navigation: to the nearest pane on that side, wherever it is
+        // in the split tree.
         {
-            let dir = self.terminal_manager.split_direction();
-            let right =
-                self.check_keybinding(&event, &self.config.keybindings.focus_pane_right.clone());
-            let down =
-                self.check_keybinding(&event, &self.config.keybindings.focus_pane_down.clone());
-            let left =
-                self.check_keybinding(&event, &self.config.keybindings.focus_pane_left.clone());
-            let up = self.check_keybinding(&event, &self.config.keybindings.focus_pane_up.clone());
-
-            let next = match dir {
-                SplitDirection::Horizontal => right,
-                SplitDirection::Vertical => down,
+            use ultty::pane_layout::FocusDirection;
+            let keys = &self.config.keybindings;
+            let direction = if self.check_keybinding(&event, &keys.focus_pane_right.clone()) {
+                Some(FocusDirection::Right)
+            } else if self.check_keybinding(&event, &keys.focus_pane_down.clone()) {
+                Some(FocusDirection::Down)
+            } else if self.check_keybinding(&event, &keys.focus_pane_left.clone()) {
+                Some(FocusDirection::Left)
+            } else if self.check_keybinding(&event, &keys.focus_pane_up.clone()) {
+                Some(FocusDirection::Up)
+            } else {
+                None
             };
-            let prev = match dir {
-                SplitDirection::Horizontal => left,
-                SplitDirection::Vertical => up,
-            };
-            if next {
-                self.terminal_manager.focus_next_pane();
-                self.needs_redraw = true;
-                return;
-            }
-            if prev {
-                self.terminal_manager.focus_prev_pane();
+            if let Some(direction) = direction {
+                let (width, height) = self.renderer.terminal_area();
+                self.terminal_manager
+                    .focus_direction(direction, width, height);
                 self.needs_redraw = true;
                 return;
             }
