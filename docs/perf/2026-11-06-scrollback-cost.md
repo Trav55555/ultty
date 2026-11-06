@@ -65,3 +65,33 @@ A compact scrollback format: text bytes plus style runs instead of 20-byte
 cells. That is roughly 100 bytes for a typical line, so 10,000 lines fit in
 about 1 MiB. Readers would decode the few rows they show. Backlog item 6
 replaces the former items 6 and 7 with this.
+
+## Result: compact scrollback (2026-11-06)
+
+Scrollback rows are now stored as one UTF-8 character per cell plus style
+runs, without trailing blanks (`crates/ultty-vt/src/grid/history.rs`).
+
+**The benchmark above was misleading.** Its file uses bare `\n`, with no
+carriage return, so fed headless each line started where the last one
+ended and filled whole rows. A real PTY turns `\n` into `\r\n`. The
+figures below use a CRLF copy of the same file, so lines are 84 cells as
+they are live.
+
+The machine was under load (load average about 8 on 12 cores), so these are
+the best of 8 interleaved runs per configuration. MiB/s:
+
+| | before | compact | alternate screen (ceiling) |
+|---|---:|---:|---:|
+| 120x40 | 202 | 223 | ~420 |
+| 300x75 | 101 | 125 | ~255 |
+
+- **Memory.** 10,000 lines of typical output at 300 columns: 2.4 MB in
+  history, down from 57 MB (test `a_full_scrollback_of_typical_output_stays_small`).
+- **History size no longer matters.** With compact rows, 1,000 and
+  100,000 rows of history run at about the same speed; the cache effect is
+  gone.
+- **What is left.** Encoding now costs about 3,500 instructions a line,
+  mostly comparing each cell's style, because `Color` is an enum and is
+  compared field by field. Closing the rest of the gap to the alternate
+  screen would mean a different `Color` representation. That reaches
+  through the whole codebase and is not done here.

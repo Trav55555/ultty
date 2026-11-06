@@ -245,6 +245,11 @@ impl Row {
         self.dirty = true;
     }
 
+    /// The row's cells as a slice.
+    pub(crate) fn cell_slice(&self) -> &[Cell] {
+        &self.cells
+    }
+
     /// Check if the row is dirty.
     #[inline]
     pub fn is_dirty(&self) -> bool {

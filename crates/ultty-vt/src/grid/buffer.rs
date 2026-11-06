@@ -1,7 +1,9 @@
 //! Terminal buffer with scrollback history.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
+use super::history::CompactRow;
 use super::{Cell, CellFlags, Dimensions, Grid, Row};
 
 /// Default scrollback buffer size (lines).
@@ -15,8 +17,9 @@ pub const DEFAULT_SCROLLBACK: usize = 10_000;
 pub struct Buffer {
     /// The visible grid
     grid: Grid,
-    /// Scrollback history (oldest first)
-    history: VecDeque<Row>,
+    /// Scrollback history (oldest first), in compact form so it stays small
+    /// enough to keep in cache; see [`CompactRow`].
+    history: VecDeque<CompactRow>,
     /// Maximum history size
     max_history: usize,
     /// Current scroll offset (0 = at bottom, >0 = scrolled up)
@@ -54,7 +57,8 @@ impl Buffer {
             ));
         }
         for (index, row) in self.history.iter().enumerate() {
-            row.check_integrity(super::MAX_COMBINING_PER_CELL)
+            row.decode()
+                .check_integrity(super::MAX_COMBINING_PER_CELL)
                 .map_err(|e| format!("history row {index}: {e}"))?;
         }
         Ok(())
@@ -138,13 +142,12 @@ impl Buffer {
             let Some(source) = self.grid.row(index as u16) else {
                 break;
             };
-            let row = if self.history.len() >= self.max_history {
-                let mut recycled = self.history.pop_front().unwrap_or_else(|| Row::new(0));
-                recycled.copy_from(source);
-                recycled
+            let mut row = if self.history.len() >= self.max_history {
+                self.history.pop_front().unwrap_or_default()
             } else {
-                source.clone()
+                CompactRow::default()
             };
+            row.encode_from(source);
             self.history.push_back(row);
         }
     }
@@ -158,14 +161,16 @@ impl Buffer {
             if self.history.len() >= self.max_history {
                 self.history.pop_front();
             }
-            self.history.push_back(row);
+            self.history.push_back(CompactRow::encode(&row));
         }
     }
 
     /// Get a row at the given visual index (accounting for scroll).
     ///
-    /// Index 0 is the top of the visible area.
-    pub fn visible_row(&self, visual_index: u16) -> Option<&Row> {
+    /// Index 0 is the top of the visible area. Rows of the live grid are
+    /// borrowed; rows from scrollback are decoded, so hold the result only as
+    /// long as needed.
+    pub fn visible_row(&self, visual_index: u16) -> Option<Cow<'_, Row>> {
         let total_history = self.history.len();
         let visible_rows = self.grid.dimensions().rows as usize;
 
@@ -177,19 +182,21 @@ impl Buffer {
 
             if absolute_index < total_history {
                 // This row is in history
-                self.history.get(absolute_index)
+                self.history
+                    .get(absolute_index)
+                    .map(|row| Cow::Owned(row.decode()))
             } else {
                 // This row is in the visible grid
                 let grid_index = absolute_index - total_history;
                 if grid_index < visible_rows {
-                    self.grid.row(grid_index as u16)
+                    self.grid.row(grid_index as u16).map(Cow::Borrowed)
                 } else {
                     None
                 }
             }
         } else {
             // Not scrolled, show grid directly
-            self.grid.row(visual_index)
+            self.grid.row(visual_index).map(Cow::Borrowed)
         }
     }
 
@@ -197,13 +204,16 @@ impl Buffer {
     ///
     /// Index 0 is the oldest history row.
     /// Indices beyond history access the current grid.
-    pub fn row_at(&self, absolute_index: usize) -> Option<&Row> {
+    /// Like [`Buffer::visible_row`], scrollback rows are decoded.
+    pub fn row_at(&self, absolute_index: usize) -> Option<Cow<'_, Row>> {
         let history_len = self.history.len();
         if absolute_index < history_len {
-            self.history.get(absolute_index)
+            self.history
+                .get(absolute_index)
+                .map(|row| Cow::Owned(row.decode()))
         } else {
             let grid_index = absolute_index - history_len;
-            self.grid.row(grid_index as u16)
+            self.grid.row(grid_index as u16).map(Cow::Borrowed)
         }
     }
 
@@ -259,7 +269,11 @@ impl Buffer {
             if rows_to_pull > 0 {
                 // Pull from end of history (most recent)
                 let start = self.history.len() - rows_to_pull;
-                let pulled: Vec<Row> = self.history.drain(start..).collect();
+                let pulled: Vec<Row> = self
+                    .history
+                    .drain(start..)
+                    .map(|r| CompactRow::decode(&r))
+                    .collect();
                 // Insert at beginning of grid
                 self.grid.prepend_rows(pulled);
             }
@@ -288,7 +302,8 @@ impl Buffer {
         let mut current_logical_idx: usize = 0;
 
         // Process history rows
-        for row in self.history.drain(..) {
+        for compact in self.history.drain(..) {
+            let row = compact.decode();
             push_reflow_cells(&mut current_line, &row);
             if !row.is_wrapped() {
                 while current_line.last().is_some_and(|(c, _)| c.is_blank()) {
@@ -468,7 +483,10 @@ impl Buffer {
         let split_point = if all_rows.len() > new_rows {
             let sp = all_rows.len() - new_rows;
             if self.max_history > 0 {
-                self.history = all_rows.drain(..sp).collect();
+                self.history = all_rows
+                    .drain(..sp)
+                    .map(|row| CompactRow::encode(&row))
+                    .collect();
                 while self.history.len() > self.max_history {
                     self.history.pop_front();
                 }
@@ -693,9 +711,89 @@ mod tests {
         buf.write_ascii_span(b"abcdef");
 
         assert_eq!(buf.history_len(), 1);
-        assert_eq!(buf.history[0][0].char(), 'A');
+        assert_eq!(buf.history[0].decode()[0].char(), 'A');
         assert_eq!(buf.grid().row(0).unwrap().text(), "abcde");
         assert_eq!(buf.grid().row(1).unwrap().text_trimmed(), "f");
+    }
+
+    #[test]
+    fn scrolled_back_rows_read_exactly_as_written() {
+        // What the renderer, copy, and search see through visible_row and
+        // row_at for rows that went through compact scrollback.
+        let dims = Dimensions::new(20, 4);
+        let mut buf = Buffer::new(dims);
+        let mut expected: Vec<Row> = Vec::new();
+        for i in 0..12u8 {
+            {
+                let grid = buf.grid_mut();
+                grid.attrs_mut().set_fg(super::super::Color::Indexed(i));
+                grid.attrs_mut().set_bg(if i % 2 == 0 {
+                    super::super::Color::Default
+                } else {
+                    super::super::Color::rgb(i, 2, 3)
+                });
+                for c in format!("{i:02} é中x").chars() {
+                    grid.write_char(c);
+                }
+            }
+            let row = buf.grid().cursor().position.row;
+            buf.grid_mut().row_mut(row).unwrap().set_wrapped(i % 3 == 0);
+            expected.push(
+                buf.grid()
+                    .row(buf.grid().cursor().position.row)
+                    .unwrap()
+                    .clone(),
+            );
+            buf.grid_mut().carriage_return();
+            buf.newline();
+        }
+        // 12 lines written, 4 on screen: the first 9 are in history.
+        assert_eq!(buf.history_len(), 9);
+        for (index, want) in expected.iter().take(9).enumerate() {
+            let got = buf.row_at(index).unwrap();
+            assert!(got.cells().eq(want.cells()), "row_at({index})");
+            assert_eq!(got.is_wrapped(), want.is_wrapped(), "row_at({index}) wrap");
+        }
+        buf.scroll_up(9);
+        for visual in 0..4u16 {
+            let got = buf.visible_row(visual).unwrap();
+            assert!(
+                got.cells().eq(expected[visual as usize].cells()),
+                "visible_row({visual}) after scrolling back"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_scrollback_of_typical_output_stays_small() {
+        // 10,000 lines of 84 characters with some color, as `cat` of a log
+        // would leave them, on a 300-column screen. As full rows this was
+        // 300 cells x 20 bytes = 6 KB a line, about 57 MiB.
+        let mut buf = Buffer::new(Dimensions::new(300, 75));
+        let line =
+            b"the quick brown fox jumps over the lazy dog 0123456789 ABCDEF green 0123456789 end";
+        for i in 0..(DEFAULT_SCROLLBACK + 75) {
+            if i % 3 == 0 {
+                buf.grid_mut()
+                    .attrs_mut()
+                    .set_fg(super::super::Color::Named(2));
+            } else {
+                buf.grid_mut()
+                    .attrs_mut()
+                    .set_fg(super::super::Color::Default);
+            }
+            buf.write_ascii_span(line);
+            buf.grid_mut().carriage_return();
+            buf.newline();
+        }
+        assert_eq!(buf.history_len(), DEFAULT_SCROLLBACK);
+        // Measured 2026-11-06: 2.42 MB, about 240 bytes a line.
+        let bytes: usize = buf.history.iter().map(CompactRow::footprint).sum();
+        let full_rows = DEFAULT_SCROLLBACK * 300 * std::mem::size_of::<Cell>();
+        assert!(
+            bytes * 20 < full_rows,
+            "scrollback holds {bytes} bytes for {DEFAULT_SCROLLBACK} lines; full rows were {full_rows}"
+        );
     }
 
     #[test]
@@ -734,7 +832,7 @@ mod tests {
 
         // First row should be in history now
         assert_eq!(buf.history_len(), 1);
-        assert_eq!(buf.history[0][0].char(), 'A');
+        assert_eq!(buf.history[0].decode()[0].char(), 'A');
 
         // Grid first row should be empty
         assert_eq!(buf.grid().cell(0, 0).unwrap().char(), ' ');
@@ -855,8 +953,8 @@ mod tests {
 
         // Top 2 rows (A, B) should move to history
         assert_eq!(buf.history_len(), 2);
-        assert_eq!(buf.history[0][0].char(), 'A');
-        assert_eq!(buf.history[1][0].char(), 'B');
+        assert_eq!(buf.history[0].decode()[0].char(), 'A');
+        assert_eq!(buf.history[1].decode()[0].char(), 'B');
 
         // Grid should have C, D, E - cell() takes (col, row)
         assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'C');
@@ -920,7 +1018,7 @@ mod tests {
         buf.write_char('Y');
 
         assert_eq!(buf.history_len(), 1);
-        assert_eq!(buf.history[0][0].char(), '0');
+        assert_eq!(buf.history[0].decode()[0].char(), '0');
         assert_eq!(buf.grid().row(0).unwrap()[0].char(), '1');
     }
 
@@ -948,7 +1046,7 @@ mod tests {
         );
 
         // First history row should start with 'A'
-        assert_eq!(buf.history[0][0].char(), 'A');
+        assert_eq!(buf.history[0].decode()[0].char(), 'A');
     }
 
     #[test]
