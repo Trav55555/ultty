@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::event_loop::{EventLoop as TerminalEventLoop, TerminalEvent, Waker};
+use crate::pane_layout::{Divider, FocusDirection, PaneLayout, PaneNode, Rect};
 use crate::pty::{Child, PtySize};
 
 /// Extra environment variables for the shells of one tab.
@@ -125,17 +126,15 @@ impl TabId {
 pub struct Tab {
     /// Unique ID
     pub id: TabId,
-    /// Terminal IDs in this tab (first is primary/focused in simple case)
+    /// This tab's panes in layout order, read-only: kept in step with
+    /// `layout` by `split` and `remove_terminal`, the only writers.
     pub terminals: Vec<TerminalId>,
     /// Currently focused terminal in this tab
     pub focused_terminal: TerminalId,
     /// Tab title (often the title of the focused terminal)
     pub title: String,
-    /// How panes are arranged in this tab
-    pub split_direction: SplitDirection,
-    /// Relative size of each pane (normalized to sum to 1.0).
-    /// Length matches `terminals`. Empty means equal distribution.
-    pub pane_ratios: Vec<f32>,
+    /// How panes are arranged: a tree of side-by-side and stacked splits.
+    pub layout: PaneLayout,
     /// Extra environment given to every shell spawned in this tab.
     pub shell_env: TabEnv,
 }
@@ -148,23 +147,27 @@ impl Tab {
             terminals: vec![terminal_id],
             focused_terminal: terminal_id,
             title: format!("Tab {}", id.0 + 1),
-            split_direction: SplitDirection::default(),
-            pane_ratios: Vec::new(),
+            layout: PaneLayout::new(terminal_id),
             shell_env: Vec::new(),
         }
     }
 
-    /// Add a terminal to this tab (for pane splitting).
-    pub fn add_terminal(&mut self, terminal_id: TerminalId) {
-        self.terminals.push(terminal_id);
-        // Reset to equal distribution when a pane is added
-        self.pane_ratios.clear();
+    /// Put `new` next to `target`, side by side or stacked.
+    pub fn split(&mut self, target: TerminalId, direction: SplitDirection, new: TerminalId) {
+        if self.layout.split(target, direction, new) {
+            self.terminals = self.layout.panes();
+        }
     }
 
     /// Remove a terminal from this tab.
     pub fn remove_terminal(&mut self, terminal_id: TerminalId) -> bool {
         if let Some(pos) = self.terminals.iter().position(|&id| id == terminal_id) {
             self.terminals.remove(pos);
+            // The layout keeps its last pane; a tab whose last pane goes is
+            // empty and gets removed by its owner.
+            if self.layout.remove(terminal_id) {
+                self.terminals = self.layout.panes();
+            }
 
             // Update focused terminal if needed
             if self.focused_terminal == terminal_id && !self.terminals.is_empty() {
@@ -199,43 +202,6 @@ pub struct PaneArea {
     pub height: f32,
     pub cell_width: f32,
     pub cell_height: f32,
-}
-
-/// Pixel rectangles `(x, y, width, height)` of `count` panes side by side
-/// (Horizontal) or stacked (Vertical), sized by `ratios`; missing or
-/// mismatched ratios mean equal shares. Rendering and grid sizing both use
-/// this, so a pane's terminal always matches the space it is drawn in.
-pub fn pane_rects(
-    direction: SplitDirection,
-    ratios: &[f32],
-    count: usize,
-    width: f32,
-    height: f32,
-) -> Vec<(f32, f32, f32, f32)> {
-    let mut offset = 0.0;
-    (0..count)
-        .map(|i| {
-            let ratio = if ratios.len() == count {
-                ratios[i]
-            } else {
-                1.0 / count as f32
-            };
-            match direction {
-                SplitDirection::Horizontal => {
-                    let w = width * ratio;
-                    let rect = (offset, 0.0, w, height);
-                    offset += w;
-                    rect
-                }
-                SplitDirection::Vertical => {
-                    let h = height * ratio;
-                    let rect = (0.0, offset, width, h);
-                    offset += h;
-                    rect
-                }
-            }
-        })
-        .collect()
 }
 
 pub struct TerminalManager {
@@ -561,21 +527,16 @@ impl TerminalManager {
 
         let mut sizes = Vec::new();
         for tab in &self.tabs {
-            let rects = pane_rects(
-                tab.split_direction,
-                &tab.pane_ratios,
-                tab.terminals.len(),
-                area.width,
-                area.height,
-            );
-            for (terminal_id, (_, _, width, height)) in tab.terminals.iter().zip(rects) {
+            for (terminal_id, (_, _, width, height)) in
+                tab.layout.rects((0.0, 0.0, area.width, area.height))
+            {
                 let grid = crate::renderer::grid_dimensions_for(
                     width,
                     height,
                     area.cell_width,
                     area.cell_height,
                 );
-                sizes.push((*terminal_id, grid));
+                sizes.push((terminal_id, grid));
             }
         }
         for (terminal_id, (cols, rows)) in sizes {
@@ -682,60 +643,54 @@ impl TerminalManager {
         self.terminals.is_empty() || self.terminals.iter().all(|t| t.has_exited())
     }
 
-    /// Split the current pane horizontally (side by side).
+    /// Split the focused pane side by side.
     pub fn split_horizontal(&mut self) -> io::Result<Option<TerminalId>> {
-        let Some(tab) = self.active_tab_mut() else {
-            return Ok(None);
-        };
-        let tab_id = tab.id;
-
-        // Set split direction if this is the first split
-        if tab.terminals.len() == 1 {
-            tab.split_direction = SplitDirection::Horizontal;
-        }
-
-        let terminal_id = self.create_terminal(tab_id)?;
-
-        if let Some(tab) = self.active_tab_mut() {
-            tab.add_terminal(terminal_id);
-        }
-        self.relayout();
-
-        Ok(Some(terminal_id))
+        self.split_focused(SplitDirection::Horizontal)
     }
 
-    /// Split the current pane vertically (stacked).
+    /// Split the focused pane top and bottom.
     pub fn split_vertical(&mut self) -> io::Result<Option<TerminalId>> {
-        let Some(tab) = self.active_tab_mut() else {
+        self.split_focused(SplitDirection::Vertical)
+    }
+
+    /// Put a new pane next to the focused one. Splitting along the focused
+    /// pane's own split adds a sibling; splitting across it nests.
+    fn split_focused(&mut self, direction: SplitDirection) -> io::Result<Option<TerminalId>> {
+        let Some(tab) = self.active_tab() else {
             return Ok(None);
         };
-        let tab_id = tab.id;
-
-        // Set split direction if this is the first split
-        if tab.terminals.len() == 1 {
-            tab.split_direction = SplitDirection::Vertical;
-        }
-
+        let (tab_id, target) = (tab.id, tab.focused_terminal);
         let terminal_id = self.create_terminal(tab_id)?;
-
         if let Some(tab) = self.active_tab_mut() {
-            tab.add_terminal(terminal_id);
+            tab.split(target, direction, terminal_id);
         }
         self.relayout();
-
         Ok(Some(terminal_id))
     }
 
-    /// Get the number of panes in the active tab.
     pub fn pane_count(&self) -> usize {
         self.active_tab().map(|t| t.terminals.len()).unwrap_or(0)
     }
 
-    /// Get the split direction of the active tab.
-    pub fn split_direction(&self) -> SplitDirection {
+    /// The active tab's panes and their rectangles within a `width` x
+    /// `height` area, in layout order.
+    pub fn active_pane_rects(&self, width: f32, height: f32) -> Vec<(TerminalId, Rect)> {
         self.active_tab()
-            .map(|t| t.split_direction)
+            .map(|tab| tab.layout.rects((0.0, 0.0, width, height)))
             .unwrap_or_default()
+    }
+
+    /// Move focus to the nearest pane on one side of the focused one.
+    pub fn focus_direction(&mut self, direction: FocusDirection, width: f32, height: f32) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        if let Some(next) =
+            tab.layout
+                .neighbor((0.0, 0.0, width, height), tab.focused_terminal, direction)
+        {
+            tab.focused_terminal = next;
+        }
     }
 
     /// Focus the next pane in the active tab.
@@ -909,6 +864,15 @@ impl TerminalManager {
         Ok(terminal_id)
     }
 
+    /// Focus a pane of the active tab by its terminal ID.
+    pub fn focus_terminal(&mut self, terminal_id: TerminalId) {
+        if let Some(tab) = self.active_tab_mut() {
+            if tab.terminals.contains(&terminal_id) {
+                tab.focused_terminal = terminal_id;
+            }
+        }
+    }
+
     /// Focus a specific pane by index.
     pub fn focus_pane(&mut self, index: usize) {
         let Some(tab) = self.active_tab_mut() else {
@@ -932,92 +896,35 @@ impl TerminalManager {
             .unwrap_or(0)
     }
 
-    /// Get the pane ratios for the active tab. If empty, returns equal distribution.
-    pub fn pane_ratios(&self) -> Vec<f32> {
-        let Some(tab) = self.active_tab() else {
-            return vec![1.0];
-        };
-        if tab.pane_ratios.is_empty() {
-            let n = tab.terminals.len().max(1);
-            vec![1.0 / n as f32; n]
-        } else {
-            tab.pane_ratios.clone()
-        }
+    /// The pane at (x, y) in a `width` x `height` content area.
+    pub fn pane_at(&self, x: f32, y: f32, width: f32, height: f32) -> Option<TerminalId> {
+        self.active_pane_rects(width, height)
+            .into_iter()
+            .find(|(_, (px, py, pw, ph))| x >= *px && x < px + pw && y >= *py && y < py + ph)
+            .map(|(id, _)| id)
     }
 
-    /// Resize a pane divider. `divider_index` is the border between pane[i] and pane[i+1].
-    /// `delta` is the amount to move in pixels; `total_size` is the available dimension.
-    pub fn resize_pane(&mut self, divider_index: usize, delta: f32, total_size: f32) {
-        let Some(tab) = self.active_tab_mut() else {
-            return;
-        };
-        let count = tab.terminals.len();
-        if divider_index >= count.saturating_sub(1) || total_size <= 0.0 {
-            return;
-        }
-
-        // Initialize ratios if empty
-        if tab.pane_ratios.is_empty() {
-            tab.pane_ratios = vec![1.0 / count as f32; count];
-        }
-
-        let delta_ratio = delta / total_size;
-        let min_ratio = 0.05; // 5% minimum pane size
-
-        let new_left = (tab.pane_ratios[divider_index] + delta_ratio).max(min_ratio);
-        let new_right = (tab.pane_ratios[divider_index + 1] - delta_ratio).max(min_ratio);
-
-        // Renormalize only the two affected panes
-        let old_sum = tab.pane_ratios[divider_index] + tab.pane_ratios[divider_index + 1];
-        let new_sum = new_left + new_right;
-        tab.pane_ratios[divider_index] = new_left * old_sum / new_sum;
-        tab.pane_ratios[divider_index + 1] = new_right * old_sum / new_sum;
-        self.relayout();
-    }
-
-    /// Given a click position in pixels relative to the content area (below tab bar),
-    /// determine which pane index was clicked. Returns None if only 1 pane or out of bounds.
-    pub fn pane_at_position(
+    /// The divider within `tolerance` pixels of (x, y), if any.
+    pub fn divider_at(
         &self,
         x: f32,
         y: f32,
-        available_width: f32,
-        available_height: f32,
-    ) -> Option<usize> {
-        let tab = self.active_tab()?;
-        let count = tab.terminals.len();
-        if count <= 1 {
-            return None;
-        }
-
-        let ratios = self.pane_ratios();
-        let (pos, total) = match tab.split_direction {
-            SplitDirection::Horizontal => (x, available_width),
-            SplitDirection::Vertical => (y, available_height),
-        };
-
-        let mut cumulative = 0.0;
-        for (i, ratio) in ratios.iter().enumerate() {
-            cumulative += ratio * total;
-            if pos < cumulative {
-                return Some(i);
-            }
-        }
-        Some(count - 1)
+        width: f32,
+        height: f32,
+        tolerance: f32,
+    ) -> Option<Divider> {
+        self.active_tab()?
+            .layout
+            .divider_at((0.0, 0.0, width, height), x, y, tolerance)
     }
 
-    /// Given a position, find the divider index being hovered (within a tolerance).
-    /// Returns the divider index (border between pane[i] and pane[i+1]).
-    pub fn divider_at_position(&self, pos: f32, total: f32, tolerance: f32) -> Option<usize> {
-        let ratios = self.pane_ratios();
-        let mut cumulative = 0.0;
-        for (i, ratio) in ratios.iter().enumerate() {
-            cumulative += ratio * total;
-            if i < ratios.len() - 1 && (pos - cumulative).abs() < tolerance {
-                return Some(i);
-            }
+    /// Move a divider of the active tab by `delta` pixels and resize the
+    /// panes on either side.
+    pub fn drag_divider(&mut self, divider: &Divider, delta: f32) {
+        if let Some(tab) = self.active_tab_mut() {
+            tab.layout.drag(divider, delta);
         }
-        None
+        self.relayout();
     }
 
     /// Extract session data from the current state.
@@ -1069,10 +976,8 @@ impl TerminalManager {
                     title: tab.title.clone(),
                     working_directory,
                     terminals,
-                    split_direction: match tab.split_direction {
-                        SplitDirection::Horizontal => "Horizontal".to_string(),
-                        SplitDirection::Vertical => "Vertical".to_string(),
-                    },
+                    split_direction: direction_name(tab.layout.root_direction()).to_string(),
+                    layout: Some(layout_data(tab.layout.root(), &tab.terminals)),
                 }
             })
             .collect();
@@ -1159,14 +1064,17 @@ impl TerminalManager {
                 focused_terminal_id = Some(tid);
             }
 
-            let split_direction = match tab_data.split_direction.as_str() {
-                "Vertical" => SplitDirection::Vertical,
-                _ => SplitDirection::Horizontal,
-            };
+            let split_direction = parse_direction(&tab_data.split_direction);
+            // The saved tree when it covers exactly these panes; otherwise
+            // (older sessions, or a mismatch) one row or column of them.
+            let layout = tab_data
+                .layout
+                .as_ref()
+                .and_then(|data| restore_layout(data, &terminal_ids))
+                .unwrap_or_else(|| flat_layout(split_direction, &terminal_ids));
 
             let tab = Tab {
                 id: tab_id,
-                terminals: terminal_ids,
                 focused_terminal: focused_terminal_id.ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -1174,8 +1082,8 @@ impl TerminalManager {
                     )
                 })?,
                 title: tab_data.title.clone(),
-                split_direction,
-                pane_ratios: Vec::new(),
+                terminals: layout.panes(),
+                layout,
                 shell_env: env,
             };
 
@@ -1188,6 +1096,95 @@ impl TerminalManager {
         }
 
         Ok(manager)
+    }
+}
+
+fn direction_name(direction: SplitDirection) -> &'static str {
+    match direction {
+        SplitDirection::Horizontal => "Horizontal",
+        SplitDirection::Vertical => "Vertical",
+    }
+}
+
+fn parse_direction(name: &str) -> SplitDirection {
+    match name {
+        "Vertical" => SplitDirection::Vertical,
+        _ => SplitDirection::Horizontal,
+    }
+}
+
+/// A layout tree for saving, panes as positions in `panes`.
+fn layout_data(node: &PaneNode, panes: &[TerminalId]) -> crate::session::LayoutData {
+    use crate::session::LayoutData;
+    match node {
+        PaneNode::Leaf(id) => LayoutData::Pane {
+            index: panes.iter().position(|p| p == id).unwrap_or(0),
+        },
+        PaneNode::Split {
+            direction,
+            children,
+        } => LayoutData::Split {
+            direction: direction_name(*direction).to_string(),
+            children: children
+                .iter()
+                .map(|(child, ratio)| (layout_data(child, panes), *ratio))
+                .collect(),
+        },
+    }
+}
+
+/// Rebuild a saved tree over `panes`; None unless it names each pane once.
+fn restore_layout(data: &crate::session::LayoutData, panes: &[TerminalId]) -> Option<PaneLayout> {
+    use crate::session::LayoutData;
+    fn build(data: &LayoutData, panes: &[TerminalId], used: &mut Vec<bool>) -> Option<PaneNode> {
+        match data {
+            LayoutData::Pane { index } => {
+                let seen = used.get_mut(*index)?;
+                if *seen {
+                    return None;
+                }
+                *seen = true;
+                Some(PaneNode::Leaf(panes[*index]))
+            }
+            LayoutData::Split {
+                direction,
+                children,
+            } => {
+                if children.len() < 2 {
+                    return None;
+                }
+                let total: f32 = children.iter().map(|(_, r)| r).sum();
+                if !(total.is_finite() && total > 0.0) {
+                    return None;
+                }
+                let children = children
+                    .iter()
+                    .map(|(child, ratio)| Some((build(child, panes, used)?, ratio / total)))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(PaneNode::Split {
+                    direction: parse_direction(direction),
+                    children,
+                })
+            }
+        }
+    }
+    let mut used = vec![false; panes.len()];
+    let root = build(data, panes, &mut used)?;
+    used.iter().all(|u| *u).then(|| PaneLayout::from_root(root))
+}
+
+/// `panes` in one row (Horizontal) or column (Vertical), equal shares.
+fn flat_layout(direction: SplitDirection, panes: &[TerminalId]) -> PaneLayout {
+    match panes {
+        [] => unreachable!("a restored tab always has a pane"),
+        [only] => PaneLayout::new(*only),
+        many => PaneLayout::from_root(PaneNode::Split {
+            direction,
+            children: many
+                .iter()
+                .map(|id| (PaneNode::Leaf(*id), 1.0 / many.len() as f32))
+                .collect(),
+        }),
     }
 }
 
@@ -1254,20 +1251,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pane_rects_share_the_area_by_direction_and_ratio() {
-        assert_eq!(
-            pane_rects(SplitDirection::Horizontal, &[], 2, 800.0, 600.0),
-            vec![(0.0, 0.0, 400.0, 600.0), (400.0, 0.0, 400.0, 600.0)]
-        );
-        assert_eq!(
-            pane_rects(SplitDirection::Vertical, &[0.25, 0.75], 2, 800.0, 600.0),
-            vec![(0.0, 0.0, 800.0, 150.0), (0.0, 150.0, 800.0, 450.0)]
-        );
-        // Ratios that do not match the pane count fall back to equal shares.
-        assert_eq!(
-            pane_rects(SplitDirection::Horizontal, &[1.0], 2, 800.0, 600.0)[1],
-            (400.0, 0.0, 400.0, 600.0)
-        );
+    fn mixed_splits_size_each_pane_to_its_place_in_the_tree() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let first = manager.focused_terminal_id().unwrap();
+        manager.layout_panes(AREA).unwrap();
+        // [first | right], then split `right` down: [first | (right / below)].
+        let right = manager.split_horizontal().unwrap().unwrap();
+        manager.focus_terminal(right);
+        let below = manager.split_vertical().unwrap().unwrap();
+        assert_eq!(grid(&manager, first), (40, 24));
+        assert_eq!(grid(&manager, right), (40, 12));
+        assert_eq!(grid(&manager, below), (40, 12));
+
+        // Focus follows the geometry: left of `below` is `first`.
+        manager.focus_terminal(below);
+        manager.focus_direction(FocusDirection::Left, AREA.width, AREA.height);
+        assert_eq!(manager.focused_terminal_id(), Some(first));
+    }
+
+    #[test]
+    fn sessions_keep_nested_splits() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let right = manager.split_horizontal().unwrap().unwrap();
+        manager.focus_terminal(right);
+        manager.split_vertical().unwrap().unwrap();
+        let saved = manager.to_session_data();
+        let layout = saved.tabs[0].layout.clone().unwrap();
+        let restored =
+            restore_layout(&layout, &[TerminalId(10), TerminalId(11), TerminalId(12)]).unwrap();
+        let rects = restored.rects((0.0, 0.0, 800.0, 480.0));
+        assert_eq!(rects[0], (TerminalId(10), (0.0, 0.0, 400.0, 480.0)));
+        assert_eq!(rects[1], (TerminalId(11), (400.0, 0.0, 400.0, 240.0)));
+        assert_eq!(rects[2], (TerminalId(12), (400.0, 240.0, 400.0, 240.0)));
+        // A tree that does not cover the panes falls back to a flat layout.
+        assert!(restore_layout(&layout, &[TerminalId(10), TerminalId(11)]).is_none());
     }
 
     fn grid(manager: &TerminalManager, id: TerminalId) -> (u16, u16) {
@@ -1296,9 +1313,12 @@ mod tests {
         assert_eq!(grid(&manager, first), (40, 24));
         assert_eq!(grid(&manager, second), (40, 24));
 
-        // A third pane: a third of the columns each, without being told.
+        // A third pane takes half of the pane it splits (the focused,
+        // first one); the other pane keeps its size.
         let third = manager.split_horizontal().unwrap().unwrap();
-        assert_eq!(grid(&manager, third), (26, 24));
+        assert_eq!(grid(&manager, first), (20, 24));
+        assert_eq!(grid(&manager, third), (20, 24));
+        assert_eq!(grid(&manager, second), (40, 24));
 
         // Closing a pane gives its space back to the two that remain.
         assert!(manager.close_focused_pane());
