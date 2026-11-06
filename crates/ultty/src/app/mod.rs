@@ -628,6 +628,22 @@ impl App {
     ///
     /// This is the single hook every tab change goes through, so it also
     /// syncs the protocol server's tab bookkeeping.
+    /// Show the focused pane's directory and git branch in the title band.
+    fn update_title_location(&mut self) {
+        let cwd = self
+            .terminal_manager
+            .focused_terminal()
+            .and_then(control::terminal_working_directory);
+        let home = std::env::var("HOME").ok();
+        self.tab_bar.title_path = cwd
+            .as_deref()
+            .map(|dir| ultty::tabs::display_path(dir, home.as_deref()))
+            .unwrap_or_default();
+        self.tab_bar.title_branch = cwd
+            .as_deref()
+            .and_then(|dir| ultty::tabs::git_branch(std::path::Path::new(dir)));
+    }
+
     fn update_tab_bar(&mut self) {
         self.sync_protocol_tabs();
         self.last_tab_title_refresh = Instant::now();
@@ -649,6 +665,7 @@ impl App {
             total_width,
             tab_width_override,
         );
+        self.update_title_location();
 
         // Update renderer's tab bar height for dimension calculations
         let new_height = self.tab_bar.content_top();
@@ -889,14 +906,14 @@ impl App {
 
         let old_hovered_tab = self.tab_bar.hovered_tab;
         let old_new_tab_hovered = self.tab_bar.new_tab_button_hovered;
-        let old_window_control = self.tab_bar.hovered_window_control;
+        let old_window_control = self.tab_bar.hovered_title_button;
         let old_close_button = self.tab_bar.hovered_close_button;
         self.tab_bar.set_hover(x, y);
 
         // Redraw if hover state changed
         if old_hovered_tab != self.tab_bar.hovered_tab
             || old_new_tab_hovered != self.tab_bar.new_tab_button_hovered
-            || old_window_control != self.tab_bar.hovered_window_control
+            || old_window_control != self.tab_bar.hovered_title_button
             || old_close_button != self.tab_bar.hovered_close_button
         {
             self.needs_redraw = true;

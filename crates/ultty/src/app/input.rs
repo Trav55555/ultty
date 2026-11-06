@@ -202,18 +202,30 @@ impl App {
                 if self.tab_bar.visible && y < self.tab_bar.height() {
                     // Window control buttons
                     if button == MouseButton::Left {
-                        if let Some(control) = self.tab_bar.window_control_at(x, y) {
-                            use ultty::tabs::WindowControl;
+                        // "+" is handled with the tab row's "+" below.
+                        if let Some(control) = self
+                            .tab_bar
+                            .title_button_at(x, y)
+                            .filter(|button| *button != ultty::tabs::TitleButton::NewTab)
+                        {
+                            use ultty::tabs::TitleButton;
                             match control {
-                                WindowControl::Close => {
+                                TitleButton::Close => {
                                     self.pending_close = true;
                                 }
-                                WindowControl::Maximize => {
+                                TitleButton::Maximize => {
                                     self.window.set_maximized(!self.window.is_maximized());
                                 }
-                                WindowControl::Minimize => {
+                                TitleButton::Minimize => {
                                     self.window.set_minimized(true);
                                 }
+                                TitleButton::SplitRight => {
+                                    self.split_pane(SplitDirection::Horizontal);
+                                }
+                                TitleButton::SplitDown => {
+                                    self.split_pane(SplitDirection::Vertical);
+                                }
+                                TitleButton::NewTab => {}
                             }
                             return;
                         }
@@ -523,6 +535,23 @@ impl App {
             t.encode_mouse_event(TerminalMouseButton::Release, col, row, true, true, mods)
         }) {
             let _ = self.send_input(&bytes);
+        }
+    }
+
+    /// Split the focused pane: side by side (Horizontal) or stacked
+    /// (Vertical). Shared by the keybindings and the title-band buttons.
+    pub(super) fn split_pane(&mut self, direction: SplitDirection) {
+        let result = match direction {
+            SplitDirection::Horizontal => self.terminal_manager.split_horizontal(),
+            SplitDirection::Vertical => self.terminal_manager.split_vertical(),
+        };
+        match result {
+            Ok(Some(terminal_id)) => {
+                tracing::info!("Split {:?}: new terminal {:?}", direction, terminal_id);
+                self.needs_redraw = true;
+            }
+            Ok(None) => tracing::warn!("No active tab for split"),
+            Err(e) => tracing::warn!("Failed to split: {}", e),
         }
     }
 
@@ -877,25 +906,11 @@ impl App {
             return;
         }
         if self.check_keybinding(&event, &self.config.keybindings.split_horizontal.clone()) {
-            match self.terminal_manager.split_horizontal() {
-                Ok(Some(terminal_id)) => {
-                    tracing::info!("Split horizontal: new terminal {:?}", terminal_id);
-                    self.needs_redraw = true;
-                }
-                Ok(None) => tracing::warn!("No active tab for split"),
-                Err(e) => tracing::warn!("Failed to split: {}", e),
-            }
+            self.split_pane(SplitDirection::Horizontal);
             return;
         }
         if self.check_keybinding(&event, &self.config.keybindings.split_vertical.clone()) {
-            match self.terminal_manager.split_vertical() {
-                Ok(Some(terminal_id)) => {
-                    tracing::info!("Split vertical: new terminal {:?}", terminal_id);
-                    self.needs_redraw = true;
-                }
-                Ok(None) => tracing::warn!("No active tab for split"),
-                Err(e) => tracing::warn!("Failed to split: {}", e),
-            }
+            self.split_pane(SplitDirection::Vertical);
             return;
         }
 

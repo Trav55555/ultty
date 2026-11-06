@@ -5,7 +5,7 @@
 use crate::terminal_manager::{Tab, TabId};
 
 /// Height of the window control band in pixels (at default scale).
-pub const TITLE_BAR_HEIGHT: f32 = 36.0;
+pub const TITLE_BAR_HEIGHT: f32 = 44.0;
 
 /// Height of the tab row in pixels (at default scale).
 pub const TAB_ROW_HEIGHT: f32 = 28.0;
@@ -33,13 +33,14 @@ pub const TAB_CLOSE_HOVER_SIZE: f32 = 22.0;
 /// Minimum tab width.
 pub const MIN_TAB_WIDTH: f32 = 80.0;
 
-/// Width reserved for window control buttons (close, maximize, minimize) on the right.
-pub const WINDOW_CONTROLS_WIDTH: f32 = 108.0;
+/// Extra gap between the split buttons and the window controls in the title
+/// band; a thin separator is drawn in its middle.
+pub const TITLE_GROUP_GAP: f32 = 12.0;
 
 /// Side of the visible square drawn for each chrome button, centered in its
 /// slot (the window controls' WINDOW_BUTTON_WIDTH, the "+" button's
 /// NEW_TAB_BUTTON_WIDTH).
-pub const CHROME_BUTTON_SIZE: f32 = 26.0;
+pub const CHROME_BUTTON_SIZE: f32 = 28.0;
 
 /// Gap between the window edge and the slot of the nearest chrome button
 /// (the "+" on the left, the window controls on the right). Half a slot's
@@ -47,12 +48,19 @@ pub const CHROME_BUTTON_SIZE: f32 = 26.0;
 /// between two buttons, and the very corners stay free for resizing.
 pub const CHROME_EDGE_INSET: f32 = (WINDOW_BUTTON_WIDTH - CHROME_BUTTON_SIZE) / 2.0;
 
-/// Width of each window control button.
-pub const WINDOW_BUTTON_WIDTH: f32 = 36.0;
+/// Width of each title-band button slot. The visible button is
+/// CHROME_BUTTON_SIZE, so neighbouring buttons sit 10 px apart.
+pub const WINDOW_BUTTON_WIDTH: f32 = 38.0;
 
-/// Which window control button was clicked.
+/// A button in the title band.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WindowControl {
+pub enum TitleButton {
+    /// New tab; in the title band only while the tab row is hidden.
+    NewTab,
+    /// Split the focused pane side by side.
+    SplitRight,
+    /// Split the focused pane top and bottom.
+    SplitDown,
     Minimize,
     Maximize,
     Close,
@@ -82,9 +90,13 @@ pub struct TabBarState {
     /// Whether the "+" button is hovered.
     pub new_tab_button_hovered: bool,
     /// Which window control button is hovered (if any).
-    pub hovered_window_control: Option<WindowControl>,
+    pub hovered_title_button: Option<TitleButton>,
     /// Which tab's close button is hovered (if any).
     pub hovered_close_button: Option<usize>,
+    /// The focused pane's working directory, home shown as `~`.
+    pub title_path: String,
+    /// The git branch at `title_path` (short commit when detached).
+    pub title_branch: Option<String>,
 }
 
 impl TabBarState {
@@ -101,8 +113,10 @@ impl TabBarState {
             drag_offset_x: 0.0,
             new_tab_button_x: 0.0,
             new_tab_button_hovered: false,
-            hovered_window_control: None,
+            hovered_title_button: None,
             hovered_close_button: None,
+            title_path: String::new(),
+            title_branch: None,
         }
     }
 
@@ -151,18 +165,16 @@ impl TabBarState {
         // Individual tab entries only render when there are 2+ tabs.
         self.visible = true;
 
-        // Layout: title/control band contains [+][drag area][minimize][maximize][close].
-        // The lower tab row contains only tabs plus trailing drag area.
+        // Layout: the title band holds [drag area][split right][split down]
+        // [minimize][maximize][close] (see title_buttons). The tab row holds
+        // the tabs, then "+" right after the last one.
         let tabs_start_x = 0.0;
-        let usable_width = total_width;
+        let usable_width = (total_width - Self::NEW_TAB_BUTTON_WIDTH).max(0.0);
         let ideal_width = usable_width / tab_count as f32;
         let tab_width = tab_width_override
             .filter(|width| width.is_finite() && *width > 0.0)
             .map(|width| width.max(MIN_TAB_WIDTH))
             .unwrap_or_else(|| ideal_width.max(MIN_TAB_WIDTH));
-
-        // "+" button sits just inside the left edge
-        self.new_tab_button_x = CHROME_EDGE_INSET;
 
         let mut x = tabs_start_x;
         for (index, tab) in tabs.iter().enumerate() {
@@ -185,10 +197,52 @@ impl TabBarState {
 
             x += tab_width;
         }
+        // In the tab row, "+" follows the last tab (clamped inside the
+        // window when tabs overflow it).
+        self.new_tab_button_x = x.min(total_width - Self::NEW_TAB_BUTTON_WIDTH).max(0.0);
     }
 
-    /// Width of the new-tab "+" button.
-    pub const NEW_TAB_BUTTON_WIDTH: f32 = TITLE_BAR_HEIGHT;
+    /// Width of the "+" target at the end of the tab row.
+    pub const NEW_TAB_BUTTON_WIDTH: f32 = TAB_ROW_HEIGHT;
+
+    /// Title-band buttons and the x of each one's slot (WINDOW_BUTTON_WIDTH
+    /// wide), left to right. The one source of this layout: hit testing,
+    /// hover and drawing all read it.
+    pub fn title_buttons(&self) -> Vec<(TitleButton, f32)> {
+        let mut x = self.total_width - CHROME_EDGE_INSET;
+        let mut slots = Vec::with_capacity(6);
+        for button in [
+            TitleButton::Close,
+            TitleButton::Maximize,
+            TitleButton::Minimize,
+        ] {
+            x -= WINDOW_BUTTON_WIDTH;
+            slots.push((button, x));
+        }
+        x -= TITLE_GROUP_GAP;
+        let mut left = vec![TitleButton::SplitDown, TitleButton::SplitRight];
+        if !self.shows_tab_row() {
+            left.push(TitleButton::NewTab);
+        }
+        for button in left {
+            x -= WINDOW_BUTTON_WIDTH;
+            slots.push((button, x));
+        }
+        slots.reverse();
+        slots
+    }
+
+    /// x of the separator between the split buttons and the window controls.
+    pub fn title_group_separator_x(&self) -> f32 {
+        self.total_width - CHROME_EDGE_INSET - 3.0 * WINDOW_BUTTON_WIDTH - TITLE_GROUP_GAP / 2.0
+    }
+
+    /// Left edge of the title-band buttons; title text must end before it.
+    pub fn title_buttons_start(&self) -> f32 {
+        self.title_buttons()
+            .first()
+            .map_or(self.total_width, |(_, x)| *x)
+    }
 
     /// Whether the lower tab row should be visible.
     pub fn shows_tab_row(&self) -> bool {
@@ -205,12 +259,19 @@ impl TabBarState {
         None
     }
 
-    /// Check if a click at (x, y) is on the new tab "+" button.
+    /// Check if a click at (x, y) is on the new tab "+" button: at the end
+    /// of the tab row, or in the title band while the row is hidden.
     pub fn is_new_tab_button_at(&self, x: f32, y: f32) -> bool {
-        self.visible
-            && (0.0..TITLE_BAR_HEIGHT).contains(&y)
-            && x >= self.new_tab_button_x
-            && x < self.new_tab_button_x + Self::NEW_TAB_BUTTON_WIDTH
+        if !self.visible {
+            return false;
+        }
+        if self.shows_tab_row() {
+            (TITLE_BAR_HEIGHT..TAB_BAR_HEIGHT).contains(&y)
+                && x >= self.new_tab_button_x
+                && x < self.new_tab_button_x + Self::NEW_TAB_BUTTON_WIDTH
+        } else {
+            self.title_button_at(x, y) == Some(TitleButton::NewTab)
+        }
     }
 
     /// Check if a click at (x, y) is in the title band area that toggles maximize on double click.
@@ -218,32 +279,18 @@ impl TabBarState {
         self.visible
             && (0.0..TITLE_BAR_HEIGHT).contains(&y)
             && !self.is_new_tab_button_at(x, y)
-            && self.window_control_at(x, y).is_none()
+            && self.title_button_at(x, y).is_none()
     }
 
-    /// Check if a click at (x, y) is on a window control button.
-    pub fn window_control_at(&self, x: f32, y: f32) -> Option<WindowControl> {
+    /// The title-band button at (x, y), if any.
+    pub fn title_button_at(&self, x: f32, y: f32) -> Option<TitleButton> {
         if !self.visible || !(0.0..TITLE_BAR_HEIGHT).contains(&y) {
             return None;
         }
-        let controls_start = self.total_width - CHROME_EDGE_INSET - WINDOW_CONTROLS_WIDTH;
-        if x < controls_start {
-            return None;
-        }
-        let offset = x - controls_start;
-        // Layout: [minimize][maximize][close] — each WINDOW_BUTTON_WIDTH wide, centered
-        let padding = (WINDOW_CONTROLS_WIDTH - WINDOW_BUTTON_WIDTH * 3.0) / 2.0;
-        let btn_offset = offset - padding;
-        if btn_offset < 0.0 {
-            return None;
-        }
-        let btn_idx = (btn_offset / WINDOW_BUTTON_WIDTH) as usize;
-        match btn_idx {
-            0 => Some(WindowControl::Minimize),
-            1 => Some(WindowControl::Maximize),
-            2 => Some(WindowControl::Close),
-            _ => None,
-        }
+        self.title_buttons()
+            .into_iter()
+            .find(|(_, slot_x)| (*slot_x..*slot_x + WINDOW_BUTTON_WIDTH).contains(&x))
+            .map(|(button, _)| button)
     }
 
     /// Check if position is in the draggable title bar area (not on a tab, button, or control).
@@ -252,7 +299,7 @@ impl TabBarState {
             return false;
         }
         // Not on window controls
-        if self.window_control_at(x, y).is_some() {
+        if self.title_button_at(x, y).is_some() {
             return false;
         }
         // Not on "+" button
@@ -274,7 +321,7 @@ impl TabBarState {
         if !self.visible || y > self.height() {
             self.hovered_tab = None;
             self.new_tab_button_hovered = false;
-            self.hovered_window_control = None;
+            self.hovered_title_button = None;
             self.hovered_close_button = None;
             return;
         }
@@ -285,7 +332,7 @@ impl TabBarState {
             None
         };
         self.new_tab_button_hovered = self.is_new_tab_button_at(x, y);
-        self.hovered_window_control = self.window_control_at(x, y);
+        self.hovered_title_button = self.title_button_at(x, y);
         self.hovered_close_button = self.close_button_at(x, y);
 
         // Update tab states
@@ -312,13 +359,14 @@ impl TabBarState {
         None
     }
 
-    /// Get the height of the tab bar (0 if not visible).
     /// Where the terminal content starts: below the bar plus
     /// [`TERMINAL_TOP_PADDING`]. Chrome hit tests use [`Self::height`].
     pub fn content_top(&self) -> f32 {
         self.height() + TERMINAL_TOP_PADDING
     }
 
+    /// Height of the bar: the title band, plus the tab row when it shows
+    /// (0 when hidden).
     pub fn height(&self) -> f32 {
         if !self.visible {
             0.0
@@ -440,10 +488,157 @@ impl TabState {
     }
 }
 
+/// `dir` with the home directory shown as `~`.
+pub fn display_path(dir: &str, home: Option<&str>) -> String {
+    match home.filter(|home| !home.is_empty() && *home != "/") {
+        Some(home) if dir == home => "~".to_string(),
+        Some(home) => match dir.strip_prefix(home) {
+            Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+            _ => dir.to_string(),
+        },
+        None => dir.to_string(),
+    }
+}
+
+/// The git branch checked out at `dir` or its nearest ancestor repository:
+/// the branch name, or the first 7 characters of the commit when detached.
+/// Reads `.git/HEAD` directly (following a `gitdir:` file for worktrees and
+/// submodules), so it costs a few small file reads and no subprocess.
+pub fn git_branch(dir: &std::path::Path) -> Option<String> {
+    let git = dir
+        .ancestors()
+        .map(|d| d.join(".git"))
+        .find(|g| g.exists())?;
+    let git_dir = if git.is_file() {
+        let pointer = std::fs::read_to_string(&git).ok()?;
+        let target = std::path::PathBuf::from(pointer.strip_prefix("gitdir:")?.trim());
+        if target.is_absolute() {
+            target
+        } else {
+            git.parent()?.join(target)
+        }
+    } else {
+        git
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    match head.strip_prefix("ref:") {
+        Some(reference) => {
+            let reference = reference.trim();
+            Some(
+                reference
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(reference)
+                    .to_string(),
+            )
+        }
+        None => head.get(..7).map(str::to_string),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::terminal_manager::TerminalId;
+
+    #[test]
+    fn display_path_shows_home_as_tilde() {
+        let home = Some("/home/ana");
+        assert_eq!(display_path("/home/ana", home), "~");
+        assert_eq!(display_path("/home/ana/src/ultty", home), "~/src/ultty");
+        assert_eq!(display_path("/home/anabel/x", home), "/home/anabel/x");
+        assert_eq!(display_path("/etc", home), "/etc");
+        assert_eq!(display_path("/etc", None), "/etc");
+        assert_eq!(display_path("/etc", Some("/")), "/etc");
+    }
+
+    #[test]
+    fn git_branch_reads_head_from_the_nearest_repository() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = repo.path().join(".git");
+        std::fs::create_dir(&git).unwrap();
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/feature/topbar\n").unwrap();
+        let nested = repo.path().join("crates/ultty");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(git_branch(&nested).as_deref(), Some("feature/topbar"));
+
+        std::fs::write(
+            git.join("HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        assert_eq!(git_branch(repo.path()).as_deref(), Some("0123456"));
+    }
+
+    #[test]
+    fn git_branch_follows_a_gitdir_file() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("main.git/worktrees/wt");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("HEAD"), "ref: refs/heads/wt-branch\n").unwrap();
+        let worktree = root.path().join("wt");
+        std::fs::create_dir(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: ../main.git/worktrees/wt\n").unwrap();
+        assert_eq!(git_branch(&worktree).as_deref(), Some("wt-branch"));
+    }
+
+    #[test]
+    fn git_branch_is_none_outside_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        // tempdir sits under /tmp, which is not inside a repository here.
+        if dir.path().ancestors().any(|d| d.join(".git").exists()) {
+            return;
+        }
+        assert_eq!(git_branch(dir.path()), None);
+    }
+
+    #[test]
+    fn title_buttons_run_right_to_left_from_the_edge() {
+        let state = bar_with(2, 0, 800.0);
+        let buttons: Vec<TitleButton> = state.title_buttons().iter().map(|(b, _)| *b).collect();
+        assert_eq!(
+            buttons,
+            [
+                TitleButton::SplitRight,
+                TitleButton::SplitDown,
+                TitleButton::Minimize,
+                TitleButton::Maximize,
+                TitleButton::Close,
+            ]
+        );
+        let close_x = state.title_buttons().last().unwrap().1;
+        assert_eq!(close_x + WINDOW_BUTTON_WIDTH, 800.0 - CHROME_EDGE_INSET);
+        assert_eq!(
+            state.title_button_at(close_x + 1.0, 10.0),
+            Some(TitleButton::Close)
+        );
+        let split_x = state.title_buttons()[0].1;
+        assert_eq!(
+            state.title_button_at(split_x + 1.0, 10.0),
+            Some(TitleButton::SplitRight)
+        );
+        // The group gap belongs to no button.
+        let gap_x = state.title_group_separator_x();
+        assert_eq!(state.title_button_at(gap_x, 10.0), None);
+    }
+
+    #[test]
+    fn new_tab_sits_in_the_title_band_only_while_the_tab_row_is_hidden() {
+        let single = bar_with(1, 0, 800.0);
+        assert_eq!(single.title_buttons()[0].0, TitleButton::NewTab);
+        let plus_x = single.title_buttons()[0].1;
+        assert!(single.is_new_tab_button_at(plus_x + 5.0, 10.0));
+
+        let multi = bar_with(3, 0, 800.0);
+        assert!(!multi
+            .title_buttons()
+            .iter()
+            .any(|(b, _)| *b == TitleButton::NewTab));
+        let last_tab = multi.tabs.last().unwrap();
+        assert_eq!(multi.new_tab_button_x, last_tab.x + last_tab.width);
+        assert!(multi.is_new_tab_button_at(multi.new_tab_button_x + 5.0, TITLE_BAR_HEIGHT + 5.0));
+        assert!(!multi.is_new_tab_button_at(multi.new_tab_button_x + 5.0, 10.0));
+    }
 
     // ---------------------------------------------------------------
     // Helpers
@@ -564,9 +759,11 @@ mod tests {
 
     #[test]
     fn tab_width_fills_available_rail_equally() {
+        // The rail leaves room for "+" after the last tab.
         let state = bar_with(2, 0, 1000.0);
+        let expected = (1000.0 - TabBarState::NEW_TAB_BUTTON_WIDTH) / 2.0;
         for tab in &state.tabs {
-            assert_eq!(tab.width, 500.0);
+            assert_eq!(tab.width, expected);
         }
     }
 
@@ -583,7 +780,7 @@ mod tests {
     fn tab_width_in_range_not_clamped() {
         // 10 tabs in 900px => ideal 90 => above MIN_TAB_WIDTH.
         let state = bar_with(10, 0, 900.0);
-        let usable = 900.0;
+        let usable = 900.0 - TabBarState::NEW_TAB_BUTTON_WIDTH;
         let expected = usable / 10.0;
         for tab in &state.tabs {
             assert!(
@@ -812,18 +1009,20 @@ mod tests {
     #[test]
     fn single_tab_plus_is_clickable_in_title_band() {
         let state = bar_with(1, 0, 800.0);
-        assert!(state.is_new_tab_button_at(CHROME_EDGE_INSET + 5.0, 10.0));
-        assert!(!state.is_drag_area(CHROME_EDGE_INSET + 5.0, 10.0));
-        assert!(!state.is_new_tab_button_at(CHROME_EDGE_INSET + 5.0, -1.0));
-        assert!(!state.is_new_tab_button_at(CHROME_EDGE_INSET + 5.0, TITLE_BAR_HEIGHT));
+        let plus = state.title_buttons()[0].1 + 5.0;
+        assert!(state.is_new_tab_button_at(plus, 10.0));
+        assert!(!state.is_drag_area(plus, 10.0));
+        assert!(!state.is_new_tab_button_at(plus, -1.0));
+        assert!(!state.is_new_tab_button_at(plus, TITLE_BAR_HEIGHT));
     }
 
     #[test]
-    fn multi_tab_plus_is_clickable_in_title_band() {
+    fn multi_tab_plus_is_clickable_in_the_tab_row() {
         let state = bar_with(2, 0, 800.0);
-        assert!(state.is_new_tab_button_at(CHROME_EDGE_INSET + 5.0, 10.0));
-        assert!(!state.is_new_tab_button_at(CHROME_EDGE_INSET + 5.0, TITLE_BAR_HEIGHT + 10.0));
-        assert!(!state.is_drag_area(CHROME_EDGE_INSET + 5.0, 10.0));
+        let plus = state.new_tab_button_x + 5.0;
+        assert!(state.is_new_tab_button_at(plus, TITLE_BAR_HEIGHT + 10.0));
+        assert!(!state.is_new_tab_button_at(plus, 10.0));
+        assert!(!state.is_drag_area(plus, TITLE_BAR_HEIGHT + 10.0));
         assert_eq!(state.tab_at_x(5.0), Some(0));
         assert!(!state.is_drag_area(5.0, TITLE_BAR_HEIGHT + 10.0));
     }
@@ -841,7 +1040,8 @@ mod tests {
     fn title_band_toggle_area_excludes_interactive_chrome_controls() {
         let state = bar_with(2, 0, 800.0);
         assert!(state.is_title_bar_toggle_area(400.0, 10.0));
-        assert!(!state.is_title_bar_toggle_area(CHROME_EDGE_INSET + 5.0, 10.0));
+        let split = state.title_buttons()[0].1 + 5.0;
+        assert!(!state.is_title_bar_toggle_area(split, 10.0));
         assert!(!state.is_title_bar_toggle_area(800.0 - CHROME_EDGE_INSET - 10.0, 10.0));
         assert!(!state.is_title_bar_toggle_area(400.0, -1.0));
         assert!(!state.is_title_bar_toggle_area(400.0, TITLE_BAR_HEIGHT));
@@ -860,31 +1060,36 @@ mod tests {
         let state = bar_with(2, 0, 800.0);
         // The outermost CHROME_EDGE_INSET pixels belong to no button.
         for x in [0.0, CHROME_EDGE_INSET - 1.0] {
+            assert_eq!(state.title_button_at(x, 4.0), None);
             assert!(!state.is_new_tab_button_at(x, 4.0));
         }
         for x in [800.0 - CHROME_EDGE_INSET, 799.0] {
-            assert_eq!(state.window_control_at(x, 4.0), None);
+            assert_eq!(state.title_button_at(x, 4.0), None);
         }
         // The buttons themselves are still there, just inset.
-        assert!(state.is_new_tab_button_at(CHROME_EDGE_INSET + 4.0, 10.0));
         assert_eq!(
-            state.window_control_at(800.0 - CHROME_EDGE_INSET - 4.0, 10.0),
-            Some(WindowControl::Close)
+            state.title_button_at(800.0 - CHROME_EDGE_INSET - 4.0, 10.0),
+            Some(TitleButton::Close)
         );
     }
 
     #[test]
     fn window_controls_are_only_in_title_band() {
         let state = bar_with(2, 0, 800.0);
-        let minimize_x = 800.0 - CHROME_EDGE_INSET - WINDOW_CONTROLS_WIDTH + 10.0;
+        let minimize_x = state
+            .title_buttons()
+            .iter()
+            .find(|(b, _)| *b == TitleButton::Minimize)
+            .map(|(_, x)| x + 10.0)
+            .unwrap();
         assert_eq!(
-            state.window_control_at(minimize_x, 10.0),
-            Some(WindowControl::Minimize)
+            state.title_button_at(minimize_x, 10.0),
+            Some(TitleButton::Minimize)
         );
-        assert_eq!(state.window_control_at(minimize_x, -1.0), None);
-        assert_eq!(state.window_control_at(minimize_x, TITLE_BAR_HEIGHT), None);
+        assert_eq!(state.title_button_at(minimize_x, -1.0), None);
+        assert_eq!(state.title_button_at(minimize_x, TITLE_BAR_HEIGHT), None);
         assert_eq!(
-            state.window_control_at(minimize_x, TITLE_BAR_HEIGHT + 1.0),
+            state.title_button_at(minimize_x, TITLE_BAR_HEIGHT + 1.0),
             None
         );
     }

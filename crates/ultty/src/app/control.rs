@@ -753,7 +753,7 @@ fn terminal_info(
     }
 }
 
-fn terminal_working_directory(
+pub(super) fn terminal_working_directory(
     terminal: &ultty::terminal_manager::ManagedTerminal,
 ) -> Option<String> {
     terminal

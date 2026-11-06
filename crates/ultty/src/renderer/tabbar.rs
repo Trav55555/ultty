@@ -7,13 +7,48 @@ use std::borrow::Cow;
 
 use super::{Renderer, Rgba, Vertex};
 use crate::tabs::{
-    TabBarState, TabState, WindowControl, CHROME_BUTTON_SIZE, CHROME_EDGE_INSET,
-    TAB_CLOSE_BUTTON_SIZE, TAB_PADDING, TAB_ROW_HEIGHT, TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH,
-    WINDOW_CONTROLS_WIDTH,
+    TabBarState, TabState, TitleButton, CHROME_BUTTON_SIZE, TAB_CLOSE_BUTTON_SIZE, TAB_PADDING,
+    TAB_ROW_HEIGHT, TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH,
 };
 
 const CHROME_BUTTON_RADIUS: f32 = 6.0;
 const CHROME_BUTTON_BORDER: f32 = 1.0;
+
+/// Columns the `->>> ultty_` title takes: `-`, three `>`, a space, `ultty`,
+/// and the cursor.
+const TITLE_LOGO_COLUMNS: f32 = 11.0;
+
+/// Left edge of the title logo: as far from the window edge as the buttons
+/// are on the right.
+fn title_logo_x() -> f32 {
+    crate::tabs::CHROME_EDGE_INSET + (WINDOW_BUTTON_WIDTH - CHROME_BUTTON_SIZE) / 2.0
+}
+
+/// Fit `path` and ` git:(branch)` into `max_chars` columns. The branch is
+/// kept whole when it fits; the path loses characters from the left, behind
+/// an ellipsis, so its last components stay visible. Returns the path part
+/// and the branch suffix.
+fn fit_title_location(path: &str, branch: Option<&str>, max_chars: usize) -> (String, String) {
+    let suffix = branch.map(|b| format!(" git:({b})")).unwrap_or_default();
+    let suffix_len = suffix.chars().count();
+    let path_len = path.chars().count();
+    if path_len + suffix_len <= max_chars {
+        return (path.to_string(), suffix);
+    }
+    let (room, suffix) = if suffix_len + 2 <= max_chars {
+        (max_chars - suffix_len, suffix)
+    } else {
+        (max_chars, String::new())
+    };
+    if path_len <= room {
+        return (path.to_string(), suffix);
+    }
+    if room == 0 {
+        return (String::new(), suffix);
+    }
+    let tail: String = path.chars().skip(path_len - (room - 1)).collect();
+    (format!("…{tail}"), suffix)
+}
 
 fn lighten(color: Rgba, amount: f32) -> Rgba {
     Rgba::new(
@@ -150,6 +185,36 @@ fn centered_tab_title_x(tab: &TabState, title: &str, cell_width: f32) -> f32 {
 }
 
 impl Renderer {
+    /// A pane outline with a divider: vertical for split right, horizontal
+    /// for split down. Drawn with rectangles so it needs no icon font.
+    fn emit_split_icon(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        (x, y, w, h): (f32, f32, f32, f32),
+        side_by_side: bool,
+        color: Rgba,
+    ) {
+        let (icon_w, icon_h, stroke) = (14.0_f32, 12.0_f32, 1.5_f32);
+        let left = (x + (w - icon_w) / 2.0).round();
+        let top = (y + (h - icon_h) / 2.0).round();
+        for (rx, ry, rw, rh) in [
+            (left, top, icon_w, stroke),
+            (left, top + icon_h - stroke, icon_w, stroke),
+            (left, top, stroke, icon_h),
+            (left + icon_w - stroke, top, stroke, icon_h),
+        ] {
+            self.emit_rect(vertices, indices, rx, ry, rw, rh, color);
+        }
+        if side_by_side {
+            let mid = (left + (icon_w - stroke) / 2.0).round();
+            self.emit_rect(vertices, indices, mid, top, stroke, icon_h, color);
+        } else {
+            let mid = (top + (icon_h - stroke) / 2.0).round();
+            self.emit_rect(vertices, indices, left, mid, icon_w, stroke, color);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn emit_chrome_button(
         &self,
@@ -322,21 +387,17 @@ impl Renderer {
             }
         }
 
-        // New tab "+" button
-        {
-            let btn_x = tab_bar.new_tab_button_x;
-            let btn_w = TabBarState::NEW_TAB_BUTTON_WIDTH;
-            let (button_x, button_y, button_w, button_h) = chrome_button_rect(btn_x, btn_w);
-            let button_bg = if tab_bar.new_tab_button_hovered {
-                control_hover_bg
-            } else {
-                control_bg
-            };
-
-            let button_border = if tab_bar.new_tab_button_hovered {
-                control_hover_border
-            } else {
-                control_border
+        // Title-band buttons: split right/down, window controls, and "+"
+        // while the tab row is hidden.
+        for (button, slot_x) in tab_bar.title_buttons() {
+            let (button_x, button_y, button_w, button_h) =
+                chrome_button_rect(slot_x, WINDOW_BUTTON_WIDTH);
+            let is_hovered = tab_bar.hovered_title_button == Some(button);
+            let destructive = button == TitleButton::Close;
+            let (button_bg, button_border) = match (is_hovered, destructive) {
+                (true, true) => (destructive_hover_bg, destructive_hover_border),
+                (true, false) => (control_hover_bg, control_hover_border),
+                (false, _) => (control_bg, control_border),
             };
             self.emit_chrome_button(
                 &mut vertices,
@@ -348,56 +409,42 @@ impl Renderer {
                 button_bg,
                 button_border,
             );
-        }
-
-        // Window control buttons (right side): minimize, maximize, close
-        {
-            let controls_start = tab_bar.total_width - CHROME_EDGE_INSET - WINDOW_CONTROLS_WIDTH;
-            let padding = (WINDOW_CONTROLS_WIDTH - WINDOW_BUTTON_WIDTH * 3.0) / 2.0;
-
-            for (i, control) in [
-                WindowControl::Minimize,
-                WindowControl::Maximize,
-                WindowControl::Close,
-            ]
-            .iter()
-            .enumerate()
-            {
-                let btn_x = controls_start + padding + i as f32 * WINDOW_BUTTON_WIDTH;
-                let (button_x, button_y, button_w, button_h) =
-                    chrome_button_rect(btn_x, WINDOW_BUTTON_WIDTH);
-                let is_hovered = tab_bar.hovered_window_control == Some(*control);
-                let button_bg = if is_hovered {
-                    if *control == WindowControl::Close {
-                        destructive_hover_bg
-                    } else {
-                        control_hover_bg
-                    }
-                } else {
-                    control_bg
-                };
-
-                let button_border = if is_hovered {
-                    if *control == WindowControl::Close {
-                        destructive_hover_border
-                    } else {
-                        control_hover_border
-                    }
-                } else {
-                    control_border
-                };
-
-                self.emit_chrome_button(
+            if matches!(button, TitleButton::SplitRight | TitleButton::SplitDown) {
+                let color =
+                    chrome_symbol_color(self.color_scheme.foreground, accent_color, is_hovered);
+                self.emit_split_icon(
                     &mut vertices,
                     &mut indices,
-                    button_x,
-                    button_y,
-                    button_w,
-                    button_h,
-                    button_bg,
-                    button_border,
+                    (button_x, button_y, button_w, button_h),
+                    button == TitleButton::SplitRight,
+                    color,
                 );
             }
+        }
+        // Separator between the split buttons and the window controls.
+        let separator_height = CHROME_BUTTON_SIZE - 6.0;
+        self.emit_rect(
+            &mut vertices,
+            &mut indices,
+            tab_bar.title_group_separator_x(),
+            (TITLE_BAR_HEIGHT - separator_height) / 2.0,
+            1.0,
+            separator_height,
+            control_border,
+        );
+
+        // "+" at the end of the tab row: a hover highlight only; the glyph is
+        // drawn with the titles.
+        if show_tabs && tab_bar.new_tab_button_hovered {
+            self.emit_rect(
+                &mut vertices,
+                &mut indices,
+                tab_bar.new_tab_button_x + 2.0,
+                TITLE_BAR_HEIGHT + 3.0,
+                TabBarState::NEW_TAB_BUTTON_WIDTH - 4.0,
+                TAB_ROW_HEIGHT - 4.0,
+                inactive_hover_bg,
+            );
         }
 
         (vertices, indices)
@@ -471,61 +518,109 @@ impl Renderer {
             all_indices.extend(idx.iter().map(|i| i + base_idx));
         }
 
-        // Render window control button symbols
+        // Title: `->>> ultty_`, then the
+        // focused pane's location centered between it and the buttons.
         {
-            let controls_start = tab_bar.total_width - CHROME_EDGE_INSET - WINDOW_CONTROLS_WIDTH;
-            let padding = (WINDOW_CONTROLS_WIDTH - WINDOW_BUTTON_WIDTH * 3.0) / 2.0;
+            let cw = self.cell_width;
+            let text_y = (TITLE_BAR_HEIGHT - self.cell_height) / 2.0;
+            let green = self.color_scheme.named[2];
+            let aqua = self.color_scheme.named[6];
+            let fg = self.color_scheme.foreground;
+            let x0 = title_logo_x();
+            // One label per character so ligature fonts cannot merge `>>>`.
+            let mut parts: Vec<(&str, f32, Rgba)> = vec![("-", x0, green)];
+            for i in 1..=3 {
+                parts.push((">", x0 + i as f32 * cw, aqua));
+            }
+            parts.push(("ultty", x0 + 5.0 * cw, fg));
+            parts.push(("_", x0 + 10.0 * cw, green));
 
-            for (i, (control, symbol)) in [
-                (WindowControl::Minimize, "−"),
-                (WindowControl::Maximize, "▢"),
-                (WindowControl::Close, "×"),
-            ]
-            .iter()
-            .enumerate()
-            {
-                let btn_x = controls_start + padding + i as f32 * WINDOW_BUTTON_WIDTH;
-                let (button_x, button_y, button_w, button_h) =
-                    chrome_button_rect(btn_x, WINDOW_BUTTON_WIDTH);
-                let is_hovered = tab_bar.hovered_window_control == Some(*control);
-                let ctrl_color = if *control == WindowControl::Close {
-                    close_symbol_color(self.color_scheme.foreground, is_hovered)
-                } else {
-                    chrome_symbol_color(self.color_scheme.foreground, accent_color, is_hovered)
-                };
-                let (mut v, idx) = self.text_renderer.build_label_vertices(
-                    symbol,
-                    button_x,
-                    button_y,
-                    WINDOW_BUTTON_WIDTH,
-                    ctrl_color,
-                );
-                center_vertices_in_rect(&mut v, button_x, button_y, button_w, button_h);
+            let region_start = x0 + (TITLE_LOGO_COLUMNS + 2.0) * cw;
+            let region_end = tab_bar.title_buttons_start() - 2.0 * cw;
+            let max_chars = if cw > 0.0 {
+                ((region_end - region_start) / cw).floor().max(0.0) as usize
+            } else {
+                0
+            };
+            let (path, suffix) = fit_title_location(
+                &tab_bar.title_path,
+                tab_bar.title_branch.as_deref(),
+                max_chars,
+            );
+            let text_chars = (path.chars().count() + suffix.chars().count()) as f32;
+            let centered = (tab_bar.total_width - text_chars * cw) / 2.0;
+            let path_x = centered
+                .max(region_start)
+                .min((region_end - text_chars * cw).max(region_start));
+            let path_owned = path;
+            let suffix_owned = suffix;
+            if !path_owned.is_empty() {
+                parts.push((path_owned.as_str(), path_x, fg));
+            }
+            if !suffix_owned.is_empty() {
+                let suffix_x = path_x + path_owned.chars().count() as f32 * cw;
+                parts.push((suffix_owned.as_str(), suffix_x, aqua));
+            }
+            for (text, x, color) in parts {
+                let width = text.chars().count() as f32 * cw + cw;
+                let (v, idx) = self
+                    .text_renderer
+                    .build_label_vertices(text, x, text_y, width, color);
                 let base_idx = all_vertices.len() as u32;
                 all_vertices.extend(v);
                 all_indices.extend(idx.iter().map(|i| i + base_idx));
             }
         }
 
-        // Render "+" for new tab button
-        {
-            let btn_x = tab_bar.new_tab_button_x;
-            let btn_w = TabBarState::NEW_TAB_BUTTON_WIDTH;
-            let (button_x, button_y, button_w, button_h) = chrome_button_rect(btn_x, btn_w);
+        // Title-band button symbols (split icons are drawn as shapes).
+        for (button, slot_x) in tab_bar.title_buttons() {
+            let symbol = match button {
+                TitleButton::NewTab => "+",
+                TitleButton::Minimize => "−",
+                TitleButton::Maximize => "▢",
+                TitleButton::Close => "×",
+                TitleButton::SplitRight | TitleButton::SplitDown => continue,
+            };
+            let (button_x, button_y, button_w, button_h) =
+                chrome_button_rect(slot_x, WINDOW_BUTTON_WIDTH);
+            let is_hovered = tab_bar.hovered_title_button == Some(button);
+            let color = if button == TitleButton::Close {
+                close_symbol_color(self.color_scheme.foreground, is_hovered)
+            } else {
+                chrome_symbol_color(self.color_scheme.foreground, accent_color, is_hovered)
+            };
+            let (mut v, idx) = self.text_renderer.build_label_vertices(
+                symbol,
+                button_x,
+                button_y,
+                WINDOW_BUTTON_WIDTH,
+                color,
+            );
+            center_vertices_in_rect(&mut v, button_x, button_y, button_w, button_h);
+            let base_idx = all_vertices.len() as u32;
+            all_vertices.extend(v);
+            all_indices.extend(idx.iter().map(|i| i + base_idx));
+        }
 
+        // "+" at the end of the tab row.
+        if show_tabs {
             let plus_color = chrome_symbol_color(
                 self.color_scheme.foreground,
                 accent_color,
                 tab_bar.new_tab_button_hovered,
             );
-
-            let (mut vertices, indices) = self
-                .text_renderer
-                .build_label_vertices("+", button_x, button_y, btn_w, plus_color);
-            center_vertices_in_rect(&mut vertices, button_x, button_y, button_w, button_h);
+            let (plus_x, plus_w) = (tab_bar.new_tab_button_x, TabBarState::NEW_TAB_BUTTON_WIDTH);
+            let (mut v, idx) = self.text_renderer.build_label_vertices(
+                "+",
+                plus_x,
+                TITLE_BAR_HEIGHT,
+                plus_w,
+                plus_color,
+            );
+            center_vertices_in_rect(&mut v, plus_x, TITLE_BAR_HEIGHT, plus_w, TAB_ROW_HEIGHT);
             let base_idx = all_vertices.len() as u32;
-            all_vertices.extend(vertices);
-            all_indices.extend(indices.iter().map(|i| i + base_idx));
+            all_vertices.extend(v);
+            all_indices.extend(idx.iter().map(|i| i + base_idx));
         }
 
         (all_vertices, all_indices)
@@ -536,13 +631,45 @@ impl Renderer {
 mod tests {
     use super::{
         center_vertices_in_rect, centered_tab_title_x, chrome_button_inner_rect,
-        chrome_button_rect, chrome_symbol_color, close_symbol_color, dim, mix, truncate_tab_title,
-        vertex_bounds, CHROME_BUTTON_BORDER, CHROME_BUTTON_SIZE, TITLE_BAR_HEIGHT,
-        WINDOW_BUTTON_WIDTH,
+        chrome_button_rect, chrome_symbol_color, close_symbol_color, dim, fit_title_location, mix,
+        truncate_tab_title, vertex_bounds, CHROME_BUTTON_BORDER, CHROME_BUTTON_SIZE,
+        TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH,
     };
     use crate::renderer::{Rgba, Vertex};
     use crate::tabs::TabState;
     use crate::terminal_manager::TabId;
+
+    #[test]
+    fn title_location_fits_whole_when_there_is_room() {
+        assert_eq!(
+            fit_title_location("~/projects/ultty", Some("main"), 40),
+            ("~/projects/ultty".to_string(), " git:(main)".to_string())
+        );
+        assert_eq!(
+            fit_title_location("~/projects/ultty", None, 40),
+            ("~/projects/ultty".to_string(), String::new())
+        );
+    }
+
+    #[test]
+    fn title_location_trims_the_path_from_the_left_and_keeps_the_branch() {
+        let (path, suffix) = fit_title_location("~/projects/tui-terminal", Some("main"), 20);
+        assert_eq!(suffix, " git:(main)");
+        assert_eq!(path, "…terminal");
+        assert_eq!(path.chars().count() + suffix.chars().count(), 20);
+    }
+
+    #[test]
+    fn title_location_drops_the_branch_before_the_path_vanishes() {
+        let (path, suffix) =
+            fit_title_location("~/projects/tui-terminal", Some("a-very-long-branch"), 12);
+        assert_eq!(suffix, "");
+        assert_eq!(path, "…ui-terminal");
+        assert_eq!(
+            fit_title_location("~/x", Some("main"), 0),
+            (String::new(), String::new())
+        );
+    }
 
     #[test]
     fn truncate_tab_title_keeps_short_titles() {

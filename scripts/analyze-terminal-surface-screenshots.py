@@ -10,7 +10,9 @@ import zlib
 from pathlib import Path
 
 
-TITLE_BAR_HEIGHT = 28
+# Chrome geometry in pixels; keep in step with TITLE_BAR_HEIGHT and
+# TAB_ROW_HEIGHT in crates/ultty/src/tabs.rs.
+TITLE_BAR_HEIGHT = 44
 MAGENTA_EDGE_LIMIT = 0.001
 
 
