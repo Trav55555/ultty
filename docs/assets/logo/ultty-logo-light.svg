@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 256"><title>Ultty</title><g fill="none" stroke="#83c092" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><polyline points="96,88 136,128 96,168"/><polyline points="140,88 180,128 140,168"/><polyline points="184,88 224,128 184,168"/></g><rect x="30" y="117" width="50" height="22" rx="4" fill="#a7c080"/>
+<g transform="translate(0 0)" fill="none" stroke="#2d353b" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+<path d="M290 100 V140 A25 25 0 0 0 340 140 V100 M340 100 V170"/><path d="M380 66 V146 A24 24 0 0 0 404 170"/>
+<path d="M436 74 V146 A24 24 0 0 0 460 170 M420 104 H458"/><path d="M496 74 V146 A24 24 0 0 0 520 170 M480 104 H518"/>
+<path d="M552 100 V140 A25 25 0 0 0 602 140 V100 M602 100 V188 A26 26 0 0 1 576 214 H562"/></g>
+<rect x="636" y="156" width="50" height="22" rx="4" fill="#a7c080"/></svg>
