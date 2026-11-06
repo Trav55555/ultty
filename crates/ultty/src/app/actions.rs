@@ -61,6 +61,42 @@ impl App {
         }
     }
 
+    /// Capture every pane of the active tab to `path`, as the window shows
+    /// them. The caller must not hold any pane's terminal lock.
+    pub(super) fn capture_panes_screenshot(
+        &mut self,
+        path: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let overlay_state = self.build_screenshot_overlay_state();
+        let overlay = overlay_state.as_overlay();
+        let locked = super::render::lock_active_panes(
+            &self.terminal_manager,
+            self.window.inner_size(),
+            self.tab_bar.content_top(),
+        );
+        let panes: Vec<(&ultty::grid::Terminal, ultty::renderer::PaneInfo)> = locked
+            .iter()
+            .map(|(terminal, pane)| (&**terminal, *pane))
+            .collect();
+        self.renderer
+            .capture_panes_screenshot(&panes, &overlay, path)
+    }
+
+    fn notify_screenshot_saved(&self, path: &std::path::Path) {
+        tracing::info!("Screenshot saved to {}", path.display());
+        // Show notification if possible
+        if let Ok(notif) = notify_rust::Notification::new()
+            .summary("Screenshot Saved")
+            .body(&format!("Saved to {}", path.display()))
+            .show()
+        {
+            drop(notif);
+        }
+    }
+
     /// Build the list of keyboard shortcuts for display.
     pub(super) fn build_shortcuts_list(
         keybindings: &ultty::config::KeybindingConfig,
@@ -301,6 +337,14 @@ impl App {
             let _ = std::fs::create_dir_all(parent);
         }
 
+        if self.terminal_manager.pane_count() > 1 {
+            match self.capture_panes_screenshot(&path) {
+                Ok(()) => self.notify_screenshot_saved(&path),
+                Err(e) => tracing::error!("Failed to capture screenshot: {}", e),
+            }
+            return;
+        }
+
         // Get terminal reference
         let Some(terminal) = self
             .terminal_manager
@@ -326,17 +370,7 @@ impl App {
             &path,
             &native_sessions,
         ) {
-            Ok(()) => {
-                tracing::info!("Screenshot saved to {}", path.display());
-                // Show notification if possible
-                if let Ok(notif) = notify_rust::Notification::new()
-                    .summary("Screenshot Saved")
-                    .body(&format!("Saved to {}", path.display()))
-                    .show()
-                {
-                    drop(notif);
-                }
-            }
+            Ok(()) => self.notify_screenshot_saved(&path),
             Err(e) => {
                 tracing::error!("Failed to capture screenshot: {}", e);
             }

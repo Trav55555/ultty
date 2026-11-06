@@ -4,7 +4,9 @@ use std::time::Instant;
 
 use super::update::pipeline_trace_enabled;
 use super::App;
-use ultty::renderer::OverlayState;
+use ultty::event_loop::TerminalGuard;
+use ultty::renderer::{OverlayState, PaneInfo};
+use ultty::terminal_manager::TerminalManager;
 
 impl App {
     /// Render the terminal.
@@ -163,39 +165,17 @@ impl App {
 
     /// Render multiple panes.
     fn render_multi_pane(&mut self, output: wgpu::SurfaceTexture) {
-        use ultty::renderer::PaneInfo;
-
-        let size = self.window.inner_size();
-        let tab_bar_height = self.tab_bar.content_top();
-        let available_width = size.width as f32;
-        let available_height = size.height as f32 - tab_bar_height;
-
-        let terminals = self.terminal_manager.active_tab_terminals();
-        let pane_count = terminals.len();
-
-        if pane_count == 0 {
-            return;
-        }
-
-        let focused_id = self.terminal_manager.focused_terminal_id();
         // One lock per pane, held for this frame. Everything below reads the
         // panes through these guards; locking a pane's terminal again here
-        // would deadlock. The rectangles are the ones the terminal manager
-        // sizes each pane's grid to.
-        let rects = self
-            .terminal_manager
-            .active_pane_rects(available_width, available_height);
-        let locked: Vec<(ultty::event_loop::TerminalGuard<'_>, PaneInfo)> = rects
-            .into_iter()
-            .filter_map(|(id, (x, y, w, h))| {
-                let managed = terminals.iter().find(|managed| managed.id == id)?;
-                let is_focused = Some(id) == focused_id;
-                Some((
-                    managed.event_loop.terminal(),
-                    PaneInfo::new(x, y, w, h, is_focused),
-                ))
-            })
-            .collect();
+        // would deadlock.
+        let locked = lock_active_panes(
+            &self.terminal_manager,
+            self.window.inner_size(),
+            self.tab_bar.content_top(),
+        );
+        if locked.is_empty() {
+            return;
+        }
 
         let panes: Vec<(&ultty::grid::Terminal, PaneInfo)> = locked
             .iter()
@@ -240,4 +220,32 @@ impl App {
 
         self.renderer.render_panes(output, &panes, &overlay)
     }
+}
+
+/// Lock every pane of the active tab once, paired with its rectangle and
+/// focus, as the window draws them and as multi-pane screenshots capture
+/// them. The rectangles are the split tree's, the same ones each pane's grid
+/// is sized to. The guards must be the only access to these terminals while
+/// they live: locking one again would deadlock.
+pub(super) fn lock_active_panes(
+    terminal_manager: &TerminalManager,
+    window_size: winit::dpi::PhysicalSize<u32>,
+    tab_bar_height: f32,
+) -> Vec<(TerminalGuard<'_>, PaneInfo)> {
+    let terminals = terminal_manager.active_tab_terminals();
+    let focused_id = terminal_manager.focused_terminal_id();
+    terminal_manager
+        .active_pane_rects(
+            window_size.width as f32,
+            window_size.height as f32 - tab_bar_height,
+        )
+        .into_iter()
+        .filter_map(|(id, (x, y, w, h))| {
+            let managed = terminals.iter().find(|managed| managed.id == id)?;
+            Some((
+                managed.event_loop.terminal(),
+                PaneInfo::new(x, y, w, h, Some(id) == focused_id),
+            ))
+        })
+        .collect()
 }

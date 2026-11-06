@@ -7,7 +7,7 @@
 //! [`encode_rgba_png`]) are free functions so they can be unit-tested
 //! without a GPU context.
 
-use super::{OverlayState, Renderer};
+use super::{OverlayState, PaneInfo, Renderer};
 use crate::grid::Terminal;
 use crate::renderer::Vertex;
 use wgpu::util::DeviceExt;
@@ -78,6 +78,114 @@ pub(crate) fn encode_rgba_png(pixels: &[u8], width: u32, height: u32) -> anyhow:
 }
 
 impl Renderer {
+    /// Offscreen texture (in the surface format and size) a screenshot is
+    /// rendered into, plus its view.
+    fn create_screenshot_texture(&self) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("screenshot_texture"),
+            size: wgpu::Extent3d {
+                width: self.config.width,
+                height: self.config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    }
+
+    /// Finish `encoder` (already holding the draw commands for `texture`),
+    /// copy the texture back to the CPU and encode it as PNG bytes.
+    fn read_back_png(
+        &self,
+        mut encoder: wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+    ) -> anyhow::Result<Vec<u8>> {
+        let width = self.config.width;
+        let height = self.config.height;
+        let bytes_per_pixel = 4u32; // RGBA or BGRA
+        let padded_row =
+            padded_bytes_per_row(width, bytes_per_pixel, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer_size = (padded_row * height) as u64;
+
+        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("screenshot_buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &output_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let buffer_slice = output_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        self.device.poll(wgpu::PollType::wait_indefinitely())?;
+        rx.recv()??;
+
+        let data = buffer_slice.get_mapped_range()?;
+        let is_bgra = matches!(
+            self.config.format,
+            wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
+        );
+        let pixels =
+            unpad_and_convert_pixels(&data, width, height, padded_row, bytes_per_pixel, is_bgra);
+        drop(data);
+        output_buffer.unmap();
+
+        encode_rgba_png(&pixels, width, height)
+    }
+
+    /// Capture a multi-pane screenshot to a PNG file: the same frame the
+    /// window shows for these panes (rectangles, borders, chrome, overlays).
+    pub fn capture_panes_screenshot(
+        &mut self,
+        panes: &[(&Terminal, PaneInfo)],
+        overlay: &OverlayState,
+        path: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let (texture, view) = self.create_screenshot_texture();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("screenshot_panes_encoder"),
+            });
+        self.encode_panes(&mut encoder, &view, panes, overlay);
+        let png_data = self.read_back_png(encoder, &texture)?;
+        std::fs::write(path, &png_data)?;
+        tracing::info!("Screenshot saved to {}", path.display());
+        Ok(())
+    }
+
     fn render_screenshot_vertices(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -215,26 +323,7 @@ impl Renderer {
         path: &std::path::Path,
         native_sessions: &[&crate::protocol::NativeSession],
     ) -> anyhow::Result<()> {
-        let width = self.config.width;
-        let height = self.config.height;
-
-        // Create a texture we can copy from
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("screenshot_texture"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.config.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let (texture, view) = self.create_screenshot_texture();
 
         // Update tab bar height from overlay state
         self.tab_bar_height = overlay
@@ -325,66 +414,7 @@ impl Renderer {
             self.render_main_menu(&mut encoder, &view, tab_bar);
         }
 
-        // Calculate buffer size with proper alignment
-        let bytes_per_pixel = 4u32; // RGBA or BGRA
-        let padded_row =
-            padded_bytes_per_row(width, bytes_per_pixel, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let buffer_size = (padded_row * height) as u64;
-
-        // Create output buffer
-        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("screenshot_buffer"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        // Copy texture to buffer
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &output_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        // Submit and wait
-        self.queue.submit(std::iter::once(encoder.finish()));
-
-        // Map buffer and read data
-        let buffer_slice = output_buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-        self.device.poll(wgpu::PollType::wait_indefinitely())?;
-        rx.recv()??;
-
-        let data = buffer_slice.get_mapped_range()?;
-        let is_bgra = matches!(
-            self.config.format,
-            wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
-        );
-        let pixels =
-            unpad_and_convert_pixels(&data, width, height, padded_row, bytes_per_pixel, is_bgra);
-        drop(data);
-        output_buffer.unmap();
-
-        let png_data = encode_rgba_png(&pixels, width, height)?;
+        let png_data = self.read_back_png(encoder, &texture)?;
         std::fs::write(path, &png_data)?;
 
         tracing::info!("Screenshot saved to {}", path.display());
@@ -407,25 +437,7 @@ impl Renderer {
         overlay: &OverlayState,
         native_sessions: &[&crate::protocol::NativeSession],
     ) -> anyhow::Result<Vec<u8>> {
-        let width = self.config.width;
-        let height = self.config.height;
-
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("screenshot_texture"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.config.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let (texture, view) = self.create_screenshot_texture();
         self.tab_bar_height = overlay
             .tab_bar
             .map_or(crate::tabs::TERMINAL_TOP_PADDING, |tb| tb.content_top());
@@ -504,61 +516,7 @@ impl Renderer {
             self.render_main_menu(&mut encoder, &view, tab_bar);
         }
 
-        let bytes_per_pixel = 4u32;
-        let padded_row =
-            padded_bytes_per_row(width, bytes_per_pixel, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let buffer_size = (padded_row * height) as u64;
-
-        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("screenshot_buffer"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &output_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        self.queue.submit(std::iter::once(encoder.finish()));
-
-        let buffer_slice = output_buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-        self.device.poll(wgpu::PollType::wait_indefinitely())?;
-        rx.recv()??;
-
-        let data = buffer_slice.get_mapped_range()?;
-        let is_bgra = matches!(
-            self.config.format,
-            wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
-        );
-        let pixels =
-            unpad_and_convert_pixels(&data, width, height, padded_row, bytes_per_pixel, is_bgra);
-        drop(data);
-        output_buffer.unmap();
-
-        encode_rgba_png(&pixels, width, height)
+        self.read_back_png(encoder, &texture)
     }
 }
 
