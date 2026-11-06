@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Build
-cargo build --workspace              # Debug build (opt-level=1, deps at opt-level=3)
+cargo build --workspace              # Debug build (opt-level=1, deps at opt-level=3, line-tables debug info)
 cargo build --workspace --release    # Release build (LTO, codegen-units=1, panic=abort)
 
 # Test
