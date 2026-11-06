@@ -7,11 +7,11 @@ use std::borrow::Cow;
 
 use super::{Renderer, Rgba, Vertex};
 use crate::tabs::{
-    TabBarState, TabState, WindowControl, TAB_CLOSE_BUTTON_SIZE, TAB_PADDING, TAB_ROW_HEIGHT,
-    TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH, WINDOW_CONTROLS_WIDTH,
+    TabBarState, TabState, WindowControl, CHROME_BUTTON_SIZE, CHROME_EDGE_INSET,
+    TAB_CLOSE_BUTTON_SIZE, TAB_PADDING, TAB_ROW_HEIGHT, TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH,
+    WINDOW_CONTROLS_WIDTH,
 };
 
-const CHROME_BUTTON_SIZE: f32 = 26.0;
 const CHROME_BUTTON_RADIUS: f32 = 6.0;
 const CHROME_BUTTON_BORDER: f32 = 1.0;
 
@@ -352,7 +352,7 @@ impl Renderer {
 
         // Window control buttons (right side): minimize, maximize, close
         {
-            let controls_start = tab_bar.total_width - WINDOW_CONTROLS_WIDTH;
+            let controls_start = tab_bar.total_width - CHROME_EDGE_INSET - WINDOW_CONTROLS_WIDTH;
             let padding = (WINDOW_CONTROLS_WIDTH - WINDOW_BUTTON_WIDTH * 3.0) / 2.0;
 
             for (i, control) in [
@@ -473,7 +473,7 @@ impl Renderer {
 
         // Render window control button symbols
         {
-            let controls_start = tab_bar.total_width - WINDOW_CONTROLS_WIDTH;
+            let controls_start = tab_bar.total_width - CHROME_EDGE_INSET - WINDOW_CONTROLS_WIDTH;
             let padding = (WINDOW_CONTROLS_WIDTH - WINDOW_BUTTON_WIDTH * 3.0) / 2.0;
 
             for (i, (control, symbol)) in [

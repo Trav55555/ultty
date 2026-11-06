@@ -124,7 +124,7 @@ the window chrome. It captures:
 | Artifact | Purpose |
 |----------|---------|
 | `prompt.png` | Verifies the empty prompt and terminal background render. |
-| `scrollback.png` | Verifies scrollback content and the terminal scrollbar render together. |
+| `scrollback.png` | Verifies scrollback content renders, and that no scrollbar appears at the right edge. |
 | `cursor-underline.png` | Verifies DECSCUSR underline cursor rendering. |
 | `cursor-bar.png` | Verifies DECSCUSR bar cursor rendering. |
 | `selection.txt` | Records the control protocol selection query result for the run. |
@@ -144,7 +144,8 @@ affected the live renderer in that run.
 The smoke runs `scripts/analyze-terminal-surface-screenshots.py` to check that
 the captured terminal surface is nonblank, does not contain the old magenta
 edge artifact, and that the scrollback capture includes visible terminal
-content plus right-edge scrollbar activity.
+content and leaves the right edge as empty as the prompt capture (Ultty draws
+no scrollbar).
 
 ## Native Rich Text Smoke
 

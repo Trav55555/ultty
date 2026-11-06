@@ -419,7 +419,7 @@ impl App {
             ControlRequest::Screenshot { path } => {
                 if let Some(terminal) = self.terminal_manager.focused_terminal() {
                     let term = terminal.event_loop.terminal();
-                    let overlay_state = self.build_screenshot_overlay_state(&term);
+                    let overlay_state = self.build_screenshot_overlay_state();
                     let overlay = overlay_state.as_overlay();
 
                     let native_sessions: Vec<&ultty::protocol::NativeSession> = self

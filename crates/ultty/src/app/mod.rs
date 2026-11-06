@@ -35,14 +35,23 @@ const DEFAULT_HEIGHT: u32 = 600;
 /// Time window for detecting double/triple clicks.
 pub(super) const CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 
-/// Resize grab area outside the window edge, when the compositor reports outside positions.
-const WINDOW_RESIZE_OUTER_HITBOX: f32 = 8.0;
+// Client-side resize zones, in logical pixels (scaled by the window's
+// scale factor). Corners are the most-wanted and most-missed target, so they
+// are generous: the edge band counts as a corner for CORNER_ARM along each
+// edge, and a CORNER_SQUARE at the very corner reaches further in.
 
-/// Resize grab area inside the window edge for client-side decorations.
-const WINDOW_RESIZE_INNER_EDGE_HITBOX: f32 = 8.0;
+/// Width of the resize band just inside each window edge.
+const WINDOW_RESIZE_EDGE_BAND: f32 = 8.0;
 
-/// Length of the inside corner resize grab area along each window edge.
-const WINDOW_RESIZE_INNER_CORNER_HITBOX: f32 = 18.0;
+/// Resize band outside the window edge, for compositors that report
+/// pointer positions there.
+const WINDOW_RESIZE_OUTER_BAND: f32 = 8.0;
+
+/// How far along each edge from a corner the edge band resizes diagonally.
+const WINDOW_RESIZE_CORNER_ARM: f32 = 32.0;
+
+/// Side of the square at each corner that resizes diagonally.
+const WINDOW_RESIZE_CORNER_SQUARE: f32 = 14.0;
 
 /// Rounded corner radius for floating client-side decorated windows.
 const WINDOW_CORNER_RADIUS: f32 = 10.0;
@@ -132,8 +141,6 @@ pub struct App {
     config_watcher: Option<ConfigWatcher>,
     /// Visual bell state (time when bell was triggered, None if not active)
     bell_active_until: Option<Instant>,
-    /// Scrollbar dragging state
-    scrollbar_dragging: bool,
     /// Pane divider dragging state: (divider_index, last_position)
     divider_dragging: Option<(usize, f32)>,
     /// Keyboard shortcuts overlay visible
@@ -315,7 +322,6 @@ impl App {
             url_detector,
             config_watcher,
             bell_active_until: None,
-            scrollbar_dragging: false,
             divider_dragging: None,
             shortcuts_visible: false,
             protocol_status_visible: false,
@@ -896,22 +902,30 @@ impl App {
         }
     }
 
+    /// The client-side resize zone under physical (x, y), if any. Resizing
+    /// wins over the chrome buttons in the edge band, so every corner can
+    /// be grabbed; a maximized or screen-filling window has no zones, which
+    /// keeps its screen-corner close button a full target.
+    pub(super) fn resize_direction_at(&self, x: f32, y: f32) -> Option<ResizeDirection> {
+        let size = self.window.inner_size();
+        let monitor_size = self.window.current_monitor().map(|monitor| monitor.size());
+        if window_should_use_square_corners(size, monitor_size, self.window.is_maximized()) {
+            return None;
+        }
+        resize_direction_at_window_edge(
+            x,
+            y,
+            size.width as f32,
+            size.height as f32,
+            self.window.scale_factor() as f32,
+        )
+    }
+
     /// Update cursor icon when hovering a client-side resize zone.
     fn update_resize_cursor(&mut self) -> bool {
-        let size = self.window.inner_size();
         let x = self.mouse_pos.x as f32;
         let y = self.mouse_pos.y as f32;
-        let w = size.width as f32;
-        let h = size.height as f32;
-
-        if self.tab_bar.visible
-            && (self.tab_bar.is_new_tab_button_at(x, y)
-                || self.tab_bar.window_control_at(x, y).is_some())
-        {
-            return false;
-        }
-
-        let Some(direction) = resize_direction_at_window_edge(x, y, w, h) else {
+        let Some(direction) = self.resize_direction_at(x, y) else {
             return false;
         };
 
@@ -1150,56 +1164,56 @@ fn near_scaled_dimension(value: u32, target: u32, divisor: u32) -> bool {
     (scaled - target).abs() <= tolerance
 }
 
+/// The resize direction for a pointer at physical (x, y) in a window of
+/// physical size (width, height), or None away from the edges.
 fn resize_direction_at_window_edge(
     x: f32,
     y: f32,
     width: f32,
     height: f32,
+    scale: f32,
 ) -> Option<ResizeDirection> {
     if width <= 0.0 || height <= 0.0 {
         return None;
     }
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    let band = WINDOW_RESIZE_EDGE_BAND * scale;
+    let outer = WINDOW_RESIZE_OUTER_BAND * scale;
+    let arm = WINDOW_RESIZE_CORNER_ARM * scale;
+    let square = WINDOW_RESIZE_CORNER_SQUARE * scale;
 
-    let near_left_edge =
-        (-WINDOW_RESIZE_OUTER_HITBOX..=WINDOW_RESIZE_INNER_EDGE_HITBOX).contains(&x);
-    let near_right_edge =
-        (width - WINDOW_RESIZE_INNER_EDGE_HITBOX..=width + WINDOW_RESIZE_OUTER_HITBOX).contains(&x);
-    let near_top_edge =
-        (-WINDOW_RESIZE_OUTER_HITBOX..=WINDOW_RESIZE_INNER_EDGE_HITBOX).contains(&y);
-    let near_bottom_edge = (height - WINDOW_RESIZE_INNER_EDGE_HITBOX
-        ..=height + WINDOW_RESIZE_OUTER_HITBOX)
-        .contains(&y);
+    if x < -outer || y < -outer || x > width + outer || y > height + outer {
+        return None;
+    }
+    // Distance inward from each edge (negative outside the window).
+    let from_left = x;
+    let from_right = width - x;
+    let from_top = y;
+    let from_bottom = height - y;
 
-    let in_left_corner =
-        (-WINDOW_RESIZE_OUTER_HITBOX..=WINDOW_RESIZE_INNER_CORNER_HITBOX).contains(&x);
-    let in_right_corner = (width - WINDOW_RESIZE_INNER_CORNER_HITBOX
-        ..=width + WINDOW_RESIZE_OUTER_HITBOX)
-        .contains(&x);
-    let in_top_corner =
-        (-WINDOW_RESIZE_OUTER_HITBOX..=WINDOW_RESIZE_INNER_CORNER_HITBOX).contains(&y);
-    let in_bottom_corner = (height - WINDOW_RESIZE_INNER_CORNER_HITBOX
-        ..=height + WINDOW_RESIZE_OUTER_HITBOX)
-        .contains(&y);
+    let on_edge = |d: f32| d <= band;
+    let near_corner = |a: f32, b: f32| {
+        (on_edge(a) && b <= arm) || (on_edge(b) && a <= arm) || (a <= square && b <= square)
+    };
 
-    match (
-        near_left_edge,
-        near_right_edge,
-        near_top_edge,
-        near_bottom_edge,
-        in_left_corner,
-        in_right_corner,
-        in_top_corner,
-        in_bottom_corner,
-    ) {
-        (_, _, _, _, true, _, true, _) => Some(ResizeDirection::NorthWest),
-        (_, _, _, _, _, true, true, _) => Some(ResizeDirection::NorthEast),
-        (_, _, _, _, true, _, _, true) => Some(ResizeDirection::SouthWest),
-        (_, _, _, _, _, true, _, true) => Some(ResizeDirection::SouthEast),
-        (true, _, _, _, _, _, _, _) => Some(ResizeDirection::West),
-        (_, true, _, _, _, _, _, _) => Some(ResizeDirection::East),
-        (_, _, true, _, _, _, _, _) => Some(ResizeDirection::North),
-        (_, _, _, true, _, _, _, _) => Some(ResizeDirection::South),
-        _ => None,
+    if near_corner(from_left, from_top) {
+        Some(ResizeDirection::NorthWest)
+    } else if near_corner(from_right, from_top) {
+        Some(ResizeDirection::NorthEast)
+    } else if near_corner(from_left, from_bottom) {
+        Some(ResizeDirection::SouthWest)
+    } else if near_corner(from_right, from_bottom) {
+        Some(ResizeDirection::SouthEast)
+    } else if on_edge(from_left) {
+        Some(ResizeDirection::West)
+    } else if on_edge(from_right) {
+        Some(ResizeDirection::East)
+    } else if on_edge(from_top) {
+        Some(ResizeDirection::North)
+    } else if on_edge(from_bottom) {
+        Some(ResizeDirection::South)
+    } else {
+        None
     }
 }
 
@@ -1305,60 +1319,45 @@ mod tests {
         assert_eq!(MAINTENANCE_POLL_INTERVAL, Duration::from_millis(250));
     }
 
-    #[test]
-    fn resize_hitbox_uses_smaller_inside_edges_and_outside_edges() {
-        assert_eq!(
-            resize_direction_at_window_edge(8.0, 200.0, 800.0, 600.0),
-            Some(ResizeDirection::West)
-        );
-        assert_eq!(
-            resize_direction_at_window_edge(-8.0, 200.0, 800.0, 600.0),
-            Some(ResizeDirection::West)
-        );
-        assert_eq!(
-            resize_direction_at_window_edge(792.0, 200.0, 800.0, 600.0),
-            Some(ResizeDirection::East)
-        );
-        assert_eq!(
-            resize_direction_at_window_edge(808.0, 200.0, 800.0, 600.0),
-            Some(ResizeDirection::East)
-        );
-        assert_eq!(
-            resize_direction_at_window_edge(9.0, 200.0, 800.0, 600.0),
-            None
-        );
+    fn hit(x: f32, y: f32, scale: f32) -> Option<ResizeDirection> {
+        resize_direction_at_window_edge(x, y, 800.0, 600.0, scale)
     }
 
     #[test]
-    fn resize_hitbox_uses_smaller_inside_corners_and_outside_corners() {
-        assert_eq!(
-            resize_direction_at_window_edge(18.0, 8.0, 800.0, 600.0),
-            Some(ResizeDirection::NorthWest)
-        );
-        assert_eq!(
-            resize_direction_at_window_edge(-8.0, -8.0, 800.0, 600.0),
-            Some(ResizeDirection::NorthWest)
-        );
-        assert_eq!(
-            resize_direction_at_window_edge(782.0, 18.0, 800.0, 600.0),
-            Some(ResizeDirection::NorthEast)
-        );
-        assert_eq!(
-            resize_direction_at_window_edge(808.0, -8.0, 800.0, 600.0),
-            Some(ResizeDirection::NorthEast)
-        );
-        assert_eq!(
-            resize_direction_at_window_edge(18.0, 592.0, 800.0, 600.0),
-            Some(ResizeDirection::SouthWest)
-        );
-        assert_eq!(
-            resize_direction_at_window_edge(782.0, 582.0, 800.0, 600.0),
-            Some(ResizeDirection::SouthEast)
-        );
-        assert_eq!(
-            resize_direction_at_window_edge(19.0, 8.0, 800.0, 600.0),
-            Some(ResizeDirection::North)
-        );
+    fn resize_edges_cover_a_band_inside_and_outside_the_window() {
+        assert_eq!(hit(8.0, 300.0, 1.0), Some(ResizeDirection::West));
+        assert_eq!(hit(-8.0, 300.0, 1.0), Some(ResizeDirection::West));
+        assert_eq!(hit(792.0, 300.0, 1.0), Some(ResizeDirection::East));
+        assert_eq!(hit(400.0, 0.0, 1.0), Some(ResizeDirection::North));
+        assert_eq!(hit(400.0, 599.0, 1.0), Some(ResizeDirection::South));
+        assert_eq!(hit(9.0, 300.0, 1.0), None);
+        assert_eq!(hit(-9.0, 300.0, 1.0), None);
+        assert_eq!(hit(400.0, 300.0, 1.0), None);
+    }
+
+    #[test]
+    fn resize_corners_reach_along_both_edges() {
+        // 32 px along the top edge from the top-left corner is still diagonal.
+        assert_eq!(hit(32.0, 4.0, 1.0), Some(ResizeDirection::NorthWest));
+        assert_eq!(hit(4.0, 32.0, 1.0), Some(ResizeDirection::NorthWest));
+        assert_eq!(hit(33.0, 4.0, 1.0), Some(ResizeDirection::North));
+        // The corner square reaches past the edge band.
+        assert_eq!(hit(14.0, 14.0, 1.0), Some(ResizeDirection::NorthWest));
+        assert_eq!(hit(15.0, 15.0, 1.0), None);
+        // Every corner, including outside the window.
+        assert_eq!(hit(780.0, 2.0, 1.0), Some(ResizeDirection::NorthEast));
+        assert_eq!(hit(2.0, 580.0, 1.0), Some(ResizeDirection::SouthWest));
+        assert_eq!(hit(790.0, 590.0, 1.0), Some(ResizeDirection::SouthEast));
+        assert_eq!(hit(806.0, 606.0, 1.0), Some(ResizeDirection::SouthEast));
+    }
+
+    #[test]
+    fn resize_zones_scale_with_the_display() {
+        // At 2x, the 8 px logical band is 16 physical pixels.
+        assert_eq!(hit(16.0, 300.0, 2.0), Some(ResizeDirection::West));
+        assert_eq!(hit(16.0, 300.0, 1.0), None);
+        assert_eq!(hit(64.0, 8.0, 2.0), Some(ResizeDirection::NorthWest));
+        assert_eq!(hit(28.0, 28.0, 2.0), Some(ResizeDirection::NorthWest));
     }
 
     #[test]

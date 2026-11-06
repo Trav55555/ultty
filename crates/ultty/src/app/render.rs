@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use super::update::pipeline_trace_enabled;
 use super::App;
-use ultty::renderer::{OverlayState, ScrollbarState};
+use ultty::renderer::OverlayState;
 
 impl App {
     /// Render the terminal.
@@ -91,15 +91,6 @@ impl App {
             return;
         };
 
-        // Calculate scrollbar state
-        let buffer = terminal.buffer();
-        let dims = terminal.dimensions();
-        let scrollbar = ScrollbarState::new(
-            buffer.total_lines(),
-            dims.rows as usize,
-            buffer.scroll_offset(),
-        );
-
         // Check if bell is still active
         let bell_active = self
             .bell_active_until
@@ -122,11 +113,6 @@ impl App {
             ctrl_held: self.modifiers.control_key(),
             tab_bar: if self.tab_bar.visible {
                 Some(&self.tab_bar)
-            } else {
-                None
-            },
-            scrollbar: if scrollbar.is_visible() {
-                Some(scrollbar)
             } else {
                 None
             },
@@ -232,20 +218,6 @@ impl App {
             .map(|(terminal, pane)| (&**terminal, *pane))
             .collect();
 
-        // Calculate scrollbar state from the focused pane
-        let scrollbar = panes
-            .iter()
-            .find(|(_, pane)| pane.is_focused)
-            .map(|(terminal, _)| {
-                let buffer = terminal.buffer();
-                let dims = terminal.dimensions();
-                ScrollbarState::new(
-                    buffer.total_lines(),
-                    dims.rows as usize,
-                    buffer.scroll_offset(),
-                )
-            });
-
         // Check if bell is still active
         let bell_active = self
             .bell_active_until
@@ -271,7 +243,6 @@ impl App {
             } else {
                 None
             },
-            scrollbar: scrollbar.filter(|s| s.is_visible()),
             bell_active,
             shortcuts_visible: self.shortcuts_visible,
             keybindings: if self.shortcuts_visible {

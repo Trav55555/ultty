@@ -155,14 +155,21 @@ def validate_common(path: Path, label: str) -> list[str]:
     return errors
 
 
-def validate_scrollback(path: Path) -> list[str]:
+# Extra right-edge pixels the scrollback capture may show over the empty
+# prompt capture. The window border is in both; a scrollbar added ~4500.
+RIGHT_EDGE_SLACK = 200
+
+
+def validate_scrollback(path: Path, prompt_path: Path) -> list[str]:
     _, _, rows = parse_png(path)
+    _, _, prompt_rows = parse_png(prompt_path)
     errors = validate_common(path, "scrollback")
 
     if foreground_pixel_count(rows) < 400:
         errors.append("scrollback screenshot does not contain enough terminal content")
-    if right_edge_activity(rows) < 20:
-        errors.append("scrollback screenshot does not show right-edge scrollbar activity")
+    # Ultty has no scrollbar: history must not change the right edge.
+    if right_edge_activity(rows) > right_edge_activity(prompt_rows) + RIGHT_EDGE_SLACK:
+        errors.append("scrollback screenshot shows something at the right edge (a scrollbar?)")
 
     return errors
 
@@ -178,7 +185,7 @@ def main() -> int:
 
     errors = []
     errors.extend(validate_common(args.prompt, "prompt"))
-    errors.extend(validate_scrollback(args.scrollback))
+    errors.extend(validate_scrollback(args.scrollback, args.prompt))
     errors.extend(validate_common(args.cursor_underline, "cursor-underline"))
     errors.extend(validate_common(args.cursor_bar, "cursor-bar"))
     errors.extend(validate_common(args.resize, "resize"))
