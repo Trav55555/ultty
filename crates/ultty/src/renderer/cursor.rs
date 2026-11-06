@@ -8,12 +8,6 @@ use super::{Renderer, Rgba, Vertex};
 const MIN_CURSOR_STROKE: f32 = 2.0;
 const MAX_CURSOR_STROKE: f32 = 3.0;
 const CURSOR_STROKE_RATIO: f32 = 0.16;
-const CURSOR_VERTICAL_INSET_RATIO: f32 = 0.28;
-const MIN_CURSOR_VERTICAL_INSET: f32 = 3.0;
-const MAX_CURSOR_VERTICAL_INSET: f32 = 5.0;
-const CURSOR_DESCENT_BLEED_RATIO: f32 = 0.12;
-const MIN_CURSOR_DESCENT_BLEED: f32 = 1.0;
-const MAX_CURSOR_DESCENT_BLEED: f32 = 2.0;
 
 fn cursor_stroke(size: f32) -> f32 {
     if size <= 0.0 {
@@ -23,39 +17,11 @@ fn cursor_stroke(size: f32) -> f32 {
     (size * CURSOR_STROKE_RATIO).clamp(MIN_CURSOR_STROKE, MAX_CURSOR_STROKE)
 }
 
-fn cursor_vertical_inset(cell_height: f32) -> f32 {
-    if cell_height <= 0.0 {
-        return 0.0;
-    }
-
-    let max_inset = (cell_height * 0.5 - 1.0).max(0.0);
-    let inset = (cell_height * CURSOR_VERTICAL_INSET_RATIO)
-        .round()
-        .clamp(MIN_CURSOR_VERTICAL_INSET, MAX_CURSOR_VERTICAL_INSET);
-
-    inset.min(max_inset)
-}
-
-fn cursor_descent_bleed(cell_height: f32) -> f32 {
-    if cell_height <= 2.0 {
-        return 0.0;
-    }
-
-    let max_bleed = (cell_height * 0.18).floor().max(0.0);
-    let bleed = (cell_height * CURSOR_DESCENT_BLEED_RATIO)
-        .round()
-        .clamp(MIN_CURSOR_DESCENT_BLEED, MAX_CURSOR_DESCENT_BLEED);
-
-    bleed.min(max_bleed)
-}
-
+/// Top and bottom of block and bar cursors: the whole cell, so a block
+/// cursor covers the row's full height rather than looking clipped.
 fn cursor_vertical_bounds(row: u16, cell_height: f32, y_offset: f32) -> (f32, f32) {
     let y0 = row as f32 * cell_height + y_offset;
-    let y1 = y0 + cell_height;
-    let inset = cursor_vertical_inset(cell_height);
-    let bleed = cursor_descent_bleed(cell_height);
-
-    (y0 + inset, y1 + bleed)
+    (y0, y0 + cell_height)
 }
 
 fn emit_cursor_rect(
@@ -214,9 +180,7 @@ mod tests {
     //! The Renderer methods above require a GPU context so we test the
     //! pure arithmetic that computes cursor geometry directly.
 
-    use super::{
-        cursor_descent_bleed, cursor_stroke, cursor_vertical_bounds, cursor_vertical_inset,
-    };
+    use super::{cursor_stroke, cursor_vertical_bounds};
 
     /// Replicate block cursor geometry math from `emit_cursor_block`.
     fn block_geometry(
@@ -353,8 +317,8 @@ mod tests {
     fn bar_position_at_origin() {
         let (x0, y0, x1, y1) = bar_geometry(0, 0, 10.0, 20.0, 0.0);
         assert_eq!(x0, 0.0);
-        assert_eq!(y0, 5.0);
-        assert_eq!(y1, 22.0);
+        assert_eq!(y0, 0.0);
+        assert_eq!(y1, 20.0);
         assert!((x1 - 2.0).abs() < 1e-5);
     }
 
@@ -373,21 +337,16 @@ mod tests {
     }
 
     #[test]
-    fn bar_bleeds_below_cell() {
+    fn bar_fills_its_cell_height() {
         let (_, y0, _, y1) = bar_geometry(3, 7, 8.0, 16.0, 0.0);
-        assert_eq!(y0, 116.0);
-        assert_eq!(y1, 130.0);
-        assert!(y1 > 128.0);
+        assert_eq!((y0, y1), (112.0, 128.0));
     }
 
     #[test]
-    fn block_bleeds_below_cell() {
+    fn block_fills_its_cell() {
         let (x0, y0, x1, y1) = block_geometry(3, 7, 8.0, 16.0, 0.0);
-        assert_eq!(x0, 24.0);
-        assert_eq!(x1, 32.0);
-        assert_eq!(y0, 116.0);
-        assert_eq!(y1, 130.0);
-        assert!(y1 > 128.0);
+        assert_eq!((x0, x1), (24.0, 32.0));
+        assert_eq!((y0, y1), (112.0, 128.0));
     }
 
     #[test]
@@ -402,8 +361,8 @@ mod tests {
     fn bar_with_offset_shifts_position() {
         let (x0, y0, _, y1) = bar_with_offset_geometry(0, 0, 10.0, 20.0, 50.0, 100.0);
         assert_eq!(x0, 50.0);
-        assert_eq!(y0, 105.0);
-        assert_eq!(y1, 122.0);
+        assert_eq!(y0, 100.0);
+        assert_eq!(y1, 120.0);
     }
 
     #[test]
@@ -411,8 +370,8 @@ mod tests {
         let (x0, y0, x1, y1) = block_with_offset_geometry(0, 0, 10.0, 20.0, 50.0, 100.0);
         assert_eq!(x0, 50.0);
         assert_eq!(x1, 60.0);
-        assert_eq!(y0, 105.0);
-        assert_eq!(y1, 122.0);
+        assert_eq!(y0, 100.0);
+        assert_eq!(y1, 120.0);
     }
 
     #[test]
@@ -449,30 +408,9 @@ mod tests {
     }
 
     #[test]
-    fn cursor_vertical_inset_is_bounded() {
-        assert_eq!(cursor_vertical_inset(0.0), 0.0);
-        assert_eq!(cursor_vertical_inset(2.0), 0.0);
-        assert_eq!(cursor_vertical_inset(8.0), 3.0);
-        assert_eq!(cursor_vertical_inset(16.0), 4.0);
-        assert_eq!(cursor_vertical_inset(100.0), 5.0);
-    }
-
-    #[test]
-    fn cursor_descent_bleed_is_bounded() {
-        assert_eq!(cursor_descent_bleed(0.0), 0.0);
-        assert_eq!(cursor_descent_bleed(2.0), 0.0);
-        assert_eq!(cursor_descent_bleed(8.0), 1.0);
-        assert_eq!(cursor_descent_bleed(16.0), 2.0);
-        assert_eq!(cursor_descent_bleed(100.0), 2.0);
-    }
-
-    #[test]
-    fn block_cursor_keeps_a_small_descender_bleed_for_default_font_cells() {
+    fn block_cursor_spans_the_row_below_the_bar() {
+        // Row 0 under a 72 px bar with 17 px cells.
         let (_, y0, _, y1) = block_geometry(0, 0, 9.0, 17.0, 72.0);
-
-        assert_eq!(y0, 77.0);
-        assert_eq!(y1, 91.0);
-        assert!(y1 > 72.0 + 17.0);
-        assert!(y1 - (72.0 + 17.0) <= 2.0);
+        assert_eq!((y0, y1), (72.0, 89.0));
     }
 }
