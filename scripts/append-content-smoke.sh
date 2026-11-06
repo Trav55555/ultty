@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+NATIVE_BIN_DIR="${NATIVE_BIN_DIR:-$(pwd)/target/debug}"
+[ -x "$NATIVE_BIN_DIR/append-content-smoke" ] || { echo "append-content-smoke not built: cargo build -p hello-native --bins" >&2; exit 2; }
+
 OUT_DIR="${1:-/tmp/ultty-append-content-smoke}"
 ULTTYCTL="${ULTTYCTL:-target/debug/ulttyctl}"
 
@@ -59,7 +62,9 @@ cleanup() {
 trap cleanup EXIT
 normalize_tabs
 
-ctl new-tab cargo run -p hello-native --bin append-content-smoke >/dev/null
+# Run the prebuilt binary: `cargo run` inside the tab may rebuild (a
+# different environment invalidates the cache), outlasting the wait below.
+ctl new-tab "$NATIVE_BIN_DIR/append-content-smoke" >/dev/null
 sleep 1.0
 ctl screenshot "$OUT_DIR/before-append.png" >/dev/null
 assert_png "$OUT_DIR/before-append.png"
