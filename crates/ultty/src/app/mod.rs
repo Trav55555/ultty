@@ -182,7 +182,8 @@ pub struct App {
     /// Accumulated pixel scroll delta for smooth scrolling on Wayland/HiDPI
     scroll_pixel_accum: f64,
     scroll_line_accum: f64,
-    /// HiDPI scale factor (physical pixels / logical pixels)
+    /// HiDPI scale factor (physical pixels / logical pixels); kept in step
+    /// with the window by `WindowEvent::ScaleFactorChanged`.
     scale_factor: f32,
     /// The minimum inner size last sent to the window.
     min_window_size: Option<PhysicalSize<u32>>,
@@ -255,9 +256,13 @@ impl App {
         // Set window opacity
         renderer.set_opacity(config.behavior.opacity);
 
-        // Tab bar is always visible (CSD), set its height before sizing the terminal
-        renderer
-            .set_tab_bar_height(ultty::tabs::TAB_BAR_HEIGHT + ultty::tabs::TERMINAL_TOP_PADDING);
+        // Create tab bar state at the window's scale. It is always visible
+        // (CSD), so set its height before sizing the terminal.
+        let mut tab_bar = TabBarState::new();
+        tab_bar.scale = scale_factor;
+        // The title types itself out at launch, starting from `->>>_`.
+        tab_bar.title_letters = 0;
+        renderer.set_tab_bar_height(tab_bar.content_top());
 
         // Get terminal dimensions from renderer
         let (cols, rows) = renderer.terminal_dimensions();
@@ -290,11 +295,6 @@ impl App {
 
         // Create URL detector
         let url_detector = UrlDetector::new(config.behavior.url_detection);
-
-        // Create tab bar state
-        let mut tab_bar = TabBarState::new();
-        // The title types itself out at launch, starting from `->>>_`.
-        tab_bar.title_letters = 0;
 
         // Create config watcher for hot-reload
         let config_watcher = ConfigWatcher::new();
@@ -1139,6 +1139,31 @@ impl App {
         if let Err(e) = self.terminal_manager.layout_panes(area) {
             tracing::warn!("Failed to resize terminals: {}", e);
         }
+    }
+
+    /// The window moved to a display with another scale factor, or the
+    /// display's scaling changed. Rescales the chrome and the font; winit
+    /// follows this with a `Resized` event that resizes the surface.
+    fn handle_scale_factor_changed(&mut self, scale_factor: f32) {
+        if scale_factor <= 0.0 || (scale_factor - self.scale_factor).abs() < f32::EPSILON {
+            return;
+        }
+        // Keep any zoom the user applied: the font stays the same size in
+        // logical points.
+        let font_size = self.renderer.font_size() / self.scale_factor * scale_factor;
+        tracing::info!(
+            "Scale factor {} -> {}, font size {:.1}px",
+            self.scale_factor,
+            scale_factor,
+            font_size
+        );
+        self.scale_factor = scale_factor;
+        self.tab_bar.scale = scale_factor;
+        self.renderer.set_font_size(font_size);
+        self.update_tab_bar();
+        // Cell size changed: re-size every pane's grid.
+        self.relayout_terminals();
+        self.needs_redraw = true;
     }
 
     fn handle_resize(&mut self, size: PhysicalSize<u32>) {

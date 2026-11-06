@@ -1,16 +1,21 @@
 //! Tab bar state and rendering helpers.
 //!
 //! This module provides the data structures for rendering a tab bar UI.
+//!
+//! The geometry constants below are logical pixels. [`TabBarState`] holds the
+//! window's scale factor and turns them into physical pixels through its
+//! accessors ([`TabBarState::title_bar_height`] and friends), so hit testing,
+//! layout and drawing all agree on one scale.
 
 use crate::terminal_manager::{Tab, TabId};
 
-/// Height of the window control band in pixels (at default scale).
+/// Height of the window control band in logical pixels.
 pub const TITLE_BAR_HEIGHT: f32 = 44.0;
 
-/// Height of the tab row in pixels (at default scale).
+/// Height of the tab row in logical pixels.
 pub const TAB_ROW_HEIGHT: f32 = 28.0;
 
-/// Height of the complete chrome area in pixels (at default scale).
+/// Height of the complete chrome area in logical pixels.
 pub const TAB_BAR_HEIGHT: f32 = TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT;
 
 /// Gap between the bar and the first terminal row, in the terminal's
@@ -101,11 +106,14 @@ pub struct MenuLayout {
     pub y: f32,
     pub width: f32,
     pub item_height: f32,
+    /// Space above the first and below the last item ([`MENU_PADDING`],
+    /// scaled).
+    pub padding: f32,
 }
 
 impl MenuLayout {
     pub fn height(&self) -> f32 {
-        self.item_height * MenuItem::ALL.len() as f32 + 2.0 * MENU_PADDING
+        self.item_height * MenuItem::ALL.len() as f32 + 2.0 * self.padding
     }
 
     /// The item under (x, y), if any.
@@ -113,7 +121,7 @@ impl MenuLayout {
         if x < self.x || x >= self.x + self.width {
             return None;
         }
-        let offset = y - self.y - MENU_PADDING;
+        let offset = y - self.y - self.padding;
         if offset < 0.0 || self.item_height <= 0.0 {
             return None;
         }
@@ -208,6 +216,9 @@ pub struct TabBarState {
     pub menu_open: bool,
     /// The menu item under the pointer.
     pub hovered_menu_item: Option<MenuItem>,
+    /// The window's scale factor: physical pixels per logical pixel. All of
+    /// the bar's geometry is the logical constants times this.
+    pub scale: f32,
 }
 
 impl TabBarState {
@@ -231,7 +242,54 @@ impl TabBarState {
             title_letters: TITLE_WORD_LETTERS,
             menu_open: false,
             hovered_menu_item: None,
+            scale: 1.0,
         }
+    }
+
+    /// `logical` pixels at the bar's scale.
+    pub fn scaled(&self, logical: f32) -> f32 {
+        logical * self.scale
+    }
+
+    /// Height of the title band. Bar heights are rounded to whole pixels so
+    /// the terminal below starts on a pixel boundary at any scale.
+    pub fn title_bar_height(&self) -> f32 {
+        self.scaled(TITLE_BAR_HEIGHT).round()
+    }
+
+    /// Height of the tab row.
+    pub fn tab_row_height(&self) -> f32 {
+        self.scaled(TAB_ROW_HEIGHT).round()
+    }
+
+    /// Gap between the bar and the first terminal row.
+    pub fn terminal_top_padding(&self) -> f32 {
+        self.scaled(TERMINAL_TOP_PADDING).round()
+    }
+
+    /// Width of each title-band button slot.
+    pub fn window_button_width(&self) -> f32 {
+        self.scaled(WINDOW_BUTTON_WIDTH)
+    }
+
+    /// Side of the visible square drawn for each chrome button.
+    pub fn chrome_button_size(&self) -> f32 {
+        self.scaled(CHROME_BUTTON_SIZE)
+    }
+
+    /// Gap between the window edge and the nearest chrome button's slot.
+    pub fn chrome_edge_inset(&self) -> f32 {
+        self.scaled(CHROME_EDGE_INSET)
+    }
+
+    /// Width of the "+" target at the end of the tab row.
+    pub fn new_tab_button_width(&self) -> f32 {
+        self.tab_row_height()
+    }
+
+    /// Minimum tab width.
+    pub fn min_tab_width(&self) -> f32 {
+        self.scaled(MIN_TAB_WIDTH)
     }
 
     /// Update the tab bar state from terminal manager tabs.
@@ -283,12 +341,13 @@ impl TabBarState {
         // [minimize][maximize][close] (see title_buttons). The tab row holds
         // the tabs, then "+" right after the last one.
         let tabs_start_x = 0.0;
-        let usable_width = (total_width - Self::NEW_TAB_BUTTON_WIDTH).max(0.0);
+        let usable_width = (total_width - self.new_tab_button_width()).max(0.0);
         let ideal_width = usable_width / tab_count as f32;
+        let min_tab_width = self.min_tab_width();
         let tab_width = tab_width_override
             .filter(|width| width.is_finite() && *width > 0.0)
-            .map(|width| width.max(MIN_TAB_WIDTH))
-            .unwrap_or_else(|| ideal_width.max(MIN_TAB_WIDTH));
+            .map(|width| width.max(min_tab_width))
+            .unwrap_or_else(|| ideal_width.max(min_tab_width));
 
         let mut x = tabs_start_x;
         for (index, tab) in tabs.iter().enumerate() {
@@ -307,42 +366,46 @@ impl TabBarState {
                 width: tab_width,
                 is_active,
                 is_hovered: self.hovered_tab == Some(index),
+                scale: self.scale,
             });
 
             x += tab_width;
         }
         // In the tab row, "+" follows the last tab (clamped inside the
         // window when tabs overflow it).
-        self.new_tab_button_x = x.min(total_width - Self::NEW_TAB_BUTTON_WIDTH).max(0.0);
+        self.new_tab_button_x = x.min(total_width - self.new_tab_button_width()).max(0.0);
     }
 
-    /// Width of the "+" target at the end of the tab row.
+    /// Width of the "+" target at the end of the tab row, in logical pixels;
+    /// see [`Self::new_tab_button_width`].
     pub const NEW_TAB_BUTTON_WIDTH: f32 = TAB_ROW_HEIGHT;
 
-    /// Title-band buttons and the x of each one's slot (WINDOW_BUTTON_WIDTH
-    /// wide), left to right. The one source of this layout: hit testing,
-    /// hover and drawing all read it.
+    /// Title-band buttons and the x of each one's slot
+    /// ([`Self::window_button_width`] wide), left to right. The one source of
+    /// this layout: hit testing, hover and drawing all read it.
     pub fn title_buttons(&self) -> Vec<(TitleButton, f32)> {
-        let mut x = self.total_width - CHROME_EDGE_INSET;
+        let slot_width = self.window_button_width();
+        let inset = self.chrome_edge_inset();
+        let mut x = self.total_width - inset;
         let mut slots = Vec::with_capacity(6);
         for button in [
             TitleButton::Close,
             TitleButton::Maximize,
             TitleButton::Minimize,
         ] {
-            x -= WINDOW_BUTTON_WIDTH;
+            x -= slot_width;
             slots.push((button, x));
         }
-        x -= TITLE_GROUP_GAP;
+        x -= self.scaled(TITLE_GROUP_GAP);
         let mut left = vec![TitleButton::SplitDown, TitleButton::SplitRight];
         if !self.shows_tab_row() {
             left.push(TitleButton::NewTab);
         }
         for button in left {
-            x -= WINDOW_BUTTON_WIDTH;
+            x -= slot_width;
             slots.push((button, x));
         }
-        slots.push((TitleButton::Menu, CHROME_EDGE_INSET));
+        slots.push((TitleButton::Menu, inset));
         slots.reverse();
         slots
     }
@@ -358,7 +421,8 @@ impl TabBarState {
                 .map_or(0, |b| " git:()".len() + b.chars().count());
         let for_location = (location_chars as f32 + 10.0) * cell_width;
         // Menu button and the `->>> ultty_` logo, plus the right-hand buttons.
-        let logo_end = CHROME_EDGE_INSET + 2.0 * WINDOW_BUTTON_WIDTH + 13.0 * cell_width;
+        let logo_end =
+            self.chrome_edge_inset() + 2.0 * self.window_button_width() + 13.0 * cell_width;
         let right_buttons = self.total_width - self.title_buttons_start();
         let for_chrome = logo_end + right_buttons;
         let height = self.content_top() + 3.0 * cell_height;
@@ -373,18 +437,23 @@ impl TabBarState {
             .map(|item| item.label().chars().count())
             .max()
             .unwrap_or(0) as f32;
-        let button_left = CHROME_EDGE_INSET + (WINDOW_BUTTON_WIDTH - CHROME_BUTTON_SIZE) / 2.0;
+        let button_left = self.chrome_edge_inset()
+            + (self.window_button_width() - self.chrome_button_size()) / 2.0;
         MenuLayout {
             x: button_left,
-            y: TITLE_BAR_HEIGHT - 4.0,
+            y: self.title_bar_height() - self.scaled(4.0),
             width: (longest + 4.0) * cell_width,
-            item_height: (cell_height + 12.0).round(),
+            item_height: (cell_height + self.scaled(12.0)).round(),
+            padding: self.scaled(MENU_PADDING),
         }
     }
 
     /// x of the separator between the split buttons and the window controls.
     pub fn title_group_separator_x(&self) -> f32 {
-        self.total_width - CHROME_EDGE_INSET - 3.0 * WINDOW_BUTTON_WIDTH - TITLE_GROUP_GAP / 2.0
+        self.total_width
+            - self.chrome_edge_inset()
+            - 3.0 * self.window_button_width()
+            - self.scaled(TITLE_GROUP_GAP) / 2.0
     }
 
     /// Left edge of the right-hand title-band buttons; title text must end
@@ -418,9 +487,9 @@ impl TabBarState {
             return false;
         }
         if self.shows_tab_row() {
-            (TITLE_BAR_HEIGHT..TAB_BAR_HEIGHT).contains(&y)
+            self.in_tab_row(y)
                 && x >= self.new_tab_button_x
-                && x < self.new_tab_button_x + Self::NEW_TAB_BUTTON_WIDTH
+                && x < self.new_tab_button_x + self.new_tab_button_width()
         } else {
             self.title_button_at(x, y) == Some(TitleButton::NewTab)
         }
@@ -429,19 +498,20 @@ impl TabBarState {
     /// Check if a click at (x, y) is in the title band area that toggles maximize on double click.
     pub fn is_title_bar_toggle_area(&self, x: f32, y: f32) -> bool {
         self.visible
-            && (0.0..TITLE_BAR_HEIGHT).contains(&y)
+            && (0.0..self.title_bar_height()).contains(&y)
             && !self.is_new_tab_button_at(x, y)
             && self.title_button_at(x, y).is_none()
     }
 
     /// The title-band button at (x, y), if any.
     pub fn title_button_at(&self, x: f32, y: f32) -> Option<TitleButton> {
-        if !self.visible || !(0.0..TITLE_BAR_HEIGHT).contains(&y) {
+        if !self.visible || !(0.0..self.title_bar_height()).contains(&y) {
             return None;
         }
+        let slot_width = self.window_button_width();
         self.title_buttons()
             .into_iter()
-            .find(|(_, slot_x)| (*slot_x..*slot_x + WINDOW_BUTTON_WIDTH).contains(&x))
+            .find(|(_, slot_x)| (*slot_x..*slot_x + slot_width).contains(&x))
             .map(|(button, _)| button)
     }
 
@@ -458,7 +528,7 @@ impl TabBarState {
         if self.is_new_tab_button_at(x, y) {
             return false;
         }
-        if y < TITLE_BAR_HEIGHT || !self.shows_tab_row() {
+        if y < self.title_bar_height() || !self.shows_tab_row() {
             return true;
         }
         // Not on a tab
@@ -478,7 +548,7 @@ impl TabBarState {
             return;
         }
 
-        self.hovered_tab = if self.shows_tab_row() && y >= TITLE_BAR_HEIGHT {
+        self.hovered_tab = if self.shows_tab_row() && y >= self.title_bar_height() {
             self.tab_at_x(x)
         } else {
             None
@@ -495,26 +565,30 @@ impl TabBarState {
 
     /// Check if a click at (x, y) is on the close button of a tab.
     pub fn close_button_at(&self, x: f32, y: f32) -> Option<usize> {
-        if !self.visible
-            || !self.shows_tab_row()
-            || !(TITLE_BAR_HEIGHT..TAB_BAR_HEIGHT).contains(&y)
-        {
+        if !self.visible || !self.shows_tab_row() || !self.in_tab_row(y) {
             return None;
         }
 
+        let close_size = self.scaled(TAB_CLOSE_BUTTON_SIZE);
         for (index, tab) in self.tabs.iter().enumerate() {
             let close_x = tab.close_button_x();
-            if x >= close_x && x < close_x + TAB_CLOSE_BUTTON_SIZE {
+            if x >= close_x && x < close_x + close_size {
                 return Some(index);
             }
         }
         None
     }
 
+    /// Whether `y` falls in the tab row's band (whether or not it shows).
+    fn in_tab_row(&self, y: f32) -> bool {
+        let top = self.title_bar_height();
+        (top..top + self.tab_row_height()).contains(&y)
+    }
+
     /// Where the terminal content starts: below the bar plus
-    /// [`TERMINAL_TOP_PADDING`]. Chrome hit tests use [`Self::height`].
+    /// [`Self::terminal_top_padding`]. Chrome hit tests use [`Self::height`].
     pub fn content_top(&self) -> f32 {
-        self.height() + TERMINAL_TOP_PADDING
+        self.height() + self.terminal_top_padding()
     }
 
     /// Height of the bar: the title band, plus the tab row when it shows
@@ -523,9 +597,9 @@ impl TabBarState {
         if !self.visible {
             0.0
         } else if self.shows_tab_row() {
-            TAB_BAR_HEIGHT
+            self.title_bar_height() + self.tab_row_height()
         } else {
-            TITLE_BAR_HEIGHT
+            self.title_bar_height()
         }
     }
 
@@ -600,43 +674,63 @@ pub struct TabState {
     pub is_active: bool,
     /// Whether this tab is hovered
     pub is_hovered: bool,
+    /// The bar's scale factor, copied from [`TabBarState::scale`].
+    pub scale: f32,
 }
 
 impl TabState {
+    /// `logical` pixels at the tab's scale.
+    fn scaled(&self, logical: f32) -> f32 {
+        logical * self.scale
+    }
+
+    /// Top of the tab row (the title band's height, rounded as
+    /// [`TabBarState::title_bar_height`] rounds it).
+    fn row_top(&self) -> f32 {
+        self.scaled(TITLE_BAR_HEIGHT).round()
+    }
+
+    /// Height of the tab row.
+    fn row_height(&self) -> f32 {
+        self.scaled(TAB_ROW_HEIGHT).round()
+    }
+
     /// Get the bounds of this tab.
     pub fn bounds(&self) -> (f32, f32, f32, f32) {
-        (self.x, TITLE_BAR_HEIGHT, self.width, TAB_ROW_HEIGHT)
+        (self.x, self.row_top(), self.width, self.row_height())
     }
 
     /// Get the text rendering position.
     pub fn text_position(&self) -> (f32, f32) {
         (
-            self.x + TAB_PADDING,
-            TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT / 2.0 - 6.0,
+            self.x + self.scaled(TAB_PADDING),
+            self.row_top() + self.row_height() / 2.0 - self.scaled(6.0),
         )
     }
 
     /// Get the maximum text width.
     pub fn max_text_width(&self) -> f32 {
         // Leave space for close button
-        self.width - TAB_PADDING - TAB_CLOSE_EDGE_PADDING - TAB_CLOSE_BUTTON_SIZE - 4.0
+        self.width
+            - self.scaled(TAB_PADDING)
+            - self.scaled(TAB_CLOSE_EDGE_PADDING)
+            - self.scaled(TAB_CLOSE_BUTTON_SIZE)
+            - self.scaled(4.0)
     }
 
     /// Get the close button's left edge.
     pub fn close_button_x(&self) -> f32 {
-        self.x + self.width - TAB_CLOSE_EDGE_PADDING - TAB_CLOSE_BUTTON_SIZE
+        self.x + self.width
+            - self.scaled(TAB_CLOSE_EDGE_PADDING)
+            - self.scaled(TAB_CLOSE_BUTTON_SIZE)
     }
 
     /// Get the close hover affordance bounds.
     pub fn close_hover_bounds(&self) -> (f32, f32, f32, f32) {
-        let center_x = self.close_button_x() + TAB_CLOSE_BUTTON_SIZE / 2.0;
-        let center_y = TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT / 2.0;
-        (
-            center_x - TAB_CLOSE_HOVER_SIZE / 2.0,
-            center_y - TAB_CLOSE_HOVER_SIZE / 2.0,
-            TAB_CLOSE_HOVER_SIZE,
-            TAB_CLOSE_HOVER_SIZE,
-        )
+        let center_x = self.close_button_x() + self.scaled(TAB_CLOSE_BUTTON_SIZE) / 2.0;
+        let center_y = self.row_top() + self.row_height() / 2.0;
+        let size = self.scaled(TAB_CLOSE_HOVER_SIZE);
+        (center_x - size / 2.0, center_y - size / 2.0, size, size)
     }
 }
 
@@ -871,8 +965,132 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
+    // Scale factor
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn scale_one_matches_the_logical_constants() {
+        let single = bar_with(1, 0, 800.0);
+        assert_eq!(single.title_bar_height(), 44.0);
+        assert_eq!(single.height(), 44.0);
+        assert_eq!(single.content_top(), 48.0);
+        let multi = bar_with(2, 0, 800.0);
+        assert_eq!(multi.height(), 72.0);
+        assert_eq!(multi.content_top(), 76.0);
+        assert_eq!(multi.window_button_width(), 38.0);
+        assert_eq!(multi.chrome_edge_inset(), 5.0);
+        assert_eq!(multi.tabs[0].close_button_x(), multi.tabs[0].width - 26.0);
+    }
+
+    #[test]
+    fn scale_two_doubles_the_bar() {
+        let single = scaled_bar_with(1, 1600.0, 2.0);
+        assert_eq!(single.height(), 88.0);
+        assert_eq!(single.content_top(), 96.0);
+        let multi = scaled_bar_with(2, 1600.0, 2.0);
+        assert_eq!(multi.height(), 144.0);
+        assert_eq!(multi.content_top(), 152.0);
+        assert_eq!(
+            multi.tabs[0].bounds(),
+            (0.0, 88.0, multi.tabs[0].width, 56.0)
+        );
+        assert_eq!(
+            multi.tabs[0].width,
+            (1600.0 - multi.new_tab_button_width()) / 2.0
+        );
+        assert_eq!(multi.new_tab_button_width(), 56.0);
+    }
+
+    #[test]
+    fn scale_two_doubles_every_title_button_slot() {
+        let one = bar_with(2, 0, 800.0);
+        let two = scaled_bar_with(2, 1600.0, 2.0);
+        let doubled: Vec<(TitleButton, f32)> = one
+            .title_buttons()
+            .into_iter()
+            .map(|(button, x)| (button, x * 2.0))
+            .collect();
+        assert_eq!(two.title_buttons(), doubled);
+        assert_eq!(
+            two.title_group_separator_x(),
+            one.title_group_separator_x() * 2.0
+        );
+        assert_eq!(two.title_buttons_start(), one.title_buttons_start() * 2.0);
+    }
+
+    #[test]
+    fn scale_two_hit_tests_follow_the_doubled_geometry() {
+        let state = scaled_bar_with(2, 1600.0, 2.0);
+        let close_x = slot(&state, TitleButton::Close);
+        // Below the 1x band but inside the 2x one.
+        assert_eq!(
+            state.title_button_at(close_x + 70.0, 80.0),
+            Some(TitleButton::Close)
+        );
+        assert_eq!(state.title_button_at(close_x + 1.0, 88.0), None);
+        assert_eq!(state.tab_at_x(10.0), Some(0));
+        assert!(state.is_drag_area(800.0, 80.0));
+        assert!(!state.is_drag_area(10.0, 100.0));
+
+        let tab = &state.tabs[1];
+        let close = tab.close_button_x();
+        assert_eq!(close, tab.x + tab.width - 52.0);
+        assert_eq!(state.close_button_at(close + 30.0, 140.0), Some(1));
+        assert_eq!(state.close_button_at(close + 36.0, 140.0), None);
+        assert_eq!(state.close_button_at(close + 30.0, 144.0), None);
+
+        let plus = state.new_tab_button_x;
+        assert!(state.is_new_tab_button_at(plus + 50.0, 100.0));
+        assert!(!state.is_new_tab_button_at(plus + 50.0, 80.0));
+
+        let single = scaled_bar_with(1, 1600.0, 2.0);
+        let plus = slot(&single, TitleButton::NewTab);
+        assert!(single.is_new_tab_button_at(plus + 70.0, 80.0));
+    }
+
+    #[test]
+    fn scale_two_scales_the_menu_and_min_window_size() {
+        let one = bar_with(1, 0, 800.0);
+        let two = scaled_bar_with(1, 1600.0, 2.0);
+        // Cell metrics are physical already, so they double with the font.
+        let layout_one = one.menu_layout(8.0, 16.0);
+        let layout_two = two.menu_layout(16.0, 32.0);
+        assert_eq!(layout_two.x, layout_one.x * 2.0);
+        assert_eq!(layout_two.y, layout_one.y * 2.0);
+        assert_eq!(layout_two.width, layout_one.width * 2.0);
+        assert_eq!(layout_two.item_height, layout_one.item_height * 2.0);
+        assert_eq!(layout_two.height(), layout_one.height() * 2.0);
+        let last = MenuItem::ALL.len() as f32 - 0.5;
+        let y = layout_two.y + layout_two.padding + last * layout_two.item_height;
+        assert_eq!(
+            layout_two.item_at(layout_two.x + 1.0, y),
+            Some(MenuItem::About)
+        );
+
+        let (w1, h1) = one.min_window_size(8.0, 16.0);
+        let (w2, h2) = two.min_window_size(16.0, 32.0);
+        assert_eq!((w2, h2), (w1 * 2.0, h1 * 2.0));
+    }
+
+    #[test]
+    fn fractional_scale_keeps_the_bar_on_whole_pixels() {
+        let state = scaled_bar_with(2, 1000.0, 1.1);
+        assert_eq!(state.title_bar_height(), 48.0);
+        assert_eq!(state.height(), 48.0 + 31.0);
+        assert_eq!(state.content_top(), 48.0 + 31.0 + 4.0);
+    }
+
+    // ---------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------
+
+    /// A bar at `scale` updated with `count` tabs, the first one active.
+    fn scaled_bar_with(count: usize, width: f32, scale: f32) -> TabBarState {
+        let mut state = TabBarState::new();
+        state.scale = scale;
+        state.update(&make_tabs(count), TabId::new(0), width);
+        state
+    }
 
     fn make_tabs(count: usize) -> Vec<Tab> {
         (0..count)

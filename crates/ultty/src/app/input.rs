@@ -7,7 +7,6 @@ use ultty::config::KeybindingConfig;
 use ultty::grid::{
     MouseButton as TerminalMouseButton, MouseModifiers, SelectionMode, SelectionPoint,
 };
-use ultty::tabs::TITLE_BAR_HEIGHT;
 use ultty::terminal_manager::SplitDirection;
 use ultty::url::UrlDetector;
 use ultty::vim::CopyModeResult;
@@ -33,6 +32,9 @@ impl App {
             }
             WindowEvent::Resized(size) => {
                 self.handle_resize(size);
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.handle_scale_factor_changed(scale_factor as f32);
             }
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
@@ -272,7 +274,8 @@ impl App {
                         }
                     }
 
-                    let is_tab_row = self.tab_bar.shows_tab_row() && y >= TITLE_BAR_HEIGHT;
+                    let is_tab_row =
+                        self.tab_bar.shows_tab_row() && y >= self.tab_bar.title_bar_height();
 
                     // Middle click closes tab
                     if button == MouseButton::Middle && is_tab_row {
