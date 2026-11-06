@@ -73,6 +73,31 @@ impl TestTerminal {
         })
     }
 
+    /// A test terminal running a shell without the user's configuration:
+    /// `bash --norc --noprofile -i`, or `sh -i` where bash is missing.
+    ///
+    /// Use this for checks of terminal behavior. [`TestTerminal::with_size`]
+    /// runs the user's `$SHELL` with its rc files, whose startup time,
+    /// asynchronous prompts, and typeahead handling vary by machine; some
+    /// setups drop keystrokes typed while the shell starts.
+    pub fn hermetic(cols: u16, rows: u16) -> std::io::Result<Self> {
+        let event_loop = if std::path::Path::new("/bin/bash").exists() {
+            EventLoop::with_command(
+                "/bin/bash",
+                &["/bin/bash", "--norc", "--noprofile", "-i"],
+                cols,
+                rows,
+            )?
+        } else {
+            EventLoop::with_command("/bin/sh", &["/bin/sh", "-i"], cols, rows)?
+        };
+        Ok(Self {
+            event_loop,
+            cols,
+            rows,
+        })
+    }
+
     /// Create a test terminal in a specific working directory.
     pub fn with_dir(cols: u16, rows: u16, working_dir: &str) -> std::io::Result<Self> {
         let event_loop = EventLoop::new_with_dir(cols, rows, working_dir)?;
