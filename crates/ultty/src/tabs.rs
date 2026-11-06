@@ -52,9 +52,89 @@ pub const CHROME_EDGE_INSET: f32 = (WINDOW_BUTTON_WIDTH - CHROME_BUTTON_SIZE) / 
 /// CHROME_BUTTON_SIZE, so neighbouring buttons sit 10 px apart.
 pub const WINDOW_BUTTON_WIDTH: f32 = 38.0;
 
+/// An entry in the main menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuItem {
+    NewTab,
+    NewWindow,
+    SplitRight,
+    SplitDown,
+    Settings,
+    Shortcuts,
+    About,
+}
+
+impl MenuItem {
+    /// Menu order, top to bottom.
+    pub const ALL: [MenuItem; 7] = [
+        MenuItem::NewTab,
+        MenuItem::NewWindow,
+        MenuItem::SplitRight,
+        MenuItem::SplitDown,
+        MenuItem::Settings,
+        MenuItem::Shortcuts,
+        MenuItem::About,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MenuItem::NewTab => "New tab",
+            MenuItem::NewWindow => "New window",
+            MenuItem::SplitRight => "Split right",
+            MenuItem::SplitDown => "Split down",
+            MenuItem::Settings => "Settings",
+            MenuItem::Shortcuts => "Keyboard shortcuts",
+            MenuItem::About => "About Ultty",
+        }
+    }
+
+    /// A thin rule is drawn above these to group the menu.
+    pub fn starts_group(self) -> bool {
+        matches!(self, MenuItem::SplitRight | MenuItem::Settings)
+    }
+}
+
+/// Where the open main menu sits, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MenuLayout {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub item_height: f32,
+}
+
+impl MenuLayout {
+    pub fn height(&self) -> f32 {
+        self.item_height * MenuItem::ALL.len() as f32 + 2.0 * MENU_PADDING
+    }
+
+    /// The item under (x, y), if any.
+    pub fn item_at(&self, x: f32, y: f32) -> Option<MenuItem> {
+        if x < self.x || x >= self.x + self.width {
+            return None;
+        }
+        let offset = y - self.y - MENU_PADDING;
+        if offset < 0.0 || self.item_height <= 0.0 {
+            return None;
+        }
+        MenuItem::ALL
+            .get((offset / self.item_height) as usize)
+            .copied()
+    }
+
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height()
+    }
+}
+
+/// Space above the first and below the last menu item.
+pub const MENU_PADDING: f32 = 6.0;
+
 /// A button in the title band.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TitleButton {
+    /// The main menu, at the far left.
+    Menu,
     /// New tab; in the title band only while the tab row is hidden.
     NewTab,
     /// Split the focused pane side by side.
@@ -97,6 +177,10 @@ pub struct TabBarState {
     pub title_path: String,
     /// The git branch at `title_path` (short commit when detached).
     pub title_branch: Option<String>,
+    /// Whether the main menu is open.
+    pub menu_open: bool,
+    /// The menu item under the pointer.
+    pub hovered_menu_item: Option<MenuItem>,
 }
 
 impl TabBarState {
@@ -117,6 +201,8 @@ impl TabBarState {
             hovered_close_button: None,
             title_path: String::new(),
             title_branch: None,
+            menu_open: false,
+            hovered_menu_item: None,
         }
     }
 
@@ -228,8 +314,26 @@ impl TabBarState {
             x -= WINDOW_BUTTON_WIDTH;
             slots.push((button, x));
         }
+        slots.push((TitleButton::Menu, CHROME_EDGE_INSET));
         slots.reverse();
         slots
+    }
+
+    /// Where the main menu opens: under the menu button, sized to its
+    /// longest label.
+    pub fn menu_layout(&self, cell_width: f32, cell_height: f32) -> MenuLayout {
+        let longest = MenuItem::ALL
+            .iter()
+            .map(|item| item.label().chars().count())
+            .max()
+            .unwrap_or(0) as f32;
+        let button_left = CHROME_EDGE_INSET + (WINDOW_BUTTON_WIDTH - CHROME_BUTTON_SIZE) / 2.0;
+        MenuLayout {
+            x: button_left,
+            y: TITLE_BAR_HEIGHT - 4.0,
+            width: (longest + 4.0) * cell_width,
+            item_height: (cell_height + 12.0).round(),
+        }
     }
 
     /// x of the separator between the split buttons and the window controls.
@@ -237,11 +341,13 @@ impl TabBarState {
         self.total_width - CHROME_EDGE_INSET - 3.0 * WINDOW_BUTTON_WIDTH - TITLE_GROUP_GAP / 2.0
     }
 
-    /// Left edge of the title-band buttons; title text must end before it.
+    /// Left edge of the right-hand title-band buttons; title text must end
+    /// before it.
     pub fn title_buttons_start(&self) -> f32 {
         self.title_buttons()
-            .first()
-            .map_or(self.total_width, |(_, x)| *x)
+            .into_iter()
+            .find(|(button, _)| *button != TitleButton::Menu)
+            .map_or(self.total_width, |(_, x)| x)
     }
 
     /// Whether the lower tab row should be visible.
@@ -541,6 +647,49 @@ mod tests {
     use super::*;
     use crate::terminal_manager::TerminalId;
 
+    fn slot(state: &TabBarState, button: TitleButton) -> f32 {
+        state
+            .title_buttons()
+            .into_iter()
+            .find(|(b, _)| *b == button)
+            .map(|(_, x)| x)
+            .unwrap()
+    }
+
+    #[test]
+    fn menu_button_sits_at_the_left_edge_and_opens_below() {
+        let state = bar_with(2, 0, 800.0);
+        assert_eq!(
+            state.title_buttons()[0],
+            (TitleButton::Menu, CHROME_EDGE_INSET)
+        );
+        assert_eq!(
+            state.title_button_at(CHROME_EDGE_INSET + 5.0, 10.0),
+            Some(TitleButton::Menu)
+        );
+        let layout = state.menu_layout(8.0, 16.0);
+        assert!(layout.y < TITLE_BAR_HEIGHT && layout.y + layout.height() > TITLE_BAR_HEIGHT);
+        assert!(layout.width >= ("Keyboard shortcuts".len() as f32) * 8.0);
+    }
+
+    #[test]
+    fn menu_items_map_to_their_rows() {
+        let state = bar_with(1, 0, 800.0);
+        let layout = state.menu_layout(8.0, 16.0);
+        let x = layout.x + 10.0;
+        for (index, item) in MenuItem::ALL.iter().enumerate() {
+            let y = layout.y + MENU_PADDING + (index as f32 + 0.5) * layout.item_height;
+            assert_eq!(layout.item_at(x, y), Some(*item));
+        }
+        assert_eq!(layout.item_at(x, layout.y + 1.0), None);
+        assert_eq!(layout.item_at(layout.x - 1.0, layout.y + 20.0), None);
+        assert_eq!(
+            layout.item_at(layout.x + layout.width, layout.y + 20.0),
+            None
+        );
+        assert!(!layout.contains(x, layout.y + layout.height()));
+    }
+
     #[test]
     fn display_path_shows_home_as_tilde() {
         let home = Some("/home/ana");
@@ -599,6 +748,7 @@ mod tests {
         assert_eq!(
             buttons,
             [
+                TitleButton::Menu,
                 TitleButton::SplitRight,
                 TitleButton::SplitDown,
                 TitleButton::Minimize,
@@ -612,7 +762,7 @@ mod tests {
             state.title_button_at(close_x + 1.0, 10.0),
             Some(TitleButton::Close)
         );
-        let split_x = state.title_buttons()[0].1;
+        let split_x = slot(&state, TitleButton::SplitRight);
         assert_eq!(
             state.title_button_at(split_x + 1.0, 10.0),
             Some(TitleButton::SplitRight)
@@ -625,8 +775,7 @@ mod tests {
     #[test]
     fn new_tab_sits_in_the_title_band_only_while_the_tab_row_is_hidden() {
         let single = bar_with(1, 0, 800.0);
-        assert_eq!(single.title_buttons()[0].0, TitleButton::NewTab);
-        let plus_x = single.title_buttons()[0].1;
+        let plus_x = slot(&single, TitleButton::NewTab);
         assert!(single.is_new_tab_button_at(plus_x + 5.0, 10.0));
 
         let multi = bar_with(3, 0, 800.0);
@@ -1009,7 +1158,7 @@ mod tests {
     #[test]
     fn single_tab_plus_is_clickable_in_title_band() {
         let state = bar_with(1, 0, 800.0);
-        let plus = state.title_buttons()[0].1 + 5.0;
+        let plus = slot(&state, TitleButton::NewTab) + 5.0;
         assert!(state.is_new_tab_button_at(plus, 10.0));
         assert!(!state.is_drag_area(plus, 10.0));
         assert!(!state.is_new_tab_button_at(plus, -1.0));
@@ -1040,7 +1189,7 @@ mod tests {
     fn title_band_toggle_area_excludes_interactive_chrome_controls() {
         let state = bar_with(2, 0, 800.0);
         assert!(state.is_title_bar_toggle_area(400.0, 10.0));
-        let split = state.title_buttons()[0].1 + 5.0;
+        let split = slot(&state, TitleButton::SplitRight) + 5.0;
         assert!(!state.is_title_bar_toggle_area(split, 10.0));
         assert!(!state.is_title_bar_toggle_area(800.0 - CHROME_EDGE_INSET - 10.0, 10.0));
         assert!(!state.is_title_bar_toggle_area(400.0, -1.0));

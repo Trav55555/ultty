@@ -7,8 +7,8 @@ use std::borrow::Cow;
 
 use super::{Renderer, Rgba, Vertex};
 use crate::tabs::{
-    TabBarState, TabState, TitleButton, CHROME_BUTTON_SIZE, TAB_CLOSE_BUTTON_SIZE, TAB_PADDING,
-    TAB_ROW_HEIGHT, TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH,
+    MenuItem, TabBarState, TabState, TitleButton, CHROME_BUTTON_SIZE, MENU_PADDING,
+    TAB_CLOSE_BUTTON_SIZE, TAB_PADDING, TAB_ROW_HEIGHT, TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH,
 };
 
 const CHROME_BUTTON_RADIUS: f32 = 6.0;
@@ -18,10 +18,12 @@ const CHROME_BUTTON_BORDER: f32 = 1.0;
 /// and the cursor.
 const TITLE_LOGO_COLUMNS: f32 = 11.0;
 
-/// Left edge of the title logo: as far from the window edge as the buttons
-/// are on the right.
+/// Left edge of the title logo: right of the menu button, as far from it as
+/// buttons are from each other.
 fn title_logo_x() -> f32 {
-    crate::tabs::CHROME_EDGE_INSET + (WINDOW_BUTTON_WIDTH - CHROME_BUTTON_SIZE) / 2.0
+    crate::tabs::CHROME_EDGE_INSET
+        + WINDOW_BUTTON_WIDTH
+        + (WINDOW_BUTTON_WIDTH - CHROME_BUTTON_SIZE) / 2.0
 }
 
 /// Fit `path` and ` git:(branch)` into `max_chars` columns. The branch is
@@ -185,6 +187,114 @@ fn centered_tab_title_x(tab: &TabState, title: &str, cell_width: f32) -> f32 {
 }
 
 impl Renderer {
+    /// Three bars: the main menu button's icon.
+    fn emit_menu_icon(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        (x, y, w, h): (f32, f32, f32, f32),
+        color: Rgba,
+    ) {
+        let (icon_w, stroke, gap) = (14.0_f32, 2.0_f32, 3.0_f32);
+        let left = (x + (w - icon_w) / 2.0).round();
+        let top = (y + (h - (3.0 * stroke + 2.0 * gap)) / 2.0).round();
+        for i in 0..3 {
+            let bar_y = top + i as f32 * (stroke + gap);
+            self.emit_rect(vertices, indices, left, bar_y, icon_w, stroke, color);
+        }
+    }
+
+    /// The open main menu: a panel under the menu button with one row per
+    /// item, a hover highlight, and rules between groups.
+    pub(super) fn build_main_menu_vertices(
+        &mut self,
+        tab_bar: &TabBarState,
+    ) -> (Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>) {
+        let (mut bg_v, mut bg_i, mut text_v, mut text_i) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        if !tab_bar.visible || !tab_bar.menu_open {
+            return (bg_v, bg_i, text_v, text_i);
+        }
+        let layout = tab_bar.menu_layout(self.cell_width, self.cell_height);
+        let bg = self.color_scheme.background;
+        let panel = lighten(bg, 0.045);
+        let border = lighten(bg, 0.17);
+        let hover = lighten(bg, 0.11);
+        let rule = lighten(bg, 0.1);
+        let fg = self.color_scheme.foreground;
+        let height = layout.height();
+        self.emit_rounded_rect(
+            &mut bg_v,
+            &mut bg_i,
+            layout.x,
+            layout.y,
+            layout.width,
+            height,
+            CHROME_BUTTON_RADIUS + 1.0,
+            border,
+        );
+        self.emit_rounded_rect(
+            &mut bg_v,
+            &mut bg_i,
+            layout.x + 1.0,
+            layout.y + 1.0,
+            layout.width - 2.0,
+            height - 2.0,
+            CHROME_BUTTON_RADIUS,
+            panel,
+        );
+        for (index, item) in MenuItem::ALL.iter().enumerate() {
+            let item_y = layout.y + MENU_PADDING + index as f32 * layout.item_height;
+            if item.starts_group() {
+                self.emit_rect(
+                    &mut bg_v,
+                    &mut bg_i,
+                    layout.x + 8.0,
+                    item_y,
+                    layout.width - 16.0,
+                    1.0,
+                    rule,
+                );
+            }
+            if tab_bar.hovered_menu_item == Some(*item) {
+                self.emit_rounded_rect(
+                    &mut bg_v,
+                    &mut bg_i,
+                    layout.x + 4.0,
+                    item_y + 2.0,
+                    layout.width - 8.0,
+                    layout.item_height - 4.0,
+                    CHROME_BUTTON_RADIUS - 2.0,
+                    hover,
+                );
+            }
+            let text_y = item_y + (layout.item_height - self.cell_height) / 2.0;
+            let text_x = layout.x + 2.0 * self.cell_width;
+            let (v, idx) = self.text_renderer.build_label_vertices(
+                item.label(),
+                text_x,
+                text_y,
+                layout.width - 3.0 * self.cell_width,
+                fg,
+            );
+            let base = text_v.len() as u32;
+            text_v.extend(v);
+            text_i.extend(idx.iter().map(|i| i + base));
+        }
+        (bg_v, bg_i, text_v, text_i)
+    }
+
+    /// Draw the main menu over everything else, when it is open.
+    pub(super) fn render_main_menu(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        tab_bar: &TabBarState,
+    ) {
+        let (bg_v, bg_i, text_v, text_i) = self.build_main_menu_vertices(tab_bar);
+        self.draw_overlay_layers(encoder, view, (&bg_v, &bg_i), (&text_v, &text_i));
+    }
+
     /// A pane outline with a divider: vertical for split right, horizontal
     /// for split down. Drawn with rectangles so it needs no icon font.
     fn emit_split_icon(
@@ -392,7 +502,8 @@ impl Renderer {
         for (button, slot_x) in tab_bar.title_buttons() {
             let (button_x, button_y, button_w, button_h) =
                 chrome_button_rect(slot_x, WINDOW_BUTTON_WIDTH);
-            let is_hovered = tab_bar.hovered_title_button == Some(button);
+            let is_hovered = tab_bar.hovered_title_button == Some(button)
+                || (button == TitleButton::Menu && tab_bar.menu_open);
             let destructive = button == TitleButton::Close;
             let (button_bg, button_border) = match (is_hovered, destructive) {
                 (true, true) => (destructive_hover_bg, destructive_hover_border),
@@ -409,6 +520,16 @@ impl Renderer {
                 button_bg,
                 button_border,
             );
+            if button == TitleButton::Menu {
+                let color =
+                    chrome_symbol_color(self.color_scheme.foreground, accent_color, is_hovered);
+                self.emit_menu_icon(
+                    &mut vertices,
+                    &mut indices,
+                    (button_x, button_y, button_w, button_h),
+                    color,
+                );
+            }
             if matches!(button, TitleButton::SplitRight | TitleButton::SplitDown) {
                 let color =
                     chrome_symbol_color(self.color_scheme.foreground, accent_color, is_hovered);
@@ -579,7 +700,7 @@ impl Renderer {
                 TitleButton::Minimize => "−",
                 TitleButton::Maximize => "▢",
                 TitleButton::Close => "×",
-                TitleButton::SplitRight | TitleButton::SplitDown => continue,
+                TitleButton::Menu | TitleButton::SplitRight | TitleButton::SplitDown => continue,
             };
             let (button_x, button_y, button_w, button_h) =
                 chrome_button_rect(slot_x, WINDOW_BUTTON_WIDTH);

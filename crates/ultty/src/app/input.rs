@@ -149,6 +149,24 @@ impl App {
         let x = self.mouse_pos.x as f32;
         let y = self.mouse_pos.y as f32;
 
+        // An open menu takes every click: an item runs, anything else closes
+        // it. Nothing reaches the terminal or the chrome underneath.
+        if self.tab_bar.menu_open {
+            if state == ElementState::Pressed {
+                let (cell_width, cell_height) = self.renderer.cell_dimensions();
+                let item = self
+                    .tab_bar
+                    .menu_layout(cell_width, cell_height)
+                    .item_at(x, y)
+                    .filter(|_| button == MouseButton::Left);
+                self.close_menu();
+                if let Some(item) = item {
+                    self.perform_menu_item(item);
+                }
+            }
+            return;
+        }
+
         // Check if mouse tracking is enabled and send event to PTY
         if self.terminal().is_some_and(|t| t.mouse_tracking_enabled()) {
             // Don't intercept UI elements when mouse tracking is on
@@ -224,6 +242,11 @@ impl App {
                                 }
                                 TitleButton::SplitDown => {
                                     self.split_pane(SplitDirection::Vertical);
+                                }
+                                TitleButton::Menu => {
+                                    self.tab_bar.menu_open = true;
+                                    self.tab_bar.hovered_menu_item = None;
+                                    self.needs_redraw = true;
                                 }
                                 TitleButton::NewTab => {}
                             }
@@ -535,6 +558,45 @@ impl App {
             t.encode_mouse_event(TerminalMouseButton::Release, col, row, true, true, mods)
         }) {
             let _ = self.send_input(&bytes);
+        }
+    }
+
+    pub(super) fn close_menu(&mut self) {
+        self.tab_bar.menu_open = false;
+        self.tab_bar.hovered_menu_item = None;
+        self.needs_redraw = true;
+    }
+
+    /// Run a main-menu entry.
+    pub(super) fn perform_menu_item(&mut self, item: ultty::tabs::MenuItem) {
+        use ultty::tabs::MenuItem;
+        match item {
+            MenuItem::NewTab => match self.create_tab() {
+                Ok(_) => {
+                    self.clear_tab_width_freeze();
+                    self.update_tab_bar();
+                    self.needs_redraw = true;
+                }
+                Err(e) => tracing::warn!("Failed to create tab: {}", e),
+            },
+            MenuItem::NewWindow => {
+                // One window per process: start another Ultty.
+                let spawned =
+                    std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn());
+                if let Err(e) = spawned {
+                    tracing::warn!("Failed to open a new window: {}", e);
+                }
+            }
+            MenuItem::SplitRight => self.split_pane(SplitDirection::Horizontal),
+            MenuItem::SplitDown => self.split_pane(SplitDirection::Vertical),
+            MenuItem::Settings => open_settings(),
+            MenuItem::Shortcuts => {
+                self.shortcuts_visible = true;
+                self.needs_redraw = true;
+            }
+            MenuItem::About => {
+                Self::show_notification("Ultty", &format!("Version {}", env!("CARGO_PKG_VERSION")))
+            }
         }
     }
 
@@ -1003,6 +1065,14 @@ impl App {
         // Debug dump shortcut
         if self.check_keybinding(&event, &self.config.keybindings.debug_dump.clone()) {
             self.debug_dump_terminal();
+            return;
+        }
+
+        // Escape closes the main menu; it takes no other keys.
+        if self.tab_bar.menu_open {
+            if let Key::Named(NamedKey::Escape) = &event.logical_key {
+                self.close_menu();
+            }
             return;
         }
 
@@ -1554,6 +1624,37 @@ impl App {
 
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-' || c == '.'
+}
+
+/// Open the config file with the desktop's default handler, or its folder
+/// when the file does not exist yet.
+fn open_settings() {
+    let Some(path) = ultty::config::Config::config_path() else {
+        tracing::warn!("No config directory");
+        return;
+    };
+    let target = if path.exists() {
+        path
+    } else {
+        match path.parent() {
+            Some(dir) => {
+                if let Err(e) = std::fs::create_dir_all(dir) {
+                    tracing::warn!("Cannot create {}: {}", dir.display(), e);
+                    return;
+                }
+                dir.to_path_buf()
+            }
+            None => return,
+        }
+    };
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    if let Err(e) = std::process::Command::new(opener).arg(&target).spawn() {
+        tracing::warn!("Failed to open {}: {}", target.display(), e);
+    }
 }
 
 #[cfg(test)]

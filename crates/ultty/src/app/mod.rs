@@ -909,6 +909,17 @@ impl App {
         let old_window_control = self.tab_bar.hovered_title_button;
         let old_close_button = self.tab_bar.hovered_close_button;
         self.tab_bar.set_hover(x, y);
+        let old_menu_item = self.tab_bar.hovered_menu_item;
+        if self.tab_bar.menu_open {
+            let (cell_width, cell_height) = self.renderer.cell_dimensions();
+            self.tab_bar.hovered_menu_item = self
+                .tab_bar
+                .menu_layout(cell_width, cell_height)
+                .item_at(x, y);
+            if self.tab_bar.hovered_menu_item != old_menu_item {
+                self.needs_redraw = true;
+            }
+        }
 
         // Redraw if hover state changed
         if old_hovered_tab != self.tab_bar.hovered_tab
