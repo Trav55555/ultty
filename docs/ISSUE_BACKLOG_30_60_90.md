@@ -65,26 +65,6 @@ and `aarch64-apple-darwin` matrix legs of `.github/workflows/release.yml`.
 - The Gatekeeper notes in README.md and `docs/release-artifacts.md` are
   replaced with the signing status.
 
-### 3. Durable GUI smoke runner
-
-**Problem.** `.github/workflows/live-smoke.yml` targets a self-hosted
-`[self-hosted, linux, ultty-gui]` runner that was registered temporarily on one
-machine for a single 2026-05-29 run. That registration is not durable, so the
-workflow cannot be dispatched today and the live smoke gate has no home.
-
-**Scope.** Either stand up a persistent GUI runner with a documented
-provisioning recipe, or move the gate onto a hosted runner using a virtual
-display and a software `wgpu` backend (Xvfb or a headless Wayland compositor
-plus `WGPU_BACKEND=gl` or lavapipe). Record whichever path is chosen in
-[Live Smoke Automation](live-smoke-automation.md).
-
-**Acceptance.**
-- `live-smoke.yml` can be dispatched on demand and completes.
-- Three consecutive dispatches on different days pass, showing the runner is
-  not a one-off.
-- The runner setup is reproducible from a checked-in document or script, not
-  from one maintainer's memory.
-
 ### 4. Add a `cargo-deny` step to CI
 
 **Problem.** `cargo audit` covers advisories only. Nothing checks licenses,
@@ -106,6 +86,21 @@ enough along that the advisory ignore list is stable.
   licenses of the current dependency tree.
 
 ## Recently Completed Readiness Work
+
+- **GUI smoke in CI (2026-11-06).** The `GUI smoke` job in `ci.yml` runs
+  Ultty under Xvfb with Mesa's software Vulkan (lavapipe) on a stock
+  `ubuntu-latest` runner. No self-hosted GPU machine is needed. It runs:
+  - `scripts/live-smoke-gate.sh`;
+  - `scripts/terminal-workflow-smoke.sh`;
+  - `scripts/regression-smoke.sh`, which covers:
+    - `ulttyctl info` answering;
+    - fresh tabs keeping their top lines;
+    - `text --scrollback`;
+    - counter-app running natively over the socket and in-band.
+
+  Against builds from before the `info` and shrink fixes, it fails on the
+  exact bug each time. Run it locally with `scripts/ci-gui-smoke.sh` (needs
+  `xvfb` and `mesa-vulkan-drivers`).
 
 - **Run-level text shaping (ligatures) (2026-11-06).** Runs of printable
   ASCII cells that contain punctuation and share a face and foreground
