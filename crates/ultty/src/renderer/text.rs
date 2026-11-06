@@ -242,6 +242,67 @@ fn font_attrs(font_family: &str) -> Attrs<'_> {
     }
 }
 
+/// Which real styled faces the configured family has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FaceStyles {
+    bold: bool,
+    italic: bool,
+}
+
+impl FaceStyles {
+    /// Look the family up once. Asking cosmic-text for a style the family
+    /// lacks makes it fall back to another family that has it, often a
+    /// proportional one (bold DroidSansMono Nerd Font became Noto Sans
+    /// Bold), which breaks the grid. A family that is not installed at all
+    /// falls back regardless, so all styles stay requestable for it.
+    fn of_family(db: &cosmic_text::fontdb::Database, family: &str) -> Self {
+        if family.is_empty() {
+            return Self {
+                bold: true,
+                italic: true,
+            };
+        }
+        let mut found = false;
+        let mut styles = Self {
+            bold: false,
+            italic: false,
+        };
+        for face in db.faces() {
+            if face
+                .families
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(family))
+            {
+                found = true;
+                styles.bold |= face.weight >= Weight::BOLD;
+                styles.italic |= face.style != Style::Normal;
+            }
+        }
+        if found {
+            styles
+        } else {
+            Self {
+                bold: true,
+                italic: true,
+            }
+        }
+    }
+}
+
+/// Attributes for text in `family`, requesting bold and italic only when
+/// the family has those faces; otherwise its regular face is used and the
+/// style is synthesized (see `synthesized_styles`).
+fn styled_attrs(family: &str, bold: bool, italic: bool, styles: FaceStyles) -> Attrs<'_> {
+    let mut attrs = font_attrs(family);
+    if bold && styles.bold {
+        attrs = attrs.weight(Weight::BOLD);
+    }
+    if italic && styles.italic {
+        attrs = attrs.style(Style::Italic);
+    }
+    attrs
+}
+
 pub struct TextRenderer {
     font_system: FontSystem,
     atlas: GlyphAtlas,
@@ -252,6 +313,8 @@ pub struct TextRenderer {
     decoration: DecorationMetrics,
     device: Arc<wgpu::Device>,
     font_family: String,
+    /// Real bold and italic faces available in `font_family`.
+    face_styles: FaceStyles,
     ligatures: bool,
     shaping_cache: HashMap<ShapingCacheKey, ShapedGlyph>,
     /// Shaped runs for ligatures by text, one map per face (bold, italic);
@@ -330,6 +393,7 @@ impl TextRenderer {
 
         let styled_text_buffer = Buffer::new(&mut font_system, metrics);
 
+        let face_styles = FaceStyles::of_family(font_system.db(), &font_family);
         let mut renderer = Self {
             font_system,
             atlas,
@@ -343,6 +407,7 @@ impl TextRenderer {
                 thickness: 1.0,
             },
             device,
+            face_styles,
             font_family,
             ligatures: font_config.ligatures,
             shaping_cache: HashMap::with_capacity(256),
@@ -452,13 +517,12 @@ impl TextRenderer {
         style: CellStyle,
         shaping: Shaping,
     ) -> Vec<ShapedGlyph> {
-        let mut attrs = font_attrs(&self.font_family);
-        if style.bold {
-            attrs = attrs.weight(Weight::BOLD);
-        }
-        if style.italic {
-            attrs = attrs.style(Style::Italic);
-        }
+        let attrs = styled_attrs(
+            &self.font_family,
+            style.bold,
+            style.italic,
+            self.face_styles,
+        );
         buffer.set_text(text, &attrs, shaping, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
@@ -500,9 +564,9 @@ impl TextRenderer {
             &mut self.font_system,
             buffer,
             &self.font_family,
+            self.face_styles,
             text,
             style,
-            self.cell_width,
         )
     }
 
@@ -769,14 +833,7 @@ impl TextRenderer {
             .set_size(Some(10000.0), Some(self.cell_height * 2.0));
 
         let shaping = self.get_shaping();
-        let mut attrs = font_attrs(&self.font_family);
-
-        if bold {
-            attrs = attrs.weight(Weight::BOLD);
-        }
-        if italic {
-            attrs = attrs.style(Style::Italic);
-        }
+        let attrs = styled_attrs(&self.font_family, bold, italic, self.face_styles);
 
         self.styled_text_buffer
             .set_text(text, &attrs, shaping, None);
@@ -1344,17 +1401,11 @@ fn shape_run_glyphs(
     font_system: &mut FontSystem,
     buffer: &mut Buffer,
     font_family: &str,
+    face_styles: FaceStyles,
     text: &str,
     style: CellStyle,
-    cell_width: f32,
 ) -> RunGlyphs {
-    let mut attrs = font_attrs(font_family);
-    if style.bold {
-        attrs = attrs.weight(Weight::BOLD);
-    }
-    if style.italic {
-        attrs = attrs.style(Style::Italic);
-    }
+    let attrs = styled_attrs(font_family, style.bold, style.italic, face_styles);
     buffer.set_text(text, &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(font_system, false);
     let Some(run) = buffer.layout_runs().next() else {
@@ -1362,6 +1413,12 @@ fn shape_run_glyphs(
     };
     let line_y = run.line_y;
     let mut shaped = Vec::with_capacity(run.glyphs.len());
+    // Each glyph is placed relative to the first glyph of its cluster, and
+    // the cluster at its own cell. Using the run's advances instead drifts
+    // whenever the face is narrower or wider than a cell (a fallback face,
+    // such as a proportional bold for a font with no bold), opening gaps
+    // before the next run and the cursor.
+    let mut cluster: Option<(usize, i32)> = None;
     for glyph in run.glyphs {
         let face = font_system
             .db()
@@ -1374,11 +1431,18 @@ fn shape_run_glyphs(
         }
         // ASCII only, so byte offsets are cell offsets.
         let cell = glyph.start.min(text.len().saturating_sub(1)) as u16;
+        let cluster_x = match cluster {
+            Some((start, x)) if start == glyph.start => x,
+            _ => {
+                cluster = Some((glyph.start, physical.x));
+                physical.x
+            }
+        };
         shaped.push((
             cell,
             ShapedGlyph {
                 cache_key: physical.cache_key,
-                x_offset: physical.x as f32 - f32::from(cell) * cell_width,
+                x_offset: (physical.x - cluster_x) as f32,
                 y_offset: physical.y as f32,
                 line_y,
                 synthetic_bold,
@@ -1758,6 +1822,84 @@ mod tests {
         assert!(!could_ligate("hello123"));
     }
 
+    const ALL_STYLES: FaceStyles = FaceStyles {
+        bold: true,
+        italic: true,
+    };
+
+    #[test]
+    fn styles_the_family_lacks_are_not_requested() {
+        let regular_only = FaceStyles {
+            bold: false,
+            italic: false,
+        };
+        let attrs = styled_attrs("Some Mono", true, true, regular_only);
+        assert_eq!(attrs.weight, Weight::NORMAL);
+        assert_eq!(attrs.style, Style::Normal);
+        let attrs = styled_attrs("Some Mono", true, true, ALL_STYLES);
+        assert_eq!(attrs.weight, Weight::BOLD);
+        assert_eq!(attrs.style, Style::Italic);
+    }
+
+    #[test]
+    fn a_missing_family_keeps_every_style_requestable() {
+        let db = cosmic_text::fontdb::Database::new();
+        assert_eq!(FaceStyles::of_family(&db, "No Such Family"), ALL_STYLES);
+        assert_eq!(FaceStyles::of_family(&db, ""), ALL_STYLES);
+    }
+
+    #[test]
+    fn a_regular_only_family_is_detected() {
+        // DroidSansMono Nerd Font ships a Regular face only; it is the
+        // default family, but CI machines may not have it installed.
+        let font_system = FontSystem::new();
+        let family = "DroidSansMono Nerd Font";
+        let installed = font_system
+            .db()
+            .faces()
+            .any(|face| face.families.iter().any(|(name, _)| name == family));
+        if !installed {
+            eprintln!("{family} not installed; skipped");
+            return;
+        }
+        let styles = FaceStyles::of_family(font_system.db(), family);
+        assert!(!styles.bold, "{family} has no bold face");
+    }
+
+    #[test]
+    fn run_glyphs_stay_in_their_cells_when_the_font_is_narrower() {
+        // A bold prompt in a font with no bold face falls back to another
+        // family, often proportional, whose glyphs are narrower than the
+        // cell. Each glyph must still start at its own cell; placing them by
+        // the font's advances drifted every later glyph left, leaving gaps
+        // before the next styled run and the cursor.
+        let mut font_system = FontSystem::new();
+        let metrics = Metrics::new(14.0, 18.0);
+        let mut buffer = Buffer::new(&mut font_system, metrics);
+        buffer.set_wrap(cosmic_text::Wrap::None);
+        buffer.set_size(Some(1000.0), Some(40.0));
+        let bold = CellStyle {
+            bold: true,
+            ..CellStyle::default()
+        };
+        let glyphs = shape_run_glyphs(
+            &mut font_system,
+            &mut buffer,
+            "DejaVu Sans",
+            ALL_STYLES,
+            "git:(main)",
+            bold,
+        );
+        assert!(!glyphs.is_empty());
+        for (cell, glyph) in &glyphs {
+            assert!(
+                glyph.x_offset.abs() < 2.0,
+                "cell {cell} glyph is {} px off its cell",
+                glyph.x_offset
+            );
+        }
+    }
+
     #[test]
     fn run_glyphs_map_back_to_their_cells() {
         // With a font that forms no ligatures, every cell still gets its
@@ -1768,25 +1910,13 @@ mod tests {
         buffer.set_wrap(cosmic_text::Wrap::None);
         buffer.set_size(Some(1000.0), Some(40.0));
         let text = "a=>b!=c";
-        // Positions are whole pixels, so measure the advance over many cells.
-        let cell_width = {
-            let glyphs = shape_run_glyphs(
-                &mut font_system,
-                &mut buffer,
-                "DejaVu Sans Mono",
-                "MMMMMMMMMM",
-                CellStyle::default(),
-                0.0,
-            );
-            glyphs[9].1.x_offset / 9.0
-        };
         let glyphs = shape_run_glyphs(
             &mut font_system,
             &mut buffer,
             "DejaVu Sans Mono",
+            ALL_STYLES,
             text,
             CellStyle::default(),
-            cell_width,
         );
         let cells: Vec<u16> = glyphs.iter().map(|(cell, _)| *cell).collect();
         assert_eq!(cells, (0..text.len() as u16).collect::<Vec<_>>());
@@ -1828,9 +1958,9 @@ mod tests {
                 &mut font_system,
                 &mut buffer,
                 &family,
+                ALL_STYLES,
                 text,
                 CellStyle::default(),
-                8.4,
             )
             .into_iter()
             .map(|(cell, g)| (cell, g.cache_key.glyph_id))
@@ -1842,9 +1972,9 @@ mod tests {
                         &mut font_system,
                         &mut buffer,
                         &family,
+                        ALL_STYLES,
                         &ch.to_string(),
                         CellStyle::default(),
-                        8.4,
                     )[0]
                     .1
                     .cache_key
