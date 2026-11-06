@@ -554,28 +554,50 @@ impl Renderer {
     ) {
         let (bg_vertices, bg_indices, text_vertices, text_indices) =
             self.build_shortcuts_overlay_vertices(keybindings);
-        if bg_vertices.is_empty() && text_vertices.is_empty() {
-            return;
-        }
+        self.draw_overlay_layers(
+            encoder,
+            view,
+            (&bg_vertices, &bg_indices),
+            (&text_vertices, &text_indices),
+        );
+    }
 
-        if !bg_vertices.is_empty() && !bg_indices.is_empty() {
+    /// Draw a floating overlay on top of everything: solid shapes first,
+    /// then text from the glyph atlas.
+    pub(super) fn draw_overlay_layers(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        (bg_vertices, bg_indices): (&[Vertex], &[u32]),
+        (text_vertices, text_indices): (&[Vertex], &[u32]),
+    ) {
+        for (vertices, indices, textured) in [
+            (bg_vertices, bg_indices, false),
+            (text_vertices, text_indices, true),
+        ] {
+            if vertices.is_empty() || indices.is_empty() {
+                continue;
+            }
             let vb = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("shortcuts_bg_vb"),
-                    contents: bytemuck::cast_slice(&bg_vertices),
+                    label: Some("overlay_vb"),
+                    contents: bytemuck::cast_slice(vertices),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
             let ib = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("shortcuts_bg_ib"),
-                    contents: bytemuck::cast_slice(&bg_indices),
+                    label: Some("overlay_ib"),
+                    contents: bytemuck::cast_slice(indices),
                     usage: wgpu::BufferUsages::INDEX,
                 });
-
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("shortcuts_bg_pass"),
+                label: Some(if textured {
+                    "overlay_text_pass"
+                } else {
+                    "overlay_bg_pass"
+                }),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,
@@ -590,53 +612,17 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-
-            rp.set_pipeline(self.bg_pipeline.pipeline());
-            rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+            if textured {
+                rp.set_pipeline(self.text_renderer.pipeline());
+                rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+                rp.set_bind_group(1, self.text_renderer.atlas_bind_group(), &[]);
+            } else {
+                rp.set_pipeline(self.bg_pipeline.pipeline());
+                rp.set_bind_group(0, &self.uniform_bind_group, &[]);
+            }
             rp.set_vertex_buffer(0, vb.slice(..));
             rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
-        }
-
-        if !text_vertices.is_empty() && !text_indices.is_empty() {
-            let vb = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("shortcuts_text_vb"),
-                    contents: bytemuck::cast_slice(&text_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let ib = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("shortcuts_text_ib"),
-                    contents: bytemuck::cast_slice(&text_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("shortcuts_text_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            rp.set_pipeline(self.text_renderer.pipeline());
-            rp.set_bind_group(0, &self.uniform_bind_group, &[]);
-            rp.set_bind_group(1, self.text_renderer.atlas_bind_group(), &[]);
-            rp.set_vertex_buffer(0, vb.slice(..));
-            rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..text_indices.len() as u32, 0, 0..1);
+            rp.draw_indexed(0..indices.len() as u32, 0, 0..1);
         }
     }
 
