@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import statistics
 import struct
 import sys
 import zlib
@@ -97,18 +98,20 @@ def paeth(left: int, up: int, up_left: int) -> int:
     return up_left
 
 
-def row_average(rows: list[list[tuple[int, int, int, int]]], y: int) -> tuple[float, float, float]:
+def row_color(rows: list[list[tuple[int, int, int, int]]], y: int) -> tuple[float, float, float]:
+    """The background color of row y, sampled across its central band.
+
+    Takes the per-channel median, so text that crosses the band (a long
+    shell prompt on the first terminal line) does not shift the result.
+    """
     row = rows[min(y, len(rows) - 1)]
-    # Sample the central trailing band, away from prompt text, tab labels,
-    # the new-tab button, and right-side window controls.
+    # Sample the central trailing band, away from tab labels, the new-tab
+    # button, and right-side window controls.
     start = max(4, int(len(row) * 0.42))
     end = min(len(row) - 4, int(len(row) * 0.78))
     sample = row[start:max(start + 1, end)]
-    count = len(sample)
-    return (
-        sum(px[0] for px in sample) / count,
-        sum(px[1] for px in sample) / count,
-        sum(px[2] for px in sample) / count,
+    return tuple(
+        float(statistics.median(px[channel] for px in sample)) for channel in range(3)
     )
 
 
@@ -130,9 +133,9 @@ def magenta_edge_ratio(rows: list[list[tuple[int, int, int, int]]]) -> float:
 
 def validate_single_tab(path: Path) -> list[str]:
     _, height, rows = parse_png(path)
-    title = row_average(rows, TITLE_BAR_HEIGHT // 2)
-    lower = row_average(rows, TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT // 2)
-    terminal = row_average(rows, min(height - 2, TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT + 24))
+    title = row_color(rows, TITLE_BAR_HEIGHT // 2)
+    lower = row_color(rows, TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT // 2)
+    terminal = row_color(rows, min(height - 2, TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT + 24))
     errors = []
 
     if distance(lower, terminal) > 12:
@@ -147,9 +150,9 @@ def validate_single_tab(path: Path) -> list[str]:
 
 def validate_tab_rail(path: Path, label: str) -> list[str]:
     _, height, rows = parse_png(path)
-    title = row_average(rows, TITLE_BAR_HEIGHT // 2)
-    rail = row_average(rows, TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT // 2)
-    terminal = row_average(rows, min(height - 2, TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT + 24))
+    title = row_color(rows, TITLE_BAR_HEIGHT // 2)
+    rail = row_color(rows, TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT // 2)
+    terminal = row_color(rows, min(height - 2, TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT + 24))
     errors = []
 
     if distance(rail, terminal) < 6:
