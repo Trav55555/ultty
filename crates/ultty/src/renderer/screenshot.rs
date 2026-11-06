@@ -298,8 +298,6 @@ impl Renderer {
         self.render_screenshot_chrome(&mut encoder, &view, overlay);
 
         // Render text
-        self.render_screenshot_chrome(&mut encoder, &view, overlay);
-
         let _ = self.text_renderer.render(
             &mut encoder,
             &view,
