@@ -1,3 +1,7 @@
+# CI on Gitea Actions (git.traversannan.com), the primary remote; GitHub is
+# a push mirror. Jobs run on the shared workstation runner (ubuntu-latest,
+# Docker). There is no macOS runner: macOS builds only run in the GitHub
+# release workflow.
 name: CI
 
 on:
@@ -44,8 +48,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          # PRs restore main's cache but never save their own: PR saves
-          # overflowed the 10 GB repo limit and evicted main's entries.
+          # PRs restore main's cache but never save their own, so one
+          # main-branch entry per job is all the runner keeps.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-audit
         run: cargo install cargo-audit --version 0.22.1 --locked
@@ -55,10 +59,7 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -67,19 +68,15 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          # PRs restore main's cache but never save their own: PR saves
-          # overflowed the 10 GB repo limit and evicted main's entries.
+          # PRs restore main's cache but never save their own, so one
+          # main-branch entry per job is all the runner keeps.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
-        if: runner.os == 'Linux'
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: Test
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -87,11 +84,10 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          # PRs restore main's cache but never save their own: PR saves
-          # overflowed the 10 GB repo limit and evicted main's entries.
+          # PRs restore main's cache but never save their own, so one
+          # main-branch entry per job is all the runner keeps.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
-        if: runner.os == 'Linux'
       - run: cargo test --workspace
       - name: Protocol roundtrip property tests
         run: cargo test -p ultty-protocol --test roundtrip -- --ignored
@@ -112,8 +108,8 @@ jobs:
           toolchain: ${{ env.RUST_MSRV }}
       - uses: Swatinem/rust-cache@v2
         with:
-          # PRs restore main's cache but never save their own: PR saves
-          # overflowed the 10 GB repo limit and evicted main's entries.
+          # PRs restore main's cache but never save their own, so one
+          # main-branch entry per job is all the runner keeps.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
       - run: cargo check --workspace --all-targets
@@ -128,8 +124,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          # PRs restore main's cache but never save their own: PR saves
-          # overflowed the 10 GB repo limit and evicted main's entries.
+          # PRs restore main's cache but never save their own, so one
+          # main-branch entry per job is all the runner keeps.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test -p ultty-vt --test integrity
         env:
@@ -174,8 +170,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          # PRs restore main's cache but never save their own: PR saves
-          # overflowed the 10 GB repo limit and evicted main's entries.
+          # PRs restore main's cache but never save their own, so one
+          # main-branch entry per job is all the runner keeps.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # lavapipe (mesa-vulkan-drivers) renders without a GPU; Xvfb is the
       # display. Ultty runs for real and the live smokes drive it.

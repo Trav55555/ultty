@@ -33,7 +33,7 @@ active development. It does not imply a stable external release.
 
 | Area | Gate | Type | Evidence |
 |------|------|------|----------|
-| Build and tests | `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings` pass on the target branch. | Automated CI | `.github/workflows/ci.yml` |
+| Build and tests | `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings` pass on the target branch. | Automated CI | `.gitea/workflows/ci.yml` |
 | Terminal correctness | Parser, grid, protocol, widget, snapshot, and property tests pass. Regressions in VT behavior, tabs, splits, resize, copy mode, and native region diffing block dogfood. | Automated CI | [Testing Strategy](TESTING_STRATEGY.md), [Protocol Specification](PROTOCOL_SPEC.md) |
 | Native runtime observability | A running instance responds to `ulttyctl ping`, `ulttyctl info`, `ulttyctl tabs`, and `ulttyctl screenshot`. The diagnostics overlay remains available through the documented shortcut. | Local-only | [ADR 0015](adr/0015-trustworthy-terminal-inspectable-runtime.md), [ADR 0017](adr/0017-runtime-socket-and-control-plane-semantics.md) |
 | Live smoke | `scripts/live-smoke-gate.sh /tmp/ultty-live-smoke-gate` passes against a real Ultty window. | Local-only | [Visual Regression](visual-regression.md) |

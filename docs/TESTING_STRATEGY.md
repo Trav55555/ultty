@@ -261,20 +261,23 @@ criterion_main!(benches);
 
 ## CI Pipeline
 
-`.github/workflows/ci.yml` runs five jobs on every push and pull request to
-`main`:
+`.gitea/workflows/ci.yml` runs on Gitea Actions (Linux) for every push and
+pull request to `main`:
 
 | Job | What it runs |
 |-----|--------------|
 | `fmt` | `cargo fmt --all -- --check` |
 | `security-audit` | `scripts/security-audit.sh` |
-| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` on ubuntu and macos |
-| `test` | `cargo test --workspace`, the ignored protocol roundtrip tests, and the snapshot tests, on ubuntu and macos |
+| `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` |
+| `test` | `cargo test --workspace`, the ignored protocol roundtrip tests, and the snapshot tests |
 | `msrv` | `cargo check --workspace --all-targets` on the MSRV toolchain |
+| `vt-integrity` | The deep property run of `cargo test -p ultty-vt --test integrity` |
+| `fuzz` | Short cargo-fuzz runs of the VT parser, protocol decoders, and in-band splitter |
+| `gui-smoke` | `scripts/ci-gui-smoke.sh`: Ultty under Xvfb with software Vulkan, driven by the live smokes |
 
-The screenshot gates and the benchmarks are not in this pipeline. Screenshot
-gates run through `.github/workflows/live-smoke.yml` on manual dispatch, since
-they need a GUI runner. Benchmarks are run by hand and recorded under
+There is no macOS runner; macOS is only built by the GitHub release workflow.
+Benchmarks are not in this pipeline. The fuller screenshot gates also run
+through `.github/workflows/live-smoke.yml` on manual dispatch. Benchmarks are run by hand and recorded under
 `docs/perf/`.
 
 ## Test Data Management
