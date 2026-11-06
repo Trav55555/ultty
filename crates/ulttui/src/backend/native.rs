@@ -1,6 +1,5 @@
 //! Native protocol backend for Ultty terminal.
 
-mod in_band;
 mod transport;
 
 use std::collections::{HashMap, VecDeque};
@@ -8,7 +7,6 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use bytes::BytesMut;
-use ultty_protocol::Encode;
 use ultty_protocol::{
     AppMessage, ComputedRegionLayout, Content, FrameId, InputEvent, InputType, Key, Modifiers,
     RegionId, TerminalMessage, CAP_APPEND_CONTENT, CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY,
@@ -18,23 +16,18 @@ use ultty_protocol::{
 use crate::event::Event;
 use crate::widgets::View;
 
-use super::detect;
 use super::native_diff::{
     begin_native_key_recording, optimize_frame_messages, record_native_key, take_native_keys,
     RetainedTree,
 };
 use transport::{FrameError, ReadOutcome};
+use ultty_client::{detect, in_band};
 
 /// How long one event poll waits for terminal messages.
 const POLL_TIMEOUT: Duration = Duration::from_millis(16);
 
 /// How long the terminal has to answer `ClientHello` with `SessionReady`.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// How long the in-band probe waits when the terminal answers neither the
-/// probe nor DA1. Terminals answer DA1 at once, so this only matters for
-/// ones that do not; set `ULTTY_IN_BAND=0` to skip the probe entirely.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub struct NativeBackend {
     stream: Option<UnixStream>,
@@ -131,9 +124,11 @@ impl NativeBackend {
     /// which is right: the outer terminal cannot know where the pane is.
     fn init_in_band(&mut self) -> anyhow::Result<()> {
         let mut tty = in_band::InBandTty::open()?;
-        if !probe_in_band(&mut tty, &mut self.read_buf, PROBE_TIMEOUT)? {
+        let mut received = Vec::new();
+        if !in_band::probe(&mut tty, &mut received, in_band::PROBE_TIMEOUT)? {
             anyhow::bail!("terminal does not support in-band native mode");
         }
+        self.read_buf.extend_from_slice(&received);
 
         self.in_band = Some(Box::new(tty));
         self.wait_for_session_ready()?;
@@ -516,53 +511,6 @@ impl Default for NativeBackend {
     }
 }
 
-/// Send the in-band probe on `tty` and report whether the terminal speaks
-/// the protocol: `ClientHello`, then DA1. A protocol terminal's first frame
-/// (normally `ServerHello`) arrives before its DA1 reply; other terminals
-/// answer only DA1. Frame bytes received are left in `read_buf`.
-fn probe_in_band(
-    tty: &mut in_band::InBandTty,
-    read_buf: &mut BytesMut,
-    timeout: Duration,
-) -> anyhow::Result<bool> {
-    let hello = AppMessage::ClientHello {
-        version: PROTOCOL_VERSION,
-        requested_capabilities: CLIENT_DEFAULT_CAPABILITIES,
-    };
-    tty.write_frames(&hello.encode_to_bytes())?;
-    tty.write_raw(b"\x1b[c")?;
-
-    let deadline = std::time::Instant::now() + timeout;
-    let mut da1 = in_band::Da1Scanner::default();
-    // Both callbacks see both flags; whichever arrives first decides.
-    let answered = std::cell::Cell::new(false);
-    let da1_first = std::cell::Cell::new(false);
-    while !answered.get() && !da1_first.get() {
-        let now = std::time::Instant::now();
-        if now >= deadline {
-            anyhow::bail!("terminal answered neither the in-band probe nor DA1");
-        }
-        let outcome = tty.read(
-            (deadline - now).min(Duration::from_millis(50)),
-            |frames| {
-                read_buf.extend_from_slice(frames);
-                if !da1_first.get() && transport::holds_complete_frame(read_buf) {
-                    answered.set(true);
-                }
-            },
-            |other| {
-                if !answered.get() && da1.feed(other) {
-                    da1_first.set(true);
-                }
-            },
-        )?;
-        if outcome == ReadOutcome::Closed {
-            anyhow::bail!("terminal closed during the in-band probe");
-        }
-    }
-    Ok(answered.get())
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Read;
@@ -620,6 +568,10 @@ mod tests {
             col.child(Button::new(*label).id(*label))
         })
     }
+
+    use std::time::Duration;
+
+    use ultty_protocol::TerminalMessage;
 
     #[test]
     fn socket_handshake_finishes_as_soon_as_the_terminal_answers() {
@@ -707,90 +659,5 @@ mod tests {
         for (index, (id, _)) in first_ids.iter().enumerate() {
             assert_eq!(retained_children[index + 1], *id);
         }
-    }
-
-    use std::io::Write;
-    use std::time::Duration;
-
-    use bytes::BytesMut;
-    use ultty_protocol::TerminalMessage;
-
-    /// Run the probe against a fake terminal on a PTY that answers with
-    /// `reply` once it has seen the probe.
-    fn probe_against(reply: Vec<u8>) -> anyhow::Result<bool> {
-        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-        let (mut master, slave) = {
-            let (mut m, mut s) = (0, 0);
-            // SAFETY: openpty writes two fds; the name/termios/winsize
-            // arguments may be null. `null_mut` fits both platforms: libc
-            // declares termios/winsize `*const` on Linux, `*mut` on macOS.
-            let rc = unsafe {
-                libc::openpty(
-                    &mut m,
-                    &mut s,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            };
-            assert_eq!(rc, 0, "openpty");
-            // SAFETY: both fds were just opened and are owned here.
-            unsafe {
-                (
-                    std::fs::File::from(OwnedFd::from_raw_fd(m)),
-                    OwnedFd::from_raw_fd(s),
-                )
-            }
-        };
-        let terminal = std::thread::spawn(move || {
-            let mut seen = Vec::new();
-            let mut buf = [0u8; 4096];
-            while !(seen.windows(3).any(|w| w == b"\x1b[c")) {
-                let n = master.read(&mut buf).expect("read probe");
-                seen.extend_from_slice(&buf[..n]);
-            }
-            master.write_all(&reply).expect("reply");
-            // Closing the master would hang up the slave and discard the
-            // reply before the probe reads it.
-            (seen, master)
-        });
-        let mut tty = super::in_band::InBandTty::open_on(slave.as_raw_fd(), slave.as_raw_fd())?;
-        let mut read_buf = BytesMut::new();
-        let result = super::probe_in_band(&mut tty, &mut read_buf, Duration::from_secs(2));
-        let (seen, _master) = terminal.join().unwrap();
-        assert!(
-            seen.starts_with(b"\x1b_U"),
-            "probe starts with an in-band hello"
-        );
-        drop(tty);
-        result
-    }
-
-    fn server_hello_wire() -> Vec<u8> {
-        use ultty_protocol::Encode;
-        let hello = TerminalMessage::ServerHello {
-            version: ultty_protocol::PROTOCOL_VERSION,
-            capabilities: 0,
-        };
-        ultty_protocol::in_band::encode_to_vec(&hello.encode_to_bytes())
-    }
-
-    #[test]
-    fn probe_succeeds_when_the_hello_reply_precedes_da1() {
-        let mut reply = server_hello_wire();
-        reply.extend_from_slice(b"\x1b[?62;22c");
-        assert!(probe_against(reply).unwrap());
-    }
-
-    #[test]
-    fn probe_fails_on_a_terminal_that_only_answers_da1() {
-        assert!(!probe_against(b"\x1b[?62;22c".to_vec()).unwrap());
-    }
-
-    #[test]
-    fn probe_fails_when_da1_comes_first() {
-        let mut reply = b"\x1b[?1;2c".to_vec();
-        reply.extend(server_hello_wire());
-        assert!(!probe_against(reply).unwrap());
     }
 }

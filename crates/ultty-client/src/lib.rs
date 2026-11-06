@@ -27,6 +27,9 @@ compile_error!(
     "ultty-client currently uses Unix sockets. Windows support requires a named-pipe native transport."
 );
 
+pub mod detect;
+pub mod in_band;
+
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -47,9 +50,10 @@ pub const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Errors returned by [`UlttyClient`] operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The ULTTY_SOCKET environment variable is not set.
-    #[error("ULTTY_SOCKET not set - run inside ultty terminal")]
-    SocketNotSet,
+    /// No Ultty terminal is reachable: this process is not on the tab that
+    /// owns `ULTTY_SOCKET`, and the terminal did not answer the in-band probe.
+    #[error("not running in an Ultty terminal")]
+    NotUltty,
 
     /// An I/O error occurred.
     #[error(transparent)]
@@ -77,7 +81,7 @@ pub enum Error {
 /// Provides methods for connecting to the terminal, managing regions,
 /// setting content, handling frames, and polling events.
 pub struct UlttyClient {
-    stream: UnixStream,
+    link: Link,
     read_buf: BytesMut,
     /// Messages received while waiting for a specific reply; drained by
     /// [`UlttyClient::poll_events`] so nothing is lost.
@@ -92,13 +96,48 @@ pub struct UlttyClient {
     frame_id: u32,
 }
 
+/// How the client reaches the terminal.
+enum Link {
+    /// The tab's protocol socket.
+    Socket(UnixStream),
+    /// In-band strings on this process's own terminal. Boxed: it holds
+    /// terminal settings and buffers the socket path never uses.
+    InBand(Box<in_band::InBandTty>),
+}
+
 impl UlttyClient {
-    /// Connect to the ultty terminal via the `ULTTY_SOCKET` environment variable.
+    /// Connect to the Ultty terminal this process runs on and perform the
+    /// handshake.
     ///
-    /// Performs the protocol handshake and returns a ready client.
+    /// Uses the tab's socket when this process runs on the tab that owns
+    /// `ULTTY_SOCKET`, and otherwise the in-band transport, which also works
+    /// over ssh and under `script` ([`detect`] has the rules). Fails with
+    /// [`Error::NotUltty`] when neither reaches Ultty.
     pub fn connect() -> Result<Self, Error> {
-        let socket_path = std::env::var("ULTTY_SOCKET").map_err(|_| Error::SocketNotSet)?;
-        Self::connect_to(socket_path)
+        if let Some(socket_path) = detect::socket_path() {
+            return Self::connect_to(socket_path);
+        }
+        if detect::in_band_candidate() {
+            return Self::connect_in_band();
+        }
+        Err(Error::NotUltty)
+    }
+
+    /// Connect in-band through this process's own terminal (stdin and
+    /// stdout), which stays in raw mode until the client is dropped.
+    pub fn connect_in_band() -> Result<Self, Error> {
+        Self::in_band_over(in_band::InBandTty::open()?)
+    }
+
+    fn in_band_over(mut tty: in_band::InBandTty) -> Result<Self, Error> {
+        let mut received = Vec::new();
+        if !in_band::probe(&mut tty, &mut received, in_band::PROBE_TIMEOUT)? {
+            return Err(Error::NotUltty);
+        }
+        let mut client = Self::with_link(Link::InBand(Box::new(tty)));
+        client.read_buf.extend_from_slice(&received);
+        client.await_session()?;
+        Ok(client)
     }
 
     /// Connect to the ultty terminal listening on `socket_path`.
@@ -112,9 +151,14 @@ impl UlttyClient {
     /// Build a client on an already-connected stream and perform the handshake.
     fn from_stream(stream: UnixStream) -> Result<Self, Error> {
         stream.set_read_timeout(Some(REPLY_TIMEOUT))?;
+        let mut client = Self::with_link(Link::Socket(stream));
+        client.handshake()?;
+        Ok(client)
+    }
 
-        let mut client = Self {
-            stream,
+    fn with_link(link: Link) -> Self {
+        Self {
+            link,
             read_buf: BytesMut::with_capacity(4096),
             pending_events: VecDeque::new(),
             session_id: 0,
@@ -125,10 +169,12 @@ impl UlttyClient {
             negotiated_version: PROTOCOL_VERSION,
             next_region_id: 1,
             frame_id: 0,
-        };
+        }
+    }
 
-        client.handshake()?;
-        Ok(client)
+    /// Whether the client talks in-band rather than over the socket.
+    pub fn is_in_band(&self) -> bool {
+        matches!(self.link, Link::InBand(_))
     }
 
     /// The session ID assigned by the server.
@@ -165,7 +211,10 @@ impl UlttyClient {
     /// Send a raw [`AppMessage`] to the terminal.
     pub fn send(&mut self, msg: &AppMessage) -> Result<(), Error> {
         let bytes = msg.encode_to_bytes();
-        self.stream.write_all(&bytes)?;
+        match &mut self.link {
+            Link::Socket(stream) => stream.write_all(&bytes)?,
+            Link::InBand(tty) => tty.write_frames(&bytes)?,
+        }
         Ok(())
     }
 
@@ -185,7 +234,7 @@ impl UlttyClient {
     /// [`REPLY_TIMEOUT`].
     pub fn end_frame(&mut self, frame_id: FrameId) -> Result<(), Error> {
         self.send(&AppMessage::EndFrame { frame_id })?;
-        self.stream.flush()?;
+        self.flush()?;
 
         let regions = self.wait_for("LayoutComputed", |msg| match msg {
             TerminalMessage::LayoutComputed { regions, .. } => Some(regions),
@@ -311,8 +360,14 @@ impl UlttyClient {
     /// currently readable on the socket. `Ping` is answered with `Pong` and
     /// not returned.
     pub fn poll_events(&mut self) -> Result<Vec<TerminalMessage>, Error> {
+        if let Link::InBand(tty) = &self.link {
+            if tty.heartbeat_due() {
+                // An unsolicited Pong tells the terminal an idle app is alive.
+                self.send(&AppMessage::Pong)?;
+            }
+        }
         let mut events: Vec<TerminalMessage> = self.pending_events.drain(..).collect();
-        let _ = self.read_available();
+        let _ = self.read_available(None);
         while let Some(msg) = self.try_decode()? {
             if self.answer_ping(&msg)? {
                 continue;
@@ -329,7 +384,11 @@ impl UlttyClient {
             version: PROTOCOL_VERSION,
             requested_capabilities: CLIENT_DEFAULT_CAPABILITIES,
         })?;
+        self.await_session()
+    }
 
+    /// Read `ServerHello` and `SessionReady` after `ClientHello` was sent.
+    fn await_session(&mut self) -> Result<(), Error> {
         let (server_version, capabilities) = self.wait_for("ServerHello", |msg| match msg {
             TerminalMessage::ServerHello {
                 version,
@@ -388,9 +447,9 @@ impl UlttyClient {
         pick: impl Fn(TerminalMessage) -> Option<T>,
     ) -> Result<T, Error> {
         let deadline = Instant::now() + REPLY_TIMEOUT;
-        self.stream.set_nonblocking(false)?;
+        self.set_socket_blocking(true)?;
         let result = self.wait_for_inner(what, deadline, pick);
-        self.stream.set_nonblocking(true)?;
+        self.set_socket_blocking(false)?;
         result
     }
 
@@ -417,9 +476,7 @@ impl UlttyClient {
             if now >= deadline {
                 return Err(Error::Timeout(what));
             }
-            self.stream
-                .set_read_timeout(Some(deadline.duration_since(now)))?;
-            self.read_available()?;
+            self.read_available(Some(deadline.duration_since(now)))?;
         }
     }
 
@@ -427,15 +484,35 @@ impl UlttyClient {
     fn answer_ping(&mut self, msg: &TerminalMessage) -> Result<bool, Error> {
         if matches!(msg, TerminalMessage::Ping) {
             self.send(&AppMessage::Pong)?;
-            self.stream.flush()?;
+            self.flush()?;
             return Ok(true);
         }
         Ok(false)
     }
 
-    fn read_available(&mut self) -> Result<(), Error> {
+    /// Read what is available: wait up to `timeout`, or not at all for
+    /// `None`. In-band input that is not protocol data is ignored.
+    fn read_available(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
+        let stream = match &mut self.link {
+            Link::InBand(tty) => {
+                let read_buf = &mut self.read_buf;
+                let status = tty.read(
+                    timeout.unwrap_or(Duration::ZERO),
+                    |frames| read_buf.extend_from_slice(frames),
+                    |_other| {},
+                )?;
+                return match status {
+                    in_band::ReadStatus::Open => Ok(()),
+                    in_band::ReadStatus::Closed => Err(Error::ConnectionClosed),
+                };
+            }
+            Link::Socket(stream) => stream,
+        };
+        if let Some(timeout) = timeout {
+            stream.set_read_timeout(Some(timeout.max(Duration::from_millis(1))))?;
+        }
         let mut buf = [0u8; 4096];
-        match self.stream.read(&mut buf) {
+        match stream.read(&mut buf) {
             Ok(0) => Err(Error::ConnectionClosed),
             Ok(n) => {
                 self.read_buf.extend_from_slice(&buf[..n]);
@@ -451,6 +528,23 @@ impl UlttyClient {
             }
             Err(e) => Err(Error::Io(e)),
         }
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        if let Link::Socket(stream) = &mut self.link {
+            stream.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Socket reads block (with a timeout) while waiting for a reply and are
+    /// non-blocking otherwise. The in-band tty is polled with explicit
+    /// timeouts instead.
+    fn set_socket_blocking(&mut self, blocking: bool) -> Result<(), Error> {
+        if let Link::Socket(stream) = &self.link {
+            stream.set_nonblocking(!blocking)?;
+        }
+        Ok(())
     }
 
     fn try_decode(&mut self) -> Result<Option<TerminalMessage>, Error> {
@@ -485,6 +579,19 @@ impl UlttyClient {
         let id = RegionId::new(self.next_region_id);
         self.next_region_id += 1;
         id
+    }
+}
+
+impl Drop for UlttyClient {
+    /// End an in-band session at once. A socket session ends when the
+    /// socket closes, but the terminal cannot see an in-band app leave
+    /// without `Disconnect`.
+    fn drop(&mut self) {
+        if let Link::InBand(tty) = &mut self.link {
+            if let Err(e) = tty.write_frames(&AppMessage::Disconnect.encode_to_bytes()) {
+                tracing::debug!("in-band disconnect on drop failed: {e}");
+            }
+        }
     }
 }
 
@@ -675,7 +782,7 @@ mod tests {
         client.begin_frame().unwrap();
         let started = Instant::now();
         // Shorten the wait for the test by driving the inner loop directly.
-        client.stream.set_nonblocking(false).unwrap();
+        client.set_socket_blocking(true).unwrap();
         let err = client
             .wait_for_inner(
                 "LayoutComputed",
@@ -716,5 +823,97 @@ mod tests {
         }
         assert_eq!(events, vec![key_event('z')]);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn in_band_client_handshakes_and_sends_frames_on_its_terminal() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use ultty_protocol::in_band::{decode_payload, encode_to_vec, Piece, Splitter};
+
+        let (mut master, slave) = {
+            let (mut m, mut s) = (0, 0);
+            // SAFETY: openpty writes two fds; the other arguments may be null.
+            let rc = unsafe {
+                libc::openpty(
+                    &mut m,
+                    &mut s,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(rc, 0, "openpty");
+            // SAFETY: both fds were just opened and are owned here.
+            unsafe {
+                (
+                    std::fs::File::from(OwnedFd::from_raw_fd(m)),
+                    OwnedFd::from_raw_fd(s),
+                )
+            }
+        };
+        let fake = thread::spawn(move || {
+            // Answer the probe the way Ultty does: frames before DA1.
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !seen.windows(3).any(|w| w == b"\x1b[c") {
+                let n = master.read(&mut buf).unwrap();
+                seen.extend_from_slice(&buf[..n]);
+            }
+            let mut reply = Vec::new();
+            for msg in [
+                TerminalMessage::ServerHello {
+                    version: PROTOCOL_VERSION,
+                    capabilities: CLIENT_DEFAULT_CAPABILITIES,
+                },
+                TerminalMessage::SessionReady {
+                    session_id: 9,
+                    root_region: RegionId::ROOT,
+                    width: 120,
+                    height: 40,
+                },
+            ] {
+                reply.extend_from_slice(&msg.encode_to_bytes());
+            }
+            let mut wire = encode_to_vec(&reply);
+            wire.extend_from_slice(b"\x1b[?62;22c");
+            master.write_all(&wire).unwrap();
+
+            // Collect what the client sends in-band until Disconnect.
+            let mut splitter = Splitter::default();
+            let mut frames = Vec::new();
+            let mut got = Vec::new();
+            while !got.iter().any(|m| matches!(m, AppMessage::Disconnect)) {
+                let n = master.read(&mut buf).unwrap();
+                splitter.feed(&buf[..n], |piece| {
+                    if let Piece::Payload(text) = piece {
+                        decode_payload(text, &mut frames).unwrap();
+                    }
+                });
+                let mut cursor = &frames[..];
+                got.clear();
+                while let Ok(msg) = AppMessage::decode(&mut cursor) {
+                    got.push(msg);
+                }
+            }
+            (got, master)
+        });
+
+        let tty = in_band::InBandTty::open_on(slave.as_raw_fd(), slave.as_raw_fd()).unwrap();
+        let mut client = UlttyClient::in_band_over(tty).unwrap();
+        assert!(client.is_in_band());
+        assert_eq!(client.session_id(), 9);
+        assert_eq!(
+            (client.viewport_width(), client.viewport_height()),
+            (120, 40)
+        );
+        client.subscribe(RegionId::ROOT, 1).unwrap();
+        drop(client); // sends Disconnect
+
+        let (got, _master) = fake.join().unwrap();
+        assert!(
+            matches!(got.first(), Some(AppMessage::Subscribe { .. })),
+            "got {got:?}"
+        );
+        assert!(matches!(got.last(), Some(AppMessage::Disconnect)));
     }
 }

@@ -1,4 +1,4 @@
-//! In-band transport on the app's own terminal (ADR 0018).
+//! In-band transport on the app's own terminal (ADR 0018, spec §1.3).
 //!
 //! Frames go to stdout and come back on stdin as `ESC _ U <base64url> ESC \`
 //! strings, so native mode works wherever the terminal's byte stream goes:
@@ -15,14 +15,21 @@ use std::time::{Duration, Instant};
 use ultty_protocol::in_band::{self, Piece, Splitter};
 use ultty_protocol::{AppMessage, Encode};
 
-use super::transport::ReadOutcome;
+/// Whether the terminal side is still there after [`InBandTty::read`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadStatus {
+    /// Still open (input may or may not have arrived).
+    Open,
+    /// End of file on the terminal: no more input will arrive.
+    Closed,
+}
 
 const STDIN: RawFd = 0;
 const STDOUT: RawFd = 1;
 
 /// The heartbeat interval. The terminal ends an in-band session after 10 s
 /// without traffic, so an idle app says something well inside that.
-pub(super) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 
 /// What the panic hook needs: the terminal's fds and settings to restore.
 #[derive(Clone, Copy)]
@@ -38,7 +45,7 @@ struct Restore {
 static EXIT_RESTORE: Mutex<Option<Restore>> = Mutex::new(None);
 
 /// The app's terminal, in raw mode, carrying in-band strings.
-pub(super) struct InBandTty {
+pub struct InBandTty {
     fd_in: RawFd,
     fd_out: RawFd,
     saved: libc::termios,
@@ -48,13 +55,13 @@ pub(super) struct InBandTty {
 
 impl InBandTty {
     /// Put stdin's terminal in raw mode for in-band use.
-    pub(super) fn open() -> io::Result<Self> {
+    pub fn open() -> io::Result<Self> {
         Self::open_on(STDIN, STDOUT)
     }
 
     /// Use the terminal on `fd_in` (read, and switched to raw mode) and
     /// `fd_out` (written). Both must stay open while this value lives.
-    pub(super) fn open_on(fd_in: RawFd, fd_out: RawFd) -> io::Result<Self> {
+    pub fn open_on(fd_in: RawFd, fd_out: RawFd) -> io::Result<Self> {
         // SAFETY: `termios` is plain data; tcgetattr fills it or fails.
         let mut saved: libc::termios = unsafe { std::mem::zeroed() };
         // SAFETY: the caller keeps `fd_in` open; `saved` is a valid
@@ -86,14 +93,14 @@ impl InBandTty {
     }
 
     /// Write protocol frames as in-band strings.
-    pub(super) fn write_frames(&mut self, frames: &[u8]) -> io::Result<()> {
+    pub fn write_frames(&mut self, frames: &[u8]) -> io::Result<()> {
         self.write_raw(&in_band::encode_to_vec(frames))?;
         self.last_sent = Instant::now();
         Ok(())
     }
 
     /// Write bytes to the terminal unchanged.
-    pub(super) fn write_raw(&mut self, mut bytes: &[u8]) -> io::Result<()> {
+    pub fn write_raw(&mut self, mut bytes: &[u8]) -> io::Result<()> {
         while !bytes.is_empty() {
             // SAFETY: `bytes` is valid for its length; `fd_out` is open.
             let n = unsafe { libc::write(self.fd_out, bytes.as_ptr().cast(), bytes.len()) };
@@ -110,25 +117,25 @@ impl InBandTty {
     }
 
     /// Whether the app has been quiet long enough to owe a heartbeat.
-    pub(super) fn heartbeat_due(&self) -> bool {
+    pub fn heartbeat_due(&self) -> bool {
         self.last_sent.elapsed() >= HEARTBEAT_INTERVAL
     }
 
     /// Wait up to `timeout` for input, then read everything available.
     /// Decoded frame bytes go to `on_frames`; everything else on stdin
     /// (replies such as DA1, stray keystrokes) goes to `on_other`, in order.
-    pub(super) fn read(
+    pub fn read(
         &mut self,
         timeout: Duration,
         mut on_frames: impl FnMut(&[u8]),
         mut on_other: impl FnMut(&[u8]),
-    ) -> io::Result<ReadOutcome> {
+    ) -> io::Result<ReadStatus> {
         let mut wait = timeout;
         let mut buf = [0u8; 64 * 1024];
         let mut decoded = Vec::new();
         loop {
             if !poll_readable(self.fd_in, wait)? {
-                return Ok(ReadOutcome::Open);
+                return Ok(ReadStatus::Open);
             }
             // SAFETY: `buf` is valid for `buf.len()` bytes; `fd_in` is open.
             let n = unsafe { libc::read(self.fd_in, buf.as_mut_ptr().cast(), buf.len()) };
@@ -140,7 +147,7 @@ impl InBandTty {
                 return Err(err);
             }
             if n == 0 {
-                return Ok(ReadOutcome::Closed);
+                return Ok(ReadStatus::Closed);
             }
             self.splitter.feed(&buf[..n as usize], |piece| match piece {
                 Piece::Payload(text) => {
@@ -241,16 +248,76 @@ fn disconnect_and_restore() {
     }
 }
 
+/// How long [`probe`] waits when the terminal answers neither the probe nor
+/// DA1. Terminals answer DA1 at once, so this only matters for ones that do
+/// not; set `ULTTY_IN_BAND=0` to skip the probe entirely.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Whether `buf` starts with a complete protocol frame.
+fn holds_complete_frame(buf: &[u8]) -> bool {
+    buf.len() >= 8 && buf.len() >= 8 + u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize
+}
+
+/// Send the in-band probe on `tty` and report whether the terminal speaks
+/// the protocol: `ClientHello`, then DA1. A protocol terminal's first frame
+/// (normally `ServerHello`) arrives before its DA1 reply; other terminals
+/// answer only DA1. Frame bytes received are appended to `read_buf`, ready
+/// for the rest of the handshake.
+///
+/// Errors when the terminal answers neither within `timeout`, or closes.
+pub fn probe(
+    tty: &mut InBandTty,
+    read_buf: &mut Vec<u8>,
+    timeout: Duration,
+) -> Result<bool, crate::Error> {
+    let hello = AppMessage::ClientHello {
+        version: ultty_protocol::PROTOCOL_VERSION,
+        requested_capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
+    };
+    tty.write_frames(&hello.encode_to_bytes())?;
+    tty.write_raw(b"\x1b[c")?;
+
+    let deadline = Instant::now() + timeout;
+    let mut da1 = Da1Scanner::default();
+    // Both callbacks see both flags; whichever arrives first decides.
+    let answered = std::cell::Cell::new(false);
+    let da1_first = std::cell::Cell::new(false);
+    while !answered.get() && !da1_first.get() {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(crate::Error::Timeout("the in-band probe or DA1 reply"));
+        }
+        let status = tty.read(
+            (deadline - now).min(Duration::from_millis(50)),
+            |frames| {
+                read_buf.extend_from_slice(frames);
+                if !da1_first.get() && holds_complete_frame(read_buf) {
+                    answered.set(true);
+                }
+            },
+            |other| {
+                if !answered.get() && da1.feed(other) {
+                    da1_first.set(true);
+                }
+            },
+        )?;
+        if status == ReadStatus::Closed {
+            return Err(crate::Error::ConnectionClosed);
+        }
+    }
+    Ok(answered.get())
+}
+
 /// Finds a DA1 reply (`ESC [ ? <digits and ;> c`) in stdin bytes that may
 /// arrive split across reads.
 #[derive(Debug, Default)]
-pub(super) struct Da1Scanner {
+pub struct Da1Scanner {
     tail: Vec<u8>,
 }
 
 impl Da1Scanner {
     /// Feed bytes; true once a complete DA1 reply has been seen.
-    pub(super) fn feed(&mut self, bytes: &[u8]) -> bool {
+    pub fn feed(&mut self, bytes: &[u8]) -> bool {
         self.tail.extend_from_slice(bytes);
         let mut i = 0;
         while let Some(p) = find(&self.tail[i..], b"\x1b[?") {
@@ -285,7 +352,90 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::Da1Scanner;
+    use super::{probe, Da1Scanner, InBandTty};
+    use std::io::Read;
+    use std::io::Write;
+    use std::time::Duration;
+
+    use ultty_protocol::{Encode, TerminalMessage};
+
+    /// Run the probe against a fake terminal on a PTY that answers with
+    /// `reply` once it has seen the probe.
+    fn probe_against(reply: Vec<u8>) -> Result<bool, crate::Error> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        let (mut master, slave) = {
+            let (mut m, mut s) = (0, 0);
+            // SAFETY: openpty writes two fds; the name/termios/winsize
+            // arguments may be null. `null_mut` fits both platforms: libc
+            // declares termios/winsize `*const` on Linux, `*mut` on macOS.
+            let rc = unsafe {
+                libc::openpty(
+                    &mut m,
+                    &mut s,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(rc, 0, "openpty");
+            // SAFETY: both fds were just opened and are owned here.
+            unsafe {
+                (
+                    std::fs::File::from(OwnedFd::from_raw_fd(m)),
+                    OwnedFd::from_raw_fd(s),
+                )
+            }
+        };
+        let terminal = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !(seen.windows(3).any(|w| w == b"\x1b[c")) {
+                let n = master.read(&mut buf).expect("read probe");
+                seen.extend_from_slice(&buf[..n]);
+            }
+            master.write_all(&reply).expect("reply");
+            // Closing the master would hang up the slave and discard the
+            // reply before the probe reads it.
+            (seen, master)
+        });
+        let mut tty = InBandTty::open_on(slave.as_raw_fd(), slave.as_raw_fd())?;
+        let mut read_buf = Vec::new();
+        let result = probe(&mut tty, &mut read_buf, Duration::from_secs(2));
+        let (seen, _master) = terminal.join().unwrap();
+        assert!(
+            seen.starts_with(b"\x1b_U"),
+            "probe starts with an in-band hello"
+        );
+        drop(tty);
+        result
+    }
+
+    fn server_hello_wire() -> Vec<u8> {
+        let hello = TerminalMessage::ServerHello {
+            version: ultty_protocol::PROTOCOL_VERSION,
+            capabilities: 0,
+        };
+        ultty_protocol::in_band::encode_to_vec(&hello.encode_to_bytes())
+    }
+
+    #[test]
+    fn probe_succeeds_when_the_hello_reply_precedes_da1() {
+        let mut reply = server_hello_wire();
+        reply.extend_from_slice(b"\x1b[?62;22c");
+        assert!(probe_against(reply).unwrap());
+    }
+
+    #[test]
+    fn probe_fails_on_a_terminal_that_only_answers_da1() {
+        assert!(!probe_against(b"\x1b[?62;22c".to_vec()).unwrap());
+    }
+
+    #[test]
+    fn probe_fails_when_da1_comes_first() {
+        let mut reply = b"\x1b[?1;2c".to_vec();
+        reply.extend(server_hello_wire());
+        assert!(!probe_against(reply).unwrap());
+    }
 
     #[test]
     fn da1_reply_is_found_across_any_split() {

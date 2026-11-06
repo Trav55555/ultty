@@ -35,13 +35,6 @@ pub(super) enum FrameError {
     BadMagic(u16),
 }
 
-/// Whether `buf` starts with a complete frame.
-pub(super) fn holds_complete_frame(buf: &[u8]) -> bool {
-    buf.len() >= FRAME_HEADER_LEN
-        && buf.len()
-            >= FRAME_HEADER_LEN + u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize
-}
-
 impl NativeBackend {
     pub(super) fn send_message(&mut self, msg: &AppMessage) -> anyhow::Result<()> {
         let bytes = msg.encode_to_bytes();
@@ -68,11 +61,15 @@ impl NativeBackend {
     pub(super) fn read_available(&mut self) -> anyhow::Result<ReadOutcome> {
         if let Some(tty) = self.in_band.as_mut() {
             let read_buf = &mut self.read_buf;
-            return Ok(tty.read(
+            let status = tty.read(
                 super::POLL_TIMEOUT,
                 |frames| read_buf.extend_from_slice(frames),
                 |other| tracing::trace!("ignoring {} non-protocol bytes on stdin", other.len()),
-            )?);
+            )?;
+            return Ok(match status {
+                ultty_client::in_band::ReadStatus::Open => ReadOutcome::Open,
+                ultty_client::in_band::ReadStatus::Closed => ReadOutcome::Closed,
+            });
         }
         let stream = self
             .stream
