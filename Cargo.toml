@@ -50,7 +50,7 @@ serde_json = "1"
 
 # GPU Rendering
 wgpu = "30"
-winit = "0.29"
+winit = "0.30"
 bytemuck = { version = "1.14", features = ["derive"] }
 
 # Text Rendering
