@@ -564,6 +564,7 @@ mod tests {
             glyph_id,
             14.0,
             (0.0, 0.0),
+            cosmic_text::fontdb::Weight::NORMAL,
             CacheKeyFlags::empty(),
         )
         .0
