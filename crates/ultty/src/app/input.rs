@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use super::{resize_direction_at_window_edge, App, CLICK_THRESHOLD};
+use super::{App, CLICK_THRESHOLD};
 use ultty::config::KeybindingConfig;
 use ultty::grid::{
     MouseButton as TerminalMouseButton, MouseModifiers, SelectionMode, SelectionPoint,
@@ -14,9 +14,6 @@ use ultty::vim::CopyModeResult;
 use ultty_protocol::{Key as ProtocolKey, Modifiers as ProtocolModifiers};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{Key, NamedKey};
-
-const SCROLLBAR_WIDTH: f32 = 8.0;
-const SCROLLBAR_MARGIN: f32 = 2.0;
 
 impl App {
     /// Handle window event. Returns true if should exit.
@@ -157,8 +154,6 @@ impl App {
             // Don't intercept UI elements when mouse tracking is on
             if self.tab_bar.visible && y < self.tab_bar.height() {
                 // Still allow tab bar interaction
-            } else if self.is_in_scrollbar(x, y) {
-                // Still allow scrollbar interaction
             } else {
                 // Convert to cell coordinates and send to terminal
                 let (col, row) = self.pixel_to_cell(
@@ -197,17 +192,9 @@ impl App {
                             Instant::now() - CLICK_THRESHOLD * 2;
                     }
 
-                    let size = self.window.inner_size();
-                    let w = size.width as f32;
-                    let h = size.height as f32;
-                    let over_chrome_button = self.tab_bar.visible
-                        && (self.tab_bar.is_new_tab_button_at(x, y)
-                            || self.tab_bar.window_control_at(x, y).is_some());
-                    if !over_chrome_button {
-                        if let Some(direction) = resize_direction_at_window_edge(x, y, w, h) {
-                            let _ = self.window.drag_resize_window(direction);
-                            return;
-                        }
+                    if let Some(direction) = self.resize_direction_at(x, y) {
+                        let _ = self.window.drag_resize_window(direction);
+                        return;
                     }
                 }
 
@@ -350,13 +337,6 @@ impl App {
                     return;
                 }
 
-                // Check for scrollbar click
-                if self.is_in_scrollbar(x, y) {
-                    self.scrollbar_dragging = true;
-                    self.handle_scrollbar_click(y);
-                    return;
-                }
-
                 let (col, row) = self.pixel_to_cell(
                     self.mouse_pos.x,
                     self.mouse_pos.y - self.tab_bar.height() as f64,
@@ -425,7 +405,6 @@ impl App {
             }
             ElementState::Released => {
                 self.mouse_pressed = false;
-                self.scrollbar_dragging = false;
                 self.divider_dragging = None;
 
                 // Forward MouseUp to native protocol sessions
@@ -469,12 +448,6 @@ impl App {
                 }
             }
             self.needs_redraw = true;
-            return;
-        }
-
-        // Handle scrollbar dragging
-        if self.scrollbar_dragging {
-            self.handle_scrollbar_click(self.mouse_pos.y as f32);
             return;
         }
 
@@ -551,54 +524,6 @@ impl App {
         }) {
             let _ = self.send_input(&bytes);
         }
-    }
-
-    /// Check if a position is within the scrollbar area.
-    fn is_in_scrollbar(&self, x: f32, y: f32) -> bool {
-        let size = self.window.inner_size();
-        is_in_scrollbar_hitbox(
-            x,
-            y,
-            size.width as f32,
-            size.height as f32,
-            self.tab_bar.height(),
-        )
-    }
-
-    /// Handle scrollbar click/drag - scroll to position.
-    fn handle_scrollbar_click(&mut self, y: f32) {
-        let size = self.window.inner_size();
-        let Some(terminal) = self.terminal() else {
-            return;
-        };
-        let total_lines = terminal.buffer().total_lines();
-        let viewport_rows = terminal.dimensions().rows as usize;
-        drop(terminal);
-
-        let Some(target_offset) = scrollbar_target_offset(
-            y,
-            size.height as f32,
-            self.tab_bar.height(),
-            total_lines,
-            viewport_rows,
-        ) else {
-            return;
-        };
-
-        // Apply scroll
-        let Some(mut t) = self.terminal_mut() else {
-            return;
-        };
-        let buffer = t.buffer_mut();
-        let current = buffer.scroll_offset();
-        if target_offset > current {
-            buffer.scroll_up(target_offset - current);
-        } else if target_offset < current {
-            buffer.scroll_down(current - target_offset);
-        }
-        drop(t);
-
-        self.needs_redraw = true;
     }
 
     /// Select the word at the given position.
@@ -1616,42 +1541,6 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-' || c == '.'
 }
 
-fn is_in_scrollbar_hitbox(
-    x: f32,
-    y: f32,
-    window_width: f32,
-    window_height: f32,
-    tab_bar_height: f32,
-) -> bool {
-    let scrollbar_x = window_width - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN;
-    let scrollbar_top = tab_bar_height + SCROLLBAR_MARGIN;
-    let scrollbar_bottom = window_height - SCROLLBAR_MARGIN;
-
-    x >= scrollbar_x && y >= scrollbar_top && y <= scrollbar_bottom
-}
-
-fn scrollbar_target_offset(
-    y: f32,
-    window_height: f32,
-    tab_bar_height: f32,
-    total_lines: usize,
-    viewport_rows: usize,
-) -> Option<usize> {
-    if total_lines <= viewport_rows {
-        return None;
-    }
-
-    let scrollbar_top = tab_bar_height + SCROLLBAR_MARGIN;
-    let scrollbar_height = window_height - tab_bar_height - SCROLLBAR_MARGIN * 2.0;
-    if scrollbar_height <= 0.0 {
-        return None;
-    }
-
-    let fraction = ((y - scrollbar_top) / scrollbar_height).clamp(0.0, 1.0);
-    let max_offset = total_lines - viewport_rows;
-    Some(((1.0 - fraction) * max_offset as f32).round() as usize)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1721,125 +1610,6 @@ mod tests {
             CLICK_THRESHOLD <= Duration::from_millis(1000),
             "CLICK_THRESHOLD ({:?}) should be at most 1000ms",
             CLICK_THRESHOLD
-        );
-    }
-
-    #[test]
-    fn scrollbar_hitbox_covers_right_edge_track() {
-        let window_width = 1000.0;
-        let window_height = 700.0;
-        let tab_bar_height = 30.0;
-        let track_left = window_width - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN;
-        let track_top = tab_bar_height + SCROLLBAR_MARGIN;
-        let track_bottom = window_height - SCROLLBAR_MARGIN;
-
-        assert!(is_in_scrollbar_hitbox(
-            track_left,
-            track_top,
-            window_width,
-            window_height,
-            tab_bar_height
-        ));
-        assert!(is_in_scrollbar_hitbox(
-            window_width - 1.0,
-            track_bottom,
-            window_width,
-            window_height,
-            tab_bar_height
-        ));
-    }
-
-    #[test]
-    fn scrollbar_hitbox_rejects_points_outside_track() {
-        let window_width = 1000.0;
-        let window_height = 700.0;
-        let tab_bar_height = 30.0;
-        let track_left = window_width - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN;
-        let track_top = tab_bar_height + SCROLLBAR_MARGIN;
-        let track_bottom = window_height - SCROLLBAR_MARGIN;
-
-        assert!(!is_in_scrollbar_hitbox(
-            track_left - 1.0,
-            track_top,
-            window_width,
-            window_height,
-            tab_bar_height
-        ));
-        assert!(!is_in_scrollbar_hitbox(
-            window_width - 1.0,
-            track_top - 1.0,
-            window_width,
-            window_height,
-            tab_bar_height
-        ));
-        assert!(!is_in_scrollbar_hitbox(
-            window_width - 1.0,
-            track_bottom + 1.0,
-            window_width,
-            window_height,
-            tab_bar_height
-        ));
-    }
-
-    #[test]
-    fn scrollbar_click_maps_top_middle_and_bottom_to_offsets() {
-        let window_height = 700.0;
-        let tab_bar_height = 30.0;
-        let total_lines = 100;
-        let viewport_rows = 20;
-        let track_top = tab_bar_height + SCROLLBAR_MARGIN;
-        let track_height = window_height - tab_bar_height - SCROLLBAR_MARGIN * 2.0;
-        let track_middle = track_top + track_height / 2.0;
-        let track_bottom = window_height - SCROLLBAR_MARGIN;
-
-        assert_eq!(
-            scrollbar_target_offset(
-                track_top,
-                window_height,
-                tab_bar_height,
-                total_lines,
-                viewport_rows
-            ),
-            Some(80)
-        );
-        assert_eq!(
-            scrollbar_target_offset(
-                track_middle,
-                window_height,
-                tab_bar_height,
-                total_lines,
-                viewport_rows
-            ),
-            Some(40)
-        );
-        assert_eq!(
-            scrollbar_target_offset(
-                track_bottom,
-                window_height,
-                tab_bar_height,
-                total_lines,
-                viewport_rows
-            ),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn scrollbar_click_mapping_clamps_and_skips_non_overflowing_content() {
-        let window_height = 700.0;
-        let tab_bar_height = 30.0;
-
-        assert_eq!(
-            scrollbar_target_offset(0.0, window_height, tab_bar_height, 100, 20),
-            Some(80)
-        );
-        assert_eq!(
-            scrollbar_target_offset(900.0, window_height, tab_bar_height, 100, 20),
-            Some(0)
-        );
-        assert_eq!(
-            scrollbar_target_offset(32.0, window_height, tab_bar_height, 20, 20),
-            None
         );
     }
 }

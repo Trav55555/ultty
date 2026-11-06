@@ -17,14 +17,12 @@ mod panes;
 mod pipeline;
 mod powerline;
 mod screenshot;
-mod scrollbar;
 mod tabbar;
 mod text;
 
 pub use atlas::{AtlasStats, GlyphAtlas};
 pub use color::{ColorScheme, Rgba};
 pub use pipeline::RenderPipeline;
-pub use scrollbar::ScrollbarState;
 pub use text::TextRenderer;
 
 use crate::config::{ColorConfig, FontConfig};
@@ -81,8 +79,6 @@ pub struct OverlayState<'a> {
     pub ctrl_held: bool,
     /// Tab bar state (if tabs are visible)
     pub tab_bar: Option<&'a TabBarState>,
-    /// Scrollbar state (if scrollback exists)
-    pub scrollbar: Option<ScrollbarState>,
     /// Visual bell active (border flash)
     pub bell_active: bool,
     /// Keyboard shortcuts overlay visible
@@ -102,7 +98,6 @@ impl<'a> Default for OverlayState<'a> {
             urls: &[],
             ctrl_held: false,
             tab_bar: None,
-            scrollbar: None,
             bell_active: false,
             shortcuts_visible: false,
             keybindings: None,
@@ -2046,50 +2041,5 @@ mod tests {
         // Bottom-right should map to (1, -1)
         assert!((uniforms.projection[0][0] - 2.0 / 800.0).abs() < 0.0001);
         assert!((uniforms.projection[1][1] - (-2.0 / 600.0)).abs() < 0.0001);
-    }
-
-    #[test]
-    fn scrollbar_visibility() {
-        // No scrollback - not visible
-        let scrollbar = ScrollbarState::new(24, 24, 0);
-        assert!(!scrollbar.is_visible());
-
-        // Some scrollback - visible
-        let scrollbar = ScrollbarState::new(100, 24, 0);
-        assert!(scrollbar.is_visible());
-    }
-
-    #[test]
-    fn scrollbar_thumb_at_bottom() {
-        // At bottom (offset 0), thumb should be at bottom
-        let scrollbar = ScrollbarState::new(100, 24, 0);
-        let (pos, size) = scrollbar.thumb_geometry();
-
-        // Size should be viewport/total
-        assert!((size - 24.0 / 100.0).abs() < 0.01);
-
-        // Position should be near bottom (1.0 - size)
-        assert!((pos - (1.0 - size)).abs() < 0.01);
-    }
-
-    #[test]
-    fn scrollbar_thumb_at_top() {
-        // At top (max offset), thumb should be at top
-        let scrollbar = ScrollbarState::new(100, 24, 76); // 100 - 24 = 76 max offset
-        let (pos, _size) = scrollbar.thumb_geometry();
-
-        // Position should be near top (0)
-        assert!(pos < 0.01);
-    }
-
-    #[test]
-    fn scrollbar_thumb_middle() {
-        // At middle offset, thumb should be in middle
-        let scrollbar = ScrollbarState::new(100, 24, 38); // Half of max offset
-        let (pos, size) = scrollbar.thumb_geometry();
-
-        // Position should be roughly in middle
-        let expected_middle = (1.0 - size) / 2.0;
-        assert!((pos - expected_middle).abs() < 0.1);
     }
 }

@@ -3,9 +3,8 @@
 
 use super::App;
 use ultty::config::Config;
-use ultty::grid::Terminal;
 use ultty::protocol::ProtocolServer;
-use ultty::renderer::{OverlayState, ScrollbarState};
+use ultty::renderer::OverlayState;
 use ultty::tabs::TabBarState;
 use ultty::url::DetectedUrl;
 use ultty::vim::CopyMode;
@@ -14,7 +13,6 @@ pub(super) struct ScreenshotOverlayState {
     copy_mode: Option<CopyMode>,
     urls: Vec<DetectedUrl>,
     tab_bar: Option<TabBarState>,
-    scrollbar: Option<ScrollbarState>,
     bell_active: bool,
     shortcuts_visible: bool,
     keybindings: Vec<(String, String)>,
@@ -28,7 +26,6 @@ impl ScreenshotOverlayState {
             urls: &self.urls,
             ctrl_held: false,
             tab_bar: self.tab_bar.as_ref(),
-            scrollbar: self.scrollbar,
             bell_active: self.bell_active,
             shortcuts_visible: self.shortcuts_visible,
             keybindings: self
@@ -41,18 +38,7 @@ impl ScreenshotOverlayState {
 }
 
 impl App {
-    pub(super) fn build_screenshot_overlay_state(
-        &self,
-        terminal: &Terminal,
-    ) -> ScreenshotOverlayState {
-        let buffer = terminal.buffer();
-        let dims = terminal.dimensions();
-        let scrollbar = ScrollbarState::new(
-            buffer.total_lines(),
-            dims.rows as usize,
-            buffer.scroll_offset(),
-        );
-
+    pub(super) fn build_screenshot_overlay_state(&self) -> ScreenshotOverlayState {
         ScreenshotOverlayState {
             copy_mode: if self.copy_mode.is_active() {
                 Some(self.copy_mode.clone())
@@ -65,7 +51,6 @@ impl App {
             } else {
                 None
             },
-            scrollbar: scrollbar.is_visible().then_some(scrollbar),
             bell_active: self
                 .bell_active_until
                 .map(|until| std::time::Instant::now() < until)
@@ -332,7 +317,7 @@ impl App {
             return;
         };
 
-        let overlay_state = self.build_screenshot_overlay_state(&terminal);
+        let overlay_state = self.build_screenshot_overlay_state();
         let overlay = overlay_state.as_overlay();
 
         let native_sessions: Vec<&ultty::protocol::NativeSession> = self
@@ -531,8 +516,6 @@ fn format_duration(duration: std::time::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use ultty::renderer::ScrollbarState;
     use ultty::tabs::TabBarState;
 
     #[test]
@@ -544,7 +527,6 @@ mod tests {
             copy_mode: None,
             urls: Vec::new(),
             tab_bar: Some(tab_bar),
-            scrollbar: Some(ScrollbarState::new(100, 24, 0)),
             bell_active: true,
             shortcuts_visible: true,
             keybindings: vec![("ctrl+s".to_string(), "Screenshot".to_string())],
@@ -554,7 +536,6 @@ mod tests {
         let overlay = snapshot.as_overlay();
 
         assert!(overlay.tab_bar.is_some());
-        assert!(overlay.scrollbar.is_some());
         assert!(overlay.bell_active);
         assert!(overlay.shortcuts_visible);
         assert_eq!(

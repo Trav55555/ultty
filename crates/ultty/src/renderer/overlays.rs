@@ -149,13 +149,6 @@ impl Renderer {
             }
         }
 
-        // Render scrollbar if there's scrollback
-        if let Some(scrollbar) = &overlay.scrollbar {
-            if scrollbar.is_visible() {
-                self.emit_scrollbar(&mut vertices, &mut indices, scrollbar);
-            }
-        }
-
         // Render visual bell (border flash)
         if overlay.bell_active {
             self.emit_bell_border(&mut vertices, &mut indices);
