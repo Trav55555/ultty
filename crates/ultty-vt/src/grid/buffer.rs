@@ -253,8 +253,17 @@ impl Buffer {
         let new_rows = new_dims.rows as usize;
 
         if new_rows < old_rows {
-            // Shrinking - move top rows to history, keep bottom rows in grid
-            let rows_to_move = old_rows - new_rows;
+            // Shrinking. Blank rows below the cursor go first (the grid
+            // resize below truncates them), as in xterm: otherwise a
+            // half-empty screen would scroll its top lines into history
+            // just because the window got shorter. Whatever is still too
+            // much moves from the top into history.
+            let cursor_row = self.grid.cursor().position.row as usize;
+            let blank_below = (cursor_row + 1..old_rows)
+                .rev()
+                .take_while(|&row| self.grid.row(row as u16).is_some_and(Row::is_blank))
+                .count();
+            let rows_to_move = (old_rows - new_rows).saturating_sub(blank_below);
             let grid_rows: Vec<Row> = self.grid.rows().take(rows_to_move).cloned().collect();
             self.push_to_history(grid_rows);
             // Remove those rows from the grid (shift everything up)
@@ -960,6 +969,55 @@ mod tests {
         assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'C');
         assert_eq!(buf.grid().cell(0, 1).unwrap().char(), 'D');
         assert_eq!(buf.grid().cell(0, 2).unwrap().char(), 'E');
+    }
+
+    fn write_lines(buf: &mut Buffer, lines: &[&str]) {
+        for (i, line) in lines.iter().enumerate() {
+            buf.write_ascii_span(line.as_bytes());
+            if i + 1 < lines.len() {
+                buf.grid_mut().carriage_return();
+                buf.newline();
+            }
+        }
+    }
+
+    fn screen(buf: &Buffer) -> Vec<String> {
+        (0..buf.dimensions().rows)
+            .map(|row| buf.grid().row(row).unwrap().text_trimmed())
+            .collect()
+    }
+
+    #[test]
+    fn shrinking_drops_blank_rows_below_the_cursor_first() {
+        // Two lines on a five-row screen, then the tab bar appears and the
+        // screen loses two rows: nothing should scroll away.
+        let mut buf = Buffer::new(Dimensions::new(10, 5));
+        write_lines(&mut buf, &["one", "two"]);
+        buf.resize(Dimensions::new(10, 3));
+        assert_eq!(buf.history_len(), 0);
+        assert_eq!(screen(&buf), ["one", "two", ""]);
+        assert_eq!(buf.grid().cursor().position.row, 1);
+    }
+
+    #[test]
+    fn shrinking_with_the_cursor_at_the_bottom_moves_top_rows_to_history() {
+        let mut buf = Buffer::new(Dimensions::new(10, 4));
+        write_lines(&mut buf, &["a", "b", "c", "d"]);
+        buf.resize(Dimensions::new(10, 2));
+        assert_eq!(buf.history_len(), 2);
+        assert_eq!(screen(&buf), ["c", "d"]);
+    }
+
+    #[test]
+    fn shrinking_keeps_content_below_the_cursor() {
+        // Text below the cursor (a full-screen app moved it up) is not
+        // dropped; the screen scrolls instead.
+        let mut buf = Buffer::new(Dimensions::new(10, 4));
+        write_lines(&mut buf, &["a", "b", "c", "d"]);
+        buf.grid_mut().set_cursor_position(0, 1);
+        buf.resize(Dimensions::new(10, 2));
+        assert_eq!(buf.history_len(), 2);
+        assert_eq!(screen(&buf), ["c", "d"]);
     }
 
     #[test]
