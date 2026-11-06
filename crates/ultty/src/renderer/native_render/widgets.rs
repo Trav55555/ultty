@@ -304,19 +304,14 @@ impl Renderer {
                 text_vertices.extend(verts);
                 text_indices.extend(idxs.iter().map(|i| i + base_idx));
             }
+            // Deprecated by ADR 0018: the terminal no longer interprets
+            // Markdown or highlights Code. It shows the source verbatim so
+            // older apps stay legible during the overlap release.
             WidgetContent::Markdown(md) => {
-                self.render_markdown_content(&md.source, x, y, w, text_vertices, text_indices);
+                self.render_plain_source(&md.source, x, y, text_vertices, text_indices);
             }
             WidgetContent::Code(code) => {
-                self.render_code_content(
-                    &code.source,
-                    &code.language,
-                    code.line_numbers,
-                    x,
-                    y,
-                    text_vertices,
-                    text_indices,
-                );
+                self.render_plain_source(&code.source, x, y, text_vertices, text_indices);
             }
             WidgetContent::Image(img) => {
                 // Upload image to GPU and defer rendering to image pipeline pass
@@ -409,6 +404,30 @@ impl Renderer {
                 text_vertices.extend(verts);
                 text_indices.extend(idxs.iter().map(|i| i + base_idx));
             }
+        }
+    }
+
+    /// Draw `source` one line per cell row in the foreground color.
+    fn render_plain_source(
+        &mut self,
+        source: &str,
+        x: f32,
+        y: f32,
+        text_vertices: &mut Vec<Vertex>,
+        text_indices: &mut Vec<u32>,
+    ) {
+        let color = self.color_scheme.foreground;
+        for (row, line) in source.lines().enumerate() {
+            self.text_renderer.append_styled_text_vertices(
+                line,
+                x,
+                y + row as f32 * self.cell_height,
+                color,
+                false,
+                false,
+                text_vertices,
+                text_indices,
+            );
         }
     }
 }

@@ -113,13 +113,22 @@ Grid Changes ──► Layout Pass ──► Render Pass ──► GPU Submit
 ### Backend Selection
 
 ```rust
-// Automatic detection
-if env::var("ULTTY_SOCKET").is_ok() {
-    NativeBackend::connect()  // Binary protocol
+// Automatic detection (crates/ulttui/src/backend/mod.rs)
+if detect::is_ultty() {                 // ULTTY_SOCKET, on the tab's own tty
+    NativeBackend::new()                // socket
+} else if detect::in_band_candidate() { // a tty, not tmux/screen/dumb/linux
+    NativeBackend::new_in_band()        // probe; APC strings on stdin/stdout
 } else {
-    AnsiBackend::new()        // ratatui fallback
+    AnsiBackend::new()                  // ratatui fallback
 }
+// A native backend whose init fails (no socket, probe answered by DA1
+// first) falls back to ANSI.
 ```
+
+In-band data reaches Ultty through the PTY: the VT parser emits APC `U`
+strings, the per-terminal I/O thread decodes them, and the app's update
+loop hands them to the protocol server. Every PTY write, including the
+server's replies, goes through the I/O thread's ordered queue.
 
 ## Protocol (ultty-protocol)
 

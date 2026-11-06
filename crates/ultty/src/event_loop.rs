@@ -2,11 +2,25 @@
 //!
 //! Each [`EventLoop`] drives one PTY child. A dedicated I/O thread reads the
 //! child's output as fast as it arrives, parses it into the shared
-//! [`Terminal`], and answers terminal queries (DSR, DA, DECRQM) directly on
-//! the PTY. The UI thread never parses: it locks the terminal to render,
-//! writes input, resizes, and collects [`TerminalEvent`]s with
-//! [`EventLoop::process`]. Parsing is therefore never paced by frames, and a
-//! flood of output cannot stall input or rendering.
+//! [`Terminal`], and answers terminal queries (DSR, DA, DECRQM). The UI
+//! thread never parses: it locks the terminal to render, queues input,
+//! resizes, and collects [`TerminalEvent`]s with [`EventLoop::process`].
+//! Parsing is therefore never paced by frames, and a flood of output cannot
+//! stall input or rendering.
+//!
+//! Every write to the PTY goes through one ordered queue that the I/O thread
+//! drains without blocking: keyboard input, query replies, and in-band
+//! protocol strings. Two writers on one fd could splice bytes into the
+//! middle of an in-band string, and a blocking write to a child that is not
+//! reading would freeze whichever thread made it.
+//!
+//! In-band protocol data (ADR 0018) arrives in the child's output, is decoded
+//! here, and is handed to the UI with [`EventLoop::take_in_band`]. Query
+//! replies produced after such data are held until the UI answers it with
+//! [`EventLoop::finish_in_band`], so a client sees replies in the order it
+//! asked. That ordering is what the in-band probe relies on: a client sends
+//! `ClientHello` and then DA1, and treats `ServerHello` arriving first as
+//! support.
 
 use std::cell::RefCell;
 #[cfg(target_os = "linux")]
@@ -40,11 +54,21 @@ const MAX_PENDING_EVENTS: usize = 1024;
 /// and output whose wake was skipped is always flushed by a trailing wake.
 const OUTPUT_WAKE_INTERVAL: Duration = Duration::from_millis(4);
 
+/// Most decoded in-band bytes kept for the UI. More than this means the UI
+/// has stopped collecting; the data is dropped and reported as broken.
+const MAX_IN_BAND_PENDING: usize = 16 * 1024 * 1024;
+
+/// Most bytes queued for the PTY. A child that stops reading its input fills
+/// this, after which [`EventLoop::send_input`] fails instead of growing the
+/// queue without bound.
+const MAX_OUTBOUND: usize = 16 * 1024 * 1024;
+
 /// After the PTY closes, how often and how many times the I/O thread pokes
 /// the UI so it can reap the child once the kernel reports the exit.
 const EXIT_POKE_INTERVAL: Duration = Duration::from_millis(20);
 const EXIT_POKES: usize = 250;
 
+use bytes::{Buf, BytesMut};
 use polling::{Event, Events, Poller};
 
 use crate::grid::{Dimensions, Terminal, TerminalHandler};
@@ -95,6 +119,44 @@ struct State {
     closed: bool,
     /// Bumped on every parsed chunk and on close, for [`EventLoop::wait`].
     generation: u64,
+    /// Decoded in-band frame bytes the UI has not taken yet.
+    in_band: Vec<u8>,
+    /// Since the UI last took in-band input, a string was not valid base64
+    /// or `in_band` overflowed. The stream is no longer trustworthy.
+    in_band_broken: bool,
+    /// The UI took in-band input and has not answered it yet.
+    in_band_open: bool,
+    /// Query replies held until the UI answers pending in-band input.
+    held_responses: Vec<u8>,
+    /// Bytes for the PTY, written in order by the I/O thread.
+    outbound: BytesMut,
+}
+
+impl State {
+    /// Whether query replies must wait for the UI's in-band answer.
+    fn holds_responses(&self) -> bool {
+        self.in_band_open || self.in_band_broken || !self.in_band.is_empty()
+    }
+
+    fn has_in_band(&self) -> bool {
+        self.in_band_broken || !self.in_band.is_empty()
+    }
+
+    /// Whether the UI has anything to collect.
+    fn ready(&self) -> bool {
+        self.output_pending || !self.events.is_empty() || self.closed || self.has_in_band()
+    }
+}
+
+/// In-band protocol data taken from the PTY output by
+/// [`EventLoop::take_in_band`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct InBandInput {
+    /// Decoded frame bytes, in order. They may end mid-frame.
+    pub bytes: Vec<u8>,
+    /// Some in-band data was malformed or dropped since the last take, so
+    /// any session reading this stream should end.
+    pub broken: bool,
 }
 
 struct Shared {
@@ -239,6 +301,11 @@ impl EventLoop {
                 bytes_since_collect: 0,
                 closed: false,
                 generation: 0,
+                in_band: Vec::new(),
+                in_band_broken: false,
+                in_band_open: false,
+                held_responses: Vec::new(),
+                outbound: BytesMut::new(),
             }),
             changed: Condvar::new(),
             wake_pending: AtomicBool::new(false),
@@ -284,10 +351,7 @@ impl EventLoop {
         // Drop any wake that fired before a waker existed so this call
         // re-delivers it.
         self.shared.wake_pending.store(false, Ordering::Release);
-        let pending = {
-            let state = self.shared.lock();
-            state.output_pending || !state.events.is_empty() || state.closed
-        };
+        let pending = self.shared.lock().ready();
         if pending {
             self.shared.notify();
         }
@@ -365,9 +429,95 @@ impl EventLoop {
             .map_err(io::Error::other)
     }
 
-    /// Send input to the shell.
+    /// Queue input for the shell. The I/O thread writes it in order.
+    ///
+    /// Fails once the PTY has closed, or when the child has stopped reading
+    /// and [`MAX_OUTBOUND`] bytes are already waiting.
     pub fn send_input(&mut self, data: &[u8]) -> io::Result<()> {
-        self.child.write_all(data).map_err(io::Error::other)
+        self.enqueue(|state| state.outbound.extend_from_slice(data), data.len())
+    }
+
+    /// Take the in-band protocol data parsed since the last call, if any.
+    ///
+    /// Query replies stay held until [`EventLoop::finish_in_band`] is
+    /// called, so callers must always call it after a `Some`.
+    pub fn take_in_band(&self) -> Option<InBandInput> {
+        let mut state = self.shared.lock();
+        if !state.has_in_band() {
+            return None;
+        }
+        state.in_band_open = true;
+        Some(InBandInput {
+            bytes: std::mem::take(&mut state.in_band),
+            broken: std::mem::take(&mut state.in_band_broken),
+        })
+    }
+
+    /// Answer in-band input taken with [`EventLoop::take_in_band`]: queue
+    /// `frames` as in-band strings, then the query replies held behind them.
+    pub fn finish_in_band(&self, frames: &[u8]) -> io::Result<()> {
+        let wire = ultty_protocol::in_band::encode_to_vec(frames);
+        // Clearing `in_band_open`, choosing the held replies, and queueing
+        // them must happen under one lock. Otherwise the I/O thread could
+        // see nothing held in between and send a newer reply first.
+        self.enqueue(
+            |state| {
+                state.in_band_open = false;
+                state.outbound.extend_from_slice(&wire);
+                // If more in-band data arrived after the take, the held
+                // replies may include ones it caused, which must follow the
+                // next answer. Holding them all is safe; sending any early
+                // is not.
+                if !state.holds_responses() {
+                    let held = std::mem::take(&mut state.held_responses);
+                    state.outbound.extend_from_slice(&held);
+                }
+            },
+            wire.len(),
+        )
+    }
+
+    /// Queue protocol `frames` for the child as in-band strings.
+    pub fn send_in_band(&self, frames: &[u8]) -> io::Result<()> {
+        if frames.is_empty() {
+            return Ok(());
+        }
+        let wire = ultty_protocol::in_band::encode_to_vec(frames);
+        self.enqueue(|state| state.outbound.extend_from_slice(&wire), wire.len())
+    }
+
+    /// Process group in the foreground of this PTY.
+    pub fn foreground_pgrp(&self) -> Option<i32> {
+        // SAFETY: `pty_fd` is the open PTY master owned by `self.child`;
+        // `tcgetpgrp` only reads kernel metadata for that terminal.
+        let pgrp = unsafe { libc::tcgetpgrp(self.child.pty_fd()) };
+        (pgrp > 0).then_some(pgrp)
+    }
+
+    /// Processes in this PTY's foreground process group other than shells:
+    /// the candidates for the program running there. Empty when it cannot
+    /// be determined (no `/proc`).
+    pub fn foreground_pids(&self) -> Vec<i32> {
+        self.foreground_pgrp()
+            .map(pids_in_group)
+            .unwrap_or_default()
+    }
+
+    fn enqueue(&self, push: impl FnOnce(&mut State), len: usize) -> io::Result<()> {
+        {
+            let mut state = self.shared.lock();
+            if state.closed {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "PTY closed"));
+            }
+            if state.outbound.len() + len > MAX_OUTBOUND {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "PTY input queue full: child is not reading its input",
+                ));
+            }
+            push(&mut state);
+        }
+        self.reader_poller.notify()
     }
 
     /// Send a key press to the shell.
@@ -409,12 +559,11 @@ impl EventLoop {
     pub fn wait(&mut self, timeout: Duration) -> io::Result<Vec<TerminalEvent>> {
         {
             let state = self.shared.lock();
-            let ready = |s: &State| s.output_pending || !s.events.is_empty() || s.closed;
-            if !ready(&state) {
+            if !state.ready() {
                 let _ = self
                     .shared
                     .changed
-                    .wait_timeout_while(state, timeout, |s| !ready(s))
+                    .wait_timeout_while(state, timeout, |s| !s.ready())
                     .unwrap_or_else(PoisonError::into_inner);
             }
         }
@@ -430,6 +579,11 @@ impl EventLoop {
     {
         loop {
             let events = self.wait(Duration::from_millis(16))?; // ~60fps
+                                                                // No protocol server here: answer in-band data with nothing so
+                                                                // held query replies go out.
+            if self.take_in_band().is_some() {
+                self.finish_in_band(&[])?;
+            }
 
             for event in events {
                 let should_continue = callback(self, event.clone());
@@ -465,7 +619,9 @@ fn run_reader(pty: Pty, shared: &Shared, poller: &Poller) {
         if shared.stop.load(Ordering::Acquire) {
             break;
         }
-        match drain(&pty, &mut parser, &mut buf, shared, &mut wakes) {
+        match drain(&pty, &mut parser, &mut buf, shared, &mut wakes)
+            .and_then(|()| flush_outbound(&pty, shared))
+        {
             Ok(()) => {}
             Err(err) => {
                 if !matches!(err, PtyError::Closed) {
@@ -480,8 +636,13 @@ fn run_reader(pty: Pty, shared: &Shared, poller: &Poller) {
         // was skipped, sleep no longer than it takes to become due.
         poll_events.clear();
         let timeout = wakes.flush_due_in();
+        let interest = if shared.lock().outbound.is_empty() {
+            Event::readable(0)
+        } else {
+            Event::all(0)
+        };
         if let Err(err) = poller
-            .modify(pty.as_fd(), Event::readable(0))
+            .modify(pty.as_fd(), interest)
             .and_then(|()| poller.wait(&mut poll_events, timeout))
         {
             tracing::warn!("PTY poll failed: {err}");
@@ -537,17 +698,21 @@ fn drain(
         }
         read_batches += 1;
         read_bytes += n;
-        let (responses, has_events) = {
+        let urgent = {
             let mut state = shared.lock();
             parse_into(&mut state, parser, &buf[..n]);
-            (state.terminal.take_responses(), !state.events.is_empty())
-        };
-        for response in responses {
-            if let Err(err) = pty.write_all(&response) {
-                tracing::warn!("Failed to send terminal response: {err}");
+            let hold = state.holds_responses();
+            for response in state.terminal.take_responses() {
+                if hold {
+                    state.held_responses.extend_from_slice(&response);
+                } else {
+                    state.outbound.extend_from_slice(&response);
+                }
             }
-        }
-        wakes.output(shared, has_events);
+            !state.events.is_empty() || state.has_in_band()
+        };
+        flush_outbound(pty, shared)?;
+        wakes.output(shared, urgent);
     }
 }
 
@@ -594,6 +759,25 @@ impl WakeThrottle {
             self.wake(shared);
         }
     }
+}
+
+/// Write queued bytes until the queue is empty or the PTY would block.
+fn flush_outbound(pty: &Pty, shared: &Shared) -> Result<(), PtyError> {
+    let mut state = shared.lock();
+    while !state.outbound.is_empty() {
+        match pty.write(&state.outbound) {
+            Ok(0) => break,
+            Ok(n) => state.outbound.advance(n),
+            Err(PtyError::Closed) => return Err(PtyError::Closed),
+            Err(PtyError::WriteFailed(err)) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                tracing::warn!("PTY write failed, dropping queued input: {err}");
+                state.outbound.clear();
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn close(shared: &Shared) {
@@ -645,7 +829,11 @@ fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
     use crate::protocol::ansi::{Action, AnsiOutput};
 
     let State {
-        terminal, events, ..
+        terminal,
+        events,
+        in_band,
+        in_band_broken,
+        ..
     } = state;
     let mut handler = TerminalHandler::new(terminal);
     let trace = pipeline_trace_enabled();
@@ -672,6 +860,14 @@ fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
                     title: title.clone(),
                     body: body.clone(),
                 }),
+                Action::InBand(text) => {
+                    if in_band.len() + text.len() > MAX_IN_BAND_PENDING
+                        || ultty_protocol::in_band::decode_payload(text, in_band).is_err()
+                    {
+                        *in_band_broken = true;
+                    }
+                    None
+                }
                 _ => None,
             };
             if let Some(event) = event {
@@ -768,6 +964,26 @@ fn process_name_for_group(pgrp: i32) -> Option<String> {
     }
 
     fallback
+}
+
+#[cfg(target_os = "linux")]
+fn pids_in_group(pgrp: i32) -> Vec<i32> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().parse::<i32>().is_ok())
+        .filter_map(|entry| fs::read_to_string(entry.path().join("stat")).ok())
+        .filter_map(|stat| parse_proc_stat(&stat))
+        .filter(|process| process.pgrp == pgrp && !is_shell_process(&process.name))
+        .map(|process| process.pid)
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pids_in_group(_pgrp: i32) -> Vec<i32> {
+    Vec::new()
 }
 
 #[cfg(target_os = "linux")]
@@ -995,5 +1211,93 @@ mod tests {
         let started = Instant::now();
         drop(event_loop);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// A shell child that runs `script` with `$1` set to a temp file path.
+    fn child_writing_to(script: &str) -> (EventLoop, tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("stdin.bin");
+        let path_str = path.to_str().unwrap().to_string();
+        let event_loop = EventLoop::with_command(
+            "/bin/sh",
+            &["/bin/sh", "-c", script, "sh", &path_str],
+            80,
+            24,
+        )
+        .expect("spawn sh");
+        (event_loop, dir, path)
+    }
+
+    fn file_eventually(path: &std::path::Path, check: impl Fn(&[u8]) -> bool) -> Vec<u8> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let data = std::fs::read(path).unwrap_or_default();
+            if check(&data) || Instant::now() >= deadline {
+                return data;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn take_in_band_eventually(event_loop: &EventLoop) -> Option<InBandInput> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Some(input) = event_loop.take_in_band() {
+                return Some(input);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    #[test]
+    fn query_replies_wait_for_the_in_band_answer() {
+        // The child sends an in-band string ("hi") and then DA1, the probe
+        // sequence, and records everything it is sent.
+        let (event_loop, _dir, path) =
+            child_writing_to(r#"stty raw -echo; printf '\033_UaGk\033\\\033[c'; exec cat > "$1""#);
+        let input = take_in_band_eventually(&event_loop).expect("in-band input");
+        assert_eq!(input.bytes, b"hi");
+        assert!(!input.broken);
+
+        // Until the UI answers, the DA1 reply must not reach the child.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!std::fs::read(&path).unwrap_or_default().contains(&b'['));
+
+        event_loop.finish_in_band(b"ok").expect("finish");
+        let answer = ultty_protocol::in_band::encode_to_vec(b"ok");
+        let got = file_eventually(&path, |d| d.len() > answer.len() && d.ends_with(b"c"));
+        assert!(got.starts_with(&answer), "answer first: {got:?}");
+        assert!(
+            got[answer.len()..].starts_with(b"\x1b[?"),
+            "then DA1: {got:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_in_band_text_is_reported_broken() {
+        let (event_loop, _dir, _path) = child_writing_to(r#"printf '\033_U!!\033\\'; sleep 5"#);
+        let input = take_in_band_eventually(&event_loop).expect("in-band input");
+        assert!(input.broken);
+        assert!(input.bytes.is_empty());
+        event_loop.finish_in_band(&[]).expect("finish");
+    }
+
+    #[test]
+    fn input_and_in_band_writes_reach_the_child_in_order() {
+        let (mut event_loop, _dir, path) = child_writing_to(r#"stty raw -echo; exec cat > "$1""#);
+        // Let the child switch its terminal to raw mode before writing.
+        std::thread::sleep(Duration::from_millis(200));
+        let frames = vec![0x55u8; 100_000];
+        event_loop.send_input(b"1").unwrap();
+        event_loop.send_in_band(&frames).unwrap();
+        event_loop.send_input(b"2").unwrap();
+
+        let mut expected = b"1".to_vec();
+        expected.extend(ultty_protocol::in_band::encode_to_vec(&frames));
+        expected.push(b'2');
+        let got = file_eventually(&path, |d| d.len() >= expected.len());
+        assert_eq!(got.len(), expected.len());
+        assert!(got == expected, "bytes arrived out of order or altered");
     }
 }

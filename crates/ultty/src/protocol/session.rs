@@ -36,6 +36,12 @@ const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_STREAM_LIFECYCLE
     | CAP_REGION_METADATA;
 
+/// An in-band session with no traffic from its app for this long has ended.
+/// Clients send a heartbeat (an unsolicited `Pong`) at least every few
+/// seconds while idle. The terminal never pings in-band: if the app has
+/// died, a ping would land in the shell's input as typed text.
+pub const IN_BAND_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Maximum read buffer size (16 MB). Sessions exceeding this are disconnected.
 const MAX_READ_BUF: usize = 16 * 1024 * 1024;
 const MAX_RECENT_PROTOCOL_ERRORS: usize = 5;
@@ -53,8 +59,8 @@ pub struct NativeSession {
     scene: SceneTree,
     /// Layout engine.
     layout: LayoutEngine,
-    /// Socket connection.
-    stream: UnixStream,
+    /// How the app is connected.
+    link: Link,
     /// Read buffer.
     read_buf: BytesMut,
     /// Write buffer.
@@ -114,6 +120,30 @@ pub struct NativeSession {
     last_layout_duration: Option<std::time::Duration>,
 }
 
+/// How a session's app is connected.
+enum Link {
+    /// The tab's protocol socket.
+    Socket(UnixStream),
+    /// In-band strings on the tab's PTY (ADR 0018). The server feeds input
+    /// with [`NativeSession::feed_in_band`] and collects output with
+    /// [`NativeSession::take_in_band_output`].
+    InBand {
+        /// Frame bytes waiting to be written to the PTY.
+        outgoing: Vec<u8>,
+        /// Foreground process group of the PTY when the session started.
+        pgrp: Option<i32>,
+        /// Non-shell processes in that group then. One of them is the app.
+        pids: Vec<i32>,
+    },
+}
+
+fn process_exists(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists and may be
+    // signalled; nothing is sent.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 /// Tracks an in-progress style transition for a region.
 struct StyleAnimation {
     /// When the animation started.
@@ -138,7 +168,25 @@ impl NativeSession {
     /// Create a new session from a connection accepted on `tab_id`'s socket.
     pub fn new(stream: UnixStream, session_id: u64, tab_id: TabId) -> io::Result<Self> {
         stream.set_nonblocking(true)?;
+        Ok(Self::with_link(Link::Socket(stream), session_id, tab_id))
+    }
 
+    /// Create a session whose app talks in-band on `tab_id`'s PTY, which had
+    /// process group `pgrp`, holding `pids`, in the foreground when the app
+    /// said hello.
+    pub fn new_in_band(session_id: u64, tab_id: TabId, pgrp: Option<i32>, pids: Vec<i32>) -> Self {
+        Self::with_link(
+            Link::InBand {
+                outgoing: Vec::new(),
+                pgrp,
+                pids,
+            },
+            session_id,
+            tab_id,
+        )
+    }
+
+    fn with_link(link: Link, session_id: u64, tab_id: TabId) -> Self {
         let mut scene = SceneTree::new();
         if let Some(root) = scene.get_mut(RegionId::ROOT) {
             root.constraints.width = Dimension::Percent(100.0);
@@ -147,12 +195,12 @@ impl NativeSession {
             root.constraints.flex_direction = FlexDirection::Column;
         }
 
-        Ok(Self {
+        Self {
             session_id,
             tab_id,
             scene,
             layout: LayoutEngine::new(),
-            stream,
+            link,
             read_buf: BytesMut::with_capacity(8192),
             write_buf: BytesMut::with_capacity(8192),
             viewport_width: 80.0,
@@ -181,7 +229,7 @@ impl NativeSession {
             awaiting_pong: false,
             recent_protocol_errors: VecDeque::with_capacity(MAX_RECENT_PROTOCOL_ERRORS),
             last_layout_duration: None,
-        })
+        }
     }
 
     /// Set viewport dimensions (in terminal cells).
@@ -360,6 +408,18 @@ impl NativeSession {
     pub fn check_keepalive(&mut self) -> io::Result<bool> {
         let now = std::time::Instant::now();
         let idle = now.duration_since(self.last_activity);
+
+        if self.is_in_band() {
+            if idle > IN_BAND_IDLE_TIMEOUT {
+                info!(
+                    "In-band session {} silent for {}s",
+                    self.session_id,
+                    idle.as_secs()
+                );
+                return Ok(false);
+            }
+            return Ok(true);
+        }
 
         // Hard idle timeout: 120 seconds
         if idle > std::time::Duration::from_secs(120) {
@@ -584,9 +644,79 @@ impl NativeSession {
         !self.write_buf.is_empty()
     }
 
-    pub fn stream_fd(&self) -> std::os::unix::io::BorrowedFd<'_> {
+    /// The session socket, for readiness polling. In-band sessions have none.
+    pub fn stream_fd(&self) -> Option<std::os::unix::io::BorrowedFd<'_>> {
         use std::os::unix::io::AsFd;
-        self.stream.as_fd()
+        match &self.link {
+            Link::Socket(stream) => Some(stream.as_fd()),
+            Link::InBand { .. } => None,
+        }
+    }
+
+    /// Whether the app talks in-band on the tab's PTY.
+    pub fn is_in_band(&self) -> bool {
+        matches!(self.link, Link::InBand { .. })
+    }
+
+    /// For an in-band session, the PTY's foreground process group when it
+    /// started.
+    pub fn in_band_pgrp(&self) -> Option<i32> {
+        match self.link {
+            Link::InBand { pgrp, .. } => pgrp,
+            Link::Socket(_) => None,
+        }
+    }
+
+    /// Whether the in-band app still runs, judged from outside: the PTY's
+    /// foreground group is still the one at hello, and at least one of the
+    /// non-shell processes that were in it then is alive.
+    ///
+    /// The group check catches an app exiting under a job-control shell.
+    /// The process check catches it without job control (a script, `bash -c`,
+    /// `script`), where the group stays the same after the app dies; shells
+    /// are left out because a wrapper script outlives the app. Requiring
+    /// only one survivor means a helper the app ran exiting does not end the
+    /// session. Neither check sees a remote app over ssh; that relies on
+    /// `Disconnect` and the idle timeout.
+    pub fn in_band_app_alive(&self, pgrp: Option<i32>) -> bool {
+        match &self.link {
+            Link::InBand {
+                pgrp: started,
+                pids,
+                ..
+            } => {
+                *started == pgrp && (pids.is_empty() || pids.iter().any(|&pid| process_exists(pid)))
+            }
+            Link::Socket(_) => true,
+        }
+    }
+
+    /// Add frame bytes that arrived in-band. Call [`NativeSession::poll`]
+    /// afterwards to process them.
+    pub fn feed_in_band(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.last_activity = std::time::Instant::now();
+        self.read_buf.extend_from_slice(bytes);
+        if self.read_buf.len() > MAX_READ_BUF {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "read buffer exceeded maximum size",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Frame bytes queued for an in-band app since the last call.
+    pub fn take_in_band_output(&mut self) -> Vec<u8> {
+        if let Err(e) = self.flush_writes() {
+            warn!("Session {} flush failed: {}", self.session_id, e);
+        }
+        match &mut self.link {
+            Link::InBand { outgoing, .. } => std::mem::take(outgoing),
+            Link::Socket(_) => Vec::new(),
+        }
     }
 
     pub fn send_input(&mut self, event: ultty_protocol::InputEvent) -> io::Result<()> {
@@ -1710,6 +1840,53 @@ mod tests {
             layout_replies(&messages).len(),
             1,
             "the rest of the frame still renders"
+        );
+    }
+
+    #[test]
+    fn in_band_session_times_out_without_ever_pinging() {
+        let mut session = NativeSession::new_in_band(1, TabId::new(0), Some(9), Vec::new());
+        assert!(session.is_in_band());
+        assert_eq!(session.in_band_pgrp(), Some(9));
+
+        // Idle but within the timeout: alive, and nothing is sent to the PTY.
+        session.last_activity = std::time::Instant::now() - std::time::Duration::from_secs(9);
+        assert!(session.check_keepalive().unwrap());
+        assert!(session.take_in_band_output().is_empty());
+
+        session.last_activity =
+            std::time::Instant::now() - IN_BAND_IDLE_TIMEOUT - std::time::Duration::from_secs(1);
+        assert!(!session.check_keepalive().unwrap());
+        assert!(session.take_in_band_output().is_empty());
+    }
+
+    #[test]
+    fn in_band_app_is_gone_when_its_group_changes_or_a_process_exits() {
+        let spawn = || {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap()
+        };
+        let (mut app, mut helper) = (spawn(), spawn());
+        let pids = vec![app.id() as i32, helper.id() as i32];
+        let session = NativeSession::new_in_band(1, TabId::new(0), Some(5), pids);
+        assert!(session.in_band_app_alive(Some(5)));
+        assert!(!session.in_band_app_alive(Some(6)), "new foreground group");
+        helper.kill().unwrap();
+        helper.wait().unwrap();
+        assert!(
+            session.in_band_app_alive(Some(5)),
+            "a helper exiting is not the app"
+        );
+        app.kill().unwrap();
+        app.wait().unwrap();
+        assert!(!session.in_band_app_alive(Some(5)), "every process exited");
+
+        let unknown = NativeSession::new_in_band(2, TabId::new(0), Some(5), Vec::new());
+        assert!(
+            unknown.in_band_app_alive(Some(5)),
+            "no pids: group check only"
         );
     }
 }

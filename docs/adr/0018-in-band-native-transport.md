@@ -2,8 +2,16 @@
 
 ## Status
 
-Proposed (2026-11-05). Needs a maintainer decision on the two questions under
-"Open decisions" before any implementation starts.
+- Widgets (proposal 2): Accepted 2026-11-05 for `Markdown` and `Code`.
+  The terminal's markdown and syntax renderers are removed; the tags still
+  decode and draw as verbatim source. Moving `Input`, `Button`, `Progress`
+  and `Spinner` into `ulttui` is accepted in direction, one slice at a time.
+- Transport (proposal 1): Accepted 2026-11-05 and implemented in Ultty and
+  `ulttui`; `ultty-client` still speaks only the socket. The benchmark
+  ([docs/perf/2026-11-05-in-band-transport.md](../perf/2026-11-05-in-band-transport.md))
+  measured +35% bytes and +6 to +14 µs round-trip latency at p50 on real
+  app traffic. Every frame crossed a real ssh hop to EC2 intact. The design
+  below differs from the proposal in places; see "As built".
 
 ## Context
 
@@ -53,11 +61,18 @@ inside APC strings on the PTY:
 - base64 costs about 33% of payload size, which matters only for images. The
   socket stays as a local fast path, used when `ULTTY_TTY` matches.
 
-Multiplexers: tmux forwards app-to-terminal APC only with `allow-passthrough`
-and DCS wrapping, and does not forward terminal replies to panes at all. So
-native mode stays off under multiplexers, as kitty graphics do. This
-proposal does not solve that; it solves ssh, sudo, containers, and
-recording.
+Multiplexers (measured with tmux 3.6):
+- tmux drops bare APC whether passthrough is on or off. It forwards
+  DCS-wrapped APC only with `allow-passthrough on`, and only up to 1 MiB.
+- It does forward APC written to its input to the active pane.
+
+Ultty cannot know where a tmux pane sits in its tab, so native mode must
+stay off under multiplexers. The probe enforces this: apps send it bare
+and never DCS-wrap it, so tmux drops it and the app falls back to ANSI.
+Frames are chunked into APCs well under 1 MiB (64 KiB), which also bounds
+what the parser buffers. This proposal does not make native mode work
+under multiplexers; it makes it work over ssh, under sudo, in containers,
+and in recordings.
 
 ### 2. Keep the wire vocabulary primitive
 
@@ -79,31 +94,85 @@ Keep `Image` as a primitive. Remove the deprecated tags after one release
 that decodes both, as [ADR 0011](0011-pre-1-0-protocol-evolution.md) allows
 before 1.0.
 
-## Open decisions
+## Decisions
 
-1. **Transport.** Adopt the in-band transport (socket kept as local fast
-   path), or keep the socket as the only transport and document native mode
-   as local-only.
-2. **Widgets.** Supersede the widget part of ADR 0002 (option above), or keep
-   terminal-rendered widgets as a deliberate product feature and accept that
-   the wire format freezes their behavior. Deprecating only `Markdown` and
-   `Code` is a cheap middle step either way.
+1. **Transport.** In-band is adopted. The socket stays and `ulttui` prefers
+   it when it runs on the tab that owns it.
+2. **Widgets.** `Markdown` and `Code` are deprecated and no longer rendered
+   by the terminal ([ADR 0002](0002-native-protocol-semantic-ui.md) is
+   amended). The other widgets move to `ulttui` one slice at a time.
 
-## Consequences if adopted
+## As built
 
-- `ultty`: an APC `U` handler in `ultty-vt::ansi` that hands decoded frames to
-  the tab's protocol session; sessions gain a PTY-backed writer.
-- `ulttui` / `ultty-client`: an in-band writer, a stdin demultiplexer, and the
-  probe; the socket path becomes one of two transports.
-- Fuzzing: the `vt_terminal` target starts covering protocol frames, since
-  they now arrive through the VT parser.
-- Docs: spec §1.2 gains the in-band framing; README's native-mode
-  limitations shrink to multiplexers.
+The wire format is as proposed, with each APC string carrying a chunk of
+at most 64 KiB of the frame stream ([spec §1.3](../PROTOCOL_SPEC.md)).
+Building and running it changed five things.
+
+- **Probe.** There is no separate query frame. The app sends `ClientHello`
+  then DA1, and support means a frame arrives before the DA1 reply, so
+  non-Ultty terminals are detected without waiting out a timeout. This
+  requires the terminal to keep replies in request order. Ultty does that by
+  routing every PTY write through one queue on the I/O thread, and by
+  holding query replies until the UI has answered the in-band data before
+  them.
+- **Multiplexers.** tmux takes an APC string as a pane title and screen as
+  its hardstatus, so the probe would rename the pane. `ulttui` does not
+  probe when `TMUX` or `STY` is set or `TERM` is `tmux*` or `screen*`.
+  Ultty no longer passes `TMUX`, `TMUX_PANE`, `STY`, or `WINDOW` to its
+  shells: its tabs are not inside that multiplexer.
+- **Liveness.** The terminal never pings in-band, because a ping to a dead
+  app reaches the shell as typed input. Instead an idle app sends a `Pong`
+  every 2 s, and a session ends after 10 s of silence. It also ends at once
+  when the app is seen to be gone:
+  - `Disconnect` is sent from `Drop`, the panic hook, and an `atexit` hook,
+    so `std::process::exit` ends the session too.
+  - Ultty checks the PTY's foreground process group, and the processes it
+    held at hello. The process check matters without job control (a
+    script, `bash -c`, `script`), where the group does not change when the
+    app dies.
+  - Neither check sees a remote app over ssh. There, a crash without
+    `Disconnect` leaves its scene up for up to 10 s.
+- **Scope.** A tab hosts one in-band session, only while it has a single
+  pane, and only after a well-formed `ClientHello`.
+- **Trust.** Anything that writes to the tab can open a session, including
+  a remote host or a `cat`ed file. In-band sessions cannot read the
+  clipboard.
+
+Known costs:
+- A remote app that dies without `Disconnect` leaves its scene up for up to
+  10 s. Keys typed meanwhile are sent as in-band strings into the remote
+  shell's input, where they show up as junk on the command line.
+- A `cat`ed file holding a valid `ClientHello` opens a session that blanks
+  the tab until the idle timeout. A remote host could already clear the
+  screen with ANSI, so this adds no new capability.
+
+## Follow-ups
+
+- `ultty-client` (used by `hello-native` and `split-panes`) gains the
+  in-band transport.
+- Image-heavy apps keep using the socket when it is available. In-band
+  moves a 1 MiB image in about 3 ms.
 
 ## Validation
 
-- A `counter-app` session driven over `ssh localhost` renders natively.
-- The same app under `script` records frames that replay correctly.
-- `cargo test --workspace`, the protocol roundtrip tests, and both fuzz
-  targets pass; the widget deprecation has a test that the v1 tags still
-  decode during the overlap release.
+- In a live Ultty tab with no `ULTTY_SOCKET`:
+  - `counter-app` ran natively over in-band, and keys reached it.
+  - Under `script` it ran natively as well.
+  - Inside tmux it fell back to ANSI, with the pane title untouched.
+  - After `q` (`process::exit`) and after `kill -9`, the session ended at
+    once and the shell came back.
+  - A normal tab still used the socket.
+- `cargo test --workspace` passes, including:
+  - parser, splitter, and event-loop ordering tests;
+  - server lifecycle and clipboard tests;
+  - probe tests against a fake terminal on a real PTY.
+- Fuzzing ran clean: `in_band_split` 7.9M runs, `vt_terminal` 540K runs.
+- Over ssh, 2026-11-05. A local Ultty tab ran `ssh -t` to a throwaway
+  Ubuntu 24.04 EC2 host (us-east-1, torn down afterwards), with no socket on
+  the remote side:
+  - The remote `counter-app` ran natively.
+  - It stayed up through 15 s of idle on heartbeats alone.
+  - Keys reached it.
+  - `q` ended the session through `Disconnect`.
+  - After a remote `kill -9`, the session ended at the 10 s silence timeout
+    (9.9 s measured) and the shell came back.

@@ -21,19 +21,87 @@ The Ultimate Terminal Protocol (UTP) is a binary protocol between TUI applicatio
 | Backward compatible | Version and capability negotiation |
 | Debuggable | Explicit framing and typed payloads |
 
-### 1.2 Transport
+### 1.2 Transports
 
-The only transport is a Unix domain socket. The terminal binds one listening
-socket per tab (`ultty-<pid>-tab<id>.sock` in the user's runtime directory) and
-passes that tab's path to the tab's shell as `ULTTY_SOCKET`, with the tab's PTY
-slave path as `ULTTY_TTY`; an app connects to the path in its own environment.
+Frames (§3) travel over one of two transports. The frame byte stream is the
+same on both.
+
+**Socket.** The terminal binds one listening socket per tab
+(`ultty-<pid>-tab<id>.sock` in the user's runtime directory) and passes that
+tab's path to the tab's shell as `ULTTY_SOCKET`, with the tab's PTY slave
+path as `ULTTY_TTY`; an app connects to the path in its own environment.
 `ulttui` connects only when its stdin, stdout, or stderr is the `ULTTY_TTY`
 terminal, so a copy of the variables inherited into a multiplexer pane or a
 recording PTY is ignored (`ULTTY_FORCE_NATIVE=1` overrides this). The socket
-does not cross ssh. In-band transport is proposed in
-[ADR 0018](adr/0018-in-band-native-transport.md). A session belongs to the tab whose socket
-accepted it: input events and clipboard reads are delivered only while that tab
-is visible, and closing the tab unlinks its socket and disconnects its sessions.
+reaches only programs on the same machine. A session belongs to the tab whose
+socket accepted it: input events and clipboard reads are delivered only while
+that tab is visible, and closing the tab unlinks its socket and disconnects
+its sessions.
+
+**In-band** ([ADR 0018](adr/0018-in-band-native-transport.md)). Frames travel
+in the terminal byte stream, so native mode works wherever that stream goes:
+over ssh, under sudo, in containers, and through recorders such as `script`.
+`ulttui` uses the socket when it can and probes for in-band otherwise.
+
+### 1.3 In-band framing
+
+The frame byte stream is cut into chunks of at most 65,536 bytes. Each chunk
+is sent as one APC string:
+
+```text
+ESC _ U <base64url of the chunk, no padding> ESC \
+```
+
+- **Directions.** Apps write strings to their terminal (stdout). The
+  terminal writes them to the app's input (stdin).
+- **Reassembly.** A frame may span strings and a string may hold several
+  frames. Receivers concatenate decoded chunks and read frames by their
+  length headers.
+- **Decoding.** Receivers accept padded or unpadded base64url. They may
+  discard strings longer than 131,072 base64 bytes, and a string that is not
+  valid base64url ends the session.
+- **Other bytes.** Bytes outside `ESC _ U ... ESC \` strings are not
+  protocol data. Apps ignore them on stdin. Terminals process them as
+  ordinary output.
+
+**Probe.** An app writes `ClientHello` as an in-band string and then DA1
+(`ESC [ c`). A terminal that supports in-band answers with a frame, normally
+`ServerHello`, before its DA1 reply; any other terminal ignores the APC
+string and answers only DA1. A terminal must send its reply to a query
+that follows an in-band string only after its answer to that string. Ultty
+applies this per read from the PTY, so it may also delay replies to queries
+made just before the string; apps must send the hello first. An app that
+sees the DA1
+reply first, or nothing within a timeout (`ulttui`: 1 s), uses ANSI.
+
+- Apps keep their tty in raw mode, without echo, for the whole session.
+  Otherwise the line discipline holds the terminal's strings and echoes
+  them back.
+- Apps must not wrap the probe for multiplexer passthrough. A terminal
+  outside a multiplexer cannot know where a pane is.
+- `ulttui` does not probe under tmux or screen: when `TMUX` or `STY` is set,
+  or `TERM` starts with `tmux` or `screen`. Both take APC strings as title or
+  status text. It also skips the probe on `TERM=dumb` and on the Linux
+  console, which prints unknown APC strings, and when `ULTTY_IN_BAND=0`.
+
+**Sessions.** A terminal opens an in-band session only when a well-formed
+`ClientHello` starts the data, so stray strings, such as a file being
+displayed, cannot open one. Ultty allows one in-band session per tab, and
+only on a tab with a single pane. A session ends when any of these happen:
+
+- the app sends `Disconnect`;
+- the stream is malformed;
+- the app has been silent for 10 s;
+- the terminal sees the app is gone: Ultty checks the PTY's foreground
+  process group and the processes it held at hello.
+
+The terminal never sends `Ping` in-band: if the app has died, the string
+would reach the shell as typed input. Instead an idle app sends an
+unsolicited `Pong` at least every 2 s.
+
+**Trust.** Anything that can write to the terminal can send in-band data,
+including a remote host. In-band sessions therefore cannot read the
+clipboard: `ClipboardGet` is answered with `ClipboardContent` with no text.
 
 ---
 
@@ -293,14 +361,20 @@ A `Dimension` is a `u8` tag followed immediately by an `f32` LE value only for t
 | Tag | Widget | Fields in encoding order |
 |-----|--------|--------------------------|
 | 0 | Input | value string, placeholder string, flags u8 (`multiline=1`, `password=2`) |
-| 1 | Markdown | source string |
-| 2 | Code | source string, language string, line_numbers u8 |
+| 1 | Markdown (deprecated) | source string |
+| 2 | Code (deprecated) | source string, language string, line_numbers u8 |
 | 3 | Progress | value f32, label Option<string>, animated u8, indeterminate u8 |
 | 4 | Spinner | label Option<string>, style u8 (`Braille=0`, `Dots=1`, `Line=2`, `Bounce=3`) |
 | 5 | Image | width u32, height u32, scale u8, data_len u32, bytes |
 | 6 | Button | label string, style u8 (`Default=0`, `Primary=1`, `Danger=2`, `Success=3`) |
 
 Image scale is `Fit=0`, `Fill=1`, `Stretch=2`, `None=3`.
+
+`Markdown` and `Code` are deprecated ([ADR 0018](adr/0018-in-band-native-transport.md)).
+Terminals still decode them, but draw the source verbatim, one line per row,
+without parsing markdown or highlighting. Apps should send `RichText` and do
+their own styling; `ulttui`'s `MarkdownView` already does. Tags 1 and 2 will
+be removed in a later protocol version.
 
 ---
 

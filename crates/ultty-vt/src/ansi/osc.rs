@@ -1,7 +1,7 @@
 //! OSC (Operating System Command), DCS, APC, and other string sequence handling.
 
 use super::AnsiParser;
-use super::{Action, State};
+use super::{Action, ApcKind, State, MAX_IN_BAND_APC};
 
 /// Maximum size for OSC/DCS string buffers to prevent unbounded memory growth.
 const MAX_STRING_BUFFER: usize = 65536;
@@ -253,21 +253,52 @@ impl AnsiParser {
         }
     }
 
-    /// APC string state - accumulating APC content (Kitty graphics, etc.).
-    /// We currently just ignore APC content but need to consume it properly.
+    /// APC string state. Ultty in-band strings (`U`) are collected; others,
+    /// such as kitty graphics, are consumed and ignored.
     pub(super) fn apc_string(&mut self, byte: u8) {
         if byte == 0x1B {
             // ESC - might be start of ST (String Terminator = ESC \)
             self.state = State::ApcStringEsc;
+            return;
         }
-        // Otherwise just consume the byte - we don't process APC content yet
+        match self.apc_kind {
+            ApcKind::Unknown => {
+                self.apc_kind = if byte == b'U' {
+                    ApcKind::InBand
+                } else {
+                    ApcKind::Other
+                };
+            }
+            _ => self.apc_extend(&[byte]),
+        }
+    }
+
+    /// Add payload bytes to an in-band string, dropping it if it grows past
+    /// [`MAX_IN_BAND_APC`].
+    pub(super) fn apc_extend(&mut self, bytes: &[u8]) {
+        if self.apc_kind != ApcKind::InBand {
+            return;
+        }
+        if self.apc_buffer.len() + bytes.len() > MAX_IN_BAND_APC {
+            self.apc_kind = ApcKind::Oversized;
+            self.apc_buffer = Vec::new();
+            return;
+        }
+        self.apc_buffer.extend_from_slice(bytes);
     }
 
     /// APC string ESC state - waiting for backslash to complete ST.
-    pub(super) fn apc_string_esc(&mut self, byte: u8) {
+    pub(super) fn apc_string_esc<F>(&mut self, byte: u8, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
         match byte {
             // Backslash completes ST (String Terminator)
             b'\\' => {
+                if self.apc_kind == ApcKind::InBand {
+                    callback(Action::InBand(std::mem::take(&mut self.apc_buffer)));
+                }
+                self.apc_kind = ApcKind::Unknown;
                 self.reset();
             }
             // Any other byte - not a valid ST, continue in APC mode
@@ -796,5 +827,81 @@ mod tests {
     fn apc_followed_by_text() {
         let actions = parse(b"\x1b_payload\x1b\\X");
         assert_eq!(actions, vec![Action::Print('X')]);
+    }
+
+    #[test]
+    fn in_band_apc_is_collected_without_the_marker() {
+        let actions = parse(b"a\x1b_UAAEC-_\x1b\\b");
+        assert_eq!(
+            actions,
+            vec![
+                Action::Print('a'),
+                Action::InBand(b"AAEC-_".to_vec()),
+                Action::Print('b')
+            ]
+        );
+    }
+
+    #[test]
+    fn other_apc_strings_are_not_in_band() {
+        assert!(parse(b"\x1b_Ga=q\x1b\\").is_empty());
+        assert!(parse(b"\x1b_\x1b\\").is_empty());
+    }
+
+    #[test]
+    fn in_band_apc_survives_any_split_through_both_feed_paths() {
+        let wire = b"x\x1b_Uabc123def\x1b\\y\x1b_Gskip\x1b\\\x1b_U\x1b\\";
+        let expected = vec![
+            Action::Print('x'),
+            Action::InBand(b"abc123def".to_vec()),
+            Action::Print('y'),
+            Action::InBand(Vec::new()),
+        ];
+        for split in 1..wire.len() {
+            let mut parser = AnsiParser::new();
+            let mut got = Vec::new();
+            for chunk in wire.chunks(split) {
+                parser.feed(chunk, |a| got.push(a));
+            }
+            assert_eq!(got, expected, "feed, split {split}");
+
+            let mut parser = AnsiParser::new();
+            let mut got = Vec::new();
+            for chunk in wire.chunks(split) {
+                parser.feed_with_ascii_spans(chunk, |out| match out {
+                    crate::ansi::AnsiOutput::Action(a) => got.push(a),
+                    crate::ansi::AnsiOutput::PrintAscii(s) => {
+                        got.extend(s.iter().map(|&b| Action::Print(b as char)))
+                    }
+                });
+            }
+            assert_eq!(got, expected, "spans, split {split}");
+        }
+    }
+
+    #[test]
+    fn oversized_in_band_apc_is_dropped_and_parsing_recovers() {
+        let mut wire = b"\x1b_U".to_vec();
+        wire.extend(std::iter::repeat_n(b'A', crate::ansi::MAX_IN_BAND_APC + 1));
+        wire.extend_from_slice(b"\x1b\\ok\x1b_Uyes\x1b\\");
+        let mut parser = AnsiParser::new();
+        let mut got = Vec::new();
+        parser.feed_with_ascii_spans(&wire, |out| {
+            if let crate::ansi::AnsiOutput::Action(a) = out {
+                got.push(a);
+            }
+        });
+        assert_eq!(got, vec![Action::InBand(b"yes".to_vec())]);
+    }
+
+    #[test]
+    fn largest_allowed_in_band_apc_is_kept() {
+        let mut wire = b"\x1b_U".to_vec();
+        wire.extend(std::iter::repeat_n(b'A', crate::ansi::MAX_IN_BAND_APC));
+        wire.extend_from_slice(b"\x1b\\");
+        let actions = parse(&wire);
+        assert!(
+            matches!(&actions[..], [Action::InBand(p)] if p.len() == crate::ansi::MAX_IN_BAND_APC)
+        );
     }
 }
