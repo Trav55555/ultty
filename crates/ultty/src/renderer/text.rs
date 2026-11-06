@@ -81,20 +81,32 @@ fn joins_ligature_run(cell: &crate::grid::Cell) -> bool {
         && !cell.has_flag(CellFlags::HIDDEN)
 }
 
+/// What decides a glyph's face and drawn color: two cells may share a
+/// ligature only if these match. A ligature is one glyph in one color, so
+/// joining cells the program colored differently would recolor some.
+fn ligature_key(cell: &crate::grid::Cell) -> (bool, bool, crate::grid::Color, bool, bool) {
+    let style = CellStyle::from_flags(cell.flags());
+    (
+        style.bold,
+        style.italic,
+        cell.fg(),
+        cell.has_flag(CellFlags::REVERSE),
+        cell.has_flag(CellFlags::DIM),
+    )
+}
+
 /// The end (exclusive) of the ligature run starting at `start`: consecutive
-/// cells that join runs and select the same face. Colors may differ; each
-/// glyph takes its own cell's color.
+/// cells that join runs, with the same face and foreground.
 fn ligature_run_end(row: &crate::grid::Row, start: u16, cols: u16) -> u16 {
     let Some(first) = row.get(start).filter(|c| joins_ligature_run(c)) else {
         return start;
     };
-    let face = CellStyle::from_flags(first.flags());
+    let key = ligature_key(first);
     let mut end = start + 1;
     while end < cols {
-        let joins = row.get(end).is_some_and(|cell| {
-            let style = CellStyle::from_flags(cell.flags());
-            joins_ligature_run(cell) && style.bold == face.bold && style.italic == face.italic
-        });
+        let joins = row
+            .get(end)
+            .is_some_and(|cell| joins_ligature_run(cell) && ligature_key(cell) == key);
         if !joins {
             break;
         }
@@ -242,9 +254,13 @@ pub struct TextRenderer {
     font_family: String,
     ligatures: bool,
     shaping_cache: HashMap<ShapingCacheKey, ShapedGlyph>,
-    /// Shaped runs for ligatures, keyed by text and face; see
-    /// [`ligature_run_end`].
-    run_cache: HashMap<(String, u8), RunGlyphs>,
+    /// Shaped runs for ligatures by text, one map per face (bold, italic);
+    /// see [`ligature_run_end`]. Keyed by `String` so a lookup borrows the
+    /// run text instead of allocating.
+    run_cache: [HashMap<String, RunGlyphs>; 4],
+    /// Reused per run: the run's text, and a copy of its glyphs to draw.
+    run_text: String,
+    run_glyphs: RunGlyphs,
     styled_text_buffer: Buffer,
     byte_to_char_offsets: Vec<usize>,
     queue: Arc<wgpu::Queue>,
@@ -330,7 +346,9 @@ impl TextRenderer {
             font_family,
             ligatures: font_config.ligatures,
             shaping_cache: HashMap::with_capacity(256),
-            run_cache: HashMap::new(),
+            run_cache: Default::default(),
+            run_text: String::new(),
+            run_glyphs: Vec::new(),
             styled_text_buffer,
             byte_to_char_offsets: Vec::with_capacity(256),
             queue,
@@ -420,8 +438,10 @@ impl TextRenderer {
         text: &str,
         style: CellStyle,
     ) -> Option<ShapedGlyph> {
-        let shaping = self.get_shaping();
-        self.shape_text(buffer, text, style, shaping)
+        // Always full shaping: a single character cannot form a ligature,
+        // and basic shaping does no font fallback, so with ligatures off
+        // CJK and emoji cells drew as missing-glyph boxes.
+        self.shape_text(buffer, text, style, Shaping::Advanced)
             .into_iter()
             .next()
     }
@@ -488,18 +508,24 @@ impl TextRenderer {
         )
     }
 
-    /// [`shape_run_glyphs`], cached by text and face.
-    fn shaped_run(&mut self, buffer: &mut Buffer, text: &str, style: CellStyle) -> RunGlyphs {
-        let key = (text.to_string(), shaping_cache_key(' ', true, style).1);
-        if let Some(glyphs) = self.run_cache.get(&key) {
-            return glyphs.clone();
+    /// Put the glyphs of the run in `self.run_text` into `self.run_glyphs`,
+    /// shaping it only if this face has not seen the text before.
+    fn load_run_glyphs(&mut self, buffer: &mut Buffer, style: CellStyle) {
+        let face = usize::from(style.bold) | usize::from(style.italic) << 1;
+        self.run_glyphs.clear();
+        if let Some(cached) = self.run_cache[face].get(self.run_text.as_str()) {
+            self.run_glyphs.extend_from_slice(cached);
+            return;
         }
-        let glyphs = self.shape_run(buffer, text, style);
-        if self.run_cache.len() >= MAX_RUN_CACHE_ENTRIES {
-            self.run_cache.clear();
+        let text = std::mem::take(&mut self.run_text);
+        let glyphs = self.shape_run(buffer, &text, style);
+        self.run_glyphs.extend_from_slice(&glyphs);
+        let cache = &mut self.run_cache[face];
+        if cache.len() >= MAX_RUN_CACHE_ENTRIES {
+            cache.clear();
         }
-        self.run_cache.insert(key, glyphs.clone());
-        glyphs
+        cache.insert(text.clone(), glyphs);
+        self.run_text = text;
     }
 
     /// Rasterize (or fetch) `shaped` and emit its quad for the cell at
@@ -643,7 +669,7 @@ impl TextRenderer {
         // Clear caches since metrics changed
         self.atlas.clear();
         self.shaping_cache.clear();
-        self.run_cache.clear();
+        self.run_cache.iter_mut().for_each(HashMap::clear);
         self.decoration = self.measure_decoration_metrics(baseline);
     }
 
@@ -984,13 +1010,26 @@ impl TextRenderer {
                 // the font can join them (`=>`, `!=`). Each glyph is drawn
                 // at, and in the color of, the cell its cluster starts at.
                 if self.ligatures {
-                    let end = ligature_run_end(&row, col_idx, dims.cols);
+                    let mut end = ligature_run_end(&row, col_idx, dims.cols);
+                    // The block cursor's cell is drawn on its own, in the
+                    // inverted color, so a ligature never straddles it.
+                    if let Some((cursor_col, cursor_row)) = block_cursor {
+                        // A run before the cursor stops at it; a cursor at the
+                        // run's start leaves it empty, so that cell takes the
+                        // per-cell path and the next run starts after it.
+                        if cursor_row == row_idx && (col_idx..end).contains(&cursor_col) {
+                            end = cursor_col;
+                        }
+                    }
                     if end - col_idx >= 2 {
-                        let text: String = (col_idx..end)
-                            .filter_map(|col| row.get(col).map(|cell| cell.char()))
-                            .collect();
-                        if could_ligate(&text) {
-                            for (offset, shaped) in self.shaped_run(&mut run_buffer, &text, style) {
+                        self.run_text.clear();
+                        self.run_text.extend(
+                            (col_idx..end).filter_map(|col| row.get(col).map(|cell| cell.char())),
+                        );
+                        if could_ligate(&self.run_text) {
+                            self.load_run_glyphs(&mut run_buffer, style);
+                            let glyphs = std::mem::take(&mut self.run_glyphs);
+                            for &(offset, shaped) in &glyphs {
                                 let col = col_idx + offset;
                                 let Some(glyph_cell) = row.get(col) else {
                                     continue;
@@ -1012,6 +1051,7 @@ impl TextRenderer {
                                     under_cursor,
                                 );
                             }
+                            self.run_glyphs = glyphs;
                             run_drawn_until = end;
                             continue;
                         }
@@ -1711,10 +1751,13 @@ mod tests {
             "non-ASCII ends the run"
         );
 
-        // A color change alone does not end a run: each glyph takes its
-        // own cell's color.
+        // A foreground change ends a run, so a ligature never recolors
+        // cells the program colored differently. Background does not.
         let mut row = row_of("==>");
         row[1].set_fg(crate::grid::Color::Named(2));
+        assert_eq!(ligature_run_end(&row, 0, row.width()), 1);
+        let mut row = row_of("==>");
+        row[1].set_bg(crate::grid::Color::Named(2));
         assert_eq!(ligature_run_end(&row, 0, row.width()), 3);
     }
 

@@ -137,6 +137,51 @@ fn bench_render_mixed(c: &mut Criterion) {
     group.finish();
 }
 
+/// A screen of punctuation-heavy source code, where ligature run shaping
+/// does the most work.
+fn create_code_terminal(cols: u16, rows: u16) -> Terminal {
+    let lines = [
+        "    if a != b && c >= d => { return x->y; } // ok",
+        "    let total = items.iter().map(|x| x * 2).sum::<u32>();",
+        "    match v { Some(x) => x <= 10, None => false } !== ===",
+        "    #[derive(Debug)] fn f<'a>(s: &'a str) -> Result<(), Error>",
+    ];
+    let mut terminal = Terminal::new(Dimensions::new(cols, rows));
+    let grid = terminal.grid_mut();
+    for row in 0..rows {
+        grid.set_cursor_position(0, row);
+        for c in lines[row as usize % lines.len()]
+            .chars()
+            .take(cols as usize)
+        {
+            grid.write_char(c);
+        }
+    }
+    terminal
+}
+
+fn bench_render_code(c: &mut Criterion) {
+    let mut group = c.benchmark_group("render_code");
+    group.sample_size(30);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (cols, rows) = (300u16, 100u16);
+    let mut renderer = rt.block_on(async {
+        Renderer::new_headless(cols as u32 * 10, rows as u32 * 20)
+            .await
+            .unwrap()
+    });
+    let terminal = create_code_terminal(cols, rows);
+    let overlay = OverlayState::default();
+    group.bench_function("300x100_code", |b| {
+        b.iter(|| {
+            renderer
+                .render_to_texture(black_box(&terminal), black_box(&overlay))
+                .unwrap();
+        })
+    });
+    group.finish();
+}
+
 fn bench_render_large(c: &mut Criterion) {
     let mut group = c.benchmark_group("render_large");
     group.sample_size(20);
@@ -169,6 +214,7 @@ criterion_group!(
     bench_render_empty,
     bench_render_filled,
     bench_render_mixed,
-    bench_render_large
+    bench_render_large,
+    bench_render_code
 );
 criterion_main!(benches);
