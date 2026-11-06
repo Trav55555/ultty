@@ -319,6 +319,24 @@ impl TabBarState {
         slots
     }
 
+    /// Smallest window that still shows the title's location in full plus
+    /// ten columns of room, never narrower than the logo and buttons need,
+    /// and three terminal rows tall. Sizes are in pixels.
+    pub fn min_window_size(&self, cell_width: f32, cell_height: f32) -> (f32, f32) {
+        let location_chars = self.title_path.chars().count()
+            + self
+                .title_branch
+                .as_ref()
+                .map_or(0, |b| " git:()".len() + b.chars().count());
+        let for_location = (location_chars as f32 + 10.0) * cell_width;
+        // Menu button and the `->>> ultty_` logo, plus the right-hand buttons.
+        let logo_end = CHROME_EDGE_INSET + 2.0 * WINDOW_BUTTON_WIDTH + 13.0 * cell_width;
+        let right_buttons = self.total_width - self.title_buttons_start();
+        let for_chrome = logo_end + right_buttons;
+        let height = self.content_top() + 3.0 * cell_height;
+        (for_location.max(for_chrome).ceil(), height.ceil())
+    }
+
     /// Where the main menu opens: under the menu button, sized to its
     /// longest label.
     pub fn menu_layout(&self, cell_width: f32, cell_height: f32) -> MenuLayout {
@@ -688,6 +706,25 @@ mod tests {
             None
         );
         assert!(!layout.contains(x, layout.y + layout.height()));
+    }
+
+    #[test]
+    fn min_window_size_fits_the_location_plus_ten_columns_and_three_rows() {
+        let mut state = bar_with(1, 0, 800.0);
+        state.title_path = "~/projects/a-rather-long-project-name/crates".to_string();
+        state.title_branch = Some("main".to_string());
+        let (cw, ch) = (8.0, 16.0);
+        let chars = state.title_path.len() + " git:(main)".len();
+        let (width, height) = state.min_window_size(cw, ch);
+        assert_eq!(width, (chars as f32 + 10.0) * cw);
+        assert_eq!(height, state.content_top() + 3.0 * ch);
+
+        // A short location still leaves room for the logo and buttons.
+        state.title_path = "~".to_string();
+        state.title_branch = None;
+        let (width, _) = state.min_window_size(cw, ch);
+        let right_buttons = state.total_width - state.title_buttons_start();
+        assert!(width >= right_buttons + 13.0 * cw);
     }
 
     #[test]

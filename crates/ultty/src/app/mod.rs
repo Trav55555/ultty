@@ -184,6 +184,8 @@ pub struct App {
     scroll_line_accum: f64,
     /// HiDPI scale factor (physical pixels / logical pixels)
     scale_factor: f32,
+    /// The minimum inner size last sent to the window.
+    min_window_size: Option<PhysicalSize<u32>>,
 }
 
 impl App {
@@ -349,6 +351,7 @@ impl App {
             scroll_pixel_accum: 0.0,
             scroll_line_accum: 0.0,
             scale_factor,
+            min_window_size: None,
         };
 
         // Initialize tab bar state so it renders on first frame
@@ -642,6 +645,19 @@ impl App {
         self.tab_bar.title_branch = cwd
             .as_deref()
             .and_then(|dir| ultty::tabs::git_branch(std::path::Path::new(dir)));
+        self.update_min_window_size();
+    }
+
+    /// Keep the window from shrinking below what the title and three rows
+    /// need. Only tells the window when the size actually changes.
+    fn update_min_window_size(&mut self) {
+        let (cell_width, cell_height) = self.renderer.cell_dimensions();
+        let (width, height) = self.tab_bar.min_window_size(cell_width, cell_height);
+        let size = PhysicalSize::new(width as u32, height as u32);
+        if self.min_window_size != Some(size) {
+            self.min_window_size = Some(size);
+            self.window.set_min_inner_size(Some(size));
+        }
     }
 
     fn update_tab_bar(&mut self) {
