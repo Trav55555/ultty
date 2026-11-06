@@ -1779,8 +1779,8 @@ mod tests {
         let mut font_system = FontSystem::new();
         let metrics = Metrics::new(14.0, 18.0);
         let mut buffer = Buffer::new(&mut font_system, metrics);
-        buffer.set_wrap(&mut font_system, cosmic_text::Wrap::None);
-        buffer.set_size(&mut font_system, 1000.0, 40.0);
+        buffer.set_wrap(cosmic_text::Wrap::None);
+        buffer.set_size(Some(1000.0), Some(40.0));
         let bold = CellStyle {
             bold: true,
             ..CellStyle::default()
