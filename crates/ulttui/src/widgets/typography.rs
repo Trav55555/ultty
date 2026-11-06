@@ -6,7 +6,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use super::View;
+use super::{expand_tabs, View};
 use crate::theme::{to_ratatui_color, Theme};
 use ultty_protocol::{Constraints, Content, Dimension, Style as ProtoStyle};
 
@@ -17,7 +17,9 @@ pub struct Title {
 
 impl Title {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
+        Self {
+            text: expand_tabs(&text.into()).into_owned(),
+        }
     }
 }
 
@@ -53,7 +55,9 @@ pub struct Body {
 
 impl Body {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
+        Self {
+            text: expand_tabs(&text.into()).into_owned(),
+        }
     }
 }
 
@@ -87,7 +91,9 @@ pub struct Muted {
 
 impl Muted {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
+        Self {
+            text: expand_tabs(&text.into()).into_owned(),
+        }
     }
 }
 
@@ -121,7 +127,9 @@ pub struct Accent {
 
 impl Accent {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
+        Self {
+            text: expand_tabs(&text.into()).into_owned(),
+        }
     }
 }
 
@@ -153,6 +161,14 @@ impl View for Accent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_typography_expands_tabs_at_construction() {
+        assert_eq!(Title::new("ab\tc").text, "ab      c");
+        assert_eq!(Body::new("ab\tc").text, "ab      c");
+        assert_eq!(Muted::new("ab\tc").text, "ab      c");
+        assert_eq!(Accent::new("ab\tc").text, "ab      c");
+    }
 
     #[test]
     fn title_content_is_rich_text() {

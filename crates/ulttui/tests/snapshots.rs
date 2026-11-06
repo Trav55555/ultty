@@ -226,9 +226,21 @@ fn snapshot_truncation() {
 
 #[test]
 fn snapshot_special_chars() {
+    // The two tabs advance to columns 8 and 16 before either renderer sees them.
     let text = Text::new("Tabs:\t\tSpaces   End");
     let output = render_to_string(&text, 30, 1);
     insta::assert_snapshot!(output);
+
+    let ultty_protocol::Content::Text(native) = View::content(&text) else {
+        panic!("Expected text");
+    };
+    assert_eq!(output, native.text);
+
+    let rich = ulttui::widgets::RichText::new()
+        .text("Tabs:")
+        .text("\t")
+        .text("\tSpaces   End");
+    assert_eq!(render_to_string(&rich, 30, 1), output);
 }
 
 #[test]
