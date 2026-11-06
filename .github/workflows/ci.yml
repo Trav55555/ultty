@@ -148,7 +148,8 @@ jobs:
       # display. Ultty runs for real and the live smokes drive it.
       - run: >
           sudo apt-get update && sudo apt-get install -y
-          libwayland-dev libxkbcommon-dev xvfb mesa-vulkan-drivers fonts-dejavu-core
+          libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libvulkan1
+          xvfb mesa-vulkan-drivers fonts-dejavu-core
       - run: cargo build -p ultty -p hello-native -p counter-app --bins
       - run: scripts/ci-gui-smoke.sh "$RUNNER_TEMP/gui-smoke"
       - name: Upload smoke artifacts
