@@ -38,15 +38,21 @@ workspace-level `tests/` directory.
 Commands are listed in [CLAUDE.md](CLAUDE.md). Do not hard-code test counts in
 documentation; run `cargo test --workspace` and read the number from there.
 
-**CI** (`.github/workflows/ci.yml`) runs five jobs: `fmt`, `security-audit`,
-`clippy` (`--all-targets -D warnings`, on ubuntu and macos), `test` (ubuntu and
-macos), and `msrv` (`cargo check --workspace --all-targets` on 1.89). There is
-no coverage or benchmark job. The runtime is Unix-first: CI validates Linux and
-macOS; Windows requires future named-pipe/ConPTY platform work.
+**Remotes.** `origin` is Gitea (`git.traversannan.com/trav/ultty`), where PRs
+and CI live; GitHub (`github.com/Trav55555/ultty`) is a push mirror. Open PRs
+on Gitea (`tea pulls create`), not GitHub.
+
+**CI** (`.gitea/workflows/ci.yml`, Gitea Actions on Linux) runs eight jobs:
+`fmt`, `security-audit`, `clippy` (`--all-targets -D warnings`), `test`, `msrv`
+(`cargo check --workspace --all-targets` on 1.89), `vt-integrity`, `fuzz`, and
+`gui-smoke` (Ultty under Xvfb with software Vulkan). There is no coverage or
+benchmark job, and no macOS runner: macOS is only built by the release
+workflow. Windows requires future named-pipe/ConPTY platform work.
 **RUSTFLAGS=-Dwarnings** — all warnings are errors.
 
 `.github/workflows/live-smoke.yml` (manual dispatch, self-hosted GUI runner) and
-`.github/workflows/release.yml` (tag push) are the other two workflows.
+`.github/workflows/release.yml` (tag push) are the other two workflows; they
+run on GitHub, from the mirror.
 
 ## Code Style
 
