@@ -21,11 +21,12 @@ use ultty::terminal_manager::{TabId, TerminalManager};
 use ultty::tmux::TmuxController;
 use ultty::url::UrlDetector;
 use ultty::vim::{CopyMode, Selection as VimSelection};
+use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::Event;
-use winit::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
-use winit::window::{CursorIcon, ResizeDirection, Window, WindowBuilder};
+use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
 /// Default window dimensions.
 const DEFAULT_WIDTH: u32 = 800;
@@ -180,22 +181,20 @@ pub struct App {
 
 impl App {
     /// Create a new application with window.
-    fn new(
-        event_loop: &EventLoop<AppEvent>,
-        event_proxy: EventLoopProxy<AppEvent>,
-    ) -> Result<Self> {
+    fn new(event_loop: &ActiveEventLoop, event_proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
         // Load configuration
         let config = Config::load();
         tracing::info!("Loaded configuration");
 
         // Create window with transparency support if opacity < 1
-        let window = WindowBuilder::new()
-            .with_title("Ultty")
-            .with_inner_size(LogicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT))
-            .with_min_inner_size(LogicalSize::new(200.0, 100.0))
-            .with_transparent(true)
-            .with_decorations(false)
-            .build(event_loop)?;
+        let window = event_loop.create_window(
+            Window::default_attributes()
+                .with_title("Ultty")
+                .with_inner_size(LogicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT))
+                .with_min_inner_size(LogicalSize::new(200.0, 100.0))
+                .with_transparent(true)
+                .with_decorations(false),
+        )?;
         let window = Arc::new(window);
 
         let size = window.inner_size();
@@ -204,7 +203,9 @@ impl App {
         // Create wgpu instance
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            ..Default::default()
+            // GL presents through the display connection (Wayland needs it).
+            display: Some(Box::new(event_loop.owned_display_handle())),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         // Create surface
@@ -215,8 +216,9 @@ impl App {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            ..Default::default()
         }))
-        .ok_or_else(|| anyhow::anyhow!("Failed to find suitable GPU adapter"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to find suitable GPU adapter: {e}"))?;
 
         // Scale font size to physical pixels so cosmic-text metrics match
         // the orthographic projection (which uses physical window dimensions).
@@ -572,47 +574,24 @@ impl App {
 
     /// Run the application.
     pub fn run() -> Result<()> {
-        let event_loop = EventLoopBuilder::<AppEvent>::with_user_event().build()?;
-        let event_proxy = event_loop.create_proxy();
+        let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
+        let mut handler = AppHandler {
+            proxy: event_loop.create_proxy(),
+            app: None,
+            init_error: None,
+        };
+        event_loop.run_app(&mut handler)?;
+        handler.init_error.map_or(Ok(()), Err)
+    }
 
-        let mut app = App::new(&event_loop, event_proxy)?;
-
-        // Initialize tab bar state
-        app.update_tab_bar();
-
-        event_loop.run(move |event, elwt| {
-            elwt.set_control_flow(ControlFlow::WaitUntil(
-                app.next_update_deadline(Instant::now()),
-            ));
-
-            match event {
-                Event::WindowEvent { event, .. } => {
-                    let should_exit = app.handle_window_event(event);
-                    if should_exit {
-                        elwt.exit();
-                    }
-                }
-                Event::UserEvent(AppEvent::RuntimeReadable) => {
-                    if app.update() {
-                        elwt.exit();
-                    }
-                    elwt.set_control_flow(ControlFlow::WaitUntil(
-                        app.next_update_deadline(Instant::now()),
-                    ));
-                }
-                Event::AboutToWait => {
-                    if app.update() {
-                        elwt.exit();
-                    }
-                    elwt.set_control_flow(ControlFlow::WaitUntil(
-                        app.next_update_deadline(Instant::now()),
-                    ));
-                }
-                _ => {}
-            }
-        })?;
-
-        Ok(())
+    /// Run pending terminal work, then sleep until the next deadline.
+    fn update_and_schedule(&mut self, event_loop: &ActiveEventLoop) {
+        if self.update() {
+            event_loop.exit();
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            self.next_update_deadline(Instant::now()),
+        ));
     }
 
     /// Get the terminal state of the focused terminal.
@@ -942,19 +921,19 @@ impl App {
             ResizeDirection::West | ResizeDirection::East => CursorIcon::EwResize,
             ResizeDirection::North | ResizeDirection::South => CursorIcon::NsResize,
         };
-        self.window.set_cursor_icon(cursor);
+        self.window.set_cursor(cursor);
         true
     }
 
     fn update_cursor_for_url(&mut self) {
         // Don't change cursor if hovering over tab bar
         if self.tab_bar.visible && (self.mouse_pos.y as f32) < self.tab_bar.height() {
-            self.window.set_cursor_icon(CursorIcon::Default);
+            self.window.set_cursor(CursorIcon::Default);
             return;
         }
 
         if !self.url_detector.is_enabled() || !self.modifiers.control_key() {
-            self.window.set_cursor_icon(CursorIcon::Default);
+            self.window.set_cursor(CursorIcon::Default);
             return;
         }
 
@@ -962,9 +941,9 @@ impl App {
         let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
         let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
         if self.url_detector.has_url_at(col, row) {
-            self.window.set_cursor_icon(CursorIcon::Pointer);
+            self.window.set_cursor(CursorIcon::Pointer);
         } else {
-            self.window.set_cursor_icon(CursorIcon::Default);
+            self.window.set_cursor(CursorIcon::Default);
         }
     }
 
@@ -1246,6 +1225,65 @@ fn protocol_tab_env(
                 e
             );
             Ok(Vec::new())
+        }
+    }
+}
+
+/// Drives [`App`] from winit. The window, and so the app, is created on the
+/// first `resumed`, as winit 0.30 requires.
+struct AppHandler {
+    proxy: EventLoopProxy<AppEvent>,
+    app: Option<App>,
+    /// A startup failure, returned from [`App::run`] after the loop exits.
+    init_error: Option<anyhow::Error>,
+}
+
+impl ApplicationHandler<AppEvent> for AppHandler {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.app.is_some() {
+            return;
+        }
+        match App::new(event_loop, self.proxy.clone()) {
+            Ok(mut app) => {
+                app.update_tab_bar();
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    app.next_update_deadline(Instant::now()),
+                ));
+                self.app = Some(app);
+            }
+            Err(error) => {
+                self.init_error = Some(error);
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        if let Some(app) = self.app.as_mut() {
+            if app.handle_window_event(event) {
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        match event {
+            AppEvent::RuntimeReadable => {
+                if let Some(app) = self.app.as_mut() {
+                    app.update_and_schedule(event_loop);
+                }
+            }
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(app) = self.app.as_mut() {
+            app.update_and_schedule(event_loop);
         }
     }
 }
