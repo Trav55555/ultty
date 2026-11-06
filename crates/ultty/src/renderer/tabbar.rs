@@ -653,8 +653,14 @@ impl Renderer {
             for i in 1..=3 {
                 parts.push((">", x0 + i as f32 * cw, aqua));
             }
-            parts.push(("ultty", x0 + 5.0 * cw, fg));
-            parts.push(("_", x0 + 10.0 * cw, green));
+            // The launch animation types `ultty` letter by letter; with no
+            // letters yet the cursor sits right after `->>>`.
+            let letters = tab_bar.title_letters.min(5);
+            if letters > 0 {
+                parts.push((&"ultty"[..letters], x0 + 5.0 * cw, fg));
+            }
+            let cursor_column = if letters == 0 { 4 } else { 5 + letters };
+            parts.push(("_", x0 + cursor_column as f32 * cw, green));
 
             let region_start = x0 + (TITLE_LOGO_COLUMNS + 2.0) * cw;
             let region_end = tab_bar.title_buttons_start() - 2.0 * cw;

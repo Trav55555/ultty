@@ -186,6 +186,8 @@ pub struct App {
     scale_factor: f32,
     /// The minimum inner size last sent to the window.
     min_window_size: Option<PhysicalSize<u32>>,
+    /// When the window opened; drives the title's typing animation.
+    launched_at: Instant,
 }
 
 impl App {
@@ -284,7 +286,9 @@ impl App {
         let url_detector = UrlDetector::new(config.behavior.url_detection);
 
         // Create tab bar state
-        let tab_bar = TabBarState::new();
+        let mut tab_bar = TabBarState::new();
+        // The title types itself out at launch, starting from `->>>_`.
+        tab_bar.title_letters = 0;
 
         // Create config watcher for hot-reload
         let config_watcher = ConfigWatcher::new();
@@ -352,6 +356,7 @@ impl App {
             scroll_line_accum: 0.0,
             scale_factor,
             min_window_size: None,
+            launched_at: Instant::now(),
         };
 
         // Initialize tab bar state so it renders on first frame

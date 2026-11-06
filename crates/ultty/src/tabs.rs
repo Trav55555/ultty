@@ -127,6 +127,30 @@ impl MenuLayout {
     }
 }
 
+/// Letters in the title's `ultty`.
+pub const TITLE_WORD_LETTERS: usize = 5;
+/// At launch the title shows `->>>_` this long before typing `ultty`.
+const TITLE_TYPE_START: std::time::Duration = std::time::Duration::from_millis(700);
+/// Time between typed letters of the launch animation.
+const TITLE_TYPE_STEP: std::time::Duration = std::time::Duration::from_millis(90);
+
+/// How many letters of `ultty` the title shows `elapsed` after launch.
+pub fn title_letters_at(elapsed: std::time::Duration) -> usize {
+    match elapsed.checked_sub(TITLE_TYPE_START) {
+        None => 0,
+        Some(typing) => {
+            let steps = typing.as_millis() / TITLE_TYPE_STEP.as_millis() + 1;
+            (steps as usize).min(TITLE_WORD_LETTERS)
+        }
+    }
+}
+
+/// When, measured from launch, the title next changes; None once typed.
+pub fn title_next_change(elapsed: std::time::Duration) -> Option<std::time::Duration> {
+    let shown = title_letters_at(elapsed);
+    (shown < TITLE_WORD_LETTERS).then(|| TITLE_TYPE_START + TITLE_TYPE_STEP * shown as u32)
+}
+
 /// Space above the first and below the last menu item.
 pub const MENU_PADDING: f32 = 6.0;
 
@@ -177,6 +201,9 @@ pub struct TabBarState {
     pub title_path: String,
     /// The git branch at `title_path` (short commit when detached).
     pub title_branch: Option<String>,
+    /// Letters of `ultty` the title shows: 0 shows `->>>_`; the launch
+    /// animation types the rest.
+    pub title_letters: usize,
     /// Whether the main menu is open.
     pub menu_open: bool,
     /// The menu item under the pointer.
@@ -201,6 +228,7 @@ impl TabBarState {
             hovered_close_button: None,
             title_path: String::new(),
             title_branch: None,
+            title_letters: TITLE_WORD_LETTERS,
             menu_open: false,
             hovered_menu_item: None,
         }
@@ -725,6 +753,22 @@ mod tests {
         let (width, _) = state.min_window_size(cw, ch);
         let right_buttons = state.total_width - state.title_buttons_start();
         assert!(width >= right_buttons + 13.0 * cw);
+    }
+
+    #[test]
+    fn title_types_ultty_after_a_pause() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        assert_eq!(title_letters_at(ms(0)), 0);
+        assert_eq!(title_letters_at(ms(699)), 0);
+        assert_eq!(title_letters_at(ms(700)), 1);
+        assert_eq!(title_letters_at(ms(789)), 1);
+        assert_eq!(title_letters_at(ms(790)), 2);
+        assert_eq!(title_letters_at(ms(1060)), 5);
+        assert_eq!(title_letters_at(ms(60_000)), 5);
+        assert_eq!(title_next_change(ms(0)), Some(ms(700)));
+        assert_eq!(title_next_change(ms(700)), Some(ms(790)));
+        assert_eq!(title_next_change(ms(1060)), None);
     }
 
     #[test]
