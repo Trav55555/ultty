@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="40 0 680 256" role="img" aria-label="ultty"><title>ultty</title>
+<g transform="translate(70 0) scale(0.95) translate(-128 4)"><g fill="none" stroke="#83c092" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><polyline points="102,64 128,38 154,64"/><polyline points="90,114 128,76 166,114"/><polyline points="78,164 128,114 178,164"/></g><rect x="117" y="172" width="22" height="46" rx="4" fill="#a7c080"/></g>
+<g transform="translate(-110 0)" fill="none" stroke="#d3c6aa" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M290 100 V140 A25 25 0 0 0 340 140 V100 M340 100 V170"/><path d="M380 66 V146 A24 24 0 0 0 404 170"/><path d="M436 74 V146 A24 24 0 0 0 460 170 M420 104 H458"/><path d="M496 74 V146 A24 24 0 0 0 520 170 M480 104 H518"/><path d="M552 100 V140 A25 25 0 0 0 602 140 V100 M602 100 V188 A26 26 0 0 1 576 214 H562"/></g>
+<rect x="526" y="156" width="44" height="22" rx="4" fill="#a7c080"/>
+</svg>

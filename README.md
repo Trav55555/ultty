@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo/ultty-animated-dark.svg">
+    <img alt="ultty" src="docs/assets/logo/ultty-animated-light.svg" width="460">
+  </picture>
+</p>
+
 # Ultty
 
 A GPU-accelerated terminal that replaces ANSI escape sequences with a native binary protocol for TUI applications.
