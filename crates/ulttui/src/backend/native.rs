@@ -28,6 +28,9 @@ use transport::{FrameError, ReadOutcome};
 /// How long one event poll waits for terminal messages.
 const POLL_TIMEOUT: Duration = Duration::from_millis(16);
 
+/// How long the terminal has to answer `ClientHello` with `SessionReady`.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// How long the in-band probe waits when the terminal answers neither the
 /// probe nor DA1. Terminals answer DA1 at once, so this only matters for
 /// ones that do not; set `ULTTY_IN_BAND=0` to skip the probe entirely.
@@ -90,10 +93,17 @@ impl NativeBackend {
         let socket_path =
             detect::socket_path().ok_or_else(|| anyhow::anyhow!("ULTTY_SOCKET not set"))?;
 
-        let stream = UnixStream::connect(&socket_path)?;
-        // Start blocking for handshake — read_timeout set after session is ready
+        self.connect_socket(UnixStream::connect(&socket_path)?)
+    }
+
+    /// Run the handshake over a connected socket and start the session.
+    fn connect_socket(&mut self, stream: UnixStream) -> anyhow::Result<()> {
+        // Blocking writes; reads wait at most one poll interval, so the
+        // handshake finishes as soon as SessionReady arrives. A longer read
+        // timeout here made every read wait out that timeout once the
+        // terminal had answered, delaying startup by its full length.
         stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        stream.set_read_timeout(Some(POLL_TIMEOUT))?;
         self.stream = Some(stream);
 
         self.send_client_hello()?;
@@ -107,11 +117,6 @@ impl NativeBackend {
             width: self.viewport_width,
             height: self.viewport_height,
         });
-
-        // Keep blocking mode for writes; use short read_timeout for the event poll loop
-        if let Some(ref stream) = self.stream {
-            stream.set_read_timeout(Some(Duration::from_millis(16)))?;
-        }
 
         Ok(())
     }
@@ -301,8 +306,8 @@ impl NativeBackend {
     }
 
     fn wait_for_session_ready(&mut self) -> anyhow::Result<()> {
-        let mut attempts = 0;
-        while attempts < 50 {
+        let deadline = std::time::Instant::now() + HANDSHAKE_TIMEOUT;
+        while std::time::Instant::now() < deadline {
             if self.read_available()? == ReadOutcome::Closed {
                 anyhow::bail!("Connection closed during handshake");
             }
@@ -338,9 +343,6 @@ impl NativeBackend {
                     _ => {}
                 }
             }
-
-            std::thread::sleep(Duration::from_millis(50));
-            attempts += 1;
         }
 
         anyhow::bail!("Timeout waiting for SessionReady")
@@ -617,6 +619,40 @@ mod tests {
         labels.iter().fold(Column::new(), |col, label| {
             col.child(Button::new(*label).id(*label))
         })
+    }
+
+    #[test]
+    fn socket_handshake_finishes_as_soon_as_the_terminal_answers() {
+        use ultty_protocol::Encode;
+        let (app_side, mut terminal) = UnixStream::pair().unwrap();
+        let fake = std::thread::spawn(move || {
+            let mut hello = [0u8; 14];
+            terminal.read_exact(&mut hello).unwrap();
+            for msg in [
+                TerminalMessage::ServerHello {
+                    version: ultty_protocol::PROTOCOL_VERSION,
+                    capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
+                },
+                TerminalMessage::SessionReady {
+                    session_id: 1,
+                    root_region: RegionId::ROOT,
+                    width: 80,
+                    height: 24,
+                },
+            ] {
+                std::io::Write::write_all(&mut terminal, &msg.encode_to_bytes()).unwrap();
+            }
+            terminal
+        });
+        let mut backend = NativeBackend::new();
+        let started = std::time::Instant::now();
+        backend.connect_socket(app_side).unwrap();
+        let elapsed = started.elapsed();
+        let _terminal = fake.join().unwrap();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "handshake took {elapsed:?}"
+        );
     }
 
     #[test]
