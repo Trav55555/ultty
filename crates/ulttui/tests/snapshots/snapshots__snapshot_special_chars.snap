@@ -2,4 +2,4 @@
 source: crates/ulttui/tests/snapshots.rs
 expression: output
 ---
-Tabs:Spaces   End
+Tabs:           Spaces   End
