@@ -31,10 +31,16 @@ pub const MIN_TAB_WIDTH: f32 = 80.0;
 /// Width reserved for window control buttons (close, maximize, minimize) on the right.
 pub const WINDOW_CONTROLS_WIDTH: f32 = 108.0;
 
-/// Gap between the window edge and the nearest chrome button (the "+" on
-/// the left, the window controls on the right). It keeps the top corners
-/// free for resizing instead of handing them to a button.
-pub const CHROME_EDGE_INSET: f32 = 12.0;
+/// Side of the visible square drawn for each chrome button, centered in its
+/// slot (the window controls' WINDOW_BUTTON_WIDTH, the "+" button's
+/// NEW_TAB_BUTTON_WIDTH).
+pub const CHROME_BUTTON_SIZE: f32 = 26.0;
+
+/// Gap between the window edge and the slot of the nearest chrome button
+/// (the "+" on the left, the window controls on the right). Half a slot's
+/// spare width, so the visible gap from a button to the edge matches the gap
+/// between two buttons, and the very corners stay free for resizing.
+pub const CHROME_EDGE_INSET: f32 = (WINDOW_BUTTON_WIDTH - CHROME_BUTTON_SIZE) / 2.0;
 
 /// Width of each window control button.
 pub const WINDOW_BUTTON_WIDTH: f32 = 36.0;
@@ -829,6 +835,13 @@ mod tests {
         assert!(!state.is_title_bar_toggle_area(400.0, -1.0));
         assert!(!state.is_title_bar_toggle_area(400.0, TITLE_BAR_HEIGHT));
         assert!(!state.is_title_bar_toggle_area(400.0, TITLE_BAR_HEIGHT + 10.0));
+    }
+
+    #[test]
+    fn chrome_buttons_sit_as_far_from_the_edge_as_from_each_other() {
+        let between_buttons = WINDOW_BUTTON_WIDTH - CHROME_BUTTON_SIZE;
+        let to_edge = CHROME_EDGE_INSET + (WINDOW_BUTTON_WIDTH - CHROME_BUTTON_SIZE) / 2.0;
+        assert_eq!(to_edge, between_buttons);
     }
 
     #[test]
