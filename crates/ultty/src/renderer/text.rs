@@ -60,6 +60,55 @@ fn shaping_cache_key(ch: char, ligatures: bool, style: CellStyle) -> ShapingCach
     (ch, bits)
 }
 
+/// Most distinct runs kept in the run shaping cache before it is cleared.
+const MAX_RUN_CACHE_ENTRIES: usize = 4096;
+
+/// Shaped glyphs of a run, each with the index (from the run's first cell)
+/// of the cell its cluster starts at.
+type RunGlyphs = Vec<(u16, ShapedGlyph)>;
+
+/// Whether `cell` can be shaped together with its neighbours to form
+/// ligatures: a single printable ASCII character with nothing that needs the
+/// per-cell path (wide characters, grapheme clusters, hidden text, symbols
+/// drawn procedurally).
+fn joins_ligature_run(cell: &crate::grid::Cell) -> bool {
+    let ch = cell.char();
+    ch.is_ascii_graphic()
+        && !is_procedural_cell_symbol(ch)
+        && !cell.has_flag(CellFlags::WIDE_CHAR)
+        && !cell.has_flag(CellFlags::WIDE_CHAR_SPACER)
+        && !cell.has_flag(CellFlags::HAS_COMBINING)
+        && !cell.has_flag(CellFlags::HIDDEN)
+}
+
+/// The end (exclusive) of the ligature run starting at `start`: consecutive
+/// cells that join runs and select the same face. Colors may differ; each
+/// glyph takes its own cell's color.
+fn ligature_run_end(row: &crate::grid::Row, start: u16, cols: u16) -> u16 {
+    let Some(first) = row.get(start).filter(|c| joins_ligature_run(c)) else {
+        return start;
+    };
+    let face = CellStyle::from_flags(first.flags());
+    let mut end = start + 1;
+    while end < cols {
+        let joins = row.get(end).is_some_and(|cell| {
+            let style = CellStyle::from_flags(cell.flags());
+            joins_ligature_run(cell) && style.bold == face.bold && style.italic == face.italic
+        });
+        if !joins {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
+/// Programming-font ligatures join punctuation (`=>`, `!=`, `->`), so a run
+/// of letters and digits gains nothing from run shaping.
+fn could_ligate(text: &str) -> bool {
+    text.bytes().any(|b| b.is_ascii_punctuation())
+}
+
 /// Decide which requested styles the matched face cannot provide.
 ///
 /// Returns `(synthetic_bold, fake_italic)`. cosmic-text falls back to the
@@ -193,6 +242,9 @@ pub struct TextRenderer {
     font_family: String,
     ligatures: bool,
     shaping_cache: HashMap<ShapingCacheKey, ShapedGlyph>,
+    /// Shaped runs for ligatures, keyed by text and face; see
+    /// [`ligature_run_end`].
+    run_cache: HashMap<(String, u8), RunGlyphs>,
     styled_text_buffer: Buffer,
     byte_to_char_offsets: Vec<usize>,
     queue: Arc<wgpu::Queue>,
@@ -278,6 +330,7 @@ impl TextRenderer {
             font_family,
             ligatures: font_config.ligatures,
             shaping_cache: HashMap::with_capacity(256),
+            run_cache: HashMap::new(),
             styled_text_buffer,
             byte_to_char_offsets: Vec::with_capacity(256),
             queue,
@@ -420,6 +473,70 @@ impl TextRenderer {
         shaped
     }
 
+    /// Shape `text`, one ASCII character per cell, as a single run so the
+    /// font can form ligatures across cells. Each glyph comes with the index
+    /// of the cell its cluster starts at, and an x offset relative to that
+    /// cell. `buffer` must not wrap.
+    fn shape_run(&mut self, buffer: &mut Buffer, text: &str, style: CellStyle) -> RunGlyphs {
+        shape_run_glyphs(
+            &mut self.font_system,
+            buffer,
+            &self.font_family,
+            text,
+            style,
+            self.cell_width,
+        )
+    }
+
+    /// [`shape_run_glyphs`], cached by text and face.
+    fn shaped_run(&mut self, buffer: &mut Buffer, text: &str, style: CellStyle) -> RunGlyphs {
+        let key = (text.to_string(), shaping_cache_key(' ', true, style).1);
+        if let Some(glyphs) = self.run_cache.get(&key) {
+            return glyphs.clone();
+        }
+        let glyphs = self.shape_run(buffer, text, style);
+        if self.run_cache.len() >= MAX_RUN_CACHE_ENTRIES {
+            self.run_cache.clear();
+        }
+        self.run_cache.insert(key, glyphs.clone());
+        glyphs
+    }
+
+    /// Rasterize (or fetch) `shaped` and emit its quad for the cell at
+    /// `cell`, in `color` (brightened for synthetic bold unless the cell is
+    /// under the block cursor).
+    #[allow(clippy::too_many_arguments)]
+    fn push_glyph(
+        &mut self,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        shaped: ShapedGlyph,
+        cell: (u16, u16),
+        cell_size: (f32, f32),
+        render_offset: (f32, f32),
+        color: Rgba,
+        under_block_cursor: bool,
+    ) {
+        let Some(glyph_info) = self
+            .atlas
+            .get_glyph(&mut self.font_system, shaped.cache_key)
+        else {
+            return;
+        };
+        if glyph_info.width == 0.0 || glyph_info.height == 0.0 {
+            return;
+        }
+        let (x, y) = cell_glyph_origin(cell, cell_size, render_offset, shaped, &glyph_info);
+        // Under the cursor the color is already the inverted background;
+        // brightening it would reduce contrast.
+        let color = if shaped.synthetic_bold && !under_block_cursor {
+            brighten(color)
+        } else {
+            color
+        };
+        Self::emit_glyph_quad(vertices, indices, x, y, &glyph_info, color);
+    }
+
     /// Start a frame. Must precede any quad that samples the glyph atlas,
     /// because this is the only point at which atlas slots are evicted.
     pub fn begin_frame(&mut self) {
@@ -526,6 +643,7 @@ impl TextRenderer {
         // Clear caches since metrics changed
         self.atlas.clear();
         self.shaping_cache.clear();
+        self.run_cache.clear();
         self.decoration = self.measure_decoration_metrics(baseline);
     }
 
@@ -791,12 +909,22 @@ impl TextRenderer {
         buffer.set_size(&mut self.font_system, cell_width * 4.0, cell_height * 2.0);
         let block_cursor = block_cursor_cell(terminal, cursor_blink_visible);
         let solid_uv = self.atlas.solid_uv();
+        // Ligature runs span up to a whole row; this buffer must not wrap.
+        let mut run_buffer = Buffer::new(&mut self.font_system, self.metrics);
+        run_buffer.set_wrap(&mut self.font_system, cosmic_text::Wrap::None);
+        run_buffer.set_size(
+            &mut self.font_system,
+            cell_width * (f32::from(dims.cols) + 1.0),
+            cell_height * 2.0,
+        );
 
         for row_idx in 0..dims.rows {
             let row = match term_buffer.visible_row(row_idx) {
                 Some(r) => r,
                 None => continue,
             };
+            // Cells before this column had their glyphs drawn by a run.
+            let mut run_drawn_until = 0u16;
 
             for col_idx in 0..dims.cols {
                 let cell = match row.get(col_idx) {
@@ -848,6 +976,48 @@ impl TextRenderer {
                     continue;
                 }
 
+                if col_idx < run_drawn_until {
+                    continue;
+                }
+
+                // With ligatures on, shape a run of ASCII cells together so
+                // the font can join them (`=>`, `!=`). Each glyph is drawn
+                // at, and in the color of, the cell its cluster starts at.
+                if self.ligatures {
+                    let end = ligature_run_end(&row, col_idx, dims.cols);
+                    if end - col_idx >= 2 {
+                        let text: String = (col_idx..end)
+                            .filter_map(|col| row.get(col).map(|cell| cell.char()))
+                            .collect();
+                        if could_ligate(&text) {
+                            for (offset, shaped) in self.shaped_run(&mut run_buffer, &text, style) {
+                                let col = col_idx + offset;
+                                let Some(glyph_cell) = row.get(col) else {
+                                    continue;
+                                };
+                                let under_cursor = block_cursor == Some((col, row_idx));
+                                let color = if under_cursor {
+                                    cursor_glyph_color(glyph_cell, color_scheme)
+                                } else {
+                                    cell_foreground(glyph_cell, color_scheme)
+                                };
+                                self.push_glyph(
+                                    &mut vertices,
+                                    &mut indices,
+                                    shaped,
+                                    (col, row_idx),
+                                    (cell_width, cell_height),
+                                    (x_offset, y_offset),
+                                    color,
+                                    under_cursor,
+                                );
+                            }
+                            run_drawn_until = end;
+                            continue;
+                        }
+                    }
+                }
+
                 // Multi-codepoint graphemes (combining marks, ZWJ emoji,
                 // flags) live on the row itself, so history rows render them
                 // too. They are always shaped with full shaping so the font's
@@ -876,39 +1046,16 @@ impl TextRenderer {
                 };
 
                 for &shaped in glyphs {
-                    if let Some(glyph_info) = self
-                        .atlas
-                        .get_glyph(&mut self.font_system, shaped.cache_key)
-                    {
-                        if glyph_info.width == 0.0 || glyph_info.height == 0.0 {
-                            continue;
-                        }
-
-                        let (x, y) = cell_glyph_origin(
-                            (col_idx, row_idx),
-                            (cell_width, cell_height),
-                            (x_offset, y_offset),
-                            shaped,
-                            &glyph_info,
-                        );
-
-                        // Under the cursor the color is already the inverted
-                        // background; brightening it would reduce contrast.
-                        let fg_color = if shaped.synthetic_bold && !under_block_cursor {
-                            brighten(base_color)
-                        } else {
-                            base_color
-                        };
-
-                        Self::emit_glyph_quad(
-                            &mut vertices,
-                            &mut indices,
-                            x,
-                            y,
-                            &glyph_info,
-                            fg_color,
-                        );
-                    }
+                    self.push_glyph(
+                        &mut vertices,
+                        &mut indices,
+                        shaped,
+                        (col_idx, row_idx),
+                        (cell_width, cell_height),
+                        (x_offset, y_offset),
+                        base_color,
+                        under_block_cursor,
+                    );
                 }
             }
         }
@@ -1159,6 +1306,57 @@ fn byte_offset_to_char_index(offsets: &[usize], byte_offset: usize) -> usize {
         Ok(index) => index,
         Err(index) => index.saturating_sub(1),
     }
+}
+
+/// Shape `text`, one ASCII character per cell, as a single run so the font
+/// can form ligatures across cells. Each glyph comes with the index of the
+/// cell its cluster starts at, and an x offset relative to that cell.
+/// `buffer` must not wrap.
+fn shape_run_glyphs(
+    font_system: &mut FontSystem,
+    buffer: &mut Buffer,
+    font_family: &str,
+    text: &str,
+    style: CellStyle,
+    cell_width: f32,
+) -> RunGlyphs {
+    let mut attrs = font_attrs(font_family);
+    if style.bold {
+        attrs = attrs.weight(Weight::BOLD);
+    }
+    if style.italic {
+        attrs = attrs.style(Style::Italic);
+    }
+    buffer.set_text(font_system, text, attrs, Shaping::Advanced);
+    let Some(run) = buffer.layout_runs().next() else {
+        return Vec::new();
+    };
+    let line_y = run.line_y;
+    let mut shaped = Vec::with_capacity(run.glyphs.len());
+    for glyph in run.glyphs {
+        let face = font_system
+            .db()
+            .face(glyph.font_id)
+            .map(|face| (face.weight, face.style));
+        let (synthetic_bold, fake_italic) = synthesized_styles(style, face);
+        let mut physical = glyph.physical((0.0, 0.0), 1.0);
+        if fake_italic {
+            physical.cache_key.flags |= CacheKeyFlags::FAKE_ITALIC;
+        }
+        // ASCII only, so byte offsets are cell offsets.
+        let cell = glyph.start.min(text.len().saturating_sub(1)) as u16;
+        shaped.push((
+            cell,
+            ShapedGlyph {
+                cache_key: physical.cache_key,
+                x_offset: physical.x as f32 - f32::from(cell) * cell_width,
+                y_offset: physical.y as f32,
+                line_y,
+                synthetic_bold,
+            },
+        ));
+    }
+    shaped
 }
 
 fn cell_glyph_origin(
@@ -1475,6 +1673,141 @@ mod tests {
     /// This test verifies that cosmic-text Buffer requires set_size before layout_runs
     /// will return any runs. This was the root cause of the "grey screen" bug where
     /// text wasn't rendering because layout_runs() returned an empty iterator.
+    fn row_of(text: &str) -> crate::grid::Row {
+        let mut row = crate::grid::Row::new(text.chars().count() as u16 + 4);
+        for (col, ch) in text.chars().enumerate() {
+            row[col as u16] = crate::grid::Cell::new(ch);
+        }
+        row
+    }
+
+    #[test]
+    fn ligature_runs_stop_at_spaces_wide_chars_and_face_changes() {
+        let row = row_of("a=>b c");
+        assert_eq!(
+            ligature_run_end(&row, 0, row.width()),
+            4,
+            "stops at the space"
+        );
+        assert_eq!(
+            ligature_run_end(&row, 4, row.width()),
+            4,
+            "a space starts no run"
+        );
+
+        let mut row = row_of("x!=y");
+        row[2].set_flag(CellFlags::BOLD);
+        assert_eq!(
+            ligature_run_end(&row, 0, row.width()),
+            2,
+            "bold changes the face"
+        );
+
+        let mut row = row_of("->中");
+        row[2].set_flag(CellFlags::WIDE_CHAR);
+        assert_eq!(
+            ligature_run_end(&row, 0, row.width()),
+            2,
+            "non-ASCII ends the run"
+        );
+
+        // A color change alone does not end a run: each glyph takes its
+        // own cell's color.
+        let mut row = row_of("==>");
+        row[1].set_fg(crate::grid::Color::Named(2));
+        assert_eq!(ligature_run_end(&row, 0, row.width()), 3);
+    }
+
+    #[test]
+    fn only_runs_with_punctuation_are_shaped_together() {
+        assert!(could_ligate("a=>b"));
+        assert!(could_ligate("!="));
+        assert!(!could_ligate("hello123"));
+    }
+
+    #[test]
+    fn run_glyphs_map_back_to_their_cells() {
+        // With a font that forms no ligatures, every cell still gets its
+        // own glyph, at its own cell, with a small offset.
+        let mut font_system = FontSystem::new();
+        let metrics = Metrics::new(14.0, 18.0);
+        let mut buffer = Buffer::new(&mut font_system, metrics);
+        buffer.set_wrap(&mut font_system, cosmic_text::Wrap::None);
+        buffer.set_size(&mut font_system, 1000.0, 40.0);
+        let text = "a=>b!=c";
+        // Positions are whole pixels, so measure the advance over many cells.
+        let cell_width = {
+            let glyphs = shape_run_glyphs(
+                &mut font_system,
+                &mut buffer,
+                "DejaVu Sans Mono",
+                "MMMMMMMMMM",
+                CellStyle::default(),
+                0.0,
+            );
+            glyphs[9].1.x_offset / 9.0
+        };
+        let glyphs = shape_run_glyphs(
+            &mut font_system,
+            &mut buffer,
+            "DejaVu Sans Mono",
+            text,
+            CellStyle::default(),
+            cell_width,
+        );
+        let cells: Vec<u16> = glyphs.iter().map(|(cell, _)| *cell).collect();
+        assert_eq!(cells, (0..text.len() as u16).collect::<Vec<_>>());
+        for (cell, glyph) in &glyphs {
+            assert!(
+                glyph.x_offset.abs() < 1.0,
+                "cell {cell} glyph is {} px off its cell",
+                glyph.x_offset
+            );
+        }
+    }
+
+    /// Run with a ligature font installed to see what run shaping does:
+    /// `cargo test -p ultty --lib probe_ligature_font -- --ignored --nocapture`
+    #[test]
+    #[ignore = "depends on an installed ligature font"]
+    fn probe_ligature_font() {
+        let family = std::env::var("ULTTY_LIGATURE_FONT").unwrap_or_else(|_| "Miracode".into());
+        let mut font_system = FontSystem::new();
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(14.0, 18.0));
+        buffer.set_wrap(&mut font_system, cosmic_text::Wrap::None);
+        buffer.set_size(&mut font_system, 1000.0, 40.0);
+        for text in ["=>", "!=", "->", "===", "<=>"] {
+            let run: Vec<_> = shape_run_glyphs(
+                &mut font_system,
+                &mut buffer,
+                &family,
+                text,
+                CellStyle::default(),
+                8.4,
+            )
+            .into_iter()
+            .map(|(cell, g)| (cell, g.cache_key.glyph_id))
+            .collect();
+            let alone: Vec<_> = text
+                .chars()
+                .map(|ch| {
+                    shape_run_glyphs(
+                        &mut font_system,
+                        &mut buffer,
+                        &family,
+                        &ch.to_string(),
+                        CellStyle::default(),
+                        8.4,
+                    )[0]
+                    .1
+                    .cache_key
+                    .glyph_id
+                })
+                .collect();
+            eprintln!("{family} {text:>4}: run {run:?} alone {alone:?}");
+        }
+    }
+
     #[test]
     fn cosmic_text_buffer_requires_set_size_for_layout() {
         let mut font_system = FontSystem::new();
