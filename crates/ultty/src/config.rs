@@ -587,6 +587,11 @@ pub struct KeybindingConfig {
     pub screenshot: String,
     /// Dump terminal state to file for debugging
     pub debug_dump: String,
+    /// Scroll back through history by a page (main screen only; on the
+    /// alternate screen the key goes to the app)
+    pub scroll_page_up: String,
+    /// Scroll forward through history by a page
+    pub scroll_page_down: String,
     /// Additional custom keybindings
     #[serde(flatten)]
     pub custom: HashMap<String, String>,
@@ -619,6 +624,8 @@ impl Default for KeybindingConfig {
             font_reset: "ctrl+0".to_string(),
             screenshot: "ctrl+shift+s".to_string(),
             debug_dump: "ctrl+shift+alt+d".to_string(),
+            scroll_page_up: "shift+pageup".to_string(),
+            scroll_page_down: "shift+pagedown".to_string(),
             custom: HashMap::new(),
         }
     }
@@ -685,6 +692,11 @@ impl KeybindingConfig {
             ("font_reset".to_string(), self.font_reset.clone()),
             ("screenshot".to_string(), self.screenshot.clone()),
             ("debug_dump".to_string(), self.debug_dump.clone()),
+            ("scroll_page_up".to_string(), self.scroll_page_up.clone()),
+            (
+                "scroll_page_down".to_string(),
+                self.scroll_page_down.clone(),
+            ),
         ];
 
         let mut custom: Vec<(String, String)> = self
