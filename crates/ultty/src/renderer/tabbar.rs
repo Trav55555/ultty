@@ -7,10 +7,10 @@ use std::borrow::Cow;
 
 use super::{Renderer, Rgba, Vertex};
 use crate::tabs::{
-    MenuItem, TabBarState, TabState, TitleButton, CHROME_BUTTON_SIZE, MENU_PADDING,
-    TAB_CLOSE_BUTTON_SIZE, TAB_PADDING, TAB_ROW_HEIGHT, TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH,
+    MenuItem, TabBarState, TabState, TitleButton, TAB_CLOSE_BUTTON_SIZE, TAB_PADDING,
 };
 
+// Drawing sizes in logical pixels; scaled by `TabBarState::scaled`.
 const CHROME_BUTTON_RADIUS: f32 = 6.0;
 const CHROME_BUTTON_BORDER: f32 = 1.0;
 
@@ -20,10 +20,10 @@ const TITLE_LOGO_COLUMNS: f32 = 11.0;
 
 /// Left edge of the title logo: right of the menu button, as far from it as
 /// buttons are from each other.
-fn title_logo_x() -> f32 {
-    crate::tabs::CHROME_EDGE_INSET
-        + WINDOW_BUTTON_WIDTH
-        + (WINDOW_BUTTON_WIDTH - CHROME_BUTTON_SIZE) / 2.0
+fn title_logo_x(tab_bar: &TabBarState) -> f32 {
+    tab_bar.chrome_edge_inset()
+        + tab_bar.window_button_width()
+        + (tab_bar.window_button_width() - tab_bar.chrome_button_size()) / 2.0
 }
 
 /// Fit `path` and ` git:(branch)` into `max_chars` columns. The branch is
@@ -96,24 +96,31 @@ fn close_symbol_color(foreground: Rgba, is_hovered: bool) -> Rgba {
     }
 }
 
-fn chrome_button_rect(button_x: f32, button_width: f32) -> (f32, f32, f32, f32) {
-    let size = CHROME_BUTTON_SIZE
-        .min(button_width)
-        .clamp(0.0, TITLE_BAR_HEIGHT);
+/// The visible square of the title-band button whose slot starts at `slot_x`.
+fn chrome_button_rect(tab_bar: &TabBarState, slot_x: f32) -> (f32, f32, f32, f32) {
+    let slot_width = tab_bar.window_button_width();
+    let band = tab_bar.title_bar_height();
+    let size = tab_bar
+        .chrome_button_size()
+        .min(slot_width)
+        .clamp(0.0, band);
     (
-        button_x + (button_width - size) / 2.0,
-        (TITLE_BAR_HEIGHT - size) / 2.0,
+        slot_x + (slot_width - size) / 2.0,
+        (band - size) / 2.0,
         size,
         size,
     )
 }
 
-fn chrome_button_inner_rect(x: f32, y: f32, width: f32, height: f32) -> (f32, f32, f32, f32) {
+fn chrome_button_inner_rect(
+    (x, y, width, height): (f32, f32, f32, f32),
+    border: f32,
+) -> (f32, f32, f32, f32) {
     (
-        x + CHROME_BUTTON_BORDER,
-        y + CHROME_BUTTON_BORDER,
-        (width - CHROME_BUTTON_BORDER * 2.0).max(0.0),
-        (height - CHROME_BUTTON_BORDER * 2.0).max(0.0),
+        x + border,
+        y + border,
+        (width - border * 2.0).max(0.0),
+        (height - border * 2.0).max(0.0),
     )
 }
 
@@ -176,7 +183,7 @@ fn truncate_tab_title(title: &str, max_width: f32, cell_width: f32) -> Cow<'_, s
 }
 
 fn centered_tab_title_x(tab: &TabState, title: &str, cell_width: f32) -> f32 {
-    let label_x = tab.x + TAB_PADDING;
+    let label_x = tab.x + TAB_PADDING * tab.scale;
     let label_width = tab.max_text_width().max(0.0);
     if title.is_empty() || label_width <= 0.0 || cell_width <= 0.0 {
         return label_x;
@@ -192,10 +199,15 @@ impl Renderer {
         &self,
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
+        tab_bar: &TabBarState,
         (x, y, w, h): (f32, f32, f32, f32),
         color: Rgba,
     ) {
-        let (icon_w, stroke, gap) = (14.0_f32, 2.0_f32, 3.0_f32);
+        let (icon_w, stroke, gap) = (
+            tab_bar.scaled(14.0),
+            tab_bar.scaled(2.0),
+            tab_bar.scaled(3.0),
+        );
         let left = (x + (w - icon_w) / 2.0).round();
         let top = (y + (h - (3.0 * stroke + 2.0 * gap)) / 2.0).round();
         for i in 0..3 {
@@ -223,6 +235,8 @@ impl Renderer {
         let rule = lighten(bg, 0.1);
         let fg = self.color_scheme.foreground;
         let height = layout.height();
+        let px = |logical: f32| tab_bar.scaled(logical);
+        let line = px(1.0);
         self.emit_rounded_rect(
             &mut bg_v,
             &mut bg_i,
@@ -230,29 +244,29 @@ impl Renderer {
             layout.y,
             layout.width,
             height,
-            CHROME_BUTTON_RADIUS + 1.0,
+            px(CHROME_BUTTON_RADIUS + 1.0),
             border,
         );
         self.emit_rounded_rect(
             &mut bg_v,
             &mut bg_i,
-            layout.x + 1.0,
-            layout.y + 1.0,
-            layout.width - 2.0,
-            height - 2.0,
-            CHROME_BUTTON_RADIUS,
+            layout.x + line,
+            layout.y + line,
+            layout.width - 2.0 * line,
+            height - 2.0 * line,
+            px(CHROME_BUTTON_RADIUS),
             panel,
         );
         for (index, item) in MenuItem::ALL.iter().enumerate() {
-            let item_y = layout.y + MENU_PADDING + index as f32 * layout.item_height;
+            let item_y = layout.y + layout.padding + index as f32 * layout.item_height;
             if item.starts_group() {
                 self.emit_rect(
                     &mut bg_v,
                     &mut bg_i,
-                    layout.x + 8.0,
+                    layout.x + px(8.0),
                     item_y,
-                    layout.width - 16.0,
-                    1.0,
+                    layout.width - px(16.0),
+                    line,
                     rule,
                 );
             }
@@ -260,11 +274,11 @@ impl Renderer {
                 self.emit_rounded_rect(
                     &mut bg_v,
                     &mut bg_i,
-                    layout.x + 4.0,
-                    item_y + 2.0,
-                    layout.width - 8.0,
-                    layout.item_height - 4.0,
-                    CHROME_BUTTON_RADIUS - 2.0,
+                    layout.x + px(4.0),
+                    item_y + px(2.0),
+                    layout.width - px(8.0),
+                    layout.item_height - px(4.0),
+                    px(CHROME_BUTTON_RADIUS - 2.0),
                     hover,
                 );
             }
@@ -301,11 +315,16 @@ impl Renderer {
         &self,
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
+        tab_bar: &TabBarState,
         (x, y, w, h): (f32, f32, f32, f32),
         side_by_side: bool,
         color: Rgba,
     ) {
-        let (icon_w, icon_h, stroke) = (14.0_f32, 12.0_f32, 1.5_f32);
+        let (icon_w, icon_h, stroke) = (
+            tab_bar.scaled(14.0),
+            tab_bar.scaled(12.0),
+            tab_bar.scaled(1.5),
+        );
         let left = (x + (w - icon_w) / 2.0).round();
         let top = (y + (h - icon_h) / 2.0).round();
         for (rx, ry, rw, rh) in [
@@ -325,30 +344,21 @@ impl Renderer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn emit_chrome_button(
         &self,
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
+        tab_bar: &TabBarState,
+        rect: (f32, f32, f32, f32),
         fill: Rgba,
         border: Rgba,
     ) {
-        self.emit_rounded_rect(
-            vertices,
-            indices,
-            x,
-            y,
-            width,
-            height,
-            CHROME_BUTTON_RADIUS,
-            border,
-        );
+        let (x, y, width, height) = rect;
+        let radius = tab_bar.scaled(CHROME_BUTTON_RADIUS);
+        let border_width = tab_bar.scaled(CHROME_BUTTON_BORDER);
+        self.emit_rounded_rect(vertices, indices, x, y, width, height, radius, border);
 
-        let (inner_x, inner_y, inner_w, inner_h) = chrome_button_inner_rect(x, y, width, height);
+        let (inner_x, inner_y, inner_w, inner_h) = chrome_button_inner_rect(rect, border_width);
         self.emit_rounded_rect(
             vertices,
             indices,
@@ -356,7 +366,7 @@ impl Renderer {
             inner_y,
             inner_w,
             inner_h,
-            CHROME_BUTTON_RADIUS - CHROME_BUTTON_BORDER,
+            radius - border_width,
             fill,
         );
     }
@@ -371,6 +381,10 @@ impl Renderer {
         }
 
         let height = tab_bar.height();
+        let title_bar_height = tab_bar.title_bar_height();
+        let tab_row_height = tab_bar.tab_row_height();
+        let px = |logical: f32| tab_bar.scaled(logical);
+        let line = px(1.0);
         let show_tabs = tab_bar.shows_tab_row();
         let bg = self.color_scheme.background;
         let title_bg = lighten(bg, 0.012);
@@ -394,7 +408,7 @@ impl Renderer {
             0.0,
             0.0,
             self.config.width as f32,
-            TITLE_BAR_HEIGHT,
+            title_bar_height,
             title_bg,
         );
 
@@ -403,9 +417,9 @@ impl Renderer {
                 &mut vertices,
                 &mut indices,
                 0.0,
-                TITLE_BAR_HEIGHT,
+                title_bar_height,
                 self.config.width as f32,
-                TAB_ROW_HEIGHT,
+                tab_row_height,
                 tab_row_bg,
             );
         }
@@ -416,9 +430,9 @@ impl Renderer {
             &mut vertices,
             &mut indices,
             0.0,
-            height - 1.0,
+            height - line,
             self.config.width as f32,
-            1.0,
+            line,
             rail_line,
         );
 
@@ -435,12 +449,12 @@ impl Renderer {
                 inactive_tab_bg
             };
 
-            let margin_x = 1.0;
-            let tab_y = TITLE_BAR_HEIGHT + if tab.is_active { 1.0 } else { 3.0 };
+            let margin_x = line;
+            let tab_y = title_bar_height + if tab.is_active { line } else { px(3.0) };
             let tab_height = if tab.is_active {
                 height - tab_y
             } else {
-                height - tab_y - 1.0
+                height - tab_y - line
             };
             self.emit_rect(
                 &mut vertices,
@@ -459,7 +473,7 @@ impl Renderer {
                     tab.x + margin_x,
                     tab_y,
                     tab.width - margin_x * 2.0,
-                    3.0,
+                    px(3.0),
                     accent_color,
                 );
                 self.emit_rect(
@@ -467,16 +481,16 @@ impl Renderer {
                     &mut indices,
                     tab.x + margin_x,
                     tab_y,
-                    1.0,
+                    line,
                     tab_height,
                     active_edge,
                 );
                 self.emit_rect(
                     &mut vertices,
                     &mut indices,
-                    tab.x + tab.width - margin_x - 1.0,
+                    tab.x + tab.width - margin_x - line,
                     tab_y,
-                    1.0,
+                    line,
                     tab_height,
                     active_edge,
                 );
@@ -500,8 +514,7 @@ impl Renderer {
         // Title-band buttons: split right/down, window controls, and "+"
         // while the tab row is hidden.
         for (button, slot_x) in tab_bar.title_buttons() {
-            let (button_x, button_y, button_w, button_h) =
-                chrome_button_rect(slot_x, WINDOW_BUTTON_WIDTH);
+            let button_rect = chrome_button_rect(tab_bar, slot_x);
             let is_hovered = tab_bar.hovered_title_button == Some(button)
                 || (button == TitleButton::Menu && tab_bar.menu_open);
             let destructive = button == TitleButton::Close;
@@ -513,22 +526,15 @@ impl Renderer {
             self.emit_chrome_button(
                 &mut vertices,
                 &mut indices,
-                button_x,
-                button_y,
-                button_w,
-                button_h,
+                tab_bar,
+                button_rect,
                 button_bg,
                 button_border,
             );
             if button == TitleButton::Menu {
                 let color =
                     chrome_symbol_color(self.color_scheme.foreground, accent_color, is_hovered);
-                self.emit_menu_icon(
-                    &mut vertices,
-                    &mut indices,
-                    (button_x, button_y, button_w, button_h),
-                    color,
-                );
+                self.emit_menu_icon(&mut vertices, &mut indices, tab_bar, button_rect, color);
             }
             if matches!(button, TitleButton::SplitRight | TitleButton::SplitDown) {
                 let color =
@@ -536,20 +542,21 @@ impl Renderer {
                 self.emit_split_icon(
                     &mut vertices,
                     &mut indices,
-                    (button_x, button_y, button_w, button_h),
+                    tab_bar,
+                    button_rect,
                     button == TitleButton::SplitRight,
                     color,
                 );
             }
         }
         // Separator between the split buttons and the window controls.
-        let separator_height = CHROME_BUTTON_SIZE - 6.0;
+        let separator_height = tab_bar.chrome_button_size() - px(6.0);
         self.emit_rect(
             &mut vertices,
             &mut indices,
             tab_bar.title_group_separator_x(),
-            (TITLE_BAR_HEIGHT - separator_height) / 2.0,
-            1.0,
+            (title_bar_height - separator_height) / 2.0,
+            line,
             separator_height,
             control_border,
         );
@@ -560,10 +567,10 @@ impl Renderer {
             self.emit_rect(
                 &mut vertices,
                 &mut indices,
-                tab_bar.new_tab_button_x + 2.0,
-                TITLE_BAR_HEIGHT + 3.0,
-                TabBarState::NEW_TAB_BUTTON_WIDTH - 4.0,
-                TAB_ROW_HEIGHT - 4.0,
+                tab_bar.new_tab_button_x + px(2.0),
+                title_bar_height + px(3.0),
+                tab_bar.new_tab_button_width() - px(4.0),
+                tab_row_height - px(4.0),
                 inactive_hover_bg,
             );
         }
@@ -585,7 +592,9 @@ impl Renderer {
 
         // Center tab text vertically in the tab row. Chrome symbols are centered
         // by their emitted glyph bounds because symbols have uneven side bearings.
-        let tab_text_y = TITLE_BAR_HEIGHT + (TAB_ROW_HEIGHT - self.cell_height) / 2.0;
+        let title_bar_height = tab_bar.title_bar_height();
+        let tab_row_height = tab_bar.tab_row_height();
+        let tab_text_y = title_bar_height + (tab_row_height - self.cell_height) / 2.0;
         let accent_color = dim(self.color_scheme.cursor, 0.92);
 
         let show_tabs = tab_bar.shows_tab_row();
@@ -619,8 +628,8 @@ impl Renderer {
 
             // Close button "x" on the right side of the tab
             let is_close_hovered = tab_bar.hovered_close_button == Some(tab_idx);
-            let close_center_x =
-                tab.close_button_x() + TAB_CLOSE_BUTTON_SIZE / 2.0 - self.cell_width / 2.0;
+            let close_center_x = tab.close_button_x() + tab_bar.scaled(TAB_CLOSE_BUTTON_SIZE) / 2.0
+                - self.cell_width / 2.0;
 
             let close_color = if is_close_hovered {
                 lighten(self.color_scheme.foreground, 0.08)
@@ -631,7 +640,7 @@ impl Renderer {
                 "×",
                 close_center_x,
                 tab_text_y,
-                12.0,
+                tab_bar.scaled(12.0),
                 close_color,
             );
             let base_idx = all_vertices.len() as u32;
@@ -643,11 +652,11 @@ impl Renderer {
         // focused pane's location centered between it and the buttons.
         {
             let cw = self.cell_width;
-            let text_y = (TITLE_BAR_HEIGHT - self.cell_height) / 2.0;
+            let text_y = (title_bar_height - self.cell_height) / 2.0;
             let green = self.color_scheme.named[2];
             let aqua = self.color_scheme.named[6];
             let fg = self.color_scheme.foreground;
-            let x0 = title_logo_x();
+            let x0 = title_logo_x(tab_bar);
             // One label per character so ligature fonts cannot merge `>>>`.
             let mut parts: Vec<(&str, f32, Rgba)> = vec![("-", x0, green)];
             for i in 1..=3 {
@@ -708,8 +717,7 @@ impl Renderer {
                 TitleButton::Close => "×",
                 TitleButton::Menu | TitleButton::SplitRight | TitleButton::SplitDown => continue,
             };
-            let (button_x, button_y, button_w, button_h) =
-                chrome_button_rect(slot_x, WINDOW_BUTTON_WIDTH);
+            let (button_x, button_y, button_w, button_h) = chrome_button_rect(tab_bar, slot_x);
             let is_hovered = tab_bar.hovered_title_button == Some(button);
             let color = if button == TitleButton::Close {
                 close_symbol_color(self.color_scheme.foreground, is_hovered)
@@ -720,7 +728,7 @@ impl Renderer {
                 symbol,
                 button_x,
                 button_y,
-                WINDOW_BUTTON_WIDTH,
+                tab_bar.window_button_width(),
                 color,
             );
             center_vertices_in_rect(&mut v, button_x, button_y, button_w, button_h);
@@ -736,15 +744,15 @@ impl Renderer {
                 accent_color,
                 tab_bar.new_tab_button_hovered,
             );
-            let (plus_x, plus_w) = (tab_bar.new_tab_button_x, TabBarState::NEW_TAB_BUTTON_WIDTH);
+            let (plus_x, plus_w) = (tab_bar.new_tab_button_x, tab_bar.new_tab_button_width());
             let (mut v, idx) = self.text_renderer.build_label_vertices(
                 "+",
                 plus_x,
-                TITLE_BAR_HEIGHT,
+                title_bar_height,
                 plus_w,
                 plus_color,
             );
-            center_vertices_in_rect(&mut v, plus_x, TITLE_BAR_HEIGHT, plus_w, TAB_ROW_HEIGHT);
+            center_vertices_in_rect(&mut v, plus_x, title_bar_height, plus_w, tab_row_height);
             let base_idx = all_vertices.len() as u32;
             all_vertices.extend(v);
             all_indices.extend(idx.iter().map(|i| i + base_idx));
@@ -759,11 +767,12 @@ mod tests {
     use super::{
         center_vertices_in_rect, centered_tab_title_x, chrome_button_inner_rect,
         chrome_button_rect, chrome_symbol_color, close_symbol_color, dim, fit_title_location, mix,
-        truncate_tab_title, vertex_bounds, CHROME_BUTTON_BORDER, CHROME_BUTTON_SIZE,
-        TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH,
+        truncate_tab_title, vertex_bounds, CHROME_BUTTON_BORDER,
     };
     use crate::renderer::{Rgba, Vertex};
-    use crate::tabs::TabState;
+    use crate::tabs::{
+        TabBarState, TabState, CHROME_BUTTON_SIZE, TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH,
+    };
     use crate::terminal_manager::TabId;
 
     #[test]
@@ -881,7 +890,7 @@ mod tests {
 
     #[test]
     fn chrome_button_rect_centers_square_in_slot() {
-        let (x, y, width, height) = chrome_button_rect(100.0, WINDOW_BUTTON_WIDTH);
+        let (x, y, width, height) = chrome_button_rect(&TabBarState::new(), 100.0);
 
         assert_eq!(x, 100.0 + (WINDOW_BUTTON_WIDTH - CHROME_BUTTON_SIZE) / 2.0);
         assert_eq!(y, (TITLE_BAR_HEIGHT - CHROME_BUTTON_SIZE) / 2.0);
@@ -890,8 +899,19 @@ mod tests {
     }
 
     #[test]
+    fn chrome_button_rect_scales_with_the_bar() {
+        let mut tab_bar = TabBarState::new();
+        tab_bar.scale = 2.0;
+        assert_eq!(
+            chrome_button_rect(&tab_bar, 100.0),
+            (110.0, 16.0, 56.0, 56.0)
+        );
+    }
+
+    #[test]
     fn chrome_button_inner_rect_reserves_even_border() {
-        let (x, y, width, height) = chrome_button_inner_rect(100.0, 20.0, 24.0, 18.0);
+        let (x, y, width, height) =
+            chrome_button_inner_rect((100.0, 20.0, 24.0, 18.0), CHROME_BUTTON_BORDER);
 
         assert_eq!(x, 100.0 + CHROME_BUTTON_BORDER);
         assert_eq!(y, 20.0 + CHROME_BUTTON_BORDER);
@@ -921,6 +941,7 @@ mod tests {
             width,
             is_active: false,
             is_hovered: false,
+            scale: 1.0,
         }
     }
 
