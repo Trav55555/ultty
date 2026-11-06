@@ -5,7 +5,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use super::View;
+use super::{expand_tabs, expand_tabs_from_column, View};
 use crate::theme::{to_ratatui_color, Theme};
 use crate::vim::{KeyParser, VimConfig, VimHandler, VimResult};
 use crate::{impl_vim_ext, impl_vim_handler_accessors};
@@ -20,7 +20,7 @@ pub struct Text {
 impl Text {
     pub fn new(content: impl Into<String>) -> Self {
         Self {
-            content: content.into(),
+            content: expand_tabs(&content.into()).into_owned(),
         }
     }
 
@@ -56,6 +56,7 @@ impl View for Text {
 pub struct RichText {
     spans: Vec<(String, ultty_protocol::Style)>,
     fill_width: bool,
+    column: usize,
 }
 
 impl RichText {
@@ -64,7 +65,9 @@ impl RichText {
     }
 
     pub fn span(mut self, text: impl Into<String>, style: ultty_protocol::Style) -> Self {
-        self.spans.push((text.into(), style));
+        let text = text.into();
+        let text = expand_tabs_from_column(&text, &mut self.column).into_owned();
+        self.spans.push((text, style));
         self
     }
 

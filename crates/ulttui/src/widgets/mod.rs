@@ -1,5 +1,9 @@
 //! Built-in widgets.
 
+use std::borrow::Cow;
+
+use unicode_width::UnicodeWidthChar;
+
 mod badge;
 mod binary_toggle;
 mod button;
@@ -58,6 +62,39 @@ use crate::focus::FocusManager;
 use ratatui::layout::Rect;
 use ratatui::Frame;
 use ultty_protocol::{AppMessage, Constraints, Content, RegionId};
+
+/// Expand tabs to eight-column stops, starting each line at column zero.
+fn expand_tabs(text: &str) -> Cow<'_, str> {
+    if !text.contains('\t') {
+        return Cow::Borrowed(text);
+    }
+    expand_tabs_from_column(text, &mut 0)
+}
+
+fn expand_tabs_from_column<'a>(text: &'a str, column: &mut usize) -> Cow<'a, str> {
+    let mut expanded = text
+        .contains('\t')
+        .then(|| String::with_capacity(text.len()));
+    for ch in text.chars() {
+        if ch == '\t' {
+            let spaces = 8 - *column % 8;
+            if let Some(output) = &mut expanded {
+                output.extend(std::iter::repeat_n(' ', spaces));
+            }
+            *column += spaces;
+        } else {
+            if let Some(output) = &mut expanded {
+                output.push(ch);
+            }
+            if ch == '\n' {
+                *column = 0;
+            } else {
+                *column += ch.width().unwrap_or(0);
+            }
+        }
+    }
+    expanded.map_or(Cow::Borrowed(text), Cow::Owned)
+}
 
 /// Read-only focus query for widgets that render differently when focused.
 ///
@@ -280,6 +317,43 @@ impl<T: View> View for &T {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_expand_tabs_no_tabs_borrowed() {
+        assert!(matches!(expand_tabs("hello\n世界"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn test_expand_tabs_stops() {
+        for (input, expected) in [
+            ("\t", "        "),
+            ("ab\tc", "ab      c"),
+            ("\t\t", "                "),
+            ("12345678\t", "12345678        "),
+            ("abcdefg\t", "abcdefg "),
+            ("ab\n\tc", "ab\n        c"),
+            ("界\tx", "界      x"),
+        ] {
+            assert_eq!(expand_tabs(input), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn test_rich_text_tabs_across_spans() {
+        let text = RichText::new()
+            .text("界")
+            .span("\tc", ultty_protocol::Style::new().bold())
+            .text("\nxy")
+            .text("\tz");
+        assert_eq!(text.spans()[1].0, "      c");
+        assert!(text.spans()[1].1.bold);
+        assert_eq!(text.spans()[3].0, "      z");
+        let Content::RichText(native) = View::content(&text) else {
+            panic!("Expected rich text");
+        };
+        assert_eq!(native.spans[1].text, "      c");
+        assert_eq!(native.spans[3].text, "      z");
+    }
 
     // A minimal test widget with all defaults
     struct EmptyView;
