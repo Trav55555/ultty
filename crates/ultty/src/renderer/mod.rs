@@ -1253,6 +1253,9 @@ impl Renderer {
         if let Some(rows) = overlay.protocol_status {
             self.render_protocol_status_overlay(&mut encoder, &view, rows);
         }
+        if let Some(tab_bar) = overlay.tab_bar {
+            self.render_main_menu(&mut encoder, &view, tab_bar);
+        }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         self.queue.present(output);
@@ -1416,6 +1419,9 @@ impl Renderer {
         }
         if let Some(rows) = overlay.protocol_status {
             self.render_protocol_status_overlay(&mut encoder, &view, rows);
+        }
+        if let Some(tab_bar) = overlay.tab_bar {
+            self.render_main_menu(&mut encoder, &view, tab_bar);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

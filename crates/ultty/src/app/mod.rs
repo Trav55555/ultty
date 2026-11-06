@@ -184,6 +184,10 @@ pub struct App {
     scroll_line_accum: f64,
     /// HiDPI scale factor (physical pixels / logical pixels)
     scale_factor: f32,
+    /// The minimum inner size last sent to the window.
+    min_window_size: Option<PhysicalSize<u32>>,
+    /// When the window opened; drives the title's typing animation.
+    launched_at: Instant,
 }
 
 impl App {
@@ -288,7 +292,9 @@ impl App {
         let url_detector = UrlDetector::new(config.behavior.url_detection);
 
         // Create tab bar state
-        let tab_bar = TabBarState::new();
+        let mut tab_bar = TabBarState::new();
+        // The title types itself out at launch, starting from `->>>_`.
+        tab_bar.title_letters = 0;
 
         // Create config watcher for hot-reload
         let config_watcher = ConfigWatcher::new();
@@ -355,6 +361,8 @@ impl App {
             scroll_pixel_accum: 0.0,
             scroll_line_accum: 0.0,
             scale_factor,
+            min_window_size: None,
+            launched_at: Instant::now(),
         };
 
         // Initialize tab bar state so it renders on first frame
@@ -634,6 +642,35 @@ impl App {
     ///
     /// This is the single hook every tab change goes through, so it also
     /// syncs the protocol server's tab bookkeeping.
+    /// Show the focused pane's directory and git branch in the title band.
+    fn update_title_location(&mut self) {
+        let cwd = self
+            .terminal_manager
+            .focused_terminal()
+            .and_then(control::terminal_working_directory);
+        let home = std::env::var("HOME").ok();
+        self.tab_bar.title_path = cwd
+            .as_deref()
+            .map(|dir| ultty::tabs::display_path(dir, home.as_deref()))
+            .unwrap_or_default();
+        self.tab_bar.title_branch = cwd
+            .as_deref()
+            .and_then(|dir| ultty::tabs::git_branch(std::path::Path::new(dir)));
+        self.update_min_window_size();
+    }
+
+    /// Keep the window from shrinking below what the title and three rows
+    /// need. Only tells the window when the size actually changes.
+    fn update_min_window_size(&mut self) {
+        let (cell_width, cell_height) = self.renderer.cell_dimensions();
+        let (width, height) = self.tab_bar.min_window_size(cell_width, cell_height);
+        let size = PhysicalSize::new(width as u32, height as u32);
+        if self.min_window_size != Some(size) {
+            self.min_window_size = Some(size);
+            self.window.set_min_inner_size(Some(size));
+        }
+    }
+
     fn update_tab_bar(&mut self) {
         self.sync_protocol_tabs();
         self.last_tab_title_refresh = Instant::now();
@@ -655,6 +692,7 @@ impl App {
             total_width,
             tab_width_override,
         );
+        self.update_title_location();
 
         // Update renderer's tab bar height for dimension calculations
         let new_height = self.tab_bar.content_top();
@@ -892,14 +930,25 @@ impl App {
 
         let old_hovered_tab = self.tab_bar.hovered_tab;
         let old_new_tab_hovered = self.tab_bar.new_tab_button_hovered;
-        let old_window_control = self.tab_bar.hovered_window_control;
+        let old_window_control = self.tab_bar.hovered_title_button;
         let old_close_button = self.tab_bar.hovered_close_button;
         self.tab_bar.set_hover(x, y);
+        let old_menu_item = self.tab_bar.hovered_menu_item;
+        if self.tab_bar.menu_open {
+            let (cell_width, cell_height) = self.renderer.cell_dimensions();
+            self.tab_bar.hovered_menu_item = self
+                .tab_bar
+                .menu_layout(cell_width, cell_height)
+                .item_at(x, y);
+            if self.tab_bar.hovered_menu_item != old_menu_item {
+                self.needs_redraw = true;
+            }
+        }
 
         // Redraw if hover state changed
         if old_hovered_tab != self.tab_bar.hovered_tab
             || old_new_tab_hovered != self.tab_bar.new_tab_button_hovered
-            || old_window_control != self.tab_bar.hovered_window_control
+            || old_window_control != self.tab_bar.hovered_title_button
             || old_close_button != self.tab_bar.hovered_close_button
         {
             self.needs_redraw = true;

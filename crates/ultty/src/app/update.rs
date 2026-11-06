@@ -31,6 +31,12 @@ impl App {
             deadline = deadline.min(until);
         }
 
+        if let Some(next) =
+            ultty::tabs::title_next_change(now.saturating_duration_since(self.launched_at))
+        {
+            deadline = deadline.min(self.launched_at + next);
+        }
+
         deadline.max(now)
     }
 
@@ -124,6 +130,11 @@ impl App {
 
     /// Process terminal events and render. Returns true if should exit.
     pub(super) fn update(&mut self) -> bool {
+        let letters = ultty::tabs::title_letters_at(self.launched_at.elapsed());
+        if letters != self.tab_bar.title_letters {
+            self.tab_bar.title_letters = letters;
+            self.needs_redraw = true;
+        }
         self.refresh_runtime_wakeup_fds();
 
         // Check for config file changes (hot-reload)

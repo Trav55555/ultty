@@ -321,6 +321,9 @@ impl Renderer {
         }
 
         self.render_screenshot_overlays(&mut encoder, &view, terminal, overlay);
+        if let Some(tab_bar) = overlay.tab_bar {
+            self.render_main_menu(&mut encoder, &view, tab_bar);
+        }
 
         // Calculate buffer size with proper alignment
         let bytes_per_pixel = 4u32; // RGBA or BGRA
@@ -497,6 +500,9 @@ impl Renderer {
         }
 
         self.render_screenshot_overlays(&mut encoder, &view, terminal, overlay);
+        if let Some(tab_bar) = overlay.tab_bar {
+            self.render_main_menu(&mut encoder, &view, tab_bar);
+        }
 
         let bytes_per_pixel = 4u32;
         let padded_row =
