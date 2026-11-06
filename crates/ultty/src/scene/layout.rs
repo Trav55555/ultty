@@ -696,20 +696,20 @@ mod tests {
     #[test]
     fn constraints_justify_content_variants() {
         for (proto, expected) in [
-            (ProtoJustifyContent::Start, taffy::JustifyContent::Start),
-            (ProtoJustifyContent::End, taffy::JustifyContent::End),
-            (ProtoJustifyContent::Center, taffy::JustifyContent::Center),
+            (ProtoJustifyContent::Start, taffy::JustifyContent::START),
+            (ProtoJustifyContent::End, taffy::JustifyContent::END),
+            (ProtoJustifyContent::Center, taffy::JustifyContent::CENTER),
             (
                 ProtoJustifyContent::SpaceBetween,
-                taffy::JustifyContent::SpaceBetween,
+                taffy::JustifyContent::SPACE_BETWEEN,
             ),
             (
                 ProtoJustifyContent::SpaceAround,
-                taffy::JustifyContent::SpaceAround,
+                taffy::JustifyContent::SPACE_AROUND,
             ),
             (
                 ProtoJustifyContent::SpaceEvenly,
-                taffy::JustifyContent::SpaceEvenly,
+                taffy::JustifyContent::SPACE_EVENLY,
             ),
         ] {
             let c = Constraints {
@@ -717,29 +717,25 @@ mod tests {
                 ..default_constraints()
             };
             let style = constraints_to_style(&c);
-            assert_eq!(
-                style.justify_content,
-                Some(expected),
-                "JustifyContent::{proto:?}"
-            );
+            assert_eq!(style.justify_content, expected, "JustifyContent::{proto:?}");
         }
     }
 
     #[test]
     fn constraints_align_items_variants() {
         for (proto, expected) in [
-            (ProtoAlignItems::Start, taffy::AlignItems::Start),
-            (ProtoAlignItems::End, taffy::AlignItems::End),
-            (ProtoAlignItems::Center, taffy::AlignItems::Center),
-            (ProtoAlignItems::Baseline, taffy::AlignItems::Baseline),
-            (ProtoAlignItems::Stretch, taffy::AlignItems::Stretch),
+            (ProtoAlignItems::Start, taffy::AlignItems::START),
+            (ProtoAlignItems::End, taffy::AlignItems::END),
+            (ProtoAlignItems::Center, taffy::AlignItems::CENTER),
+            (ProtoAlignItems::Baseline, taffy::AlignItems::BASELINE),
+            (ProtoAlignItems::Stretch, taffy::AlignItems::STRETCH),
         ] {
             let c = Constraints {
                 align_items: proto,
                 ..default_constraints()
             };
             let style = constraints_to_style(&c);
-            assert_eq!(style.align_items, Some(expected), "AlignItems::{proto:?}");
+            assert_eq!(style.align_items, expected, "AlignItems::{proto:?}");
         }
     }
 
@@ -756,11 +752,11 @@ mod tests {
     #[test]
     fn constraints_align_self_non_auto_maps_to_some() {
         for (proto, expected) in [
-            (ProtoAlignSelf::Start, taffy::AlignSelf::Start),
-            (ProtoAlignSelf::End, taffy::AlignSelf::End),
-            (ProtoAlignSelf::Center, taffy::AlignSelf::Center),
-            (ProtoAlignSelf::Baseline, taffy::AlignSelf::Baseline),
-            (ProtoAlignSelf::Stretch, taffy::AlignSelf::Stretch),
+            (ProtoAlignSelf::Start, taffy::AlignSelf::START),
+            (ProtoAlignSelf::End, taffy::AlignSelf::END),
+            (ProtoAlignSelf::Center, taffy::AlignSelf::CENTER),
+            (ProtoAlignSelf::Baseline, taffy::AlignSelf::BASELINE),
+            (ProtoAlignSelf::Stretch, taffy::AlignSelf::STRETCH),
         ] {
             let c = Constraints {
                 align_self: proto,
@@ -774,33 +770,29 @@ mod tests {
     #[test]
     fn constraints_align_content_variants() {
         for (proto, expected) in [
-            (ProtoAlignContent::Start, taffy::AlignContent::Start),
-            (ProtoAlignContent::End, taffy::AlignContent::End),
-            (ProtoAlignContent::Center, taffy::AlignContent::Center),
+            (ProtoAlignContent::Start, taffy::AlignContent::START),
+            (ProtoAlignContent::End, taffy::AlignContent::END),
+            (ProtoAlignContent::Center, taffy::AlignContent::CENTER),
             (
                 ProtoAlignContent::SpaceBetween,
-                taffy::AlignContent::SpaceBetween,
+                taffy::AlignContent::SPACE_BETWEEN,
             ),
             (
                 ProtoAlignContent::SpaceAround,
-                taffy::AlignContent::SpaceAround,
+                taffy::AlignContent::SPACE_AROUND,
             ),
             (
                 ProtoAlignContent::SpaceEvenly,
-                taffy::AlignContent::SpaceEvenly,
+                taffy::AlignContent::SPACE_EVENLY,
             ),
-            (ProtoAlignContent::Stretch, taffy::AlignContent::Stretch),
+            (ProtoAlignContent::Stretch, taffy::AlignContent::STRETCH),
         ] {
             let c = Constraints {
                 align_content: proto,
                 ..default_constraints()
             };
             let style = constraints_to_style(&c);
-            assert_eq!(
-                style.align_content,
-                Some(expected),
-                "AlignContent::{proto:?}"
-            );
+            assert_eq!(style.align_content, expected, "AlignContent::{proto:?}");
         }
     }
 
@@ -854,26 +846,26 @@ mod tests {
         };
         let style = constraints_to_style(&c);
 
-        assert_eq!(style.margin.top, LengthPercentageAuto::Length(1.0));
-        assert_eq!(style.margin.right, LengthPercentageAuto::Length(2.0));
-        assert_eq!(style.margin.bottom, LengthPercentageAuto::Length(3.0));
-        assert_eq!(style.margin.left, LengthPercentageAuto::Auto);
+        assert_eq!(style.margin.top, LengthPercentageAuto::length(1.0));
+        assert_eq!(style.margin.right, LengthPercentageAuto::length(2.0));
+        assert_eq!(style.margin.bottom, LengthPercentageAuto::length(3.0));
+        assert_eq!(style.margin.left, LengthPercentageAuto::auto());
 
-        assert_eq!(style.padding.left, LengthPercentage::Percent(0.1));
-        assert_eq!(style.padding.right, LengthPercentage::Percent(0.1));
+        assert_eq!(style.padding.left, LengthPercentage::percent(0.1));
+        assert_eq!(style.padding.right, LengthPercentage::percent(0.1));
 
-        assert_eq!(style.gap.width, LengthPercentage::Length(5.0));
-        assert_eq!(style.gap.height, LengthPercentage::Percent(0.2));
+        assert_eq!(style.gap.width, LengthPercentage::length(5.0));
+        assert_eq!(style.gap.height, LengthPercentage::percent(0.2));
     }
 
     // ── dimension_to_taffy tests ────────────────────────────────────
 
     #[test]
     fn dimension_to_taffy_auto_and_cells() {
-        assert_eq!(dimension_to_taffy(&ProtoDimension::Auto), Dimension::Auto);
+        assert_eq!(dimension_to_taffy(&ProtoDimension::Auto), Dimension::auto());
         assert_eq!(
             dimension_to_taffy(&ProtoDimension::Cells(10.0)),
-            Dimension::Length(10.0)
+            Dimension::length(10.0)
         );
     }
 
@@ -881,11 +873,11 @@ mod tests {
     fn dimension_to_taffy_percent_divides_by_100() {
         assert_eq!(
             dimension_to_taffy(&ProtoDimension::Percent(50.0)),
-            Dimension::Percent(0.5)
+            Dimension::percent(0.5)
         );
         assert_eq!(
             dimension_to_taffy(&ProtoDimension::Percent(100.0)),
-            Dimension::Percent(1.0)
+            Dimension::percent(1.0)
         );
     }
 
@@ -893,15 +885,15 @@ mod tests {
     fn dimension_to_taffy_fr_mincontent_maxcontent_fallback_to_auto() {
         assert_eq!(
             dimension_to_taffy(&ProtoDimension::Fr(1.0)),
-            Dimension::Auto
+            Dimension::auto()
         );
         assert_eq!(
             dimension_to_taffy(&ProtoDimension::MinContent),
-            Dimension::Auto
+            Dimension::auto()
         );
         assert_eq!(
             dimension_to_taffy(&ProtoDimension::MaxContent),
-            Dimension::Auto
+            Dimension::auto()
         );
     }
 
@@ -909,11 +901,11 @@ mod tests {
     fn dimension_to_taffy_viewport_units() {
         assert_eq!(
             dimension_to_taffy(&ProtoDimension::Vw(50.0)),
-            Dimension::Percent(0.5)
+            Dimension::percent(0.5)
         );
         assert_eq!(
             dimension_to_taffy(&ProtoDimension::Vh(50.0)),
-            Dimension::Percent(0.5)
+            Dimension::percent(0.5)
         );
     }
 
@@ -923,15 +915,15 @@ mod tests {
     fn length_auto_basic_variants() {
         assert_eq!(
             dimension_to_length_auto(&ProtoDimension::Auto),
-            LengthPercentageAuto::Auto
+            LengthPercentageAuto::auto()
         );
         assert_eq!(
             dimension_to_length_auto(&ProtoDimension::Cells(5.0)),
-            LengthPercentageAuto::Length(5.0)
+            LengthPercentageAuto::length(5.0)
         );
         assert_eq!(
             dimension_to_length_auto(&ProtoDimension::Percent(25.0)),
-            LengthPercentageAuto::Percent(0.25)
+            LengthPercentageAuto::percent(0.25)
         );
     }
 
@@ -939,23 +931,23 @@ mod tests {
     fn length_auto_catch_all_returns_auto() {
         assert_eq!(
             dimension_to_length_auto(&ProtoDimension::Fr(1.0)),
-            LengthPercentageAuto::Auto
+            LengthPercentageAuto::auto()
         );
         assert_eq!(
             dimension_to_length_auto(&ProtoDimension::Vw(50.0)),
-            LengthPercentageAuto::Auto
+            LengthPercentageAuto::auto()
         );
         assert_eq!(
             dimension_to_length_auto(&ProtoDimension::Vh(50.0)),
-            LengthPercentageAuto::Auto
+            LengthPercentageAuto::auto()
         );
         assert_eq!(
             dimension_to_length_auto(&ProtoDimension::MinContent),
-            LengthPercentageAuto::Auto
+            LengthPercentageAuto::auto()
         );
         assert_eq!(
             dimension_to_length_auto(&ProtoDimension::MaxContent),
-            LengthPercentageAuto::Auto
+            LengthPercentageAuto::auto()
         );
     }
 
@@ -965,11 +957,11 @@ mod tests {
     fn length_pct_cells_and_percent() {
         assert_eq!(
             dimension_to_length_pct(&ProtoDimension::Cells(5.0)),
-            LengthPercentage::Length(5.0)
+            LengthPercentage::length(5.0)
         );
         assert_eq!(
             dimension_to_length_pct(&ProtoDimension::Percent(50.0)),
-            LengthPercentage::Percent(0.5)
+            LengthPercentage::percent(0.5)
         );
     }
 
@@ -977,19 +969,19 @@ mod tests {
     fn length_pct_catch_all_returns_zero_length() {
         assert_eq!(
             dimension_to_length_pct(&ProtoDimension::Auto),
-            LengthPercentage::Length(0.0)
+            LengthPercentage::length(0.0)
         );
         assert_eq!(
             dimension_to_length_pct(&ProtoDimension::Fr(1.0)),
-            LengthPercentage::Length(0.0)
+            LengthPercentage::length(0.0)
         );
         assert_eq!(
             dimension_to_length_pct(&ProtoDimension::Vw(50.0)),
-            LengthPercentage::Length(0.0)
+            LengthPercentage::length(0.0)
         );
         assert_eq!(
             dimension_to_length_pct(&ProtoDimension::Vh(50.0)),
-            LengthPercentage::Length(0.0)
+            LengthPercentage::length(0.0)
         );
     }
 
