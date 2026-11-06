@@ -68,6 +68,12 @@ const MAX_OUTBOUND: usize = 16 * 1024 * 1024;
 const EXIT_POKE_INTERVAL: Duration = Duration::from_millis(20);
 const EXIT_POKES: usize = 250;
 
+/// How long after the child's exit to wait for the I/O thread to drain and
+/// close the PTY before reporting [`TerminalEvent::ChildExited`] anyway. It
+/// usually closes within milliseconds; it stays open only while a background
+/// process the child left behind still holds it.
+const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(200);
+
 use bytes::{Buf, BytesMut};
 use polling::{Event, Events, Poller};
 
@@ -264,6 +270,10 @@ pub struct EventLoop {
     foreground_name_cache: RefCell<Option<(Instant, Option<String>)>>,
     /// Bytes parsed between the two most recent [`EventLoop::process`] calls
     last_drain_bytes: usize,
+    /// When `waitpid` first reported the child's exit.
+    exit_seen_at: Option<Instant>,
+    /// Whether `ChildExited` went out before the PTY closed.
+    exit_reported_early: bool,
 }
 
 impl EventLoop {
@@ -336,6 +346,8 @@ impl EventLoop {
             reader: Some(reader),
             foreground_name_cache: RefCell::new(None),
             last_drain_bytes: 0,
+            exit_seen_at: None,
+            exit_reported_early: false,
         })
     }
 
@@ -545,11 +557,19 @@ impl EventLoop {
             state.closed
         };
 
-        if (closed || !self.child.has_exited())
-            && self.child.try_wait().map_err(io::Error::other)?
-        {
-            if let Some(status) = self.child.exit_status() {
-                events.push(TerminalEvent::ChildExited { status });
+        // Report the exit only after the child's last output: once the I/O
+        // thread has drained and closed the PTY, or, if something else keeps
+        // the PTY open, after a short grace. waitpid alone sees the exit
+        // while the final chunk can still be unread.
+        if self.child.try_wait().map_err(io::Error::other)? {
+            let seen_at = *self.exit_seen_at.get_or_insert_with(Instant::now);
+            let report =
+                closed || (!self.exit_reported_early && seen_at.elapsed() >= EXIT_DRAIN_GRACE);
+            if report {
+                self.exit_reported_early |= !closed;
+                if let Some(status) = self.child.exit_status() {
+                    events.push(TerminalEvent::ChildExited { status });
+                }
             }
         }
         Ok(events)
@@ -1064,6 +1084,54 @@ mod tests {
         assert!(!event_loop.has_exited());
         assert_eq!(event_loop.terminal().dimensions().cols, 80);
         assert_eq!(event_loop.terminal().dimensions().rows, 24);
+    }
+
+    /// A child that prints and exits at once must not have its last output
+    /// lost: `ChildExited` used to be reported as soon as `waitpid` saw the
+    /// exit, while the final chunk was still unread in the PTY.
+    #[test]
+    fn child_exit_is_reported_after_its_final_output() {
+        for attempt in 0..20 {
+            let mut event_loop = EventLoop::with_command(
+                "/bin/sh",
+                &["/bin/sh", "-c", "seq 1 3000; printf FINAL_OUTPUT_MARK"],
+                80,
+                24,
+            )
+            .expect("create event loop");
+            event_loop
+                .run(|_, event| !matches!(event, TerminalEvent::ChildExited { .. }))
+                .expect("run");
+            let terminal = event_loop.terminal();
+            let shown = terminal
+                .grid()
+                .rows()
+                .any(|row| row.text().contains("FINAL_OUTPUT_MARK"));
+            assert!(shown, "attempt {attempt}: final output missing at exit");
+        }
+    }
+
+    /// A background process can keep the PTY open after the child exits;
+    /// the exit must still be reported, once the drain grace runs out.
+    #[test]
+    fn child_exit_is_reported_while_a_background_process_holds_the_pty() {
+        let mut event_loop = EventLoop::with_command(
+            "/bin/sh",
+            &["/bin/sh", "-c", "sleep 5 & echo STARTED"],
+            80,
+            24,
+        )
+        .expect("create event loop");
+        let start = Instant::now();
+        let status = event_loop
+            .run(|_, event| !matches!(event, TerminalEvent::ChildExited { .. }))
+            .expect("run");
+        assert_eq!(status, 0);
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "exit took {:?}; it waited for the background sleep",
+            start.elapsed()
+        );
     }
 
     #[test]
