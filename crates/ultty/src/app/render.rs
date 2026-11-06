@@ -167,7 +167,7 @@ impl App {
         use ultty::terminal_manager::SplitDirection;
 
         let size = self.window.inner_size();
-        let tab_bar_height = self.tab_bar.height();
+        let tab_bar_height = self.tab_bar.content_top();
         let available_width = size.width as f32;
         let available_height = size.height as f32 - tab_bar_height;
 
