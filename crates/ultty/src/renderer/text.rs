@@ -504,7 +504,6 @@ impl TextRenderer {
             &self.font_family,
             text,
             style,
-            self.cell_width,
         )
     }
 
@@ -1358,7 +1357,6 @@ fn shape_run_glyphs(
     font_family: &str,
     text: &str,
     style: CellStyle,
-    cell_width: f32,
 ) -> RunGlyphs {
     let mut attrs = font_attrs(font_family);
     if style.bold {
@@ -1373,6 +1371,12 @@ fn shape_run_glyphs(
     };
     let line_y = run.line_y;
     let mut shaped = Vec::with_capacity(run.glyphs.len());
+    // Each glyph is placed relative to the first glyph of its cluster, and
+    // the cluster at its own cell. Using the run's advances instead drifts
+    // whenever the face is narrower or wider than a cell (a fallback face,
+    // such as a proportional bold for a font with no bold), opening gaps
+    // before the next run and the cursor.
+    let mut cluster: Option<(usize, i32)> = None;
     for glyph in run.glyphs {
         let face = font_system
             .db()
@@ -1385,11 +1389,18 @@ fn shape_run_glyphs(
         }
         // ASCII only, so byte offsets are cell offsets.
         let cell = glyph.start.min(text.len().saturating_sub(1)) as u16;
+        let cluster_x = match cluster {
+            Some((start, x)) if start == glyph.start => x,
+            _ => {
+                cluster = Some((glyph.start, physical.x));
+                physical.x
+            }
+        };
         shaped.push((
             cell,
             ShapedGlyph {
                 cache_key: physical.cache_key,
-                x_offset: physical.x as f32 - f32::from(cell) * cell_width,
+                x_offset: (physical.x - cluster_x) as f32,
                 y_offset: physical.y as f32,
                 line_y,
                 synthetic_bold,
@@ -1769,6 +1780,39 @@ mod tests {
     }
 
     #[test]
+    fn run_glyphs_stay_in_their_cells_when_the_font_is_narrower() {
+        // A bold prompt in a font with no bold face falls back to another
+        // family, often proportional, whose glyphs are narrower than the
+        // cell. Each glyph must still start at its own cell; placing them by
+        // the font's advances drifted every later glyph left, leaving gaps
+        // before the next styled run and the cursor.
+        let mut font_system = FontSystem::new();
+        let metrics = Metrics::new(14.0, 18.0);
+        let mut buffer = Buffer::new(&mut font_system, metrics);
+        buffer.set_wrap(&mut font_system, cosmic_text::Wrap::None);
+        buffer.set_size(&mut font_system, 1000.0, 40.0);
+        let bold = CellStyle {
+            bold: true,
+            ..CellStyle::default()
+        };
+        let glyphs = shape_run_glyphs(
+            &mut font_system,
+            &mut buffer,
+            "DejaVu Sans",
+            "git:(main)",
+            bold,
+        );
+        assert!(!glyphs.is_empty());
+        for (cell, glyph) in &glyphs {
+            assert!(
+                glyph.x_offset.abs() < 2.0,
+                "cell {cell} glyph is {} px off its cell",
+                glyph.x_offset
+            );
+        }
+    }
+
+    #[test]
     fn run_glyphs_map_back_to_their_cells() {
         // With a font that forms no ligatures, every cell still gets its
         // own glyph, at its own cell, with a small offset.
@@ -1778,25 +1822,12 @@ mod tests {
         buffer.set_wrap(&mut font_system, cosmic_text::Wrap::None);
         buffer.set_size(&mut font_system, 1000.0, 40.0);
         let text = "a=>b!=c";
-        // Positions are whole pixels, so measure the advance over many cells.
-        let cell_width = {
-            let glyphs = shape_run_glyphs(
-                &mut font_system,
-                &mut buffer,
-                "DejaVu Sans Mono",
-                "MMMMMMMMMM",
-                CellStyle::default(),
-                0.0,
-            );
-            glyphs[9].1.x_offset / 9.0
-        };
         let glyphs = shape_run_glyphs(
             &mut font_system,
             &mut buffer,
             "DejaVu Sans Mono",
             text,
             CellStyle::default(),
-            cell_width,
         );
         let cells: Vec<u16> = glyphs.iter().map(|(cell, _)| *cell).collect();
         assert_eq!(cells, (0..text.len() as u16).collect::<Vec<_>>());
@@ -1840,7 +1871,6 @@ mod tests {
                 &family,
                 text,
                 CellStyle::default(),
-                8.4,
             )
             .into_iter()
             .map(|(cell, g)| (cell, g.cache_key.glyph_id))
@@ -1854,7 +1884,6 @@ mod tests {
                         &family,
                         &ch.to_string(),
                         CellStyle::default(),
-                        8.4,
                     )[0]
                     .1
                     .cache_key
