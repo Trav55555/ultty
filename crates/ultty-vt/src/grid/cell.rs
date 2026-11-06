@@ -113,14 +113,47 @@ impl Color {
 ///
 /// Contains a character, foreground/background colors, and style flags.
 /// Designed for efficient storage and copying.
+/// A [`Color`] packed into one `u32`: a tag in the top byte (0 default,
+/// 1 named, 2 indexed, 3 RGB) and the payload below it.
+///
+/// Cells store colors this way so comparing two cells, or a cell's style
+/// against a run's, is integer comparison rather than an enum match per
+/// color. Encoding scrollback compares every cell's style, and with the
+/// enum that comparison was most of the cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) struct PackedColor(u32);
+
+impl PackedColor {
+    pub(crate) const DEFAULT: Self = Self(0);
+
+    pub(crate) const fn pack(color: Color) -> Self {
+        Self(match color {
+            Color::Default => 0,
+            Color::Named(n) => (1 << 24) | n as u32,
+            Color::Indexed(n) => (2 << 24) | n as u32,
+            Color::Rgb(r, g, b) => (3 << 24) | (r as u32) << 16 | (g as u32) << 8 | b as u32,
+        })
+    }
+
+    pub(crate) const fn unpack(self) -> Color {
+        let v = self.0;
+        match v >> 24 {
+            1 => Color::Named(v as u8),
+            2 => Color::Indexed(v as u8),
+            3 => Color::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8),
+            _ => Color::Default,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Cell {
     /// The character in this cell (could be multi-byte for emoji)
     c: char,
     /// Foreground color
-    fg: Color,
+    fg: PackedColor,
     /// Background color
-    bg: Color,
+    bg: PackedColor,
     /// Style flags
     flags: CellFlags,
     /// Hyperlink ID (0 = no hyperlink, non-zero indexes into terminal's hyperlink map)
@@ -131,8 +164,8 @@ impl Default for Cell {
     fn default() -> Self {
         Self {
             c: ' ',
-            fg: Color::Default,
-            bg: Color::Default,
+            fg: PackedColor::DEFAULT,
+            bg: PackedColor::DEFAULT,
             flags: CellFlags::NONE,
             hyperlink_id: 0,
         }
@@ -150,13 +183,36 @@ impl Cell {
 
     /// Create a cell with all attributes specified.
     pub fn with_attrs(c: char, fg: Color, bg: Color, flags: CellFlags) -> Self {
+        Self::from_packed(c, PackedColor::pack(fg), PackedColor::pack(bg), flags, 0)
+    }
+
+    /// A cell built from packed colors (see [`PackedColor`]).
+    pub(crate) const fn from_packed(
+        c: char,
+        fg: PackedColor,
+        bg: PackedColor,
+        flags: CellFlags,
+        hyperlink_id: u32,
+    ) -> Self {
         Self {
             c,
             fg,
             bg,
             flags,
-            hyperlink_id: 0,
+            hyperlink_id,
         }
+    }
+
+    /// The packed foreground color.
+    #[inline]
+    pub(crate) fn packed_fg(&self) -> PackedColor {
+        self.fg
+    }
+
+    /// The packed background color.
+    #[inline]
+    pub(crate) fn packed_bg(&self) -> PackedColor {
+        self.bg
     }
 
     /// Get the character.
@@ -174,25 +230,25 @@ impl Cell {
     /// Get the foreground color.
     #[inline]
     pub fn fg(&self) -> Color {
-        self.fg
+        self.fg.unpack()
     }
 
     /// Set the foreground color.
     #[inline]
     pub fn set_fg(&mut self, color: Color) {
-        self.fg = color;
+        self.fg = PackedColor::pack(color);
     }
 
     /// Get the background color.
     #[inline]
     pub fn bg(&self) -> Color {
-        self.bg
+        self.bg.unpack()
     }
 
     /// Set the background color.
     #[inline]
     pub fn set_bg(&mut self, color: Color) {
-        self.bg = color;
+        self.bg = PackedColor::pack(color);
     }
 
     /// Get the flags.
@@ -258,7 +314,7 @@ impl Cell {
     #[inline]
     pub fn erase(&mut self, bg: Color) {
         *self = Self::default();
-        self.bg = bg;
+        self.bg = PackedColor::pack(bg);
     }
 
     /// Copy attributes (colors, flags, hyperlink) from another cell, keeping the character.
@@ -273,7 +329,7 @@ impl Cell {
     /// Check if this is a blank cell.
     #[inline]
     pub fn is_blank(&self) -> bool {
-        self.c == ' ' && self.bg == Color::Default && self.flags.is_empty()
+        self.c == ' ' && self.bg == PackedColor::DEFAULT && self.flags.is_empty()
     }
 
     /// Check if this is a wide character.
@@ -297,7 +353,10 @@ impl fmt::Debug for Cell {
             write!(
                 f,
                 "Cell({:?}, fg={:?}, bg={:?}, flags={:?})",
-                self.c, self.fg, self.bg, self.flags
+                self.c,
+                self.fg.unpack(),
+                self.bg.unpack(),
+                self.flags
             )
         }
     }
@@ -306,6 +365,35 @@ impl fmt::Debug for Cell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_color_survives_packing() {
+        let mut colors = vec![Color::Default];
+        for n in 0..=255u8 {
+            colors.push(Color::Named(n));
+            colors.push(Color::Indexed(n));
+            colors.push(Color::Rgb(n, 255 - n, n / 2));
+        }
+        colors.push(Color::Rgb(0, 0, 0));
+        colors.push(Color::Rgb(255, 255, 255));
+        for color in colors {
+            assert_eq!(PackedColor::pack(color).unpack(), color);
+            let mut cell = Cell::default();
+            cell.set_fg(color);
+            cell.set_bg(color);
+            assert_eq!((cell.fg(), cell.bg()), (color, color));
+        }
+        // Distinct colors pack to distinct values, so packed equality is
+        // color equality.
+        assert_ne!(
+            PackedColor::pack(Color::Named(1)),
+            PackedColor::pack(Color::Indexed(1))
+        );
+        assert_ne!(
+            PackedColor::pack(Color::Default),
+            PackedColor::pack(Color::Rgb(0, 0, 0))
+        );
+    }
 
     #[test]
     fn default_cell_is_blank_space() {
