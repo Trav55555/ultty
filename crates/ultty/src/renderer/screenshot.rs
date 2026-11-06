@@ -113,6 +113,7 @@ impl Renderer {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
                 resolve_target: None,
+                depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -121,6 +122,7 @@ impl Renderer {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         match pipeline {
@@ -273,6 +275,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: linear_bg.r as f64 * self.opacity as f64,
@@ -286,6 +289,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             render_pass.set_pipeline(self.bg_pipeline.pipeline());
@@ -300,7 +304,7 @@ impl Renderer {
         // Render text
         self.render_screenshot_chrome(&mut encoder, &view, overlay);
 
-        let _ = self.text_renderer.render(
+        self.text_renderer.render(
             &mut encoder,
             &view,
             terminal,
@@ -334,15 +338,15 @@ impl Renderer {
 
         // Copy texture to buffer
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyBufferInfo {
                 buffer: &output_buffer,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_row),
                     rows_per_image: Some(height),
@@ -364,10 +368,10 @@ impl Renderer {
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        self.device.poll(wgpu::Maintain::Wait);
+        self.device.poll(wgpu::PollType::wait_indefinitely())?;
         rx.recv()??;
 
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice.get_mapped_range()?;
         let is_bgra = matches!(
             self.config.format,
             wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
@@ -451,6 +455,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: linear_bg.r as f64,
@@ -464,6 +469,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             render_pass.set_pipeline(self.bg_pipeline.pipeline());
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
@@ -472,7 +478,7 @@ impl Renderer {
             render_pass.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
         }
 
-        let _ = self.text_renderer.render(
+        self.text_renderer.render(
             &mut encoder,
             &view,
             terminal,
@@ -503,15 +509,15 @@ impl Renderer {
         });
 
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyBufferInfo {
                 buffer: &output_buffer,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_row),
                     rows_per_image: Some(height),
@@ -531,10 +537,10 @@ impl Renderer {
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        self.device.poll(wgpu::Maintain::Wait);
+        self.device.poll(wgpu::PollType::wait_indefinitely())?;
         rx.recv()??;
 
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice.get_mapped_range()?;
         let is_bgra = matches!(
             self.config.format,
             wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm

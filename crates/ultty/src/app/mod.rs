@@ -204,7 +204,7 @@ impl App {
         // Create wgpu instance
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         // Create surface
@@ -215,8 +215,9 @@ impl App {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            ..Default::default()
         }))
-        .ok_or_else(|| anyhow::anyhow!("Failed to find suitable GPU adapter"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to find suitable GPU adapter: {e}"))?;
 
         // Scale font size to physical pixels so cosmic-text metrics match
         // the orthographic projection (which uses physical window dimensions).
