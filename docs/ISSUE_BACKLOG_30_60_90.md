@@ -1,6 +1,6 @@
 # Ultty Readiness Issue Backlog
 
-**Updated:** 2026-11-05
+**Updated:** 2026-11-06
 **Source plan:** [Ultty Readiness Roadmap](ROADMAP_30_60_90.md)
 **Readiness gates:** [Public Alpha Readiness](alpha-readiness.md)
 
@@ -9,41 +9,6 @@ not filed there yet; file them before starting. Candidate Issues further down
 are slices to file when work resumes.
 
 ## Active Issues
-
-### 1. Upgrade the graphics, layout, and TUI dependencies
-
-**Problem.** `wgpu 0.19`, `winit 0.29`, `cosmic-text 0.11`, `taffy 0.5`,
-`ratatui 0.29`, and `crossterm 0.28` are all two or more years behind current
-releases. Nothing in the roadmap covers moving off them. They hold open all
-three advisory ignores in [Security Audit](security-audit.md):
-`RUSTSEC-2024-0436` (`paste`, via `ratatui` and `wgpu`/`metal`),
-`RUSTSEC-2026-0002` (`lru`, via `ratatui`), and `RUSTSEC-2026-0097` (`rand`,
-via `tokio-tungstenite`).
-
-**Scope.** Split into one slice per dependency, largest blast radius first.
-
-| Dependency | Files that touch its API |
-|------------|--------------------------|
-| `wgpu` 0.19 -> current | `crates/ultty/src/app/mod.rs`, `app/render.rs`, `renderer/mod.rs`, `renderer/pipeline.rs`, `renderer/atlas.rs`, `renderer/text.rs`, `renderer/image.rs`, `renderer/overlays.rs`, `renderer/panes.rs`, `renderer/screenshot.rs`, `renderer/native_render/mod.rs`, `renderer/native_render/cache.rs`, `renderer/native_render/images.rs` |
-| `winit` 0.29 -> 0.30+ | `crates/ultty/src/app/mod.rs`, `app/input.rs`, `app/control.rs`, `app/wakeup.rs` |
-| `cosmic-text` 0.11 -> current | `crates/ultty/src/renderer/text.rs`, `renderer/atlas.rs` |
-| `taffy` 0.5 -> current | `crates/ultty/src/scene/layout.rs`, `scene/layout/constraints.rs` |
-| `ratatui` 0.29 / `crossterm` 0.28 -> current | `crates/ulttui/src/backend/ansi.rs` plus 30 other files using `ratatui::` types in widget render paths |
-| `tokio-tungstenite` 0.24 -> current | `crates/ulttui` dev-dependency only; carries the vulnerable `rand` |
-
-The `winit` 0.30 move is the sharp edge: it replaces the closure-based
-`EventLoop::run` with the `ApplicationHandler` trait, so the whole event loop,
-wakeup plumbing, and control-socket integration change shape. `wgpu` is the
-largest by file count but mostly mechanical API renames.
-
-**Acceptance.**
-- Each dependency lands as its own commit with `cargo clippy --workspace
-  --all-targets -- -D warnings` and `cargo test --workspace` green.
-- The live smoke gate passes afterwards, with evidence recorded under
-  `docs/releases/evidence/<date>/` or as a `live-smoke.yml` run URL.
-- `scripts/security-audit.sh` runs with zero `--ignore` flags, and the
-  Accepted Warning Advisories table in [Security Audit](security-audit.md) is
-  empty.
 
 ### 2. Sign and notarize macOS release artifacts
 
@@ -77,8 +42,8 @@ drift is easy to miss.
 same way the other jobs are. Reconcile its advisory ignores with
 `scripts/security-audit.sh` so there is one list, not two.
 
-**Not started on purpose.** Tracked here; do not add it until item 1 is far
-enough along that the advisory ignore list is stable.
+**Not started on purpose.** Tracked here; do not add it until the
+advisory ignore list is stable.
 
 **Acceptance.**
 - `cargo deny check` passes locally and in CI.
@@ -86,6 +51,13 @@ enough along that the advisory ignore list is stable.
   licenses of the current dependency tree.
 
 ## Recently Completed Readiness Work
+
+- **Graphics, layout, and TUI dependency upgrade (2026-11-06).** `wgpu` 30,
+  `winit` 0.30, `cosmic-text` 0.19, `taffy` 0.15, `ratatui` 0.30, and
+  `crossterm` 0.29, then a full `cargo update`. Four advisory ignores remain,
+  all held by upstream with no fixed release: `ttf-parser` (`cosmic-text`,
+  `winit`) and the three `zbus` 5 crates (`notify-rust` 4.18.2); see
+  [Security Audit](security-audit.md).
 
 - **GUI smoke in CI (2026-11-06).** The `GUI smoke` job in `ci.yml` runs
   Ultty under Xvfb with Mesa's software Vulkan (lavapipe) on a stock

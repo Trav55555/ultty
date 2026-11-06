@@ -142,7 +142,7 @@ pub struct App {
     /// Visual bell state (time when bell was triggered, None if not active)
     bell_active_until: Option<Instant>,
     /// Pane divider dragging state: (divider_index, last_position)
-    divider_dragging: Option<(usize, f32)>,
+    divider_dragging: Option<(ultty::pane_layout::Divider, f32)>,
     /// Keyboard shortcuts overlay visible
     shortcuts_visible: bool,
     /// Native protocol status overlay visible

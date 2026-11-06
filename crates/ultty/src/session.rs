@@ -27,8 +27,27 @@ pub struct TabData {
     pub working_directory: Option<String>,
     /// Terminals/panes in this tab
     pub terminals: Vec<TerminalData>,
-    /// How panes are split
+    /// How panes are split (the top-level split; kept for older readers)
     pub split_direction: String,
+    /// The full split tree, panes referring to `terminals` by position.
+    /// Absent in sessions saved before nested splits: those restore as one
+    /// row or column in `split_direction`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutData>,
+}
+
+/// A saved split tree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum LayoutData {
+    /// A pane: the terminal at `index` in the tab's `terminals`.
+    Pane { index: usize },
+    /// Children side by side ("Horizontal") or stacked ("Vertical"), each
+    /// with its share of the split.
+    Split {
+        direction: String,
+        children: Vec<(LayoutData, f32)>,
+    },
 }
 
 /// Data for a single terminal/pane.
@@ -170,6 +189,7 @@ mod tests {
                         },
                     ],
                     split_direction: "Horizontal".to_string(),
+                    layout: None,
                 },
                 TabData {
                     title: "shell".to_string(),
@@ -180,6 +200,7 @@ mod tests {
                         is_focused: true,
                     }],
                     split_direction: "Vertical".to_string(),
+                    layout: None,
                 },
             ],
             active_tab_index: 0,
@@ -261,6 +282,7 @@ mod tests {
             working_directory: None,
             terminals: vec![],
             split_direction: "Horizontal".to_string(),
+            layout: None,
         };
         let cloned = tab.clone();
         assert_eq!(cloned.title, tab.title);
@@ -392,6 +414,7 @@ mod tests {
                     is_focused: true,
                 }],
                 split_direction: "Horizontal".to_string(),
+                layout: None,
             }],
             active_tab_index: 0,
         };
@@ -412,6 +435,7 @@ mod tests {
                     is_focused: i == 0,
                 }],
                 split_direction: "Horizontal".to_string(),
+                layout: None,
             })
             .collect();
         let session = SessionData {
@@ -553,6 +577,7 @@ mod tests {
             working_directory: None,
             terminals: vec![],
             split_direction: "Horizontal".to_string(),
+            layout: None,
         });
         session1.save(&path).unwrap();
 
@@ -563,12 +588,14 @@ mod tests {
             working_directory: None,
             terminals: vec![],
             split_direction: "Vertical".to_string(),
+            layout: None,
         });
         session2.tabs.push(TabData {
             title: "second-b".to_string(),
             working_directory: None,
             terminals: vec![],
             split_direction: "Vertical".to_string(),
+            layout: None,
         });
         session2.save(&path).unwrap();
 
@@ -636,6 +663,7 @@ mod tests {
             working_directory: None,
             terminals: vec![],
             split_direction: "Horizontal".to_string(),
+            layout: None,
         };
         let json = serde_json::to_string(&tab).unwrap();
         let loaded: TabData = serde_json::from_str(&json).unwrap();
@@ -666,6 +694,7 @@ mod tests {
                 },
             ],
             split_direction: "Vertical".to_string(),
+            layout: None,
         };
         let json = serde_json::to_string(&tab).unwrap();
         let loaded: TabData = serde_json::from_str(&json).unwrap();
@@ -719,6 +748,7 @@ mod tests {
                     is_focused: false,
                 }],
                 split_direction: "".to_string(),
+                layout: None,
             }],
             active_tab_index: 0,
         };
@@ -803,6 +833,7 @@ mod tests {
             working_directory: None,
             terminals: vec![],
             split_direction: "Horizontal".to_string(),
+            layout: None,
         });
 
         let mut s2 = SessionData::new();
@@ -811,6 +842,7 @@ mod tests {
             working_directory: None,
             terminals: vec![],
             split_direction: "Vertical".to_string(),
+            layout: None,
         });
 
         let p1 = tmp.path().join("s1.json");
