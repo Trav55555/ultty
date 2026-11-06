@@ -668,14 +668,15 @@ mod tests {
         let (mut master, slave) = {
             let (mut m, mut s) = (0, 0);
             // SAFETY: openpty writes two fds; the name/termios/winsize
-            // arguments may be null.
+            // arguments may be null. `null_mut` fits both platforms: libc
+            // declares termios/winsize `*const` on Linux, `*mut` on macOS.
             let rc = unsafe {
                 libc::openpty(
                     &mut m,
                     &mut s,
                     std::ptr::null_mut(),
-                    std::ptr::null(),
-                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
                 )
             };
             assert_eq!(rc, 0, "openpty");
