@@ -10,6 +10,10 @@ use ultty::testing::{AppCheck, TestTerminal};
 
 const WAIT_SHORT: Duration = Duration::from_millis(300);
 const WAIT_LONG: Duration = Duration::from_secs(5);
+/// How long an app gets to leave the alternate screen after being told to
+/// quit. Generous: on a loaded machine (the full parallel suite) editors
+/// take seconds to exit.
+const QUIT_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn command_exists(cmd: &str) -> bool {
     std::process::Command::new("which")
@@ -216,12 +220,17 @@ fn self_check_nvim() {
     println!("nvim test: {}", result.summary());
     println!("{}", term.debug());
 
-    // Quit nvim
-    term.send("\x1b:q!\r").unwrap();
+    // Quit nvim.
+    // Escape on its own first: sent together with ":" it can read as
+    // Alt+":". Then wait for the editor to really leave, not just for the
+    // output to pause, which a loaded machine can do mid-quit.
+    term.send("\x1b").unwrap();
     term.wait_until_stable(WAIT_SHORT, WAIT_LONG).unwrap();
-
-    // Verify we're back to main screen
-    assert!(!term.is_alternate_screen(), "Should exit alternate screen");
+    term.send(":q!\r").unwrap();
+    let left = term
+        .wait_until(QUIT_TIMEOUT, |t| !t.is_alternate_screen())
+        .unwrap();
+    assert!(left, "Should exit alternate screen");
 
     if !result.is_success() {
         for fail in &result.failed {
@@ -251,9 +260,17 @@ fn self_check_vim() {
     println!("vim test: {}", result.summary());
     println!("{}", term.debug());
 
-    // Quit vim
-    term.send("\x1b:q!\r").unwrap();
+    // Quit vim.
+    // Escape on its own first: sent together with ":" it can read as
+    // Alt+":". Then wait for the editor to really leave, not just for the
+    // output to pause, which a loaded machine can do mid-quit.
+    term.send("\x1b").unwrap();
     term.wait_until_stable(WAIT_SHORT, WAIT_LONG).unwrap();
+    term.send(":q!\r").unwrap();
+    let left = term
+        .wait_until(QUIT_TIMEOUT, |t| !t.is_alternate_screen())
+        .unwrap();
+    assert!(left, "Should exit alternate screen");
 
     for fail in &result.failed {
         println!("  FAIL: {}", fail);
@@ -321,12 +338,12 @@ fn self_check_less() {
     );
     assert!(snapshot.contains("1"), "Should show content");
 
-    // Quit
+    // Quit, and wait for the app to really leave the alternate screen.
     term.send("q").unwrap();
-    term.wait_until_stable(WAIT_SHORT, Duration::from_secs(2))
+    let left = term
+        .wait_until(QUIT_TIMEOUT, |t| !t.is_alternate_screen())
         .unwrap();
-
-    assert!(!term.is_alternate_screen(), "Should exit alternate screen");
+    assert!(left, "Should exit alternate screen");
 }
 
 // ============================================================================

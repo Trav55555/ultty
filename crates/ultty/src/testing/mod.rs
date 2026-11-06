@@ -184,10 +184,21 @@ impl TestTerminal {
     /// while, which a slow shell start on a loaded machine can satisfy
     /// before the expected output arrives.
     pub fn wait_for_text(&mut self, needle: &str, timeout: Duration) -> std::io::Result<bool> {
+        self.wait_until(timeout, |term| term.contains(needle))
+    }
+
+    /// Process output until `done` holds or `timeout` passes, and report
+    /// whether it held. Like [`TestTerminal::wait_for_text`], for any
+    /// condition on the terminal (say, leaving the alternate screen).
+    pub fn wait_until(
+        &mut self,
+        timeout: Duration,
+        done: impl Fn(&Self) -> bool,
+    ) -> std::io::Result<bool> {
         let start = Instant::now();
         loop {
             self.process()?;
-            if self.contains(needle) {
+            if done(self) {
                 return Ok(true);
             }
             if start.elapsed() >= timeout {

@@ -101,14 +101,14 @@ impl Renderer {
         });
 
         self.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &img.data,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(img.width * 4),
                 rows_per_image: Some(img.height),
@@ -203,14 +203,14 @@ impl Renderer {
 
         // Upload pixel data
         self.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &image.data,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(image.width * 4),
                 rows_per_image: Some(image.height),
@@ -297,7 +297,7 @@ impl Renderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -323,8 +323,8 @@ impl Renderer {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("image_pipeline_layout"),
-                bind_group_layouts: &[&uniform_bind_group_layout, &bind_group_layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(&uniform_bind_group_layout), Some(&bind_group_layout)],
+                immediate_size: 0,
             });
 
         // Create render pipeline
@@ -335,12 +335,14 @@ impl Renderer {
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: "vs_main",
-                    buffers: &[Vertex::desc()],
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(Vertex::desc())],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: "fs_main",
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: self.config.format,
                         blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -358,7 +360,8 @@ impl Renderer {
                 },
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
+                cache: None,
             });
 
         self.image_pipeline = Some(ImagePipeline {
@@ -379,9 +382,9 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         terminal: &Terminal,
-    ) -> Result<(), wgpu::SurfaceError> {
+    ) {
         if terminal.images().is_empty() {
-            return Ok(());
+            return;
         }
 
         // Ensure we have an image pipeline
@@ -456,6 +459,7 @@ impl Renderer {
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view,
                         resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Load,
                             store: wgpu::StoreOp::Store,
@@ -464,6 +468,7 @@ impl Renderer {
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
 
                 if let Some(img_pipeline) = self.image_pipeline.as_ref() {
@@ -476,8 +481,6 @@ impl Renderer {
                 }
             }
         }
-
-        Ok(())
     }
 }
 

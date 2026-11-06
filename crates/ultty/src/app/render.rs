@@ -17,38 +17,43 @@ impl App {
         // Acquire the frame before locking any terminal: this can block
         // until the next vsync, and the terminals' I/O threads must keep
         // parsing meanwhile.
-        let result = self.surface.get_current_texture().and_then(|output| {
-            if pane_count > 1 {
-                self.render_multi_pane(output)
-            } else {
-                self.render_single_pane(output)
+        let (output, suboptimal) = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(output) => (output, false),
+            wgpu::CurrentSurfaceTexture::Suboptimal(output) => (output, true),
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                self.reconfigure_surface();
+                return;
             }
-        });
+            // Nothing to draw into this time; the terminals stay dirty, so
+            // the next update tries again.
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                tracing::warn!("Render error: surface texture validation failed");
+                return;
+            }
+        };
 
-        match result {
-            Ok(()) => {
-                // Clear dirty flags after successful render
-                self.terminal_manager.clear_dirty();
-                // Clear render dirty flags of the sessions that were just
-                // drawn so the renderer can reuse cached GPU buffers. Hidden
-                // tabs' sessions stay dirty until they are shown.
-                if let Some(ref mut server) = self.protocol_server {
-                    for session in server.active_tab_sessions_mut() {
-                        session.clear_render_dirty();
-                        session.clear_scroll_dirty();
-                    }
-                }
+        if pane_count > 1 {
+            self.render_multi_pane(output);
+        } else {
+            self.render_single_pane(output);
+        }
+
+        // Clear dirty flags after successful render
+        self.terminal_manager.clear_dirty();
+        // Clear render dirty flags of the sessions that were just
+        // drawn so the renderer can reuse cached GPU buffers. Hidden
+        // tabs' sessions stay dirty until they are shown.
+        if let Some(ref mut server) = self.protocol_server {
+            for session in server.active_tab_sessions_mut() {
+                session.clear_render_dirty();
+                session.clear_scroll_dirty();
             }
-            Err(wgpu::SurfaceError::Lost) => {
-                let size = self.window.inner_size();
-                self.renderer.resize(&self.surface, size.width, size.height);
-            }
-            Err(wgpu::SurfaceError::OutOfMemory) => {
-                tracing::error!("Out of GPU memory");
-            }
-            Err(e) => {
-                tracing::warn!("Render error: {}", e);
-            }
+        }
+        if suboptimal {
+            self.reconfigure_surface();
         }
 
         if let Some(start) = trace_start {
@@ -70,17 +75,20 @@ impl App {
         }
     }
 
+    /// Configure the surface again for the window's current size.
+    fn reconfigure_surface(&mut self) {
+        let size = self.window.inner_size();
+        self.renderer.resize(&self.surface, size.width, size.height);
+    }
+
     /// Render a single terminal pane.
-    fn render_single_pane(
-        &mut self,
-        output: wgpu::SurfaceTexture,
-    ) -> Result<(), wgpu::SurfaceError> {
+    fn render_single_pane(&mut self, output: wgpu::SurfaceTexture) {
         let Some(terminal) = self
             .terminal_manager
             .focused_terminal()
             .map(|t| t.event_loop.terminal())
         else {
-            return Ok(());
+            return;
         };
 
         // Check if bell is still active
@@ -154,10 +162,7 @@ impl App {
     }
 
     /// Render multiple panes.
-    fn render_multi_pane(
-        &mut self,
-        output: wgpu::SurfaceTexture,
-    ) -> Result<(), wgpu::SurfaceError> {
+    fn render_multi_pane(&mut self, output: wgpu::SurfaceTexture) {
         use ultty::renderer::PaneInfo;
         use ultty::terminal_manager::SplitDirection;
 
@@ -170,7 +175,7 @@ impl App {
         let pane_count = terminals.len();
 
         if pane_count == 0 {
-            return Ok(());
+            return;
         }
 
         let focused_id = self.terminal_manager.focused_terminal_id();

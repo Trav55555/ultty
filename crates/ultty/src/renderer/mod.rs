@@ -364,14 +364,12 @@ impl Renderer {
         font_config: &FontConfig,
     ) -> anyhow::Result<Self> {
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("ultty_device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("ultty_device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            })
             .await?;
 
         let device = Arc::new(device);
@@ -404,6 +402,7 @@ impl Renderer {
             alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
 
@@ -491,7 +490,7 @@ impl Renderer {
     pub async fn new_headless(width: u32, height: u32) -> anyhow::Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         // Request adapter without a surface (headless)
@@ -500,21 +499,20 @@ impl Renderer {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                ..Default::default()
             })
             .await
-            .ok_or_else(|| {
-                anyhow::anyhow!("Failed to find suitable GPU adapter for headless rendering")
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to find suitable GPU adapter for headless rendering: {e}")
             })?;
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("ultty_headless_device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("ultty_headless_device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            })
             .await?;
 
         let device = Arc::new(device);
@@ -533,6 +531,7 @@ impl Renderer {
             alpha_mode: wgpu::CompositeAlphaMode::Opaque,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
         };
 
         // Create uniform buffer
@@ -678,6 +677,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -686,6 +686,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             render_pass.set_pipeline(self.bg_pipeline.pipeline());
@@ -706,7 +707,7 @@ impl Renderer {
             self.tab_bar_height,
             overlay.cursor_blink_visible,
             &self.uniform_bind_group,
-        )?;
+        );
 
         // Build and render overlays
         let (overlay_vertices, overlay_indices) = self.build_overlay_vertices(terminal, overlay);
@@ -732,6 +733,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -740,6 +742,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             render_pass.set_pipeline(self.bg_pipeline.pipeline());
@@ -751,7 +754,7 @@ impl Renderer {
 
         // Submit and wait for completion
         self.queue.submit(std::iter::once(encoder.finish()));
-        self.device.poll(wgpu::Maintain::Wait);
+        self.device.poll(wgpu::PollType::wait_indefinitely())?;
 
         Ok(())
     }
@@ -887,11 +890,7 @@ impl Renderer {
     }
 
     /// Render the terminal to a surface.
-    pub fn render(
-        &mut self,
-        output: wgpu::SurfaceTexture,
-        terminal: &Terminal,
-    ) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(&mut self, output: wgpu::SurfaceTexture, terminal: &Terminal) {
         self.render_with_overlay(output, terminal, &OverlayState::default())
     }
 
@@ -901,7 +900,7 @@ impl Renderer {
         output: wgpu::SurfaceTexture,
         terminal: &Terminal,
         overlay: &OverlayState,
-    ) -> Result<(), wgpu::SurfaceError> {
+    ) {
         // Update tab bar height from overlay state
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
         self.text_renderer.begin_frame();
@@ -951,6 +950,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         // Pre-multiplied alpha for transparency support
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -960,6 +960,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             // Draw backgrounds
@@ -971,7 +972,7 @@ impl Renderer {
         }
 
         // Render images (Sixel, etc.) after backgrounds, before text
-        self.render_images(&mut encoder, &view, terminal)?;
+        self.render_images(&mut encoder, &view, terminal);
 
         // Render tab bar if visible
         if !tab_bar_vertices.is_empty() {
@@ -996,6 +997,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -1004,6 +1006,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             render_pass.set_pipeline(self.bg_pipeline.pipeline());
@@ -1040,6 +1043,7 @@ impl Renderer {
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &view,
                             resolve_target: None,
+                            depth_slice: None,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Load,
                                 store: wgpu::StoreOp::Store,
@@ -1048,6 +1052,7 @@ impl Renderer {
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
+                        multiview_mask: None,
                     });
 
                     render_pass.set_pipeline(self.text_renderer.pipeline());
@@ -1072,7 +1077,7 @@ impl Renderer {
             self.tab_bar_height,
             overlay.cursor_blink_visible,
             &self.uniform_bind_group,
-        )?;
+        );
 
         // Render overlays (vim cursor, URL underlines)
         let (overlay_vertices, overlay_indices) = self.build_overlay_vertices(terminal, overlay);
@@ -1100,6 +1105,7 @@ impl Renderer {
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &view,
                         resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Load,
                             store: wgpu::StoreOp::Store,
@@ -1108,6 +1114,7 @@ impl Renderer {
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
 
                 render_pass.set_pipeline(self.bg_pipeline.pipeline());
@@ -1153,6 +1160,7 @@ impl Renderer {
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &view,
                             resolve_target: None,
+                            depth_slice: None,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Load,
                                 store: wgpu::StoreOp::Store,
@@ -1161,6 +1169,7 @@ impl Renderer {
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
+                        multiview_mask: None,
                     });
 
                     rp.set_pipeline(self.bg_pipeline.pipeline());
@@ -1200,6 +1209,7 @@ impl Renderer {
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                                 view: &view,
                                 resolve_target: None,
+                                depth_slice: None,
                                 ops: wgpu::Operations {
                                     load: wgpu::LoadOp::Load,
                                     store: wgpu::StoreOp::Store,
@@ -1208,6 +1218,7 @@ impl Renderer {
                             depth_stencil_attachment: None,
                             timestamp_writes: None,
                             occlusion_query_set: None,
+                            multiview_mask: None,
                         });
 
                         rp.set_pipeline(self.text_renderer.pipeline());
@@ -1232,9 +1243,7 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
-
-        Ok(())
+        self.queue.present(output);
     }
 
     pub fn render_with_native_sessions<'a>(
@@ -1245,7 +1254,7 @@ impl Renderer {
         sessions: impl Iterator<Item = &'a crate::protocol::NativeSession>,
         native_search_matches: Option<&[crate::scene::SearchMatch]>,
         native_search_index: usize,
-    ) -> Result<(), wgpu::SurfaceError> {
+    ) {
         self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
         self.text_renderer.begin_frame();
 
@@ -1289,6 +1298,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -1297,6 +1307,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             render_pass.set_pipeline(self.bg_pipeline.pipeline());
@@ -1310,7 +1321,7 @@ impl Renderer {
         let has_native_sessions = !sessions.is_empty();
 
         if !has_native_sessions {
-            self.render_images(&mut encoder, &view, terminal)?;
+            self.render_images(&mut encoder, &view, terminal);
         }
 
         if !tab_bar_vertices.is_empty() {
@@ -1334,6 +1345,7 @@ impl Renderer {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -1342,6 +1354,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             render_pass.set_pipeline(self.bg_pipeline.pipeline());
@@ -1362,7 +1375,7 @@ impl Renderer {
                 self.tab_bar_height,
                 overlay.cursor_blink_visible,
                 &self.uniform_bind_group,
-            )?;
+            );
         }
 
         let any_dirty = sessions.iter().any(|s| s.is_render_dirty());
@@ -1392,9 +1405,7 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
-
-        Ok(())
+        self.queue.present(output);
     }
 
     /// Emit a rectangle (helper for tab bar).
