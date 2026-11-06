@@ -85,6 +85,32 @@ enough along that the advisory ignore list is stable.
 - The allowed license set is explicit and matches `MIT OR Apache-2.0` plus the
   licenses of the current dependency tree.
 
+### Expand tabs in ulttui ANSI text
+
+**Problem.** ratatui 0.30 drops control characters from text, so a tab in
+a `Text` or `RichText` widget now draws as nothing in ANSI mode
+(`Tabs:\t\tSpaces` renders as `Tabs:Spaces`). Before 0.30 the raw tab
+reached the terminal and moved its cursor, which shifted every cell after
+it. Native mode does not expand tabs either.
+
+**Scope.** Expand tabs to the next tab stop (8 columns) in ulttui's text
+widgets, before both renderers see the text, and update
+`snapshot_special_chars`.
+
+### Find the remaining flaky self-check
+
+**Problem.** A `crates/ultty/tests/self_check.rs` test failed once in a
+full parallel `cargo test --workspace` run on 2026-11-06 (7 passed, 1
+failed). It did not recur in 36 loaded reruns of the suite or 3 more full
+workspace runs, so its name is unknown. `self_check_clear_screen` had the
+same shape of bug (a stability wait over an interactive prompt) and was
+fixed in #120. The other checks still wait for the screen to go quiet and
+match markers that the terminal echoes as they are typed.
+
+**Scope.** Move the remaining self-checks to `TestTerminal::wait_for_text`
+with markers that only the commands' output contains, as in
+`self_check_clear_screen`.
+
 ## Recently Completed Readiness Work
 
 - **GUI smoke in CI (2026-11-06).** The `GUI smoke` job in `ci.yml` runs
