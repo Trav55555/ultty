@@ -13,18 +13,16 @@ The script runs `cargo audit --deny warnings` and ignores only the warning-class
 
 | Advisory | Crate | Reason |
 |----------|-------|--------|
-| `RUSTSEC-2024-0436` | `paste` | Warning-only unmaintained advisory from transitive dependencies (`ratatui`, `wgpu`/`metal`). Track through upstream dependency updates. |
-| `RUSTSEC-2026-0002` | `lru` | Warning-only unsound advisory through `ratatui`; Ultty does not directly use `lru::IterMut`. Track through upstream `ratatui` updates. |
-| `RUSTSEC-2026-0253` | `lru` | Warning-only unsound advisory (panic safety in `LruCache::pop()`) through `ratatui` 0.29; the fixed `lru` 0.18 is outside ratatui's range. Same root as `RUSTSEC-2026-0002`. |
-| `RUSTSEC-2026-0192` | `ttf-parser` | Unmaintained advisory. Reached through `cosmic-text` 0.11 (`ttf-parser` 0.20) and `winit` 0.29 via `sctk-adwaita` (`ttf-parser` 0.25). Cleared by the renderer dependency upgrade. |
-| `RUSTSEC-2026-0206` | `rustybuzz` | Unmaintained advisory through `cosmic-text` 0.11. Cleared by the renderer dependency upgrade. |
-| `RUSTSEC-2026-0370` | `zvariant` | Unmaintained advisory (2026-11-05): merged into `zbus` 6 as its `wire` module, no patched release. Reached through `notify-rust` → `zbus` 5 for desktop notifications. Remove when `notify-rust` moves to `zbus` 6; no release does yet, and the latest needs Rust 1.89. |
+| `RUSTSEC-2026-0192` | `ttf-parser` | Unmaintained advisory. Reached through `cosmic-text` 0.19 (via `fontdb`) and `winit` 0.30 (via `sctk-adwaita` and `ab_glyph`), both `ttf-parser` 0.25.1. Remove when either dependency moves off `ttf-parser`. |
+| `RUSTSEC-2026-0370` | `zvariant` | Unmaintained advisory (2026-11-05): merged into `zbus` 6 as its `wire` module, no patched release. Reached through `notify-rust` 4.18.2 (the latest release) → `zbus` 5. Remove when `notify-rust` moves to `zbus` 6; no release does yet. |
 | `RUSTSEC-2026-0371` | `zbus_names` | Same as `RUSTSEC-2026-0370`: merged into `zbus` 6, reached through `notify-rust` → `zbus` 5. |
 | `RUSTSEC-2026-0372` | `zvariant_derive` | Same as `RUSTSEC-2026-0370`: merged into `zbus` 6, reached through `notify-rust` → `zbus` 5. |
 
-All of these advisories are held open by dependencies: the renderer and
-ratatui stack, two or more years behind current releases, and `notify-rust`. Upgrading them is tracked in
-[Issue Backlog](ISSUE_BACKLOG_30_60_90.md).
+All of these advisories are held open by upstream dependencies that have no
+fixed release yet: `cosmic-text` and `winit` (`ttf-parser`) and `notify-rust`
+(`zbus` 5). The renderer and TUI stack is current (wgpu 30, winit 0.30,
+cosmic-text 0.19, taffy 0.15, ratatui 0.30), and the `paste`, `lru` and
+`rustybuzz` advisories cleared with that upgrade.
 
 Advisories that had semver-compatible fixes were resolved with `cargo update`
 on 2026-09-22 rather than ignored: `crossbeam-epoch`, `anyhow`,
@@ -39,8 +37,10 @@ the 1.85 MSRV:
 - `futures-util` 0.3.34 drops `pin-utils`, closing `RUSTSEC-2026-0441`.
 - `clipboard-win` moves from a yanked release to 5.4.3.
 
-A full `cargo update` was not used: it pulls `notify-rust` 4.18.2, which
-needs Rust 1.89.
+On 2026-11-06 a full `cargo update` followed the renderer and TUI upgrade (the
+MSRV is now 1.89, which `notify-rust` 4.18.2 needs). It cleared
+`RUSTSEC-2024-0436` (`paste`), `RUSTSEC-2026-0002` and `RUSTSEC-2026-0253`
+(`lru`), and `RUSTSEC-2026-0206` (`rustybuzz`), so those ignores are gone.
 
 `examples/porygon-tui` is excluded from the workspace, so `cargo audit` covers
 the workspace lockfile only. The `tokio-tungstenite` path above comes from
