@@ -176,12 +176,9 @@ impl NativeBackend {
         })
     }
 
+    /// Send the changes between the last frame and `view`. A view that
+    /// renders the same as the last frame sends nothing at all.
     pub fn render(&mut self, view: &impl View) -> anyhow::Result<()> {
-        let frame_id = FrameId(self.next_frame_id);
-        self.next_frame_id += 1;
-
-        self.send_message(&AppMessage::BeginFrame { frame_id })?;
-
         let (frame_messages, native_keys) = self.collect_frame(view)?;
         let (optimized_messages, next_tree) = optimize_frame_messages(
             &self.retained,
@@ -191,11 +188,15 @@ impl NativeBackend {
         );
         self.retained = next_tree;
 
-        for msg in optimized_messages {
-            self.send_message(&msg)?;
+        if !optimized_messages.is_empty() {
+            let frame_id = FrameId(self.next_frame_id);
+            self.next_frame_id += 1;
+            self.send_message(&AppMessage::BeginFrame { frame_id })?;
+            for msg in optimized_messages {
+                self.send_message(&msg)?;
+            }
+            self.send_message(&AppMessage::EndFrame { frame_id })?;
         }
-
-        self.send_message(&AppMessage::EndFrame { frame_id })?;
 
         self.process_pending_messages()?;
 
@@ -616,6 +617,23 @@ mod tests {
         labels.iter().fold(Column::new(), |col, label| {
             col.child(Button::new(*label).id(*label))
         })
+    }
+
+    #[test]
+    fn rerendering_an_unchanged_view_sends_nothing() {
+        let (mut backend, mut reader) = backend_over_pair();
+        backend.render(&buttons(&["a", "b"])).unwrap();
+        assert!(!drain_messages(&mut reader).is_empty());
+
+        backend.render(&buttons(&["a", "b"])).unwrap();
+        let second = drain_messages(&mut reader);
+        assert!(second.is_empty(), "an unchanged view sent {second:?}");
+
+        // A real change still goes out as one complete frame.
+        backend.render(&buttons(&["a", "c"])).unwrap();
+        let third = drain_messages(&mut reader);
+        assert!(matches!(third.first(), Some(AppMessage::BeginFrame { .. })));
+        assert!(matches!(third.last(), Some(AppMessage::EndFrame { .. })));
     }
 
     #[test]
