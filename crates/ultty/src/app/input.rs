@@ -158,7 +158,7 @@ impl App {
                 // Convert to cell coordinates and send to terminal
                 let (col, row) = self.pixel_to_cell(
                     self.mouse_pos.x,
-                    self.mouse_pos.y - self.tab_bar.height() as f64,
+                    self.mouse_pos.y - self.tab_bar.content_top() as f64,
                 );
                 let term_button = match button {
                     MouseButton::Left => TerminalMouseButton::Left,
@@ -305,7 +305,7 @@ impl App {
                 // In multi-pane mode, check for divider drag or pane focus
                 if button == MouseButton::Left && self.terminal_manager.pane_count() > 1 {
                     let size = self.window.inner_size();
-                    let tab_h = self.tab_bar.height();
+                    let tab_h = self.tab_bar.content_top();
                     let content_y = y - tab_h;
                     let aw = size.width as f32;
                     let ah = size.height as f32 - tab_h;
@@ -339,7 +339,7 @@ impl App {
 
                 let (col, row) = self.pixel_to_cell(
                     self.mouse_pos.x,
-                    self.mouse_pos.y - self.tab_bar.height() as f64,
+                    self.mouse_pos.y - self.tab_bar.content_top() as f64,
                 );
 
                 // Forward to native protocol sessions
@@ -409,7 +409,7 @@ impl App {
 
                 // Forward MouseUp to native protocol sessions
                 if let Some(proto_button) = Self::winit_to_protocol_mouse_button(button) {
-                    let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
+                    let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
                     let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y.max(0.0));
                     let event_type = ultty_protocol::InputType::MouseUp {
                         button: proto_button,
@@ -454,7 +454,7 @@ impl App {
         // Handle pane divider dragging
         if let Some((div_idx, last_pos)) = self.divider_dragging {
             let size = self.window.inner_size();
-            let tab_h = self.tab_bar.height();
+            let tab_h = self.tab_bar.content_top();
             let dir = self.terminal_manager.split_direction();
             let (current_pos, total) = match dir {
                 SplitDirection::Horizontal => (self.mouse_pos.x as f32, size.width as f32),
@@ -472,7 +472,7 @@ impl App {
         }
 
         // Account for tab bar offset
-        let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
+        let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
         if adjusted_y < 0.0 {
             return; // Dragging in tab bar area
         }
@@ -511,7 +511,7 @@ impl App {
 
     /// Handle mouse motion without button pressed (for AnyEvent mode).
     fn handle_mouse_motion(&mut self) {
-        let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
+        let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
         if adjusted_y < 0.0 {
             return; // In tab bar area
         }
@@ -625,7 +625,7 @@ impl App {
 
         // Check if mouse tracking is enabled - send scroll events to PTY
         if self.terminal().is_some_and(|t| t.mouse_tracking_enabled()) {
-            let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
+            let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
             let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y.max(0.0));
             // Terminal scroll: positive lines = scroll up (button 64)
             // Button 64 = scroll up, Button 65 = scroll down
@@ -665,7 +665,7 @@ impl App {
 
         // Forward scroll to native protocol sessions
         {
-            let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
+            let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
             let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y.max(0.0));
             let delta_y = match delta {
                 MouseScrollDelta::LineDelta(_, y) => y,

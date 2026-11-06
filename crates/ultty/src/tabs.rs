@@ -13,6 +13,11 @@ pub const TAB_ROW_HEIGHT: f32 = 28.0;
 /// Height of the complete chrome area in pixels (at default scale).
 pub const TAB_BAR_HEIGHT: f32 = TITLE_BAR_HEIGHT + TAB_ROW_HEIGHT;
 
+/// Gap between the bar and the first terminal row, in the terminal's
+/// background, so a full-height cursor on the top row is not clipped by the
+/// bar's edge.
+pub const TERMINAL_TOP_PADDING: f32 = 4.0;
+
 /// Padding inside each tab.
 pub const TAB_PADDING: f32 = 12.0;
 
@@ -308,6 +313,12 @@ impl TabBarState {
     }
 
     /// Get the height of the tab bar (0 if not visible).
+    /// Where the terminal content starts: below the bar plus
+    /// [`TERMINAL_TOP_PADDING`]. Chrome hit tests use [`Self::height`].
+    pub fn content_top(&self) -> f32 {
+        self.height() + TERMINAL_TOP_PADDING
+    }
+
     pub fn height(&self) -> f32 {
         if !self.visible {
             0.0
