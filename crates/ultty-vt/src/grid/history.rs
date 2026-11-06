@@ -11,14 +11,15 @@
 //! Rows are encoded when they scroll into history and decoded when
 //! something reads them, which is at most a screenful while scrolled back.
 
-use super::cell::{Cell, CellFlags, Color};
+use super::cell::{Cell, CellFlags, PackedColor};
 use super::row::Row;
 
-/// Everything about a cell except its character.
+/// Everything about a cell except its character. Colors stay packed so
+/// comparing styles, done for every cell, is integer comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Style {
-    fg: Color,
-    bg: Color,
+    fg: PackedColor,
+    bg: PackedColor,
     flags: CellFlags,
     hyperlink_id: u32,
 }
@@ -26,17 +27,15 @@ struct Style {
 impl Style {
     fn of(cell: &Cell) -> Self {
         Self {
-            fg: cell.fg(),
-            bg: cell.bg(),
+            fg: cell.packed_fg(),
+            bg: cell.packed_bg(),
             flags: cell.flags(),
             hyperlink_id: cell.hyperlink_id(),
         }
     }
 
     fn cell(self, c: char) -> Cell {
-        let mut cell = Cell::with_attrs(c, self.fg, self.bg, self.flags);
-        cell.set_hyperlink_id(self.hyperlink_id);
-        cell
+        Cell::from_packed(c, self.fg, self.bg, self.flags, self.hyperlink_id)
     }
 }
 
@@ -153,6 +152,7 @@ impl CompactRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grid::cell::Color;
     use proptest::prelude::*;
 
     /// Two rows hold the same content.

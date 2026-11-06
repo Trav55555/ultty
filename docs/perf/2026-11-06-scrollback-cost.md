@@ -95,3 +95,22 @@ the best of 8 interleaved runs per configuration. MiB/s:
   compared field by field. Closing the rest of the gap to the alternate
   screen would mean a different `Color` representation. That reaches
   through the whole codebase and is not done here.
+
+## Packed cell colors (2026-11-06)
+
+`Cell` now stores each color as a `u32` (a tag byte plus payload), and
+`fg()`/`bg()` unpack it, so callers see the same `Color` enum. Comparing
+cells and styles becomes integer comparison. Best of 8 interleaved runs,
+MiB/s:
+
+| | before | packed | alternate screen |
+|---|---:|---:|---:|
+| 120x40 | 221 | 241 (+9%) | 412 -> 426 |
+| 300x75 | 126 | 133 (+5%) | 254 -> 272 |
+
+- **Instructions** on the 8 MB CRLF sample fell 12% (2.07 to 1.82 billion).
+- **The encoder** is still about 2,600 instructions a line (about 31 a
+  cell): about 12 for the style comparison, about 5 for the byte push, and
+  the loop.
+- **What is left** is micro-optimization worth perhaps 10-20% more, so it
+  stops here.
