@@ -1,7 +1,7 @@
 # Ultty — Agent Guide
 
 GPU-accelerated terminal emulator + TUI framework. Rust workspace, edition 2021,
-MSRV 1.85 (`rust-version` in the root `Cargo.toml`). The toolchain is pinned by
+MSRV 1.89 (`rust-version` in the root `Cargo.toml`). The toolchain is pinned by
 `rust-toolchain.toml`.
 
 [CLAUDE.md](CLAUDE.md) is the authoritative guide for build commands,
@@ -40,7 +40,7 @@ documentation; run `cargo test --workspace` and read the number from there.
 
 **CI** (`.github/workflows/ci.yml`) runs five jobs: `fmt`, `security-audit`,
 `clippy` (`--all-targets -D warnings`, on ubuntu and macos), `test` (ubuntu and
-macos), and `msrv` (`cargo check --workspace --all-targets` on 1.85). There is
+macos), and `msrv` (`cargo check --workspace --all-targets` on 1.89). There is
 no coverage or benchmark job. The runtime is Unix-first: CI validates Linux and
 macOS; Windows requires future named-pipe/ConPTY platform work.
 **RUSTFLAGS=-Dwarnings** — all warnings are errors.

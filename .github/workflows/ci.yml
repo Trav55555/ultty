@@ -12,7 +12,7 @@ env:
   # Pinned to match rust-toolchain.toml. Bump both together.
   RUST_TOOLCHAIN: 1.98.1
   # Minimum supported Rust version declared in the root Cargo.toml.
-  RUST_MSRV: 1.85
+  RUST_MSRV: 1.89
 
 jobs:
   fmt:

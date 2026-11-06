@@ -133,7 +133,7 @@ fn append_clipped_glyphs(
     out_verts: &mut Vec<Vertex>,
     out_idxs: &mut Vec<u32>,
 ) {
-    for quad in idxs.chunks_exact(6) {
+    for quad in idxs.as_chunks::<6>().0 {
         let first = quad[0] as usize;
         let v0 = &verts[first];
         let v2 = &verts[first + 2];
@@ -388,13 +388,12 @@ impl Renderer {
                     }
 
                     if session.is_streaming(region.id) {
-                        let blink_on = ((std::time::SystemTime::now()
+                        let blink_on = (std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_millis()
                             / 500)
-                            % 2)
-                            == 0;
+                            .is_multiple_of(2);
 
                         if blink_on {
                             if max_cols > 0 && cursor_col >= max_cols {
