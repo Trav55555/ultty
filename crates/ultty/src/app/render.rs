@@ -164,7 +164,6 @@ impl App {
     /// Render multiple panes.
     fn render_multi_pane(&mut self, output: wgpu::SurfaceTexture) {
         use ultty::renderer::PaneInfo;
-        use ultty::terminal_manager::SplitDirection;
 
         let size = self.window.inner_size();
         let tab_bar_height = self.tab_bar.content_top();
@@ -186,32 +185,25 @@ impl App {
         // One lock per pane, held for this frame. Everything below reads the
         // panes through these guards; locking a pane's terminal again here
         // would deadlock.
-        let locked: Vec<(ultty::event_loop::TerminalGuard<'_>, PaneInfo)> = {
-            let mut offset = 0.0f32;
-            terminals
-                .iter()
-                .enumerate()
-                .map(|(i, managed)| {
-                    let ratio = ratios.get(i).copied().unwrap_or(1.0 / pane_count as f32);
-                    let is_focused = Some(managed.id) == focused_id;
-                    let pane = match split_direction {
-                        SplitDirection::Horizontal => {
-                            let w = available_width * ratio;
-                            let p = PaneInfo::new(offset, 0.0, w, available_height, is_focused);
-                            offset += w;
-                            p
-                        }
-                        SplitDirection::Vertical => {
-                            let h = available_height * ratio;
-                            let p = PaneInfo::new(0.0, offset, available_width, h, is_focused);
-                            offset += h;
-                            p
-                        }
-                    };
-                    (managed.event_loop.terminal(), pane)
-                })
-                .collect()
-        };
+        // The same rectangles the terminal manager sizes each pane's grid to.
+        let rects = ultty::terminal_manager::pane_rects(
+            split_direction,
+            &ratios,
+            pane_count,
+            available_width,
+            available_height,
+        );
+        let locked: Vec<(ultty::event_loop::TerminalGuard<'_>, PaneInfo)> = terminals
+            .iter()
+            .zip(rects)
+            .map(|(managed, (x, y, w, h))| {
+                let is_focused = Some(managed.id) == focused_id;
+                (
+                    managed.event_loop.terminal(),
+                    PaneInfo::new(x, y, w, h, is_focused),
+                )
+            })
+            .collect();
 
         let panes: Vec<(&ultty::grid::Terminal, PaneInfo)> = locked
             .iter()

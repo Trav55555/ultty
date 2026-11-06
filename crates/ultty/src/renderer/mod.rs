@@ -318,7 +318,7 @@ pub const MAX_GRID_DIMENSION: u16 = 4096;
 
 /// Compute grid columns/rows from pixel space and cell metrics, clamped to
 /// `1..=MAX_GRID_DIMENSION`. Non-finite or non-positive inputs yield 1.
-fn grid_dimensions_for(
+pub fn grid_dimensions_for(
     width_px: f32,
     height_px: f32,
     cell_width: f32,
@@ -777,6 +777,14 @@ impl Renderer {
             available_height,
             self.cell_width,
             self.cell_height,
+        )
+    }
+
+    /// The pixel area below the bar that terminal panes share.
+    pub fn terminal_area(&self) -> (f32, f32) {
+        (
+            self.config.width as f32,
+            (self.config.height as f32 - self.tab_bar_height).max(0.0),
         )
     }
 
