@@ -25,8 +25,13 @@ The Ultimate Terminal Protocol (UTP) is a binary protocol between TUI applicatio
 
 The only transport is a Unix domain socket. The terminal binds one listening
 socket per tab (`ultty-<pid>-tab<id>.sock` in the user's runtime directory) and
-passes that tab's path to the tab's shell as `ULTTY_SOCKET`; an app connects to
-the path in its own environment. A session belongs to the tab whose socket
+passes that tab's path to the tab's shell as `ULTTY_SOCKET`, with the tab's PTY
+slave path as `ULTTY_TTY`; an app connects to the path in its own environment.
+`ulttui` connects only when its stdin, stdout, or stderr is the `ULTTY_TTY`
+terminal, so a copy of the variables inherited into a multiplexer pane or a
+recording PTY is ignored (`ULTTY_FORCE_NATIVE=1` overrides this). The socket
+does not cross ssh. In-band transport is proposed in
+[ADR 0018](adr/0018-in-band-native-transport.md). A session belongs to the tab whose socket
 accepted it: input events and clipboard reads are delivered only while that tab
 is visible, and closing the tab unlinks its socket and disconnects its sessions.
 

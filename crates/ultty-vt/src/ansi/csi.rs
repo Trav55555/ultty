@@ -283,6 +283,7 @@ impl AnsiParser {
             1049 => Some(Action::SetMode(Mode::AlternateScreenSaveCursor)),
             2004 => Some(Action::SetMode(Mode::BracketedPaste)),
             2026 => Some(Action::SetMode(Mode::SynchronizedUpdate)),
+            2027 => Some(Action::SetMode(Mode::GraphemeClustering)),
             _ => None,
         }
     }
@@ -311,6 +312,7 @@ impl AnsiParser {
             1049 => Some(Action::ResetMode(Mode::AlternateScreenSaveCursor)),
             2004 => Some(Action::ResetMode(Mode::BracketedPaste)),
             2026 => Some(Action::ResetMode(Mode::SynchronizedUpdate)),
+            2027 => Some(Action::ResetMode(Mode::GraphemeClustering)),
             _ => None,
         }
     }

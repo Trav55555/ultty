@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust
-//! use ultty::protocol::ansi::{AnsiParser, Action};
+//! use ultty_vt::ansi::{AnsiParser, Action};
 //!
 //! let mut parser = AnsiParser::new();
 //! let mut actions = Vec::new();
@@ -398,6 +398,9 @@ pub enum Mode {
     AlternateScrollMode,
     /// Synchronized update mode (CSI ?2026h/l) - batch updates for flicker-free rendering
     SynchronizedUpdate,
+    /// Grapheme cluster processing (CSI ?2027h/l) - multi-codepoint
+    /// graphemes occupy one cell with their Unicode width
+    GraphemeClustering,
 }
 
 /// Parser state machine states.

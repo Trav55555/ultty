@@ -11,7 +11,6 @@ use cosmic_text::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use wgpu::util::DeviceExt;
 
 /// Character plus the shaping-relevant style bits (see [`shaping_cache_key`]).
 type ShapingCacheKey = (char, u8);
@@ -196,6 +195,36 @@ pub struct TextRenderer {
     shaping_cache: HashMap<ShapingCacheKey, ShapedGlyph>,
     styled_text_buffer: Buffer,
     byte_to_char_offsets: Vec<usize>,
+    queue: Arc<wgpu::Queue>,
+    /// Vertex/index buffers for the grid draws of the current frame, reused
+    /// across frames. Each draw in a frame gets its own slot: writes land at
+    /// the next submit, so two draws sharing a buffer would both see the
+    /// last write.
+    grid_buffers: Vec<GridBuffers>,
+    grid_buffers_used: usize,
+}
+
+/// One reusable vertex + index buffer pair.
+struct GridBuffers {
+    vertex: wgpu::Buffer,
+    index: wgpu::Buffer,
+}
+
+/// Smallest buffer the pool allocates, so ordinary frames never regrow.
+const MIN_GRID_BUFFER_BYTES: u64 = 64 * 1024;
+
+fn grid_buffer(
+    device: &wgpu::Device,
+    label: &str,
+    usage: wgpu::BufferUsages,
+    len: u64,
+) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: len.max(MIN_GRID_BUFFER_BYTES).next_power_of_two(),
+        usage: usage | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 impl TextRenderer {
@@ -221,7 +250,7 @@ impl TextRenderer {
             Self::measure_cell_with_font(&mut font_system, metrics, &font_family);
 
         // Create glyph atlas
-        let atlas = GlyphAtlas::new(device.clone(), queue);
+        let atlas = GlyphAtlas::new(device.clone(), Arc::clone(&queue));
 
         // Create text pipeline
         let pipeline = TextPipeline::new(
@@ -251,6 +280,9 @@ impl TextRenderer {
             shaping_cache: HashMap::with_capacity(256),
             styled_text_buffer,
             byte_to_char_offsets: Vec::with_capacity(256),
+            queue,
+            grid_buffers: Vec::new(),
+            grid_buffers_used: 0,
         };
         renderer.decoration = renderer.measure_decoration_metrics(baseline);
         Ok(renderer)
@@ -336,6 +368,20 @@ impl TextRenderer {
         style: CellStyle,
     ) -> Option<ShapedGlyph> {
         let shaping = self.get_shaping();
+        self.shape_text(buffer, text, style, shaping)
+            .into_iter()
+            .next()
+    }
+
+    /// Shape `text` and return every glyph of its first layout run, each
+    /// positioned relative to the start of the run.
+    fn shape_text(
+        &mut self,
+        buffer: &mut Buffer,
+        text: &str,
+        style: CellStyle,
+        shaping: Shaping,
+    ) -> Vec<ShapedGlyph> {
         let mut attrs = font_attrs(&self.font_family);
         if style.bold {
             attrs = attrs.weight(Weight::BOLD);
@@ -345,33 +391,85 @@ impl TextRenderer {
         }
         buffer.set_text(&mut self.font_system, text, attrs, shaping);
 
-        let run = buffer.layout_runs().next()?;
-        let glyph = run.glyphs.first()?;
-        let face = self
-            .font_system
-            .db()
-            .face(glyph.font_id)
-            .map(|face| (face.weight, face.style));
-        let (synthetic_bold, fake_italic) = synthesized_styles(style, face);
+        let Some(run) = buffer.layout_runs().next() else {
+            return Vec::new();
+        };
+        let line_y = run.line_y;
+        let mut shaped = Vec::with_capacity(run.glyphs.len());
+        for glyph in run.glyphs {
+            let face = self
+                .font_system
+                .db()
+                .face(glyph.font_id)
+                .map(|face| (face.weight, face.style));
+            let (synthetic_bold, fake_italic) = synthesized_styles(style, face);
 
-        let mut physical = glyph.physical((0.0, 0.0), 1.0);
-        if fake_italic {
-            physical.cache_key.flags |= CacheKeyFlags::FAKE_ITALIC;
+            let mut physical = glyph.physical((0.0, 0.0), 1.0);
+            if fake_italic {
+                physical.cache_key.flags |= CacheKeyFlags::FAKE_ITALIC;
+            }
+
+            shaped.push(ShapedGlyph {
+                cache_key: physical.cache_key,
+                x_offset: physical.x as f32,
+                y_offset: physical.y as f32,
+                line_y,
+                synthetic_bold,
+            });
         }
-
-        Some(ShapedGlyph {
-            cache_key: physical.cache_key,
-            x_offset: physical.x as f32,
-            y_offset: physical.y as f32,
-            line_y: run.line_y,
-            synthetic_bold,
-        })
+        shaped
     }
 
     /// Start a frame. Must precede any quad that samples the glyph atlas,
     /// because this is the only point at which atlas slots are evicted.
     pub fn begin_frame(&mut self) {
         self.atlas.begin_frame();
+        self.grid_buffers_used = 0;
+    }
+
+    /// Upload this draw's vertices and indices into the next pooled slot,
+    /// growing it if needed, and return the slot.
+    fn upload_grid(&mut self, vertices: &[Vertex], indices: &[u32]) -> usize {
+        let vertex_bytes: &[u8] = bytemuck::cast_slice(vertices);
+        let index_bytes: &[u8] = bytemuck::cast_slice(indices);
+        let slot = self.grid_buffers_used;
+        self.grid_buffers_used += 1;
+        if slot == self.grid_buffers.len() {
+            self.grid_buffers.push(GridBuffers {
+                vertex: grid_buffer(
+                    &self.device,
+                    "text_vertex_buffer",
+                    wgpu::BufferUsages::VERTEX,
+                    vertex_bytes.len() as u64,
+                ),
+                index: grid_buffer(
+                    &self.device,
+                    "text_index_buffer",
+                    wgpu::BufferUsages::INDEX,
+                    index_bytes.len() as u64,
+                ),
+            });
+        }
+        let buffers = &mut self.grid_buffers[slot];
+        if buffers.vertex.size() < vertex_bytes.len() as u64 {
+            buffers.vertex = grid_buffer(
+                &self.device,
+                "text_vertex_buffer",
+                wgpu::BufferUsages::VERTEX,
+                vertex_bytes.len() as u64,
+            );
+        }
+        if buffers.index.size() < index_bytes.len() as u64 {
+            buffers.index = grid_buffer(
+                &self.device,
+                "text_index_buffer",
+                wgpu::BufferUsages::INDEX,
+                index_bytes.len() as u64,
+            );
+        }
+        self.queue.write_buffer(&buffers.vertex, 0, vertex_bytes);
+        self.queue.write_buffer(&buffers.index, 0, index_bytes);
+        slot
     }
 
     /// Whether a glyph was skipped this frame because the atlas was full;
@@ -635,22 +733,10 @@ impl TextRenderer {
             return Ok(());
         }
 
-        // Create vertex/index buffers
-        let vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("text_vertex_buffer"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
-        let index_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("text_index_buffer"),
-                contents: bytemuck::cast_slice(&indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
+        let slot = self.upload_grid(&vertices, &indices);
+        let vertex_bytes = std::mem::size_of_val(vertices.as_slice()) as u64;
+        let index_bytes = std::mem::size_of_val(indices.as_slice()) as u64;
+        let buffers = &self.grid_buffers[slot];
 
         // Render pass for text
         {
@@ -672,8 +758,11 @@ impl TextRenderer {
             render_pass.set_pipeline(self.pipeline.pipeline());
             render_pass.set_bind_group(0, uniform_bind_group, &[]);
             render_pass.set_bind_group(1, self.atlas.bind_group(), &[]);
-            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.set_vertex_buffer(0, buffers.vertex.slice(..vertex_bytes));
+            render_pass.set_index_buffer(
+                buffers.index.slice(..index_bytes),
+                wgpu::IndexFormat::Uint32,
+            );
             render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
         }
 
@@ -759,31 +848,34 @@ impl TextRenderer {
                     continue;
                 }
 
-                let shaped_glyph = if !cell.has_flag(CellFlags::HAS_COMBINING) {
-                    let cache_key_lookup = shaping_cache_key(ch, self.ligatures, style);
-                    if let Some(&cached) = self.shaping_cache.get(&cache_key_lookup) {
-                        Some(cached)
-                    } else {
-                        let shaped = self.shape_cell(&mut buffer, &ch.to_string(), style);
-                        if let Some(shaped) = shaped {
-                            self.shaping_cache.insert(cache_key_lookup, shaped);
-                        }
-                        shaped
-                    }
+                // Multi-codepoint graphemes (combining marks, ZWJ emoji,
+                // flags) live on the row itself, so history rows render them
+                // too. They are always shaped with full shaping so the font's
+                // composition rules apply, and every resulting glyph is drawn.
+                let cluster_glyphs: Vec<ShapedGlyph>;
+                let single_glyph: Option<ShapedGlyph>;
+                let glyphs: &[ShapedGlyph] = if let Some(extra) = row.grapheme_extra(col_idx) {
+                    let mut text = String::with_capacity(4 * (1 + extra.len()));
+                    text.push(ch);
+                    text.extend(extra);
+                    cluster_glyphs = self.shape_text(&mut buffer, &text, style, Shaping::Advanced);
+                    &cluster_glyphs
                 } else {
-                    // Combining marks are stored per grid row; when the
-                    // viewport is scrolled back, visual rows above the
-                    // scroll offset are history rows with no grapheme data.
-                    let scroll_offset = term_buffer.scroll_offset();
-                    let grapheme = usize::from(row_idx)
-                        .checked_sub(scroll_offset)
-                        .and_then(|grid_row| u16::try_from(grid_row).ok())
-                        .and_then(|grid_row| terminal.grid().grapheme(grid_row, col_idx))
-                        .unwrap_or_else(|| ch.to_string());
-                    self.shape_cell(&mut buffer, &grapheme, style)
+                    let cache_key_lookup = shaping_cache_key(ch, self.ligatures, style);
+                    single_glyph = match self.shaping_cache.get(&cache_key_lookup) {
+                        Some(&cached) => Some(cached),
+                        None => {
+                            let shaped = self.shape_cell(&mut buffer, &ch.to_string(), style);
+                            if let Some(shaped) = shaped {
+                                self.shaping_cache.insert(cache_key_lookup, shaped);
+                            }
+                            shaped
+                        }
+                    };
+                    single_glyph.as_slice()
                 };
 
-                if let Some(shaped) = shaped_glyph {
+                for &shaped in glyphs {
                     if let Some(glyph_info) = self
                         .atlas
                         .get_glyph(&mut self.font_system, shaped.cache_key)

@@ -16,7 +16,8 @@ workflow.
 
 ```
 crates/
-  ultty/            # Terminal emulator binary (GPU renderer, ANSI parser, native protocol)
+  ultty-vt/         # Terminal emulation core: VT parser + grid/scrollback, no I/O
+  ultty/            # Terminal emulator binary (GPU renderer, PTY, native protocol)
   ulttui/           # TUI framework library (Elm architecture, 28 widget modules, dual-mode)
   ultty-protocol/   # Wire protocol codec (binary encode/decode, layout types)
   ultty-client/     # Low-level client SDK (raw protocol access)

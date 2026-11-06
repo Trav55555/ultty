@@ -108,6 +108,21 @@ impl Pty {
         self.master.as_raw_fd()
     }
 
+    /// A second handle to the same PTY master, for a thread that reads the
+    /// child's output while this one keeps writing input and resizing.
+    ///
+    /// The duplicate is close-on-exec and shares the original's non-blocking
+    /// mode (both refer to one open file description).
+    pub fn try_clone(&self) -> Result<Self> {
+        let master = self.master.try_clone().map_err(|e| {
+            PtyError::OpenFailed(nix::Error::from_raw(e.raw_os_error().unwrap_or(0)))
+        })?;
+        Ok(Pty {
+            master,
+            slave_name: self.slave_name.clone(),
+        })
+    }
+
     /// Get the slave PTY name (e.g., "/dev/pts/0").
     pub fn slave_name(&self) -> &str {
         &self.slave_name
@@ -255,6 +270,12 @@ impl AsRawFd for Pty {
     }
 }
 
+impl AsFd for Pty {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.master.as_fd()
+    }
+}
+
 /// The slave side of a PTY pair (for the child process).
 pub struct SlavePty {
     fd: OwnedFd,
@@ -353,6 +374,22 @@ fn is_cloexec(fd: RawFd) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloned_master_is_cloexec_and_reads_the_same_output() {
+        let (pty, slave) = Pty::open().expect("open pty");
+        let clone = pty.try_clone().expect("clone pty");
+        assert!(is_cloexec(clone.as_raw_fd()));
+        assert_ne!(clone.as_raw_fd(), pty.as_raw_fd());
+        nix::unistd::write(&slave.fd, b"hi").expect("write slave");
+        let mut buf = [0u8; 8];
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut n = 0;
+        while n == 0 && Instant::now() < deadline {
+            n = clone.read(&mut buf).expect("read clone");
+        }
+        assert_eq!(&buf[..n], b"hi");
+    }
 
     #[test]
     fn open_pty() {

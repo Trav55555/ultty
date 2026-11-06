@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use super::{CellFlags, Dimensions, Grid, Row};
+use super::{Cell, CellFlags, Dimensions, Grid, Row};
 
 /// Default scrollback buffer size (lines).
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
@@ -23,7 +23,43 @@ pub struct Buffer {
     scroll_offset: usize,
 }
 
+/// A cell being re-wrapped, plus the extra codepoints of its grapheme.
+type ReflowCell = (Cell, Option<Vec<char>>);
+
+fn push_reflow_cells(line: &mut Vec<ReflowCell>, row: &Row) {
+    for (col, cell) in row.cells().enumerate() {
+        let extra = row.grapheme_extra(col as u16).map(<[char]>::to_vec);
+        line.push((*cell, extra));
+    }
+}
+
 impl Buffer {
+    /// Check the buffer's invariants: the grid's own (see
+    /// [`Grid::check_integrity`]), scrollback within its limit, a viewport
+    /// offset that points into history, and consistent history rows.
+    pub fn check_integrity(&self) -> Result<(), String> {
+        self.grid.check_integrity()?;
+        if self.history.len() > self.max_history {
+            return Err(format!(
+                "history holds {} rows, limit is {}",
+                self.history.len(),
+                self.max_history
+            ));
+        }
+        if self.scroll_offset > self.history.len() {
+            return Err(format!(
+                "viewport offset {} beyond {} history rows",
+                self.scroll_offset,
+                self.history.len()
+            ));
+        }
+        for (index, row) in self.history.iter().enumerate() {
+            row.check_integrity(super::MAX_COMBINING_PER_CELL)
+                .map_err(|e| format!("history row {index}: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// Create a new buffer with the given dimensions.
     pub fn new(dims: Dimensions) -> Self {
         Self::with_scrollback(dims, DEFAULT_SCROLLBACK)
@@ -88,6 +124,29 @@ impl Buffer {
     /// Scroll to bottom (most recent).
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
+    }
+
+    /// Copy the top `n` grid rows into history.
+    ///
+    /// Once history is full, the evicted oldest row's allocation is reused
+    /// for the copy, so steady-state scrolling allocates nothing.
+    fn save_top_rows(&mut self, n: usize) {
+        if self.max_history == 0 {
+            return;
+        }
+        for index in 0..n.min(self.grid.dimensions().rows as usize) {
+            let Some(source) = self.grid.row(index as u16) else {
+                break;
+            };
+            let row = if self.history.len() >= self.max_history {
+                let mut recycled = self.history.pop_front().unwrap_or_else(|| Row::new(0));
+                recycled.copy_from(source);
+                recycled
+            } else {
+                source.clone()
+            };
+            self.history.push_back(row);
+        }
     }
 
     /// Push lines from grid top into history (called when grid scrolls up).
@@ -212,8 +271,6 @@ impl Buffer {
     /// Tracks cursor position through the reflow so it stays on the same
     /// logical content after re-wrapping.
     fn reflow_all(&mut self, new_dims: Dimensions) {
-        use crate::grid::cell::Cell;
-
         let new_cols = new_dims.cols;
         let new_rows = new_dims.rows as usize;
         let old_cursor_row = self.grid.cursor().position.row as usize;
@@ -224,18 +281,17 @@ impl Buffer {
         let mut cursor_logical_col: usize = 0;
         let mut found_cursor = false;
 
-        // Collect all logical lines from history and grid
-        let mut logical_lines: Vec<Vec<Cell>> = Vec::new();
-        let mut current_line: Vec<Cell> = Vec::new();
+        // Collect all logical lines from history and grid. Each cell carries
+        // the extra codepoints of its grapheme cluster so reflow keeps them.
+        let mut logical_lines: Vec<Vec<ReflowCell>> = Vec::new();
+        let mut current_line: Vec<ReflowCell> = Vec::new();
         let mut current_logical_idx: usize = 0;
 
         // Process history rows
         for row in self.history.drain(..) {
-            for cell in row.cells() {
-                current_line.push(*cell);
-            }
+            push_reflow_cells(&mut current_line, &row);
             if !row.is_wrapped() {
-                while current_line.last().is_some_and(|c| c.is_blank()) {
+                while current_line.last().is_some_and(|(c, _)| c.is_blank()) {
                     current_line.pop();
                 }
                 logical_lines.push(std::mem::take(&mut current_line));
@@ -263,9 +319,7 @@ impl Buffer {
             }
 
             let cells_before = current_line.len();
-            for cell in row.cells() {
-                current_line.push(*cell);
-            }
+            push_reflow_cells(&mut current_line, row);
 
             // Track cursor: it's on this grid row
             if idx == old_cursor_row && !found_cursor {
@@ -275,7 +329,7 @@ impl Buffer {
             }
 
             if !row.is_wrapped() {
-                while current_line.last().is_some_and(|c| c.is_blank()) {
+                while current_line.last().is_some_and(|(c, _)| c.is_blank()) {
                     current_line.pop();
                 }
                 // Clamp cursor col if it fell in trimmed blanks
@@ -289,7 +343,7 @@ impl Buffer {
         }
 
         if !current_line.is_empty() {
-            while current_line.last().is_some_and(|c| c.is_blank()) {
+            while current_line.last().is_some_and(|(c, _)| c.is_blank()) {
                 current_line.pop();
             }
             if found_cursor && cursor_logical_line == current_logical_idx {
@@ -335,7 +389,7 @@ impl Buffer {
                 let mut col = 0u16;
 
                 while col < new_cols && pos < line.len() {
-                    let cell = &line[pos];
+                    let (cell, extra) = &line[pos];
 
                     // Skip spacer cells from old layout — regenerated when placing wide chars
                     if cell.is_wide_spacer() {
@@ -355,6 +409,7 @@ impl Buffer {
                             *dest = *cell;
                             dest.set_char(' ');
                             dest.unset_flag(CellFlags::WIDE_CHAR);
+                            dest.unset_flag(CellFlags::HAS_COMBINING);
                         }
                         col += 1;
                         pos += 1;
@@ -363,6 +418,9 @@ impl Buffer {
 
                     if let Some(dest) = new_row.get_mut(col) {
                         *dest = *cell;
+                    }
+                    if let Some(extra) = extra {
+                        new_row.set_grapheme_extra(col, extra);
                     }
                     col += 1;
                     pos += 1;
@@ -448,7 +506,13 @@ impl Buffer {
         let auto_wrap = self.grid.auto_wrap();
         let scroll_bottom = self.grid.effective_scroll_region().bottom;
         let max_col = self.grid.dimensions().cols;
-        let char_width = c.width().unwrap_or(0) as u16;
+        // A codepoint that joins the previous grapheme cluster takes no new
+        // column, so it can never wrap or scroll.
+        let char_width = if self.grid.continues_cluster(c) {
+            0
+        } else {
+            c.width().unwrap_or(0) as u16
+        };
 
         // Determine if this write will cause scrolling.
         // With pending wrap behavior:
@@ -475,10 +539,7 @@ impl Buffer {
             // since scroll regions are used by apps on the alternate screen which
             // has no meaningful scrollback.
             if self.grid.scroll_region().is_none() {
-                let top_row = self.grid.row(0).cloned();
-                if let Some(row) = top_row {
-                    self.push_to_history(vec![row]);
-                }
+                self.save_top_rows(1);
             }
         }
 
@@ -504,9 +565,7 @@ impl Buffer {
             if self.grid.cursor().wrap_pending && self.grid.scroll_region().is_none() {
                 let scroll_bottom = self.grid.dimensions().rows.saturating_sub(1);
                 if self.grid.cursor().position.row >= scroll_bottom {
-                    if let Some(row) = self.grid.row(0).cloned() {
-                        self.push_to_history(vec![row]);
-                    }
+                    self.save_top_rows(1);
                 }
             }
 
@@ -532,8 +591,7 @@ impl Buffer {
 
         if self.grid.scroll_region().is_none() {
             // Full-screen scroll — save top rows to history
-            let rows_to_save: Vec<Row> = self.grid.rows().take(n_usize).cloned().collect();
-            self.push_to_history(rows_to_save);
+            self.save_top_rows(n_usize);
         }
         // With a scroll region, rows displaced from region.top are discarded
         // (scroll regions are used by apps on the alternate screen which has

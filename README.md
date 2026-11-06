@@ -91,7 +91,7 @@ manifest:
 cargo run --manifest-path examples/porygon-tui/Cargo.toml
 ```
 
-Native apps auto-detect whether they're running inside Ultty. Inside Ultty, they send the native protocol and the terminal does layout and rendering. Outside Ultty, they use ANSI mode via ratatui on supported Unix terminals.
+Native apps auto-detect whether they're running directly on an Ultty tab. There, they send the native protocol and the terminal does layout and rendering. Everywhere else they use ANSI mode via ratatui on supported Unix terminals, including inside tmux, screen, or zellij started from an Ultty tab, under `script`, and over ssh: the native protocol travels over a local socket, so it only reaches the tab's own terminal.
 
 ## ANSI Compatibility
 
@@ -171,6 +171,7 @@ Current dated reports:
 - [Baseline benchmarks](docs/perf/2026-05-14-baseline.md)
 - [ASCII span and grid write path](docs/perf/2026-05-14-ascii-span.md)
 - [Live pipeline trace and PTY readiness wakeups](docs/perf/2026-05-14-live-pipeline-trace.md)
+- [PTY throughput after the I/O thread](docs/perf/2026-11-05-io-thread.md)
 - [Visual regression smoke](docs/visual-regression.md)
 
 | Metric | Target |

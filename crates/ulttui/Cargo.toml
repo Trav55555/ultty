@@ -11,6 +11,9 @@ rust-version.workspace = true
 # Protocol
 ultty-protocol = { workspace = true }
 
+# ttyname_r for native-mode detection
+libc = "0.2"
+
 # Fallback rendering
 crossterm = { workspace = true }
 ratatui = { workspace = true }

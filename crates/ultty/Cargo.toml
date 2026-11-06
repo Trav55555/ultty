@@ -22,6 +22,9 @@ path = "src/bin/ulttyctl.rs"
 [dependencies]
 # Protocol
 ultty-protocol = { workspace = true }
+
+# Terminal emulation core (parser, grid, scrollback)
+ultty-vt = { workspace = true }
 bytes = { workspace = true }
 
 # Layout

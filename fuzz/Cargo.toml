@@ -13,6 +13,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 ultty-protocol = { path = "../crates/ultty-protocol" }
+ultty-vt = { path = "../crates/ultty-vt" }
 
 [[bin]]
 name = "decode_app"
@@ -24,6 +25,13 @@ bench = false
 [[bin]]
 name = "decode_terminal"
 path = "fuzz_targets/decode_terminal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vt_terminal"
+path = "fuzz_targets/vt_terminal.rs"
 test = false
 doc = false
 bench = false

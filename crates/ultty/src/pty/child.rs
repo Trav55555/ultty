@@ -60,7 +60,15 @@ impl Child {
         env: &[(OsString, OsString)],
     ) -> Result<Self> {
         let (pty, slave) = Pty::open_with_size(size)?;
-        let exec_plan = ChildExec::new(program, args, working_dir, env)?;
+        // A child offered a native protocol socket is also told which
+        // terminal that socket belongs to, so a program running somewhere
+        // else (a tmux pane, a `script` recording) that inherited the
+        // variables can tell the socket is not for it.
+        let mut env = env.to_vec();
+        if env.iter().any(|(key, _)| key == "ULTTY_SOCKET") {
+            env.push(("ULTTY_TTY".into(), pty.slave_name().into()));
+        }
+        let exec_plan = ChildExec::new(program, args, working_dir, &env)?;
 
         // SAFETY: the child path only performs session/fd setup and execve with
         // argv/env/cwd prepared before fork. It must not allocate or take locks.
@@ -582,6 +590,29 @@ mod tests {
             blocked, 0,
             "child inherited a blocked-signal mask: {output:?}"
         );
+    }
+
+    #[test]
+    fn a_child_offered_a_protocol_socket_learns_its_own_terminal() {
+        let env = [(
+            OsString::from("ULTTY_SOCKET"),
+            OsString::from("/run/x.sock"),
+        )];
+        let output = run_in_pty_with_env(
+            "if [ \"$ULTTY_TTY\" = \"$(tty)\" ]; then echo TTY-MATCH; fi; echo DONE",
+            &env,
+        );
+        assert!(output.contains("TTY-MATCH"), "ULTTY_TTY != tty: {output:?}");
+
+        // Without a socket nothing is added (an Ultty running these tests
+        // passes its own ULTTY_TTY down, so only check outside one).
+        if std::env::var_os("ULTTY_TTY").is_none() {
+            let output = run_in_pty("echo \"tty=[$ULTTY_TTY]\"; echo DONE");
+            assert!(
+                output.contains("tty=[]"),
+                "set without a socket: {output:?}"
+            );
+        }
     }
 
     #[test]

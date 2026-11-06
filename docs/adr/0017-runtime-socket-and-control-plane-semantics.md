@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended 2026-11-05: PTY output no longer goes through the wakeup
+bridge. Each terminal's I/O thread parses its PTY and wakes the UI itself
+(`ultty::event_loop`); the bridge watches only the native protocol and control
+sockets.
 
 ## Context
 

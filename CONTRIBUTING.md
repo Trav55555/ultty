@@ -96,11 +96,14 @@ and frame boundaries. Every tab listens on its own socket,
 `$XDG_RUNTIME_DIR/ultty-<pid>-tab<id>.sock` (falling back to a mode-0700
 `ultty-<uid>` directory under `/tmp`), created when the tab opens and unlinked
 when it closes. Ultty advertises that tab's path in the `ULTTY_SOCKET`
-environment variable of the shell it spawns for the tab, which is also how an
-app detects that it is running inside Ultty. Because a session is bound to the
-tab that accepted it, keyboard input, mouse events and clipboard reads only
-reach sessions of the visible tab. Apps that find no `ULTTY_SOCKET` fall back
-to ANSI rendering through ratatui.
+environment variable of the shell it spawns for the tab, and the tab's PTY in
+`ULTTY_TTY`. `ulttui` uses native mode only when its own terminal is
+`ULTTY_TTY`: both variables are inherited by tmux, screen, `script` and nested
+terminals, which run the app on a different terminal, and drawing through the
+socket from there would paint over the tab. `ULTTY_FORCE_NATIVE=1` skips that
+check. Because a session is bound to the tab that accepted it, keyboard input,
+mouse events and clipboard reads only reach sessions of the visible tab. Apps
+that do not qualify fall back to ANSI rendering through ratatui.
 
 **Control socket.** `ulttyctl` connects here to drive a running instance:
 `ping`, `info`, sending input, capturing screenshots, waiting for output. It

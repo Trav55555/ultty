@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```
-//! use ultty::grid::{Grid, Dimensions, Terminal};
+//! use ultty_vt::grid::{Grid, Dimensions, Terminal};
 //!
 //! // Create a terminal
 //! let mut term = Terminal::new(Dimensions::new(80, 24));
@@ -50,7 +50,7 @@ use std::ops::{Index, IndexMut};
 ///
 /// PTY output can attach an unbounded run of zero-width marks to one cell;
 /// anything beyond this many is dropped.
-pub const MAX_COMBINING_PER_CELL: usize = 8;
+pub const MAX_COMBINING_PER_CELL: usize = 16;
 
 /// Terminal grid dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,9 +189,6 @@ pub struct Grid {
     dirty: Vec<bool>,
     /// Scroll region (None means full screen)
     scroll_region: Option<ScrollRegion>,
-    /// Combining characters storage: (row, col) -> additional chars
-    /// Only cells with HAS_COMBINING flag have entries here
-    combining: std::collections::HashMap<(u16, u16), Vec<char>>,
     /// Custom tab stops (column numbers where tabs stop)
     /// Initialized to default every-8-columns pattern
     tab_stops: std::collections::BTreeSet<u16>,
@@ -205,6 +202,26 @@ pub struct Grid {
     /// Incremented every time cell content changes (writes, scrolls, erases,
     /// resizes). Pure cursor moves do not bump it. Used to invalidate
     /// selections that refer to content which no longer exists.
+    content_version: u64,
+    /// Grapheme cluster processing (DEC mode 2027). When on, a codepoint that
+    /// continues the previously printed cluster (ZWJ sequences, emoji
+    /// modifiers, flags, variation selectors, spacing marks) joins that cell
+    /// instead of taking new columns, and the cluster takes the width Unicode
+    /// assigns the whole sequence.
+    grapheme_clustering: bool,
+    /// Where the last printed grapheme starts, and the cursor and content
+    /// state right after printing it. A following codepoint may only join
+    /// that cluster while both are unchanged.
+    last_print: Option<LastPrint>,
+}
+
+/// Position of the most recently printed grapheme, see [`Grid::write_char`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LastPrint {
+    base_row: u16,
+    base_col: u16,
+    cursor: CursorPosition,
+    wrap_pending: bool,
     content_version: u64,
 }
 
@@ -223,12 +240,13 @@ impl Grid {
             attrs: Cell::default(),
             dirty,
             scroll_region: None,
-            combining: std::collections::HashMap::new(),
             tab_stops,
             auto_wrap: true,
             insert_mode: false,
             last_char: ' ',
             content_version: 0,
+            grapheme_clustering: true,
+            last_print: None,
         }
     }
 
@@ -309,10 +327,12 @@ impl Grid {
         let rows = self.dims.rows;
         for row_idx in 0..rows {
             if let Some(row) = self.row_mut(row_idx) {
+                // Start from blank cells so no wide-char, spacer, grapheme,
+                // or style flags from earlier content survive the fill.
+                row.clear();
                 for col in 0..cols {
                     row[col].set_char(c);
                 }
-                row.mark_dirty();
             }
         }
     }
@@ -346,63 +366,70 @@ impl Grid {
 
     /// Add a combining character to a cell.
     fn add_combining_char(&mut self, row: u16, col: u16, c: char) {
-        // Set the flag on the cell
-        if let Some(cell) = self.cell_mut(col, row) {
-            cell.set_flag(CellFlags::HAS_COMBINING);
+        if let Some(r) = self.rows.get_mut(row as usize) {
+            r.push_grapheme_char(col, c, MAX_COMBINING_PER_CELL);
         }
-
-        // Add to the combining map, dropping marks beyond the per-cell cap
-        let marks = self.combining.entry((row, col)).or_default();
-        if marks.len() < MAX_COMBINING_PER_CELL {
-            marks.push(c);
-        }
+        self.mark_dirty(row);
     }
 
     /// Get combining characters for a cell.
     pub fn combining_chars(&self, row: u16, col: u16) -> Option<&[char]> {
-        self.combining.get(&(row, col)).map(|v| v.as_slice())
+        self.rows.get(row as usize)?.grapheme_extra(col)
     }
 
     /// Get the full grapheme for a cell (base char + combining chars).
     pub fn grapheme(&self, row: u16, col: u16) -> Option<String> {
-        let cell = self.cell(col, row)?;
-        let base = cell.char();
-        if cell.has_flag(CellFlags::HAS_COMBINING) {
-            if let Some(combining) = self.combining_chars(row, col) {
-                let mut s = String::with_capacity(1 + combining.len());
-                s.push(base);
-                for &c in combining {
-                    s.push(c);
-                }
-                return Some(s);
-            }
-        }
-        Some(base.to_string())
-    }
-
-    /// Clear combining characters for a cell.
-    fn clear_combining(&mut self, row: u16, col: u16) {
-        self.combining.remove(&(row, col));
-    }
-
-    /// Clear all combining characters for a range of rows.
-    fn clear_combining_rows(&mut self, start_row: u16, end_row: u16) {
-        self.combining
-            .retain(|&(row, _), _| row < start_row || row > end_row);
+        self.rows.get(row as usize)?.grapheme(col)
     }
 
     /// Clear combining characters for a range of cells in one row.
     fn clear_combining_range(&mut self, row: u16, start_col: u16, end_col: u16) {
-        self.combining
-            .retain(|&(r, c), _| r != row || c < start_col || c >= end_col);
-        if let Some(row_cells) = self.rows.get_mut(row as usize) {
-            for col in start_col..end_col {
-                if let Some(cell) = row_cells.get_mut(col) {
-                    cell.unset_flag(CellFlags::HAS_COMBINING);
-                }
-            }
+        if let Some(r) = self.rows.get_mut(row as usize) {
+            r.clear_graphemes(start_col, end_col);
         }
         self.mark_dirty(row);
+    }
+
+    /// Check the grid's structural invariants: row count and widths match
+    /// the dimensions, the cursor and scroll region are in bounds, and every
+    /// row is internally consistent (see [`Row::check_integrity`]).
+    pub fn check_integrity(&self) -> Result<(), String> {
+        let Dimensions { cols, rows } = self.dims;
+        if self.rows.len() != rows as usize {
+            return Err(format!(
+                "grid has {} rows, dimensions say {rows}",
+                self.rows.len()
+            ));
+        }
+        if self.dirty.len() != rows as usize {
+            return Err(format!(
+                "dirty map has {} rows, grid has {rows}",
+                self.dirty.len()
+            ));
+        }
+        let pos = self.cursor.position;
+        if rows > 0 && pos.row >= rows {
+            return Err(format!("cursor row {} outside {rows} rows", pos.row));
+        }
+        if cols > 0 && pos.col >= cols {
+            return Err(format!("cursor col {} outside {cols} cols", pos.col));
+        }
+        if let Some(region) = self.scroll_region {
+            if region.top > region.bottom || region.bottom >= rows {
+                return Err(format!("scroll region {region:?} outside {rows} rows"));
+            }
+        }
+        for (index, row) in self.rows.iter().enumerate() {
+            if row.width() != cols {
+                return Err(format!(
+                    "row {index} is {} wide, grid is {cols}",
+                    row.width()
+                ));
+            }
+            row.check_integrity(MAX_COMBINING_PER_CELL)
+                .map_err(|e| format!("row {index}: {e}"))?;
+        }
+        Ok(())
     }
 
     /// Get a row by index.
@@ -427,9 +454,114 @@ impl Grid {
         self.rows.get_mut(row as usize)?.get_mut(col)
     }
 
+    /// Whether grapheme cluster processing (mode 2027) is enabled.
+    pub fn grapheme_clustering(&self) -> bool {
+        self.grapheme_clustering
+    }
+
+    /// Enable or disable grapheme cluster processing (mode 2027).
+    pub fn set_grapheme_clustering(&mut self, enabled: bool) {
+        self.grapheme_clustering = enabled;
+        self.last_print = None;
+    }
+
+    /// The cell holding the last printed grapheme, if nothing has moved the
+    /// cursor or changed the grid since it was printed.
+    fn cluster_base(&self) -> Option<(u16, u16)> {
+        let last = self.last_print?;
+        let unchanged = last.cursor == self.cursor.position
+            && last.wrap_pending == self.cursor.wrap_pending
+            && last.content_version == self.content_version;
+        unchanged.then_some((last.base_row, last.base_col))
+    }
+
+    /// Record that a grapheme starting at `(row, col)` was just printed.
+    fn record_print(&mut self, row: u16, col: u16) {
+        self.last_print = Some(LastPrint {
+            base_row: row,
+            base_col: col,
+            cursor: self.cursor.position,
+            wrap_pending: self.cursor.wrap_pending,
+            content_version: self.content_version,
+        });
+    }
+
+    /// Whether `c` joins the previously printed grapheme cluster rather than
+    /// starting a new one. Such a codepoint never advances to a new cell,
+    /// so callers must treat it as zero-width when deciding to wrap.
+    pub fn continues_cluster(&self, c: char) -> bool {
+        use unicode_segmentation::UnicodeSegmentation;
+
+        // Nothing below U+0300 extends a cluster (except CR LF, which is
+        // never printed), so the common case never segments.
+        if !self.grapheme_clustering || c < '\u{300}' {
+            return false;
+        }
+        let Some((row, col)) = self.cluster_base() else {
+            return false;
+        };
+        let Some(mut cluster) = self.rows.get(row as usize).and_then(|r| r.grapheme(col)) else {
+            return false;
+        };
+        cluster.push(c);
+        cluster.graphemes(true).nth(1).is_none()
+    }
+
+    /// Append `c` to the cluster at `(row, col)`, widening the cell to two
+    /// columns when the sequence now has emoji presentation (VS16, flag
+    /// pairs, ZWJ sequences) and there is room on the row.
+    fn extend_cluster(&mut self, row: u16, col: u16, c: char) {
+        use unicode_width::UnicodeWidthStr;
+
+        let Some(r) = self.rows.get_mut(row as usize) else {
+            return;
+        };
+        r.push_grapheme_char(col, c, MAX_COMBINING_PER_CELL);
+        let was_wide = r.get(col).is_some_and(|cell| cell.is_wide());
+        let cluster_width = r.grapheme(col).map_or(1, |g| g.width());
+        let room = col.saturating_add(1) < self.dims.cols;
+        let at_cursor = !self.cursor.wrap_pending && self.cursor.position.col == col + 1;
+
+        if !was_wide && cluster_width >= 2 && room && at_cursor {
+            let next = col + 1;
+            // The spacer overwrites whatever was at `next`; a wide char there
+            // would leave its own spacer orphaned.
+            if self.cell(next, row).is_some_and(|cell| cell.is_wide()) {
+                if let Some(orphan) = self.cell_mut(next + 1, row) {
+                    orphan.clear();
+                }
+            }
+            self.clear_combining_range(row, next, next + 1);
+            let base = self.cell(col, row).copied();
+            if let Some(mut base) = base {
+                base.set_flag(CellFlags::WIDE_CHAR);
+                if let Some(cell) = self.cell_mut(col, row) {
+                    *cell = base;
+                }
+                if let Some(spacer) = self.cell_mut(next, row) {
+                    spacer.set_char(' ');
+                    spacer.copy_attrs_from(&base);
+                    spacer.unset_flag(CellFlags::WIDE_CHAR);
+                    spacer.unset_flag(CellFlags::HAS_COMBINING);
+                    spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
+                }
+            }
+            self.advance_cursor(1);
+        }
+        self.mark_dirty(row);
+        self.record_print(row, col);
+    }
+
     /// Write a character at the cursor position and advance.
     pub fn write_char(&mut self, c: char) {
         use unicode_width::UnicodeWidthChar;
+
+        if self.continues_cluster(c) {
+            if let Some((row, col)) = self.cluster_base() {
+                self.extend_cluster(row, col, c);
+            }
+            return;
+        }
 
         // Get character width (0 for control chars, 1 for normal, 2 for wide)
         let width = c.width().unwrap_or(0) as u16;
@@ -491,7 +623,7 @@ impl Grid {
         let attrs = self.attrs;
 
         // Clear any combining characters from previous content
-        self.clear_combining(row, col);
+        self.clear_combining_range(row, col, col.saturating_add(1));
 
         // Insert mode (IRM): shift existing cells right before writing
         if self.insert_mode {
@@ -512,6 +644,16 @@ impl Grid {
         if is_spacer && col > 0 {
             if let Some(primary) = self.cell_mut(col - 1, row) {
                 primary.clear();
+            }
+        }
+        // A wide char's spacer overwrites the next cell; if that cell starts
+        // another wide char, that char's own spacer would be orphaned.
+        if width > 1
+            && col + 2 < self.dims.cols
+            && self.cell(col + 1, row).is_some_and(|c| c.is_wide())
+        {
+            if let Some(orphan) = self.cell_mut(col + 2, row) {
+                orphan.clear();
             }
         }
 
@@ -544,6 +686,7 @@ impl Grid {
         self.last_char = c;
 
         self.advance_cursor(width);
+        self.record_print(row, col);
     }
 
     /// Advance the cursor after printing `width` columns, parking it on the
@@ -591,21 +734,14 @@ impl Grid {
             let available = self.dims.cols.saturating_sub(col).max(1) as usize;
             let write_len = available.min(remaining.len());
             let end_col = col + write_len as u16;
-            let attrs = self.attrs;
+            let mut template = self.attrs;
+            template.unset_flag(CellFlags::HAS_COMBINING);
+            template.unset_flag(CellFlags::WIDE_CHAR);
+            template.unset_flag(CellFlags::WIDE_CHAR_SPACER);
 
-            self.clear_combining_range(row, col, end_col);
             self.clear_wide_orphans_for_ascii_span(row, col, end_col);
-
             if let Some(row_cells) = self.rows.get_mut(row as usize) {
-                for (offset, &byte) in remaining[..write_len].iter().enumerate() {
-                    if let Some(cell) = row_cells.get_mut(col + offset as u16) {
-                        cell.set_char(byte as char);
-                        cell.copy_attrs_from(&attrs);
-                        cell.unset_flag(CellFlags::HAS_COMBINING);
-                        cell.unset_flag(CellFlags::WIDE_CHAR);
-                        cell.unset_flag(CellFlags::WIDE_CHAR_SPACER);
-                    }
-                }
+                row_cells.write_ascii(col, &remaining[..write_len], template);
             }
             self.mark_dirty(row);
 
@@ -618,6 +754,7 @@ impl Grid {
             } else {
                 self.cursor.position.col = end_col;
             }
+            self.record_print(row, end_col - 1);
         }
     }
 
@@ -672,22 +809,8 @@ impl Grid {
             }
         }
 
-        for col in start_col..end_col {
-            let is_wide = self.cell(col, row).is_some_and(|cell| cell.is_wide());
-            let is_spacer = self
-                .cell(col, row)
-                .is_some_and(|cell| cell.is_wide_spacer());
-            if is_wide && col + 1 < self.dims.cols {
-                if let Some(spacer) = self.cell_mut(col + 1, row) {
-                    spacer.clear();
-                }
-            }
-            if is_spacer && col > 0 {
-                if let Some(primary) = self.cell_mut(col - 1, row) {
-                    primary.clear();
-                }
-            }
-        }
+        // Every cell in start_col..end_col is overwritten, so a wide char
+        // can only be split at the two edges handled above.
     }
 
     /// Move cursor up, stopping at scroll region top if inside region.
@@ -715,7 +838,7 @@ impl Grid {
         } else {
             self.dims.rows.saturating_sub(1)
         };
-        self.cursor.position.row = (self.cursor.position.row + n).min(bottom);
+        self.cursor.position.row = self.cursor.position.row.saturating_add(n).min(bottom);
     }
 
     /// Move cursor left, stopping at left edge.
@@ -727,8 +850,12 @@ impl Grid {
     /// Move cursor right, stopping at right edge.
     pub fn cursor_right(&mut self, n: u16) {
         self.cursor.wrap_pending = false;
-        self.cursor.position.col =
-            (self.cursor.position.col + n).min(self.dims.cols.saturating_sub(1));
+        self.cursor.position.col = self
+            .cursor
+            .position
+            .col
+            .saturating_add(n)
+            .min(self.dims.cols.saturating_sub(1));
     }
 
     /// Set absolute cursor position (1-based like ANSI).
@@ -881,9 +1008,6 @@ impl Grid {
         let n = n as usize;
         let region_height = (region.bottom.saturating_sub(region.top) + 1) as usize;
 
-        // Clear combining chars for the entire scroll region
-        self.clear_combining_rows(region.top, region.bottom);
-
         if n >= region_height {
             // Clear the entire scroll region
             for row_idx in region.top..=region.bottom {
@@ -917,9 +1041,6 @@ impl Grid {
         let bg = self.attrs.bg();
         let n = n as usize;
         let region_height = (region.bottom.saturating_sub(region.top) + 1) as usize;
-
-        // Clear combining chars for the entire scroll region
-        self.clear_combining_rows(region.top, region.bottom);
 
         if n >= region_height {
             // Clear the entire scroll region
@@ -960,9 +1081,6 @@ impl Grid {
         if cursor_row < region.top || cursor_row > region.bottom {
             return;
         }
-
-        // Clear combining chars for affected rows
-        self.clear_combining_rows(cursor_row, region.bottom);
 
         let n = n as usize;
         let region_height = (region.bottom.saturating_sub(cursor_row) + 1) as usize;
@@ -1018,9 +1136,6 @@ impl Grid {
             return;
         }
 
-        // Clear combining chars for affected rows
-        self.clear_combining_rows(cursor_row, region.bottom);
-
         let n = n as usize;
         let region_height = (region.bottom.saturating_sub(cursor_row) + 1) as usize;
 
@@ -1066,23 +1181,7 @@ impl Grid {
     pub fn erase_below(&mut self) {
         let r = self.cursor.position.row;
         let bg = self.attrs.bg();
-        // Clear combining chars: partial cursor row (cursor_col..end) + all rows below
-        for col in self.cursor.position.col..self.dims.cols {
-            self.combining.remove(&(r, col));
-        }
-        if r + 1 < self.dims.rows {
-            self.clear_combining_rows(r + 1, self.dims.rows.saturating_sub(1));
-        }
-
-        // Erase from cursor to end of current line
-        if let Some(row) = self.rows.get_mut(r as usize) {
-            for i in self.cursor.position.col..self.dims.cols {
-                if let Some(cell) = row.get_mut(i) {
-                    cell.erase(bg);
-                }
-            }
-        }
-        self.mark_dirty(r);
+        self.erase_cells(r, self.cursor.position.col, self.dims.cols);
 
         // Erase all lines below cursor
         for row_idx in (r + 1)..self.dims.rows {
@@ -1097,13 +1196,6 @@ impl Grid {
     pub fn erase_above(&mut self) {
         let r = self.cursor.position.row;
         let bg = self.attrs.bg();
-        // Clear combining chars: all rows above cursor + partial cursor row (0..=cursor_col)
-        if r > 0 {
-            self.clear_combining_rows(0, r - 1);
-        }
-        for col in 0..=self.cursor.position.col {
-            self.combining.remove(&(r, col));
-        }
 
         // Erase all lines above cursor
         for row_idx in 0..r {
@@ -1114,20 +1206,42 @@ impl Grid {
         }
 
         // Erase from start of current line to cursor
-        if let Some(row) = self.rows.get_mut(r as usize) {
-            for i in 0..=self.cursor.position.col {
-                if let Some(cell) = row.get_mut(i) {
+        self.erase_cells(r, 0, self.cursor.position.col.saturating_add(1));
+    }
+
+    /// Erase cells `start..end` of `row` with the current background.
+    ///
+    /// A wide char that straddles either boundary is erased whole, so the
+    /// row never keeps half of one (xterm behaves the same way).
+    pub fn erase_cells(&mut self, row: u16, start: u16, end: u16) {
+        let cols = self.dims.cols;
+        let end = end.min(cols);
+        if start >= end {
+            return;
+        }
+        let mut start = start;
+        let mut end = end;
+        if start > 0 && self.cell(start, row).is_some_and(|c| c.is_wide_spacer()) {
+            start -= 1;
+        }
+        if end < cols && self.cell(end - 1, row).is_some_and(|c| c.is_wide()) {
+            end += 1;
+        }
+        let bg = self.attrs.bg();
+        if let Some(r) = self.rows.get_mut(row as usize) {
+            r.clear_graphemes(start, end);
+            for col in start..end {
+                if let Some(cell) = r.get_mut(col) {
                     cell.erase(bg);
                 }
             }
         }
-        self.mark_dirty(r);
+        self.mark_dirty(row);
     }
 
     /// Erase entire display.
     pub fn clear(&mut self) {
         let bg = self.attrs.bg();
-        self.combining.clear();
         for row in &mut self.rows {
             row.erase(bg);
         }
@@ -1137,17 +1251,8 @@ impl Grid {
     /// Erase from cursor to end of line.
     pub fn erase_line_right(&mut self) {
         let r = self.cursor.position.row;
-        let bg = self.attrs.bg();
-        // Clear combining chars for erased cells on this row
-        for col in self.cursor.position.col..self.dims.cols {
-            self.combining.remove(&(r, col));
-        }
+        self.erase_cells(r, self.cursor.position.col, self.dims.cols);
         if let Some(row) = self.rows.get_mut(r as usize) {
-            for i in self.cursor.position.col..self.dims.cols {
-                if let Some(cell) = row.get_mut(i) {
-                    cell.erase(bg);
-                }
-            }
             // Erasing to end of line means this line ends here (hard break),
             // so clear the wrapped flag. This is important for proper reflow
             // when resizing - content after an erase-to-EOL should not be
@@ -1160,26 +1265,13 @@ impl Grid {
     /// Erase from start of line to cursor.
     pub fn erase_line_left(&mut self) {
         let r = self.cursor.position.row;
-        let bg = self.attrs.bg();
-        // Clear combining chars for erased cells on this row
-        for col in 0..=self.cursor.position.col {
-            self.combining.remove(&(r, col));
-        }
-        if let Some(row) = self.rows.get_mut(r as usize) {
-            for i in 0..=self.cursor.position.col {
-                if let Some(cell) = row.get_mut(i) {
-                    cell.erase(bg);
-                }
-            }
-        }
-        self.mark_dirty(r);
+        self.erase_cells(r, 0, self.cursor.position.col.saturating_add(1));
     }
 
     /// Erase entire current line.
     pub fn erase_line(&mut self) {
         let r = self.cursor.position.row;
         let bg = self.attrs.bg();
-        self.clear_combining_rows(r, r);
         if let Some(row) = self.rows.get_mut(r as usize) {
             row.erase(bg);
         }
@@ -1199,8 +1291,6 @@ impl Grid {
         let new_cols = new_dims.cols;
 
         if new_cols != self.dims.cols {
-            // Cell coordinates beyond the new width are gone
-            self.combining.retain(|&(_, col), _| col < new_cols);
             for row in &mut self.rows {
                 row.resize(new_cols);
             }
@@ -1211,7 +1301,6 @@ impl Grid {
             self.rows.push(Row::new(new_cols));
         }
         self.rows.truncate(new_dims.rows as usize);
-        self.combining.retain(|&(row, _), _| row < new_dims.rows);
 
         // Clamp cursor
         self.cursor.position.col = self
@@ -1253,8 +1342,6 @@ impl Grid {
         // Row indices changed, so any scroll region is meaningless now.
         // Apps that need one re-set it after SIGWINCH (xterm does the same).
         self.scroll_region = None;
-        // Combining marks are keyed by (row, col) which the reflow invalidated
-        self.combining.clear();
 
         // Ensure correct number of rows
         while self.rows.len() < new_dims.rows as usize {
@@ -1964,7 +2051,7 @@ mod tests {
     }
 
     #[test]
-    fn combining_chars_cleared_on_scroll_up() {
+    fn combining_chars_move_with_scrolled_rows() {
         let mut grid = Grid::new(Dimensions::new(10, 5));
 
         // Write 'e' with combining accent on row 2
@@ -1974,9 +2061,9 @@ mod tests {
         grid.write_char('\u{0301}');
         assert!(grid.combining_chars(2, 0).is_some());
 
-        // Scroll up - combining chars should be cleaned
+        // Scroll up - the mark moves with its row instead of being dropped
         grid.scroll_up(1);
-        // Old combining entry at (2, 0) should be gone
+        assert_eq!(grid.combining_chars(1, 0), Some(&['\u{0301}'][..]));
         assert!(grid.combining_chars(2, 0).is_none());
     }
 
@@ -2004,7 +2091,7 @@ mod tests {
         assert!(grid.combining_chars(0, 0).is_some());
 
         grid.clear();
-        assert!(grid.combining.is_empty());
+        assert!(grid.combining_chars(0, 0).is_none());
     }
 
     #[test]

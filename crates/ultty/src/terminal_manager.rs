@@ -7,10 +7,11 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::os::fd::RawFd;
 use std::path::Path;
 
-use crate::event_loop::{EventLoop as TerminalEventLoop, TerminalEvent};
+use std::sync::Arc;
+
+use crate::event_loop::{EventLoop as TerminalEventLoop, TerminalEvent, Waker};
 use crate::pty::{Child, PtySize};
 
 /// Extra environment variables for the shells of one tab.
@@ -204,9 +205,27 @@ pub struct TerminalManager {
     /// Default terminal dimensions
     default_cols: u16,
     default_rows: u16,
+    /// Handed to every terminal so its I/O thread can wake the UI.
+    waker: Option<Waker>,
 }
 
 impl TerminalManager {
+    /// Register the callback every terminal's I/O thread uses to wake the
+    /// UI, for existing terminals and any created later.
+    pub fn set_waker(&mut self, waker: Waker) {
+        for terminal in &self.terminals {
+            terminal.event_loop.set_waker(Arc::clone(&waker));
+        }
+        self.waker = Some(waker);
+    }
+
+    fn push_terminal(&mut self, terminal: ManagedTerminal) {
+        if let Some(waker) = &self.waker {
+            terminal.event_loop.set_waker(Arc::clone(waker));
+        }
+        self.terminals.push(terminal);
+    }
+
     /// Create a new terminal manager with one tab and one terminal.
     ///
     /// The initial tab's shell gets no extra environment; use
@@ -226,6 +245,7 @@ impl TerminalManager {
             next_tab_id: 0,
             default_cols: cols,
             default_rows: rows,
+            waker: None,
         };
 
         // Create initial tab with terminal
@@ -327,7 +347,7 @@ impl TerminalManager {
             env,
         )?;
 
-        self.terminals.push(terminal);
+        self.push_terminal(terminal);
         Ok(terminal_id)
     }
 
@@ -505,15 +525,6 @@ impl TerminalManager {
         }
 
         Ok(all_events)
-    }
-
-    /// Return PTY master file descriptors for all live terminals.
-    pub fn pty_fds(&self) -> Vec<RawFd> {
-        self.terminals
-            .iter()
-            .filter(|terminal| !terminal.has_exited())
-            .map(|terminal| terminal.event_loop.pty_fd())
-            .collect()
     }
 
     /// Remove exited terminals and their empty tabs.
@@ -783,7 +794,7 @@ impl TerminalManager {
             title: format!("Terminal {}", terminal_id.0),
         };
 
-        self.terminals.push(terminal);
+        self.push_terminal(terminal);
         Ok(terminal_id)
     }
 
@@ -935,8 +946,12 @@ impl TerminalManager {
                     .terminals
                     .first()
                     .and_then(|&tid| self.terminals.iter().find(|t| t.id == tid))
-                    .and_then(|t| t.event_loop.terminal().working_directory())
-                    .map(|s| s.to_string());
+                    .and_then(|t| {
+                        t.event_loop
+                            .terminal()
+                            .working_directory()
+                            .map(str::to_string)
+                    });
 
                 TabData {
                     title: tab.title.clone(),
@@ -980,6 +995,7 @@ impl TerminalManager {
             next_tab_id: 0,
             default_cols: cols,
             default_rows: rows,
+            waker: None,
         };
 
         for (i, tab_data) in session.tabs.iter().enumerate() {
@@ -1124,6 +1140,28 @@ impl ManagedTerminal {
 mod tests {
     use super::*;
 
+    /// A manager whose only tab runs a shell that prints nothing.
+    ///
+    /// The I/O thread parses child output as it arrives, so a login shell's
+    /// prompt (which on many systems sets the window title) would race with
+    /// tests that set terminal state directly. `sh` stays a shell, so the
+    /// foreground-process name does not stand in for the title either.
+    fn quiet_manager() -> TerminalManager {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let first = manager.active_tab().unwrap().id;
+        manager
+            .create_tab_with_command(
+                "/bin/sh",
+                &["-c".to_string(), "read never".to_string()],
+                None,
+                None,
+                &mut no_tab_env,
+            )
+            .unwrap();
+        manager.close_tab(first);
+        manager
+    }
+
     #[test]
     fn create_manager() {
         let manager = TerminalManager::new(80, 24).unwrap();
@@ -1146,7 +1184,7 @@ mod tests {
 
     #[test]
     fn tab_display_title_uses_osc_title_for_default_tabs() {
-        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let mut manager = quiet_manager();
         let tab_id = manager.active_tab().unwrap().id;
         manager.terminals[0]
             .event_loop
@@ -1158,11 +1196,13 @@ mod tests {
 
     #[test]
     fn tab_display_title_falls_back_to_working_directory_for_shell_titles() {
-        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let mut manager = quiet_manager();
         let tab_id = manager.active_tab().unwrap().id;
-        let terminal = manager.terminals[0].event_loop.terminal_mut();
-        terminal.set_title("zsh".to_string());
-        terminal.set_working_directory("/tmp/ultty-project".to_string());
+        {
+            let mut terminal = manager.terminals[0].event_loop.terminal_mut();
+            terminal.set_title("zsh".to_string());
+            terminal.set_working_directory("/tmp/ultty-project".to_string());
+        }
 
         assert_eq!(manager.tab_display_title(tab_id), "/tmp/ultty-project");
     }

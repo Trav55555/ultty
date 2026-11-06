@@ -1,7 +1,7 @@
 //! Handler that applies ANSI parser actions to the Terminal.
 
+use crate::ansi::{Action, Attribute, Color as AnsiColor, Mode, NamedColor};
 use crate::grid::{decode_sixel, CellFlags, MouseEncoding, MouseMode, Terminal, TerminalImage};
-use crate::protocol::ansi::{Action, Attribute, Color as AnsiColor, Mode, NamedColor};
 
 use super::cell::Color;
 
@@ -116,42 +116,10 @@ impl<'a> TerminalHandler<'a> {
                 _ => {}
             },
             Action::EraseCharacters(n) => {
-                let col = self.terminal.grid().cursor().position.col;
-                let row = self.terminal.grid().cursor().position.row;
-                let cols = self.terminal.grid().dimensions().cols;
-                let bg = self.terminal.grid().attrs().bg();
-                let end = col.saturating_add(n).min(cols);
-
-                // Check for orphaned wide char at the start boundary
-                if col > 0
-                    && self
-                        .terminal
-                        .grid()
-                        .cell(col, row)
-                        .is_some_and(|c| c.is_wide_spacer())
-                {
-                    if let Some(primary) = self.terminal.grid_mut().cell_mut(col - 1, row) {
-                        primary.erase(bg);
-                    }
-                }
-                // Check for orphaned wide char spacer at the end boundary
-                if end < cols
-                    && self
-                        .terminal
-                        .grid()
-                        .cell(end, row)
-                        .is_some_and(|c| c.is_wide_spacer())
-                {
-                    if let Some(spacer) = self.terminal.grid_mut().cell_mut(end, row) {
-                        spacer.erase(bg);
-                    }
-                }
-
-                for c in col..end {
-                    if let Some(cell) = self.terminal.grid_mut().cell_mut(c, row) {
-                        cell.erase(bg);
-                    }
-                }
+                let pos = self.terminal.grid().cursor().position;
+                self.terminal
+                    .grid_mut()
+                    .erase_cells(pos.row, pos.col, pos.col.saturating_add(n));
             }
 
             // Line operations
@@ -507,7 +475,13 @@ impl<'a> TerminalHandler<'a> {
                             2
                         }
                     }
-                    2027 => 2, // Unicode core spec - not implemented
+                    2027 => {
+                        if self.terminal.grid().grapheme_clustering() {
+                            1
+                        } else {
+                            2
+                        }
+                    }
                     // Mode not recognized
                     _ => 0,
                 };
@@ -520,6 +494,7 @@ impl<'a> TerminalHandler<'a> {
 
             // Full reset (RIS — ESC c)
             Action::FullReset => {
+                self.terminal.set_grapheme_clustering(true);
                 self.terminal.grid_mut().clear();
                 self.terminal.grid_mut().reset_attrs();
                 self.terminal.grid_mut().set_scroll_region(0, 0);
@@ -737,6 +712,9 @@ impl<'a> TerminalHandler<'a> {
                 // defers rendering until the mode is disabled (ESU received).
                 self.terminal.modes_mut().synchronized_update = enabled;
             }
+            Mode::GraphemeClustering => {
+                self.terminal.set_grapheme_clustering(enabled);
+            }
         }
     }
 
@@ -833,13 +811,189 @@ fn convert_named_color(named: NamedColor) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ansi::AnsiParser;
     use crate::grid::{cell::Color, Dimensions};
-    use crate::protocol::ansi::AnsiParser;
 
     fn process(terminal: &mut Terminal, input: &[u8]) {
         let mut parser = AnsiParser::new();
         let mut handler = TerminalHandler::new(terminal);
         parser.feed(input, |action| handler.handle(action));
+    }
+
+    fn cursor_col(term: &Terminal) -> u16 {
+        term.grid().cursor().position.col
+    }
+
+    #[test]
+    fn maximal_cursor_motion_parameters_clamp_instead_of_overflowing() {
+        let mut term = Terminal::new(Dimensions::new(10, 5));
+        process(&mut term, b"\x1b[3;3H\x1b[65535B\x1b[65535C");
+        assert_eq!(term.grid().cursor().position.row, 4);
+        assert_eq!(term.grid().cursor().position.col, 9);
+    }
+
+    #[test]
+    fn screen_alignment_replaces_wide_chars_with_plain_cells() {
+        let mut term = Terminal::new(Dimensions::new(3, 2));
+        process(&mut term, "\x1b[2G\u{4e2d}\x1b#8\u{4e2d}".as_bytes());
+        assert_eq!(term.check_integrity(), Ok(()));
+        assert_eq!(term.grid().cell(2, 0).unwrap().char(), 'E');
+    }
+
+    #[test]
+    fn wide_char_overlapping_the_next_wide_char_clears_its_spacer() {
+        let mut term = Terminal::new(Dimensions::new(6, 1));
+        // Wide char at cols 1-2, then a wide char at cols 0-1 overwrites its
+        // first half; col 2 must not keep a spacer with no primary.
+        process(&mut term, "a\u{4e2d}\r\u{4e2d}".as_bytes());
+        assert_eq!(term.check_integrity(), Ok(()));
+        assert_eq!(term.grid().cell(2, 0).unwrap().char(), ' ');
+    }
+
+    #[test]
+    fn partial_erases_never_split_a_wide_char() {
+        // Cursor on the spacer of a wide char at cols 2-3.
+        for erase in [&b"\x1b[J"[..], b"\x1b[K", b"\x1b[1K", b"\x1b[1J", b"\x1b[X"] {
+            let mut term = Terminal::new(Dimensions::new(6, 2));
+            process(&mut term, "ab\u{4e2d}cd\x1b[1;4H".as_bytes());
+            process(&mut term, erase);
+            assert_eq!(term.check_integrity(), Ok(()), "after {erase:?}");
+            assert!(
+                !term.grid().cell(2, 0).unwrap().is_wide(),
+                "after {erase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn copied_text_keeps_graphemes_and_skips_wide_spacers() {
+        use crate::grid::{SelectionMode, SelectionPoint};
+
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(
+            &mut term,
+            "e\u{301}\u{4e2d}\u{6587}\u{2764}\u{fe0f}!".as_bytes(),
+        );
+        term.start_selection(SelectionPoint::new(0, 0), SelectionMode::Normal);
+        term.update_selection(SelectionPoint::new(19, 0));
+        assert_eq!(
+            term.selected_text().as_deref(),
+            Some("e\u{301}\u{4e2d}\u{6587}\u{2764}\u{fe0f}!")
+        );
+    }
+
+    #[test]
+    fn combining_mark_survives_scroll() {
+        let mut term = Terminal::new(Dimensions::new(10, 3));
+        process(&mut term, "a\r\ne\u{301}\r\nx\r\ny".as_bytes());
+        // One line scrolled off; the accented line is now the top row.
+        assert_eq!(term.grid().grapheme(0, 0).as_deref(), Some("e\u{301}"));
+    }
+
+    #[test]
+    fn combining_mark_survives_into_scrollback_and_reflow() {
+        let mut term = Terminal::new(Dimensions::new(10, 2));
+        process(&mut term, "e\u{301}\r\nx\r\ny".as_bytes());
+        let mut history = term.buffer().clone();
+        history.scroll_up(1);
+        let top = history.visible_row(0).expect("history row");
+        assert_eq!(top.grapheme(0).as_deref(), Some("e\u{301}"));
+        assert_eq!(top.text_trimmed(), "e\u{301}");
+
+        term.resize(Dimensions::new(6, 2));
+        let mut history = term.buffer().clone();
+        history.scroll_up(1);
+        let top = history.visible_row(0).expect("history row after reflow");
+        assert_eq!(top.grapheme(0).as_deref(), Some("e\u{301}"));
+    }
+
+    #[test]
+    fn insert_and_delete_chars_move_combining_marks() {
+        let mut term = Terminal::new(Dimensions::new(10, 2));
+        process(&mut term, "ae\u{301}".as_bytes());
+        process(&mut term, b"\x1b[1G\x1b[@"); // ICH 1 at column 0
+        assert_eq!(term.grid().grapheme(0, 2).as_deref(), Some("e\u{301}"));
+        assert_eq!(term.grid().grapheme(0, 1).as_deref(), Some("a"));
+        process(&mut term, b"\x1b[1G\x1b[2P"); // DCH 2 at column 0
+        assert_eq!(term.grid().grapheme(0, 0).as_deref(), Some("e\u{301}"));
+        assert!(term.grid().combining_chars(0, 2).is_none());
+    }
+
+    #[test]
+    fn zwj_sequence_occupies_one_wide_cell() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(&mut term, family.as_bytes());
+        assert_eq!(cursor_col(&term), 2);
+        assert_eq!(term.grid().grapheme(0, 0).as_deref(), Some(family));
+        assert!(term.grid().cell(1, 0).unwrap().is_wide_spacer());
+    }
+
+    #[test]
+    fn emoji_presentation_selector_widens_narrow_base() {
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(&mut term, "\u{2764}\u{fe0f}x".as_bytes());
+        assert!(term.grid().cell(0, 0).unwrap().is_wide());
+        assert!(term.grid().cell(1, 0).unwrap().is_wide_spacer());
+        assert_eq!(term.grid().cell(2, 0).unwrap().char(), 'x');
+        assert_eq!(cursor_col(&term), 3);
+    }
+
+    #[test]
+    fn regional_indicators_pair_into_flags() {
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        // Two flags: US then DE.
+        process(&mut term, "\u{1f1fa}\u{1f1f8}\u{1f1e9}\u{1f1ea}".as_bytes());
+        assert_eq!(cursor_col(&term), 4);
+        assert_eq!(
+            term.grid().grapheme(0, 0).as_deref(),
+            Some("\u{1f1fa}\u{1f1f8}")
+        );
+        assert_eq!(
+            term.grid().grapheme(0, 2).as_deref(),
+            Some("\u{1f1e9}\u{1f1ea}")
+        );
+    }
+
+    #[test]
+    fn skin_tone_modifier_joins_its_base() {
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(&mut term, "\u{1f44d}\u{1f3fd}".as_bytes());
+        assert_eq!(cursor_col(&term), 2);
+    }
+
+    #[test]
+    fn cursor_motion_breaks_the_cluster() {
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(&mut term, "\u{1f1fa}\x1b[1;6H\u{1f1f8}".as_bytes());
+        assert_eq!(term.grid().grapheme(0, 0).as_deref(), Some("\u{1f1fa}"));
+        assert_eq!(term.grid().grapheme(0, 5).as_deref(), Some("\u{1f1f8}"));
+    }
+
+    #[test]
+    fn cluster_continuation_at_right_margin_does_not_wrap() {
+        let mut term = Terminal::new(Dimensions::new(4, 2));
+        process(&mut term, "ab\u{1f468}\u{200d}\u{1f469}".as_bytes());
+        assert_eq!(term.grid().cursor().position.row, 0);
+        assert_eq!(
+            term.grid().grapheme(0, 2).as_deref(),
+            Some("\u{1f468}\u{200d}\u{1f469}")
+        );
+    }
+
+    #[test]
+    fn mode_2027_reset_restores_per_codepoint_widths() {
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(&mut term, b"\x1b[?2027$p");
+        assert_eq!(term.take_responses(), vec![b"\x1b[?2027;1$y".to_vec()]);
+
+        process(&mut term, b"\x1b[?2027l\x1b[?2027$p");
+        assert_eq!(term.take_responses(), vec![b"\x1b[?2027;2$y".to_vec()]);
+        process(&mut term, "\u{1f468}\u{200d}\u{1f469}".as_bytes());
+        assert_eq!(cursor_col(&term), 4);
+
+        process(&mut term, b"\x1bc");
+        assert!(term.grid().grapheme_clustering());
     }
 
     #[test]

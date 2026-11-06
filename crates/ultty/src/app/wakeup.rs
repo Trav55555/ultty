@@ -1,10 +1,12 @@
-//! Bridge runtime fd readiness into the winit event loop.
+//! Bridge socket readiness (native protocol and control servers) into the
+//! winit event loop. PTY output does not come through here: each terminal's
+//! I/O thread wakes the UI directly.
 
-use std::os::fd::RawFd;
+use std::os::fd::{BorrowedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use polling::{Event as PollEvent, Events, Poller};
 use winit::event_loop::EventLoopProxy;
@@ -13,15 +15,16 @@ use super::AppEvent;
 
 const WATCH_TIMEOUT: Duration = Duration::from_millis(100);
 const WAKE_COALESCE: Duration = Duration::from_millis(1);
+const REREGISTER_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Sends a winit user event when any tracked runtime fd becomes readable.
-pub(super) struct PtyWakeup {
+pub(super) struct SocketWakeup {
     fds: Arc<Mutex<Vec<RawFd>>>,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
-impl PtyWakeup {
+impl SocketWakeup {
     pub(super) fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
         let fds = Arc::new(Mutex::new(Vec::<RawFd>::new()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -47,7 +50,7 @@ impl PtyWakeup {
     }
 }
 
-impl Drop for PtyWakeup {
+impl Drop for SocketWakeup {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
@@ -61,33 +64,61 @@ fn watch_runtime_readiness(
     stop: Arc<AtomicBool>,
     proxy: EventLoopProxy<AppEvent>,
 ) {
+    let poller = match Poller::new() {
+        Ok(poller) => poller,
+        Err(err) => {
+            tracing::warn!("runtime wakeup disabled: cannot create poller: {err}");
+            return;
+        }
+    };
+    let mut registered: Vec<RawFd> = Vec::new();
+    let mut last_registration = Instant::now();
+    let mut events = Events::new();
+
     while !stop.load(Ordering::Relaxed) {
-        let snapshot = fds.lock().map(|fds| fds.clone()).unwrap_or_default();
-        if snapshot.is_empty() {
+        let wanted = fds.lock().map(|fds| fds.clone()).unwrap_or_default();
+        // A closed socket's fd number can be reused by a new one while the
+        // set of numbers stays the same, silently dropping its epoll
+        // registration; re-registering now and then recovers from that.
+        if wanted != registered || last_registration.elapsed() >= REREGISTER_INTERVAL {
+            for &fd in &registered {
+                // SAFETY: only used to name the fd for removal; a closed or
+                // reused number makes epoll_ctl fail, which is ignored.
+                let _ = poller.delete(unsafe { BorrowedFd::borrow_raw(fd) });
+            }
+            registered.clear();
+            for (index, &fd) in wanted.iter().enumerate() {
+                // SAFETY: the fds are listener sockets owned by the UI
+                // thread's servers; a stale number fails registration and
+                // is skipped until the next refresh.
+                if unsafe { poller.add(fd, PollEvent::readable(index)) }.is_ok() {
+                    registered.push(fd);
+                }
+            }
+            last_registration = Instant::now();
+        } else {
+            // Readiness is one-shot; re-arm everything for the next wait.
+            for (index, &fd) in registered.iter().enumerate() {
+                // SAFETY: as above; failures are ignored.
+                let _ = poller.modify(
+                    unsafe { BorrowedFd::borrow_raw(fd) },
+                    PollEvent::readable(index),
+                );
+            }
+        }
+
+        events.clear();
+        if poller.wait(&mut events, Some(WATCH_TIMEOUT)).is_err() {
             thread::sleep(WATCH_TIMEOUT);
             continue;
         }
-
-        if wait_for_readable_fd(&snapshot, WATCH_TIMEOUT).unwrap_or(false) {
+        if !events.is_empty() {
             if proxy.send_event(AppEvent::RuntimeReadable).is_err() {
                 break;
             }
             thread::sleep(WAKE_COALESCE);
         }
     }
-}
-
-fn wait_for_readable_fd(fds: &[RawFd], timeout: Duration) -> std::io::Result<bool> {
-    let poller = Poller::new()?;
-    for (index, fd) in fds.iter().copied().enumerate() {
-        // SAFETY: `fd` is a best-effort snapshot owned by the UI thread. If it
-        // has already closed, registration fails and this wake cycle skips it.
-        let _ = unsafe { poller.add(fd, PollEvent::readable(index)) };
-    }
-
-    let mut events = Events::new();
-    poller.wait(&mut events, Some(timeout))?;
-    Ok(!events.is_empty())
 }
 
 fn normalize_fds(fds: &mut Vec<RawFd>) {
