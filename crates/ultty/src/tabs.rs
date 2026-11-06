@@ -31,6 +31,11 @@ pub const MIN_TAB_WIDTH: f32 = 80.0;
 /// Width reserved for window control buttons (close, maximize, minimize) on the right.
 pub const WINDOW_CONTROLS_WIDTH: f32 = 108.0;
 
+/// Gap between the window edge and the nearest chrome button (the "+" on
+/// the left, the window controls on the right). It keeps the top corners
+/// free for resizing instead of handing them to a button.
+pub const CHROME_EDGE_INSET: f32 = 12.0;
+
 /// Width of each window control button.
 pub const WINDOW_BUTTON_WIDTH: f32 = 36.0;
 
@@ -145,8 +150,8 @@ impl TabBarState {
             .map(|width| width.max(MIN_TAB_WIDTH))
             .unwrap_or_else(|| ideal_width.max(MIN_TAB_WIDTH));
 
-        // "+" button is at the left edge
-        self.new_tab_button_x = 0.0;
+        // "+" button sits just inside the left edge
+        self.new_tab_button_x = CHROME_EDGE_INSET;
 
         let mut x = tabs_start_x;
         for (index, tab) in tabs.iter().enumerate() {
@@ -210,7 +215,7 @@ impl TabBarState {
         if !self.visible || !(0.0..TITLE_BAR_HEIGHT).contains(&y) {
             return None;
         }
-        let controls_start = self.total_width - WINDOW_CONTROLS_WIDTH;
+        let controls_start = self.total_width - CHROME_EDGE_INSET - WINDOW_CONTROLS_WIDTH;
         if x < controls_start {
             return None;
         }
@@ -790,18 +795,18 @@ mod tests {
     #[test]
     fn single_tab_plus_is_clickable_in_title_band() {
         let state = bar_with(1, 0, 800.0);
-        assert!(state.is_new_tab_button_at(5.0, 10.0));
-        assert!(!state.is_drag_area(5.0, 10.0));
-        assert!(!state.is_new_tab_button_at(5.0, -1.0));
-        assert!(!state.is_new_tab_button_at(5.0, TITLE_BAR_HEIGHT));
+        assert!(state.is_new_tab_button_at(CHROME_EDGE_INSET + 5.0, 10.0));
+        assert!(!state.is_drag_area(CHROME_EDGE_INSET + 5.0, 10.0));
+        assert!(!state.is_new_tab_button_at(CHROME_EDGE_INSET + 5.0, -1.0));
+        assert!(!state.is_new_tab_button_at(CHROME_EDGE_INSET + 5.0, TITLE_BAR_HEIGHT));
     }
 
     #[test]
     fn multi_tab_plus_is_clickable_in_title_band() {
         let state = bar_with(2, 0, 800.0);
-        assert!(state.is_new_tab_button_at(5.0, 10.0));
-        assert!(!state.is_new_tab_button_at(5.0, TITLE_BAR_HEIGHT + 10.0));
-        assert!(!state.is_drag_area(5.0, 10.0));
+        assert!(state.is_new_tab_button_at(CHROME_EDGE_INSET + 5.0, 10.0));
+        assert!(!state.is_new_tab_button_at(CHROME_EDGE_INSET + 5.0, TITLE_BAR_HEIGHT + 10.0));
+        assert!(!state.is_drag_area(CHROME_EDGE_INSET + 5.0, 10.0));
         assert_eq!(state.tab_at_x(5.0), Some(0));
         assert!(!state.is_drag_area(5.0, TITLE_BAR_HEIGHT + 10.0));
     }
@@ -812,24 +817,42 @@ mod tests {
         assert!(state.is_drag_area(400.0, 10.0));
         assert!(!state.is_drag_area(400.0, -1.0));
         assert!(!state.is_drag_area(400.0, TAB_BAR_HEIGHT));
-        assert!(!state.is_drag_area(790.0, 10.0));
+        assert!(!state.is_drag_area(800.0 - CHROME_EDGE_INSET - 10.0, 10.0));
     }
 
     #[test]
     fn title_band_toggle_area_excludes_interactive_chrome_controls() {
         let state = bar_with(2, 0, 800.0);
         assert!(state.is_title_bar_toggle_area(400.0, 10.0));
-        assert!(!state.is_title_bar_toggle_area(5.0, 10.0));
-        assert!(!state.is_title_bar_toggle_area(790.0, 10.0));
+        assert!(!state.is_title_bar_toggle_area(CHROME_EDGE_INSET + 5.0, 10.0));
+        assert!(!state.is_title_bar_toggle_area(800.0 - CHROME_EDGE_INSET - 10.0, 10.0));
         assert!(!state.is_title_bar_toggle_area(400.0, -1.0));
         assert!(!state.is_title_bar_toggle_area(400.0, TITLE_BAR_HEIGHT));
         assert!(!state.is_title_bar_toggle_area(400.0, TITLE_BAR_HEIGHT + 10.0));
     }
 
     #[test]
+    fn chrome_buttons_leave_the_top_corners_free() {
+        let state = bar_with(2, 0, 800.0);
+        // The outermost CHROME_EDGE_INSET pixels belong to no button.
+        for x in [0.0, CHROME_EDGE_INSET - 1.0] {
+            assert!(!state.is_new_tab_button_at(x, 4.0));
+        }
+        for x in [800.0 - CHROME_EDGE_INSET, 799.0] {
+            assert_eq!(state.window_control_at(x, 4.0), None);
+        }
+        // The buttons themselves are still there, just inset.
+        assert!(state.is_new_tab_button_at(CHROME_EDGE_INSET + 4.0, 10.0));
+        assert_eq!(
+            state.window_control_at(800.0 - CHROME_EDGE_INSET - 4.0, 10.0),
+            Some(WindowControl::Close)
+        );
+    }
+
+    #[test]
     fn window_controls_are_only_in_title_band() {
         let state = bar_with(2, 0, 800.0);
-        let minimize_x = 800.0 - WINDOW_CONTROLS_WIDTH + 10.0;
+        let minimize_x = 800.0 - CHROME_EDGE_INSET - WINDOW_CONTROLS_WIDTH + 10.0;
         assert_eq!(
             state.window_control_at(minimize_x, 10.0),
             Some(WindowControl::Minimize)
