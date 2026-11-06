@@ -73,7 +73,7 @@ workspace has two license files and an excluded standalone package, license
 drift is easy to miss.
 
 **Scope.** Add `deny.toml` covering `advisories`, `licenses`, `bans`, and
-`sources`, then add a `cargo-deny` job to `.github/workflows/ci.yml` pinned the
+`sources`, then add a `cargo-deny` job to `.gitea/workflows/ci.yml` pinned the
 same way the other jobs are. Reconcile its advisory ignores with
 `scripts/security-audit.sh` so there is one list, not two.
 
