@@ -646,7 +646,9 @@ impl Renderer {
         });
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
+        self.tab_bar_height = overlay
+            .tab_bar
+            .map_or(crate::tabs::TERMINAL_TOP_PADDING, |tb| tb.content_top());
         self.text_renderer.begin_frame();
 
         let mut encoder = self
@@ -907,7 +909,9 @@ impl Renderer {
         overlay: &OverlayState,
     ) {
         // Update tab bar height from overlay state
-        self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
+        self.tab_bar_height = overlay
+            .tab_bar
+            .map_or(crate::tabs::TERMINAL_TOP_PADDING, |tb| tb.content_top());
         self.text_renderer.begin_frame();
 
         let view = output
@@ -1260,7 +1264,9 @@ impl Renderer {
         native_search_matches: Option<&[crate::scene::SearchMatch]>,
         native_search_index: usize,
     ) {
-        self.tab_bar_height = overlay.tab_bar.map(|tb| tb.height()).unwrap_or(0.0);
+        self.tab_bar_height = overlay
+            .tab_bar
+            .map_or(crate::tabs::TERMINAL_TOP_PADDING, |tb| tb.content_top());
         self.text_renderer.begin_frame();
 
         let view = output

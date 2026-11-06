@@ -239,7 +239,8 @@ impl App {
         renderer.set_opacity(config.behavior.opacity);
 
         // Tab bar is always visible (CSD), set its height before sizing the terminal
-        renderer.set_tab_bar_height(ultty::tabs::TAB_BAR_HEIGHT);
+        renderer
+            .set_tab_bar_height(ultty::tabs::TAB_BAR_HEIGHT + ultty::tabs::TERMINAL_TOP_PADDING);
 
         // Get terminal dimensions from renderer
         let (cols, rows) = renderer.terminal_dimensions();
@@ -644,7 +645,7 @@ impl App {
         );
 
         // Update renderer's tab bar height for dimension calculations
-        let new_height = self.tab_bar.height();
+        let new_height = self.tab_bar.content_top();
         let old_height = self.renderer.tab_bar_height();
 
         if (new_height - old_height).abs() > 0.1 {
@@ -938,7 +939,7 @@ impl App {
         }
 
         // Account for tab bar offset
-        let adjusted_y = self.mouse_pos.y - self.tab_bar.height() as f64;
+        let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
         let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
         if self.url_detector.has_url_at(col, row) {
             self.window.set_cursor(CursorIcon::Pointer);
