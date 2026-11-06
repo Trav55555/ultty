@@ -151,6 +151,27 @@ impl TestTerminal {
         Ok(true)
     }
 
+    /// Wait until `needle` appears on screen, up to `timeout`. Returns
+    /// whether it appeared.
+    ///
+    /// Prefer this to [`TestTerminal::wait_until_stable`] when the test
+    /// knows what it expects: "stable" only means nothing changed for a
+    /// while, which a slow shell start on a loaded machine can satisfy
+    /// before the expected output arrives.
+    pub fn wait_for_text(&mut self, needle: &str, timeout: Duration) -> std::io::Result<bool> {
+        let start = Instant::now();
+        loop {
+            self.process()?;
+            if self.contains(needle) {
+                return Ok(true);
+            }
+            if start.elapsed() >= timeout {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Wait until terminal output stabilizes.
     pub fn wait_until_stable(
         &mut self,
