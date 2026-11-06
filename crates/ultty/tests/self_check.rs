@@ -177,30 +177,26 @@ fn self_check_scrolling() {
 #[test]
 fn self_check_clear_screen() {
     let mut term = TestTerminal::with_size(80, 24).expect("create terminal");
-    term.wait_for_output(WAIT_SHORT).unwrap();
 
-    // Print something
-    term.send("echo 'BEFORE_CLEAR'\r").unwrap();
-    term.wait_until_stable(WAIT_SHORT, Duration::from_secs(2))
-        .unwrap();
+    // Wait for the output itself rather than for the screen to go quiet:
+    // an interactive shell's prompt can keep redrawing (async prompts, a
+    // loaded machine) longer than any fixed window. The quotes split the
+    // marker in the typed command, so only the command's output matches,
+    // not the terminal's echo of the input.
+    term.send("echo BEFORE''_CLEAR\r").unwrap();
+    assert!(
+        term.wait_for_text("BEFORE_CLEAR", WAIT_LONG).unwrap(),
+        "Text should appear"
+    );
 
-    let before = term.snapshot();
-    assert!(before.contains("BEFORE_CLEAR"), "Text should appear");
-
-    // Clear screen
     term.send("clear\r").unwrap();
-    term.wait_until_stable(WAIT_SHORT, Duration::from_secs(2))
-        .unwrap();
-
-    // Print something else
-    term.send("echo 'AFTER_CLEAR'\r").unwrap();
-    term.wait_until_stable(WAIT_SHORT, Duration::from_secs(2))
-        .unwrap();
-
-    let after = term.snapshot();
+    term.send("echo AFTER''_CLEAR\r").unwrap();
     // After clear, old text should be gone from visible area
     // Note: It may still be in scrollback
-    assert!(after.contains("AFTER_CLEAR"), "New text should appear");
+    assert!(
+        term.wait_for_text("AFTER_CLEAR", WAIT_LONG).unwrap(),
+        "New text should appear"
+    );
 }
 
 // ============================================================================
