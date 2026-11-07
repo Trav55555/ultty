@@ -1,28 +1,158 @@
-//! Memory usage benchmarks for core data structures.
+//! Heap and RSS used by the terminal model, measured, not estimated.
 //!
-//! Measures heap allocations to verify against the <50MB target.
+//! A counting global allocator records the live heap bytes each workload
+//! leaves behind (and its peak), and `/proc/self/statm` gives the RSS delta.
+//! Allocation counts do not depend on machine load, so the heap figures are
+//! a deterministic gate: each case fails when it exceeds its budget, which is
+//! the bytes measured on 2026-11-07 plus 5%. When a change moves a number on
+//! purpose, update the budget in the same commit and say why.
+//!
+//! cargo bench -p ultty --bench memory   (release profile, LTO: slow to build)
+//! cargo test -p ultty --bench memory    (same allocations, builds faster)
+//!
+//! Exits non-zero when any case is over budget. RSS is printed for context
+//! only: it depends on the allocator's page reuse and is not gated.
 
-use criterion::{black_box, criterion_group, Criterion};
-use ultty::grid::{Dimensions, Terminal};
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::hint::black_box;
+use std::process::ExitCode;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use ultty::grid::{Dimensions, Terminal, TerminalHandler};
+use ultty::protocol::ansi::{AnsiOutput, AnsiParser};
 use ultty::scene::{Region, SceneTree};
 use ultty_protocol::{Constraints, Display, RegionId};
 
-fn measure_terminal_memory(cols: u16, rows: u16, scrollback: usize) -> usize {
-    let term = Terminal::new(Dimensions::new(cols, rows));
-    std::mem::size_of_val(&term) + estimate_heap_size(&term, scrollback)
+struct Counting;
+
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+fn record_alloc(size: usize) {
+    let live = LIVE.fetch_add(size, Ordering::Relaxed) + size;
+    PEAK.fetch_max(live, Ordering::Relaxed);
 }
 
-fn estimate_heap_size(term: &Terminal, scrollback: usize) -> usize {
-    let dims = term.grid().dimensions();
-    let cell_size = 16;
-    let viewport_cells = dims.cols as usize * dims.rows as usize * cell_size;
-    let scrollback_cells = dims.cols as usize * scrollback * cell_size;
-    viewport_cells + scrollback_cells
+// SAFETY: every call forwards to `System` with the same arguments; the
+// counters are side bookkeeping and never affect the returned memory.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: forwarded unchanged; the caller upholds `alloc`'s contract.
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            record_alloc(layout.size());
+        }
+        ptr
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: forwarded unchanged; the caller upholds the contract.
+        let ptr = unsafe { System.alloc_zeroed(layout) };
+        if !ptr.is_null() {
+            record_alloc(layout.size());
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: `ptr` came from this allocator with this `layout`.
+        unsafe { System.dealloc(ptr, layout) };
+        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: forwarded unchanged; the caller upholds `realloc`'s contract.
+        let new = unsafe { System.realloc(ptr, layout, new_size) };
+        if !new.is_null() {
+            LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+            record_alloc(new_size);
+        }
+        new
+    }
 }
 
-fn measure_scene_tree_memory(region_count: usize) -> usize {
+#[global_allocator]
+static GLOBAL: Counting = Counting;
+
+fn rss_bytes() -> Option<usize> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let resident_pages: usize = statm.split_whitespace().nth(1)?.parse().ok()?;
+    Some(resident_pages * 4096)
+}
+
+struct Measurement {
+    live: usize,
+    peak: usize,
+    rss_delta: Option<isize>,
+}
+
+/// Run `build`, keep its result alive, and report what it holds.
+fn measure<T>(build: impl FnOnce() -> T) -> Measurement {
+    let rss_before = rss_bytes();
+    let base = LIVE.load(Ordering::Relaxed);
+    PEAK.store(base, Ordering::Relaxed);
+    let value = build();
+    let live = LIVE.load(Ordering::Relaxed).saturating_sub(base);
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+    let rss_delta = rss_before
+        .zip(rss_bytes())
+        .map(|(before, after)| after as isize - before as isize);
+    drop(black_box(value));
+    Measurement {
+        live,
+        peak,
+        rss_delta,
+    }
+}
+
+fn feed(terminal: &mut Terminal, bytes: &[u8]) {
+    let mut parser = AnsiParser::new();
+    for chunk in bytes.chunks(64 * 1024) {
+        let mut handler = TerminalHandler::new(terminal);
+        parser.feed_with_ascii_spans(chunk, |out| match out {
+            AnsiOutput::Action(action) => handler.handle(action),
+            AnsiOutput::PrintAscii(span) => handler.handle_ascii_span(span),
+        });
+    }
+}
+
+/// 84-character log lines, every third one green, CRLF-terminated as a PTY
+/// with ONLCR delivers them.
+fn typical_lines(count: usize) -> Vec<u8> {
+    let line =
+        b"the quick brown fox jumps over the lazy dog 0123456789 ABCDEF green 0123456789 end";
+    let mut out = Vec::with_capacity(count * (line.len() + 12));
+    for i in 0..count {
+        if i % 3 == 0 {
+            out.extend_from_slice(b"\x1b[32m");
+        }
+        out.extend_from_slice(line);
+        if i % 3 == 0 {
+            out.extend_from_slice(b"\x1b[0m");
+        }
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
+/// Lines that change SGR every few cells: the worst case for run-length
+/// encoded scrollback.
+fn sgr_dense_lines(count: usize, cols: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in 0..count {
+        for c in 0..cols / 3 {
+            let color = (i * 7 + c * 13) % 256;
+            out.extend_from_slice(format!("\x1b[38;5;{color}m").as_bytes());
+            out.extend_from_slice(b"ab ");
+        }
+        out.extend_from_slice(b"\x1b[0m\r\n");
+    }
+    out
+}
+
+fn scene_tree(regions: usize) -> SceneTree {
     let mut tree = SceneTree::new();
-    for i in 1..=region_count {
+    for i in 1..=regions {
         let mut region = Region::new(RegionId::new(i as u32));
         region.parent = Some(RegionId::ROOT);
         region.constraints = Constraints {
@@ -31,93 +161,106 @@ fn measure_scene_tree_memory(region_count: usize) -> usize {
         };
         tree.insert(region);
     }
-    std::mem::size_of_val(&tree) + region_count * std::mem::size_of::<Region>() * 2
+    tree
 }
 
-fn bench_memory_usage(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memory_usage");
-
-    group.bench_function("terminal_80x24_10k_scrollback", |b| {
-        b.iter(|| {
-            let size = measure_terminal_memory(80, 24, 10_000);
-            black_box(size)
-        })
-    });
-
-    group.bench_function("terminal_200x60_10k_scrollback", |b| {
-        b.iter(|| {
-            let size = measure_terminal_memory(200, 60, 10_000);
-            black_box(size)
-        })
-    });
-
-    group.bench_function("scene_tree_100_regions", |b| {
-        b.iter(|| {
-            let size = measure_scene_tree_memory(100);
-            black_box(size)
-        })
-    });
-
-    group.bench_function("scene_tree_1000_regions", |b| {
-        b.iter(|| {
-            let size = measure_scene_tree_memory(1000);
-            black_box(size)
-        })
-    });
-
-    group.finish();
+struct Case {
+    name: &'static str,
+    /// Live heap bytes allowed after the workload (measured + 5%).
+    budget: usize,
+    run: fn() -> Measurement,
 }
 
-fn report_memory_estimates() {
-    println!("\n=== Memory Estimates ===\n");
+fn filled_terminal(cols: u16, rows: u16, bytes: &[u8]) -> Terminal {
+    let mut terminal = Terminal::new(Dimensions::new(cols, rows));
+    feed(&mut terminal, bytes);
+    terminal
+}
 
-    let term_80x24 = measure_terminal_memory(80, 24, 10_000);
-    println!(
-        "Terminal 80x24 (10k scrollback): {:.2} MB",
-        term_80x24 as f64 / 1_000_000.0
-    );
+const CASES: &[Case] = &[
+    Case {
+        name: "empty_terminal_80x24",
+        budget: 168_000,
+        run: || measure(|| Terminal::new(Dimensions::new(80, 24))),
+    },
+    Case {
+        name: "empty_terminal_300x75",
+        budget: 1_040_000,
+        run: || measure(|| Terminal::new(Dimensions::new(300, 75))),
+    },
+    Case {
+        name: "typical_10k_lines_80x24",
+        budget: 2_730_000,
+        run: || {
+            let input = typical_lines(10_024);
+            measure(|| filled_terminal(80, 24, &input))
+        },
+    },
+    Case {
+        name: "typical_10k_lines_120x40",
+        budget: 3_253_000,
+        run: || {
+            let input = typical_lines(10_040);
+            measure(|| filled_terminal(120, 40, &input))
+        },
+    },
+    Case {
+        name: "typical_10k_lines_300x75",
+        budget: 4_001_000,
+        run: || {
+            let input = typical_lines(10_075);
+            measure(|| filled_terminal(300, 75, &input))
+        },
+    },
+    Case {
+        name: "sgr_dense_10k_lines_120x40",
+        budget: 16_252_000,
+        run: || {
+            let input = sgr_dense_lines(10_040, 120);
+            measure(|| filled_terminal(120, 40, &input))
+        },
+    },
+    Case {
+        name: "scene_tree_1000_regions",
+        budget: 953_000,
+        run: || measure(|| scene_tree(1000)),
+    },
+];
 
-    let term_200x60 = measure_terminal_memory(200, 60, 10_000);
+fn main() -> ExitCode {
+    // `cargo bench` passes `--bench`; a filter argument selects cases.
+    let filter = std::env::args()
+        .skip(1)
+        .find(|arg| !arg.starts_with('-'))
+        .unwrap_or_default();
     println!(
-        "Terminal 200x60 (10k scrollback): {:.2} MB",
-        term_200x60 as f64 / 1_000_000.0
+        "{:<30} {:>12} {:>12} {:>12} {:>12}  status",
+        "case", "live bytes", "budget", "peak bytes", "rss delta"
     );
-
-    let scene_1000 = measure_scene_tree_memory(1000);
-    println!(
-        "Scene tree (1000 regions): {:.2} MB",
-        scene_1000 as f64 / 1_000_000.0
-    );
-
-    let glyph_atlas = 2048 * 2048;
-    println!(
-        "Glyph atlas (2048x2048 R8): {:.2} MB",
-        glyph_atlas as f64 / 1_000_000.0
-    );
-
-    let total_estimate = term_80x24 + scene_1000 + glyph_atlas;
-    println!(
-        "\nTotal estimate (terminal + scene + atlas): {:.2} MB",
-        total_estimate as f64 / 1_000_000.0
-    );
-    println!("Target: <50 MB");
-    println!(
-        "Status: {}",
-        if total_estimate < 50_000_000 {
-            "PASS"
-        } else {
-            "FAIL"
+    let mut over = 0;
+    for case in CASES.iter().filter(|case| case.name.contains(&filter)) {
+        let m = (case.run)();
+        let ok = m.live <= case.budget;
+        if !ok {
+            over += 1;
         }
-    );
-}
-
-criterion_group!(benches, bench_memory_usage);
-
-fn main() {
-    report_memory_estimates();
-    println!();
-    benches();
-    criterion::Criterion::default()
-        .configure_from_args()
-        .final_summary();
+        let rss = m
+            .rss_delta
+            .map_or_else(|| "n/a".to_string(), |d| d.to_string());
+        println!(
+            "{:<30} {:>12} {:>12} {:>12} {:>12}  {}",
+            case.name,
+            m.live,
+            case.budget,
+            m.peak,
+            rss,
+            if ok { "ok" } else { "OVER BUDGET" }
+        );
+    }
+    if over > 0 {
+        eprintln!("{over} memory case(s) over budget");
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }

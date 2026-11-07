@@ -85,40 +85,29 @@ fn create_layout_response(region_count: usize) -> TerminalMessage {
     }
 }
 
+/// Every case sets its own throughput: criterion keeps a group's last
+/// `throughput` for all later benches, so one shared setting reports the
+/// byte count of a different message.
 fn bench_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("protocol_encode");
 
-    let simple = create_simple_message();
-    group.bench_function("simple_message", |b| {
-        b.iter(|| black_box(&simple).encode_to_bytes())
-    });
+    let app_cases = [
+        ("simple_message", create_simple_message()),
+        ("complex_message", create_complex_message()),
+        ("rich_text_100_spans", create_rich_text_message()),
+    ];
+    for (name, message) in &app_cases {
+        group.throughput(Throughput::Bytes(message.encode_to_bytes().len() as u64));
+        group.bench_function(*name, |b| b.iter(|| black_box(message).encode_to_bytes()));
+    }
 
-    let complex = create_complex_message();
-    group.bench_function("complex_message", |b| {
-        b.iter(|| black_box(&complex).encode_to_bytes())
-    });
-
-    let rich = create_rich_text_message();
-    let rich_bytes = rich.encode_to_bytes();
-    group.throughput(Throughput::Bytes(rich_bytes.len() as u64));
-    group.bench_function("rich_text_100_spans", |b| {
-        b.iter(|| black_box(&rich).encode_to_bytes())
-    });
-
-    let layout_10 = create_layout_response(10);
-    group.bench_function("layout_10_regions", |b| {
-        b.iter(|| black_box(&layout_10).encode_to_bytes())
-    });
-
-    let layout_100 = create_layout_response(100);
-    group.bench_function("layout_100_regions", |b| {
-        b.iter(|| black_box(&layout_100).encode_to_bytes())
-    });
-
-    let layout_1000 = create_layout_response(1000);
-    group.bench_function("layout_1000_regions", |b| {
-        b.iter(|| black_box(&layout_1000).encode_to_bytes())
-    });
+    for count in [10, 100, 1000] {
+        let message = create_layout_response(count);
+        group.throughput(Throughput::Bytes(message.encode_to_bytes().len() as u64));
+        group.bench_function(format!("layout_{count}_regions"), |b| {
+            b.iter(|| black_box(&message).encode_to_bytes())
+        });
+    }
 
     group.finish();
 }
@@ -126,54 +115,37 @@ fn bench_encode(c: &mut Criterion) {
 fn bench_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("protocol_decode");
 
-    let simple_bytes = create_simple_message().encode_to_bytes();
-    group.bench_function("simple_message", |b| {
-        b.iter(|| {
-            let mut cursor = simple_bytes.as_ref();
-            AppMessage::decode(black_box(&mut cursor)).unwrap()
-        })
-    });
+    let app_cases = [
+        ("simple_message", create_simple_message().encode_to_bytes()),
+        (
+            "complex_message",
+            create_complex_message().encode_to_bytes(),
+        ),
+        (
+            "rich_text_100_spans",
+            create_rich_text_message().encode_to_bytes(),
+        ),
+    ];
+    for (name, bytes) in &app_cases {
+        group.throughput(Throughput::Bytes(bytes.len() as u64));
+        group.bench_function(*name, |b| {
+            b.iter(|| {
+                let mut cursor = bytes.as_ref();
+                AppMessage::decode(black_box(&mut cursor)).unwrap()
+            })
+        });
+    }
 
-    let complex_bytes = create_complex_message().encode_to_bytes();
-    group.bench_function("complex_message", |b| {
-        b.iter(|| {
-            let mut cursor = complex_bytes.as_ref();
-            AppMessage::decode(black_box(&mut cursor)).unwrap()
-        })
-    });
-
-    let rich_bytes = create_rich_text_message().encode_to_bytes();
-    group.throughput(Throughput::Bytes(rich_bytes.len() as u64));
-    group.bench_function("rich_text_100_spans", |b| {
-        b.iter(|| {
-            let mut cursor = rich_bytes.as_ref();
-            AppMessage::decode(black_box(&mut cursor)).unwrap()
-        })
-    });
-
-    let layout_10_bytes = create_layout_response(10).encode_to_bytes();
-    group.bench_function("layout_10_regions", |b| {
-        b.iter(|| {
-            let mut cursor = layout_10_bytes.as_ref();
-            TerminalMessage::decode(black_box(&mut cursor)).unwrap()
-        })
-    });
-
-    let layout_100_bytes = create_layout_response(100).encode_to_bytes();
-    group.bench_function("layout_100_regions", |b| {
-        b.iter(|| {
-            let mut cursor = layout_100_bytes.as_ref();
-            TerminalMessage::decode(black_box(&mut cursor)).unwrap()
-        })
-    });
-
-    let layout_1000_bytes = create_layout_response(1000).encode_to_bytes();
-    group.bench_function("layout_1000_regions", |b| {
-        b.iter(|| {
-            let mut cursor = layout_1000_bytes.as_ref();
-            TerminalMessage::decode(black_box(&mut cursor)).unwrap()
-        })
-    });
+    for count in [10, 100, 1000] {
+        let bytes = create_layout_response(count).encode_to_bytes();
+        group.throughput(Throughput::Bytes(bytes.len() as u64));
+        group.bench_function(format!("layout_{count}_regions"), |b| {
+            b.iter(|| {
+                let mut cursor = bytes.as_ref();
+                TerminalMessage::decode(black_box(&mut cursor)).unwrap()
+            })
+        });
+    }
 
     group.finish();
 }
