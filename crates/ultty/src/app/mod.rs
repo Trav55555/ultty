@@ -661,6 +661,17 @@ impl App {
         }
     }
 
+    /// Send a report the terminal generates on its own (mouse motion,
+    /// focus changes). Unlike [`Self::send_input`] it does not mark the
+    /// output that follows as an echo to draw at once: a moving mouse in
+    /// vim or htop would otherwise force a frame for every motion event.
+    fn send_report(&mut self, data: &[u8]) -> std::io::Result<()> {
+        match self.terminal_manager.focused_terminal_mut() {
+            Some(terminal) => terminal.event_loop.send_input(data),
+            None => Ok(()),
+        }
+    }
+
     /// Update the tab bar state from the terminal manager.
     ///
     /// This is the single hook every tab change goes through, so it also

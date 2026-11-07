@@ -100,7 +100,7 @@ impl App {
                 if self.terminal().is_some_and(|t| t.modes().focus_reporting) {
                     // Send focus in/out escape sequence
                     let seq = if focused { b"\x1b[I" } else { b"\x1b[O" };
-                    let _ = self.send_input(seq);
+                    let _ = self.send_report(seq);
                 }
             }
             _ => {}
@@ -541,7 +541,7 @@ impl App {
             if let Some(bytes) = self.terminal().and_then(|t| {
                 t.encode_mouse_event(TerminalMouseButton::Left, col, row, true, true, mods)
             }) {
-                let _ = self.send_input(&bytes);
+                let _ = self.send_report(&bytes);
             }
             return;
         }
@@ -568,7 +568,7 @@ impl App {
         if let Some(bytes) = self.terminal().and_then(|t| {
             t.encode_mouse_event(TerminalMouseButton::Release, col, row, true, true, mods)
         }) {
-            let _ = self.send_input(&bytes);
+            let _ = self.send_report(&bytes);
         }
     }
 
