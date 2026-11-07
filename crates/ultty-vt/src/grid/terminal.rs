@@ -298,6 +298,15 @@ impl Terminal {
         !self.pending_responses.is_empty()
     }
 
+    /// Keep at most `lines` lines of main-screen scrollback, dropping the
+    /// oldest lines beyond it. The alternate screen has no scrollback.
+    pub fn set_scrollback_limit(&mut self, lines: usize) {
+        if self.main.set_max_history(lines) > 0 && !self.using_alternate {
+            // Rows the selection refers to may be gone or renumbered.
+            self.clear_selection();
+        }
+    }
+
     /// Get the active buffer.
     pub fn buffer(&self) -> &Buffer {
         if self.using_alternate {

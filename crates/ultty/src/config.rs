@@ -46,6 +46,8 @@ impl Config {
         let mut config: Self = toml::from_str(&contents).map_err(ConfigError::Parse)?;
         config.warn_on_duplicate_keybindings();
         config.font.clamp_size();
+        config.font.clamp_line_height();
+        config.behavior.clamp_scrollback();
         config.terminal.validate_term();
         Ok(config)
     }
@@ -482,7 +484,9 @@ pub struct FontConfig {
     pub family: String,
     /// Font size in points
     pub size: f32,
-    /// Line height multiplier
+    /// Line height as a multiple of the font size: the cell height is
+    /// `size * line_height`, rounded up to whole pixels. Clamped to
+    /// [`MIN_LINE_HEIGHT`]..=[`MAX_LINE_HEIGHT`].
     pub line_height: f32,
     /// Draw font ligatures (`=>`, `!=`, `===` in fonts such as Fira Code).
     ///
@@ -536,6 +540,32 @@ impl FontConfig {
                 self.size, clamped, MIN_FONT_SIZE, MAX_FONT_SIZE
             );
             self.size = clamped;
+        }
+    }
+}
+
+/// Smallest `font.line_height` accepted.
+pub const MIN_LINE_HEIGHT: f32 = 0.5;
+
+/// Largest `font.line_height` accepted.
+pub const MAX_LINE_HEIGHT: f32 = 3.0;
+
+impl FontConfig {
+    /// Clamp `line_height` into [`MIN_LINE_HEIGHT`]..=[`MAX_LINE_HEIGHT`],
+    /// warning when it was out of range or not a number. A zero or NaN
+    /// multiplier would give one-pixel cells.
+    pub fn clamp_line_height(&mut self) {
+        let clamped = if self.line_height.is_nan() {
+            FontConfig::default().line_height
+        } else {
+            self.line_height.clamp(MIN_LINE_HEIGHT, MAX_LINE_HEIGHT)
+        };
+        if clamped != self.line_height {
+            warn!(
+                "font.line_height {} is out of range; using {} (allowed {}..={})",
+                self.line_height, clamped, MIN_LINE_HEIGHT, MAX_LINE_HEIGHT
+            );
+            self.line_height = clamped;
         }
     }
 }
@@ -779,7 +809,9 @@ pub struct ParsedKeybinding {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct BehaviorConfig {
-    /// Scrollback buffer size (lines)
+    /// Lines of scrollback each pane keeps, at most
+    /// [`MAX_SCROLLBACK_LINES`]. A config reload applies it to open panes
+    /// too; lowering it drops their oldest lines.
     pub scrollback_lines: usize,
     /// Enable URL detection
     pub url_detection: bool,
@@ -798,7 +830,9 @@ pub struct BehaviorConfig {
     /// the pane can write, including a `cat`ed file or a remote host over ssh.
     /// OSC 52 clipboard reads are always refused.
     pub clipboard_write: ClipboardWrite,
-    /// Close window when shell exits
+    /// Close a pane when its program exits, and the window when its last
+    /// pane closes. When false, a pane whose program exited stays open with
+    /// its last output until it is closed by hand.
     pub close_on_exit: bool,
     /// Window opacity (0.0-1.0, 1.0 = fully opaque)
     pub opacity: f32,
@@ -862,6 +896,25 @@ impl TerminalConfig {
                 self.term, default
             );
             self.term = default;
+        }
+    }
+}
+
+/// Largest `behavior.scrollback_lines` accepted. History is stored
+/// compactly, but a million long lines is still hundreds of megabytes per
+/// pane.
+pub const MAX_SCROLLBACK_LINES: usize = 1_000_000;
+
+impl BehaviorConfig {
+    /// Clamp `scrollback_lines` to [`MAX_SCROLLBACK_LINES`], warning when it
+    /// was larger.
+    pub fn clamp_scrollback(&mut self) {
+        if self.scrollback_lines > MAX_SCROLLBACK_LINES {
+            warn!(
+                "behavior.scrollback_lines {} is too large; using {}",
+                self.scrollback_lines, MAX_SCROLLBACK_LINES
+            );
+            self.scrollback_lines = MAX_SCROLLBACK_LINES;
         }
     }
 }
@@ -1193,6 +1246,32 @@ copy = "ctrl+c"
         let config = Config::load_from_path(&path).unwrap();
 
         assert_eq!(config.font.size, MIN_FONT_SIZE);
+    }
+
+    #[test]
+    fn loaded_config_clamps_line_height_and_scrollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[font]\nline_height = 0.0\n[behavior]\nscrollback_lines = 99999999999\n",
+        )
+        .unwrap();
+
+        let config = Config::load_from_path(&path).unwrap();
+
+        assert_eq!(config.font.line_height, MIN_LINE_HEIGHT);
+        assert_eq!(config.behavior.scrollback_lines, MAX_SCROLLBACK_LINES);
+
+        let mut font = FontConfig {
+            line_height: f32::NAN,
+            ..Default::default()
+        };
+        font.clamp_line_height();
+        assert_eq!(font.line_height, 1.0);
+        font.line_height = 1.4;
+        font.clamp_line_height();
+        assert_eq!(font.line_height, 1.4);
     }
 
     #[test]

@@ -327,6 +327,15 @@ fn grid_buffer(
     })
 }
 
+/// Font size and line height for `font_config`. The size is clamped so
+/// cells are never 0 px wide; the line height, which is the cell height, is
+/// `size * line_height` rounded up to whole pixels.
+fn font_metrics(font_config: &FontConfig) -> Metrics {
+    let font_size = crate::config::clamp_font_size(font_config.size);
+    let line_height = (font_size * font_config.line_height).ceil().max(1.0);
+    Metrics::new(font_size, line_height)
+}
+
 impl TextRenderer {
     /// Create a new text renderer with configuration.
     pub fn with_config(
@@ -339,10 +348,7 @@ impl TextRenderer {
         // Create font system with system fonts
         let mut font_system = FontSystem::new();
 
-        // Calculate metrics (size clamped so cells can never be 0 px wide)
-        let font_size = crate::config::clamp_font_size(font_config.size);
-        let line_height = (font_size * font_config.line_height).ceil().max(1.0);
-        let metrics = Metrics::new(font_size, line_height);
+        let metrics = font_metrics(font_config);
 
         // Measure cell dimensions using a sample character
         let font_family = font_config.family.clone();
@@ -1704,6 +1710,19 @@ mod tests {
 
         let default = Cell::new('a');
         assert_eq!(cursor_glyph_color(&default, &scheme), scheme.background);
+    }
+
+    #[test]
+    fn line_height_multiplies_the_cell_height() {
+        let font = |line_height| FontConfig {
+            size: 14.0,
+            line_height,
+            ..FontConfig::default()
+        };
+        assert_eq!(font_metrics(&font(1.0)).line_height, 14.0);
+        assert_eq!(font_metrics(&font(1.5)).line_height, 21.0);
+        // Rounded up to whole pixels.
+        assert_eq!(font_metrics(&font(1.2)).line_height, 17.0);
     }
 
     #[test]
