@@ -29,6 +29,7 @@
 
 mod buffer;
 mod cell;
+mod cluster;
 mod history;
 mod image;
 mod palette;
@@ -535,7 +536,16 @@ impl Grid {
         let Some((row, col)) = self.cluster_base() else {
             return false;
         };
-        let Some(mut cluster) = self.rows.get(row as usize).and_then(|r| r.grapheme(col)) else {
+        let Some(r) = self.rows.get(row as usize) else {
+            return false;
+        };
+        let Some(base) = r.get(col) else {
+            return false;
+        };
+        if let Some(joins) = cluster::joins(base.char(), r.grapheme_extra(col).unwrap_or(&[]), c) {
+            return joins;
+        }
+        let Some(mut cluster) = r.grapheme(col) else {
             return false;
         };
         cluster.push(c);
