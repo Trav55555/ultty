@@ -95,8 +95,10 @@ setup_nvidia() {
   # so the screen is virtual. XTest and GetImage work on it.
   if [[ ! -f /etc/X11/ubench-xorg.conf ]] && nvidia-smi >/dev/null 2>&1; then
     busid=$(nvidia-xconfig --query-gpu-info | awk -F'PCI:' '/PCI BusID/ {print "PCI:"$2; exit}')
+    # No --use-display-device=None: driver 580 refuses it with a virtual
+    # screen ("not supported with virtual display").
     sudo nvidia-xconfig -o /etc/X11/ubench-xorg.conf --allow-empty-initial-configuration \
-      --use-display-device=None --virtual=2560x1440 --busid="$busid" >/dev/null
+      --virtual=2560x1440 --busid="$busid" >/dev/null
   fi
 }
 
