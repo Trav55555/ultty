@@ -1209,6 +1209,7 @@ impl App {
                     application_cursor: modes.application_cursor_keys,
                     kitty_flags: modes.kitty_keyboard_flags,
                     modify_other_keys: modes.modify_other_keys,
+                    linefeed_newline: modes.linefeed_newline,
                 }
             })
             .unwrap_or_default();

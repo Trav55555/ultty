@@ -239,6 +239,8 @@ pub struct KeyModes {
     pub kitty_flags: u8,
     /// xterm modifyOtherKeys level, 0 to 2 (`CSI > 4 ; level m`).
     pub modify_other_keys: u8,
+    /// LNM (ANSI mode 20): Enter sends CR LF instead of CR.
+    pub linefeed_newline: bool,
 }
 
 const DISAMBIGUATE: u8 = 1;
@@ -276,6 +278,7 @@ pub fn encode(input: &KeyInput, modes: KeyModes) -> Vec<u8> {
         text,
         flags,
         application_cursor: modes.application_cursor,
+        linefeed_newline: modes.linefeed_newline,
     };
 
     if ev.key.is_modifier() && !report_all {
@@ -315,6 +318,7 @@ struct Event<'a> {
     text: Option<&'a str>,
     flags: u8,
     application_cursor: bool,
+    linefeed_newline: bool,
 }
 
 /// The fields of a `CSI ... u`-style sequence.
@@ -432,6 +436,7 @@ impl Event<'_> {
             // so a shell stays usable after a program leaves flags set.
             if !report_all {
                 let plain: Option<&[u8]> = match self.key {
+                    Key::Enter if self.linefeed_newline => Some(b"\r\n"),
                     Key::Enter => Some(b"\r"),
                     Key::Backspace => Some(b"\x7f"),
                     Key::Tab => Some(b"\t"),
@@ -498,6 +503,7 @@ impl Event<'_> {
             out.push(0x1b);
         }
         match self.key {
+            Key::Enter if self.linefeed_newline => out.extend_from_slice(b"\r\n"),
             Key::Enter => out.push(b'\r'),
             Key::Escape => out.push(0x1b),
             Key::Backspace if self.mods.contains(Mods::CTRL) => out.push(0x08),
@@ -1222,6 +1228,17 @@ mod tests {
     }
 
     // Kitty protocol: the examples of kitty's own test suite.
+
+    #[test]
+    fn enter_sends_cr_lf_under_lnm() {
+        let lnm = KeyModes {
+            linefeed_newline: true,
+            ..KeyModes::default()
+        };
+        assert_eq!(enc(Key::Enter, Mods::NONE, lnm), "\r\n");
+        assert_eq!(enc(Key::Enter, A, lnm), "\x1b\r\n");
+        assert_eq!(enc(Key::Enter, Mods::NONE, KeyModes::default()), "\r");
+    }
 
     #[test]
     fn kitty_disambiguate() {
