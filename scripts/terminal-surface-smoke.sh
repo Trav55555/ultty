@@ -59,7 +59,12 @@ capture_resize_evidence() {
     "$ULTTYCTL" info
   } >"$evidence"
 
-  "$ULTTYCTL" resize "$width" "$height" >/dev/null
+  # Under X11 the platform resizes asynchronously, so ulttyctl resize can
+  # report "not applied"; record its answer and resize with xdotool instead.
+  {
+    printf 'resize: '
+    "$ULTTYCTL" resize "$width" "$height" 2>&1 || true
+  } >>"$evidence"
   if command -v xdotool >/dev/null 2>&1; then
     "$ULTTYCTL" focus >/dev/null 2>&1 || true
     sleep 0.2

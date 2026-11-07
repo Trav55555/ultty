@@ -64,9 +64,13 @@ normalize_tabs
 run_logged "$ULTTYCTL" tabs
 append "- Tab command path matched visible one-based tab labels for new, switch, and close."
 
-"$ULTTYCTL" resize 900 640 >/dev/null
+if "$ULTTYCTL" resize 900 640 >>"$COMMAND_LOG" 2>&1; then
+  append "- Resize command applied."
+else
+  append "- Resize command not applied by the platform; its answer is in commands.log."
+fi
 "$ULTTYCTL" screenshot "$OUT_DIR/resize-900x640.png" >/dev/null
-append "- Resize command completed and renderer screenshot captured at resize-900x640.png."
+append "- Renderer screenshot captured at resize-900x640.png."
 
 append
 append "## Compositor Debugging Evidence"

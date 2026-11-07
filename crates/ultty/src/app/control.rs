@@ -218,7 +218,7 @@ impl App {
                             .and_then(terminal_working_directory),
                     })
                     .collect();
-                ControlResponse::Data(ControlData::Tabs(tabs))
+                ControlResponse::Data(ControlData::Tabs { tabs })
             }
 
             ControlRequest::GetText {
@@ -232,7 +232,9 @@ impl App {
                     } else {
                         0
                     };
-                    ControlResponse::Text(buffer_text(term.buffer(), history))
+                    ControlResponse::Text {
+                        text: buffer_text(term.buffer(), history),
+                    }
                 } else {
                     ControlResponse::Error {
                         code: 1,
@@ -241,7 +243,9 @@ impl App {
                 }
             }
 
-            ControlRequest::GetSelection => ControlResponse::Data(ControlData::Selection(None)),
+            ControlRequest::GetSelection => {
+                ControlResponse::Data(ControlData::Selection { text: None })
+            }
 
             ControlRequest::SendText { text } => {
                 if let Some(ref mut server) = self.protocol_server {
@@ -456,9 +460,9 @@ impl App {
                     None
                 };
                 match result {
-                    Some(Ok(())) => ControlResponse::Data(ControlData::ScreenshotSaved(
-                        path.display().to_string(),
-                    )),
+                    Some(Ok(())) => ControlResponse::Data(ControlData::ScreenshotSaved {
+                        path: path.display().to_string(),
+                    }),
                     Some(Err(e)) => ControlResponse::Error {
                         code: 5,
                         message: format!("Screenshot failed: {}", e),
@@ -569,7 +573,7 @@ impl App {
                         }
                     }
 
-                    ControlResponse::Data(ControlData::SearchResults(matches))
+                    ControlResponse::Data(ControlData::SearchResults { matches })
                 } else {
                     ControlResponse::Error {
                         code: 1,
@@ -592,7 +596,7 @@ impl App {
                     .into_iter()
                     .map(|cmd| self.process_control_request(client_key, cmd))
                     .collect();
-                ControlResponse::Data(ControlData::BatchResults(results))
+                ControlResponse::Data(ControlData::BatchResults { results })
             }
 
             ControlRequest::Authenticate { token } => {

@@ -30,6 +30,13 @@ struct ClientState {
     stream: UnixStream,
     output_format: OutputFormat,
     authenticated: bool,
+    /// The client has sent its one request and is waiting for the answer.
+    ///
+    /// It is no longer polled: ulttyctl half-closes its write side after the
+    /// request, and that EOF must not count as a disconnect, or a deferred
+    /// answer (`wait-for`) would find the client gone and close the socket
+    /// unanswered.
+    awaiting_response: bool,
 }
 
 struct ParsedControlRequest {
@@ -82,9 +89,12 @@ impl ControlServer {
     pub fn readiness_fds(&self) -> Vec<RawFd> {
         let mut fds = Vec::with_capacity(self.clients.len() + 1);
         fds.push(self.listener.as_raw_fd());
+        // A client awaiting its answer stays readable (its EOF) and would
+        // wake the loop on every pass.
         fds.extend(
             self.clients
                 .values()
+                .filter(|client| !client.awaiting_response)
                 .map(|client| client.stream.as_raw_fd()),
         );
         fds
@@ -124,6 +134,7 @@ impl ControlServer {
                             stream,
                             output_format: OutputFormat::Text,
                             authenticated: false,
+                            awaiting_response: false,
                         },
                     );
                     debug!("Control client connected: {}", key);
@@ -169,6 +180,11 @@ impl ControlServer {
             if let Some(parsed) = self.parse_request(&data) {
                 if let Some(client) = self.clients.get_mut(&key) {
                     client.output_format = parsed.output_format;
+                    client.awaiting_response = true;
+                    need_modify = false;
+                    if let Err(e) = self.poller.delete(&client.stream) {
+                        warn!("Failed to stop polling control client {}: {}", key, e);
+                    }
                 }
                 self.pending_requests.push((key, parsed.request));
             }
@@ -203,7 +219,9 @@ impl ControlServer {
             if let Err(e) = client.stream.write_all(text.as_bytes()) {
                 warn!("Failed to send response to client {}: {}", client_key, e);
             }
-            let _ = self.poller.delete(&client.stream);
+            if !client.awaiting_response {
+                let _ = self.poller.delete(&client.stream);
+            }
         }
     }
 
@@ -501,7 +519,8 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-fn format_response(response: &ControlResponse, format: OutputFormat) -> String {
+/// Render `response` as the control socket sends it in `format`.
+pub fn format_response(response: &ControlResponse, format: OutputFormat) -> String {
     if format == OutputFormat::Json {
         return serde_json::to_string(response)
             .unwrap_or_else(|_| r#"{"error":"serialize failed"}"#.to_string())
@@ -510,7 +529,7 @@ fn format_response(response: &ControlResponse, format: OutputFormat) -> String {
 
     match response {
         ControlResponse::Ok => "OK\n".to_string(),
-        ControlResponse::Text(text) => format!("{}\n", text),
+        ControlResponse::Text { text } => format!("{}\n", text),
         ControlResponse::Data(data) => match data {
             ControlData::Pong => "PONG\n".to_string(),
             ControlData::Version(v) => {
@@ -528,7 +547,7 @@ fn format_response(response: &ControlResponse, format: OutputFormat) -> String {
                     info.focused
                 )
             }
-            ControlData::Tabs(tabs) => {
+            ControlData::Tabs { tabs } => {
                 let mut out = String::new();
                 for tab in tabs {
                     let marker = if tab.active { "*" } else { " " };
@@ -536,13 +555,15 @@ fn format_response(response: &ControlResponse, format: OutputFormat) -> String {
                 }
                 out
             }
-            ControlData::Selection(sel) => match sel {
+            ControlData::Selection { text } => match text {
                 Some(text) => format!("{}\n", text),
                 None => "(no selection)\n".to_string(),
             },
-            ControlData::ScreenshotSaved(path) => format!("Screenshot saved: {}\n", path),
-            ControlData::ScreenshotData(data) => format!("Screenshot data: {} bytes\n", data.len()),
-            ControlData::SearchResults(matches) => {
+            ControlData::ScreenshotSaved { path } => format!("Screenshot saved: {}\n", path),
+            ControlData::ScreenshotData { data } => {
+                format!("Screenshot data: {} bytes\n", data.len())
+            }
+            ControlData::SearchResults { matches } => {
                 if matches.is_empty() {
                     "(no matches)\n".to_string()
                 } else {
@@ -553,7 +574,7 @@ fn format_response(response: &ControlResponse, format: OutputFormat) -> String {
                     out
                 }
             }
-            ControlData::BatchResults(results) => {
+            ControlData::BatchResults { results } => {
                 let mut out = format!("{} result(s):\n", results.len());
                 for (i, r) in results.iter().enumerate() {
                     out.push_str(&format!(
@@ -842,6 +863,36 @@ mod tests {
 
         assert_eq!(response, "PONG\n");
         assert!(!server.clients.contains_key(&client_key));
+    }
+
+    #[test]
+    fn deferred_answer_survives_client_half_close() {
+        let mut server = test_server("half-close");
+        let mut client = UnixStream::connect(server.socket_path()).unwrap();
+
+        client.write_all(b"wait-for DONE").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let pending = poll_until_pending(&mut server);
+        let (client_key, _) = pending[0].clone();
+
+        // Polling past the client's EOF, as the UI loop does while a
+        // wait-for is pending, must keep the client.
+        for _ in 0..5 {
+            server.poll(Some(Duration::from_millis(10))).unwrap();
+        }
+        assert!(server.clients.contains_key(&client_key));
+        assert_eq!(server.readiness_fds(), vec![server.listener.as_raw_fd()]);
+
+        server.send_response(
+            client_key,
+            &ControlResponse::Data(ControlData::WaitMatched { line: 0, col: 0 }),
+        );
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert_eq!(response, "MATCHED at 1:1\n");
+        assert!(server.clients.is_empty());
     }
 
     #[test]
