@@ -1,5 +1,7 @@
 //! Color types and terminal color scheme.
 
+use std::borrow::Cow;
+
 use crate::config::ColorConfig;
 
 /// RGBA color for rendering.
@@ -80,6 +82,9 @@ pub struct ColorScheme {
     pub cursor: Rgba,
     /// Selection background
     pub selection: Rgba,
+    /// Palette entries an application changed with OSC 4, by index. Only
+    /// set on the per-terminal copy [`ColorScheme::for_palette`] makes.
+    overrides: Option<Box<[Option<Rgba>; 256]>>,
 }
 
 impl Default for ColorScheme {
@@ -129,6 +134,7 @@ impl ColorScheme {
             background: Rgba::from_u8(0x1E, 0x1E, 0x1E),
             cursor: Rgba::from_u8(0xFF, 0xFF, 0xFF),
             selection: Rgba::new(0.3, 0.4, 0.6, 0.5),
+            overrides: None,
         }
     }
 
@@ -156,7 +162,26 @@ impl ColorScheme {
             ),
             cursor: Rgba::from_u8(config.cursor.r, config.cursor.g, config.cursor.b),
             selection: Rgba::new(sr, sg, sb, sa),
+            overrides: None,
         }
+    }
+
+    /// This scheme as a terminal with `palette` shows it: entries the
+    /// application changed with OSC 4 replace the theme's. Borrowed as is
+    /// when nothing was changed, which is the usual case.
+    pub fn for_palette(&self, palette: &crate::grid::Palette) -> Cow<'_, ColorScheme> {
+        if !palette.has_overrides() {
+            return Cow::Borrowed(self);
+        }
+        let overrides = std::array::from_fn(|i| {
+            palette
+                .override_for(i as u8)
+                .map(|[r, g, b]| Rgba::from_u8(r, g, b))
+        });
+        Cow::Owned(Self {
+            overrides: Some(Box::new(overrides)),
+            ..self.clone()
+        })
     }
 
     /// Resolve a terminal color to RGBA.
@@ -169,7 +194,7 @@ impl ColorScheme {
                     self.background
                 }
             }
-            crate::grid::Color::Named(idx) => self.named[idx as usize % 16],
+            crate::grid::Color::Named(idx) => self.indexed_color(idx % 16),
             crate::grid::Color::Indexed(idx) => self.indexed_color(idx),
             crate::grid::Color::Rgb(r, g, b) => Rgba::from_u8(r, g, b),
         }
@@ -177,6 +202,13 @@ impl ColorScheme {
 
     /// Get a color from the 256-color palette.
     pub fn indexed_color(&self, idx: u8) -> Rgba {
+        if let Some(color) = self
+            .overrides
+            .as_ref()
+            .and_then(|overrides| overrides[usize::from(idx)])
+        {
+            return color;
+        }
         match idx {
             // Standard 16 colors
             0..=15 => self.named[idx as usize],
@@ -367,6 +399,35 @@ mod tests {
         let scheme = ColorScheme::dark();
         let c = scheme.resolve(Color::Named(1), true);
         assert_eq!(c, scheme.named[1]);
+    }
+
+    #[test]
+    fn palette_changes_recolour_indexed_and_named_cells_only() {
+        let scheme = ColorScheme::dark();
+        let mut palette = crate::grid::Palette::default();
+        assert!(matches!(scheme.for_palette(&palette), Cow::Borrowed(_)));
+
+        palette.set(1, [10, 20, 30]);
+        palette.set(200, [40, 50, 60]);
+        let changed = scheme.for_palette(&palette);
+        assert_eq!(
+            changed.resolve(Color::Named(1), true),
+            Rgba::from_u8(10, 20, 30)
+        );
+        assert_eq!(
+            changed.resolve(Color::Indexed(1), true),
+            Rgba::from_u8(10, 20, 30)
+        );
+        assert_eq!(
+            changed.resolve(Color::Indexed(200), false),
+            Rgba::from_u8(40, 50, 60)
+        );
+        assert_eq!(changed.resolve(Color::Named(2), true), scheme.named[2]);
+        assert_eq!(changed.resolve(Color::Default, false), scheme.background);
+        assert_eq!(
+            changed.resolve(Color::Rgb(1, 2, 3), true),
+            Rgba::from_u8(1, 2, 3)
+        );
     }
 
     #[test]

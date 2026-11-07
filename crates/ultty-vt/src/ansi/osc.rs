@@ -1,7 +1,7 @@
 //! OSC (Operating System Command), DCS, APC, and other string sequence handling.
 
 use super::AnsiParser;
-use super::{Action, ApcKind, State, MAX_IN_BAND_APC};
+use super::{Action, ApcKind, DynamicColor, State, StringTerminator, MAX_IN_BAND_APC};
 
 /// Maximum size for OSC/DCS string buffers to prevent unbounded memory growth.
 const MAX_STRING_BUFFER: usize = 65536;
@@ -19,7 +19,7 @@ impl AnsiParser {
             }
             // BEL also terminates OSC
             0x07 => {
-                self.dispatch_osc(callback);
+                self.dispatch_osc(StringTerminator::Bel, callback);
                 self.reset();
             }
             // CAN/SUB abort the sequence
@@ -44,12 +44,12 @@ impl AnsiParser {
         match byte {
             // Backslash completes ST (String Terminator)
             b'\\' => {
-                self.dispatch_osc(callback);
+                self.dispatch_osc(StringTerminator::St, callback);
                 self.reset();
             }
             // Any other byte - was not a valid ST, dispatch and reprocess
             _ => {
-                self.dispatch_osc(callback);
+                self.dispatch_osc(StringTerminator::St, callback);
                 self.reset();
                 // Reprocess this byte from ground state
                 self.process_byte(byte, callback);
@@ -58,7 +58,7 @@ impl AnsiParser {
     }
 
     /// Dispatch OSC sequence based on accumulated buffer.
-    fn dispatch_osc<F>(&mut self, callback: &mut F)
+    fn dispatch_osc<F>(&mut self, terminator: StringTerminator, callback: &mut F)
     where
         F: FnMut(Action),
     {
@@ -138,27 +138,55 @@ impl AnsiParser {
                         callback(Action::Notification { title, body });
                     }
                 }
-                // Foreground color query/set (OSC 10)
-                "10" => {
-                    if data == "?" {
-                        callback(Action::QueryForegroundColor);
+                // Dynamic colour queries (OSC 10, 11, 12). Each further
+                // `;`-separated item names the next colour, as in xterm, so
+                // `OSC 10;?;?` asks for the foreground and the background.
+                // Setting these colours is not supported, so other items are
+                // ignored.
+                "10" | "11" | "12" => {
+                    let colors = [
+                        DynamicColor::Foreground,
+                        DynamicColor::Background,
+                        DynamicColor::Cursor,
+                    ];
+                    let first = match code {
+                        "10" => 0,
+                        "11" => 1,
+                        _ => 2,
+                    };
+                    for (item, &color) in data.split(';').zip(&colors[first..]) {
+                        if item == "?" {
+                            callback(Action::QueryDynamicColor { color, terminator });
+                        }
                     }
-                    // Setting colors not implemented - ignore
                 }
-                // Background color query/set (OSC 11)
-                "11" => {
-                    if data == "?" {
-                        callback(Action::QueryBackgroundColor);
+                // Palette entries (OSC 4): pairs of index and `?` or a colour.
+                "4" => {
+                    let items: Vec<&str> = data.split(';').collect();
+                    for pair in items.as_chunks::<2>().0 {
+                        let Ok(index) = pair[0].parse::<u8>() else {
+                            continue;
+                        };
+                        if pair[1] == "?" {
+                            callback(Action::QueryPaletteColor { index, terminator });
+                        } else if let Some(rgb) = parse_color_spec(pair[1]) {
+                            callback(Action::SetPaletteColor { index, rgb });
+                        }
                     }
-                    // Setting colors not implemented - ignore
                 }
-                // Cursor color query/set (OSC 12)
-                "12" => {
-                    if data == "?" {
-                        callback(Action::QueryCursorColor);
+                // Palette reset (OSC 104): the listed entries, or all.
+                "104" => {
+                    if data.is_empty() {
+                        callback(Action::ResetPaletteColor(None));
                     }
-                    // Setting colors not implemented - ignore
+                    for index in data.split(';').filter_map(|i| i.parse::<u8>().ok()) {
+                        callback(Action::ResetPaletteColor(Some(index)));
+                    }
                 }
+                // Dynamic colour resets (OSC 110, 111, 112). The dynamic
+                // colours cannot be changed, so they are always at their
+                // defaults and there is nothing to do.
+                "110" | "111" | "112" => {}
                 // Kitty character width protocol (OSC 66)
                 // Format: 66;w=N;CHAR or 66;s=N;CHAR
                 // We print the character and ignore the width hint (monospace terminal)
@@ -180,9 +208,12 @@ impl AnsiParser {
             }
         } else if let Ok(code) = content.parse::<u16>() {
             // Some OSC sequences have no data (just the code)
-            if code == 133 {
+            match code {
                 // Bare OSC 133 - treat as prompt start
-                callback(Action::PromptStart);
+                133 => callback(Action::PromptStart),
+                // Bare OSC 104 resets the whole palette
+                104 => callback(Action::ResetPaletteColor(None)),
+                _ => {}
             }
         }
     }
@@ -341,8 +372,23 @@ impl AnsiParser {
         // DCS format: ESC P params q <sixel data> ST
         // When we get here, params are in dcs_params, buffer starts with 'q' or params
 
-        // Find the 'q' that starts sixel data
+        // DECRQSS (`$q`) and XTGETTCAP (`+q`) also end in `q`; take them
+        // first so they are never decoded as sixel.
         let content = &self.dcs_buffer;
+        if let Some(request) = content.strip_prefix(b"$q") {
+            callback(Action::RequestStatusString(
+                String::from_utf8_lossy(request).into_owned(),
+            ));
+            return;
+        }
+        if let Some(request) = content.strip_prefix(b"+q") {
+            callback(Action::RequestTermcap(
+                String::from_utf8_lossy(request).into_owned(),
+            ));
+            return;
+        }
+
+        // Find the 'q' that starts sixel data
         if let Some(q_pos) = content.iter().position(|&b| b == b'q') {
             // Parse params before 'q' (semicolon-separated)
             let param_bytes = &content[..q_pos];
@@ -378,6 +424,44 @@ impl AnsiParser {
     }
 }
 
+/// Parse an X11 colour specification of the forms xterm accepts from
+/// applications: `rgb:R/G/B` with 1-4 hex digits per channel (scaled to 8
+/// bits), and `#RGB`, `#RRGGBB`, `#RRRGGGBBB`, `#RRRRGGGGBBBB` (the high
+/// bits of each channel). Colour names are not supported.
+pub(super) fn parse_color_spec(spec: &str) -> Option<[u8; 3]> {
+    fn hex(digits: &str) -> Option<u32> {
+        if digits.is_empty() || digits.len() > 4 {
+            return None;
+        }
+        u32::from_str_radix(digits, 16).ok()
+    }
+
+    if let Some(channels) = spec.strip_prefix("rgb:") {
+        let mut rgb = [0u8; 3];
+        let mut parts = channels.split('/');
+        for channel in &mut rgb {
+            let digits = parts.next()?;
+            let max = (1u32 << (4 * digits.len())) - 1;
+            // Round to the nearest 8-bit value: ff -> 255, f -> 255, 8 -> 136.
+            *channel = ((hex(digits)? * 255 + max / 2) / max) as u8;
+        }
+        return parts.next().is_none().then_some(rgb);
+    }
+
+    let digits = spec.strip_prefix('#')?;
+    if digits.is_empty() || !digits.len().is_multiple_of(3) || digits.len() > 12 {
+        return None;
+    }
+    let width = digits.len() / 3;
+    let mut rgb = [0u8; 3];
+    for (i, channel) in rgb.iter_mut().enumerate() {
+        let value = hex(digits.get(i * width..(i + 1) * width)?)?;
+        // Left-align to 16 bits and keep the top 8.
+        *channel = ((value << (16 - 4 * width)) >> 8) as u8;
+    }
+    Some(rgb)
+}
+
 /// Simple base64 decoder for OSC 52 clipboard data.
 pub(super) fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -410,7 +494,7 @@ pub(super) fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Action, AnsiParser};
+    use super::super::{Action, AnsiParser, DynamicColor, StringTerminator};
 
     /// Feed raw bytes through the parser and collect emitted actions.
     fn parse(input: &[u8]) -> Vec<Action> {
@@ -522,19 +606,74 @@ mod tests {
     // OSC color queries (OSC 10, 11, 12)
     // ------------------------------------------------------------------
 
-    #[test]
-    fn osc_query_foreground_color() {
-        assert_eq!(parse(b"\x1b]10;?\x07"), vec![Action::QueryForegroundColor]);
+    fn query(color: DynamicColor, terminator: StringTerminator) -> Action {
+        Action::QueryDynamicColor { color, terminator }
     }
 
     #[test]
-    fn osc_query_background_color() {
-        assert_eq!(parse(b"\x1b]11;?\x07"), vec![Action::QueryBackgroundColor]);
+    fn osc_dynamic_color_queries_keep_their_terminator() {
+        use DynamicColor::*;
+        use StringTerminator::*;
+        assert_eq!(parse(b"\x1b]10;?\x07"), vec![query(Foreground, Bel)]);
+        assert_eq!(parse(b"\x1b]11;?\x1b\\"), vec![query(Background, St)]);
+        assert_eq!(parse(b"\x1b]12;?\x07"), vec![query(Cursor, Bel)]);
+        // Later items name the following colours.
+        assert_eq!(
+            parse(b"\x1b]10;?;?;?\x07"),
+            vec![
+                query(Foreground, Bel),
+                query(Background, Bel),
+                query(Cursor, Bel)
+            ]
+        );
+        assert_eq!(parse(b"\x1b]12;?;?\x07"), vec![query(Cursor, Bel)]);
     }
 
     #[test]
-    fn osc_query_cursor_color() {
-        assert_eq!(parse(b"\x1b]12;?\x07"), vec![Action::QueryCursorColor]);
+    fn osc_4_sets_and_queries_several_entries() {
+        assert_eq!(
+            parse(b"\x1b]4;1;#ff8000;200;?;300;?;x;?\x1b\\"),
+            vec![
+                Action::SetPaletteColor {
+                    index: 1,
+                    rgb: [0xff, 0x80, 0x00]
+                },
+                Action::QueryPaletteColor {
+                    index: 200,
+                    terminator: StringTerminator::St
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn osc_104_resets_listed_entries_or_all() {
+        assert_eq!(
+            parse(b"\x1b]104\x07\x1b]104;\x07\x1b]104;3;9\x07"),
+            vec![
+                Action::ResetPaletteColor(None),
+                Action::ResetPaletteColor(None),
+                Action::ResetPaletteColor(Some(3)),
+                Action::ResetPaletteColor(Some(9)),
+            ]
+        );
+    }
+
+    #[test]
+    fn color_specs() {
+        use super::parse_color_spec as spec;
+        assert_eq!(spec("rgb:ff/00/80"), Some([0xff, 0x00, 0x80]));
+        assert_eq!(spec("rgb:f/8/0"), Some([0xff, 0x88, 0x00]));
+        assert_eq!(spec("rgb:ffff/8000/0000"), Some([0xff, 0x80, 0x00]));
+        assert_eq!(spec("rgb:fff/800/000"), Some([0xff, 0x80, 0x00]));
+        assert_eq!(spec("#f80"), Some([0xf0, 0x80, 0x00]));
+        assert_eq!(spec("#ff8000"), Some([0xff, 0x80, 0x00]));
+        assert_eq!(spec("#ffff80000000"), Some([0xff, 0x80, 0x00]));
+        assert_eq!(spec("rgb:ff/00"), None);
+        assert_eq!(spec("rgb:ff/00/00/00"), None);
+        assert_eq!(spec("rgb:fffff/0/0"), None);
+        assert_eq!(spec("#ff80"), None);
+        assert_eq!(spec("red"), None);
     }
 
     #[test]

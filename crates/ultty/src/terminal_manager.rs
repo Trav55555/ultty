@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::event_loop::{EventLoop as TerminalEventLoop, TerminalEvent, Waker};
+use crate::grid::ThemeColors;
 use crate::pane_layout::{Divider, FocusDirection, PaneLayout, PaneNode, Rect};
 use crate::pty::{Child, PtySize};
 
@@ -204,6 +205,15 @@ pub struct PaneArea {
     pub cell_height: f32,
 }
 
+impl PaneArea {
+    /// One cell's size in whole pixels, `(width, height)`, as terminals
+    /// report it to applications (XTWINOPS 14 and 16).
+    pub fn cell_pixel_size(&self) -> (u16, u16) {
+        let px = |v: f32| v.round().clamp(0.0, f32::from(u16::MAX)) as u16;
+        (px(self.cell_width), px(self.cell_height))
+    }
+}
+
 pub struct TerminalManager {
     /// All managed terminals
     terminals: Vec<ManagedTerminal>,
@@ -220,6 +230,9 @@ pub struct TerminalManager {
     default_rows: u16,
     /// Handed to every terminal so its I/O thread can wake the UI.
     waker: Option<Waker>,
+    /// The colours terminals are drawn with, which they report to
+    /// applications. Handed to every terminal, like the waker.
+    theme_colors: ThemeColors,
     /// Where panes are laid out, once the window has a size. Splits,
     /// closes and divider drags re-lay panes out within it.
     pane_area: Option<PaneArea>,
@@ -235,9 +248,29 @@ impl TerminalManager {
         self.waker = Some(waker);
     }
 
+    /// Set the colours terminals are drawn with, for existing terminals and
+    /// any created later, so colour queries report the live theme.
+    pub fn set_theme_colors(&mut self, theme: ThemeColors) {
+        for terminal in &self.terminals {
+            terminal
+                .event_loop
+                .terminal()
+                .set_theme_colors(theme.clone());
+        }
+        self.theme_colors = theme;
+    }
+
     fn push_terminal(&mut self, terminal: ManagedTerminal) {
         if let Some(waker) = &self.waker {
             terminal.event_loop.set_waker(Arc::clone(waker));
+        }
+        {
+            let mut state = terminal.event_loop.terminal();
+            state.set_theme_colors(self.theme_colors.clone());
+            if let Some(area) = self.pane_area {
+                let (width, height) = area.cell_pixel_size();
+                state.set_cell_pixel_size(width, height);
+            }
         }
         self.terminals.push(terminal);
     }
@@ -262,6 +295,7 @@ impl TerminalManager {
             default_cols: cols,
             default_rows: rows,
             waker: None,
+            theme_colors: ThemeColors::default(),
             pane_area: None,
         };
 
@@ -539,11 +573,16 @@ impl TerminalManager {
                 sizes.push((terminal_id, grid));
             }
         }
+        let (cell_width, cell_height) = area.cell_pixel_size();
         for (terminal_id, (cols, rows)) in sizes {
             let Some(terminal) = self.terminals.iter_mut().find(|t| t.id == terminal_id) else {
                 continue;
             };
-            let current = terminal.event_loop.terminal().dimensions();
+            let current = {
+                let mut state = terminal.event_loop.terminal();
+                state.set_cell_pixel_size(cell_width, cell_height);
+                state.dimensions()
+            };
             if (current.cols, current.rows) != (cols, rows) {
                 terminal.resize(cols, rows)?;
             }
@@ -1013,6 +1052,7 @@ impl TerminalManager {
             default_cols: cols,
             default_rows: rows,
             waker: None,
+            theme_colors: ThemeColors::default(),
             pane_area: None,
         };
 
@@ -1249,6 +1289,26 @@ impl ManagedTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminals_report_the_cell_size_and_theme_they_are_drawn_with() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let theme = ThemeColors {
+            background: [1, 2, 3],
+            ..ThemeColors::default()
+        };
+        manager.set_theme_colors(theme.clone());
+        manager.layout_panes(AREA).unwrap();
+        let first = manager.focused_terminal_id().unwrap();
+        let second = manager.split_horizontal().unwrap().unwrap();
+        manager.create_tab().unwrap();
+        let third = manager.focused_terminal_id().unwrap();
+        for id in [first, second, third] {
+            let state = manager.terminal(id).unwrap().event_loop.terminal();
+            assert_eq!(state.cell_pixel_size(), Some((10, 20)), "{id:?}");
+            assert_eq!(state.palette().theme(), &theme, "{id:?}");
+        }
+    }
 
     #[test]
     fn mixed_splits_size_each_pane_to_its_place_in_the_tree() {

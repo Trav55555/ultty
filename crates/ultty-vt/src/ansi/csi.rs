@@ -9,7 +9,7 @@
 //! rest of the sequence, so no byte of a control sequence is ever printed.
 
 use super::AnsiParser;
-use super::{Action, Mode, State};
+use super::{Action, Mode, State, WindowOp};
 
 /// Maximum number of CSI parameters kept per sequence.
 ///
@@ -221,9 +221,15 @@ impl AnsiParser {
                 callback(Action::EraseInDisplay(first_or_zero.min(3) as u8))
             }
             (Some(b'?'), None, b'K') => callback(Action::EraseInLine(first_or_zero.min(2) as u8)),
-            (Some(b'?'), None, b'n') if p1 == 6 => callback(Action::ReportCursorPosition),
+            // DECXCPR (CSI ? 6 n)
+            (Some(b'?'), None, b'n') if p1 == 6 => callback(Action::ReportExtendedCursorPosition),
             // DECRQM - Request DEC Private Mode (CSI ? Ps $ p)
             (Some(b'?'), Some(b'$'), b'p') => callback(Action::RequestPrivateMode(p1)),
+            // DECRQM for ANSI modes (CSI Ps $ p)
+            (None, Some(b'$'), b'p') => callback(Action::RequestAnsiMode(p1)),
+
+            // XTVERSION (CSI > Ps q)
+            (Some(b'>'), None, b'q') => callback(Action::RequestTerminalVersion),
 
             // Kitty keyboard protocol
             (Some(b'?'), None, b'u') => callback(Action::KittyKeyboardQuery),
@@ -246,7 +252,13 @@ impl AnsiParser {
             (None, Some(b' '), b'q') => callback(Action::SetCursorStyle(byte_param(first_or_zero))),
 
             // Soft reset (DECSTR — CSI ! p)
-            (None, Some(b'!'), b'p') => callback(Action::SoftReset),
+            (None, Some(b'!'), b'p') => {
+                // Like RIS, a soft reset designates ASCII into G0/G1 again.
+                self.g0_charset_graphics = false;
+                self.g1_charset_graphics = false;
+                self.using_g1 = false;
+                callback(Action::SoftReset);
+            }
 
             // Everything else, including `CSI > Ps ; Ps m` (XTMODKEYS),
             // `CSI = c` (DA3) and `CSI ? Ps s` (XTSAVE), is not ours to act on.
@@ -314,15 +326,40 @@ impl AnsiParser {
             // Tab clear
             b'g' => callback(Action::ClearTabStop(byte_param(first_or_zero))),
 
-            // Cursor position report
+            // Status reports (DSR, CPR, DECXCPR)
             b'n' if p1 == 6 => callback(Action::ReportCursorPosition),
+            b'n' if p1 == 5 => callback(Action::DeviceStatusReport),
+
+            // XTWINOPS - CSI Ps ; ... t
+            b't' => {
+                let p2 = self.params.get(1).copied().unwrap_or(0);
+                let op = match self.params.first().copied().unwrap_or(0) {
+                    14 => Some(WindowOp::ReportTextAreaPixels),
+                    16 => Some(WindowOp::ReportCellPixels),
+                    18 => Some(WindowOp::ReportTextAreaChars),
+                    22 => Some(WindowOp::PushTitle(p2)),
+                    23 => Some(WindowOp::PopTitle(p2)),
+                    _ => None,
+                };
+                if let Some(op) = op {
+                    callback(Action::WindowOp(op));
+                }
+            }
 
             // Primary device attributes
             b'c' => callback(Action::DeviceAttributes),
 
             // ANSI SM/RM (non-private mode set/reset)
-            b'h' | b'l' if self.params.contains(&4) => {
-                callback(Action::SetInsertMode(cmd == b'h'));
+            b'h' | b'l' => {
+                let set = cmd == b'h';
+                for &param in &self.params {
+                    match param {
+                        4 => callback(Action::SetInsertMode(set)),
+                        20 if set => callback(Action::SetMode(Mode::LineFeedNewLine)),
+                        20 => callback(Action::ResetMode(Mode::LineFeedNewLine)),
+                        _ => {}
+                    }
+                }
             }
 
             _ => {
@@ -336,6 +373,7 @@ impl AnsiParser {
         match param {
             1 => Some(Action::SetMode(Mode::ApplicationCursorKeys)),
             3 => Some(Action::SetMode(Mode::ColumnMode132)),
+            40 => Some(Action::SetMode(Mode::AllowColumnModeSwitch)),
             5 => Some(Action::SetMode(Mode::ReverseVideo)),
             6 => Some(Action::SetMode(Mode::OriginMode)),
             7 => Some(Action::SetMode(Mode::AutoWrap)),
@@ -352,6 +390,7 @@ impl AnsiParser {
             1015 => Some(Action::SetMode(Mode::MouseUrxvt)),
             1007 => Some(Action::SetMode(Mode::AlternateScrollMode)),
             1047 => Some(Action::SetMode(Mode::AlternateScreenClear)),
+            1048 => Some(Action::SetMode(Mode::SaveCursor)),
             1049 => Some(Action::SetMode(Mode::AlternateScreenSaveCursor)),
             2004 => Some(Action::SetMode(Mode::BracketedPaste)),
             2026 => Some(Action::SetMode(Mode::SynchronizedUpdate)),
@@ -365,6 +404,7 @@ impl AnsiParser {
         match param {
             1 => Some(Action::ResetMode(Mode::ApplicationCursorKeys)),
             3 => Some(Action::ResetMode(Mode::ColumnMode132)),
+            40 => Some(Action::ResetMode(Mode::AllowColumnModeSwitch)),
             5 => Some(Action::ResetMode(Mode::ReverseVideo)),
             6 => Some(Action::ResetMode(Mode::OriginMode)),
             7 => Some(Action::ResetMode(Mode::AutoWrap)),
@@ -381,6 +421,7 @@ impl AnsiParser {
             1015 => Some(Action::ResetMode(Mode::MouseUrxvt)),
             1007 => Some(Action::ResetMode(Mode::AlternateScrollMode)),
             1047 => Some(Action::ResetMode(Mode::AlternateScreenClear)),
+            1048 => Some(Action::ResetMode(Mode::SaveCursor)),
             1049 => Some(Action::ResetMode(Mode::AlternateScreenSaveCursor)),
             2004 => Some(Action::ResetMode(Mode::BracketedPaste)),
             2026 => Some(Action::ResetMode(Mode::SynchronizedUpdate)),

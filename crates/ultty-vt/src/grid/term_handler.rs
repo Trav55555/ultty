@@ -1,9 +1,30 @@
 //! Handler that applies ANSI parser actions to the Terminal.
 
-use crate::ansi::{Action, Attribute, Color as AnsiColor, Mode, NamedColor};
-use crate::grid::{decode_sixel, CellFlags, MouseEncoding, MouseMode, Terminal, TerminalImage};
+use crate::ansi::{
+    Action, Attribute, Color as AnsiColor, DynamicColor, Mode, NamedColor, WindowOp,
+};
+use crate::grid::{
+    decode_sixel, format_color_spec, Cell, CellFlags, CursorShape, MouseEncoding, MouseMode,
+    Terminal, TerminalImage,
+};
 
 use super::cell::{Color, UnderlineStyle};
+
+/// Primary device attributes: a VT220-class terminal (62) with sixel
+/// graphics (4) and ANSI colour (22). Nothing it does not implement.
+const PRIMARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;4;22c";
+
+/// The terminal type the PTY's `TERM` names. XTGETTCAP reports it as `TN`.
+const TERMINAL_NAME: &str = "xterm-256color";
+
+/// This crate's version as one number, `major * 10000 + minor * 100 +
+/// patch` (the form VTE uses), for the secondary device attributes.
+fn version_number() -> u32 {
+    let part = |s: &str| s.parse::<u32>().unwrap_or(0);
+    part(env!("CARGO_PKG_VERSION_MAJOR")) * 10_000
+        + part(env!("CARGO_PKG_VERSION_MINOR")) * 100
+        + part(env!("CARGO_PKG_VERSION_PATCH"))
+}
 
 /// Applies parser actions to a Terminal.
 ///
@@ -18,6 +39,11 @@ impl<'a> TerminalHandler<'a> {
     /// Create a new handler for the given terminal.
     pub fn new(terminal: &'a mut Terminal) -> Self {
         Self { terminal }
+    }
+
+    /// The terminal this handler applies actions to.
+    pub fn terminal(&self) -> &Terminal {
+        self.terminal
     }
 
     /// Handle a single parser action.
@@ -106,10 +132,8 @@ impl<'a> TerminalHandler<'a> {
                 0 => self.terminal.grid_mut().erase_below(),
                 1 => self.terminal.grid_mut().erase_above(),
                 2 => self.terminal.grid_mut().clear(),
-                3 => {
-                    self.terminal.grid_mut().clear();
-                    self.terminal.buffer_mut().clear_history();
-                }
+                // ED 3 clears saved lines only (xterm).
+                3 => self.terminal.buffer_mut().clear_history(),
                 _ => {}
             },
             Action::EraseInLine(mode) => match mode {
@@ -237,32 +261,31 @@ impl<'a> TerminalHandler<'a> {
 
             // Terminal queries
             Action::ReportCursorPosition => {
-                // Send cursor position report: CSI row ; col R
-                let abs_row = self.terminal.grid().cursor().position.row;
-                let row = if self.terminal.modes().origin_mode {
-                    let region = self.terminal.grid().effective_scroll_region();
-                    abs_row.saturating_sub(region.top) + 1
-                } else {
-                    abs_row + 1
-                };
-                let col = self.terminal.grid().cursor().position.col + 1; // 1-based
-                let response = format!("\x1b[{};{}R", row, col);
-                self.terminal.queue_response(response.into_bytes());
+                let (row, col) = self.cursor_report_position();
+                self.reply(format!("\x1b[{row};{col}R"));
             }
+            Action::ReportExtendedCursorPosition => {
+                let (row, col) = self.cursor_report_position();
+                self.reply(format!("\x1b[?{row};{col}R"));
+            }
+            Action::DeviceStatusReport => self.reply("\x1b[0n".to_string()),
             Action::DeviceAttributes => {
-                // Send primary device attributes (DA1)
-                // We identify as VT220 with various capabilities:
-                // 1 = 132 columns, 2 = printer port, 6 = selective erase,
-                // 22 = ANSI color, 29 = ANSI text locator
-                let response = b"\x1b[?62;1;2;6;22;29c".to_vec();
-                self.terminal.queue_response(response);
+                self.terminal
+                    .queue_response(PRIMARY_DEVICE_ATTRIBUTES.to_vec());
             }
             Action::SecondaryDeviceAttributes => {
-                // Send secondary device attributes (DA2)
-                // Format: CSI > Pp ; Pv ; Pc c
-                // Pp=0 (VT100-compatible), Pv=1 (version), Pc=0 (no special options)
-                let response = b"\x1b[>0;1;0c".to_vec();
-                self.terminal.queue_response(response);
+                // CSI > Pp ; Pv ; Pc c: VT220 (1), our version, no ROM cartridge.
+                self.reply(format!("\x1b[>1;{};0c", version_number()));
+            }
+            Action::RequestTerminalVersion => {
+                self.reply(format!("\x1bP>|ultty {}\x1b\\", env!("CARGO_PKG_VERSION")));
+            }
+            Action::WindowOp(op) => self.window_op(op),
+            Action::RequestStatusString(request) => self.report_status_string(&request),
+            Action::RequestTermcap(request) => self.report_termcap(&request),
+            Action::RequestAnsiMode(mode) => {
+                let status = self.ansi_mode_status(mode);
+                self.reply(format!("\x1b[{mode};{status}$y"));
             }
 
             // Control characters
@@ -307,6 +330,9 @@ impl<'a> TerminalHandler<'a> {
                     self.terminal.buffer_mut().newline();
                 } else {
                     self.terminal.grid_mut().newline();
+                }
+                if self.terminal.modes().linefeed_newline {
+                    self.terminal.grid_mut().carriage_return();
                 }
             }
             Action::CarriageReturn => self.terminal.grid_mut().carriage_return(),
@@ -383,116 +409,36 @@ impl<'a> TerminalHandler<'a> {
                 let response = format!("\x1b[?{}u", flags);
                 self.terminal.queue_response(response.into_bytes());
             }
-            Action::QueryForegroundColor => {
-                // Respond with foreground color in XParseColor format
-                // Format: OSC 10 ; rgb:RRRR/GGGG/BBBB ST
-                // Using a typical light foreground for dark themes
-                let response = b"\x1b]10;rgb:d4d4/d4d4/d4d4\x1b\\".to_vec();
-                self.terminal.queue_response(response);
-            }
-            Action::QueryBackgroundColor => {
-                // Respond with background color in XParseColor format
-                // Format: OSC 11 ; rgb:RRRR/GGGG/BBBB ST
-                // Using a typical dark background
-                let response = b"\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\".to_vec();
-                self.terminal.queue_response(response);
-            }
-            Action::QueryCursorColor => {
-                // Respond with cursor color in XParseColor format
-                // Format: OSC 12 ; rgb:RRRR/GGGG/BBBB ST
-                let response = b"\x1b]12;rgb:d4d4/d4d4/d4d4\x1b\\".to_vec();
-                self.terminal.queue_response(response);
-            }
-            Action::RequestPrivateMode(mode) => {
-                // DECRQM response format: CSI ? Ps ; Pm $ y
-                // Pm: 1=set, 2=reset, 3=permanently set, 4=permanently reset, 0=not recognized
-                let modes = self.terminal.modes();
-                let status = match mode {
-                    1 => {
-                        if modes.application_cursor_keys {
-                            1
-                        } else {
-                            2
-                        }
-                    }
-                    7 => {
-                        if modes.auto_wrap {
-                            1
-                        } else {
-                            2
-                        }
-                    }
-                    25 => {
-                        if self.terminal.grid().cursor().visible {
-                            1
-                        } else {
-                            2
-                        }
-                    }
-                    1000 => {
-                        if modes.mouse_mode == crate::grid::terminal::MouseMode::Normal {
-                            1
-                        } else {
-                            2
-                        }
-                    }
-                    1002 => {
-                        if modes.mouse_mode == crate::grid::terminal::MouseMode::ButtonEvent {
-                            1
-                        } else {
-                            2
-                        }
-                    }
-                    1003 => {
-                        if modes.mouse_mode == crate::grid::terminal::MouseMode::AnyEvent {
-                            1
-                        } else {
-                            2
-                        }
-                    }
-                    1004 => {
-                        if modes.focus_reporting {
-                            1
-                        } else {
-                            2
-                        }
-                    }
-                    1006 => {
-                        if matches!(
-                            modes.mouse_encoding,
-                            crate::grid::terminal::MouseEncoding::Sgr
-                        ) {
-                            1
-                        } else {
-                            2
-                        }
-                    }
-                    2004 => {
-                        if modes.bracketed_paste {
-                            1
-                        } else {
-                            2
-                        }
-                    }
-                    2026 => {
-                        if modes.synchronized_update {
-                            1
-                        } else {
-                            2
-                        }
-                    }
-                    2027 => {
-                        if self.terminal.grid().grapheme_clustering() {
-                            1
-                        } else {
-                            2
-                        }
-                    }
-                    // Mode not recognized
-                    _ => 0,
+            // Colour queries answer from the theme the embedder set with
+            // `Terminal::set_theme_colors`, in order with every other reply,
+            // so a query followed by a DA1 sentinel is never misread.
+            Action::QueryDynamicColor { color, terminator } => {
+                let theme = self.terminal.palette().theme();
+                let rgb = match color {
+                    DynamicColor::Foreground => theme.foreground,
+                    DynamicColor::Background => theme.background,
+                    DynamicColor::Cursor => theme.cursor,
                 };
-                let response = format!("\x1b[?{};{}$y", mode, status);
-                self.terminal.queue_response(response.into_bytes());
+                self.reply(format!(
+                    "\x1b]{};{}{}",
+                    color.osc_code(),
+                    format_color_spec(rgb),
+                    terminator.as_str()
+                ));
+            }
+            Action::QueryPaletteColor { index, terminator } => {
+                let rgb = self.terminal.palette().color(index);
+                self.reply(format!(
+                    "\x1b]4;{index};{}{}",
+                    format_color_spec(rgb),
+                    terminator.as_str()
+                ));
+            }
+            Action::SetPaletteColor { index, rgb } => self.terminal.palette_mut().set(index, rgb),
+            Action::ResetPaletteColor(index) => self.terminal.palette_mut().reset(index),
+            Action::RequestPrivateMode(mode) => {
+                let status = self.private_mode_status(mode);
+                self.reply(format!("\x1b[?{mode};{status}$y"));
             }
             Action::UnknownOsc(_) => {
                 // Ignore unknown OSC sequences
@@ -503,7 +449,7 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.set_grapheme_clustering(true);
                 self.terminal.grid_mut().clear();
                 self.terminal.grid_mut().reset_attrs();
-                self.terminal.grid_mut().set_scroll_region(0, 0);
+                self.terminal.grid_mut().reset_scroll_region();
                 self.terminal.grid_mut().set_auto_wrap(true);
                 self.terminal.grid_mut().set_insert_mode(false);
                 self.terminal.grid_mut().cursor_mut().position =
@@ -518,23 +464,31 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.reset_auxiliary_state();
             }
 
-            // Soft reset (DECSTR — CSI ! p)
+            // Soft reset (DECSTR — CSI ! p). Per DEC and xterm it leaves the
+            // cursor and the screen where they are and resets: SGR, margins,
+            // DECTCEM, IRM, DECOM, DECAWM (on, xterm's default), DECCKM,
+            // DECKPAM and the saved cursor. The parser resets charsets.
             Action::SoftReset => {
-                self.terminal.grid_mut().reset_attrs();
-                self.terminal.grid_mut().set_scroll_region(0, 0);
-                self.terminal.grid_mut().set_auto_wrap(true);
-                self.terminal.grid_mut().set_insert_mode(false);
-                self.terminal.grid_mut().cursor_mut().visible = true;
-                self.terminal.grid_mut().cursor_mut().wrap_pending = false;
-                self.terminal.modes_mut().origin_mode = false;
-                self.terminal.modes_mut().insert_mode = false;
-                self.terminal.modes_mut().auto_wrap = true;
+                let grid = self.terminal.grid_mut();
+                grid.reset_attrs();
+                grid.reset_scroll_region();
+                grid.set_auto_wrap(true);
+                grid.set_insert_mode(false);
+                grid.reset_saved_cursor();
+                grid.cursor_mut().visible = true;
+                grid.cursor_mut().wrap_pending = false;
+                let modes = self.terminal.modes_mut();
+                modes.origin_mode = false;
+                modes.insert_mode = false;
+                modes.auto_wrap = true;
+                modes.application_cursor_keys = false;
+                modes.application_keypad = false;
             }
 
             // Screen alignment pattern (DECALN — ESC # 8)
             Action::ScreenAlignmentPattern => {
                 self.terminal.grid_mut().fill_with_char('E');
-                self.terminal.grid_mut().set_scroll_region(0, 0);
+                self.terminal.grid_mut().reset_scroll_region();
                 self.terminal.grid_mut().cursor_mut().position =
                     crate::grid::CursorPosition::origin();
                 self.terminal.grid_mut().cursor_mut().wrap_pending = false;
@@ -547,6 +501,144 @@ impl<'a> TerminalHandler<'a> {
             Action::NormalKeypadMode => {
                 self.terminal.modes_mut().application_keypad = false;
             }
+        }
+    }
+
+    fn reply(&mut self, reply: String) {
+        self.terminal.queue_response(reply.into_bytes());
+    }
+
+    /// The cursor as CPR reports it: 1-based, and relative to the scroll
+    /// region in origin mode.
+    fn cursor_report_position(&self) -> (u16, u16) {
+        let grid = self.terminal.grid();
+        let position = grid.cursor().position;
+        let row = if self.terminal.modes().origin_mode {
+            position
+                .row
+                .saturating_sub(grid.effective_scroll_region().top)
+        } else {
+            position.row
+        };
+        (row + 1, position.col + 1)
+    }
+
+    /// DECRQM status for a DEC private mode: 1 set, 2 reset, 0 unknown.
+    fn private_mode_status(&self, mode: u16) -> u8 {
+        let terminal = &*self.terminal;
+        let modes = terminal.modes();
+        let grid = terminal.grid();
+        let set = match mode {
+            1 => modes.application_cursor_keys,
+            3 => modes.column_mode_132,
+            5 => modes.reverse_video,
+            6 => modes.origin_mode,
+            7 => grid.auto_wrap(),
+            9 => modes.mouse_mode == MouseMode::X10,
+            12 => grid.cursor().blinking,
+            25 => grid.cursor().visible,
+            40 => modes.allow_column_mode_switch,
+            47 | 1047 | 1049 => terminal.is_alternate_screen(),
+            1000 => modes.mouse_mode == MouseMode::Normal,
+            1002 => modes.mouse_mode == MouseMode::ButtonEvent,
+            1003 => modes.mouse_mode == MouseMode::AnyEvent,
+            1004 => modes.focus_reporting,
+            1005 => modes.mouse_encoding == MouseEncoding::Utf8,
+            1006 => modes.mouse_encoding == MouseEncoding::Sgr,
+            1007 => modes.alternate_scroll,
+            1015 => modes.mouse_encoding == MouseEncoding::Urxvt,
+            // An action rather than a state: report it reset.
+            1048 => false,
+            2004 => modes.bracketed_paste,
+            2026 => modes.synchronized_update,
+            2027 => grid.grapheme_clustering(),
+            _ => return 0,
+        };
+        if set {
+            1
+        } else {
+            2
+        }
+    }
+
+    /// DECRQM status for an ANSI mode: 1 set, 2 reset, 3 permanently set,
+    /// 4 permanently reset, 0 unknown.
+    fn ansi_mode_status(&self, mode: u16) -> u8 {
+        let set = match mode {
+            // KAM: the keyboard never locks.
+            2 => return 4,
+            4 => self.terminal.grid().insert_mode(),
+            // SRM: there is no local echo.
+            12 => return 3,
+            20 => self.terminal.modes().linefeed_newline,
+            _ => return 0,
+        };
+        if set {
+            1
+        } else {
+            2
+        }
+    }
+
+    fn window_op(&mut self, op: WindowOp) {
+        let dims = self.terminal.dimensions();
+        let cell = self.terminal.cell_pixel_size();
+        match op {
+            WindowOp::ReportTextAreaChars => {
+                self.reply(format!("\x1b[8;{};{}t", dims.rows, dims.cols));
+            }
+            WindowOp::ReportCellPixels => {
+                if let Some((width, height)) = cell {
+                    self.reply(format!("\x1b[6;{height};{width}t"));
+                }
+            }
+            WindowOp::ReportTextAreaPixels => {
+                if let Some((width, height)) = cell {
+                    let height = u32::from(height) * u32::from(dims.rows);
+                    let width = u32::from(width) * u32::from(dims.cols);
+                    self.reply(format!("\x1b[4;{height};{width}t"));
+                }
+            }
+            // There is one title, the window's; icon-only (1) requests leave
+            // it alone so a balanced push/pop of icon and window titles
+            // restores it once.
+            WindowOp::PushTitle(which) if which != 1 => self.terminal.push_title(),
+            WindowOp::PopTitle(which) if which != 1 => {
+                self.terminal.pop_title();
+            }
+            WindowOp::PushTitle(_) | WindowOp::PopTitle(_) => {}
+        }
+    }
+
+    /// Answer DECRQSS for SGR, DECSTBM and DECSCUSR.
+    fn report_status_string(&mut self, request: &str) {
+        let grid = self.terminal.grid();
+        let setting = match request {
+            "m" => Some(format!("{}m", sgr_report(grid.attrs()))),
+            "r" => {
+                let region = grid.effective_scroll_region();
+                Some(format!("{};{}r", region.top + 1, region.bottom + 1))
+            }
+            " q" => Some(format!("{} q", cursor_style_number(grid.cursor()))),
+            _ => None,
+        };
+        self.reply(match setting {
+            Some(setting) => format!("\x1bP1$r{setting}\x1b\\"),
+            None => "\x1bP0$r\x1b\\".to_string(),
+        });
+    }
+
+    /// Answer XTGETTCAP, one reply per requested name.
+    fn report_termcap(&mut self, request: &str) {
+        for name_hex in request.split(';') {
+            let answer = decode_hex(name_hex)
+                .and_then(|name| termcap_value(&name).map(|value| (name, value)));
+            self.reply(match answer {
+                Some((name, value)) => {
+                    format!("\x1bP1+r{}={}\x1b\\", encode_hex(&name), encode_hex(value))
+                }
+                None => format!("\x1bP0+r{name_hex}\x1b\\"),
+            });
         }
     }
 
@@ -664,7 +756,17 @@ impl<'a> TerminalHandler<'a> {
                 }
             }
             Mode::OriginMode => {
+                // Setting or resetting DECOM homes the cursor to the new
+                // origin: the region's top-left, or the screen's.
                 self.terminal.modes_mut().origin_mode = enabled;
+                let top = if enabled {
+                    self.terminal.grid().effective_scroll_region().top
+                } else {
+                    0
+                };
+                let cursor = self.terminal.grid_mut().cursor_mut();
+                cursor.position = crate::grid::CursorPosition::new(0, top);
+                cursor.wrap_pending = false;
             }
             Mode::AutoWrap => {
                 self.terminal.modes_mut().auto_wrap = enabled;
@@ -676,8 +778,17 @@ impl<'a> TerminalHandler<'a> {
             Mode::CursorBlink => {
                 self.terminal.grid_mut().cursor_mut().blinking = enabled;
             }
+            Mode::AllowColumnModeSwitch => {
+                self.terminal.modes_mut().allow_column_mode_switch = enabled;
+            }
             Mode::ColumnMode132 => {
-                // 132 column mode (DECCOLM) - request resize from app
+                // xterm ignores DECCOLM unless mode 40 allows it. Without the
+                // gate, `reset` would shrink every window to 80 columns.
+                if !self.terminal.modes().allow_column_mode_switch {
+                    return;
+                }
+                self.terminal.modes_mut().column_mode_132 = enabled;
+                // Request the resize from the app.
                 let columns = if enabled { 132 } else { 80 };
                 self.terminal.request_column_resize(columns);
                 // Clear the screen when switching column modes (per DECCOLM spec)
@@ -709,6 +820,17 @@ impl<'a> TerminalHandler<'a> {
                     self.terminal.grid_mut().restore_cursor();
                 }
             }
+            Mode::SaveCursor => {
+                if enabled {
+                    let origin = self.terminal.modes().origin_mode;
+                    self.terminal.grid_mut().save_cursor(origin);
+                } else if let Some(origin) = self.terminal.grid_mut().restore_cursor() {
+                    self.terminal.modes_mut().origin_mode = origin;
+                }
+            }
+            Mode::LineFeedNewLine => {
+                self.terminal.modes_mut().linefeed_newline = enabled;
+            }
             Mode::AlternateScrollMode => {
                 self.terminal.modes_mut().alternate_scroll = enabled;
             }
@@ -737,10 +859,15 @@ impl<'a> TerminalHandler<'a> {
         let start_col = cursor.position.col;
         let start_row = cursor.position.row;
 
-        // Calculate cell dimensions using typical terminal font metrics.
-        // 8x16 is standard for most monospace fonts at common sizes.
-        let cell_pixel_width = 8u32;
-        let cell_pixel_height = 16u32;
+        // Size the image in cells with the cell size the embedder reported,
+        // the one XTWINOPS 16 tells applications, so an image drawn for it
+        // covers exactly the cells it was made for. Without one, assume a
+        // common 8x16 cell.
+        let (cell_pixel_width, cell_pixel_height) = self
+            .terminal
+            .cell_pixel_size()
+            .filter(|&(w, h)| w > 0 && h > 0)
+            .map_or((8, 16), |(w, h)| (u32::from(w), u32::from(h)));
 
         let cell_width = width.div_ceil(cell_pixel_width).min(u16::MAX as u32) as u16;
         let cell_height = height.div_ceil(cell_pixel_height).min(u16::MAX as u32) as u16;
@@ -780,6 +907,86 @@ impl<'a> TerminalHandler<'a> {
             self.terminal.grid_mut().write_ascii_span(bytes);
         }
     }
+}
+
+/// The SGR parameters that recreate `attrs` from a reset, for DECRQSS.
+fn sgr_report(attrs: &Cell) -> String {
+    let mut params = vec!["0".to_string()];
+    let underline = match attrs.underline_style() {
+        UnderlineStyle::None => None,
+        UnderlineStyle::Single => Some("4"),
+        UnderlineStyle::Double => Some("21"),
+        UnderlineStyle::Curly => Some("4:3"),
+        UnderlineStyle::Dotted => Some("4:4"),
+        UnderlineStyle::Dashed => Some("4:5"),
+    };
+    let flag = |flag, param: &'static str| attrs.has_flag(flag).then_some(param);
+    let attributes = [
+        flag(CellFlags::BOLD, "1"),
+        flag(CellFlags::DIM, "2"),
+        flag(CellFlags::ITALIC, "3"),
+        underline,
+        flag(CellFlags::BLINK, "5"),
+        flag(CellFlags::REVERSE, "7"),
+        flag(CellFlags::HIDDEN, "8"),
+        flag(CellFlags::STRIKETHROUGH, "9"),
+        flag(CellFlags::OVERLINE, "53"),
+    ];
+    params.extend(attributes.into_iter().flatten().map(str::to_string));
+    for (color, base) in [(attrs.fg(), 30), (attrs.bg(), 40)] {
+        match color {
+            Color::Default => {}
+            Color::Named(n) if n < 8 => params.push((base + u16::from(n)).to_string()),
+            Color::Named(n) => params.push((base + 60 + u16::from(n % 16 - 8)).to_string()),
+            Color::Indexed(n) => params.push(format!("{};5;{n}", base + 8)),
+            Color::Rgb(r, g, b) => params.push(format!("{};2;{r};{g};{b}", base + 8)),
+        }
+    }
+    match attrs.underline_color() {
+        Color::Default => {}
+        Color::Rgb(r, g, b) => params.push(format!("58:2::{r}:{g}:{b}")),
+        Color::Named(n) => params.push(format!("58:5:{n}")),
+        Color::Indexed(n) => params.push(format!("58:5:{n}")),
+    }
+    params.join(";")
+}
+
+/// The DECSCUSR number for a cursor's shape and blinking.
+fn cursor_style_number(cursor: &crate::grid::Cursor) -> u8 {
+    let steady = u8::from(!cursor.blinking);
+    match cursor.shape {
+        CursorShape::Block => 1 + steady,
+        CursorShape::Underline => 3 + steady,
+        CursorShape::Bar => 5 + steady,
+    }
+}
+
+/// The terminfo capabilities XTGETTCAP answers. Only what is true of
+/// Ultty: its `TERM`, 256 indexed colours, and 24-bit direct colour.
+fn termcap_value(name: &str) -> Option<&'static str> {
+    match name {
+        "TN" | "name" => Some(TERMINAL_NAME),
+        "Co" | "colors" => Some("256"),
+        "RGB" => Some("8/8/8"),
+        _ => None,
+    }
+}
+
+/// Decode XTGETTCAP's hex-encoded name; `None` unless it is whole bytes of
+/// hex digits forming UTF-8.
+fn decode_hex(hex: &str) -> Option<String> {
+    if hex.is_empty() || !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    String::from_utf8(bytes).ok()
+}
+
+fn encode_hex(text: &str) -> String {
+    text.bytes().map(|b| format!("{b:02X}")).collect()
 }
 
 /// Convert an ANSI parser color to a grid color.

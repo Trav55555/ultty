@@ -1,6 +1,8 @@
 //! Terminal state management with alternate screen support.
 
-use super::{Buffer, CursorPosition, Dimensions, Grid, ImageStore, TerminalImage};
+use super::{
+    Buffer, CursorPosition, Dimensions, Grid, ImageStore, Palette, TerminalImage, ThemeColors,
+};
 
 /// Maximum number of distinct OSC 8 hyperlink URIs remembered per terminal.
 ///
@@ -8,6 +10,14 @@ use super::{Buffer, CursorPosition, Dimensions, Grid, ImageStore, TerminalImage}
 /// When the map is full the oldest link is forgotten; cells that still
 /// reference it simply stop resolving to a URI.
 pub const MAX_HYPERLINKS: usize = 4096;
+
+/// Deepest the title stack (XTWINOPS 22/23) grows; a push beyond it
+/// forgets the oldest entry.
+pub const MAX_TITLE_STACK: usize = 10;
+
+/// Largest value a mode 1005 mouse report encodes: xterm stops at 2047,
+/// the last two-byte UTF-8 code point, so coordinates top out at 2015.
+const MAX_UTF8_MOUSE_VALUE: u32 = 2047;
 
 /// Mouse tracking mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -71,6 +81,15 @@ pub struct TerminalModes {
     pub alternate_scroll: bool,
     /// Synchronized update mode - batches screen updates for flicker-free rendering
     pub synchronized_update: bool,
+    /// Line feed/new line mode (LNM, ANSI mode 20): LF, VT and FF also
+    /// return the carriage, and Enter should send CR LF.
+    pub linefeed_newline: bool,
+    /// DECCOLM may switch between 80 and 132 columns (mode 40). Off by
+    /// default, so `reset` and `tput init` (which send `CSI ?3 l`) leave
+    /// the window alone, as in xterm.
+    pub allow_column_mode_switch: bool,
+    /// 132-column mode (DECCOLM, mode 3) was last set.
+    pub column_mode_132: bool,
 }
 
 impl Default for TerminalModes {
@@ -90,6 +109,9 @@ impl Default for TerminalModes {
             // Enable by default so mouse wheel works in less, vim, etc.
             alternate_scroll: true,
             synchronized_update: false,
+            linefeed_newline: false,
+            allow_column_mode_switch: false,
+            column_mode_132: false,
         }
     }
 }
@@ -148,6 +170,13 @@ pub struct Terminal {
     selection_started_scrolled: bool,
     /// Window title
     title: String,
+    /// Titles saved by XTWINOPS 22, newest last
+    title_stack: Vec<String>,
+    /// Size of one character cell in pixels, `(width, height)`, as the
+    /// embedder last reported it; answers XTWINOPS 14 and 16.
+    cell_pixel_size: Option<(u16, u16)>,
+    /// The embedder's colours and the application's palette changes
+    palette: Palette,
     /// Shell integration state
     shell_integration: ShellIntegration,
     /// Inline images (Sixel, etc.)
@@ -215,6 +244,9 @@ impl Terminal {
             selection_content_version: 0,
             selection_started_scrolled: false,
             title: String::new(),
+            title_stack: Vec::new(),
+            cell_pixel_size: None,
+            palette: Palette::default(),
             shell_integration: ShellIntegration::default(),
             images: ImageStore::new(),
             pending_responses: Vec::new(),
@@ -484,6 +516,55 @@ impl Terminal {
         self.title = title;
     }
 
+    /// Save the title on the title stack (XTWINOPS 22).
+    pub fn push_title(&mut self) {
+        if self.title_stack.len() >= MAX_TITLE_STACK {
+            self.title_stack.remove(0);
+        }
+        self.title_stack.push(self.title.clone());
+    }
+
+    /// Restore the most recently saved title (XTWINOPS 23). Returns whether
+    /// there was one.
+    pub fn pop_title(&mut self) -> bool {
+        match self.title_stack.pop() {
+            Some(title) => {
+                self.title = title;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Tell the terminal how big a character cell is on screen, in pixels,
+    /// so it can answer the XTWINOPS size reports image tools ask for.
+    pub fn set_cell_pixel_size(&mut self, width: u16, height: u16) {
+        self.cell_pixel_size = Some((width, height));
+    }
+
+    /// Size of a character cell in pixels, `(width, height)`, if known.
+    pub fn cell_pixel_size(&self) -> Option<(u16, u16)> {
+        self.cell_pixel_size
+    }
+
+    /// Tell the terminal which colours it is drawn with, so colour queries
+    /// report the live theme. Palette changes applications made stay.
+    pub fn set_theme_colors(&mut self, theme: ThemeColors) {
+        self.palette.set_theme(theme);
+    }
+
+    /// The palette: theme colours and the entries applications changed
+    /// with OSC 4. Renderers draw indexed colours through
+    /// [`Palette::override_for`].
+    pub fn palette(&self) -> &Palette {
+        &self.palette
+    }
+
+    /// Mutable palette, for OSC 4 / 104.
+    pub fn palette_mut(&mut self) -> &mut Palette {
+        &mut self.palette
+    }
+
     /// Get shell integration state.
     pub fn shell_integration(&self) -> &ShellIntegration {
         &self.shell_integration
@@ -737,6 +818,8 @@ impl Terminal {
         self.current_hyperlink_id = 0;
         self.selection = None;
         self.kitty_keyboard_stack.clear();
+        self.title_stack.clear();
+        self.palette.reset(None);
         self.pending_column_resize = None;
     }
 
@@ -829,8 +912,11 @@ impl Terminal {
             MouseEncoding::Sgr => {
                 Some(self.encode_mouse_sgr(button, x, y, pressed, motion, modifiers))
             }
-            MouseEncoding::X10 | MouseEncoding::Utf8 => {
+            MouseEncoding::X10 => {
                 Some(self.encode_mouse_x10(button, x, y, pressed, motion, modifiers))
+            }
+            MouseEncoding::Utf8 => {
+                Some(self.encode_mouse_utf8(button, x, y, pressed, motion, modifiers))
             }
             MouseEncoding::Urxvt => {
                 Some(self.encode_mouse_urxvt(button, x, y, pressed, motion, modifiers))
@@ -874,16 +960,15 @@ impl Terminal {
         format!("\x1b[<{};{};{}{}", cb, x + 1, y + 1, suffix).into_bytes()
     }
 
-    /// Encode mouse event in X10 format.
-    fn encode_mouse_x10(
+    /// The button code shared by the X10 and UTF-8 encodings: a release
+    /// reports button 3, as those encodings cannot say which was released.
+    fn mouse_button_code(
         &self,
         button: MouseButton,
-        x: u16,
-        y: u16,
         pressed: bool,
         motion: bool,
         modifiers: MouseModifiers,
-    ) -> Vec<u8> {
+    ) -> u8 {
         let mut cb = match button {
             MouseButton::Left => 0,
             MouseButton::Middle => 1,
@@ -902,13 +987,47 @@ impl Terminal {
         if !pressed && !matches!(button, MouseButton::ScrollUp | MouseButton::ScrollDown) {
             cb = 3 + modifiers.bits(); // Release with modifiers
         }
+        cb
+    }
 
+    /// Encode mouse event in X10 format.
+    fn encode_mouse_x10(
+        &self,
+        button: MouseButton,
+        x: u16,
+        y: u16,
+        pressed: bool,
+        motion: bool,
+        modifiers: MouseModifiers,
+    ) -> Vec<u8> {
         // Add 32 to make printable, clamp to 223
-        let cb = cb + 32;
+        let cb = self.mouse_button_code(button, pressed, motion, modifiers) + 32;
         let cx = ((x + 1).min(223) + 32) as u8;
         let cy = ((y + 1).min(223) + 32) as u8;
 
         vec![b'\x1b', b'[', b'M', cb, cx, cy]
+    }
+
+    /// Encode mouse event in the UTF-8 format (mode 1005): the X10 report,
+    /// but each value is sent as the UTF-8 encoding of the character with
+    /// that code, so coordinates past 223 fit and the bytes stay valid
+    /// UTF-8. Values below 128 are the same single bytes as in X10.
+    fn encode_mouse_utf8(
+        &self,
+        button: MouseButton,
+        x: u16,
+        y: u16,
+        pressed: bool,
+        motion: bool,
+        modifiers: MouseModifiers,
+    ) -> Vec<u8> {
+        let cb = u32::from(self.mouse_button_code(button, pressed, motion, modifiers));
+        let mut out = String::from("\x1b[M");
+        for value in [cb + 32, u32::from(x) + 33, u32::from(y) + 33] {
+            // Every value up to the cap is a valid, non-surrogate scalar.
+            out.extend(char::from_u32(value.min(MAX_UTF8_MOUSE_VALUE)));
+        }
+        out.into_bytes()
     }
 
     /// Encode mouse event in URXVT format.

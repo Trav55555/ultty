@@ -31,6 +31,7 @@ mod buffer;
 mod cell;
 mod history;
 mod image;
+mod palette;
 mod row;
 mod term_handler;
 mod terminal;
@@ -38,6 +39,7 @@ mod terminal;
 pub use buffer::Buffer;
 pub use cell::{Cell, CellFlags, Color, UnderlineStyle};
 pub use image::{decode_sixel, ImageId, ImageStore, TerminalImage};
+pub use palette::{format_color_spec, Palette, Rgb, ThemeColors};
 pub use row::Row;
 pub use term_handler::TerminalHandler;
 pub use terminal::{
@@ -286,6 +288,17 @@ impl Grid {
     /// Get mutable cursor state.
     pub fn cursor_mut(&mut self) -> &mut Cursor {
         &mut self.cursor
+    }
+
+    /// Put the saved cursor back to its power-on state (DECSTR): home,
+    /// default attributes, autowrap on, origin mode off.
+    pub fn reset_saved_cursor(&mut self) {
+        self.cursor.saved = Some(SavedCursorState {
+            position: CursorPosition::origin(),
+            attrs: Cell::default(),
+            auto_wrap: true,
+            origin_mode: false,
+        });
     }
 
     /// Save cursor state (DECSC): position, text attributes, auto-wrap, and origin mode.
@@ -632,9 +645,13 @@ impl Grid {
             return;
         }
 
-        // Check if wide char would wrap (needs 2 columns but only 1 left)
+        // A wide char with too few columns left wraps first, respecting the
+        // scroll region. Without autowrap it has nowhere to go and is
+        // dropped, as xterm does, rather than split or moved to a new row.
         if width > 1 && col + width > self.dims.cols {
-            // Wrap to next line before writing, respecting scroll region
+            if !self.auto_wrap {
+                return;
+            }
             self.wrap_pending_cursor();
         }
 
@@ -974,6 +991,19 @@ impl Grid {
         self.tab_stops = (0..self.dims.cols).step_by(8).collect();
     }
 
+    /// Fit the tab stops to a new width: new columns get the default stop
+    /// every 8 columns, as in xterm, and stops beyond the width go. Stops in
+    /// the columns both widths share are kept, custom or not.
+    fn resize_tab_stops(&mut self, new_cols: u16) {
+        let old_cols = self.dims.cols;
+        if new_cols > old_cols {
+            self.tab_stops
+                .extend((old_cols..new_cols).filter(|c| c % 8 == 0));
+        } else {
+            self.tab_stops.retain(|&col| col < new_cols);
+        }
+    }
+
     /// Set the scroll region (1-based top and bottom, inclusive).
     /// Pass (1, rows) to reset to full screen.
     pub fn set_scroll_region(&mut self, top: u16, bottom: u16) {
@@ -988,9 +1018,10 @@ impl Grid {
             .min(self.dims.rows.saturating_sub(1));
 
         if top >= bottom {
-            // Invalid region, reset to full screen
-            self.scroll_region = None;
-        } else if top == 0 && bottom >= self.dims.rows.saturating_sub(1) {
+            // xterm ignores a region of less than two lines, cursor and all.
+            return;
+        }
+        if top == 0 && bottom >= self.dims.rows.saturating_sub(1) {
             // Full screen, no need to track
             self.scroll_region = None;
         } else {
@@ -1000,6 +1031,11 @@ impl Grid {
         // DECSTBM homes cursor to absolute (0,0)
         self.cursor.position.row = 0;
         self.cursor.position.col = 0;
+    }
+
+    /// Drop the scroll region without moving the cursor (DECSTR, RIS).
+    pub fn reset_scroll_region(&mut self) {
+        self.scroll_region = None;
     }
 
     /// Get the current scroll region.
@@ -1339,18 +1375,7 @@ impl Grid {
         // Reset scroll region — apps that need one will re-set it after resize
         self.scroll_region = None;
 
-        // Update tab stops for new width
-        let old_cols = self.dims.cols;
-        if new_dims.cols > old_cols {
-            // Extend tab stops to cover any new columns
-            for col in (old_cols..new_dims.cols).filter(|c| c % 8 == 0) {
-                self.tab_stops.insert(col);
-            }
-        } else if new_dims.cols < old_cols {
-            // Remove tab stops beyond new width
-            self.tab_stops.retain(|&col| col < new_dims.cols);
-        }
-
+        self.resize_tab_stops(new_dims.cols);
         self.dims = new_dims;
         self.dirty = vec![true; new_dims.rows as usize];
         self.content_version = self.content_version.wrapping_add(1);
@@ -1360,6 +1385,7 @@ impl Grid {
     /// Set rows directly (used by Buffer during reflow).
     pub fn set_rows(&mut self, rows: Vec<Row>, new_dims: Dimensions) {
         self.rows = rows;
+        self.resize_tab_stops(new_dims.cols);
         self.dims = new_dims;
 
         // Row indices changed, so any scroll region is meaningless now.

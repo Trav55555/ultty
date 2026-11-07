@@ -846,7 +846,7 @@ fn poll_revents(pty: &Pty, events: libc::c_short) -> libc::c_short {
 
 /// Parse one chunk of PTY output into the shared state.
 fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
-    use crate::protocol::ansi::{Action, AnsiOutput};
+    use crate::protocol::ansi::{Action, AnsiOutput, WindowOp};
 
     let State {
         terminal,
@@ -890,6 +890,13 @@ fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
                 }
                 _ => None,
             };
+            let pops_title = matches!(action, Action::WindowOp(WindowOp::PopTitle(_)));
+            handler.handle(action);
+            // A title popped off the title stack is only known once applied.
+            let event = event.or_else(|| {
+                pops_title
+                    .then(|| TerminalEvent::TitleChanged(handler.terminal().title().to_owned()))
+            });
             if let Some(event) = event {
                 let repeat_bell = matches!(event, TerminalEvent::Bell)
                     && matches!(events.last(), Some(TerminalEvent::Bell));
@@ -897,7 +904,6 @@ fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
                     events.push(event);
                 }
             }
-            handler.handle(action);
         }
         AnsiOutput::PrintAscii(bytes) => {
             if trace {
@@ -1154,6 +1160,36 @@ mod tests {
 
         assert_eq!(status, 0);
         assert!(redraw_count > 0);
+    }
+
+    /// vim and less push the title on entry and pop it on exit; the
+    /// restored title must reach the UI like any other title change.
+    #[test]
+    fn popping_the_title_stack_reports_the_restored_title() {
+        let mut event_loop = EventLoop::with_command(
+            "/bin/sh",
+            &[
+                "/bin/sh",
+                "-c",
+                r"printf '\033]2;shell\007\033[22;0t\033]2;vim\007\033[23;0t'",
+            ],
+            80,
+            24,
+        )
+        .expect("create event loop");
+        let mut titles = Vec::new();
+        event_loop
+            .run(|_, event| match event {
+                TerminalEvent::TitleChanged(title) => {
+                    titles.push(title);
+                    true
+                }
+                TerminalEvent::ChildExited { .. } => false,
+                _ => true,
+            })
+            .expect("run");
+        assert_eq!(titles, ["shell", "vim", "shell"]);
+        assert_eq!(event_loop.terminal().title(), "shell");
     }
 
     #[test]
