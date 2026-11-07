@@ -17,3 +17,4 @@
 pub mod corpus;
 pub mod env;
 pub mod stats;
+pub mod tty;

@@ -37,6 +37,8 @@ import sys
 import unittest
 
 HIGHER_IS_BETTER = {"MiB/s", "ops/s", "frames/s"}
+# Fewer samples per arm than this get no verdict.
+MIN_SAMPLES = 5
 
 
 def quantile(sorted_values, q):
@@ -208,12 +210,21 @@ def compare(groups, units, a, b, args, mde):
             "threshold": threshold,
             "mde": floor,
         }
-        if args.aa:
+        n = min(len(av), len(bv))
+        if n < MIN_SAMPLES:
+            # A bootstrap of one or two values has a CI of zero width, which
+            # would turn any difference into a confident verdict.
+            entry["verdict"] = f"too few samples (n={n})"
+        elif args.aa:
             entry["mde_half_width"] = (hi - lo) / 2
             entry["contains_one"] = lo <= 1.0 <= hi
             entry["verdict"] = "stable" if entry["contains_one"] else "UNSTABLE"
         else:
             entry["verdict"] = verdict(lo, hi, threshold, higher)
+            if getattr(args, "neutral", False):
+                # Comparing two products, not a change: say which is better.
+                entry["verdict"] = {"regressed": f"{b} worse", "improved": f"{b} better"}.get(
+                    entry["verdict"], entry["verdict"])
         results.append(entry)
     return results
 
@@ -227,7 +238,7 @@ def mde_from(path, args):
     ns = argparse.Namespace(**vars(args))
     ns.aa = True
     return {(r["suite"], r["case"]): r["mde_half_width"]
-            for r in compare(groups, units, arms[0], arms[1], ns, {})}
+            for r in compare(groups, units, arms[0], arms[1], ns, {}) if "mde_half_width" in r}
 
 
 def fmt(v):
@@ -279,7 +290,10 @@ def print_comparison(results, a, b, aa, markdown, out):
         out.write("| " + " | ".join(head) + " |\n")
         out.write("|---|---|---:|---:|---:|---|---:|---|\n")
     for r in results:
-        last = f"{r['mde_half_width'] * 100:.1f}% {r['verdict']}" if aa else r["verdict"]
+        if aa and "mde_half_width" in r:
+            last = f"{r['mde_half_width'] * 100:.1f}% {r['verdict']}"
+        else:
+            last = r["verdict"]
         cells = [r["suite"], r["case"], fmt(r["a"]["median"]), fmt(r["b"]["median"]),
                  f"{r['ratio']:.3f}", f"[{r['ci'][0]:.3f}, {r['ci'][1]:.3f}]",
                  f"{r['mann_whitney_p']:.3g}", last]
@@ -296,6 +310,8 @@ def main(argv):
     ap.add_argument("--a", help="baseline arm label")
     ap.add_argument("--b", help="candidate arm label")
     ap.add_argument("--aa", action="store_true", help="treat the two arms as A/A")
+    ap.add_argument("--neutral", action="store_true",
+                    help="comparing products: verdicts say which arm is better, not \"regressed\"")
     ap.add_argument("--mde-from", help="A/A results file giving the per-case noise floor")
     ap.add_argument("--threshold", type=float, default=0.05)
     ap.add_argument("--resamples", type=int, default=10000)
@@ -411,6 +427,14 @@ class SelfTest(unittest.TestCase):
         self.assertEqual(strict["verdict"], "regressed")
         self.assertEqual(loose["verdict"], "no detectable change")
         self.assertAlmostEqual(loose["threshold"], 0.12)
+
+    def test_too_few_samples_get_no_verdict(self):
+        r = self.run_compare(self.arms(0.5, n=2))
+        self.assertEqual(r["verdict"], "too few samples (n=2)")
+
+    def test_neutral_wording_names_the_arm(self):
+        r = self.run_compare(self.arms(0.8), neutral=True)
+        self.assertEqual(r["verdict"], "B worse")
 
     def test_mann_whitney_separated_and_identical(self):
         _, p = mann_whitney(list(range(20)), list(range(100, 120)))
