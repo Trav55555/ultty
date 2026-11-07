@@ -7,43 +7,30 @@ use ultty::config::{BehaviorConfig, ClipboardWrite};
 use ultty::event_loop::TerminalEvent;
 
 impl App {
-    pub(super) fn next_update_deadline(&self, now: Instant) -> Instant {
-        let mut deadline = now + super::MAINTENANCE_POLL_INTERVAL;
-
-        if self.needs_redraw {
-            let render_deadline =
-                self.last_render + self.render_delay_for_sync_state(self.sync_update_active());
-            deadline = deadline.min(render_deadline);
-            if let Some(catchup_deadline) =
-                catchup_poll_deadline(now, render_deadline, self.needs_redraw)
-            {
-                deadline = deadline.min(catchup_deadline);
-            }
+    /// When the loop next has timed work to do, or `None` to sleep until
+    /// input, PTY output, a socket or the config watcher wakes it.
+    pub(super) fn next_update_deadline(&self, now: Instant) -> Option<Instant> {
+        WakeState {
+            needs_redraw: self.needs_redraw,
+            last_render: self.last_render,
+            sync_active: self.needs_redraw && self.sync_update_active(),
+            cursor_blink: self.cursor_blink.next_toggle(),
+            tab_width_freeze: self.tab_width_freeze.map(|freeze| freeze.until),
+            bell: self.bell_active_until,
+            launched_at: self.launched_at,
+            tab_title_activity: self.tab_title_activity,
+            last_tab_title_refresh: self.last_tab_title_refresh,
+            config_reload: self
+                .config_watcher
+                .as_ref()
+                .and_then(|watcher| watcher.next_deadline()),
+            native_sessions: self
+                .protocol_server
+                .as_ref()
+                .map_or(0, |server| server.session_count()),
+            control_waits: self.pending_control_waits.len(),
         }
-
-        if let Some(toggle) = self.cursor_blink.next_toggle() {
-            deadline = deadline.min(toggle);
-        }
-
-        if let Some(freeze) = self.tab_width_freeze {
-            deadline = deadline.min(freeze.until);
-        }
-
-        if let Some(until) = self.bell_active_until {
-            deadline = deadline.min(until);
-        }
-
-        if let Some(next) =
-            ultty::tabs::title_next_change(now.saturating_duration_since(self.launched_at))
-        {
-            deadline = deadline.min(self.launched_at + next);
-        }
-
-        deadline.max(now)
-    }
-
-    fn render_delay_for_sync_state(&self, sync_active: bool) -> std::time::Duration {
-        render_delay_for_sync_state(sync_active)
+        .next_wake(now)
     }
 
     /// Move in-band protocol data between each tab's PTY and the protocol
@@ -153,7 +140,7 @@ impl App {
 
         // Check for config file changes (hot-reload)
         if let Some(ref mut watcher) = self.config_watcher {
-            if watcher.poll() {
+            if watcher.poll(Instant::now()) {
                 tracing::info!("Config file changed, reloading...");
                 self.reload_config();
             }
@@ -227,6 +214,9 @@ impl App {
                         match event {
                             TerminalEvent::Redraw => {
                                 self.needs_redraw = true;
+                                // Output may come with a new foreground
+                                // program or directory; see the tab titles.
+                                self.tab_title_activity = Some(now);
                                 // Only update URL detection for focused terminal
                                 if Some(terminal_id) == focused_id {
                                     content_changed = true;
@@ -311,6 +301,7 @@ impl App {
                 if tab_title_refresh_due(
                     now,
                     self.last_tab_title_refresh,
+                    self.tab_title_activity.is_some(),
                     tab_titles_changed || tab_structure_changed,
                 ) {
                     self.update_tab_bar();
@@ -430,14 +421,91 @@ fn catchup_poll_deadline(
     }
 }
 
-fn tab_title_refresh_due(now: Instant, last_refresh: Instant, force: bool) -> bool {
+/// Whether to refresh the tab titles (foreground program, directory and
+/// branch in the title band) now. They are looked up, at most once per
+/// [`TAB_TITLE_REFRESH_INTERVAL`](super::TAB_TITLE_REFRESH_INTERVAL), only
+/// after PTY output (`activity`), or at once when `force`d by a title or tab
+/// change. A pane with no output has nothing new worth a periodic wakeup.
+fn tab_title_refresh_due(now: Instant, last_refresh: Instant, activity: bool, force: bool) -> bool {
     if force {
         return true;
     }
+    activity
+        && now
+            .checked_duration_since(last_refresh)
+            .is_some_and(|elapsed| elapsed >= super::TAB_TITLE_REFRESH_INTERVAL)
+}
 
-    match now.checked_duration_since(last_refresh) {
-        Some(elapsed) => elapsed >= super::TAB_TITLE_REFRESH_INTERVAL,
-        None => false,
+/// The activity mark left after a title refresh at `now`. Activity within
+/// the last interval keeps it, so one more refresh follows a full interval
+/// after the output stops: a program started by the line just echoed has
+/// had that long to take the foreground.
+pub(super) fn title_activity_after_refresh(
+    activity: Option<Instant>,
+    now: Instant,
+) -> Option<Instant> {
+    activity.filter(|at| now.saturating_duration_since(*at) < super::TAB_TITLE_REFRESH_INTERVAL)
+}
+
+/// What the loop's own timers depend on, gathered from [`App`].
+#[derive(Debug, Clone, Copy)]
+struct WakeState {
+    /// A frame is waiting to be drawn.
+    needs_redraw: bool,
+    last_render: Instant,
+    /// The focused pane holds frames for a synchronized update.
+    sync_active: bool,
+    /// The cursor's next blink toggle, if it blinks.
+    cursor_blink: Option<Instant>,
+    tab_width_freeze: Option<Instant>,
+    /// When the visual bell's flash ends.
+    bell: Option<Instant>,
+    /// When the window opened; the title types itself out after that.
+    launched_at: Instant,
+    /// PTY output not yet followed by a settled tab title refresh.
+    tab_title_activity: Option<Instant>,
+    last_tab_title_refresh: Instant,
+    /// When a changed config file is due for reload.
+    config_reload: Option<Instant>,
+    /// Connected native sessions: their keepalives and animations are
+    /// checked on the maintenance tick.
+    native_sessions: usize,
+    /// `ulttyctl wait-for` requests, whose timeouts are checked on the
+    /// maintenance tick.
+    control_waits: usize,
+}
+
+impl WakeState {
+    /// The earliest timer, or `None` when nothing is pending. An idle
+    /// window with a steady cursor and no native or control clients has no
+    /// timer at all.
+    fn next_wake(&self, now: Instant) -> Option<Instant> {
+        let frame = self
+            .needs_redraw
+            .then(|| self.last_render + render_delay_for_sync_state(self.sync_active));
+        let maintenance = (self.native_sessions > 0 || self.control_waits > 0)
+            .then(|| now + super::MAINTENANCE_POLL_INTERVAL);
+        let title_animation =
+            ultty::tabs::title_next_change(now.saturating_duration_since(self.launched_at))
+                .map(|next| self.launched_at + next);
+        let tab_titles = self
+            .tab_title_activity
+            .map(|_| self.last_tab_title_refresh + super::TAB_TITLE_REFRESH_INTERVAL);
+        [
+            frame,
+            frame.and_then(|render| catchup_poll_deadline(now, render, true)),
+            self.cursor_blink,
+            self.tab_width_freeze,
+            self.bell,
+            title_animation,
+            tab_titles,
+            self.config_reload,
+            maintenance,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|deadline| deadline.max(now))
     }
 }
 
@@ -481,7 +549,7 @@ mod tests {
 
     use super::{
         bell_response, catchup_poll_deadline, render_delay_for_sync_state, should_render,
-        tab_title_refresh_due, BellResponse,
+        tab_title_refresh_due, title_activity_after_refresh, BellResponse, WakeState,
     };
     use ultty::config::BehaviorConfig;
 
@@ -598,18 +666,33 @@ mod tests {
         assert_eq!(catchup_poll_deadline(now, now, true), None);
     }
 
+    const TITLE_INTERVAL: Duration = super::super::TAB_TITLE_REFRESH_INTERVAL;
+
     #[test]
     fn tab_title_refresh_due_respects_interval() {
         let now = Instant::now();
 
         assert!(!tab_title_refresh_due(
             now,
-            now - super::super::TAB_TITLE_REFRESH_INTERVAL + Duration::from_millis(1),
+            now - TITLE_INTERVAL + Duration::from_millis(1),
+            true,
             false
         ));
         assert!(tab_title_refresh_due(
             now,
-            now - super::super::TAB_TITLE_REFRESH_INTERVAL,
+            now - TITLE_INTERVAL,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn tab_titles_are_not_refreshed_without_output() {
+        let now = Instant::now();
+        assert!(!tab_title_refresh_due(
+            now,
+            now - TITLE_INTERVAL * 10,
+            false,
             false
         ));
     }
@@ -618,7 +701,7 @@ mod tests {
     fn tab_title_refresh_due_honors_force() {
         let now = Instant::now();
 
-        assert!(tab_title_refresh_due(now, now, true));
+        assert!(tab_title_refresh_due(now, now, false, true));
     }
 
     #[test]
@@ -628,8 +711,124 @@ mod tests {
         assert!(!tab_title_refresh_due(
             now,
             now + Duration::from_millis(1),
+            true,
             false
         ));
+    }
+
+    #[test]
+    fn title_refresh_follows_output_by_a_full_interval_then_stops() {
+        let output = Instant::now();
+        // The refresh the output triggers right away keeps the mark ...
+        assert_eq!(
+            title_activity_after_refresh(Some(output), output),
+            Some(output)
+        );
+        // ... so one more runs an interval later, which clears it.
+        assert_eq!(
+            title_activity_after_refresh(Some(output), output + TITLE_INTERVAL),
+            None
+        );
+        assert_eq!(title_activity_after_refresh(None, output), None);
+    }
+
+    /// The state of a window that has finished launching, drawn its last
+    /// frame and has nothing pending.
+    fn idle(now: Instant) -> WakeState {
+        WakeState {
+            needs_redraw: false,
+            last_render: now - Duration::from_secs(5),
+            sync_active: false,
+            cursor_blink: None,
+            tab_width_freeze: None,
+            bell: None,
+            launched_at: now - Duration::from_secs(60),
+            tab_title_activity: None,
+            last_tab_title_refresh: now - Duration::from_secs(5),
+            config_reload: None,
+            native_sessions: 0,
+            control_waits: 0,
+        }
+    }
+
+    #[test]
+    fn an_idle_window_with_a_steady_cursor_never_wakes() {
+        let now = Instant::now();
+        assert_eq!(idle(now).next_wake(now), None);
+    }
+
+    #[test]
+    fn a_blinking_cursor_wakes_only_for_its_toggle() {
+        let now = Instant::now();
+        let toggle = now + Duration::from_millis(300);
+        let state = WakeState {
+            cursor_blink: Some(toggle),
+            ..idle(now)
+        };
+        assert_eq!(state.next_wake(now), Some(toggle));
+    }
+
+    #[test]
+    fn the_launch_title_animation_wakes_until_it_has_typed_out() {
+        let now = Instant::now();
+        let launching = WakeState {
+            launched_at: now,
+            ..idle(now)
+        };
+        assert!(launching.next_wake(now).is_some());
+    }
+
+    #[test]
+    fn output_schedules_one_title_refresh() {
+        let now = Instant::now();
+        let refreshed = now - Duration::from_millis(100);
+        let state = WakeState {
+            tab_title_activity: Some(now),
+            last_tab_title_refresh: refreshed,
+            ..idle(now)
+        };
+        assert_eq!(state.next_wake(now), Some(refreshed + TITLE_INTERVAL));
+    }
+
+    #[test]
+    fn native_sessions_and_control_waits_keep_the_maintenance_tick() {
+        let now = Instant::now();
+        let tick = Some(now + super::super::MAINTENANCE_POLL_INTERVAL);
+        let session = WakeState {
+            native_sessions: 1,
+            ..idle(now)
+        };
+        assert_eq!(session.next_wake(now), tick);
+        let wait = WakeState {
+            control_waits: 1,
+            ..idle(now)
+        };
+        assert_eq!(wait.next_wake(now), tick);
+    }
+
+    #[test]
+    fn a_pending_frame_wakes_for_the_frame_and_catchup_polls() {
+        let now = Instant::now();
+        let state = WakeState {
+            needs_redraw: true,
+            last_render: now,
+            ..idle(now)
+        };
+        assert_eq!(
+            state.next_wake(now),
+            Some(now + super::super::PTY_CATCHUP_POLL_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn overdue_timers_wake_now_not_in_the_past() {
+        let now = Instant::now();
+        let state = WakeState {
+            bell: Some(now - Duration::from_millis(5)),
+            config_reload: Some(now + Duration::from_millis(5)),
+            ..idle(now)
+        };
+        assert_eq!(state.next_wake(now), Some(now));
     }
 
     #[test]

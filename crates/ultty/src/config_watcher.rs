@@ -15,23 +15,34 @@ pub enum ConfigEvent {
     Error(String),
 }
 
+/// How long the config file must stay unchanged before it is reloaded. An
+/// editor's save is often several events (truncate, write, rename); reading
+/// after the last of them avoids loading a half-written file.
+const SETTLE: Duration = Duration::from_millis(100);
+
 /// Watches the config file for changes.
+///
+/// Changes arrive on the watcher's own thread, which calls the waker given
+/// to [`ConfigWatcher::new`]; the owner then calls [`ConfigWatcher::poll`]
+/// and, while a reload is settling, wakes again at
+/// [`ConfigWatcher::next_deadline`]. Nothing is polled while the file is
+/// unchanged.
 pub struct ConfigWatcher {
     /// File watcher
     _watcher: RecommendedWatcher,
     /// Receiver for config events
     receiver: Receiver<ConfigEvent>,
-    /// Last reload time (for debouncing)
-    last_reload: Instant,
-    /// Debounce duration
-    debounce: Duration,
+    /// When the latest change not yet reloaded was seen.
+    changed_at: Option<Instant>,
 }
 
 impl ConfigWatcher {
     /// Create a new config watcher.
     ///
+    /// `wake` is called from the watcher's thread after each change.
+    ///
     /// Returns None if the config file doesn't exist or watching fails.
-    pub fn new() -> Option<Self> {
+    pub fn new(wake: impl Fn() + Send + 'static) -> Option<Self> {
         let config_path = Config::config_path()?;
 
         // Ensure config file exists
@@ -39,7 +50,11 @@ impl ConfigWatcher {
             tracing::debug!("Config file does not exist, skipping watcher");
             return None;
         }
+        Self::watch(&config_path, wake)
+    }
 
+    /// Watch the config file at `config_path`; see [`ConfigWatcher::new`].
+    fn watch(config_path: &std::path::Path, wake: impl Fn() + Send + 'static) -> Option<Self> {
         let (tx, rx) = mpsc::channel();
 
         // Watch the parent directory (more reliable than watching the file directly)
@@ -61,6 +76,7 @@ impl ConfigWatcher {
                         match event.kind {
                             EventKind::Modify(_) | EventKind::Create(_) => {
                                 let _ = sender.send(ConfigEvent::Reload);
+                                wake();
                             }
                             _ => {}
                         }
@@ -68,6 +84,7 @@ impl ConfigWatcher {
                 }
                 Err(e) => {
                     let _ = sender.send(ConfigEvent::Error(e.to_string()));
+                    wake();
                 }
             }
         })
@@ -82,41 +99,33 @@ impl ConfigWatcher {
         Some(Self {
             _watcher: watcher,
             receiver: rx,
-            last_reload: Instant::now() - Duration::from_secs(10), // Allow immediate first reload
-            debounce: Duration::from_millis(500),
+            changed_at: None,
         })
     }
 
-    /// Check for pending config events (non-blocking).
+    /// Collect pending change events (non-blocking).
     ///
-    /// Returns true if config should be reloaded.
-    pub fn poll(&mut self) -> bool {
-        let mut should_reload = false;
-
-        // Drain all pending events
+    /// Returns true once the file has been unchanged for [`SETTLE`] after a
+    /// change, which is when it should be reloaded.
+    pub fn poll(&mut self, now: Instant) -> bool {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
-                ConfigEvent::Reload => {
-                    should_reload = true;
-                }
-                ConfigEvent::Error(e) => {
-                    tracing::warn!("Config watcher error: {}", e);
-                }
+                ConfigEvent::Reload => self.changed_at = Some(now),
+                ConfigEvent::Error(e) => tracing::warn!("Config watcher error: {}", e),
             }
         }
-
-        // Debounce: only reload if enough time has passed
-        if should_reload {
-            let now = Instant::now();
-            if now.duration_since(self.last_reload) >= self.debounce {
-                self.last_reload = now;
+        match self.changed_at {
+            Some(at) if now.saturating_duration_since(at) >= SETTLE => {
+                self.changed_at = None;
                 true
-            } else {
-                false
             }
-        } else {
-            false
+            _ => false,
         }
+    }
+
+    /// When a settling change becomes due for reload, if one is pending.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.changed_at.map(|at| at + SETTLE)
     }
 }
 
@@ -134,7 +143,7 @@ mod tests {
     #[test]
     fn config_watcher_creation() {
         // This may or may not succeed depending on whether config exists
-        let _watcher = ConfigWatcher::new();
+        let _watcher = ConfigWatcher::new(|| {});
     }
 
     #[test]
@@ -147,46 +156,66 @@ mod tests {
         assert!(p.to_string_lossy().ends_with("config.toml"));
     }
 
-    #[test]
-    fn debounce_prevents_rapid_reloads() {
-        // Create a temp directory with a config file to get a working watcher
-        let tmpdir = tempfile::tempdir().unwrap();
-        let config_file = tmpdir.path().join("config.toml");
-        fs::write(&config_file, "[font]\nsize = 14.0\n").unwrap();
-
+    fn manual_watcher() -> (ConfigWatcher, std::sync::mpsc::Sender<ConfigEvent>) {
         let (tx, rx) = std::sync::mpsc::channel();
-
-        // Simulate a watcher with manual event injection
-        let mut watcher_state = ConfigWatcher {
+        let watcher = ConfigWatcher {
             _watcher: notify::recommended_watcher(|_: Result<Event, notify::Error>| {}).unwrap(),
             receiver: rx,
-            last_reload: Instant::now(),
-            debounce: Duration::from_millis(500),
+            changed_at: None,
         };
+        (watcher, tx)
+    }
 
-        // Send a reload event — should be debounced (just set last_reload to now)
-        tx.send(ConfigEvent::Reload).unwrap();
-        assert!(!watcher_state.poll(), "should be debounced");
+    #[test]
+    fn reload_waits_for_the_file_to_settle() {
+        let (mut watcher, tx) = manual_watcher();
+        let now = Instant::now();
+        assert_eq!(watcher.next_deadline(), None, "no change, no wakeup");
 
-        // Advance past debounce by setting last_reload to the past
-        watcher_state.last_reload = Instant::now() - Duration::from_secs(1);
         tx.send(ConfigEvent::Reload).unwrap();
-        assert!(watcher_state.poll(), "should allow reload after debounce");
+        assert!(!watcher.poll(now), "a fresh change is still settling");
+        assert_eq!(watcher.next_deadline(), Some(now + SETTLE));
+
+        // A second event of the same save restarts the wait.
+        let later = now + SETTLE / 2;
+        tx.send(ConfigEvent::Reload).unwrap();
+        assert!(!watcher.poll(later));
+        assert_eq!(watcher.next_deadline(), Some(later + SETTLE));
+
+        assert!(watcher.poll(later + SETTLE), "settled: reload");
+        assert_eq!(watcher.next_deadline(), None);
+        assert!(!watcher.poll(later + SETTLE * 2), "reloads once per change");
     }
 
     #[test]
     fn poll_drains_errors_without_reload() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut watcher_state = ConfigWatcher {
-            _watcher: notify::recommended_watcher(|_: Result<Event, notify::Error>| {}).unwrap(),
-            receiver: rx,
-            last_reload: Instant::now() - Duration::from_secs(10),
-            debounce: Duration::from_millis(500),
-        };
-
+        let (mut watcher, tx) = manual_watcher();
         tx.send(ConfigEvent::Error("test error".to_string()))
             .unwrap();
-        assert!(!watcher_state.poll(), "errors should not trigger reload");
+        assert!(
+            !watcher.poll(Instant::now()),
+            "errors should not trigger reload"
+        );
+        assert_eq!(watcher.next_deadline(), None);
+    }
+
+    #[test]
+    fn a_change_on_disk_calls_the_waker() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let config_file = tmpdir.path().join("config.toml");
+        fs::write(&config_file, "[font]\nsize = 14.0\n").unwrap();
+        let (woke_tx, woke_rx) = std::sync::mpsc::channel();
+        let woke_tx = std::sync::Mutex::new(woke_tx);
+        let _watcher = ConfigWatcher::watch(&config_file, move || {
+            let _ = woke_tx.lock().unwrap().send(());
+        })
+        .expect("watch the temp config");
+
+        fs::write(&config_file, "[font]\nsize = 15.0\n").unwrap();
+        assert!(
+            woke_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "a write to the watched file wakes the owner"
+        );
     }
 
     #[test]

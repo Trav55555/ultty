@@ -69,7 +69,9 @@ const INPUT_ECHO_WINDOW: Duration = Duration::from_millis(50);
 /// Maximum time to suppress drawing during synchronized update mode.
 const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(200);
 
-/// Low-frequency maintenance wakeup for timers and config reloads.
+/// Maintenance tick while native sessions (keepalives, animations) or
+/// `ulttyctl wait-for` timeouts need checking. Nothing else polls: with
+/// neither, an idle window sleeps until input, output or a socket wakes it.
 const MAINTENANCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Faster PTY polling while a frame is dirty but not ready to render.
@@ -78,7 +80,8 @@ const PTY_CATCHUP_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// Duration to keep tab widths stable after a tab close.
 const TAB_CLOSE_WIDTH_FREEZE_DURATION: Duration = Duration::from_secs(3);
 
-/// Cadence for best-effort active app/path tab title refreshes.
+/// Most frequent best-effort tab title refresh (foreground program and
+/// directory) while panes produce output.
 const TAB_TITLE_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 /// User events sent to the winit application loop.
@@ -117,6 +120,9 @@ pub struct App {
     output_since_input: bool,
     /// Last time best-effort tab display titles were refreshed.
     last_tab_title_refresh: Instant,
+    /// The latest PTY output not yet followed by a settled tab title
+    /// refresh; see `update::title_activity_after_refresh`.
+    tab_title_activity: Option<Instant>,
     /// Whether we need to redraw
     needs_redraw: bool,
     /// Pending close request (from window control button).
@@ -299,7 +305,7 @@ impl App {
                 let _ = proxy.send_event(AppEvent::RuntimeReadable);
             }
         }));
-        let socket_wakeup = wakeup::SocketWakeup::new(event_proxy);
+        let socket_wakeup = wakeup::SocketWakeup::new(event_proxy.clone());
 
         // Try to create clipboard
         let clipboard = Clipboard::new().ok();
@@ -311,7 +317,9 @@ impl App {
         let url_detector = UrlDetector::new(config.behavior.url_detection);
 
         // Create config watcher for hot-reload
-        let config_watcher = ConfigWatcher::new();
+        let config_watcher = ConfigWatcher::new(move || {
+            let _ = event_proxy.send_event(AppEvent::RuntimeReadable);
+        });
         if config_watcher.is_some() {
             tracing::info!("Config hot-reload enabled");
         }
@@ -330,6 +338,7 @@ impl App {
             input_sent_at: None,
             output_since_input: false,
             last_tab_title_refresh: Instant::now() - TAB_TITLE_REFRESH_INTERVAL,
+            tab_title_activity: None,
             needs_redraw: true,
             pending_close: false,
             modifiers: ModifiersState::empty(),
@@ -645,9 +654,7 @@ impl App {
         if self.update() {
             event_loop.exit();
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            self.next_update_deadline(Instant::now()),
-        ));
+        event_loop.set_control_flow(control_flow(self.next_update_deadline(Instant::now())));
     }
 
     /// Get the terminal state of the focused terminal.
@@ -729,7 +736,10 @@ impl App {
 
     fn update_tab_bar(&mut self) {
         self.sync_protocol_tabs();
-        self.last_tab_title_refresh = Instant::now();
+        let now = Instant::now();
+        self.last_tab_title_refresh = now;
+        self.tab_title_activity =
+            update::title_activity_after_refresh(self.tab_title_activity, now);
 
         let total_width = self.renderer.surface_size().0 as f32;
         let active_tab_id = self
@@ -1397,6 +1407,11 @@ fn tab_shell_env(
     Ok(env)
 }
 
+/// Sleep until `deadline`, or with none, until an event arrives.
+fn control_flow(deadline: Option<Instant>) -> ControlFlow {
+    deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
+}
+
 /// Drives [`App`] from winit. The window, and so the app, is created on the
 /// first `resumed`, as winit 0.30 requires.
 struct AppHandler {
@@ -1415,9 +1430,7 @@ impl ApplicationHandler<AppEvent> for AppHandler {
             Ok(mut app) => {
                 app.update_tab_bar();
                 app.relayout_terminals();
-                event_loop.set_control_flow(ControlFlow::WaitUntil(
-                    app.next_update_deadline(Instant::now()),
-                ));
+                event_loop.set_control_flow(control_flow(app.next_update_deadline(Instant::now())));
                 self.app = Some(app);
             }
             Err(error) => {
