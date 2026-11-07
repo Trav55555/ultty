@@ -44,7 +44,7 @@ pub use row::Row;
 pub use term_handler::TerminalHandler;
 pub use terminal::{
     MouseButton, MouseEncoding, MouseMode, MouseModifiers, Selection, SelectionMode,
-    SelectionPoint, ShellIntegration, Terminal, TerminalModes,
+    SelectionPoint, ShellIntegration, Terminal, TerminalModes, DEFAULT_TERMINAL_NAME,
 };
 
 use std::ops::{Index, IndexMut};

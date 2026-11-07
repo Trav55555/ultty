@@ -3,9 +3,10 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Trav55555/ultty/main/install.sh | sh
 #
-# Installs ultty and ulttyctl into ~/.local/bin, and on Linux the desktop entry
-# and icons into ~/.local/share. No root needed. The download is checked
-# against the release's SHA256SUMS before anything is installed.
+# Installs ultty and ulttyctl into ~/.local/bin, the desktop entry and icons
+# into ~/.local/share, and the xterm-ultty terminfo entry into ~/.terminfo
+# when tic is available. No root needed. The download is checked against the
+# release's SHA256SUMS before anything is installed.
 #
 # Environment:
 #   ULTTY_VERSION      release tag to install, such as v0.1.0 (default: latest)
@@ -101,6 +102,21 @@ install_desktop_entry() {
   say "added Ultty to the application menu"
 }
 
+# Compile the xterm-ultty terminfo entry into ~/.terminfo, so terminal.term
+# can be set to xterm-ultty. Skipped quietly without tic or in a release
+# that does not ship the entry.
+install_terminfo() {
+  source="$1/dist/terminfo/ultty.terminfo"
+  [ -f "$source" ] || return 0
+  command -v tic >/dev/null 2>&1 || return 0
+  mkdir -p "$HOME/.terminfo"
+  if tic -x -o "$HOME/.terminfo" "$source" >/dev/null 2>&1; then
+    say "installed the xterm-ultty terminfo entry to $HOME/.terminfo"
+  else
+    say "could not compile the xterm-ultty terminfo entry; TERM stays xterm-256color"
+  fi
+}
+
 main() {
   need curl
   need tar
@@ -142,6 +158,7 @@ main() {
   if [ "$(uname -s)" = Linux ]; then
     install_desktop_entry "$tmp/x"
   fi
+  install_terminfo "$tmp/x"
 
   case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;

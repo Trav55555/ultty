@@ -6,8 +6,49 @@ reloads it when the file changes. Every key is optional; missing
 keys keep their defaults. The full set of keys is defined in
 `crates/ultty/src/config.rs`.
 
-This page covers the settings that decide what programs running in a pane are
-allowed to do.
+This page covers what programs running in a pane are told and allowed to do,
+and the settings that change how panes behave.
+
+## Terminal type
+
+```toml
+[terminal]
+term = "xterm-256color"   # or "xterm-ultty"
+```
+
+`term` is the `TERM` that shells and commands in new tabs start with. A
+split gets the same `TERM` as the rest of its tab, and open panes keep the
+value they started with, so after a config reload the new value applies to
+tabs opened from then on. `COLORTERM` is always `truecolor`.
+
+- `"xterm-256color"` (the default) is installed on almost every system, so it
+  works everywhere, including over ssh. It describes a few things Ultty does
+  not do (left and right margins, a printer port, setting the cursor colour),
+  and lacks the capabilities for curly and coloured underlines and
+  synchronized output.
+- `"xterm-ultty"` describes what Ultty implements: everything in
+  `xterm-256color` that Ultty does, plus truecolor (`Tc`), extended
+  underline styles and colour (`Su`, `Smulx`, `Setulc`), synchronized output
+  (`Sync`), and OSC 52 clipboard writes (`Ms`). The entry is
+  `dist/terminfo/ultty.terminfo`. `install.sh`, `make install`, and the
+  `.deb`, `.rpm`, and Homebrew packages install it. To install it by hand:
+
+  ```sh
+  tic -x -o "$HOME/.terminfo" dist/terminfo/ultty.terminfo
+  ```
+
+  Every host a program runs on needs the entry too. Over ssh, a host without
+  it gives errors such as `'xterm-ultty': unknown terminal type`. Copy the
+  entry once per host:
+
+  ```sh
+  infocmp -x xterm-ultty | ssh host tic -x -
+  ```
+
+A value that is not a terminfo name (1 to 64 letters, digits, `.`, `_`, `+`
+or `-`) is ignored with a warning, and `xterm-256color` is used. Programs that
+ask the terminal for its name (XTGETTCAP `TN`) get the `TERM` their pane
+started with.
 
 ## Clipboard
 

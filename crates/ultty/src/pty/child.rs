@@ -1,6 +1,7 @@
 //! Child process management for PTY.
 
 use super::{current_dir, default_shell, Pty, PtyError, PtySize, Result, SlavePty};
+use crate::grid::DEFAULT_TERMINAL_NAME;
 use nix::libc;
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
@@ -20,6 +21,8 @@ pub struct Child {
     exited: bool,
     /// Exit status (if exited)
     exit_status: Option<i32>,
+    /// The `TERM` the child was started with
+    term: String,
 }
 
 impl Child {
@@ -52,6 +55,9 @@ impl Child {
     /// entries override inherited variables of the same name. Passing the
     /// extra variables per spawn keeps them out of `std::env`, which is
     /// unsound to mutate in a multithreaded process.
+    ///
+    /// `TERM` is never inherited: it is the `TERM` in `env`, or
+    /// [`DEFAULT_TERMINAL_NAME`] when `env` has none.
     pub fn spawn(
         program: &str,
         args: &[&str],
@@ -71,6 +77,13 @@ impl Child {
         if env.iter().any(|(key, _)| key == "ULTTY_SOCKET") {
             env.push(("ULTTY_TTY".into(), pty.slave_name().into()));
         }
+        let term = match env.iter().find(|(key, _)| key == "TERM") {
+            Some((_, value)) => value.to_string_lossy().into_owned(),
+            None => {
+                env.push(("TERM".into(), DEFAULT_TERMINAL_NAME.into()));
+                DEFAULT_TERMINAL_NAME.to_string()
+            }
+        };
         let exec_plan = ChildExec::new(program, args, working_dir, &env)?;
 
         // SAFETY: the child path only performs session/fd setup and execve with
@@ -86,6 +99,7 @@ impl Child {
                     pid: child,
                     exited: false,
                     exit_status: None,
+                    term,
                 })
             }
             ForkResult::Child => {
@@ -124,6 +138,11 @@ impl Child {
     /// Get the exit status (if exited).
     pub fn exit_status(&self) -> Option<i32> {
         self.exit_status
+    }
+
+    /// The `TERM` the child was started with.
+    pub fn term(&self) -> &str {
+        &self.term
     }
 
     /// Resize the PTY and notify the child.
@@ -308,7 +327,6 @@ impl ChildExec {
         for (key, value) in extra_env {
             env.push(env_entry(key, value)?);
         }
-        env.push(cstring_from_bytes(b"TERM=xterm-256color")?);
         env.push(cstring_from_bytes(b"COLORTERM=truecolor")?);
 
         let mut argv = arg_strings
@@ -723,6 +741,30 @@ mod tests {
             output.contains("value=[]"),
             "per-spawn env leaked into another child: {output:?}"
         );
+    }
+
+    #[test]
+    fn term_comes_from_the_spawn_env_or_defaults_to_xterm_256color() {
+        let env = [(OsString::from("TERM"), OsString::from("xterm-ultty"))];
+        let output = run_in_pty_with_env("echo \"term=[$TERM]\"; echo DONE", &env);
+        assert!(output.contains("term=[xterm-ultty]"), "got {output:?}");
+
+        let output = run_in_pty("echo \"term=[$TERM]\"; echo DONE");
+        assert!(output.contains("term=[xterm-256color]"), "got {output:?}");
+    }
+
+    #[test]
+    fn child_remembers_the_term_it_was_started_with() {
+        let env = [(OsString::from("TERM"), OsString::from("xterm-ultty"))];
+        let mut child = Child::spawn("/bin/true", &[], &current_dir(), PtySize::default(), &env)
+            .expect("Failed to spawn true");
+        assert_eq!(child.term(), "xterm-ultty");
+        let _ = child.wait();
+
+        let mut child = Child::spawn("/bin/true", &[], &current_dir(), PtySize::default(), &[])
+            .expect("Failed to spawn true");
+        assert_eq!(child.term(), DEFAULT_TERMINAL_NAME);
+        let _ = child.wait();
     }
 
     #[test]

@@ -15,6 +15,9 @@ pub const MAX_HYPERLINKS: usize = 4096;
 /// forgets the oldest entry.
 pub const MAX_TITLE_STACK: usize = 10;
 
+/// The `TERM` a terminal reports until its embedder says otherwise.
+pub const DEFAULT_TERMINAL_NAME: &str = "xterm-256color";
+
 /// Largest value a mode 1005 mouse report encodes: xterm stops at 2047,
 /// the last two-byte UTF-8 code point, so coordinates top out at 2015.
 const MAX_UTF8_MOUSE_VALUE: u32 = 2047;
@@ -200,6 +203,9 @@ pub struct Terminal {
     kitty_keyboard_stack: Vec<u8>,
     /// Pending column mode resize request (132 or 80 columns, DECCOLM)
     pending_column_resize: Option<u16>,
+    /// The `TERM` the program in this terminal was started with, which
+    /// XTGETTCAP reports as `TN`.
+    terminal_name: String,
     /// Dimensions the inactive alternate buffer still has to be resized to.
     /// Reflowing it on every drag frame is wasted work while it is hidden.
     pending_alternate_resize: Option<Dimensions>,
@@ -260,8 +266,21 @@ impl Terminal {
             current_hyperlink_id: 0,
             kitty_keyboard_stack: Vec::new(),
             pending_column_resize: None,
+            terminal_name: DEFAULT_TERMINAL_NAME.to_string(),
             pending_alternate_resize: None,
         }
+    }
+
+    /// Tell the terminal which `TERM` its program was started with, so
+    /// XTGETTCAP reports that name.
+    pub fn set_terminal_name(&mut self, name: impl Into<String>) {
+        self.terminal_name = name.into();
+    }
+
+    /// The `TERM` this terminal reports; [`DEFAULT_TERMINAL_NAME`] unless
+    /// [`Terminal::set_terminal_name`] changed it.
+    pub fn terminal_name(&self) -> &str {
+        &self.terminal_name
     }
 
     /// Queue a response to send back to the PTY.

@@ -14,9 +14,6 @@ use super::cell::{Color, UnderlineStyle};
 /// graphics (4) and ANSI colour (22). Nothing it does not implement.
 const PRIMARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;4;22c";
 
-/// The terminal type the PTY's `TERM` names. XTGETTCAP reports it as `TN`.
-const TERMINAL_NAME: &str = "xterm-256color";
-
 /// This crate's version as one number, `major * 10000 + minor * 100 +
 /// patch` (the form VTE uses), for the secondary device attributes.
 fn version_number() -> u32 {
@@ -635,11 +632,12 @@ impl<'a> TerminalHandler<'a> {
     /// Answer XTGETTCAP, one reply per requested name.
     fn report_termcap(&mut self, request: &str) {
         for name_hex in request.split(';') {
-            let answer = decode_hex(name_hex)
-                .and_then(|name| termcap_value(&name).map(|value| (name, value)));
+            let answer = decode_hex(name_hex).and_then(|name| {
+                termcap_value(&name, self.terminal.terminal_name()).map(|value| (name, value))
+            });
             self.reply(match answer {
                 Some((name, value)) => {
-                    format!("\x1bP1+r{}={}\x1b\\", encode_hex(&name), encode_hex(value))
+                    format!("\x1bP1+r{}={}\x1b\\", encode_hex(&name), encode_hex(&value))
                 }
                 None => format!("\x1bP0+r{name_hex}\x1b\\"),
             });
@@ -966,12 +964,13 @@ fn cursor_style_number(cursor: &crate::grid::Cursor) -> u8 {
 }
 
 /// The terminfo capabilities XTGETTCAP answers. Only what is true of
-/// Ultty: its `TERM`, 256 indexed colours, and 24-bit direct colour.
-fn termcap_value(name: &str) -> Option<&'static str> {
+/// Ultty: the `TERM` in use (`terminal_name`), 256 indexed colours, and
+/// 24-bit direct colour.
+fn termcap_value(name: &str, terminal_name: &str) -> Option<String> {
     match name {
-        "TN" | "name" => Some(TERMINAL_NAME),
-        "Co" | "colors" => Some("256"),
-        "RGB" => Some("8/8/8"),
+        "TN" | "name" => Some(terminal_name.to_string()),
+        "Co" | "colors" => Some("256".to_string()),
+        "RGB" => Some("8/8/8".to_string()),
         _ => None,
     }
 }

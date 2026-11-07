@@ -24,6 +24,8 @@ pub struct Config {
     pub keybindings: KeybindingConfig,
     /// Behavior configuration
     pub behavior: BehaviorConfig,
+    /// What programs in the terminal are told about it
+    pub terminal: TerminalConfig,
     /// Launch profiles
     pub profiles: ProfilesConfig,
 }
@@ -44,6 +46,7 @@ impl Config {
         let mut config: Self = toml::from_str(&contents).map_err(ConfigError::Parse)?;
         config.warn_on_duplicate_keybindings();
         config.font.clamp_size();
+        config.terminal.validate_term();
         Ok(config)
     }
 
@@ -819,6 +822,50 @@ impl Default for BehaviorConfig {
     }
 }
 
+/// What programs in the terminal are told about it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// `TERM` for shells and commands started in new tabs (splits share
+    /// their tab's).
+    ///
+    /// `"xterm-256color"` (the default) is installed almost everywhere.
+    /// `"xterm-ultty"` describes what Ultty implements more accurately, but
+    /// needs its terminfo entry on every host it reaches, including hosts
+    /// reached over ssh.
+    pub term: String,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            term: crate::grid::DEFAULT_TERMINAL_NAME.to_string(),
+        }
+    }
+}
+
+impl TerminalConfig {
+    /// Fall back to the default `term`, with a warning, unless it is a
+    /// plausible terminfo name: 1 to 64 ASCII letters, digits, `.`, `_`,
+    /// `+` or `-`. Anything else could not name an entry and would break
+    /// every program that looks `TERM` up.
+    pub fn validate_term(&mut self) {
+        let valid = (1..=64).contains(&self.term.len())
+            && self
+                .term
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b));
+        if !valid {
+            let default = Self::default().term;
+            warn!(
+                "terminal.term {:?} is not a terminfo name; using {}",
+                self.term, default
+            );
+            self.term = default;
+        }
+    }
+}
+
 /// Policy for clipboard writes requested by programs (OSC 52).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1021,6 +1068,35 @@ mod tests {
     }
 
     #[test]
+    fn terminal_term_defaults_to_xterm_256color() {
+        assert_eq!(Config::default().terminal.term, "xterm-256color");
+        let config: Config = toml::from_str("[behavior]\nopacity = 1.0\n").unwrap();
+        assert_eq!(config.terminal.term, "xterm-256color");
+    }
+
+    #[test]
+    fn terminal_term_is_read_from_the_terminal_section() {
+        let config: Config = toml::from_str("[terminal]\nterm = \"xterm-ultty\"\n").unwrap();
+        assert_eq!(config.terminal.term, "xterm-ultty");
+    }
+
+    #[test]
+    fn invalid_terminal_term_falls_back_to_the_default() {
+        for bad in ["", "xterm 256color", "a=b", "x\u{0}y", &"x".repeat(65)] {
+            let mut terminal = TerminalConfig {
+                term: bad.to_string(),
+            };
+            terminal.validate_term();
+            assert_eq!(terminal.term, "xterm-256color", "for {bad:?}");
+        }
+        let mut terminal = TerminalConfig {
+            term: "xterm-ultty".to_string(),
+        };
+        terminal.validate_term();
+        assert_eq!(terminal.term, "xterm-ultty");
+    }
+
+    #[test]
     fn parse_rgb_color() {
         let color = RgbColor::from_hex("#FF8800").unwrap();
         assert_eq!(color.r, 0xFF);
@@ -1117,6 +1193,17 @@ copy = "ctrl+c"
         let config = Config::load_from_path(&path).unwrap();
 
         assert_eq!(config.font.size, MIN_FONT_SIZE);
+    }
+
+    #[test]
+    fn loaded_config_rejects_an_invalid_terminal_term() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[terminal]\nterm = \"not a name\"\n").unwrap();
+
+        let config = Config::load_from_path(&path).unwrap();
+
+        assert_eq!(config.terminal.term, "xterm-256color");
     }
 
     #[test]

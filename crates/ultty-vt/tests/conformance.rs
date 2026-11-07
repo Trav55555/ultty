@@ -617,6 +617,17 @@ fn xtgettcap_answers_a_small_truthful_set() {
     assert_eq!(replies(&mut term, b"\x1bP+qZZ\x1b\\"), "\x1bP0+rZZ\x1b\\");
 }
 
+#[test]
+fn xtgettcap_reports_the_term_the_program_was_started_with() {
+    let mut term = run(10, 3, b"");
+    term.set_terminal_name("xterm-ultty");
+    let ask_tn = format!("\x1bP+q{}\x1b\\", hex("TN"));
+    assert_eq!(
+        replies(&mut term, ask_tn.as_bytes()),
+        format!("\x1bP1+r{}={}\x1b\\", hex("TN"), hex("xterm-ultty"))
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Mouse mode 1005 (UTF-8 coordinates)
 // ---------------------------------------------------------------------------

@@ -303,9 +303,11 @@ impl EventLoop {
     /// Use this when the child needs spawn options the convenience
     /// constructors do not take, such as per-child environment variables.
     pub fn from_child(child: Child, cols: u16, rows: u16) -> io::Result<Self> {
+        let mut terminal = Terminal::new(Dimensions::new(cols, rows));
+        terminal.set_terminal_name(child.term());
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
-                terminal: Terminal::new(Dimensions::new(cols, rows)),
+                terminal,
                 events: Vec::new(),
                 output_pending: false,
                 bytes_since_collect: 0,
@@ -1090,6 +1092,22 @@ mod tests {
         assert!(!event_loop.has_exited());
         assert_eq!(event_loop.terminal().dimensions().cols, 80);
         assert_eq!(event_loop.terminal().dimensions().rows, 24);
+    }
+
+    /// XTGETTCAP's `TN` must name the `TERM` the program actually got.
+    #[test]
+    fn terminal_reports_the_term_its_child_was_started_with() {
+        let env = [("TERM".into(), "xterm-ultty".into())];
+        let child = Child::spawn(
+            "/bin/sh",
+            &["/bin/sh", "-c", "sleep 1"],
+            &crate::pty::current_dir(),
+            PtySize::new(80, 24),
+            &env,
+        )
+        .expect("spawn");
+        let event_loop = EventLoop::from_child(child, 80, 24).expect("create event loop");
+        assert_eq!(event_loop.terminal().terminal_name(), "xterm-ultty");
     }
 
     /// A child that prints and exits at once must not have its last output
