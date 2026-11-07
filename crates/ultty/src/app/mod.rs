@@ -665,7 +665,7 @@ impl App {
         self.sync_protocol_tabs();
         self.last_tab_title_refresh = Instant::now();
 
-        let total_width = self.window.inner_size().width as f32;
+        let total_width = self.renderer.surface_size().0 as f32;
         let active_tab_id = self
             .terminal_manager
             .active_tab()

@@ -74,7 +74,7 @@ impl App {
         let overlay = overlay_state.as_overlay();
         let locked = super::render::lock_active_panes(
             &self.terminal_manager,
-            self.window.inner_size(),
+            self.renderer.surface_size().into(),
             self.tab_bar.content_top(),
         );
         let panes: Vec<(&ultty::grid::Terminal, ultty::renderer::PaneInfo)> = locked
