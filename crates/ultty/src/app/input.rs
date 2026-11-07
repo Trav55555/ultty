@@ -64,9 +64,10 @@ impl App {
             }
             WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
                 // Forward IME committed text to native protocol sessions as TextInput
+                let foreground = self.focused_foreground_pgrp();
                 if let Some(ref mut server) = self.protocol_server {
                     if server.session_count() > 0 {
-                        server.broadcast_text_input(text.clone());
+                        server.broadcast_text_input(text.clone(), foreground);
                     }
                 }
                 // Also send the text to the terminal PTY
@@ -1381,11 +1382,12 @@ impl App {
         let Some((key, modifiers)) = self.convert_key_event(event) else {
             return;
         };
+        let foreground = self.focused_foreground_pgrp();
         let Some(ref mut server) = self.protocol_server else {
             return;
         };
         if server.session_count() > 0 {
-            server.broadcast_key(key, modifiers);
+            server.broadcast_key(key, modifiers, foreground);
         }
     }
 
@@ -1393,11 +1395,12 @@ impl App {
         let Some((key, modifiers)) = self.convert_key_event(event) else {
             return;
         };
+        let foreground = self.focused_foreground_pgrp();
         let Some(ref mut server) = self.protocol_server else {
             return;
         };
         if server.session_count() > 0 {
-            server.broadcast_key_up(key, modifiers);
+            server.broadcast_key_up(key, modifiers, foreground);
         }
     }
 

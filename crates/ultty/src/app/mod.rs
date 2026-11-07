@@ -622,6 +622,14 @@ impl App {
             .map(|t| t.event_loop.terminal())
     }
 
+    /// Process group in the foreground of the focused pane's PTY: the only
+    /// program whose native sessions receive what the user types.
+    fn focused_foreground_pgrp(&self) -> Option<i32> {
+        self.terminal_manager
+            .focused_terminal()
+            .and_then(|terminal| terminal.event_loop.foreground_pgrp())
+    }
+
     /// Get mutable terminal state of the focused terminal.
     fn terminal_mut(&mut self) -> Option<ultty::event_loop::TerminalGuard<'_>> {
         self.terminal_manager

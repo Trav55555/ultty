@@ -41,6 +41,13 @@ impl Drop for TestDir {
 ///
 /// Returns the server, that tab's socket path, and the directory guard,
 /// which the test must keep alive (bind it as `_dir`).
+/// The foreground process group keys are typed into. The test clients run
+/// in this process, so its own group puts them in the foreground.
+fn foreground() -> Option<i32> {
+    // SAFETY: getpgrp has no preconditions.
+    Some(unsafe { libc::getpgrp() })
+}
+
 fn start_server() -> (ProtocolServer, PathBuf, TestDir) {
     let dir = TestDir::new();
     let mut server = ProtocolServer::new(&dir.0).unwrap();
@@ -544,7 +551,7 @@ fn test_key_event_delivery() {
     server.poll(Some(Duration::from_millis(10))).unwrap();
 
     // Broadcast a key event (auto-flushes)
-    server.broadcast_key(Key::Char('a'), Modifiers::NONE);
+    server.broadcast_key(Key::Char('a'), Modifiers::NONE, foreground());
 
     // Client reads the input event
     let mut response = vec![0u8; 4096];
@@ -588,7 +595,7 @@ fn test_key_up_event_delivery() {
     server.poll(Some(Duration::from_millis(10))).unwrap();
 
     // Broadcast a key-up event (auto-flushes)
-    server.broadcast_key_up(Key::Char('z'), Modifiers::SHIFT);
+    server.broadcast_key_up(Key::Char('z'), Modifiers::SHIFT, foreground());
 
     // Client reads the input event
     let mut response = vec![0u8; 4096];
@@ -905,7 +912,7 @@ fn test_focus_key_routing() {
     server.poll(Some(Duration::from_millis(10))).unwrap();
 
     // Broadcast a key — should be delivered to child_id (focused + subscribed)
-    server.broadcast_key(Key::Char('x'), Modifiers::NONE);
+    server.broadcast_key(Key::Char('x'), Modifiers::NONE, foreground());
 
     let mut response = vec![0u8; 4096];
     let n = client.read(&mut response).unwrap();
@@ -1403,7 +1410,7 @@ fn test_unsubscribe_stops_events() {
     server.poll(Some(Duration::from_millis(10))).unwrap();
 
     // Verify key events arrive
-    server.broadcast_key(Key::Char('a'), Modifiers::NONE);
+    server.broadcast_key(Key::Char('a'), Modifiers::NONE, foreground());
     let mut response = vec![0u8; 4096];
     let n = client.read(&mut response).unwrap();
     assert!(n > 0, "Expected key event before unsubscribe");
@@ -1419,7 +1426,7 @@ fn test_unsubscribe_stops_events() {
     server.poll(Some(Duration::from_millis(10))).unwrap();
 
     // Broadcast another key — should NOT arrive
-    server.broadcast_key(Key::Char('b'), Modifiers::NONE);
+    server.broadcast_key(Key::Char('b'), Modifiers::NONE, foreground());
 
     // Set short read timeout and expect no data
     client
@@ -1680,7 +1687,7 @@ fn test_text_input_delivery() {
     server.poll(Some(Duration::from_millis(10))).unwrap();
 
     // Broadcast a text input event
-    server.broadcast_text_input("hello".to_string());
+    server.broadcast_text_input("hello".to_string(), foreground());
 
     // Client reads the input event
     let mut response = vec![0u8; 4096];
@@ -2013,8 +2020,8 @@ fn test_keys_route_only_to_sessions_of_the_active_tab() {
     // Tab A is active: only its session sees keystrokes, even though the
     // session on tab B connected more recently.
     assert_eq!(server.active_tab(), Some(TAB_A));
-    assert!(server.has_key_subscribers());
-    server.broadcast_key(Key::Char('a'), Modifiers::NONE);
+    assert!(server.has_key_subscribers(foreground()));
+    server.broadcast_key(Key::Char('a'), Modifiers::NONE, foreground());
     assert_eq!(key_downs(&read_messages(&mut on_a)), vec![Key::Char('a')]);
     assert!(
         key_downs(&read_messages(&mut on_b)).is_empty(),
@@ -2023,9 +2030,9 @@ fn test_keys_route_only_to_sessions_of_the_active_tab() {
 
     // Switch to tab B: keys, key-ups and text input go there instead.
     server.set_active_tab(Some(TAB_B));
-    server.broadcast_key(Key::Char('b'), Modifiers::NONE);
-    server.broadcast_key_up(Key::Char('b'), Modifiers::NONE);
-    server.broadcast_text_input("txt".to_string());
+    server.broadcast_key(Key::Char('b'), Modifiers::NONE, foreground());
+    server.broadcast_key_up(Key::Char('b'), Modifiers::NONE, foreground());
+    server.broadcast_text_input("txt".to_string(), foreground());
     let b_msgs = read_messages(&mut on_b);
     assert_eq!(key_downs(&b_msgs), vec![Key::Char('b')]);
     assert!(b_msgs.iter().any(|m| matches!(
@@ -2043,7 +2050,7 @@ fn test_keys_route_only_to_sessions_of_the_active_tab() {
     subscribe_root_keys(&mut second_on_a, &mut server);
     short_read_timeout(&second_on_a);
     server.set_active_tab(Some(TAB_A));
-    server.broadcast_key(Key::Char('c'), Modifiers::NONE);
+    server.broadcast_key(Key::Char('c'), Modifiers::NONE, foreground());
     assert_eq!(key_downs(&read_messages(&mut on_a)), vec![Key::Char('c')]);
     assert_eq!(
         key_downs(&read_messages(&mut second_on_a)),
@@ -2053,8 +2060,8 @@ fn test_keys_route_only_to_sessions_of_the_active_tab() {
 
     // No active tab: nobody receives keys.
     server.set_active_tab(None);
-    assert!(!server.has_key_subscribers());
-    server.broadcast_key(Key::Char('d'), Modifiers::NONE);
+    assert!(!server.has_key_subscribers(foreground()));
+    server.broadcast_key(Key::Char('d'), Modifiers::NONE, foreground());
     assert!(read_messages(&mut on_a).is_empty());
     assert!(read_messages(&mut second_on_a).is_empty());
     assert!(read_messages(&mut on_b).is_empty());
@@ -2159,7 +2166,7 @@ fn test_closing_a_tab_unlinks_its_socket_and_disconnects_its_sessions() {
     assert!(path_a.exists());
     server.set_viewport(80.0, 24.0);
     subscribe_root_keys(&mut on_a, &mut server);
-    server.broadcast_key(Key::Char('x'), Modifiers::NONE);
+    server.broadcast_key(Key::Char('x'), Modifiers::NONE, foreground());
     assert_eq!(key_downs(&read_messages(&mut on_a)), vec![Key::Char('x')]);
 }
 

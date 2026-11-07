@@ -36,7 +36,11 @@ recording PTY is ignored (`ULTTY_FORCE_NATIVE=1` overrides this). The socket
 reaches only programs on the same machine. A session belongs to the tab whose
 socket accepted it: input events and clipboard reads are delivered only while
 that tab is visible, and closing the tab unlinks its socket and disconnects
-its sessions.
+its sessions. Keyboard input (`KeyDown`, `KeyUp`, `TextInput`) also goes only
+to a session whose connecting process (its peer pid) is in the foreground
+process group of the focused pane's PTY, so a background job that subscribes
+to keys sees nothing the user types. In-band sessions talk over the PTY
+itself and qualify while they last.
 
 **In-band** ([ADR 0018](adr/0018-in-band-native-transport.md)). Frames travel
 in the terminal byte stream, so native mode works wherever that stream goes:

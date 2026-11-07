@@ -4,7 +4,9 @@
 //! that socket alone (`ULTTY_SOCKET`). A session therefore belongs to the
 //! tab whose socket accepted it, which is what lets the server route input
 //! and clipboard access to the tab the user is looking at rather than to
-//! whichever process connected most recently.
+//! whichever process connected most recently. Within that tab, keys go only
+//! to sessions whose connecting process is in the focused pane's foreground
+//! process group.
 //!
 //! Apps can also talk in-band on a tab's PTY (ADR 0018). The app layer feeds
 //! that data in with [`ProtocolServer::in_band_input`] and writes what
@@ -562,16 +564,30 @@ impl ProtocolServer {
         self.sessions.values_mut()
     }
 
-    /// Send a key event to the active tab's sessions that subscribed to keys.
+    /// Sessions that may receive keyboard input typed into the focused pane,
+    /// whose PTY has `foreground_pgrp` in the foreground: sessions of the
+    /// active tab (see `set_active_tab`) whose app is that foreground program
+    /// (see [`NativeSession::is_in_foreground`]).
+    fn key_recipients_mut(
+        &mut self,
+        foreground_pgrp: Option<i32>,
+    ) -> impl Iterator<Item = &mut NativeSession> {
+        self.active_tab_sessions_mut()
+            .filter(move |session| session.is_in_foreground(foreground_pgrp))
+    }
+
+    /// Send a key event to the sessions that subscribed to keys and may
+    /// receive them (see `key_recipients_mut`).
     ///
-    /// Keys are never fanned out to every session: only sessions of the tab
-    /// the user is looking at (see `set_active_tab`) see them.
+    /// Keys are never fanned out to every session: a session of a hidden
+    /// tab, or of a program in the background, sees none of them.
     pub fn broadcast_key(
         &mut self,
         key: ultty_protocol::Key,
         modifiers: ultty_protocol::Modifiers,
+        foreground_pgrp: Option<i32>,
     ) {
-        for session in self.active_tab_sessions_mut() {
+        for session in self.key_recipients_mut(foreground_pgrp) {
             if let Err(e) = session.send_key(key.clone(), modifiers) {
                 warn!(
                     "Failed to send key to session {}: {}",
@@ -583,19 +599,23 @@ impl ProtocolServer {
         self.flush();
     }
 
-    /// True if any session of the active tab subscribed to key events.
-    pub fn has_key_subscribers(&self) -> bool {
+    /// True if a session that may receive keys (see `broadcast_key`)
+    /// subscribed to them.
+    pub fn has_key_subscribers(&self, foreground_pgrp: Option<i32>) -> bool {
         self.active_tab_sessions()
+            .filter(|session| session.is_in_foreground(foreground_pgrp))
             .any(NativeSession::has_key_subscription)
     }
 
-    /// Send a key-up event to the active tab's sessions that subscribed to keys.
+    /// Send a key-up event to the sessions [`ProtocolServer::broadcast_key`]
+    /// would send a key to.
     pub fn broadcast_key_up(
         &mut self,
         key: ultty_protocol::Key,
         modifiers: ultty_protocol::Modifiers,
+        foreground_pgrp: Option<i32>,
     ) {
-        for session in self.active_tab_sessions_mut() {
+        for session in self.key_recipients_mut(foreground_pgrp) {
             if let Err(e) = session.send_key_up(key.clone(), modifiers) {
                 warn!(
                     "Failed to send key_up to session {}: {}",
@@ -607,9 +627,10 @@ impl ProtocolServer {
         self.flush();
     }
 
-    /// Send a text input event to the active tab's sessions that subscribed to keys.
-    pub fn broadcast_text_input(&mut self, text: String) {
-        for session in self.active_tab_sessions_mut() {
+    /// Send a text input event to the sessions
+    /// [`ProtocolServer::broadcast_key`] would send a key to.
+    pub fn broadcast_text_input(&mut self, text: String, foreground_pgrp: Option<i32>) {
+        for session in self.key_recipients_mut(foreground_pgrp) {
             if let Err(e) = session.send_text_input(text.clone()) {
                 warn!(
                     "Failed to send text_input to session {}: {}",
@@ -904,6 +925,11 @@ mod tests {
         (server, path)
     }
 
+    fn own_process_group() -> i32 {
+        // SAFETY: getpgrp has no preconditions.
+        unsafe { libc::getpgrp() }
+    }
+
     fn connect(server: &mut ProtocolServer, path: &Path) -> UnixStream {
         let client = UnixStream::connect(path).expect("connect");
         server.poll(Some(Duration::from_millis(100))).unwrap();
@@ -1019,7 +1045,7 @@ mod tests {
 
         server.set_active_tab(None);
         assert_eq!(server.active_tab_sessions().count(), 0);
-        assert!(!server.has_key_subscribers());
+        assert!(!server.has_key_subscribers(Some(own_process_group())));
     }
 
     #[test]
@@ -1087,6 +1113,7 @@ mod tests {
         server.broadcast_key(
             ultty_protocol::Key::Char('a'),
             ultty_protocol::Modifiers::NONE,
+            Some(own_process_group()),
         );
     }
 
@@ -1178,7 +1205,11 @@ mod tests {
         let _client = connect(&mut server, &path);
 
         assert_eq!(server.session_count(), 1);
-        server.broadcast_key(ultty_protocol::Key::Enter, ultty_protocol::Modifiers::CTRL);
+        server.broadcast_key(
+            ultty_protocol::Key::Enter,
+            ultty_protocol::Modifiers::CTRL,
+            Some(own_process_group()),
+        );
     }
 
     // ---------------------------------------------------------------
@@ -1421,5 +1452,104 @@ mod tests {
                 .any(|m| matches!(m, TerminalMessage::ClipboardContent { text: None })),
             "denial sent: {replies:?}"
         );
+    }
+
+    /// Read every message the server has sent `client` so far.
+    fn socket_replies(client: &mut UnixStream) -> Vec<TerminalMessage> {
+        use std::io::Read;
+        client.set_nonblocking(true).unwrap();
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match client.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("read: {e}"),
+            }
+        }
+        decode_all(&bytes)
+    }
+
+    fn key_downs(messages: &[TerminalMessage]) -> usize {
+        messages
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m,
+                    TerminalMessage::Input(ultty_protocol::InputEvent {
+                        event_type: ultty_protocol::InputType::KeyDown { .. },
+                        ..
+                    })
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn keys_reach_only_a_socket_session_in_the_foreground() {
+        use std::io::Write;
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
+        let mut client = connect(&mut server, &path);
+        for msg in [
+            AppMessage::ClientHello {
+                version: ultty_protocol::PROTOCOL_VERSION,
+                requested_capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
+            },
+            AppMessage::Subscribe {
+                id: ultty_protocol::RegionId::ROOT,
+                events: ultty_protocol::EVENT_KEY,
+            },
+        ] {
+            client.write_all(&encode(&msg)).unwrap();
+        }
+        server.poll(Some(Duration::from_millis(100))).unwrap();
+        let _handshake = socket_replies(&mut client);
+
+        // The test process connected, so its group is the peer's group.
+        let foreground = Some(own_process_group());
+        let background = Some(own_process_group() + 1);
+        let key = ultty_protocol::Key::Char('p');
+        let mods = ultty_protocol::Modifiers::NONE;
+
+        assert!(!server.has_key_subscribers(background));
+        server.broadcast_key(key.clone(), mods, background);
+        server.broadcast_text_input("hunter2".to_string(), background);
+        server.broadcast_key(key.clone(), mods, None);
+        assert!(
+            socket_replies(&mut client).is_empty(),
+            "a background session must receive no input"
+        );
+
+        assert!(server.has_key_subscribers(foreground));
+        server.broadcast_key(key, mods, foreground);
+        assert_eq!(key_downs(&socket_replies(&mut client)), 1);
+    }
+
+    #[test]
+    fn in_band_sessions_receive_keys_whatever_the_foreground() {
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
+        server.in_band_input(TAB_A, Some(42), Vec::new, &hello_bytes(), false);
+        server.in_band_input(
+            TAB_A,
+            Some(42),
+            Vec::new,
+            &encode(&AppMessage::Subscribe {
+                id: ultty_protocol::RegionId::ROOT,
+                events: ultty_protocol::EVENT_KEY,
+            }),
+            false,
+        );
+        let _ = in_band_output(&mut server, TAB_A);
+
+        assert!(server.has_key_subscribers(Some(42)));
+        server.broadcast_key(
+            ultty_protocol::Key::Enter,
+            ultty_protocol::Modifiers::NONE,
+            Some(42),
+        );
+        assert_eq!(key_downs(&in_band_output(&mut server, TAB_A)), 1);
     }
 }

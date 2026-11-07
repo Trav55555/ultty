@@ -61,6 +61,10 @@ pub struct NativeSession {
     layout: LayoutEngine,
     /// How the app is connected.
     link: Link,
+    /// For a socket session, the process that connected (`SO_PEERCRED`).
+    /// Keys go to it only while its process group is in the foreground of
+    /// the focused pane.
+    peer_pid: Option<i32>,
     /// Read buffer.
     read_buf: BytesMut,
     /// Write buffer.
@@ -168,7 +172,12 @@ impl NativeSession {
     /// Create a new session from a connection accepted on `tab_id`'s socket.
     pub fn new(stream: UnixStream, session_id: u64, tab_id: TabId) -> io::Result<Self> {
         stream.set_nonblocking(true)?;
-        Ok(Self::with_link(Link::Socket(stream), session_id, tab_id))
+        let peer_pid = crate::platform::socket::peer_pid(&stream)
+            .map_err(|e| warn!("Session {session_id}: cannot read peer pid: {e}"))
+            .ok();
+        let mut session = Self::with_link(Link::Socket(stream), session_id, tab_id);
+        session.peer_pid = peer_pid;
+        Ok(session)
     }
 
     /// Create a session whose app talks in-band on `tab_id`'s PTY, which had
@@ -201,6 +210,7 @@ impl NativeSession {
             scene,
             layout: LayoutEngine::new(),
             link,
+            peer_pid: None,
             read_buf: BytesMut::with_capacity(8192),
             write_buf: BytesMut::with_capacity(8192),
             viewport_width: 80.0,
@@ -778,6 +788,24 @@ impl NativeSession {
             }
         }
         RegionId::ROOT
+    }
+
+    /// Whether keys typed into a pane whose PTY has `foreground_pgrp` in the
+    /// foreground may reach this session.
+    ///
+    /// An in-band app talks over that PTY and its session ends when the
+    /// foreground changes, so it qualifies. A socket session qualifies only
+    /// while the process that connected is in the foreground group: a
+    /// background job that subscribed to keys must not see what the user
+    /// types to the shell or to another program.
+    pub fn is_in_foreground(&self, foreground_pgrp: Option<i32>) -> bool {
+        if self.is_in_band() {
+            return true;
+        }
+        let peer_group = self
+            .peer_pid
+            .and_then(crate::platform::socket::process_group);
+        peer_group.is_some() && peer_group == foreground_pgrp
     }
 
     /// Returns true if any region in this session is subscribed to key events.
