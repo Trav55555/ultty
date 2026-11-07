@@ -36,7 +36,7 @@ mod term_handler;
 mod terminal;
 
 pub use buffer::Buffer;
-pub use cell::{Cell, CellFlags, Color};
+pub use cell::{Cell, CellFlags, Color, UnderlineStyle};
 pub use image::{decode_sixel, ImageId, ImageStore, TerminalImage};
 pub use row::Row;
 pub use term_handler::TerminalHandler;
