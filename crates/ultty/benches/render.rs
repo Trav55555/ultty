@@ -64,6 +64,37 @@ fn create_corpus_terminal(cols: u16, rows: u16, corpus: Corpus) -> Terminal {
     term
 }
 
+/// Successive screens of `corpus` output scrolling past, one line apart:
+/// every row of every screen differs from the row it replaces, as when a
+/// program streams text, so no frame can reuse cached row vertices.
+fn create_scrolling_screens(cols: u16, rows: u16, corpus: Corpus) -> Vec<Terminal> {
+    let data = corpus::generate(corpus, 64 * 1024).bytes;
+    let line_ends: Vec<usize> = data
+        .iter()
+        .enumerate()
+        .filter(|&(_, &b)| b == b'\n')
+        .map(|(i, _)| i + 1)
+        .collect();
+    // Start well past the first screenful so every screen is full.
+    let first = rows as usize * 2;
+    (first..first + SCROLL_FRAMES)
+        .map(|line| {
+            let mut term = Terminal::new(Dimensions::new(cols, rows));
+            let mut parser = AnsiParser::new();
+            let mut handler = TerminalHandler::new(&mut term);
+            parser.feed_with_ascii_spans(&data[..line_ends[line]], |out| match out {
+                AnsiOutput::Action(action) => handler.handle(action),
+                AnsiOutput::PrintAscii(bytes) => handler.handle_ascii_span(bytes),
+            });
+            term
+        })
+        .collect()
+}
+
+/// Screens in one scrolling cycle; enough that a frame never repeats the
+/// previous one.
+const SCROLL_FRAMES: usize = 16;
+
 /// A screen of punctuation-heavy source code, where ligature run shaping
 /// does the most work.
 fn create_code_terminal(cols: u16, rows: u16) -> Terminal {
@@ -149,6 +180,31 @@ impl Bench {
 }
 
 impl Bench {
+    /// Output streaming past: each frame draws the next screen of a
+    /// scrolling corpus, so every row is rebuilt every frame. This is the
+    /// renderer's share of live throughput (`ubench-feed` into a tab).
+    fn run_scrolling(&self, c: &mut Criterion) {
+        let mut group = c.benchmark_group(format!("render_scrolling@{}", self.class));
+        let (cols, rows) = (120u16, 40u16);
+        for corpus in [Corpus::Ascii, Corpus::UnicodeMixed, Corpus::Cjk] {
+            let screens = create_scrolling_screens(cols, rows, corpus);
+            let mut renderer = self.renderer(cols, rows);
+            let target = renderer.create_offscreen_target();
+            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            let overlay = OverlayState::default();
+            let mut frame = 0usize;
+            group.bench_function(format!("{}/120x40", corpus.name()), |b| {
+                b.iter(|| {
+                    frame = (frame + 1) % screens.len();
+                    renderer
+                        .render_to_view(&view, black_box(&screens[frame]), black_box(&overlay))
+                        .expect("render failed");
+                })
+            });
+        }
+        group.finish();
+    }
+
     /// A full screen of code where one row changes between frames, as when
     /// a shell echoes a keystroke or a status line ticks: with the row
     /// vertex cache the frame should cost about one row of text work.
@@ -232,6 +288,7 @@ fn bench_render(c: &mut Criterion) {
         )],
     );
     bench.run_one_dirty_row(c);
+    bench.run_scrolling(c);
 }
 
 criterion_group!(benches, bench_render);
