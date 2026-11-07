@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use std::path::Path;
 
 use ultty::control::format_response;
-use ultty::control::paths::{control_dir, find_running_instance, ControlEndpoint};
+use ultty::control::paths::{control_dir, ControlEndpoint};
 use ultty_protocol::control::{
     ControlData, ControlEnvelope, ControlRequest, ControlResponse, OutputFormat,
 };
@@ -114,10 +114,14 @@ fn response_is_failure(response: &ControlResponse) -> bool {
     )
 }
 
-/// The most recently started Ultty that is still running.
+/// The Ultty this command runs inside (`ULTTY_PID`) while it is still
+/// running, else the most recently started one.
 fn find_instance() -> Result<ControlEndpoint, String> {
     let dir = control_dir().map_err(|e| format!("cannot use the control directory: {}", e))?;
-    find_running_instance(&dir).ok_or_else(|| {
+    let own_pid = std::env::var("ULTTY_PID")
+        .ok()
+        .and_then(|pid| pid.parse().ok());
+    ultty::control::paths::find_instance(&dir, own_pid).ok_or_else(|| {
         format!(
             "no running ultty has a control socket in {} (is it running?)",
             dir.display()
@@ -490,7 +494,9 @@ EXECUTION:
     run <command> [args]    Run a command in current tab
 
 AUTHENTICATION:
-    ulttyctl talks to the most recently started ultty that is running. Each
+    Inside an ultty window, ulttyctl talks to that window's ultty (found
+    through ULTTY_PID, which ultty sets for its shells); elsewhere it talks
+    to the most recently started ultty that is running. Each
     ultty listens on $XDG_RUNTIME_DIR/ultty-ctl-<pid>.sock (or, without
     XDG_RUNTIME_DIR, in a private ultty-<uid> directory under $TMPDIR or
     /tmp). Every command is authenticated automatically with the token that

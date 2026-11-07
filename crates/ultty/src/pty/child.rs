@@ -65,6 +65,9 @@ impl Child {
         // else (a tmux pane, a `script` recording) that inherited the
         // variables can tell the socket is not for it.
         let mut env = env.to_vec();
+        // Tell commands in the shell which Ultty they run in, so `ulttyctl`
+        // controls this window rather than the newest one.
+        env.push(("ULTTY_PID".into(), std::process::id().to_string().into()));
         if env.iter().any(|(key, _)| key == "ULTTY_SOCKET") {
             env.push(("ULTTY_TTY".into(), pty.slave_name().into()));
         }

@@ -67,6 +67,19 @@ pub fn find_running_instance(dir: &Path) -> Option<ControlEndpoint> {
         .find(|endpoint| UnixStream::connect(&endpoint.socket).is_ok())
 }
 
+/// The instance a command should talk to: the one whose pid is `own_pid`
+/// while it still listens, else the newest running instance.
+///
+/// Ultty puts its pid in `ULTTY_PID` for every shell it starts, so
+/// `ulttyctl` run inside a window controls that window, not whichever
+/// window was opened last.
+pub fn find_instance(dir: &Path, own_pid: Option<u32>) -> Option<ControlEndpoint> {
+    own_pid
+        .map(|pid| ControlEndpoint::for_pid(dir, pid))
+        .filter(|endpoint| UnixStream::connect(&endpoint.socket).is_ok())
+        .or_else(|| find_running_instance(dir))
+}
+
 fn pid_from_socket_name(name: &str) -> Option<u32> {
     name.strip_prefix(SOCKET_PREFIX)?
         .strip_suffix(SOCKET_SUFFIX)?
@@ -93,6 +106,23 @@ mod tests {
         assert_eq!(pid_from_socket_name("ultty-ctl-42.sock"), Some(42));
         assert_eq!(pid_from_socket_name("ultty-ctl.sock"), None);
         assert_eq!(pid_from_socket_name("ultty-ctl-42.token"), None);
+    }
+
+    #[test]
+    fn a_window_prefers_its_own_instance_while_it_listens() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = ControlEndpoint::for_pid(dir.path(), 100);
+        let own_listener = UnixListener::bind(&own.socket).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let newer = ControlEndpoint::for_pid(dir.path(), 200);
+        let _newer_listener = UnixListener::bind(&newer.socket).unwrap();
+
+        assert_eq!(find_instance(dir.path(), Some(100)), Some(own.clone()));
+        assert_eq!(find_instance(dir.path(), None), Some(newer.clone()));
+        // An instance that is gone falls back to the newest.
+        assert_eq!(find_instance(dir.path(), Some(300)), Some(newer.clone()));
+        drop(own_listener);
+        assert_eq!(find_instance(dir.path(), Some(100)), Some(newer));
     }
 
     #[test]
