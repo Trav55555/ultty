@@ -2,16 +2,19 @@
 //! cluster?" for the text terminals mostly print.
 //!
 //! The general answer runs the UAX #29 segmenter over the stored cluster
-//! plus the new codepoint, which costs an allocation and a few hundred
-//! instructions per printed character. For most text the answer follows
-//! from two small classes of codepoint:
+//! plus the new codepoint, which costs a few hundred instructions per
+//! printed character. For most text the answer follows from two small
+//! classes of codepoint:
 //!
 //! - *plain*: Grapheme_Cluster_Break is Other (including
 //!   Extended_Pictographic), LV or LVT, and the codepoint is not an Indic
-//!   conjunct consonant. Nothing joins a plain codepoint to a cluster
-//!   ending in plain text or a combining diacritic, and a plain codepoint
-//!   followed by those diacritics stays one cluster.
-//! - *diacritic*: U+0300-U+036F, Combining Diacritical Marks, all Extend.
+//!   conjunct consonant.
+//! - *extend*: Grapheme_Cluster_Break is Extend: combining diacritics,
+//!   variation selectors, emoji modifiers, tags.
+//!
+//! Nothing joins a plain codepoint to a cluster ending in plain or extend
+//! (only a ZWJ before it could), and extend codepoints and ZWJ always
+//! join a cluster made of a plain codepoint followed by more of them.
 //!
 //! The ranges are a conservative subset; the tests check every codepoint in
 //! them against the segmenter, so a Unicode update that moves one fails
@@ -58,22 +61,36 @@ fn is_plain(c: char) -> bool {
     next > 0 && c <= PLAIN[next - 1].1
 }
 
-/// Whether `c` is a combining diacritic (see the module docs).
-fn is_diacritic(c: char) -> bool {
-    matches!(c, '\u{300}'..='\u{36F}')
+/// Whether `c` is in the extend class (see the module docs).
+fn is_extend(c: char) -> bool {
+    matches!(c,
+        '\u{300}'..='\u{36F}'
+        | '\u{483}'..='\u{489}'
+        | '\u{1DC0}'..='\u{1DFF}'
+        | '\u{20D0}'..='\u{20F0}'
+        | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FE20}'..='\u{FE2F}'
+        | '\u{1F3FB}'..='\u{1F3FF}'
+        | '\u{E0020}'..='\u{E007F}'
+        | '\u{E0100}'..='\u{E01EF}'
+    )
+}
+
+const ZWJ: char = '\u{200D}';
+
+/// Whether `c` always joins a cluster of a plain codepoint and more such.
+fn is_joiner(c: char) -> bool {
+    c == ZWJ || is_extend(c)
 }
 
 /// Whether `c` joins the cluster `base` + `extra`, when that follows from
 /// the classes above; `None` when only the segmenter can tell.
 pub(super) fn joins(base: char, extra: &[char], c: char) -> Option<bool> {
-    let last = extra.last().copied().unwrap_or(base);
-    if !(is_plain(last) || is_diacritic(last)) {
-        return None;
-    }
     if is_plain(c) {
-        return Some(false);
+        let last = extra.last().copied().unwrap_or(base);
+        return (is_plain(last) || is_extend(last)).then_some(false);
     }
-    if is_diacritic(c) && is_plain(base) && extra.iter().copied().all(is_diacritic) {
+    if is_joiner(c) && is_plain(base) && extra.iter().copied().all(is_joiner) {
         return Some(true);
     }
     None
@@ -115,6 +132,7 @@ mod tests {
             "\u{AC00}",
             "\u{AC01}",
             "a\u{301}",
+            "\u{1F600}\u{1F3FD}",
             "\u{1F1E6}",
             "\u{915}\u{94D}",
             "\u{915}\u{94D}\u{301}",
@@ -148,12 +166,22 @@ mod tests {
     }
 
     #[test]
-    fn diacritics_extend_and_join_nothing_plain() {
-        for m in all(is_diacritic) {
-            assert!(segmenter_joins("a", m), "{m:?} does not join a letter");
-            assert!(segmenter_joins("a\u{301}", m), "{m:?} after a mark");
-            assert!(!segmenter_joins(&format!("a{m}"), 'b'), "{m:?} joins b");
+    fn extends_join_and_are_joined_by_nothing_plain() {
+        for m in all(is_extend) {
+            for cluster in ["a", "\u{1F600}", "a\u{301}", "a\u{200D}"] {
+                assert!(segmenter_joins(cluster, m), "{m:?} does not join {cluster:?}");
+            }
+            // Rules out ZWJ, which joins a following pictograph, and every
+            // class that joins what follows it.
+            for after in ['b', '\u{1F600}', '\u{AC00}', '\u{AC01}'] {
+                let cluster = format!("\u{1F600}{m}");
+                assert!(!segmenter_joins(&cluster, after), "{after:?} joins {cluster:?}");
+            }
             assert!(segmenter_joins(&format!("a{m}"), '\u{301}'), "after {m:?}");
+            assert!(segmenter_joins(&format!("a{m}"), ZWJ), "ZWJ after {m:?}");
+        }
+        for cluster in ["a", "a\u{301}", "a\u{200D}"] {
+            assert!(segmenter_joins(cluster, ZWJ), "ZWJ does not join {cluster:?}");
         }
     }
 
@@ -168,6 +196,11 @@ mod tests {
             ('\u{1F600}', &[], '\u{1F680}'),
             ('\u{AC00}', &[], '\u{AC01}'),
             ('e', &['\u{301}', '\u{303}'], 'x'),
+            ('\u{1F468}', &[], '\u{200D}'),
+            ('\u{1F44D}', &[], '\u{1F3FD}'),
+            ('\u{1F44D}', &['\u{1F3FD}'], '\u{1F680}'),
+            ('\u{2764}', &[], '\u{FE0F}'),
+            ('\u{1F3F3}', &['\u{FE0F}'], '\u{200D}'),
         ];
         for &(base, extra, c) in cases {
             let mut cluster: String = extra.iter().collect();
@@ -182,13 +215,10 @@ mod tests {
 
     #[test]
     fn leaves_the_rest_to_the_segmenter() {
-        // ZWJ sequences, emoji modifiers, variation selectors, flags,
-        // Hangul jamo and Indic marks all need the full rules.
+        // Pictographs after ZWJ, flags, Hangul jamo and Indic marks all
+        // need the full rules.
         let cases: &[(char, &[char], char)] = &[
-            ('\u{1F468}', &[], '\u{200D}'),
             ('\u{1F468}', &['\u{200D}'], '\u{1F469}'),
-            ('\u{1F44D}', &[], '\u{1F3FD}'),
-            ('\u{2764}', &[], '\u{FE0F}'),
             ('\u{1F1EF}', &[], '\u{1F1F5}'),
             ('\u{1100}', &[], '\u{1161}'),
             ('\u{915}', &[], '\u{94D}'),
