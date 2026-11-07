@@ -54,6 +54,18 @@ Linux desktop packages install `dist/ultty.desktop` and the Ultty app icon from 
 
 ### Installing a release build
 
+On Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Trav55555/ultty/main/install.sh | sh
+```
+
+[`install.sh`](install.sh) downloads the latest release for your OS and CPU,
+checks it against the release's `SHA256SUMS`, and installs `ultty` and
+`ulttyctl` into `~/.local/bin` (on Linux also the application-menu entry and
+icons). It needs no root. Set `ULTTY_VERSION=v0.1.0` for a specific release or
+`ULTTY_INSTALL_DIR` for another location.
+
 Release tarballs, `.deb`, and `.rpm` packages are published from the
 [Release workflow](.github/workflows/release.yml), together with a `SHA256SUMS`
 file and a rendered Homebrew formula. Verify a download against `SHA256SUMS`
