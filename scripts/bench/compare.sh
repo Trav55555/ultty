@@ -142,7 +142,7 @@ kill_run_processes() {
   local pid
   for pid in $(pgrep -u "$(id -u)" 2>/dev/null); do
     [[ "$pid" == "$$" ]] && continue
-    if tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qx "UBENCH_RUN=$UBENCH_RUN"; then
+    if tr '\0' '\n' 2>/dev/null <"/proc/$pid/environ" | grep -qx "UBENCH_RUN=$UBENCH_RUN"; then
       kill "$pid" 2>/dev/null || true
     fi
   done
@@ -213,6 +213,23 @@ EOF
     ;;
 esac
 
+# GNOME Terminal (GTK3) showed no echo for XTest keys on a bare Xvfb with no
+# window manager (the likely cause; unconfirmed), so start openbox when nothing manages the screen. Without
+# one, GNOME Terminal's latency samples fail and are reported as failures.
+WM=none
+if [[ "$SESSION" != wayland ]]; then
+  if xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q 'window id'; then
+    WM=existing
+  elif command -v openbox >/dev/null; then
+    openbox >"$OUT/logs/openbox.log" 2>&1 &
+    SESSION_PIDS+=("$!")
+    WM=openbox
+    sleep 1
+  else
+    echo "compare.sh: no window manager (install openbox); GNOME Terminal latency will fail" >&2
+  fi
+fi
+
 # ---------------------------------------------------------------- versions
 FONT_FILE=$(fc-match "$FONT" file | sed 's/^:file=//')
 FONT_SHA=$(sha256sum "$FONT_FILE" | cut -d' ' -f1)
@@ -222,6 +239,7 @@ GHOSTTY_BIN=$(command -v ghostty || echo /snap/bin/ghostty)
 cat >"$OUT/versions.json" <<EOF
 {
   "session": "$SESSION",
+  "window_manager": "$WM",
   "claim": "$CLAIM",
   "geometry": "$GEOMETRY",
   "font": "$FONT", "font_size": $FONT_SIZE, "font_file": "$FONT_FILE", "font_sha256": "$FONT_SHA",
@@ -360,7 +378,7 @@ owner_pid() {
   local term="$1" title="$2" pid
   if [[ "$term" != gnome-terminal ]]; then echo "$TERM_PID"; return; fi
   for pid in $(pgrep -x gnome-terminal- 2>/dev/null; pgrep -x gnome-terminal-server 2>/dev/null); do
-    if tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qx "UBENCH_TOKEN=$title"; then
+    if tr '\0' '\n' 2>/dev/null <"/proc/$pid/environ" | grep -qx "UBENCH_TOKEN=$title"; then
       echo "$pid"; return
     fi
   done
@@ -403,7 +421,7 @@ stop_term() {
     # dbus-run-session can leave its bus and activated services running.
     local pid
     for pid in $(pgrep -u "$(id -u)" 2>/dev/null); do
-      if tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qx "UBENCH_TOKEN=$title"; then
+      if tr '\0' '\n' 2>/dev/null <"/proc/$pid/environ" | grep -qx "UBENCH_TOKEN=$title"; then
         kill "$pid" 2>/dev/null || true
       fi
     done
@@ -528,8 +546,9 @@ run_idle() {
 
 run_k2p() {
   local term="$1" round="$2" flood="$3"
-  local title="ub-${term}-k2p-$flood-$round" win args=() case_name
-  [[ "$flood" == idle ]] || args=(--flood "$flood")
+  local title="ub-${term}-k2p-$flood-$round" win args=() probe_args=() case_name
+  # The flood waits for the f key, so the probe calibrates on a still screen.
+  [[ "$flood" == idle ]] || { args=(--flood "$flood"); probe_args=(--start-key f); }
   case_name=$([[ "$flood" == idle ]] && echo idle || echo "flood-$flood")
   wrapper "$title" "$BIN/ubench-echo" "${args[@]}"
   launch "$term" "$title"
@@ -537,11 +556,11 @@ run_k2p() {
   sleep 2
   if [[ "$SESSION" == wayland ]]; then
     python3 -I "$HERE/k2p-wayland.py" --title "$title" --terminal "$term" --out "$RESULTS" \
-      --samples "$K2P_SAMPLES" --case "$case_name" --claim "$CLAIM" \
+      --samples "$K2P_SAMPLES" --case "$case_name" --claim "$CLAIM" "${probe_args[@]}" \
       2>>"$OUT/logs/$title.probe.log" || fail "$term k2p $case_name failed (see $OUT/logs/$title.probe.log)"
   else
     "$BIN/ubench-k2p" --window "$win" --terminal "$term" --out "$RESULTS" --samples "$K2P_SAMPLES" \
-      --case "$case_name" --claim "$CLAIM" --display-session "$SESSION" \
+      --case "$case_name" --claim "$CLAIM" --display-session "$SESSION" "${probe_args[@]}" \
       2>>"$OUT/logs/$title.probe.log" || fail "$term k2p $case_name failed (see $OUT/logs/$title.probe.log)"
   fi
   stop_term "$term" "$title"

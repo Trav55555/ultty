@@ -61,7 +61,7 @@ setup_common() {
 
 setup_terminals() {
   apt_install xvfb xserver-xorg-core x11-utils x11-xserver-utils xdotool dbus-x11 dbus-user-session \
-    gnome-terminal dconf-cli sway grim wtype mesa-vulkan-drivers mesa-utils
+    gnome-terminal dconf-cli sway grim wtype mesa-vulkan-drivers mesa-utils openbox
   if [[ -n "${EXPECT_GNOME_TERMINAL:-}" ]]; then
     have=$(dpkg-query -W -f='${Version}' gnome-terminal)
     [[ "$have" == "$EXPECT_GNOME_TERMINAL" ]] || die "gnome-terminal is $have, expected $EXPECT_GNOME_TERMINAL"

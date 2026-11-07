@@ -26,6 +26,8 @@
 //!                      do not phase-lock with vsync
 //!   --timeout-ms N     per-sample wait for pixels (default 1000)
 //!   --display-session S recorded as env.session
+//!   --start-key K      after calibrating, press K and wait 1.5 s before
+//!                      sampling (ubench-echo --flood starts its flood on `f`)
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -50,6 +52,7 @@ struct Options {
     gap: (u64, u64),
     timeout: Duration,
     session: Option<String>,
+    start_key: Option<u8>,
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -63,6 +66,7 @@ fn parse_args() -> Result<Options, String> {
         gap: (50, 300),
         timeout: Duration::from_millis(1000),
         session: None,
+        start_key: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -92,6 +96,10 @@ fn parse_args() -> Result<Options, String> {
                 o.timeout = Duration::from_millis(value.parse().map_err(|_| "bad --timeout-ms")?)
             }
             "--display-session" => o.session = Some(value),
+            "--start-key" => match value.as_bytes() {
+                [b] if b.is_ascii_lowercase() => o.start_key = Some(*b),
+                _ => return Err("--start-key must be one lowercase letter".into()),
+            },
             _ => return Err(format!("unknown option {arg}")),
         }
     }
@@ -234,6 +242,10 @@ fn run(o: &Options) -> Result<(), String> {
              something else on screen is moving",
             cell.w, cell.h, cell.x, cell.y
         ));
+    }
+    if let Some(k) = o.start_key {
+        tap(&conn, root, keycode_for(&conn, u32::from(k))?)?;
+        std::thread::sleep(Duration::from_millis(1500));
     }
     eprintln!(
         "ubench-k2p: watching {}x{} at ({}, {})",

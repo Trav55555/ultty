@@ -81,6 +81,7 @@ def main(argv):
     ap.add_argument("--case", default="idle")
     ap.add_argument("--claim", default="live-unknown")
     ap.add_argument("--timeout", type=float, default=2.0)
+    ap.add_argument("--start-key", help="press this after calibrating (ubench-echo --flood waits for f)")
     args = ap.parse_args(argv)
 
     x, y, w, h = window_rect(args.title)
@@ -107,6 +108,9 @@ def main(argv):
     if grab(cell) == first:
         print(f"calibration box {cell} did not change on a second key", file=sys.stderr)
         return 1
+    if args.start_key:
+        run(["wtype", args.start_key])
+        time.sleep(1.5)
 
     rng = random.Random(1)
     latencies, polls, injects = [], [], []
