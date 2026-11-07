@@ -111,6 +111,23 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
       - run: cargo check --workspace --all-targets
 
+  # porygon-tui is outside the workspace (its own lockfile and a large
+  # dependency tree), so `cargo test --workspace` never builds it. Check it
+  # here so ulttui API changes cannot break it unnoticed.
+  porygon-tui:
+    name: porygon-tui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/porygon-tui
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check --locked --manifest-path examples/porygon-tui/Cargo.toml
+
   vt-integrity:
     name: VT integrity (deep property run)
     runs-on: ubuntu-latest
