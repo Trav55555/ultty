@@ -9,8 +9,8 @@ use ratatui::Frame;
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
 use crate::vim::{KeyParser, VimConfig, VimHandler, VimResult};
+use crate::vim::{VimAction, VimCommand, VimMode, VimMotion, VimState};
 use crate::{impl_vim_ext, impl_vim_handler_accessors};
-use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimState};
 use ultty_protocol::{
     AppMessage, BorderStyle, Constraints, Dimension, Display, FlexDirection, RegionId,
     Style as ProtoStyle, TextContent,

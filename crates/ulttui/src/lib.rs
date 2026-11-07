@@ -71,6 +71,6 @@ pub mod prelude {
         BorderEdges, BorderStyle, BorderType, Color, Constraints, Dimension, Style,
     };
 
-    // Re-export vim types from protocol
-    pub use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator};
+    // Vim types
+    pub use crate::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator};
 }

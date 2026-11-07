@@ -1,8 +1,7 @@
 //! Vim motion types and commands.
 //!
-//! This module defines the data types for vim-style navigation and editing.
-//! The actual interpretation of key sequences into these types is handled
-//! by the framework layer (ultimate-tui).
+//! The data types for vim-style navigation and editing in widgets.
+//! [`super::KeyParser`] turns key sequences into these types.
 
 /// Vim editing mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
