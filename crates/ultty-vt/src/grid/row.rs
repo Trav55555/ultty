@@ -133,13 +133,13 @@ impl Row {
         let Some(cell) = self.cells.get_mut(col as usize) else {
             return;
         };
+        let extra = self.graphemes.entry(col).or_default();
         if !cell.has_flag(CellFlags::HAS_COMBINING) {
             // Whatever is stored for this column belonged to earlier content.
-            self.graphemes.remove(&col);
+            extra.clear();
             cell.set_flag(CellFlags::HAS_COMBINING);
-            self.mark_used(col as usize + 1);
+            self.used = self.used.max(col + 1);
         }
-        let extra = self.graphemes.entry(col).or_default();
         if extra.len() < cap {
             extra.push(c);
         }
@@ -182,13 +182,10 @@ impl Row {
 
     /// Remove stored grapheme data for `start..end` without touching cells.
     fn drop_grapheme_entries(&mut self, start: u16, end: u16) {
-        if self.graphemes.is_empty() || start >= end {
+        if start >= end || self.graphemes.range(start..end).next().is_none() {
             return;
         }
-        let mut tail = self.graphemes.split_off(&start);
-        let mut keep = tail.split_off(&end);
-        self.graphemes.append(&mut keep);
-        drop(tail);
+        self.graphemes.retain(|&col, _| col < start || col >= end);
     }
 
     /// Shift grapheme entries so they follow their cells after a horizontal
