@@ -34,6 +34,7 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Added
 
+- `behavior.cursor_blink` (default `true`); `false` keeps the cursor steady.
 - `dist/terminfo/ultty.terminfo`, the `xterm-ultty` entry, installed by
   `install.sh`, `make install`, the packages and the Homebrew formula.
 - `terminal.term` sets `TERM` for new tabs (default `xterm-256color`).
@@ -56,6 +57,13 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Changed
 
+- An idle window no longer wakes up. The cursor blinks only while the
+  window has focus and the cursor is in a blinking style; nothing else
+  polls unless a native app is connected or `ulttyctl wait-for` is waiting.
+  Config edits are reloaded 100 ms after the file stops changing.
+- The GPU is opened with the primary API (Vulkan on Linux) alone, and GL
+  only if that finds no adapter. Probing GL as well cost startup time and
+  memory.
 - DA1 reports what is implemented (`CSI ? 62 ; 4 ; 22 c`: VT220 class, sixel,
   ANSI colour). DA2 reports VT220 and the version.
 - The VT parser executes C0 controls inside a control sequence, ignores
