@@ -244,7 +244,11 @@ impl App {
             }
 
             ControlRequest::GetSelection => {
-                ControlResponse::Data(ControlData::Selection { text: None })
+                let text = self
+                    .terminal_manager
+                    .focused_terminal()
+                    .and_then(|terminal| terminal.event_loop.terminal().selected_text());
+                ControlResponse::Data(ControlData::Selection { text })
             }
 
             ControlRequest::SendText { text } => {

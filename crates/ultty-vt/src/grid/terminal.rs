@@ -142,6 +142,10 @@ pub struct Terminal {
     /// Content version of the active grid when the selection was made.
     /// A selection is only valid while the content it refers to is unchanged.
     selection_content_version: u64,
+    /// Whether the view was scrolled back when the selection started. New
+    /// output snaps the view to the bottom, so such a selection cannot be
+    /// kept per row.
+    selection_started_scrolled: bool,
     /// Window title
     title: String,
     /// Shell integration state
@@ -209,6 +213,7 @@ impl Terminal {
             modes: TerminalModes::default(),
             selection: None,
             selection_content_version: 0,
+            selection_started_scrolled: false,
             title: String::new(),
             shell_integration: ShellIntegration::default(),
             images: ImageStore::new(),
@@ -328,13 +333,31 @@ impl Terminal {
 
     /// Get current selection.
     ///
-    /// Returns `None` once the selected content has been mutated (text
+    /// Returns `None` once a row the selection covers has been mutated (text
     /// written, scrolled, erased, or resized) since the selection was made.
+    /// Changes to other rows, such as a spinner or status line an app keeps
+    /// repainting, leave it alone. A selection made or viewed while scrolled
+    /// back is dropped by any change, because new output moves the view.
     pub fn selection(&self) -> Option<&Selection> {
-        if self.selection_content_version == self.grid().content_version() {
-            self.selection.as_ref()
-        } else {
+        let selection = self.selection.as_ref()?;
+        let grid = self.grid();
+        if self.selection_content_version == grid.content_version() {
+            return Some(selection);
+        }
+        if self.selection_started_scrolled || self.buffer().is_scrolled() {
+            return None;
+        }
+        let (start, end) = selection.ordered();
+        let max_row = i32::from(grid.dimensions().rows) - 1;
+        if end.row < 0 || start.row > max_row {
+            return Some(selection);
+        }
+        let first = start.row.clamp(0, max_row) as u16;
+        let last = end.row.clamp(0, max_row) as u16;
+        if grid.rows_changed_since(self.selection_content_version, first..=last) {
             None
+        } else {
+            Some(selection)
         }
     }
 
@@ -346,6 +369,7 @@ impl Terminal {
             mode,
         });
         self.selection_content_version = self.grid().content_version();
+        self.selection_started_scrolled = self.buffer().is_scrolled();
     }
 
     /// Update selection end point.
@@ -447,39 +471,7 @@ impl Terminal {
 
     /// Check if a cell is within the selection.
     pub fn is_selected(&self, col: u16, row: u16) -> bool {
-        let Some(sel) = self.selection() else {
-            return false;
-        };
-
-        let (start, end) = sel.ordered();
-        let row = row as i32;
-        let col = col as i32;
-
-        match sel.mode {
-            SelectionMode::Normal => {
-                if row < start.row || row > end.row {
-                    return false;
-                }
-                if row == start.row && row == end.row {
-                    col >= start.col && col <= end.col
-                } else if row == start.row {
-                    col >= start.col
-                } else if row == end.row {
-                    col <= end.col
-                } else {
-                    true
-                }
-            }
-            SelectionMode::Line => row >= start.row && row <= end.row,
-            SelectionMode::Block => {
-                let (left, right) = if start.col <= end.col {
-                    (start.col, end.col)
-                } else {
-                    (end.col, start.col)
-                };
-                row >= start.row && row <= end.row && col >= left && col <= right
-            }
-        }
+        self.selection().is_some_and(|sel| sel.contains(col, row))
     }
 
     /// Get window title.
@@ -1037,6 +1029,40 @@ impl Selection {
     /// Check if selection is empty (start == end).
     pub fn is_empty(&self) -> bool {
         self.start == self.end
+    }
+
+    /// Whether the cell at `col`, `row` (viewport coordinates) is inside
+    /// the selection.
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        let (start, end) = self.ordered();
+        let row = row as i32;
+        let col = col as i32;
+
+        match self.mode {
+            SelectionMode::Normal => {
+                if row < start.row || row > end.row {
+                    return false;
+                }
+                if row == start.row && row == end.row {
+                    col >= start.col && col <= end.col
+                } else if row == start.row {
+                    col >= start.col
+                } else if row == end.row {
+                    col <= end.col
+                } else {
+                    true
+                }
+            }
+            SelectionMode::Line => row >= start.row && row <= end.row,
+            SelectionMode::Block => {
+                let (left, right) = if start.col <= end.col {
+                    (start.col, end.col)
+                } else {
+                    (end.col, start.col)
+                };
+                row >= start.row && row <= end.row && col >= left && col <= right
+            }
+        }
     }
 }
 

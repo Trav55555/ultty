@@ -188,6 +188,10 @@ pub struct Grid {
     attrs: Cell,
     /// Dirty rows that need redrawing (bitset would be more efficient)
     dirty: Vec<bool>,
+    /// The `content_version` at which each row last changed. Unlike `dirty`,
+    /// the renderer never resets it, so a selection can tell whether its own
+    /// rows changed rather than whether anything on screen did.
+    row_versions: Vec<u64>,
     /// Scroll region (None means full screen)
     scroll_region: Option<ScrollRegion>,
     /// Custom tab stops (column numbers where tabs stop)
@@ -240,6 +244,7 @@ impl Grid {
             cursor: Cursor::default(),
             attrs: Cell::default(),
             dirty,
+            row_versions: vec![0; dims.rows as usize],
             scroll_region: None,
             tab_stops,
             auto_wrap: true,
@@ -261,6 +266,16 @@ impl Grid {
     /// Cursor movement and viewport scrolling leave it untouched.
     pub fn content_version(&self) -> u64 {
         self.content_version
+    }
+
+    /// Whether any row in `rows` changed after `version` (a value previously
+    /// read from [`Grid::content_version`]). Rows outside the grid count as
+    /// unchanged.
+    pub fn rows_changed_since(&self, version: u64, rows: std::ops::RangeInclusive<u16>) -> bool {
+        let start = *rows.start() as usize;
+        let end = (*rows.end() as usize).min(self.row_versions.len().saturating_sub(1));
+        // A u64 counter bumped once per mutation does not wrap in practice.
+        start <= end && self.row_versions[start..=end].iter().any(|&v| v > version)
     }
 
     /// Get cursor state.
@@ -406,6 +421,12 @@ impl Grid {
             return Err(format!(
                 "dirty map has {} rows, grid has {rows}",
                 self.dirty.len()
+            ));
+        }
+        if self.row_versions.len() != rows as usize {
+            return Err(format!(
+                "row version map has {} rows, grid has {rows}",
+                self.row_versions.len()
             ));
         }
         let pos = self.cursor.position;
@@ -1333,6 +1354,7 @@ impl Grid {
         self.dims = new_dims;
         self.dirty = vec![true; new_dims.rows as usize];
         self.content_version = self.content_version.wrapping_add(1);
+        self.row_versions = vec![self.content_version; new_dims.rows as usize];
     }
 
     /// Set rows directly (used by Buffer during reflow).
@@ -1365,6 +1387,7 @@ impl Grid {
         // Mark all dirty
         self.dirty = vec![true; new_dims.rows as usize];
         self.content_version = self.content_version.wrapping_add(1);
+        self.row_versions = vec![self.content_version; new_dims.rows as usize];
     }
 
     /// Prepend rows at the top (used when growing viewport to pull from history).
@@ -1415,6 +1438,9 @@ impl Grid {
     /// Mark a row as dirty (needs redrawing).
     fn mark_dirty(&mut self, row: u16) {
         self.content_version = self.content_version.wrapping_add(1);
+        if let Some(v) = self.row_versions.get_mut(row as usize) {
+            *v = self.content_version;
+        }
         if let Some(d) = self.dirty.get_mut(row as usize) {
             *d = true;
         }
@@ -1424,6 +1450,7 @@ impl Grid {
     fn mark_all_dirty(&mut self) {
         self.content_version = self.content_version.wrapping_add(1);
         self.dirty.fill(true);
+        self.row_versions.fill(self.content_version);
     }
 
     /// Check if a row is dirty.

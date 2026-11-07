@@ -449,6 +449,7 @@ impl Renderer {
         let buffer = terminal.buffer();
         let dims = terminal.dimensions();
         let selection_bg = self.color_scheme.selection_background();
+        let selection = terminal.selection();
         // Pre-allocate based on terminal size: ~1 bg run per row on average = rows quads
         let est_quads = dims.rows as usize * 4;
         let mut vertices = Vec::with_capacity(est_quads * 4);
@@ -469,7 +470,7 @@ impl Renderer {
                     None => continue,
                 };
 
-                let is_selected = terminal.is_selected(col_idx, row_idx);
+                let is_selected = selection.is_some_and(|sel| sel.contains(col_idx, row_idx));
                 let bg_color = if is_selected {
                     selection_bg
                 } else if cell.has_flag(CellFlags::REVERSE) {
