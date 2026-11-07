@@ -12,5 +12,5 @@ are Ultty's default Everforest palette: aqua `#83c092` chevrons, green
 | `ultty-animated-dark.svg`, `ultty-animated-light.svg` | The README header: `->>>_` blinks, then `ultty` types out (SVG SMIL, plays once, then the cursor blinks) |
 | `ultty-tree-dark.svg`, `ultty-tree-light.svg` | Upright pine tree with `ultty_` |
 
-The app icon in `dist/icons/hicolor/` is the same sideways tree, trunk and
-three equal chevrons, on a dark rounded tile.
+The app icon in `dist/icons/hicolor/` is the `->>>_` mark on a dark rounded
+tile.
