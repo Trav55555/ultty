@@ -106,7 +106,9 @@ mod tests {
     }
 
     fn all(class: fn(char) -> bool) -> impl Iterator<Item = char> {
-        (0..=0x10FFFF).filter_map(char::from_u32).filter(move |&c| class(c))
+        (0..=0x10FFFF)
+            .filter_map(char::from_u32)
+            .filter(move |&c| class(c))
     }
 
     /// What `joins` claims for a pair, checked by the segmenter.
@@ -169,19 +171,28 @@ mod tests {
     fn extends_join_and_are_joined_by_nothing_plain() {
         for m in all(is_extend) {
             for cluster in ["a", "\u{1F600}", "a\u{301}", "a\u{200D}"] {
-                assert!(segmenter_joins(cluster, m), "{m:?} does not join {cluster:?}");
+                assert!(
+                    segmenter_joins(cluster, m),
+                    "{m:?} does not join {cluster:?}"
+                );
             }
             // Rules out ZWJ, which joins a following pictograph, and every
             // class that joins what follows it.
             for after in ['b', '\u{1F600}', '\u{AC00}', '\u{AC01}'] {
                 let cluster = format!("\u{1F600}{m}");
-                assert!(!segmenter_joins(&cluster, after), "{after:?} joins {cluster:?}");
+                assert!(
+                    !segmenter_joins(&cluster, after),
+                    "{after:?} joins {cluster:?}"
+                );
             }
             assert!(segmenter_joins(&format!("a{m}"), '\u{301}'), "after {m:?}");
             assert!(segmenter_joins(&format!("a{m}"), ZWJ), "ZWJ after {m:?}");
         }
         for cluster in ["a", "a\u{301}", "a\u{200D}"] {
-            assert!(segmenter_joins(cluster, ZWJ), "ZWJ does not join {cluster:?}");
+            assert!(
+                segmenter_joins(cluster, ZWJ),
+                "ZWJ does not join {cluster:?}"
+            );
         }
     }
 

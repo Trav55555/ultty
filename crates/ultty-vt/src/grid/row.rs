@@ -840,7 +840,10 @@ mod tests {
         row.set_grapheme_extra(1, &['\u{301}']);
         let got = row.with_grapheme_str(1, Some('\u{302}'), str::to_string);
         assert_eq!(got.as_deref(), Some("e\u{301}\u{302}"));
-        assert_eq!(row.with_grapheme_str(0, None, str::to_string).as_deref(), Some(" "));
+        assert_eq!(
+            row.with_grapheme_str(0, None, str::to_string).as_deref(),
+            Some(" ")
+        );
         assert_eq!(row.with_grapheme_str(4, None, str::to_string), None);
 
         // Longer than the stack buffer.
