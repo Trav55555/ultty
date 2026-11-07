@@ -238,25 +238,18 @@ impl App {
         let size = window.inner_size();
         let scale_factor = window.scale_factor() as f32;
 
-        // Create wgpu instance
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            // GL presents through the display connection (Wayland needs it).
-            display: Some(Box::new(event_loop.owned_display_handle())),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-
-        // Create surface
-        let surface = instance.create_surface(window.clone())?;
-
-        // Get adapter
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            ..Default::default()
-        }))
-        .map_err(|e| anyhow::anyhow!("Failed to find suitable GPU adapter: {e}"))?;
+        // Vulkan (or the platform's primary API) first, GL only if that
+        // finds no adapter. An instance with every backend brings up GL as
+        // well, which loads and initializes the EGL driver even when Vulkan
+        // is then chosen: startup time and resident memory for nothing.
+        let (surface, adapter) = match request_gpu(event_loop, &window, wgpu::Backends::PRIMARY) {
+            Ok(gpu) => gpu,
+            Err(primary) => {
+                tracing::info!("No primary GPU backend ({primary:#}); trying GL");
+                request_gpu(event_loop, &window, wgpu::Backends::SECONDARY)
+                    .map_err(|gl| anyhow::anyhow!("{primary:#}; with GL: {gl:#}"))?
+            }
+        };
         tracing::debug!(target: "ultty::startup", "GPU adapter ready");
 
         // Scale font size to physical pixels so cosmic-text metrics match
@@ -1417,6 +1410,30 @@ fn tab_shell_env(
         }
     }
     Ok(env)
+}
+
+/// A surface for `window` and an adapter that can draw to it, from an
+/// instance limited to `backends`.
+fn request_gpu(
+    event_loop: &ActiveEventLoop,
+    window: &Arc<Window>,
+    backends: wgpu::Backends,
+) -> Result<(wgpu::Surface<'static>, wgpu::Adapter)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends,
+        // GL presents through the display connection (Wayland needs it).
+        display: Some(Box::new(event_loop.owned_display_handle())),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let surface = instance.create_surface(Arc::clone(window))?;
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: Some(&surface),
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .map_err(|e| anyhow::anyhow!("Failed to find suitable GPU adapter: {e}"))?;
+    Ok((surface, adapter))
 }
 
 /// Sleep until `deadline`, or with none, until an event arrives.
