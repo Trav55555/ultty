@@ -1029,9 +1029,20 @@ fn osc_clipboard() {
 
 #[test]
 fn osc_query_colors() {
-    assert_eq!(parse(b"\x1b]10;?\x07"), vec![Action::QueryForegroundColor]);
-    assert_eq!(parse(b"\x1b]11;?\x07"), vec![Action::QueryBackgroundColor]);
-    assert_eq!(parse(b"\x1b]12;?\x07"), vec![Action::QueryCursorColor]);
+    use super::{DynamicColor, StringTerminator};
+    for (bytes, color) in [
+        (b"\x1b]10;?\x07", DynamicColor::Foreground),
+        (b"\x1b]11;?\x07", DynamicColor::Background),
+        (b"\x1b]12;?\x07", DynamicColor::Cursor),
+    ] {
+        assert_eq!(
+            parse(bytes),
+            vec![Action::QueryDynamicColor {
+                color,
+                terminator: StringTerminator::Bel
+            }]
+        );
+    }
 }
 
 // ---------------------------------------------------------------

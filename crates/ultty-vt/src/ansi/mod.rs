@@ -243,17 +243,50 @@ pub enum Action {
     /// Unknown OSC sequence (for debugging)
     UnknownOsc(String),
 
-    /// Query foreground color (OSC 10 ; ?)
-    QueryForegroundColor,
+    /// Query a dynamic colour (OSC 10 / 11 / 12 with `?`). The reply ends
+    /// with the terminator the query used.
+    QueryDynamicColor {
+        color: DynamicColor,
+        terminator: StringTerminator,
+    },
 
-    /// Query background color (OSC 11 ; ?)
-    QueryBackgroundColor,
+    /// Change a palette entry (OSC 4 ; index ; spec)
+    SetPaletteColor { index: u8, rgb: [u8; 3] },
 
-    /// Query cursor color (OSC 12 ; ?)
-    QueryCursorColor,
+    /// Query a palette entry (OSC 4 ; index ; ?)
+    QueryPaletteColor {
+        index: u8,
+        terminator: StringTerminator,
+    },
+
+    /// Reset one palette entry, or all of them for `None` (OSC 104)
+    ResetPaletteColor(Option<u8>),
 
     /// Request DEC private mode status (DECRQM - CSI ? Ps $ p)
     RequestPrivateMode(u16),
+
+    /// Request ANSI mode status (DECRQM - CSI Ps $ p)
+    RequestAnsiMode(u16),
+
+    /// Device status report, operating status (DSR - CSI 5 n)
+    DeviceStatusReport,
+
+    /// Extended cursor position report (DECXCPR - CSI ? 6 n)
+    ReportExtendedCursorPosition,
+
+    /// Report the terminal's name and version (XTVERSION - CSI > 0 q)
+    RequestTerminalVersion,
+
+    /// Window manipulation and reports (XTWINOPS - CSI Ps ; ... t)
+    WindowOp(WindowOp),
+
+    /// Request a setting (DECRQSS - DCS $ q Pt ST); holds `Pt`, such as
+    /// `m` for SGR or `r` for DECSTBM.
+    RequestStatusString(String),
+
+    /// Request terminfo capabilities (XTGETTCAP - DCS + q Pt ST); holds
+    /// `Pt`, hex-encoded names separated by `;`.
+    RequestTermcap(String),
 
     /// Full reset (RIS — ESC c)
     FullReset,
@@ -410,6 +443,70 @@ pub enum Mode {
     /// Allow 80 <-> 132 column switching (CSI ?40h/l). DECCOLM is ignored
     /// unless this is set, as in xterm.
     AllowColumnModeSwitch,
+    /// Save the cursor as DECSC does on set, restore it as DECRC does on
+    /// reset (CSI ?1048h/l)
+    SaveCursor,
+    /// Line feed/new line mode, the ANSI mode 20 (CSI 20h/l): LF, VT and FF
+    /// also return the carriage
+    LineFeedNewLine,
+}
+
+/// The colours OSC 10, 11 and 12 name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DynamicColor {
+    /// Default foreground (OSC 10)
+    Foreground,
+    /// Default background (OSC 11)
+    Background,
+    /// Cursor (OSC 12)
+    Cursor,
+}
+
+impl DynamicColor {
+    /// The OSC number that names this colour.
+    pub fn osc_code(self) -> u8 {
+        match self {
+            DynamicColor::Foreground => 10,
+            DynamicColor::Background => 11,
+            DynamicColor::Cursor => 12,
+        }
+    }
+}
+
+/// How a string sequence such as an OSC ended. xterm answers a query with
+/// the same terminator, and some applications only accept that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StringTerminator {
+    /// BEL (0x07)
+    Bel,
+    /// ST (`ESC \`)
+    St,
+}
+
+impl StringTerminator {
+    /// The terminator's bytes, as text.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StringTerminator::Bel => "\x07",
+            StringTerminator::St => "\x1b\\",
+        }
+    }
+}
+
+/// The XTWINOPS (`CSI Ps t`) operations Ultty acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowOp {
+    /// Report the text area size in pixels (`CSI 14 t`).
+    ReportTextAreaPixels,
+    /// Report the character cell size in pixels (`CSI 16 t`).
+    ReportCellPixels,
+    /// Report the text area size in characters (`CSI 18 t`).
+    ReportTextAreaChars,
+    /// Push the title on the title stack (`CSI 22 ; Ps t`); `Ps` is 0
+    /// (icon and window), 1 (icon) or 2 (window).
+    PushTitle(u16),
+    /// Pop the title from the title stack (`CSI 23 ; Ps t`).
+    PopTitle(u16),
 }
 
 /// Parser state machine states.

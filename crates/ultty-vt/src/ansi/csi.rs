@@ -1,7 +1,7 @@
 //! CSI (Control Sequence Introducer) sequence handling.
 
 use super::AnsiParser;
-use super::{Action, Mode, State};
+use super::{Action, Mode, State, WindowOp};
 
 /// Maximum number of CSI parameters kept per sequence.
 ///
@@ -194,8 +194,31 @@ impl AnsiParser {
                 self.params.first().copied().unwrap_or(0) as u8,
             )),
 
-            // Cursor position report
+            // Status reports (DSR, CPR, DECXCPR)
+            b'n' if p1 == 6 && self.is_private => callback(Action::ReportExtendedCursorPosition),
             b'n' if p1 == 6 => callback(Action::ReportCursorPosition),
+            b'n' if p1 == 5 && !self.is_private => callback(Action::DeviceStatusReport),
+
+            // XTVERSION - CSI > Ps q
+            b'q' if self.intermediate == Some(b'>') => {
+                callback(Action::RequestTerminalVersion);
+            }
+
+            // XTWINOPS - CSI Ps ; ... t
+            b't' if !self.is_private && self.intermediate.is_none() => {
+                let p2 = self.params.get(1).copied().unwrap_or(0);
+                let op = match self.params.first().copied().unwrap_or(0) {
+                    14 => Some(WindowOp::ReportTextAreaPixels),
+                    16 => Some(WindowOp::ReportCellPixels),
+                    18 => Some(WindowOp::ReportTextAreaChars),
+                    22 => Some(WindowOp::PushTitle(p2)),
+                    23 => Some(WindowOp::PopTitle(p2)),
+                    _ => None,
+                };
+                if let Some(op) = op {
+                    callback(Action::WindowOp(op));
+                }
+            }
 
             // Device attributes
             b'c' => {
@@ -230,15 +253,19 @@ impl AnsiParser {
             // ANSI SM/RM (non-private mode set/reset)
             b'h' if !self.is_private => {
                 for &param in &self.params {
-                    if param == 4 {
-                        callback(Action::SetInsertMode(true));
+                    match param {
+                        4 => callback(Action::SetInsertMode(true)),
+                        20 => callback(Action::SetMode(Mode::LineFeedNewLine)),
+                        _ => {}
                     }
                 }
             }
             b'l' if !self.is_private => {
                 for &param in &self.params {
-                    if param == 4 {
-                        callback(Action::SetInsertMode(false));
+                    match param {
+                        4 => callback(Action::SetInsertMode(false)),
+                        20 => callback(Action::ResetMode(Mode::LineFeedNewLine)),
+                        _ => {}
                     }
                 }
             }
@@ -246,6 +273,10 @@ impl AnsiParser {
             // DECRQM - Request DEC Private Mode (CSI ? Ps $ p)
             b'p' if self.is_private && self.intermediate == Some(b'$') => {
                 callback(Action::RequestPrivateMode(p1));
+            }
+            // DECRQM for ANSI modes (CSI Ps $ p)
+            b'p' if self.intermediate == Some(b'$') => {
+                callback(Action::RequestAnsiMode(p1));
             }
 
             // Soft reset (DECSTR — CSI ! p)
@@ -285,6 +316,7 @@ impl AnsiParser {
             1015 => Some(Action::SetMode(Mode::MouseUrxvt)),
             1007 => Some(Action::SetMode(Mode::AlternateScrollMode)),
             1047 => Some(Action::SetMode(Mode::AlternateScreenClear)),
+            1048 => Some(Action::SetMode(Mode::SaveCursor)),
             1049 => Some(Action::SetMode(Mode::AlternateScreenSaveCursor)),
             2004 => Some(Action::SetMode(Mode::BracketedPaste)),
             2026 => Some(Action::SetMode(Mode::SynchronizedUpdate)),
@@ -315,6 +347,7 @@ impl AnsiParser {
             1015 => Some(Action::ResetMode(Mode::MouseUrxvt)),
             1007 => Some(Action::ResetMode(Mode::AlternateScrollMode)),
             1047 => Some(Action::ResetMode(Mode::AlternateScreenClear)),
+            1048 => Some(Action::ResetMode(Mode::SaveCursor)),
             1049 => Some(Action::ResetMode(Mode::AlternateScreenSaveCursor)),
             2004 => Some(Action::ResetMode(Mode::BracketedPaste)),
             2026 => Some(Action::ResetMode(Mode::SynchronizedUpdate)),

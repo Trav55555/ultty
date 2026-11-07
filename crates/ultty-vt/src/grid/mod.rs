@@ -31,6 +31,7 @@ mod buffer;
 mod cell;
 mod history;
 mod image;
+mod palette;
 mod row;
 mod term_handler;
 mod terminal;
@@ -38,6 +39,7 @@ mod terminal;
 pub use buffer::Buffer;
 pub use cell::{Cell, CellFlags, Color};
 pub use image::{decode_sixel, ImageId, ImageStore, TerminalImage};
+pub use palette::{format_color_spec, Palette, Rgb, ThemeColors};
 pub use row::Row;
 pub use term_handler::TerminalHandler;
 pub use terminal::{
