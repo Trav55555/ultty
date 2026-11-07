@@ -18,7 +18,6 @@ use ultty::protocol::ProtocolServer;
 use ultty::renderer::Renderer;
 use ultty::tabs::TabBarState;
 use ultty::terminal_manager::{TabId, TerminalManager};
-use ultty::tmux::TmuxController;
 use ultty::url::UrlDetector;
 use ultty::vim::{CopyMode, Selection as VimSelection};
 use winit::application::ApplicationHandler;
@@ -153,8 +152,6 @@ pub struct App {
     cursor_blink_visible: bool,
     /// Last time cursor blink state changed
     last_cursor_blink: Instant,
-    /// Tmux integration controller
-    tmux: TmuxController,
     /// Auto-dump countdown (frames remaining until dump, 0 = disabled)
     auto_dump_frames: u32,
     /// Native protocol server for TUI apps
@@ -305,12 +302,6 @@ impl App {
         // Build shortcuts list before moving config
         let shortcuts_list = Self::build_shortcuts_list(&config.keybindings);
 
-        // Initialize tmux controller for passthrough support
-        let tmux = TmuxController::new();
-        if tmux.is_nested() && config.tmux.auto_detect {
-            tracing::info!("Running inside tmux, passthrough mode enabled");
-        }
-
         let mut app = Self {
             window,
             surface,
@@ -341,7 +332,6 @@ impl App {
             shortcuts_list,
             cursor_blink_visible: true,
             last_cursor_blink: Instant::now(),
-            tmux,
             // Check for auto-dump environment variable (number of frames to wait)
             auto_dump_frames: std::env::var("ULTTY_AUTO_DUMP")
                 .ok()
@@ -383,7 +373,7 @@ impl App {
 
         // The server fails closed without a token file, so a token we cannot
         // write means nobody can use the socket; say so loudly.
-        let token_path = ultty_protocol::control::auth_token_path();
+        let token_path = server.token_path().to_path_buf();
         match control::write_auth_token(&token_path) {
             Ok(_) => tracing::info!(
                 "Control server started at {:?} (auth token in {:?})",
@@ -675,7 +665,7 @@ impl App {
         self.sync_protocol_tabs();
         self.last_tab_title_refresh = Instant::now();
 
-        let total_width = self.window.inner_size().width as f32;
+        let total_width = self.renderer.surface_size().0 as f32;
         let active_tab_id = self
             .terminal_manager
             .active_tab()

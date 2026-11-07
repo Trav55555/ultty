@@ -631,7 +631,12 @@ impl App {
     ) -> Result<(), ultty_protocol::control::ControlResponse> {
         use ultty_protocol::control::ControlResponse;
 
-        let expected = match read_auth_token(&ultty_protocol::control::auth_token_path()) {
+        let expected = self
+            .control_server
+            .as_ref()
+            .ok_or_else(|| io::Error::other("control server not running"))
+            .and_then(|server| read_auth_token(server.token_path()));
+        let expected = match expected {
             Ok(expected) => expected,
             Err(e) => {
                 tracing::warn!("Control auth token unavailable: {}", e);

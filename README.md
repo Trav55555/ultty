@@ -285,6 +285,7 @@ examples/           Nine workspace example apps: hello-native, counter-app,
 
 - [Contributing](CONTRIBUTING.md) — Toolchain, checks, and pull request expectations
 - [Getting Started](docs/GETTING_STARTED.md) — Installation and first app
+- [Configuration](docs/configuration.md) — Clipboard, paste, and link-opening settings
 - [Architecture](docs/ARCHITECTURE.md) — System design and components
 - [Architecture Vocabulary](CONTEXT.md) — Stable terms for core seams
 - [Protocol Specification](docs/PROTOCOL_SPEC.md) — Native protocol details

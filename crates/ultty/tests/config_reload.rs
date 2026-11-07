@@ -129,7 +129,7 @@ scrollback_lines = 10000
 url_detection = true
 copy_on_select = false
 bell_visual = true
-bell_sound = false
+bell_urgent = true
 close_on_exit = true
 opacity = 1.0
 "##;

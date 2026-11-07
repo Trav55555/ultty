@@ -3,8 +3,8 @@
 use std::time::{Duration, Instant};
 
 use super::App;
+use ultty::config::{BehaviorConfig, ClipboardWrite};
 use ultty::event_loop::TerminalEvent;
-use ultty::tmux::TmuxController;
 
 impl App {
     pub(super) fn next_update_deadline(&self, now: Instant) -> Instant {
@@ -228,20 +228,24 @@ impl App {
                                 );
                             }
                             TerminalEvent::Bell => {
-                                if Some(terminal_id) == focused_id {
-                                    // Visual bell - flash border for 100ms
-                                    if self.config.behavior.bell_visual {
-                                        self.bell_active_until =
-                                            Some(Instant::now() + Duration::from_millis(100));
-                                        self.needs_redraw = true;
-                                    }
-                                    // Audio bell (if enabled)
-                                    if self.config.behavior.bell_sound {
-                                        // System bell - print BEL character to trigger terminal bell
-                                        print!("\x07");
-                                    }
-                                    tracing::debug!("Bell");
+                                let bell = bell_response(
+                                    &self.config.behavior,
+                                    Some(terminal_id) == focused_id,
+                                    self.window.has_focus(),
+                                );
+                                if bell.flash {
+                                    // Flash the border for 100ms
+                                    self.bell_active_until =
+                                        Some(Instant::now() + Duration::from_millis(100));
+                                    self.needs_redraw = true;
                                 }
+                                if bell.urgent {
+                                    // Cleared when the window gains focus.
+                                    self.window.request_user_attention(Some(
+                                        winit::window::UserAttentionType::Informational,
+                                    ));
+                                }
+                                tracing::debug!("Bell");
                             }
                             TerminalEvent::TitleChanged(title) => {
                                 tab_titles_changed = true;
@@ -251,27 +255,17 @@ impl App {
                                 }
                             }
                             TerminalEvent::SetClipboard { clipboard: _, data } => {
-                                // Set clipboard content (OSC 52)
-                                // Only handle from focused terminal for security
-                                if Some(terminal_id) == focused_id {
-                                    // If running inside tmux, use passthrough to reach outer terminal
-                                    if self.tmux.is_nested() && self.config.tmux.passthrough {
-                                        // Send OSC 52 wrapped in tmux passthrough
-                                        use base64::Engine;
-                                        let encoded =
-                                            base64::engine::general_purpose::STANDARD.encode(&data);
-                                        let osc52 = format!("\x1b]52;c;{}\x07", encoded);
-                                        let passthrough =
-                                            TmuxController::wrap_passthrough(osc52.as_bytes());
-                                        // Write to stdout to reach outer terminal
-                                        use std::io::Write;
-                                        let _ = std::io::stdout().write_all(&passthrough);
-                                        let _ = std::io::stdout().flush();
-                                        tracing::debug!(
-                                            "Set clipboard via OSC 52 passthrough: {} chars",
-                                            data.len()
-                                        );
-                                    } else if let Some(ref mut cb) = self.clipboard {
+                                // Set clipboard content (OSC 52), if the config allows
+                                // it, and only from the focused terminal
+                                if self.config.behavior.clipboard_write == ClipboardWrite::Deny {
+                                    tracing::debug!(
+                                        "Ignored OSC 52 clipboard write: behavior.clipboard_write = \"deny\""
+                                    );
+                                } else if Some(terminal_id) == focused_id {
+                                    // Ultty owns a window and talks to the system clipboard
+                                    // directly. It never forwards OSC 52 to its own stdout,
+                                    // even when it was started from inside tmux.
+                                    if let Some(ref mut cb) = self.clipboard {
                                         if let Err(e) = cb.set_text(&data) {
                                             tracing::warn!("Failed to set clipboard: {}", e);
                                         } else {
@@ -421,13 +415,75 @@ pub(super) fn pipeline_trace_enabled() -> bool {
     })
 }
 
+/// What a BEL from a pane does.
+#[derive(Debug, PartialEq, Eq)]
+struct BellResponse {
+    /// Flash the window border.
+    flash: bool,
+    /// Ask the window manager to mark the window as wanting attention.
+    urgent: bool,
+}
+
+/// The response to a BEL. Only the focused pane flashes; any pane marks an
+/// unfocused window as wanting attention.
+fn bell_response(
+    behavior: &BehaviorConfig,
+    from_focused_pane: bool,
+    window_focused: bool,
+) -> BellResponse {
+    BellResponse {
+        flash: behavior.bell_visual && from_focused_pane,
+        urgent: behavior.bell_urgent && !window_focused,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        catchup_poll_deadline, render_delay_for_sync_state, should_render, tab_title_refresh_due,
+        bell_response, catchup_poll_deadline, render_delay_for_sync_state, should_render,
+        tab_title_refresh_due, BellResponse,
     };
+    use ultty::config::BehaviorConfig;
+
+    #[test]
+    fn bell_flashes_only_the_focused_pane() {
+        let behavior = BehaviorConfig::default();
+        assert_eq!(
+            bell_response(&behavior, true, true),
+            BellResponse {
+                flash: true,
+                urgent: false
+            }
+        );
+        assert_eq!(
+            bell_response(&behavior, false, true),
+            BellResponse {
+                flash: false,
+                urgent: false
+            }
+        );
+    }
+
+    #[test]
+    fn bell_in_an_unfocused_window_asks_for_attention() {
+        let behavior = BehaviorConfig::default();
+        assert!(bell_response(&behavior, false, false).urgent);
+
+        let quiet = BehaviorConfig {
+            bell_visual: false,
+            bell_urgent: false,
+            ..BehaviorConfig::default()
+        };
+        assert_eq!(
+            bell_response(&quiet, true, false),
+            BellResponse {
+                flash: false,
+                urgent: false
+            }
+        );
+    }
 
     #[test]
     fn should_render_when_dirty_and_frame_interval_elapsed() {

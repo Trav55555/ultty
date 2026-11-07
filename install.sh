@@ -66,13 +66,31 @@ sha256() {
   fi
 }
 
+# $1 as one quoted Exec= argument, per the Desktop Entry spec: inside double
+# quotes, escape " ` $ and \ with a backslash; then double every backslash
+# (the string-value escape) and every % (field codes).
+desktop_exec_quote() {
+  escaped="$(printf '%s' "$1" | sed -e 's/[\\"`$]/\\&/g' -e 's/\\/\\\\/g' -e 's/%/%%/g')"
+  printf '"%s"' "$escaped"
+}
+
 install_desktop_entry() {
   extracted="$1"
   [ -f "$extracted/dist/ultty.desktop" ] || return 0
+  case "$INSTALL_DIR" in
+    *'
+'*)
+      say "not adding a desktop entry: $INSTALL_DIR contains a newline"
+      return 0
+      ;;
+  esac
   mkdir -p "$DATA_DIR/applications"
   # Launchers do not always have ~/.local/bin on PATH; point at the binary.
-  sed "s|^Exec=ultty|Exec=$INSTALL_DIR/ultty|" "$extracted/dist/ultty.desktop" \
-    >"$DATA_DIR/applications/ultty.desktop"
+  # The path goes through ENVIRON, so awk never interprets it.
+  ULTTY_EXEC="$(desktop_exec_quote "$INSTALL_DIR/ultty")" awk '
+    /^Exec=ultty/ { print "Exec=" ENVIRON["ULTTY_EXEC"] substr($0, 11); next }
+    { print }
+  ' "$extracted/dist/ultty.desktop" >"$DATA_DIR/applications/ultty.desktop"
   if [ -d "$extracted/dist/icons/hicolor" ]; then
     mkdir -p "$DATA_DIR/icons"
     cp -R "$extracted/dist/icons/hicolor" "$DATA_DIR/icons/"
@@ -80,6 +98,7 @@ install_desktop_entry() {
   if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$DATA_DIR/applications" >/dev/null 2>&1 || true
   fi
+  say "added Ultty to the application menu"
 }
 
 main() {
@@ -122,7 +141,6 @@ main() {
 
   if [ "$(uname -s)" = Linux ]; then
     install_desktop_entry "$tmp/x"
-    say "added Ultty to the application menu"
   fi
 
   case ":$PATH:" in

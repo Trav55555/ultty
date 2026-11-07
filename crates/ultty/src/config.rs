@@ -26,8 +26,6 @@ pub struct Config {
     pub behavior: BehaviorConfig,
     /// Launch profiles
     pub profiles: ProfilesConfig,
-    /// Tmux integration configuration
-    pub tmux: TmuxConfig,
 }
 
 impl Config {
@@ -774,8 +772,17 @@ pub struct BehaviorConfig {
     pub copy_on_select: bool,
     /// Enable visual bell (border flash)
     pub bell_visual: bool,
-    /// Enable audio bell (system sound) - off by default
-    pub bell_sound: bool,
+    /// Mark the window as wanting attention (the taskbar urgency hint) when
+    /// a pane rings the bell while the window is unfocused. Ultty has no
+    /// audible bell.
+    pub bell_urgent: bool,
+    /// Whether programs may set the clipboard with OSC 52.
+    ///
+    /// `"allow"` (the default) lets the focused pane write the clipboard;
+    /// `"deny"` ignores every OSC 52 write. Any program whose output reaches
+    /// the pane can write, including a `cat`ed file or a remote host over ssh.
+    /// OSC 52 clipboard reads are always refused.
+    pub clipboard_write: ClipboardWrite,
     /// Close window when shell exits
     pub close_on_exit: bool,
     /// Window opacity (0.0-1.0, 1.0 = fully opaque)
@@ -791,7 +798,8 @@ impl Default for BehaviorConfig {
             url_detection: true,
             copy_on_select: true,
             bell_visual: true,
-            bell_sound: false, // Sound off by default
+            bell_urgent: true,
+            clipboard_write: ClipboardWrite::Allow,
             close_on_exit: true,
             opacity: 1.0,
             restore_session: false, // Disabled by default
@@ -799,27 +807,15 @@ impl Default for BehaviorConfig {
     }
 }
 
-/// Tmux integration configuration.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct TmuxConfig {
-    /// Enable tmux passthrough for escape sequences when running inside tmux.
-    /// This allows OSC 52 clipboard, sixel graphics, etc. to reach the outer terminal.
-    pub passthrough: bool,
-    /// Automatically detect when running inside tmux and adjust behavior.
-    pub auto_detect: bool,
-    /// Session name for control mode (if launching tmux).
-    pub session_name: Option<String>,
-}
-
-impl Default for TmuxConfig {
-    fn default() -> Self {
-        Self {
-            passthrough: true,
-            auto_detect: true,
-            session_name: None,
-        }
-    }
+/// Policy for clipboard writes requested by programs (OSC 52).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipboardWrite {
+    /// The focused pane may set the clipboard.
+    #[default]
+    Allow,
+    /// OSC 52 writes are ignored.
+    Deny,
 }
 
 /// Launch profiles configuration.
@@ -1085,14 +1081,6 @@ copy = "ctrl+c"
     }
 
     #[test]
-    fn tmux_config_defaults() {
-        let config = TmuxConfig::default();
-        assert!(config.passthrough);
-        assert!(config.auto_detect);
-        assert!(config.session_name.is_none());
-    }
-
-    #[test]
     fn font_size_is_clamped_to_sane_range() {
         assert_eq!(clamp_font_size(0.0), MIN_FONT_SIZE);
         assert_eq!(clamp_font_size(-3.0), MIN_FONT_SIZE);
@@ -1120,18 +1108,23 @@ copy = "ctrl+c"
     }
 
     #[test]
-    fn parse_tmux_config() {
-        let toml_str = r##"
-[tmux]
-passthrough = false
-auto_detect = true
-session_name = "dev"
-"##;
+    fn clipboard_write_defaults_to_allow_and_parses_deny() {
+        assert_eq!(
+            Config::default().behavior.clipboard_write,
+            ClipboardWrite::Allow
+        );
 
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(!config.tmux.passthrough);
-        assert!(config.tmux.auto_detect);
-        assert_eq!(config.tmux.session_name, Some("dev".to_string()));
+        let config: Config = toml::from_str("[behavior]\nclipboard_write = \"deny\"\n").unwrap();
+        assert_eq!(config.behavior.clipboard_write, ClipboardWrite::Deny);
+
+        assert!(toml::from_str::<Config>("[behavior]\nclipboard_write = \"maybe\"\n").is_err());
+    }
+
+    #[test]
+    fn config_with_retired_tmux_table_still_loads() {
+        let config: Config =
+            toml::from_str("[tmux]\npassthrough = true\n[font]\nfamily = \"Fira Code\"\n").unwrap();
+        assert_eq!(config.font.family, "Fira Code");
     }
 
     #[test]

@@ -340,6 +340,25 @@ pub fn grid_dimensions_for(
     (axis(width_px, cell_width), axis(height_px, cell_height))
 }
 
+/// The surface size for a `width` x `height` window, with each axis clamped
+/// to the device's largest 2D texture. wgpu treats a larger surface as a
+/// fatal error, so a window spanning several monitors (or an oversized
+/// `resize` request) must never reach `Surface::configure` unclamped.
+pub fn clamp_surface_size(width: u32, height: u32, max_texture_dimension: u32) -> (u32, u32) {
+    let clamped = (
+        width.min(max_texture_dimension),
+        height.min(max_texture_dimension),
+    );
+    if clamped != (width, height) {
+        tracing::warn!(
+            "Window {width}x{height} exceeds the GPU texture limit {max_texture_dimension}; drawing {}x{}",
+            clamped.0,
+            clamped.1
+        );
+    }
+    clamped
+}
+
 impl Renderer {
     /// Create a new renderer with configuration.
     pub async fn with_config(
@@ -367,10 +386,17 @@ impl Renderer {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("ultty_device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                // Allow windows as large as the adapter can draw, not just
+                // the 8192 px default.
+                required_limits: wgpu::Limits {
+                    max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d,
+                    ..wgpu::Limits::default()
+                },
                 ..Default::default()
             })
             .await?;
+        let (width, height) =
+            clamp_surface_size(width, height, device.limits().max_texture_dimension_2d);
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
@@ -780,6 +806,13 @@ impl Renderer {
         )
     }
 
+    /// The surface size in physical pixels: the window size clamped to the
+    /// GPU texture limit. Layout and drawing use this, never the raw window
+    /// size.
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
     /// The pixel area below the bar that terminal panes share.
     pub fn terminal_area(&self) -> (f32, f32) {
         (
@@ -804,6 +837,8 @@ impl Renderer {
             return;
         }
 
+        let (width, height) =
+            clamp_surface_size(width, height, self.device.limits().max_texture_dimension_2d);
         self.config.width = width;
         self.config.height = height;
         surface.configure(&self.device, &self.config);
@@ -1895,6 +1930,18 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn surface_size_is_clamped_to_the_texture_limit() {
+        assert_eq!(super::clamp_surface_size(800, 600, 8192), (800, 600));
+        assert_eq!(super::clamp_surface_size(8192, 8192, 8192), (8192, 8192));
+        assert_eq!(super::clamp_surface_size(17000, 600, 8192), (8192, 600));
+        assert_eq!(super::clamp_surface_size(600, 17000, 8192), (600, 8192));
+        assert_eq!(
+            super::clamp_surface_size(u32::MAX, u32::MAX, 16384),
+            (16384, 16384)
+        );
+    }
+
     #[test]
     fn grid_dimensions_are_clamped_to_sane_range() {
         assert_eq!(

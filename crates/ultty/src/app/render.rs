@@ -170,7 +170,7 @@ impl App {
         // would deadlock.
         let locked = lock_active_panes(
             &self.terminal_manager,
-            self.window.inner_size(),
+            self.renderer.surface_size().into(),
             self.tab_bar.content_top(),
         );
         if locked.is_empty() {

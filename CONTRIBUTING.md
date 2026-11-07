@@ -107,12 +107,16 @@ that do not qualify fall back to ANSI rendering through ratatui.
 
 **Control socket.** `ulttyctl` connects here to drive a running instance:
 `ping`, `info`, sending input, capturing screenshots, waiting for output. It
-lives at `$XDG_RUNTIME_DIR/ultty-ctl.sock`, falling back to `/tmp` when
-`XDG_RUNTIME_DIR` is unset. This is the socket the smoke gates use.
+Every Ultty process (each window) listens on its own socket,
+`$XDG_RUNTIME_DIR/ultty-ctl-<pid>.sock` with mode 0600. Without
+`XDG_RUNTIME_DIR` it uses a private `ultty-<uid>` directory (mode 0700, owned
+by the user, checked at start) under `$TMPDIR` or `/tmp`. `ulttyctl` talks to
+the most recently started instance that is still running. This is the socket
+the smoke gates use.
 
 Both sockets accept connections only from peers running as the same uid, and the
 control socket additionally requires a token. Ultty writes the token to
-`$XDG_RUNTIME_DIR/ultty-auth.token` with owner-only permissions; a client sends
+`ultty-auth-<pid>.token` next to its socket with owner-only permissions; a client sends
 it with `ulttyctl auth <token>` before any other command. Treat that as the
 intended behavior when you touch either socket path: the same-uid check and the
 token requirement are being landed now, so read the code in

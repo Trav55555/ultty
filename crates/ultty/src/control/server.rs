@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -10,9 +11,10 @@ use polling::{Event, Events, Poller};
 use tracing::{debug, error, info, warn};
 
 use ultty_protocol::control::{
-    control_socket_path, ControlData, ControlEnvelope, ControlRequest, ControlResponse,
-    OutputFormat,
+    ControlData, ControlEnvelope, ControlRequest, ControlResponse, OutputFormat,
 };
+
+use super::paths::{control_dir, ControlEndpoint};
 
 const LISTENER_KEY: usize = 0;
 const CLIENT_KEY_BASE: usize = 100;
@@ -20,6 +22,7 @@ const CLIENT_KEY_BASE: usize = 100;
 pub struct ControlServer {
     listener: UnixListener,
     socket_path: PathBuf,
+    token_path: PathBuf,
     poller: Poller,
     clients: HashMap<usize, ClientState>,
     next_key: usize,
@@ -45,20 +48,28 @@ struct ParsedControlRequest {
 }
 
 impl ControlServer {
+    /// Listen on this process's own socket in the private control
+    /// directory (see [`super::paths`]).
     pub fn new() -> io::Result<Self> {
-        Self::new_at(control_socket_path())
+        Self::new_at(ControlEndpoint::for_pid(
+            &control_dir()?,
+            std::process::id(),
+        ))
     }
 
-    fn new_at(socket_path: PathBuf) -> io::Result<Self> {
+    fn new_at(endpoint: ControlEndpoint) -> io::Result<Self> {
+        let ControlEndpoint {
+            socket: socket_path,
+            token: token_path,
+        } = endpoint;
         if socket_path.exists() {
             remove_stale_socket(&socket_path)?;
         }
 
-        if let Some(parent) = socket_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
         let listener = UnixListener::bind(&socket_path)?;
+        // Owner-only, like the native protocol sockets; the directory is
+        // private as well.
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
 
         let poller = Poller::new()?;
@@ -74,6 +85,7 @@ impl ControlServer {
         Ok(Self {
             listener,
             socket_path,
+            token_path,
             poller,
             clients: HashMap::new(),
             next_key: CLIENT_KEY_BASE,
@@ -83,6 +95,12 @@ impl ControlServer {
 
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// Where this server's auth token lives. The app writes it at start;
+    /// the server removes it on shutdown.
+    pub fn token_path(&self) -> &Path {
+        &self.token_path
     }
 
     /// File descriptors that should wake the UI loop when readable.
@@ -248,6 +266,7 @@ impl ControlServer {
 impl Drop for ControlServer {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.socket_path);
+        let _ = fs::remove_file(&self.token_path);
         info!("Control server shut down");
     }
 }
@@ -612,8 +631,45 @@ mod tests {
         ))
     }
 
+    fn test_endpoint(name: &str) -> ControlEndpoint {
+        let socket = test_socket_path(name);
+        ControlEndpoint {
+            token: socket.with_extension("token"),
+            socket,
+        }
+    }
+
     fn test_server(name: &str) -> ControlServer {
-        ControlServer::new_at(test_socket_path(name)).unwrap()
+        ControlServer::new_at(test_endpoint(name)).unwrap()
+    }
+
+    #[test]
+    fn socket_is_owner_only() {
+        let server = test_server("mode");
+        let mode = fs::metadata(server.socket_path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn two_instances_listen_side_by_side_and_clean_up_only_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = ControlServer::new_at(ControlEndpoint::for_pid(dir.path(), 1)).unwrap();
+        let second = ControlServer::new_at(ControlEndpoint::for_pid(dir.path(), 2)).unwrap();
+        fs::write(first.token_path(), "a").unwrap();
+        fs::write(second.token_path(), "b").unwrap();
+
+        let (second_socket, second_token) = (
+            second.socket_path().to_path_buf(),
+            second.token_path().to_path_buf(),
+        );
+        drop(second);
+        assert!(!second_socket.exists() && !second_token.exists());
+
+        assert!(UnixStream::connect(first.socket_path()).is_ok());
+        assert!(first.token_path().exists());
     }
 
     #[test]
