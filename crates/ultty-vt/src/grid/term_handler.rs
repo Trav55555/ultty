@@ -856,10 +856,15 @@ impl<'a> TerminalHandler<'a> {
         let start_col = cursor.position.col;
         let start_row = cursor.position.row;
 
-        // Calculate cell dimensions using typical terminal font metrics.
-        // 8x16 is standard for most monospace fonts at common sizes.
-        let cell_pixel_width = 8u32;
-        let cell_pixel_height = 16u32;
+        // Size the image in cells with the cell size the embedder reported,
+        // the one XTWINOPS 16 tells applications, so an image drawn for it
+        // covers exactly the cells it was made for. Without one, assume a
+        // common 8x16 cell.
+        let (cell_pixel_width, cell_pixel_height) = self
+            .terminal
+            .cell_pixel_size()
+            .filter(|&(w, h)| w > 0 && h > 0)
+            .map_or((8, 16), |(w, h)| (u32::from(w), u32::from(h)));
 
         let cell_width = width.div_ceil(cell_pixel_width).min(u16::MAX as u32) as u16;
         let cell_height = height.div_ceil(cell_pixel_height).min(u16::MAX as u32) as u16;

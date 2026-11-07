@@ -32,7 +32,9 @@ fn csi() -> impl Strategy<Value = Vec<u8>> {
 }
 
 fn dec_mode() -> impl Strategy<Value = Vec<u8>> {
-    let modes = prop::sample::select(vec![1u16, 3, 5, 6, 7, 25, 47, 1047, 1049, 2004, 2026, 2027]);
+    let modes = prop::sample::select(vec![
+        1u16, 3, 5, 6, 7, 25, 40, 47, 1005, 1047, 1048, 1049, 2004, 2026, 2027,
+    ]);
     (modes, any::<bool>())
         .prop_map(|(m, on)| format!("\x1b[?{m}{}", if on { 'h' } else { 'l' }).into_bytes())
 }

@@ -636,6 +636,29 @@ fn utf8_mouse_encodes_large_coordinates_as_utf8() {
 }
 
 // ---------------------------------------------------------------------------
+// Sixel placement
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sixel_images_span_cells_of_the_reported_size() {
+    // An 18 x 36 pixel image: six bands of 18 columns.
+    let band = "!18~";
+    let sixel = format!("\x1bPq#0;2;100;0;0#0{}\x1b\\", vec![band; 6].join("-"));
+    let spans = |cell: Option<(u16, u16)>| {
+        let mut term = run(20, 10, b"");
+        if let Some((w, h)) = cell {
+            term.set_cell_pixel_size(w, h);
+        }
+        feed(&mut term, sixel.as_bytes());
+        let image = term.images().images().next().expect("image placed");
+        assert_eq!((image.width, image.height), (18, 36));
+        (image.cell_width, image.cell_height)
+    };
+    assert_eq!(spans(Some((9, 18))), (2, 2));
+    assert_eq!(spans(None), (3, 3), "8x16 fallback");
+}
+
+// ---------------------------------------------------------------------------
 // Colour queries and the palette (OSC 4, 10, 11, 12, 104)
 // ---------------------------------------------------------------------------
 
