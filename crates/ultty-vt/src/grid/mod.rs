@@ -288,6 +288,17 @@ impl Grid {
         &mut self.cursor
     }
 
+    /// Put the saved cursor back to its power-on state (DECSTR): home,
+    /// default attributes, autowrap on, origin mode off.
+    pub fn reset_saved_cursor(&mut self) {
+        self.cursor.saved = Some(SavedCursorState {
+            position: CursorPosition::origin(),
+            attrs: Cell::default(),
+            auto_wrap: true,
+            origin_mode: false,
+        });
+    }
+
     /// Save cursor state (DECSC): position, text attributes, auto-wrap, and origin mode.
     pub fn save_cursor(&mut self, origin_mode: bool) {
         self.cursor.saved = Some(SavedCursorState {
@@ -632,9 +643,13 @@ impl Grid {
             return;
         }
 
-        // Check if wide char would wrap (needs 2 columns but only 1 left)
+        // A wide char with too few columns left wraps first, respecting the
+        // scroll region. Without autowrap it has nowhere to go and is
+        // dropped, as xterm does, rather than split or moved to a new row.
         if width > 1 && col + width > self.dims.cols {
-            // Wrap to next line before writing, respecting scroll region
+            if !self.auto_wrap {
+                return;
+            }
             self.wrap_pending_cursor();
         }
 
@@ -1001,9 +1016,10 @@ impl Grid {
             .min(self.dims.rows.saturating_sub(1));
 
         if top >= bottom {
-            // Invalid region, reset to full screen
-            self.scroll_region = None;
-        } else if top == 0 && bottom >= self.dims.rows.saturating_sub(1) {
+            // xterm ignores a region of less than two lines, cursor and all.
+            return;
+        }
+        if top == 0 && bottom >= self.dims.rows.saturating_sub(1) {
             // Full screen, no need to track
             self.scroll_region = None;
         } else {
@@ -1013,6 +1029,11 @@ impl Grid {
         // DECSTBM homes cursor to absolute (0,0)
         self.cursor.position.row = 0;
         self.cursor.position.col = 0;
+    }
+
+    /// Drop the scroll region without moving the cursor (DECSTR, RIS).
+    pub fn reset_scroll_region(&mut self) {
+        self.scroll_region = None;
     }
 
     /// Get the current scroll region.

@@ -407,6 +407,9 @@ pub enum Mode {
     /// Grapheme cluster processing (CSI ?2027h/l) - multi-codepoint
     /// graphemes occupy one cell with their Unicode width
     GraphemeClustering,
+    /// Allow 80 <-> 132 column switching (CSI ?40h/l). DECCOLM is ignored
+    /// unless this is set, as in xterm.
+    AllowColumnModeSwitch,
 }
 
 /// Parser state machine states.

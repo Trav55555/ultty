@@ -561,13 +561,7 @@ impl Buffer {
         };
 
         if will_scroll {
-            // Save the row that will be displaced by the scroll.
-            // Only save to history when scrolling the full screen (no scroll region),
-            // since scroll regions are used by apps on the alternate screen which
-            // has no meaningful scrollback.
-            if self.grid.scroll_region().is_none() {
-                self.save_top_rows(1);
-            }
+            self.save_scrolled_rows(1);
         }
 
         self.grid.write_char(c);
@@ -589,11 +583,10 @@ impl Buffer {
         self.scroll_offset = 0;
         let mut remaining = bytes;
         while !remaining.is_empty() {
-            if self.grid.cursor().wrap_pending && self.grid.scroll_region().is_none() {
-                let scroll_bottom = self.grid.dimensions().rows.saturating_sub(1);
-                if self.grid.cursor().position.row >= scroll_bottom {
-                    self.save_top_rows(1);
-                }
+            if self.grid.cursor().wrap_pending
+                && self.grid.cursor().position.row == self.grid.effective_scroll_region().bottom
+            {
+                self.save_scrolled_rows(1);
             }
 
             let cols = self.grid.dimensions().cols;
@@ -612,18 +605,23 @@ impl Buffer {
         }
     }
 
-    /// Scroll grid up, moving top line to history.
-    pub fn scroll_grid_up(&mut self, n: u16) {
-        let n_usize = n as usize;
-
-        if self.grid.scroll_region().is_none() {
-            // Full-screen scroll — save top rows to history
-            self.save_top_rows(n_usize);
+    /// Before the scroll region scrolls up `n` lines, keep the lines that
+    /// leave it. As in xterm, lines are saved whenever the region's top
+    /// margin is the top of the screen, so a tool that keeps a status line
+    /// below its output (apt, progress bars) still fills the scrollback.
+    /// Lines leaving a region that starts lower are discarded.
+    fn save_scrolled_rows(&mut self, n: usize) {
+        let region = self.grid.effective_scroll_region();
+        if region.top == 0 {
+            let height = usize::from(region.bottom - region.top) + 1;
+            self.save_top_rows(n.min(height));
         }
-        // With a scroll region, rows displaced from region.top are discarded
-        // (scroll regions are used by apps on the alternate screen which has
-        // no meaningful scrollback).
+    }
 
+    /// Scroll the scroll region up, keeping lines that leave the top of the
+    /// screen in history.
+    pub fn scroll_grid_up(&mut self, n: u16) {
+        self.save_scrolled_rows(n as usize);
         self.grid.scroll_up(n);
     }
 
@@ -634,13 +632,7 @@ impl Buffer {
         let scroll_bottom = self.grid.effective_scroll_region().bottom;
 
         if cursor_row == scroll_bottom {
-            if self.grid.scroll_region().is_none() {
-                // Full-screen scroll — save top row to history
-                self.scroll_grid_up(1);
-            } else {
-                // Scroll within region — no history capture
-                self.grid.newline();
-            }
+            self.scroll_grid_up(1);
         } else {
             self.grid.newline();
         }

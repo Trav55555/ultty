@@ -250,6 +250,10 @@ impl AnsiParser {
 
             // Soft reset (DECSTR — CSI ! p)
             b'p' if self.intermediate == Some(b'!') => {
+                // Like RIS, a soft reset designates ASCII into G0/G1 again.
+                self.g0_charset_graphics = false;
+                self.g1_charset_graphics = false;
+                self.using_g1 = false;
                 callback(Action::SoftReset);
             }
 
@@ -264,6 +268,7 @@ impl AnsiParser {
         match param {
             1 => Some(Action::SetMode(Mode::ApplicationCursorKeys)),
             3 => Some(Action::SetMode(Mode::ColumnMode132)),
+            40 => Some(Action::SetMode(Mode::AllowColumnModeSwitch)),
             5 => Some(Action::SetMode(Mode::ReverseVideo)),
             6 => Some(Action::SetMode(Mode::OriginMode)),
             7 => Some(Action::SetMode(Mode::AutoWrap)),
@@ -293,6 +298,7 @@ impl AnsiParser {
         match param {
             1 => Some(Action::ResetMode(Mode::ApplicationCursorKeys)),
             3 => Some(Action::ResetMode(Mode::ColumnMode132)),
+            40 => Some(Action::ResetMode(Mode::AllowColumnModeSwitch)),
             5 => Some(Action::ResetMode(Mode::ReverseVideo)),
             6 => Some(Action::ResetMode(Mode::OriginMode)),
             7 => Some(Action::ResetMode(Mode::AutoWrap)),

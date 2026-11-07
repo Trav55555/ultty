@@ -71,6 +71,12 @@ pub struct TerminalModes {
     pub alternate_scroll: bool,
     /// Synchronized update mode - batches screen updates for flicker-free rendering
     pub synchronized_update: bool,
+    /// DECCOLM may switch between 80 and 132 columns (mode 40). Off by
+    /// default, so `reset` and `tput init` (which send `CSI ?3 l`) leave
+    /// the window alone, as in xterm.
+    pub allow_column_mode_switch: bool,
+    /// 132-column mode (DECCOLM, mode 3) was last set.
+    pub column_mode_132: bool,
 }
 
 impl Default for TerminalModes {
@@ -90,6 +96,8 @@ impl Default for TerminalModes {
             // Enable by default so mouse wheel works in less, vim, etc.
             alternate_scroll: true,
             synchronized_update: false,
+            allow_column_mode_switch: false,
+            column_mode_132: false,
         }
     }
 }

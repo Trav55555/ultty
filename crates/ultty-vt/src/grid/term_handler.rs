@@ -106,10 +106,8 @@ impl<'a> TerminalHandler<'a> {
                 0 => self.terminal.grid_mut().erase_below(),
                 1 => self.terminal.grid_mut().erase_above(),
                 2 => self.terminal.grid_mut().clear(),
-                3 => {
-                    self.terminal.grid_mut().clear();
-                    self.terminal.buffer_mut().clear_history();
-                }
+                // ED 3 clears saved lines only (xterm).
+                3 => self.terminal.buffer_mut().clear_history(),
                 _ => {}
             },
             Action::EraseInLine(mode) => match mode {
@@ -500,7 +498,7 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.set_grapheme_clustering(true);
                 self.terminal.grid_mut().clear();
                 self.terminal.grid_mut().reset_attrs();
-                self.terminal.grid_mut().set_scroll_region(0, 0);
+                self.terminal.grid_mut().reset_scroll_region();
                 self.terminal.grid_mut().set_auto_wrap(true);
                 self.terminal.grid_mut().set_insert_mode(false);
                 self.terminal.grid_mut().cursor_mut().position =
@@ -515,23 +513,31 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.reset_auxiliary_state();
             }
 
-            // Soft reset (DECSTR — CSI ! p)
+            // Soft reset (DECSTR — CSI ! p). Per DEC and xterm it leaves the
+            // cursor and the screen where they are and resets: SGR, margins,
+            // DECTCEM, IRM, DECOM, DECAWM (on, xterm's default), DECCKM,
+            // DECKPAM and the saved cursor. The parser resets charsets.
             Action::SoftReset => {
-                self.terminal.grid_mut().reset_attrs();
-                self.terminal.grid_mut().set_scroll_region(0, 0);
-                self.terminal.grid_mut().set_auto_wrap(true);
-                self.terminal.grid_mut().set_insert_mode(false);
-                self.terminal.grid_mut().cursor_mut().visible = true;
-                self.terminal.grid_mut().cursor_mut().wrap_pending = false;
-                self.terminal.modes_mut().origin_mode = false;
-                self.terminal.modes_mut().insert_mode = false;
-                self.terminal.modes_mut().auto_wrap = true;
+                let grid = self.terminal.grid_mut();
+                grid.reset_attrs();
+                grid.reset_scroll_region();
+                grid.set_auto_wrap(true);
+                grid.set_insert_mode(false);
+                grid.reset_saved_cursor();
+                grid.cursor_mut().visible = true;
+                grid.cursor_mut().wrap_pending = false;
+                let modes = self.terminal.modes_mut();
+                modes.origin_mode = false;
+                modes.insert_mode = false;
+                modes.auto_wrap = true;
+                modes.application_cursor_keys = false;
+                modes.application_keypad = false;
             }
 
             // Screen alignment pattern (DECALN — ESC # 8)
             Action::ScreenAlignmentPattern => {
                 self.terminal.grid_mut().fill_with_char('E');
-                self.terminal.grid_mut().set_scroll_region(0, 0);
+                self.terminal.grid_mut().reset_scroll_region();
                 self.terminal.grid_mut().cursor_mut().position =
                     crate::grid::CursorPosition::origin();
                 self.terminal.grid_mut().cursor_mut().wrap_pending = false;
@@ -661,7 +667,17 @@ impl<'a> TerminalHandler<'a> {
                 }
             }
             Mode::OriginMode => {
+                // Setting or resetting DECOM homes the cursor to the new
+                // origin: the region's top-left, or the screen's.
                 self.terminal.modes_mut().origin_mode = enabled;
+                let top = if enabled {
+                    self.terminal.grid().effective_scroll_region().top
+                } else {
+                    0
+                };
+                let cursor = self.terminal.grid_mut().cursor_mut();
+                cursor.position = crate::grid::CursorPosition::new(0, top);
+                cursor.wrap_pending = false;
             }
             Mode::AutoWrap => {
                 self.terminal.modes_mut().auto_wrap = enabled;
@@ -673,8 +689,17 @@ impl<'a> TerminalHandler<'a> {
             Mode::CursorBlink => {
                 self.terminal.grid_mut().cursor_mut().blinking = enabled;
             }
+            Mode::AllowColumnModeSwitch => {
+                self.terminal.modes_mut().allow_column_mode_switch = enabled;
+            }
             Mode::ColumnMode132 => {
-                // 132 column mode (DECCOLM) - request resize from app
+                // xterm ignores DECCOLM unless mode 40 allows it. Without the
+                // gate, `reset` would shrink every window to 80 columns.
+                if !self.terminal.modes().allow_column_mode_switch {
+                    return;
+                }
+                self.terminal.modes_mut().column_mode_132 = enabled;
+                // Request the resize from the app.
                 let columns = if enabled { 132 } else { 80 };
                 self.terminal.request_column_resize(columns);
                 // Clear the screen when switching column modes (per DECCOLM spec)
