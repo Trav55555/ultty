@@ -5,6 +5,12 @@ use super::{Action, Attribute, Color, NamedColor};
 
 impl AnsiParser {
     /// Dispatch SGR (Select Graphic Rendition) sequence.
+    ///
+    /// Parameters come in groups: a parameter and the `:` sub-parameters
+    /// after it (`4:3`, `38:2::255:0:0`). The semicolon forms of the
+    /// extended colors (`38;5;n`, `38;2;r;g;b`) span several groups instead.
+    /// Groups we do not understand are skipped whole, so a sub-parameter is
+    /// never mistaken for an attribute of its own.
     pub(super) fn dispatch_sgr<F>(&self, callback: &mut F)
     where
         F: FnMut(Action),
@@ -14,109 +20,126 @@ impl AnsiParser {
             return;
         }
 
+        let params = &self.params[..];
         let mut i = 0;
-        while i < self.params.len() {
-            let p = self.params[i];
-            match p {
-                0 => callback(Action::ResetAttributes),
-                1 => callback(Action::SetAttribute(Attribute::Bold)),
-                2 => callback(Action::SetAttribute(Attribute::Dim)),
-                3 => callback(Action::SetAttribute(Attribute::Italic)),
-                4 => callback(Action::SetAttribute(Attribute::Underline)),
-                5 => callback(Action::SetAttribute(Attribute::Blink)),
-                7 => callback(Action::SetAttribute(Attribute::Reverse)),
-                8 => callback(Action::SetAttribute(Attribute::Hidden)),
-                9 => callback(Action::SetAttribute(Attribute::Strikethrough)),
-                21 => callback(Action::SetAttribute(Attribute::DoubleUnderline)),
-                22 => callback(Action::SetAttribute(Attribute::NoBold)),
-                23 => callback(Action::SetAttribute(Attribute::NoItalic)),
-                24 => callback(Action::SetAttribute(Attribute::NoUnderline)),
-                25 => callback(Action::SetAttribute(Attribute::NoBlink)),
-                27 => callback(Action::SetAttribute(Attribute::NoReverse)),
-                28 => callback(Action::SetAttribute(Attribute::NoHidden)),
-                29 => callback(Action::SetAttribute(Attribute::NoStrikethrough)),
-                53 => callback(Action::SetAttribute(Attribute::Overline)),
-                55 => callback(Action::SetAttribute(Attribute::NoOverline)),
+        while i < params.len() {
+            let mut end = i + 1;
+            while end < params.len() && self.subparams & (1 << end) != 0 {
+                end += 1;
+            }
+            if end - i > 1 {
+                if let Some(attr) = Self::sgr_with_subparams(&params[i..end]) {
+                    callback(Action::SetAttribute(attr));
+                }
+                i = end;
+                continue;
+            }
 
-                // Foreground colors
-                30..=37 => {
-                    let color = Self::named_color_from_index((p - 30) as u8);
-                    callback(Action::SetAttribute(Attribute::ForegroundColor(
-                        Color::Named(color),
-                    )));
+            let p = params[i];
+            let attr = match p {
+                0 => {
+                    callback(Action::ResetAttributes);
+                    None
                 }
-                38 => {
-                    // Extended foreground color
-                    if i + 2 < self.params.len() && self.params[i + 1] == 5 {
-                        // 256-color: ESC[38;5;Nm
-                        let idx = self.params[i + 2] as u8;
-                        callback(Action::SetAttribute(Attribute::ForegroundColor(
-                            Color::Indexed(idx),
-                        )));
-                        i += 2;
-                    } else if i + 4 < self.params.len() && self.params[i + 1] == 2 {
-                        // True color: ESC[38;2;R;G;Bm
-                        let r = self.params[i + 2] as u8;
-                        let g = self.params[i + 3] as u8;
-                        let b = self.params[i + 4] as u8;
-                        callback(Action::SetAttribute(Attribute::ForegroundColor(
-                            Color::Rgb { r, g, b },
-                        )));
-                        i += 4;
-                    }
-                }
-                39 => callback(Action::SetAttribute(Attribute::ForegroundColor(
-                    Color::Default,
+                1 => Some(Attribute::Bold),
+                2 => Some(Attribute::Dim),
+                3 => Some(Attribute::Italic),
+                4 => Some(Attribute::Underline),
+                5 => Some(Attribute::Blink),
+                7 => Some(Attribute::Reverse),
+                8 => Some(Attribute::Hidden),
+                9 => Some(Attribute::Strikethrough),
+                21 => Some(Attribute::DoubleUnderline),
+                22 => Some(Attribute::NoBold),
+                23 => Some(Attribute::NoItalic),
+                24 => Some(Attribute::NoUnderline),
+                25 => Some(Attribute::NoBlink),
+                27 => Some(Attribute::NoReverse),
+                28 => Some(Attribute::NoHidden),
+                29 => Some(Attribute::NoStrikethrough),
+                53 => Some(Attribute::Overline),
+                55 => Some(Attribute::NoOverline),
+
+                30..=37 => Some(Attribute::ForegroundColor(Color::Named(
+                    Self::named_color_from_index((p - 30) as u8),
+                ))),
+                39 => Some(Attribute::ForegroundColor(Color::Default)),
+                40..=47 => Some(Attribute::BackgroundColor(Color::Named(
+                    Self::named_color_from_index((p - 40) as u8),
+                ))),
+                49 => Some(Attribute::BackgroundColor(Color::Default)),
+                59 => Some(Attribute::UnderlineColor(Color::Default)),
+                90..=97 => Some(Attribute::ForegroundColor(Color::Named(
+                    Self::bright_color_from_index((p - 90) as u8),
+                ))),
+                100..=107 => Some(Attribute::BackgroundColor(Color::Named(
+                    Self::bright_color_from_index((p - 100) as u8),
                 ))),
 
-                // Background colors
-                40..=47 => {
-                    let color = Self::named_color_from_index((p - 40) as u8);
-                    callback(Action::SetAttribute(Attribute::BackgroundColor(
-                        Color::Named(color),
-                    )));
-                }
-                48 => {
-                    // Extended background color
-                    if i + 2 < self.params.len() && self.params[i + 1] == 5 {
-                        let idx = self.params[i + 2] as u8;
-                        callback(Action::SetAttribute(Attribute::BackgroundColor(
-                            Color::Indexed(idx),
-                        )));
-                        i += 2;
-                    } else if i + 4 < self.params.len() && self.params[i + 1] == 2 {
-                        let r = self.params[i + 2] as u8;
-                        let g = self.params[i + 3] as u8;
-                        let b = self.params[i + 4] as u8;
-                        callback(Action::SetAttribute(Attribute::BackgroundColor(
-                            Color::Rgb { r, g, b },
-                        )));
-                        i += 4;
-                    }
-                }
-                49 => callback(Action::SetAttribute(Attribute::BackgroundColor(
-                    Color::Default,
-                ))),
-
-                // Bright foreground colors
-                90..=97 => {
-                    let color = Self::bright_color_from_index((p - 90) as u8);
-                    callback(Action::SetAttribute(Attribute::ForegroundColor(
-                        Color::Named(color),
-                    )));
+                // Extended colors, semicolon form: 38;5;n or 38;2;r;g;b.
+                // The color's parameters are consumed even when they are
+                // incomplete, so they never act as attributes.
+                38 | 48 | 58 => {
+                    let (color, used) = Self::extended_color(&params[i + 1..]);
+                    i += used;
+                    color.map(|color| Self::color_attribute(p, color))
                 }
 
-                // Bright background colors
-                100..=107 => {
-                    let color = Self::bright_color_from_index((p - 100) as u8);
-                    callback(Action::SetAttribute(Attribute::BackgroundColor(
-                        Color::Named(color),
-                    )));
-                }
-
-                _ => {}
+                _ => None,
+            };
+            if let Some(attr) = attr {
+                callback(Action::SetAttribute(attr));
             }
             i += 1;
+        }
+    }
+
+    /// An SGR parameter with `:` sub-parameters: `group[0]` is the
+    /// parameter, the rest its sub-parameters.
+    fn sgr_with_subparams(group: &[u16]) -> Option<Attribute> {
+        match group {
+            [4, style, ..] => match style {
+                0 => Some(Attribute::NoUnderline),
+                1 => Some(Attribute::Underline),
+                2 => Some(Attribute::DoubleUnderline),
+                3 => Some(Attribute::CurlyUnderline),
+                4 => Some(Attribute::DottedUnderline),
+                5 => Some(Attribute::DashedUnderline),
+                _ => None,
+            },
+            [p @ (38 | 48 | 58), rest @ ..] => {
+                let color = match rest {
+                    [5, n, ..] => Color::Indexed(channel(*n)),
+                    // 38:2:<colorspace>:r:g:b, the T.416 form.
+                    [2, _, r, g, b, ..] => rgb(*r, *g, *b),
+                    // 38:2:r:g:b, the common form without a colorspace.
+                    [2, r, g, b] => rgb(*r, *g, *b),
+                    _ => return None,
+                };
+                Some(Self::color_attribute(*p, color))
+            }
+            _ => None,
+        }
+    }
+
+    /// The color named by the semicolon form after 38, 48 or 58, and how
+    /// many parameters it used.
+    fn extended_color(rest: &[u16]) -> (Option<Color>, usize) {
+        match rest {
+            [5, n, ..] => (Some(Color::Indexed(channel(*n))), 2),
+            [2, r, g, b, ..] => (Some(rgb(*r, *g, *b)), 4),
+            // Incomplete: swallow what is there.
+            [5] | [2, ..] => (None, rest.len()),
+            _ => (None, 0),
+        }
+    }
+
+    /// The attribute SGR `p` (38, 48 or 58) sets to `color`.
+    fn color_attribute(p: u16, color: Color) -> Attribute {
+        match p {
+            38 => Attribute::ForegroundColor(color),
+            48 => Attribute::BackgroundColor(color),
+            _ => Attribute::UnderlineColor(color),
         }
     }
 
@@ -148,6 +171,19 @@ impl AnsiParser {
             7 => NamedColor::BrightWhite,
             _ => NamedColor::BrightWhite,
         }
+    }
+}
+
+/// An SGR color component, saturated to a byte.
+fn channel(value: u16) -> u8 {
+    value.min(u8::MAX as u16) as u8
+}
+
+fn rgb(r: u16, g: u16, b: u16) -> Color {
+    Color::Rgb {
+        r: channel(r),
+        g: channel(g),
+        b: channel(b),
     }
 }
 
@@ -647,29 +683,18 @@ mod tests {
 
     #[test]
     fn sgr_38_5_without_index() {
-        // CSI 38;5 m - missing the color index
-        // params = [38, 5]: i=0 for 38 doesn't have enough following params
-        // to form 38;5;N, so 38 is skipped. Then i=1 processes param 5 as Blink.
-        assert_eq!(
-            parse(b"\x1b[38;5m"),
-            vec![Action::SetAttribute(Attribute::Blink)]
-        );
+        // An incomplete color is swallowed; its 5 is not Blink.
+        assert_eq!(parse(b"\x1b[38;5m"), vec![]);
     }
 
     #[test]
     fn sgr_38_2_missing_components() {
-        // CSI 38;2;100;150 m - missing blue component
-        // params = [38, 2, 100, 150]: 38 at i=0 doesn't have i+4 < len,
-        // so it's skipped. Remaining params are processed individually:
-        // 2 -> Dim, 100 -> BrightBlack background, 150 -> unknown (skipped)
+        // An incomplete RGB color is swallowed whole: its 2 is not Dim and
+        // its 100 is not a background color.
+        assert_eq!(parse(b"\x1b[38;2;100;150m"), vec![]);
         assert_eq!(
-            parse(b"\x1b[38;2;100;150m"),
-            vec![
-                Action::SetAttribute(Attribute::Dim),
-                Action::SetAttribute(Attribute::BackgroundColor(Color::Named(
-                    NamedColor::BrightBlack
-                ))),
-            ]
+            parse(b"\x1b[1;38;2;100m"),
+            vec![Action::SetAttribute(Attribute::Bold)]
         );
     }
 
@@ -744,6 +769,108 @@ mod tests {
         assert_eq!(
             AnsiParser::bright_color_from_index(255),
             NamedColor::BrightWhite
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Sub-parameters (colon form), underline styles and underline color
+    // ------------------------------------------------------------------
+
+    fn attr(a: Attribute) -> Action {
+        Action::SetAttribute(a)
+    }
+
+    #[test]
+    fn sgr_underline_styles_with_colons() {
+        assert_eq!(parse(b"\x1b[4:0m"), vec![attr(Attribute::NoUnderline)]);
+        assert_eq!(parse(b"\x1b[4:1m"), vec![attr(Attribute::Underline)]);
+        assert_eq!(parse(b"\x1b[4:2m"), vec![attr(Attribute::DoubleUnderline)]);
+        assert_eq!(parse(b"\x1b[4:3m"), vec![attr(Attribute::CurlyUnderline)]);
+        assert_eq!(parse(b"\x1b[4:4m"), vec![attr(Attribute::DottedUnderline)]);
+        assert_eq!(parse(b"\x1b[4:5m"), vec![attr(Attribute::DashedUnderline)]);
+        // An unknown style is ignored, not applied as SGR 4 or SGR 9.
+        assert_eq!(parse(b"\x1b[4:9m"), vec![]);
+    }
+
+    #[test]
+    fn sgr_sub_parameters_do_not_become_attributes() {
+        assert_eq!(
+            parse(b"\x1b[1;4:3;7m"),
+            vec![
+                attr(Attribute::Bold),
+                attr(Attribute::CurlyUnderline),
+                attr(Attribute::Reverse),
+            ]
+        );
+        // Sub-parameters on an attribute that has none are skipped whole.
+        assert_eq!(parse(b"\x1b[1:2;3m"), vec![attr(Attribute::Italic)]);
+    }
+
+    #[test]
+    fn sgr_extended_colors_with_colons() {
+        let red = Color::Rgb { r: 255, g: 0, b: 0 };
+        assert_eq!(
+            parse(b"\x1b[38:2::255:0:0m"),
+            vec![attr(Attribute::ForegroundColor(red.clone()))]
+        );
+        assert_eq!(
+            parse(b"\x1b[38:2:255:0:0m"),
+            vec![attr(Attribute::ForegroundColor(red.clone()))]
+        );
+        assert_eq!(
+            parse(b"\x1b[48:2:0:255:0:0m"),
+            vec![attr(Attribute::BackgroundColor(red.clone()))]
+        );
+        assert_eq!(
+            parse(b"\x1b[38:5:196m"),
+            vec![attr(Attribute::ForegroundColor(Color::Indexed(196)))]
+        );
+        assert_eq!(
+            parse(b"\x1b[58:2::255:0:0m"),
+            vec![attr(Attribute::UnderlineColor(red))]
+        );
+        assert_eq!(
+            parse(b"\x1b[58:5:3m"),
+            vec![attr(Attribute::UnderlineColor(Color::Indexed(3)))]
+        );
+        // Unknown color space or truncated forms are ignored.
+        assert_eq!(parse(b"\x1b[38:3:1:2:3m"), vec![]);
+        assert_eq!(parse(b"\x1b[38:2:1m"), vec![]);
+    }
+
+    #[test]
+    fn sgr_58_semicolon_forms_keep_the_other_attributes() {
+        // The 2 and 0 inside the color must not act as Dim and Reset, so
+        // bold survives.
+        assert_eq!(
+            parse(b"\x1b[1;58;2;255;0;0m"),
+            vec![
+                attr(Attribute::Bold),
+                attr(Attribute::UnderlineColor(Color::Rgb { r: 255, g: 0, b: 0 })),
+            ]
+        );
+        assert_eq!(
+            parse(b"\x1b[58;5;9;3m"),
+            vec![
+                attr(Attribute::UnderlineColor(Color::Indexed(9))),
+                attr(Attribute::Italic),
+            ]
+        );
+        assert_eq!(
+            parse(b"\x1b[59m"),
+            vec![attr(Attribute::UnderlineColor(Color::Default))]
+        );
+    }
+
+    #[test]
+    fn sgr_color_components_saturate() {
+        assert_eq!(
+            parse(b"\x1b[38;2;300;0;999m"),
+            vec![attr(Attribute::ForegroundColor(Color::Rgb {
+                r: 255,
+                g: 0,
+                b: 255
+            }))]
         );
     }
 }

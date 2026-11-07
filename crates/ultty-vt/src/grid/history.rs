@@ -1,6 +1,6 @@
 //! Compact storage for scrollback rows.
 //!
-//! A screen row is a `Vec<Cell>` of 20 bytes per column. Scrollback held
+//! A screen row is a `Vec<Cell>` of 24 bytes per column. Scrollback held
 //! 10,000 of those, far more than fits in L2, and every new line was
 //! written into the oldest one, so saving history stalled on memory and
 //! halved VT throughput (docs/perf/2026-11-06-scrollback-cost.md). A
@@ -20,6 +20,7 @@ use super::row::Row;
 struct Style {
     fg: PackedColor,
     bg: PackedColor,
+    underline_color: PackedColor,
     flags: CellFlags,
     hyperlink_id: u32,
 }
@@ -29,13 +30,21 @@ impl Style {
         Self {
             fg: cell.packed_fg(),
             bg: cell.packed_bg(),
+            underline_color: cell.packed_underline_color(),
             flags: cell.flags(),
             hyperlink_id: cell.hyperlink_id(),
         }
     }
 
     fn cell(self, c: char) -> Cell {
-        Cell::from_packed(c, self.fg, self.bg, self.flags, self.hyperlink_id)
+        Cell::from_packed(
+            c,
+            self.fg,
+            self.bg,
+            self.underline_color,
+            self.flags,
+            self.hyperlink_id,
+        )
     }
 }
 
@@ -152,7 +161,7 @@ impl CompactRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::cell::Color;
+    use crate::grid::cell::{Color, UnderlineStyle};
     use proptest::prelude::*;
 
     /// Two rows hold the same content.
@@ -188,6 +197,17 @@ mod tests {
             color(),
             prop_oneof![Just(0u16), Just(1), Just(1 << 2), Just(1 << 3)],
             prop_oneof![Just(0u32), Just(7)],
+            (
+                prop::sample::select(vec![
+                    UnderlineStyle::None,
+                    UnderlineStyle::Single,
+                    UnderlineStyle::Double,
+                    UnderlineStyle::Curly,
+                    UnderlineStyle::Dotted,
+                    UnderlineStyle::Dashed,
+                ]),
+                color(),
+            ),
             prop::option::of(prop::collection::vec(
                 prop_oneof![Just('\u{301}'), Just('\u{200d}')],
                 1..3,
@@ -196,7 +216,7 @@ mod tests {
         (1u16..60, any::<bool>(), prop::collection::vec(cell, 0..60)).prop_map(
             |(width, wrapped, cells)| {
                 let mut row = Row::new(width);
-                for (col, (c, fg, bg, flag_bits, link, extra)) in
+                for (col, (c, fg, bg, flag_bits, link, (ul_style, ul_color), extra)) in
                     cells.into_iter().take(width as usize).enumerate()
                 {
                     let col = col as u16;
@@ -212,6 +232,8 @@ mod tests {
                     }
                     let mut cell = Cell::with_attrs(c, fg, bg, flags);
                     cell.set_hyperlink_id(link);
+                    cell.set_underline_style(ul_style);
+                    cell.set_underline_color(ul_color);
                     row[col] = cell;
                     if let Some(extra) = extra {
                         row.set_grapheme_extra(col, &extra);

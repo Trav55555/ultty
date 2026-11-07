@@ -86,8 +86,12 @@ impl AnsiParser {
                         // Format: Pc;base64data where Pc is clipboard name (c, p, s, 0, etc.)
                         let clipboard = data[..semi_pos].chars().next().unwrap_or('c');
                         let b64data = &data[semi_pos + 1..];
-                        // Decode base64
-                        if let Ok(decoded) = base64_decode(b64data) {
+                        if b64data == "?" {
+                            // A read request. Ultty does not hand the
+                            // clipboard to programs, so it is refused; it
+                            // must never decode to an empty write.
+                            tracing::debug!("refused OSC 52 clipboard read");
+                        } else if let Ok(decoded) = base64_decode(b64data) {
                             if let Ok(text) = String::from_utf8(decoded) {
                                 callback(Action::SetClipboard {
                                     clipboard,
@@ -903,5 +907,12 @@ mod tests {
         assert!(
             matches!(&actions[..], [Action::InBand(p)] if p.len() == crate::ansi::MAX_IN_BAND_APC)
         );
+    }
+
+    #[test]
+    fn osc_clipboard_read_request_is_refused() {
+        // Must not decode "?" to an empty write that wipes the clipboard.
+        assert_eq!(parse(b"\x1b]52;c;?\x07"), vec![]);
+        assert_eq!(parse(b"\x1b]52;p;?\x1b\\"), vec![]);
     }
 }

@@ -1,4 +1,12 @@
 //! CSI (Control Sequence Introducer) sequence handling.
+//!
+//! The states follow the DEC/xterm parser: an optional private marker
+//! (`<`, `=`, `>` or `?`) first, then parameters separated by `;` with
+//! `:` sub-parameters (ITU T.416, used by SGR 4:3 and 38:2::r:g:b), then
+//! intermediates, then the final byte. C0 controls inside a sequence are
+//! executed and the sequence continues; CAN and SUB cancel it. Anything
+//! malformed sends the parser to [`State::CsiIgnore`], which swallows the
+//! rest of the sequence, so no byte of a control sequence is ever printed.
 
 use super::AnsiParser;
 use super::{Action, Mode, State};
@@ -9,12 +17,67 @@ use super::{Action, Mode, State};
 /// `CSI 1;1;1;...` can never grow the parameter vector without bound.
 pub const MAX_CSI_PARAMS: usize = 32;
 
+// Every kept parameter has a bit in `AnsiParser::subparams`.
+const _: () = assert!(MAX_CSI_PARAMS <= u32::BITS as usize);
+
+/// A parameter that the action stores as a byte, saturated rather than
+/// wrapped.
+fn byte_param(value: u16) -> u8 {
+    value.min(u8::MAX as u16) as u8
+}
+
 impl AnsiParser {
+    /// Forget everything about the CSI sequence being collected.
+    pub(super) fn clear_csi(&mut self) {
+        self.params.clear();
+        self.subparams = 0;
+        self.current_param = None;
+        self.param_is_sub = false;
+        self.marker = None;
+        self.intermediate = None;
+    }
+
     /// Record a finished CSI parameter, ignoring any past [`MAX_CSI_PARAMS`].
     fn push_csi_param(&mut self, value: u16) {
         if self.params.len() < MAX_CSI_PARAMS {
+            if self.param_is_sub {
+                self.subparams |= 1 << self.params.len();
+            }
             self.params.push(value);
         }
+    }
+
+    /// Finish the parameter being collected, if there is one. A trailing
+    /// `:` counts as an empty (zero) sub-parameter.
+    fn finish_csi_param(&mut self) {
+        if self.current_param.is_some() || self.param_is_sub {
+            let value = self.current_param.take().unwrap_or(0);
+            self.push_csi_param(value);
+        }
+        self.param_is_sub = false;
+    }
+
+    /// Bytes every CSI state treats alike. Returns `true` if `byte` was
+    /// one of them and has been handled.
+    fn csi_common<F>(&mut self, byte: u8, callback: &mut F) -> bool
+    where
+        F: FnMut(Action),
+    {
+        match byte {
+            // CAN and SUB cancel the sequence.
+            0x18 | 0x1A => self.reset(),
+            // ESC aborts it and starts a new escape sequence.
+            0x1B => {
+                self.clear_csi();
+                self.state = State::Escape;
+            }
+            // Other C0 controls are executed in place (VT500, xterm).
+            0x00..=0x1F => self.control(byte, callback),
+            // DEL is ignored everywhere.
+            0x7F => {}
+            _ => return false,
+        }
+        true
     }
 
     /// CSI entry - just entered CSI sequence.
@@ -22,45 +85,28 @@ impl AnsiParser {
     where
         F: FnMut(Action),
     {
+        if self.csi_common(byte, callback) {
+            return;
+        }
         match byte {
-            // Private mode indicator
-            b'?' => {
-                self.is_private = true;
-                self.state = State::CsiPrivate;
+            // Private marker: `?` (DEC), `>`, `<` and `=` (xterm, kitty).
+            0x3C..=0x3F => {
+                self.marker = Some(byte);
+                self.state = State::CsiParam;
             }
-            // Kitty keyboard protocol prefix indicators
-            b'>' | b'<' => {
-                // Store as intermediate for Kitty keyboard handling
+            b'0'..=b'9' | b';' | b':' => {
+                self.state = State::CsiParam;
+                self.csi_param(byte, callback);
+            }
+            0x20..=0x2F => {
                 self.intermediate = Some(byte);
-                self.state = State::CsiParam;
+                self.state = State::CsiIntermediate;
             }
-            // Digit - start parameter
-            b'0'..=b'9' => {
-                let digit = (byte - b'0') as u16;
-                self.current_param = Some(digit);
-                self.state = State::CsiParam;
-            }
-            // Semicolon with no preceding digit
-            b';' => {
-                self.push_csi_param(0);
-                self.state = State::CsiParam;
-            }
-            // Final byte - no parameters
-            b'@'..=b'~' => {
+            0x40..=0x7E => {
                 self.dispatch_csi(byte, callback);
                 self.reset();
             }
-            // ESC - abort and restart
-            0x1B => {
-                self.state = State::Escape;
-            }
-            // Intermediate bytes (e.g., space in DECSCUSR)
-            0x20..=0x2F => {
-                self.intermediate = Some(byte);
-            }
-            _ => {
-                self.reset();
-            }
+            _ => self.state = State::CsiIgnore,
         }
     }
 
@@ -69,8 +115,10 @@ impl AnsiParser {
     where
         F: FnMut(Action),
     {
+        if self.csi_common(byte, callback) {
+            return;
+        }
         match byte {
-            // Digit - accumulate parameter
             b'0'..=b'9' => {
                 let digit = (byte - b'0') as u16;
                 self.current_param = Some(
@@ -80,41 +128,140 @@ impl AnsiParser {
                         .saturating_add(digit),
                 );
             }
-            // Semicolon - end current parameter
             b';' => {
-                let value = self.current_param.unwrap_or(0);
+                let value = self.current_param.take().unwrap_or(0);
                 self.push_csi_param(value);
-                self.current_param = None;
+                self.param_is_sub = false;
             }
-            // Final byte - dispatch
-            b'@'..=b'~' => {
-                if let Some(p) = self.current_param {
-                    self.push_csi_param(p);
-                }
+            b':' => {
+                let value = self.current_param.take().unwrap_or(0);
+                self.push_csi_param(value);
+                self.param_is_sub = true;
+            }
+            0x20..=0x2F => {
+                self.finish_csi_param();
+                self.intermediate = Some(byte);
+                self.state = State::CsiIntermediate;
+            }
+            0x40..=0x7E => {
+                self.finish_csi_param();
                 self.dispatch_csi(byte, callback);
                 self.reset();
             }
-            // ESC - abort and restart
-            0x1B => {
-                self.state = State::Escape;
-            }
-            // Intermediate bytes (e.g., space in DECSCUSR)
-            0x20..=0x2F => {
-                self.intermediate = Some(byte);
-            }
-            _ => {
-                self.reset();
-            }
+            // A private marker after the first byte, or a non-ASCII byte.
+            _ => self.state = State::CsiIgnore,
         }
     }
 
-    /// Dispatch a complete CSI sequence.
+    /// CSI intermediate - saw an intermediate byte (e.g. space in DECSCUSR).
+    pub(super) fn csi_intermediate<F>(&mut self, byte: u8, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        if self.csi_common(byte, callback) {
+            return;
+        }
+        match byte {
+            0x40..=0x7E => {
+                self.dispatch_csi(byte, callback);
+                self.reset();
+            }
+            // A second intermediate (none we know of uses two), a parameter
+            // after an intermediate, or a non-ASCII byte.
+            _ => self.state = State::CsiIgnore,
+        }
+    }
+
+    /// CSI ignore - a malformed sequence; consume it up to its final byte.
+    pub(super) fn csi_ignore<F>(&mut self, byte: u8, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        if self.csi_common(byte, callback) {
+            return;
+        }
+        if let 0x40..=0x7E = byte {
+            self.reset();
+        }
+    }
+
+    /// Dispatch a complete CSI sequence according to its marker and
+    /// intermediate. Sequences we do not know are ignored.
     fn dispatch_csi<F>(&mut self, cmd: u8, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        // Only SGR defines sub-parameters.
+        if self.subparams != 0 && cmd != b'm' {
+            return;
+        }
+        let p1 = self.params.first().copied().unwrap_or(1);
+        let first_or_zero = self.params.first().copied().unwrap_or(0);
+
+        match (self.marker, self.intermediate, cmd) {
+            (None, None, _) => self.dispatch_plain_csi(cmd, callback),
+
+            // DEC private modes
+            (Some(b'?'), None, b'h') => {
+                for &param in &self.params {
+                    if let Some(action) = self.private_mode_set(param) {
+                        callback(action);
+                    }
+                }
+            }
+            (Some(b'?'), None, b'l') => {
+                for &param in &self.params {
+                    if let Some(action) = self.private_mode_reset(param) {
+                        callback(action);
+                    }
+                }
+            }
+            // DECSED / DECSEL: no cell is protected, so they erase like ED/EL.
+            (Some(b'?'), None, b'J') => {
+                callback(Action::EraseInDisplay(first_or_zero.min(3) as u8))
+            }
+            (Some(b'?'), None, b'K') => callback(Action::EraseInLine(first_or_zero.min(2) as u8)),
+            (Some(b'?'), None, b'n') if p1 == 6 => callback(Action::ReportCursorPosition),
+            // DECRQM - Request DEC Private Mode (CSI ? Ps $ p)
+            (Some(b'?'), Some(b'$'), b'p') => callback(Action::RequestPrivateMode(p1)),
+
+            // Kitty keyboard protocol
+            (Some(b'?'), None, b'u') => callback(Action::KittyKeyboardQuery),
+            (Some(b'>'), None, b'u') => {
+                callback(Action::KittyKeyboardPush(byte_param(first_or_zero)))
+            }
+            (Some(b'<'), None, b'u') => callback(Action::KittyKeyboardPop),
+            (Some(b'='), None, b'u') => {
+                let mode = self.params.get(1).copied().filter(|&m| m != 0).unwrap_or(1);
+                callback(Action::KittyKeyboardSet {
+                    flags: byte_param(first_or_zero),
+                    mode: byte_param(mode),
+                });
+            }
+
+            // Secondary device attributes (CSI > c)
+            (Some(b'>'), None, b'c') => callback(Action::SecondaryDeviceAttributes),
+
+            // Cursor style (DECSCUSR) - CSI Ps SP q
+            (None, Some(b' '), b'q') => callback(Action::SetCursorStyle(byte_param(first_or_zero))),
+
+            // Soft reset (DECSTR — CSI ! p)
+            (None, Some(b'!'), b'p') => callback(Action::SoftReset),
+
+            // Everything else, including `CSI > Ps ; Ps m` (XTMODKEYS),
+            // `CSI = c` (DA3) and `CSI ? Ps s` (XTSAVE), is not ours to act on.
+            _ => {}
+        }
+    }
+
+    /// Dispatch a CSI sequence without marker or intermediate.
+    fn dispatch_plain_csi<F>(&mut self, cmd: u8, callback: &mut F)
     where
         F: FnMut(Action),
     {
         let p1 = self.params.first().copied().unwrap_or(1);
         let p2 = self.params.get(1).copied().unwrap_or(1);
+        let first_or_zero = self.params.first().copied().unwrap_or(0);
 
         match cmd {
             // Cursor movement
@@ -139,12 +286,8 @@ impl AnsiParser {
             b'a' => callback(Action::CursorForward(p1.max(1))),
 
             // Erase operations (default to 0, not 1)
-            b'J' => callback(Action::EraseInDisplay(
-                self.params.first().copied().unwrap_or(0).min(3) as u8,
-            )),
-            b'K' => callback(Action::EraseInLine(
-                self.params.first().copied().unwrap_or(0).min(2) as u8,
-            )),
+            b'J' => callback(Action::EraseInDisplay(first_or_zero.min(3) as u8)),
+            b'K' => callback(Action::EraseInLine(first_or_zero.min(2) as u8)),
             b'X' => callback(Action::EraseCharacters(p1.max(1))),
 
             // Line operations
@@ -157,100 +300,29 @@ impl AnsiParser {
             b'S' => callback(Action::ScrollUp(p1.max(1))),
             b'T' => callback(Action::ScrollDown(p1.max(1))),
             b'r' => callback(Action::SetScrollingRegion {
-                top: self.params.first().copied().unwrap_or(0),
+                top: first_or_zero,
                 bottom: self.params.get(1).copied().unwrap_or(0),
             }),
 
             // Cursor save/restore
             b's' => callback(Action::SaveCursorPosition),
-            b'u' => {
-                // Check for Kitty keyboard protocol sequences
-                match self.intermediate {
-                    Some(b'>') => {
-                        // CSI > flags u - push keyboard mode
-                        let flags = self.params.first().copied().unwrap_or(0) as u8;
-                        callback(Action::KittyKeyboardPush(flags));
-                    }
-                    Some(b'<') => {
-                        // CSI < u - pop keyboard mode
-                        callback(Action::KittyKeyboardPop);
-                    }
-                    None if self.is_private => {
-                        // CSI ? u - query keyboard mode
-                        callback(Action::KittyKeyboardQuery);
-                    }
-                    _ => {
-                        // Regular restore cursor position
-                        callback(Action::RestoreCursorPosition);
-                    }
-                }
-            }
+            b'u' => callback(Action::RestoreCursorPosition),
 
             // SGR (text attributes)
             b'm' => self.dispatch_sgr(callback),
 
             // Tab clear
-            b'g' => callback(Action::ClearTabStop(
-                self.params.first().copied().unwrap_or(0) as u8,
-            )),
+            b'g' => callback(Action::ClearTabStop(byte_param(first_or_zero))),
 
             // Cursor position report
             b'n' if p1 == 6 => callback(Action::ReportCursorPosition),
 
-            // Device attributes
-            b'c' => {
-                if self.intermediate == Some(b'>') {
-                    callback(Action::SecondaryDeviceAttributes);
-                } else {
-                    callback(Action::DeviceAttributes);
-                }
-            }
+            // Primary device attributes
+            b'c' => callback(Action::DeviceAttributes),
 
-            // Cursor style (DECSCUSR) - CSI Ps SP q
-            b'q' if self.intermediate == Some(b' ') => {
-                let style = self.params.first().copied().unwrap_or(0) as u8;
-                callback(Action::SetCursorStyle(style));
-            }
-
-            // Mode set/reset
-            b'h' if self.is_private => {
-                for &param in &self.params {
-                    if let Some(action) = self.private_mode_set(param) {
-                        callback(action);
-                    }
-                }
-            }
-            b'l' if self.is_private => {
-                for &param in &self.params {
-                    if let Some(action) = self.private_mode_reset(param) {
-                        callback(action);
-                    }
-                }
-            }
             // ANSI SM/RM (non-private mode set/reset)
-            b'h' if !self.is_private => {
-                for &param in &self.params {
-                    if param == 4 {
-                        callback(Action::SetInsertMode(true));
-                    }
-                }
-            }
-            b'l' if !self.is_private => {
-                for &param in &self.params {
-                    if param == 4 {
-                        callback(Action::SetInsertMode(false));
-                    }
-                }
-            }
-
-            // DECRQM - Request DEC Private Mode (CSI ? Ps $ p)
-            b'p' if self.is_private && self.intermediate == Some(b'$') => {
-                callback(Action::RequestPrivateMode(p1));
-            }
-
-            // Soft reset (DECSTR — CSI ! p)
-            b'p' if self.intermediate == Some(b'!') => {
-                callback(Action::SoftReset);
+            b'h' | b'l' if self.params.contains(&4) => {
+                callback(Action::SetInsertMode(cmd == b'h'));
             }
 
             _ => {
@@ -853,13 +925,15 @@ mod tests {
     }
 
     #[test]
-    fn csi_invalid_byte_resets() {
-        // Invalid byte in CSI entry resets to ground
-        // 0x01 is a control character that triggers reset
-        let actions = parse(b"\x1b[\x01");
-        // The invalid byte causes a reset; should not crash
-        // 0x01 in CSI entry hits the default arm -> reset
-        assert!(actions.is_empty());
+    fn c0_inside_csi_is_executed_and_the_sequence_continues() {
+        assert_eq!(
+            parse(b"\x1b[\x011\nK"),
+            vec![
+                Action::Execute(0x01),
+                Action::Newline,
+                Action::EraseInLine(1)
+            ]
+        );
     }
 
     #[test]
@@ -954,5 +1028,93 @@ mod tests {
         // A huge numeric parameter should saturate to u16::MAX, not wrap
         let actions = parse(b"\x1b[99999A");
         assert_eq!(actions, vec![Action::CursorUp(u16::MAX)]);
+    }
+
+    // ------------------------------------------------------------------
+    // Private markers, intermediates, sub-parameters, controls
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn xtmodkeys_is_not_sgr() {
+        // vim and neovim send this at startup.
+        assert_eq!(parse(b"\x1b[>4;2m"), vec![]);
+        assert_eq!(parse(b"\x1b[>4m"), vec![]);
+    }
+
+    #[test]
+    fn kitty_keyboard_forms() {
+        assert_eq!(parse(b"\x1b[?u"), vec![Action::KittyKeyboardQuery]);
+        assert_eq!(parse(b"\x1b[>5u"), vec![Action::KittyKeyboardPush(5)]);
+        assert_eq!(parse(b"\x1b[>u"), vec![Action::KittyKeyboardPush(0)]);
+        assert_eq!(parse(b"\x1b[<u"), vec![Action::KittyKeyboardPop]);
+        assert_eq!(
+            parse(b"\x1b[=1;1u"),
+            vec![Action::KittyKeyboardSet { flags: 1, mode: 1 }]
+        );
+        assert_eq!(
+            parse(b"\x1b[=3;2u"),
+            vec![Action::KittyKeyboardSet { flags: 3, mode: 2 }]
+        );
+        // The mode defaults to 1.
+        assert_eq!(
+            parse(b"\x1b[=7u"),
+            vec![Action::KittyKeyboardSet { flags: 7, mode: 1 }]
+        );
+        assert_eq!(parse(b"\x1b[u"), vec![Action::RestoreCursorPosition]);
+    }
+
+    #[test]
+    fn private_markers_do_not_select_plain_commands() {
+        // XTSAVE / XTRESTORE are not DECSC / DECSTBM.
+        assert_eq!(parse(b"\x1b[?1049s"), vec![]);
+        assert_eq!(parse(b"\x1b[?1r"), vec![]);
+        // DA3 is not DA1; xterm's title-mode CSI > T is not SD.
+        assert_eq!(parse(b"\x1b[=c"), vec![]);
+        assert_eq!(parse(b"\x1b[>1T"), vec![]);
+        // SL (CSI Ps SP @) is not ICH.
+        assert_eq!(parse(b"\x1b[2 @"), vec![]);
+    }
+
+    #[test]
+    fn sub_parameters_outside_sgr_are_ignored() {
+        assert_eq!(parse(b"\x1b[2:3H"), vec![]);
+    }
+
+    #[test]
+    fn malformed_sequences_are_consumed_to_their_final_byte() {
+        // A marker after a parameter, a parameter after an intermediate,
+        // and a non-ASCII byte: none of the tail is printed.
+        assert_eq!(parse(b"\x1b[1?2hX"), vec![Action::Print('X')]);
+        assert_eq!(parse(b"\x1b[1 2qX"), vec![Action::Print('X')]);
+        assert_eq!(parse(b"\x1b[1\xff2mX"), vec![Action::Print('X')]);
+    }
+
+    #[test]
+    fn can_and_sub_cancel_a_sequence() {
+        assert_eq!(
+            parse(b"\x1b[1\x18AX"),
+            vec![Action::Print('A'), Action::Print('X')]
+        );
+        assert_eq!(
+            parse(b"\x1b[1\x1aAX"),
+            vec![Action::Print('A'), Action::Print('X')]
+        );
+    }
+
+    #[test]
+    fn controls_execute_in_every_csi_state() {
+        assert_eq!(
+            parse(b"\x1b[\r?\x0825\x07h"),
+            vec![
+                Action::CarriageReturn,
+                Action::Backspace,
+                Action::Bell,
+                Action::SetMode(Mode::CursorVisible),
+            ]
+        );
+        assert_eq!(
+            parse(b"\x1b[2 \tq"),
+            vec![Action::Tab, Action::SetCursorStyle(2)]
+        );
     }
 }
