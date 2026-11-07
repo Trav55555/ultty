@@ -48,6 +48,28 @@ impl Style {
     }
 }
 
+/// The number of cells up to and including the last one that is not
+/// [`Cell::default`].
+///
+/// Most rows end in a long blank tail (a short line on a wide screen), so
+/// this checks whole blocks of cells from the end with a branch-free test
+/// and only looks at single cells inside the last block that is not blank.
+fn used_len(cells: &[Cell]) -> usize {
+    const BLOCK: usize = 8;
+    let mut end = cells.len();
+    while end >= BLOCK
+        && cells[end - BLOCK..end]
+            .iter()
+            .fold(true, |blank, cell| blank & cell.is_default())
+    {
+        end -= BLOCK;
+    }
+    cells[..end]
+        .iter()
+        .rposition(|cell| !cell.is_default())
+        .map_or(0, |last| last + 1)
+}
+
 /// `len` consecutive cells with the same style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Run {
@@ -81,14 +103,9 @@ impl CompactRow {
         self.runs.clear();
         self.graphemes.clear();
 
-        let cells = row.cell_slice();
-        let blank = Cell::default();
-        let used = cells
-            .iter()
-            .rposition(|cell| *cell != blank)
-            .map_or(0, |last| last + 1);
-        let cells = &cells[..used];
-        self.text.reserve(used);
+        let cells = row.used_cells();
+        let cells = &cells[..used_len(cells)];
+        self.text.reserve(cells.len());
 
         let mut col = 0;
         while col < cells.len() {

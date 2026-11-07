@@ -1,5 +1,10 @@
 # Headless VT throughput over the CRLF corpora - 2026-11-07
 
+> **Correction:** the gate's callgrind filter dropped instructions below the
+> parser's closure instantiations, so the escape-heavy counts here are low
+> (`vt/sgr-dense` was 86 instructions per byte, not 74). See
+> [`2026-11-07-unicode-throughput.md`](./2026-11-07-unicode-throughput.md).
+
 First numbers from `ultty-bench vt` (slice 1 of the benchmark suite). Claim
 classes: `headless-e2e` (parse + grid) and `micro` (parser only). The wall-clock
 numbers were taken on a heavily loaded workstation and are **not** a release

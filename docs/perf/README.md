@@ -45,6 +45,9 @@ The current dated evidence set is:
   headless VT throughput and instructions per byte over the CRLF corpora,
   measured heap bytes, and the A/A noise floor (supersedes the memory section
   of the 2026-05-14 baseline).
+- [`2026-11-07-unicode-throughput.md`](./2026-11-07-unicode-throughput.md) for
+  the non-ASCII and scrolling instruction cuts, and corrected instruction
+  counts (the earlier gate undercounted).
 - [`2026-05-29-current-readiness.md`](./2026-05-29-current-readiness.md) for
   current benchmark refresh, fixed live-pipeline evidence, soft-wrap evidence,
   and process-level idle sample.
