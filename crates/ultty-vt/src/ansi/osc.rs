@@ -441,9 +441,12 @@ pub(super) fn parse_color_spec(spec: &str) -> Option<[u8; 3]> {
         let mut parts = channels.split('/');
         for channel in &mut rgb {
             let digits = parts.next()?;
+            // Validate before using the length: a long channel would
+            // overflow the shift below.
+            let value = hex(digits)?;
             let max = (1u32 << (4 * digits.len())) - 1;
             // Round to the nearest 8-bit value: ff -> 255, f -> 255, 8 -> 136.
-            *channel = ((hex(digits)? * 255 + max / 2) / max) as u8;
+            *channel = ((value * 255 + max / 2) / max) as u8;
         }
         return parts.next().is_none().then_some(rgb);
     }
@@ -672,6 +675,9 @@ mod tests {
         assert_eq!(spec("rgb:ff/00"), None);
         assert_eq!(spec("rgb:ff/00/00/00"), None);
         assert_eq!(spec("rgb:fffff/0/0"), None);
+        // Long enough to overflow a shift by the channel length.
+        assert_eq!(spec("rgb:fffffffff/0/0"), None);
+        assert_eq!(spec("rgb:/0/0"), None);
         assert_eq!(spec("#ff80"), None);
         assert_eq!(spec("red"), None);
     }
