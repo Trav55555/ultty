@@ -79,18 +79,18 @@ impl NativeBackend {
         }
     }
 
-    pub fn init(&mut self) -> anyhow::Result<()> {
+    pub fn init(&mut self) -> crate::Result<()> {
         if self.prefer_in_band {
             return self.init_in_band();
         }
-        let socket_path =
-            detect::socket_path().ok_or_else(|| anyhow::anyhow!("ULTTY_SOCKET not set"))?;
+        let socket_path = detect::socket_path()
+            .ok_or(crate::Error::NativeUnavailable("ULTTY_SOCKET is not set"))?;
 
         self.connect_socket(UnixStream::connect(&socket_path)?)
     }
 
     /// Run the handshake over a connected socket and start the session.
-    fn connect_socket(&mut self, stream: UnixStream) -> anyhow::Result<()> {
+    fn connect_socket(&mut self, stream: UnixStream) -> crate::Result<()> {
         // Blocking writes; reads wait at most one poll interval, so the
         // handshake finishes as soon as SessionReady arrives. A longer read
         // timeout here made every read wait out that timeout once the
@@ -122,11 +122,13 @@ impl NativeBackend {
     /// terminal ignores the APC string and answers only DA1. Inside tmux or
     /// screen the bare string is dropped, so apps there fall back to ANSI,
     /// which is right: the outer terminal cannot know where the pane is.
-    fn init_in_band(&mut self) -> anyhow::Result<()> {
+    fn init_in_band(&mut self) -> crate::Result<()> {
         let mut tty = in_band::InBandTty::open()?;
         let mut received = Vec::new();
         if !in_band::probe(&mut tty, &mut received, in_band::PROBE_TIMEOUT)? {
-            anyhow::bail!("terminal does not support in-band native mode");
+            return Err(crate::Error::NativeUnavailable(
+                "the terminal does not answer the in-band probe",
+            ));
         }
         self.read_buf.extend_from_slice(&received);
 
@@ -155,7 +157,7 @@ impl NativeBackend {
         self.prefer_in_band
     }
 
-    pub fn shutdown(&mut self) -> anyhow::Result<()> {
+    pub fn shutdown(&mut self) -> crate::Result<()> {
         if self.is_connected() {
             self.send_message(&AppMessage::Disconnect)?;
             self.stream = None;
@@ -169,7 +171,7 @@ impl NativeBackend {
         &mut self,
         region_id: RegionId,
         text: impl Into<String>,
-    ) -> anyhow::Result<()> {
+    ) -> crate::Result<()> {
         self.send_message(&AppMessage::AppendContent {
             id: region_id,
             text: text.into(),
@@ -178,7 +180,7 @@ impl NativeBackend {
 
     /// Send the changes between the last frame and `view`. A view that
     /// renders the same as the last frame sends nothing at all.
-    pub fn render(&mut self, view: &impl View) -> anyhow::Result<()> {
+    pub fn render(&mut self, view: &impl View) -> crate::Result<()> {
         let (frame_messages, native_keys) = self.collect_frame(view)?;
         let (optimized_messages, next_tree) = optimize_frame_messages(
             &self.retained,
@@ -208,14 +210,14 @@ impl NativeBackend {
     fn collect_frame(
         &self,
         view: &impl View,
-    ) -> anyhow::Result<(Vec<AppMessage>, HashMap<RegionId, String>)> {
+    ) -> crate::Result<(Vec<AppMessage>, HashMap<RegionId, String>)> {
         begin_native_key_recording();
         let walked = self.render_view_tree(view);
         let keys = take_native_keys();
         walked.map(|messages| (messages, keys))
     }
 
-    fn render_view_tree(&self, view: &impl View) -> anyhow::Result<Vec<AppMessage>> {
+    fn render_view_tree(&self, view: &impl View) -> crate::Result<Vec<AppMessage>> {
         let mut messages = Vec::new();
         let mut next_id = 1u32;
         let region_id = RegionId::new(next_id);
@@ -263,7 +265,7 @@ impl NativeBackend {
             });
         }
 
-        let mut sink = |msg: &AppMessage| -> anyhow::Result<()> {
+        let mut sink = |msg: &AppMessage| -> crate::Result<()> {
             messages.push(msg.clone());
             Ok(())
         };
@@ -278,7 +280,7 @@ impl NativeBackend {
         self.negotiated_capabilities & capability != 0
     }
 
-    pub fn poll_event(&mut self) -> anyhow::Result<Option<Event>> {
+    pub fn poll_event(&mut self) -> crate::Result<Option<Event>> {
         if self.in_band.as_ref().is_some_and(|tty| tty.heartbeat_due()) {
             // An unsolicited Pong tells the terminal an idle app is alive.
             self.send_message(&AppMessage::Pong)?;
@@ -292,7 +294,7 @@ impl NativeBackend {
         Ok(None)
     }
 
-    fn send_client_hello(&mut self) -> anyhow::Result<()> {
+    fn send_client_hello(&mut self) -> crate::Result<()> {
         let msg = AppMessage::ClientHello {
             version: PROTOCOL_VERSION,
             requested_capabilities: CLIENT_DEFAULT_CAPABILITIES,
@@ -300,11 +302,13 @@ impl NativeBackend {
         self.send_message(&msg)
     }
 
-    fn wait_for_session_ready(&mut self) -> anyhow::Result<()> {
+    fn wait_for_session_ready(&mut self) -> crate::Result<()> {
         let deadline = std::time::Instant::now() + HANDSHAKE_TIMEOUT;
         while std::time::Instant::now() < deadline {
             if self.read_available()? == ReadOutcome::Closed {
-                anyhow::bail!("Connection closed during handshake");
+                return Err(crate::Error::Handshake(
+                    "the terminal closed the connection".to_string(),
+                ));
             }
 
             while let Some(msg) = self.next_decoded_message()? {
@@ -314,11 +318,9 @@ impl NativeBackend {
                         capabilities,
                     } => {
                         if version < MIN_PROTOCOL_VERSION {
-                            anyhow::bail!(
-                                "Protocol version mismatch: {} vs minimum {}",
-                                version,
-                                MIN_PROTOCOL_VERSION
-                            );
+                            return Err(crate::Error::Handshake(format!(
+                                "protocol version {version} is older than the minimum {MIN_PROTOCOL_VERSION}"
+                            )));
                         }
                         self.negotiated_capabilities = capabilities;
                     }
@@ -340,24 +342,26 @@ impl NativeBackend {
             }
         }
 
-        anyhow::bail!("Timeout waiting for SessionReady")
+        Err(crate::Error::Handshake(
+            "timed out waiting for SessionReady".to_string(),
+        ))
     }
 
     /// Next well-formed buffered message, skipping (and logging) malformed
     /// frames so one bad frame from the terminal does not take the app down.
-    fn next_decoded_message(&mut self) -> anyhow::Result<Option<TerminalMessage>> {
+    fn next_decoded_message(&mut self) -> crate::Result<Option<TerminalMessage>> {
         loop {
             match self.try_decode_message() {
                 Ok(msg) => return Ok(msg),
                 Err(err @ FrameError::Malformed { .. }) => {
                     tracing::warn!("skipping {err}");
                 }
-                Err(err @ FrameError::BadMagic(_)) => return Err(err.into()),
+                Err(FrameError::BadMagic(magic)) => return Err(crate::Error::BadFrameMagic(magic)),
             }
         }
     }
 
-    fn process_pending_messages(&mut self) -> anyhow::Result<()> {
+    fn process_pending_messages(&mut self) -> crate::Result<()> {
         if !self.is_connected() {
             return Ok(());
         }

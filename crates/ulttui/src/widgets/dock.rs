@@ -116,10 +116,10 @@ impl View for DockLayout {
     fn render_child_native(
         &self,
         index: usize,
-        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        send_message: &mut dyn FnMut(&AppMessage) -> crate::Result<()>,
         parent: RegionId,
         next_id: &mut u32,
-    ) -> anyhow::Result<Option<RegionId>> {
+    ) -> crate::Result<Option<RegionId>> {
         let mut current = 0usize;
 
         if let Some(top) = &self.top {
@@ -367,7 +367,7 @@ mod tests {
             .center(Text::new("center"))
             .dock_right(Text::new("right"));
         let mut messages = Vec::new();
-        let mut send = |msg: &AppMessage| -> anyhow::Result<()> {
+        let mut send = |msg: &AppMessage| -> crate::Result<()> {
             messages.push(msg.clone());
             Ok(())
         };

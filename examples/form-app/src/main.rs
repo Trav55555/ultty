@@ -298,5 +298,6 @@ impl FormApp {
 }
 
 fn main() -> anyhow::Result<()> {
-    FormApp::new().run()
+    FormApp::new().run()?;
+    Ok(())
 }

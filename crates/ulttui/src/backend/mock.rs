@@ -62,15 +62,15 @@ impl MockBackend {
     /// Upper bound on idle polls after the event list is exhausted.
     pub const MAX_IDLE_POLLS: usize = 1_000_000;
 
-    pub fn init(&mut self) -> anyhow::Result<()> {
+    pub fn init(&mut self) -> crate::Result<()> {
         Ok(())
     }
 
-    pub fn shutdown(&mut self) -> anyhow::Result<()> {
+    pub fn shutdown(&mut self) -> crate::Result<()> {
         Ok(())
     }
 
-    pub fn render(&mut self, view: &impl View) -> anyhow::Result<()> {
+    pub fn render(&mut self, view: &impl View) -> crate::Result<()> {
         self.render_count += 1;
         self.rendered_constraints.push(view.constraints());
         self.rendered_content.push(view.content());
@@ -78,10 +78,10 @@ impl MockBackend {
         Ok(())
     }
 
-    pub fn poll_event(&mut self) -> anyhow::Result<Option<Event>> {
+    pub fn poll_event(&mut self) -> crate::Result<Option<Event>> {
         // Check for injected error
         if let Some(err) = self.pending_error.take() {
-            return Err(anyhow::anyhow!(err));
+            return Err(crate::Error::Mock(err));
         }
 
         // Give spawned tokio tasks a chance to run without a wall-clock sleep.

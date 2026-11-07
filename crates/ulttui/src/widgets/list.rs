@@ -186,10 +186,10 @@ impl<T: std::fmt::Display> View for List<T> {
     fn render_child_native(
         &self,
         index: usize,
-        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        send_message: &mut dyn FnMut(&AppMessage) -> crate::Result<()>,
         parent: RegionId,
         next_id: &mut u32,
-    ) -> anyhow::Result<Option<RegionId>> {
+    ) -> crate::Result<Option<RegionId>> {
         let actual_idx = match self.filtered_indices.get(index) {
             Some(&idx) => idx,
             None => return Ok(None),

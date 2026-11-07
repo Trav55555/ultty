@@ -130,5 +130,6 @@ impl Application for TodoApp {
 }
 
 fn main() -> anyhow::Result<()> {
-    TodoApp::new().run()
+    TodoApp::new().run()?;
+    Ok(())
 }

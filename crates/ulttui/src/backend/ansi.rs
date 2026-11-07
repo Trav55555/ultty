@@ -25,7 +25,7 @@ impl AnsiBackend {
         Self { terminal: None }
     }
 
-    pub fn init(&mut self) -> anyhow::Result<()> {
+    pub fn init(&mut self) -> crate::Result<()> {
         install_panic_hook();
         terminal::enable_raw_mode()?;
         io::stdout().execute(EnterAlternateScreen)?;
@@ -37,7 +37,7 @@ impl AnsiBackend {
         Ok(())
     }
 
-    pub fn shutdown(&mut self) -> anyhow::Result<()> {
+    pub fn shutdown(&mut self) -> crate::Result<()> {
         if self.terminal.is_some() {
             restore_terminal()?;
             self.terminal = None;
@@ -45,11 +45,8 @@ impl AnsiBackend {
         Ok(())
     }
 
-    pub fn render(&mut self, view: &impl View) -> anyhow::Result<()> {
-        let terminal = self
-            .terminal
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Backend not initialized"))?;
+    pub fn render(&mut self, view: &impl View) -> crate::Result<()> {
+        let terminal = self.terminal.as_mut().ok_or(crate::Error::NotInitialized)?;
 
         terminal.draw(|frame| {
             let area = frame.area();
@@ -59,7 +56,7 @@ impl AnsiBackend {
         Ok(())
     }
 
-    pub fn poll_event(&mut self) -> anyhow::Result<Option<Event>> {
+    pub fn poll_event(&mut self) -> crate::Result<Option<Event>> {
         if event::poll(Duration::from_millis(16))? {
             let crossterm_event = event::read()?;
             Ok(convert_event(crossterm_event))

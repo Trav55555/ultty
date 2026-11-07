@@ -48,6 +48,9 @@ pub mod toast;
 pub mod vim;
 pub mod widgets;
 
+mod error;
+pub use error::{Error, Result};
+
 /// Prelude for convenient imports.
 pub mod prelude {
     pub use crate::app::{App, Application};

@@ -494,10 +494,10 @@ impl View for MarkdownView {
     fn render_child_native(
         &self,
         index: usize,
-        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        send_message: &mut dyn FnMut(&AppMessage) -> crate::Result<()>,
         parent: RegionId,
         next_id: &mut u32,
-    ) -> anyhow::Result<Option<RegionId>> {
+    ) -> crate::Result<Option<RegionId>> {
         let blocks = &self.blocks;
         let is_last = index + 1 == self.children_count();
         let append_cursor = self.streaming && is_last;
@@ -913,7 +913,7 @@ mod tests {
 
     fn collect_native_messages(view: &MarkdownView, index: usize) -> Vec<AppMessage> {
         let mut messages = Vec::new();
-        let mut send = |msg: &AppMessage| -> anyhow::Result<()> {
+        let mut send = |msg: &AppMessage| -> crate::Result<()> {
             messages.push(msg.clone());
             Ok(())
         };
