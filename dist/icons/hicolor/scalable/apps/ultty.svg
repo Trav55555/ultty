@@ -2,10 +2,14 @@
 <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#343f44"/><stop offset="1" stop-color="#232a2e"/></linearGradient></defs>
 <rect x="8" y="8" width="240" height="240" rx="28" fill="url(#g)"/>
 <rect x="8.5" y="8.5" width="239" height="239" rx="27.5" fill="none" stroke="#4f5b58" stroke-width="3"/>
-<g fill="none" stroke="#83c092" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
-<polyline points="102,64 128,38 154,64"/>
-<polyline points="90,114 128,76 166,114"/>
-<polyline points="78,164 128,114 178,164"/>
+<!-- The ->>>_ mark (docs/assets/logo/ultty-mark.svg), scaled into the tile. -->
+<g transform="translate(12 36) scale(0.72)">
+<rect x="28" y="116" width="52" height="24" rx="5" fill="#a7c080"/>
+<g fill="none" stroke="#83c092" stroke-width="21" stroke-linecap="round" stroke-linejoin="round">
+<polyline points="96,88 136,128 96,168"/>
+<polyline points="140,88 180,128 140,168"/>
+<polyline points="184,88 224,128 184,168"/>
 </g>
-<rect x="117" y="172" width="22" height="46" rx="4" fill="#a7c080"/>
+<rect x="244" y="154" width="52" height="24" rx="5" fill="#a7c080"/>
+</g>
 </svg>
