@@ -22,6 +22,8 @@
 #                       e.g. "--rounds 5 --k2p-samples 300"
 #   --runs N            headless blocks (default 10)
 #   --skip-setup        assume the instance is already set up
+#   --known-hosts FILE  record the instance's host key in FILE instead of
+#                       ~/.ssh/known_hosts (useful for throwaway instances)
 #
 # Idempotent: setup skips what is installed, the build reuses the checkout and
 # target directory, and each run writes a new timestamped results directory.
@@ -35,7 +37,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 die() { echo "bench-aws: $*" >&2; exit 1; }
 log() { echo "[bench-aws $(date +%T)] $*" >&2; }
 
-HOST="" USER_NAME="" KEY="" ROLE="" REF=HEAD PORT=22 OUT="" COMPARE_ARGS="" RUNS=10 SETUP=1
+HOST="" USER_NAME="" KEY="" ROLE="" REF=HEAD PORT=22 OUT="" COMPARE_ARGS="" RUNS=10 SETUP=1 KNOWN_HOSTS=
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --host) HOST="${2:?}"; shift 2 ;;
@@ -48,7 +50,8 @@ while [[ $# -gt 0 ]]; do
     --compare-args) COMPARE_ARGS="${2?}"; shift 2 ;;
     --runs) RUNS="${2:?}"; shift 2 ;;
     --skip-setup) SETUP=0; shift ;;
-    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+    --known-hosts) KNOWN_HOSTS="${2:?}"; shift 2 ;;
+    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
     *) die "unknown option $1" ;;
   esac
 done
@@ -63,6 +66,10 @@ mkdir -p "$OUT"
 SSH_OPTS=(-i "$KEY" -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new
   -o ServerAliveInterval=30 -o ConnectTimeout=15)
 SCP_OPTS=(-i "$KEY" -P "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+if [[ -n "$KNOWN_HOSTS" ]]; then
+  SSH_OPTS+=(-o "UserKnownHostsFile=$KNOWN_HOSTS")
+  SCP_OPTS+=(-o "UserKnownHostsFile=$KNOWN_HOSTS")
+fi
 TARGET="$USER_NAME@$HOST"
 # The command goes over stdin, so it is parsed only by the remote shell.
 remote() { ssh "${SSH_OPTS[@]}" "$TARGET" bash -s <<<"$1"; }
