@@ -17,39 +17,45 @@
 //! them against the segmenter, so a Unicode update that moves one fails
 //! loudly instead of changing behaviour.
 
-/// Whether `c` is in the plain class (see the module docs).
+/// The plain class (see the module docs) as sorted, disjoint ranges.
+const PLAIN: &[(char, char)] = &[
+    ('\u{20}', '\u{7E}'),
+    ('\u{A0}', '\u{AC}'),
+    ('\u{AE}', '\u{2FF}'),
+    ('\u{370}', '\u{482}'),
+    ('\u{48A}', '\u{52F}'),
+    ('\u{5D0}', '\u{5EA}'),
+    ('\u{620}', '\u{64A}'),
+    ('\u{1E00}', '\u{1FFF}'),
+    ('\u{2010}', '\u{2027}'),
+    ('\u{2030}', '\u{205F}'),
+    ('\u{2070}', '\u{20CF}'),
+    ('\u{2100}', '\u{2BFF}'),
+    ('\u{2E80}', '\u{2FDF}'),
+    ('\u{3000}', '\u{3029}'),
+    ('\u{3030}', '\u{303F}'),
+    ('\u{3041}', '\u{3096}'),
+    ('\u{309B}', '\u{30FF}'),
+    ('\u{3105}', '\u{312F}'),
+    ('\u{3131}', '\u{318E}'),
+    ('\u{31F0}', '\u{4DBF}'),
+    ('\u{4E00}', '\u{A48C}'),
+    ('\u{AC00}', '\u{D7A3}'),
+    ('\u{F900}', '\u{FAFF}'),
+    ('\u{FF01}', '\u{FF9D}'),
+    ('\u{FFE0}', '\u{FFEE}'),
+    ('\u{1F000}', '\u{1F1E5}'),
+    ('\u{1F200}', '\u{1F3FA}'),
+    ('\u{1F400}', '\u{1FAFF}'),
+    ('\u{20000}', '\u{3FFFD}'),
+];
+
+/// Whether `c` is in the plain class.
 fn is_plain(c: char) -> bool {
-    matches!(c,
-        '\u{20}'..='\u{7E}'
-        | '\u{A0}'..='\u{AC}'
-        | '\u{AE}'..='\u{2FF}'
-        | '\u{370}'..='\u{482}'
-        | '\u{48A}'..='\u{52F}'
-        | '\u{5D0}'..='\u{5EA}'
-        | '\u{620}'..='\u{64A}'
-        | '\u{1E00}'..='\u{1FFF}'
-        | '\u{2010}'..='\u{2027}'
-        | '\u{2030}'..='\u{205F}'
-        | '\u{2070}'..='\u{20CF}'
-        | '\u{2100}'..='\u{2BFF}'
-        | '\u{2E80}'..='\u{2FDF}'
-        | '\u{3000}'..='\u{3029}'
-        | '\u{3030}'..='\u{303F}'
-        | '\u{3041}'..='\u{3096}'
-        | '\u{309B}'..='\u{30FF}'
-        | '\u{3105}'..='\u{312F}'
-        | '\u{3131}'..='\u{318E}'
-        | '\u{31F0}'..='\u{4DBF}'
-        | '\u{4E00}'..='\u{A48C}'
-        | '\u{AC00}'..='\u{D7A3}'
-        | '\u{F900}'..='\u{FAFF}'
-        | '\u{FF01}'..='\u{FF9D}'
-        | '\u{FFE0}'..='\u{FFEE}'
-        | '\u{1F000}'..='\u{1F1E5}'
-        | '\u{1F200}'..='\u{1F3FA}'
-        | '\u{1F400}'..='\u{1FAFF}'
-        | '\u{20000}'..='\u{3FFFD}'
-    )
+    // The first range starting after `c`; `c` is plain if the one before
+    // it reaches `c`.
+    let next = PLAIN.partition_point(|&(lo, _)| lo <= c);
+    next > 0 && c <= PLAIN[next - 1].1
 }
 
 /// Whether `c` is a combining diacritic (see the module docs).
@@ -89,6 +95,13 @@ mod tests {
     /// What `joins` claims for a pair, checked by the segmenter.
     fn segmenter_joins(cluster: &str, c: char) -> bool {
         clusters(&format!("{cluster}{c}")) == 1
+    }
+
+    #[test]
+    fn plain_ranges_are_sorted_and_disjoint() {
+        for pair in PLAIN.windows(2) {
+            assert!(pair[0].0 <= pair[0].1 && pair[0].1 < pair[1].0, "{pair:?}");
+        }
     }
 
     #[test]
