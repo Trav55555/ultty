@@ -91,6 +91,12 @@ setup_nvidia() {
     echo 'options nvidia-drm modeset=1' | sudo tee /etc/modprobe.d/ubench-nvidia-drm.conf >/dev/null
     sudo touch /var/run/reboot-required
   fi
+  # The headless sway session opens the GPU's render node itself; it is
+  # root:render 0660. The group applies from the next SSH session, which
+  # every later step of bench-aws.sh is.
+  if ! id -nG | tr ' ' '\n' | grep -qx render; then
+    sudo usermod -aG render,video "$USER"
+  fi
   # Headless Xorg on the GPU: no monitor is attached (a T4 has no outputs),
   # so the screen is virtual. XTest and GetImage work on it.
   if [[ ! -f /etc/X11/ubench-xorg.conf ]] && nvidia-smi >/dev/null 2>&1; then
