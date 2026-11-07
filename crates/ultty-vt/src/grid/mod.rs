@@ -974,6 +974,19 @@ impl Grid {
         self.tab_stops = (0..self.dims.cols).step_by(8).collect();
     }
 
+    /// Fit the tab stops to a new width: new columns get the default stop
+    /// every 8 columns, as in xterm, and stops beyond the width go. Stops in
+    /// the columns both widths share are kept, custom or not.
+    fn resize_tab_stops(&mut self, new_cols: u16) {
+        let old_cols = self.dims.cols;
+        if new_cols > old_cols {
+            self.tab_stops
+                .extend((old_cols..new_cols).filter(|c| c % 8 == 0));
+        } else {
+            self.tab_stops.retain(|&col| col < new_cols);
+        }
+    }
+
     /// Set the scroll region (1-based top and bottom, inclusive).
     /// Pass (1, rows) to reset to full screen.
     pub fn set_scroll_region(&mut self, top: u16, bottom: u16) {
@@ -1339,18 +1352,7 @@ impl Grid {
         // Reset scroll region — apps that need one will re-set it after resize
         self.scroll_region = None;
 
-        // Update tab stops for new width
-        let old_cols = self.dims.cols;
-        if new_dims.cols > old_cols {
-            // Extend tab stops to cover any new columns
-            for col in (old_cols..new_dims.cols).filter(|c| c % 8 == 0) {
-                self.tab_stops.insert(col);
-            }
-        } else if new_dims.cols < old_cols {
-            // Remove tab stops beyond new width
-            self.tab_stops.retain(|&col| col < new_dims.cols);
-        }
-
+        self.resize_tab_stops(new_dims.cols);
         self.dims = new_dims;
         self.dirty = vec![true; new_dims.rows as usize];
         self.content_version = self.content_version.wrapping_add(1);
@@ -1360,6 +1362,7 @@ impl Grid {
     /// Set rows directly (used by Buffer during reflow).
     pub fn set_rows(&mut self, rows: Vec<Row>, new_dims: Dimensions) {
         self.rows = rows;
+        self.resize_tab_stops(new_dims.cols);
         self.dims = new_dims;
 
         // Row indices changed, so any scroll region is meaningless now.
