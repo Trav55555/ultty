@@ -45,6 +45,9 @@ The current dated evidence set is:
   headless VT throughput and instructions per byte over the CRLF corpora,
   measured heap bytes, and the A/A noise floor (supersedes the memory section
   of the 2026-05-14 baseline).
+- [`2026-11-07-live-unicode.md`](./2026-11-07-live-unicode.md) for the
+  renderer's per-frame cost on scrolling non-ASCII output (grapheme shaping
+  cache) and the `render_scrolling` bench.
 - [`2026-11-07-unicode-throughput.md`](./2026-11-07-unicode-throughput.md) for
   the non-ASCII and scrolling instruction cuts, and corrected instruction
   counts (the earlier gate undercounted).
