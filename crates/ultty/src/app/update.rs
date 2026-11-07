@@ -255,8 +255,8 @@ impl App {
                                 }
                             }
                             TerminalEvent::SetClipboard { clipboard: _, data } => {
-                                // Set clipboard content (OSC 52)
-                                // Only handle from focused terminal for security
+                                // Set clipboard content (OSC 52), if the config allows
+                                // it, and only from the focused terminal
                                 if self.config.behavior.clipboard_write == ClipboardWrite::Deny {
                                     tracing::debug!(
                                         "Ignored OSC 52 clipboard write: behavior.clipboard_write = \"deny\""
