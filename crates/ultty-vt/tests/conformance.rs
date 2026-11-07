@@ -613,8 +613,18 @@ fn xtgettcap_answers_a_small_truthful_set() {
         replies(&mut term, b"\x1bP+q544e\x1b\\"),
         format!("\x1bP1+r{}={}\x1b\\", hex("TN"), hex("xterm-256color"))
     );
-    // Malformed hex is invalid, echoed back.
-    assert_eq!(replies(&mut term, b"\x1bP+qZZ\x1b\\"), "\x1bP0+rZZ\x1b\\");
+    // An unknown name in plain hex is echoed back as invalid.
+    assert_eq!(
+        replies(&mut term, b"\x1bP+q5858\x1b\\"),
+        "\x1bP0+r5858\x1b\\"
+    );
+    // Anything else is never echoed: replies are typed into the shell, so
+    // echoing the request would let a program inject a command.
+    assert_eq!(replies(&mut term, b"\x1bP+qZZ\x1b\\"), "\x1bP0+r\x1b\\");
+    assert_eq!(
+        replies(&mut term, b"\x1bP+qfoo\rid\r\x1b\\"),
+        "\x1bP0+r\x1b\\"
+    );
 }
 
 // ---------------------------------------------------------------------------
