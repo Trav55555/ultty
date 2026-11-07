@@ -644,9 +644,7 @@ impl<'a> TerminalHandler<'a> {
                 // Echo the name only when it is plain hex: anything else
                 // came from the program and, sent back as input, would be
                 // typed into whatever reads the terminal (a shell).
-                None if !name_hex.is_empty()
-                    && name_hex.bytes().all(|b| b.is_ascii_hexdigit()) =>
-                {
+                None if !name_hex.is_empty() && name_hex.bytes().all(|b| b.is_ascii_hexdigit()) => {
                     format!("\x1bP0+r{name_hex}\x1b\\")
                 }
                 None => "\x1bP0+r\x1b\\".to_string(),

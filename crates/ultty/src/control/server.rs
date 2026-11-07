@@ -180,6 +180,13 @@ impl ControlServer {
             .collect()
     }
 
+    /// Whether the client `key` has reply bytes still waiting to be written.
+    fn is_sending_reply(&self, key: usize) -> bool {
+        self.clients
+            .get(&key)
+            .is_some_and(|client| !client.reply.is_empty())
+    }
+
     pub fn poll(&mut self, timeout: Option<Duration>) -> io::Result<()> {
         let mut events = Events::new();
         self.poller.wait(&mut events, timeout)?;
@@ -187,9 +194,13 @@ impl ControlServer {
         for event in events.iter() {
             if event.key == LISTENER_KEY {
                 self.accept_connections()?;
-            } else if event.writable {
+            } else if self.is_sending_reply(event.key) {
                 self.continue_reply(event.key)?;
             } else {
+                // A client is either sending its request or sending its
+                // reply, never both. Dispatch on that, not on the reported
+                // readiness: a peer that writes and closes at once shows up
+                // as readable *and* writable, and its request must be read.
                 self.handle_client_event(event.key)?;
             }
         }
@@ -1107,6 +1118,26 @@ mod tests {
         client.read_to_string(&mut response).unwrap();
         assert_eq!(response, "MATCHED at 1:1\n");
         assert!(server.clients.is_empty());
+    }
+
+    #[test]
+    fn a_client_that_closes_right_after_writing_is_still_heard() {
+        // Fire-and-forget scripts (`nc -q0`, a send and close) hang up as
+        // soon as the request is written. The hang-up makes the socket
+        // report writable too; the request must still be read and run.
+        let mut server = test_server("write-and-close");
+        let mut client = UnixStream::connect(server.socket_path()).unwrap();
+        client.write_all(b"send-text hi\n").unwrap();
+        drop(client);
+
+        let pending = poll_until_pending(&mut server);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].1,
+            ControlRequest::SendText {
+                text: "hi".to_string()
+            }
+        );
     }
 
     #[test]
