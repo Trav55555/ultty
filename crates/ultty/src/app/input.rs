@@ -12,7 +12,7 @@ use ultty::terminal_manager::SplitDirection;
 use ultty::url::UrlDetector;
 use ultty::vim::CopyModeResult;
 use ultty_protocol::{Key as ProtocolKey, Modifiers as ProtocolModifiers};
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
@@ -64,7 +64,18 @@ impl App {
                 tracing::debug!("WindowEvent::MouseWheel received: delta={:?}", delta);
                 self.handle_scroll(delta);
             }
-            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+            WindowEvent::Ime(Ime::Enabled) => {
+                tracing::debug!("Input method enabled");
+            }
+            WindowEvent::Ime(Ime::Disabled) => {
+                tracing::debug!("Input method disabled");
+                self.set_ime_preedit(String::new());
+            }
+            WindowEvent::Ime(Ime::Preedit(text, _cursor)) => {
+                self.set_ime_preedit(text);
+            }
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                self.set_ime_preedit(String::new());
                 // Forward IME committed text to native protocol sessions as TextInput
                 if let Some(ref mut server) = self.protocol_server {
                     if server.session_count() > 0 {
@@ -867,8 +878,22 @@ impl App {
         }
     }
 
+    /// Show the input method's composition text, or clear it with an
+    /// empty string.
+    fn set_ime_preedit(&mut self, text: String) {
+        if self.ime_preedit != text {
+            self.ime_preedit = text;
+            self.needs_redraw = true;
+        }
+    }
+
     /// Handle keyboard input.
     fn handle_key(&mut self, event: KeyEvent) {
+        // While the input method is composing, keys are its to handle: the
+        // text arrives as a commit, and must not also be sent as keys.
+        if !self.ime_preedit.is_empty() {
+            return;
+        }
         if event.state == ElementState::Released {
             // Only a program that asked for release events gets any bytes.
             self.send_key_to_terminal(&event);

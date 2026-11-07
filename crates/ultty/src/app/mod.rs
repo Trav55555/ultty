@@ -189,6 +189,12 @@ pub struct App {
     min_window_size: Option<PhysicalSize<u32>>,
     /// When the window opened; drives the title's typing animation.
     launched_at: Instant,
+    /// Text the input method is composing (empty when it is not). While
+    /// it is non-empty, keys belong to the input method.
+    ime_preedit: String,
+    /// The cursor rectangle last given to the input method, in window
+    /// pixels, so it is only sent again when the cursor moves.
+    ime_cursor_area: Option<[i32; 4]>,
 }
 
 impl App {
@@ -214,6 +220,9 @@ impl App {
         );
         let window = event_loop.create_window(attributes)?;
         let window = Arc::new(window);
+        // winit leaves input methods off; without this, fcitx and ibus
+        // users cannot type Chinese, Japanese or Korean.
+        window.set_ime_allowed(true);
 
         let size = window.inner_size();
         let scale_factor = window.scale_factor() as f32;
@@ -362,6 +371,8 @@ impl App {
             scroll_line_accum: 0.0,
             scale_factor,
             min_window_size: None,
+            ime_preedit: String::new(),
+            ime_cursor_area: None,
             launched_at: Instant::now(),
         };
 

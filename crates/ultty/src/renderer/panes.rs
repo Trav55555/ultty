@@ -426,6 +426,10 @@ impl Renderer {
             }
         }
 
+        if let Some(preedit) = overlay.ime_preedit {
+            self.render_ime_preedit(encoder, view, preedit);
+        }
+
         // Render keyboard shortcuts overlay if visible
         if overlay.shortcuts_visible {
             if let Some(keybindings) = overlay.keybindings {
