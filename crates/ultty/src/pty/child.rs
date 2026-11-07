@@ -265,6 +265,9 @@ struct ChildExec {
     _env: Vec<CString>,
     envp: Vec<*const c_char>,
     working_dir: CString,
+    /// One past the highest fd the child may have open, read before fork
+    /// for the fallback in [`close_inherited_fds`].
+    fd_limit: libc::c_int,
 }
 
 impl ChildExec {
@@ -321,7 +324,46 @@ impl ChildExec {
             _env: env,
             envp,
             working_dir,
+            fd_limit: open_fd_limit(),
         })
+    }
+}
+
+/// Highest fd number plus one that this process can hold, capped so the
+/// fallback close loop stays short when the limit is "unlimited".
+fn open_fd_limit() -> libc::c_int {
+    const CAP: libc::rlim_t = 1 << 20;
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes into the rlimit struct we pass.
+    let current = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+        limit.rlim_cur
+    } else {
+        CAP
+    };
+    libc::c_int::try_from(current.min(CAP)).unwrap_or(libc::c_int::MAX)
+}
+
+/// Close every fd above stderr in the child, so descriptors this process
+/// opened without CLOEXEC (GPU drivers do, for buffers that may hold screen
+/// contents) never reach the shell. Async-signal-safe: plain syscalls only.
+fn close_inherited_fds(fd_limit: libc::c_int) {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: close_range(3, ~0, 0) only closes descriptors; nothing
+        // after this point uses an fd above stderr.
+        if unsafe { libc::syscall(libc::SYS_close_range, 3, libc::c_uint::MAX, 0) } == 0 {
+            return;
+        }
+    }
+    // Kernels before 5.9 and other Unixes: close them one by one.
+    for fd in 3..fd_limit {
+        // SAFETY: closing an fd that is not open just returns EBADF.
+        unsafe {
+            libc::close(fd);
+        }
     }
 }
 
@@ -400,6 +442,8 @@ fn setup_child(slave: SlavePty, exec_plan: &ChildExec) -> ! {
             libc::close(slave_fd);
         }
     }
+
+    close_inherited_fds(exec_plan.fd_limit);
 
     // Change to working directory
     // SAFETY: working_dir is a NUL-terminated CString built before fork and
@@ -596,6 +640,31 @@ mod tests {
         assert_eq!(
             blocked, 0,
             "child inherited a blocked-signal mask: {output:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn child_inherits_only_the_standard_fds() {
+        // An fd opened without CLOEXEC (as some GPU drivers do) must not
+        // reach the shell.
+        // SAFETY: the path is a NUL-terminated literal; the fd is closed below.
+        let leaked = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+        assert!(leaked > 2, "open failed: {leaked}");
+
+        // `ls` opens the directory it lists, so 3 is its own fd.
+        let output = run_in_pty("echo FDS $(ls /proc/self/fd); echo DONE");
+
+        // SAFETY: `leaked` is the fd opened above and still owned here.
+        unsafe { libc::close(leaked) };
+        let fds = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("FDS "))
+            .unwrap_or_else(|| panic!("no fd list in {output:?}"));
+        assert_eq!(
+            fds.trim(),
+            "0 1 2 3",
+            "child inherited extra fds: {output:?}"
         );
     }
 
