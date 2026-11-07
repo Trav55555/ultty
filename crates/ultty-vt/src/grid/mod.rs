@@ -545,11 +545,10 @@ impl Grid {
         if let Some(joins) = cluster::joins(base.char(), r.grapheme_extra(col).unwrap_or(&[]), c) {
             return joins;
         }
-        let Some(mut cluster) = r.grapheme(col) else {
-            return false;
-        };
-        cluster.push(c);
-        cluster.graphemes(true).nth(1).is_none()
+        r.with_grapheme_str(col, Some(c), |cluster| {
+            cluster.graphemes(true).nth(1).is_none()
+        })
+        .unwrap_or(false)
     }
 
     /// Append `c` to the cluster at `(row, col)`, widening the cell to two
@@ -563,11 +562,14 @@ impl Grid {
         };
         r.push_grapheme_char(col, c, MAX_COMBINING_PER_CELL);
         let was_wide = r.get(col).is_some_and(|cell| cell.is_wide());
-        let cluster_width = r.grapheme(col).map_or(1, |g| g.width());
         let room = col.saturating_add(1) < self.dims.cols;
         let at_cursor = !self.cursor.wrap_pending && self.cursor.position.col == col + 1;
+        let widens = !was_wide
+            && room
+            && at_cursor
+            && r.with_grapheme_str(col, None, |g| g.width()).unwrap_or(1) >= 2;
 
-        if !was_wide && cluster_width >= 2 && room && at_cursor {
+        if widens {
             let next = col + 1;
             // The spacer overwrites whatever was at `next`; a wide char there
             // would leave its own spacer orphaned.

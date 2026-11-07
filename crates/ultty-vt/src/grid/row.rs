@@ -125,6 +125,35 @@ impl Row {
         Some(s)
     }
 
+    /// Run `f` on the grapheme at `col` followed by `then`, as one string.
+    /// Clusters of the length a cell can hold are assembled on the stack,
+    /// so asking about the cluster under the cursor does not allocate.
+    pub(crate) fn with_grapheme_str<R>(
+        &self,
+        col: u16,
+        then: Option<char>,
+        f: impl FnOnce(&str) -> R,
+    ) -> Option<R> {
+        let cell = self.cells.get(col as usize)?;
+        let extra = self.grapheme_extra(col).unwrap_or(&[]);
+        let chars = std::iter::once(cell.char())
+            .chain(extra.iter().copied())
+            .chain(then);
+        let mut buf = [0u8; 4 * 20];
+        let mut len = 0;
+        for c in chars.clone() {
+            if len + c.len_utf8() > buf.len() {
+                return Some(f(&chars.collect::<String>()));
+            }
+            len += c.encode_utf8(&mut buf[len..]).len();
+        }
+        Some(match std::str::from_utf8(&buf[..len]) {
+            Ok(s) => f(s),
+            // Whole characters were encoded, so this does not happen.
+            Err(_) => f(&chars.collect::<String>()),
+        })
+    }
+
     /// Append a codepoint to the grapheme cluster at `col`.
     ///
     /// At most `cap` extra codepoints are kept per cell; the rest are dropped
@@ -607,6 +636,24 @@ mod tests {
         assert_eq!(row[0].char(), 'A');
         assert_eq!(row[1].char(), 'D');
         assert_eq!(row[2].char(), ' ');
+    }
+
+    #[test]
+    fn grapheme_str_is_the_cluster_then_the_extra_char() {
+        let mut row = Row::new(4);
+        row[1].set_char('e');
+        row.set_grapheme_extra(1, &['\u{301}']);
+        let got = row.with_grapheme_str(1, Some('\u{302}'), str::to_string);
+        assert_eq!(got.as_deref(), Some("e\u{301}\u{302}"));
+        assert_eq!(row.with_grapheme_str(0, None, str::to_string).as_deref(), Some(" "));
+        assert_eq!(row.with_grapheme_str(4, None, str::to_string), None);
+
+        // Longer than the stack buffer.
+        let long = ['\u{1F600}'; 30];
+        row.set_grapheme_extra(2, &long);
+        let expected: String = std::iter::once(' ').chain(long).chain(['x']).collect();
+        let got = row.with_grapheme_str(2, Some('x'), str::to_string);
+        assert_eq!(got.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
