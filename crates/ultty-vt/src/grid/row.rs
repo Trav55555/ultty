@@ -1,7 +1,6 @@
 //! Terminal row representation.
 
 use super::cell::{Cell, CellFlags};
-use std::collections::BTreeMap;
 use std::ops::{Index, IndexMut};
 
 /// A row of terminal cells.
@@ -27,7 +26,109 @@ pub struct Row {
     /// a stale entry is never read. Storing them on the row (rather than by
     /// screen coordinate) keeps them attached through scrolling, history,
     /// and reflow.
-    graphemes: BTreeMap<u16, Vec<char>>,
+    graphemes: GraphemeMap,
+}
+
+/// Extra grapheme codepoints by column, sorted by column.
+///
+/// Output is written left to right, so the cluster being built is nearly
+/// always the last entry and a write lands after all of them; lookups and
+/// inserts check the end before searching.
+#[derive(Debug, Default)]
+struct GraphemeMap {
+    entries: Vec<(u16, Vec<char>)>,
+}
+
+impl Clone for GraphemeMap {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.entries.clone_from(&source.entries);
+    }
+}
+
+impl GraphemeMap {
+    /// The index of `col`'s entry, or where it would be inserted.
+    fn find(&self, col: u16) -> Result<usize, usize> {
+        match self.entries.last() {
+            None => Err(0),
+            Some(&(last, _)) if last < col => Err(self.entries.len()),
+            Some(&(last, _)) if last == col => Ok(self.entries.len() - 1),
+            Some(_) => self.entries.binary_search_by_key(&col, |&(c, _)| c),
+        }
+    }
+
+    fn get(&self, col: u16) -> Option<&[char]> {
+        let index = self.find(col).ok()?;
+        Some(&self.entries[index].1)
+    }
+
+    /// `col`'s codepoints, inserting an empty entry if it has none.
+    fn entry(&mut self, col: u16) -> &mut Vec<char> {
+        let index = self.find(col).unwrap_or_else(|index| {
+            self.entries.insert(index, (col, Vec::new()));
+            index
+        });
+        &mut self.entries[index].1
+    }
+
+    fn insert(&mut self, col: u16, extra: Vec<char>) {
+        match self.find(col) {
+            Ok(index) => self.entries[index].1 = extra,
+            Err(index) => self.entries.insert(index, (col, extra)),
+        }
+    }
+
+    fn remove(&mut self, col: u16) {
+        if let Ok(index) = self.find(col) {
+            self.entries.remove(index);
+        }
+    }
+
+    /// Whether any entry is in `start..end`.
+    fn any_in(&self, start: u16, end: u16) -> bool {
+        // Writes usually land after every cluster on the row.
+        if self.entries.last().is_none_or(|&(c, _)| c < start) {
+            return false;
+        }
+        let first = self.entries.partition_point(|&(c, _)| c < start);
+        self.entries.get(first).is_some_and(|&(c, _)| c < end)
+    }
+
+    fn remove_range(&mut self, start: u16, end: u16) {
+        let first = self.entries.partition_point(|&(c, _)| c < start);
+        let past = self.entries.partition_point(|&(c, _)| c < end);
+        self.entries.drain(first..past);
+    }
+
+    /// Move entries at `from..` by `delta`, dropping any that land outside
+    /// `0..width`. A moved entry replaces one already at its new column.
+    fn shift(&mut self, from: u16, delta: i32, width: u16) {
+        let first = self.entries.partition_point(|&(c, _)| c < from);
+        if first == self.entries.len() {
+            return;
+        }
+        let moved: Vec<_> = self.entries.drain(first..).collect();
+        for (col, extra) in moved {
+            let dest = i32::from(col) + delta;
+            if (0..i32::from(width)).contains(&dest) {
+                self.insert(dest as u16, extra);
+            }
+        }
+    }
+
+    fn truncate(&mut self, width: u16) {
+        let keep = self.entries.partition_point(|&(c, _)| c < width);
+        self.entries.truncate(keep);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 impl Row {
@@ -75,7 +176,7 @@ impl Row {
             dirty: true,
             wrapped: false,
             used: 0,
-            graphemes: BTreeMap::new(),
+            graphemes: GraphemeMap::default(),
         }
     }
 
@@ -111,7 +212,7 @@ impl Row {
         if !cell.has_flag(CellFlags::HAS_COMBINING) {
             return None;
         }
-        self.graphemes.get(&col).map(Vec::as_slice)
+        self.graphemes.get(col)
     }
 
     /// The full grapheme at `col`: base character plus any extra codepoints.
@@ -162,7 +263,7 @@ impl Row {
         let Some(cell) = self.cells.get_mut(col as usize) else {
             return;
         };
-        let extra = self.graphemes.entry(col).or_default();
+        let extra = self.graphemes.entry(col);
         if !cell.has_flag(CellFlags::HAS_COMBINING) {
             // Whatever is stored for this column belonged to earlier content.
             extra.clear();
@@ -182,7 +283,7 @@ impl Row {
         };
         if extra.is_empty() {
             cell.unset_flag(CellFlags::HAS_COMBINING);
-            self.graphemes.remove(&col);
+            self.graphemes.remove(col);
         } else {
             cell.set_flag(CellFlags::HAS_COMBINING);
             self.graphemes.insert(col, extra.to_vec());
@@ -211,27 +312,16 @@ impl Row {
 
     /// Remove stored grapheme data for `start..end` without touching cells.
     fn drop_grapheme_entries(&mut self, start: u16, end: u16) {
-        if start >= end || self.graphemes.range(start..end).next().is_none() {
-            return;
+        if start < end && self.graphemes.any_in(start, end) {
+            self.graphemes.remove_range(start, end);
         }
-        self.graphemes.retain(|&col, _| col < start || col >= end);
     }
 
     /// Shift grapheme entries so they follow their cells after a horizontal
     /// move: entries at `from..` move by `delta`, and entries that land
     /// outside the row are dropped.
     fn shift_graphemes(&mut self, from: u16, delta: i32) {
-        if self.graphemes.is_empty() {
-            return;
-        }
-        let width = self.cells.len() as i32;
-        let moved = self.graphemes.split_off(&from);
-        for (col, extra) in moved {
-            let dest = col as i32 + delta;
-            if (0..width).contains(&dest) {
-                self.graphemes.insert(dest as u16, extra);
-            }
-        }
+        self.graphemes.shift(from, delta, self.width());
     }
 
     /// Check if this row is wrapped (soft-wrapped to next line).
@@ -305,7 +395,7 @@ impl Row {
     pub fn resize(&mut self, new_width: u16) {
         self.cells.resize(new_width as usize, Cell::default());
         self.used = self.used.min(new_width);
-        self.graphemes.retain(|&col, _| col < new_width);
+        self.graphemes.truncate(new_width);
         self.dirty = true;
     }
 
@@ -636,6 +726,85 @@ mod tests {
         assert_eq!(row[0].char(), 'A');
         assert_eq!(row[1].char(), 'D');
         assert_eq!(row[2].char(), ' ');
+    }
+
+    #[derive(Debug, Clone)]
+    enum MapOp {
+        Push(u16, char),
+        Insert(u16, Vec<char>),
+        Remove(u16),
+        RemoveRange(u16, u16),
+        Shift(u16, i32, u16),
+        Truncate(u16),
+    }
+
+    fn map_op() -> impl proptest::strategy::Strategy<Value = MapOp> {
+        use proptest::prelude::*;
+        let col = 0u16..24;
+        prop_oneof![
+            (col.clone(), any::<char>()).prop_map(|(c, ch)| MapOp::Push(c, ch)),
+            (col.clone(), prop::collection::vec(any::<char>(), 0..3))
+                .prop_map(|(c, v)| MapOp::Insert(c, v)),
+            col.clone().prop_map(MapOp::Remove),
+            (col.clone(), col.clone()).prop_map(|(a, b)| MapOp::RemoveRange(a, b)),
+            (col.clone(), -6i32..6, 1u16..24).prop_map(|(f, d, w)| MapOp::Shift(f, d, w)),
+            col.prop_map(MapOp::Truncate),
+        ]
+    }
+
+    proptest::proptest! {
+        /// The grapheme map behaves like the ordered map it replaced.
+        #[test]
+        fn grapheme_map_matches_an_ordered_map(ops in proptest::collection::vec(map_op(), 0..40)) {
+            use std::collections::BTreeMap;
+            let mut map = GraphemeMap::default();
+            let mut model: BTreeMap<u16, Vec<char>> = BTreeMap::new();
+            for op in ops {
+                match op {
+                    MapOp::Push(col, c) => {
+                        map.entry(col).push(c);
+                        model.entry(col).or_default().push(c);
+                    }
+                    MapOp::Insert(col, v) => {
+                        map.insert(col, v.clone());
+                        model.insert(col, v);
+                    }
+                    MapOp::Remove(col) => {
+                        map.remove(col);
+                        model.remove(&col);
+                    }
+                    MapOp::RemoveRange(start, end) => {
+                        proptest::prop_assert_eq!(
+                            map.any_in(start, end),
+                            start < end && model.range(start..end).next().is_some()
+                        );
+                        if start < end {
+                            map.remove_range(start, end);
+                            model.retain(|&c, _| c < start || c >= end);
+                        }
+                    }
+                    MapOp::Shift(from, delta, width) => {
+                        map.shift(from, delta, width);
+                        let moved = model.split_off(&from);
+                        for (col, extra) in moved {
+                            let dest = i32::from(col) + delta;
+                            if (0..i32::from(width)).contains(&dest) {
+                                model.insert(dest as u16, extra);
+                            }
+                        }
+                    }
+                    MapOp::Truncate(width) => {
+                        map.truncate(width);
+                        model.retain(|&c, _| c < width);
+                    }
+                }
+                let expected: Vec<(u16, Vec<char>)> = model.clone().into_iter().collect();
+                proptest::prop_assert_eq!(&map.entries, &expected);
+                for col in 0..24 {
+                    proptest::prop_assert_eq!(map.get(col), model.get(&col).map(Vec::as_slice));
+                }
+            }
+        }
     }
 
     #[test]
