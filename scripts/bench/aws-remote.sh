@@ -114,11 +114,11 @@ cmd_setup() {
 cmd_build() {
   local bundle="$1" ref="$2"
   [[ -f "$bundle" ]] || die "no bundle at $bundle"
-  git bundle verify "$bundle" >/dev/null || die "bundle $bundle is not valid"
   # A fresh clone of the bundle each build: cheap, and never stale. The
   # cargo target directory lives outside it, so builds stay incremental.
   rm -rf "$SRC"
-  git clone --quiet --no-checkout "$bundle" "$SRC"
+  # Cloning checks the bundle (`git bundle verify` needs a repository).
+  git clone --quiet --no-checkout "$bundle" "$SRC" || die "bundle $bundle is not valid"
   sha=$(git -C "$SRC" rev-parse --verify "$ref^{commit}") || die "commit $ref is not in the bundle"
   git -C "$SRC" checkout --quiet --force --detach "$sha"
   local channel
