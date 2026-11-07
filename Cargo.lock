@@ -4632,6 +4632,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "ultty-bench",
  "ultty-protocol",
  "ultty-vt",
  "unicode-width",
