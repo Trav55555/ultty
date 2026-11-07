@@ -4,6 +4,7 @@
 //! It owns the scene graph and layout engine for that connection.
 
 mod commands;
+mod content_limits;
 mod dirty;
 mod errors;
 mod frame;
@@ -57,6 +58,9 @@ pub struct NativeSession {
     tab_id: TabId,
     /// Scene tree for this session.
     scene: SceneTree,
+    /// Upper bound on the bytes of text in `scene`; see
+    /// [`NativeSession::admit_text`].
+    text_bytes_bound: usize,
     /// Layout engine.
     layout: LayoutEngine,
     /// How the app is connected.
@@ -208,6 +212,7 @@ impl NativeSession {
             session_id,
             tab_id,
             scene,
+            text_bytes_bound: 0,
             layout: LayoutEngine::new(),
             link,
             peer_pid: None,
@@ -1916,5 +1921,112 @@ mod tests {
             unknown.in_band_app_alive(Some(5)),
             "no pids: group check only"
         );
+    }
+
+    fn create_text_region(session: &mut NativeSession, id: RegionId) {
+        session
+            .handle_message(AppMessage::CreateRegion {
+                id,
+                parent: RegionId::ROOT,
+                insert_index: -1,
+                constraints: ultty_protocol::Constraints::default(),
+                style: ultty_protocol::Style::default(),
+            })
+            .unwrap();
+    }
+
+    fn append(session: &mut NativeSession, id: RegionId, text: &str) {
+        session
+            .handle_message(AppMessage::AppendContent {
+                id,
+                text: text.to_string(),
+            })
+            .unwrap();
+    }
+
+    fn region_text_len(session: &NativeSession, id: RegionId) -> usize {
+        content_limits::text_bytes(&session.scene.get(id).unwrap().content)
+    }
+
+    /// What the in-band flood generator sends: one region, 1 MiB appends.
+    #[test]
+    fn append_flood_keeps_a_region_to_its_newest_text() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        let id = RegionId::new(1);
+        create_text_region(&mut session, id);
+        let chunk = "A".repeat(1024 * 1024 - 64);
+
+        for _ in 0..64 {
+            append(&mut session, id, &chunk);
+            assert!(region_text_len(&session, id) <= content_limits::MAX_REGION_TEXT_BYTES);
+        }
+        append(&mut session, id, "NEWEST");
+
+        let Content::Text(text) = &session.scene.get(id).unwrap().content else {
+            panic!("expected text");
+        };
+        assert!(text.text.ends_with("NEWEST"));
+        assert!(text.text.len() >= content_limits::TRIMMED_REGION_TEXT_BYTES);
+        assert_eq!(session.recent_protocol_errors().count(), 0);
+    }
+
+    #[test]
+    fn session_text_is_capped_across_regions() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        let chunk = "B".repeat(1024 * 1024);
+        let per_region = content_limits::MAX_REGION_TEXT_BYTES / chunk.len();
+        let regions =
+            content_limits::MAX_SESSION_TEXT_BYTES / content_limits::MAX_REGION_TEXT_BYTES;
+
+        for n in 1..=regions + 4 {
+            let id = RegionId::new(n as u32);
+            create_text_region(&mut session, id);
+            for _ in 0..per_region {
+                append(&mut session, id, &chunk);
+            }
+        }
+
+        let total: usize = session
+            .scene
+            .iter_depth_first()
+            .map(|region| content_limits::text_bytes(&region.content))
+            .sum();
+        assert!(total <= content_limits::MAX_SESSION_TEXT_BYTES, "{total}");
+        assert!(session.recent_protocol_errors().count() > 0);
+
+        // Freeing a region makes room again.
+        session
+            .handle_message(AppMessage::DeleteRegion {
+                id: RegionId::new(1),
+            })
+            .unwrap();
+        let last = RegionId::new((regions + 4) as u32);
+        let before = region_text_len(&session, last);
+        append(&mut session, last, &chunk);
+        assert_eq!(region_text_len(&session, last), before + chunk.len());
+    }
+
+    #[test]
+    fn set_content_counts_toward_the_session_limit() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        let chunk = "C".repeat(1024 * 1024);
+        let count = content_limits::MAX_SESSION_TEXT_BYTES / chunk.len() + 1;
+
+        for n in 1..=count {
+            let id = RegionId::new(n as u32);
+            create_text_region(&mut session, id);
+            session
+                .handle_message(AppMessage::SetContent {
+                    id,
+                    content: Content::Text(ultty_protocol::TextContent::new(chunk.clone())),
+                })
+                .unwrap();
+        }
+
+        assert_eq!(region_text_len(&session, RegionId::new(count as u32)), 0);
+        assert_eq!(session.recent_protocol_errors().count(), 1);
     }
 }

@@ -356,6 +356,21 @@ A `Dimension` is a `u8` tag followed immediately by an `f32` LE value only for t
 
 `TextContent`: string, then `wrap: u8` (`None=0`, `Char=1`, `Word=2`), `align: u8` (`Left=0`, `Center=1`, `Right=2`), `overflow: u8` (`Clip=0`, `Ellipsis=1`, `Fade=2`).
 
+**Text limits.** Terminals bound the text a session holds, since
+`AppendContent` adds up even though each message is size-limited. Ultty's
+limits:
+
+- **Per region: 4 MiB, as a ring.** When `AppendContent` takes a region's
+  text (`Text`, `RichText` spans, or `Markdown` source) past 4 MiB, the
+  oldest text is dropped until about 3 MiB remain, cutting after a line
+  break when one is near. Streaming apps such as logs and chat keep working
+  and keep their newest output; an app that needs its whole history must
+  keep it itself or split it across regions.
+- **Per session: 64 MiB.** A `SetContent` or `AppendContent` that would take
+  the text of all the session's regions past 64 MiB is refused: the region
+  keeps its content and the app gets `Error` 400. Deleting regions or
+  replacing their content frees room.
+
 ### 8.3 Rich Text Content
 
 `RichText` is a `u32` span count followed by spans. Each span is a string followed by a full `Style`.

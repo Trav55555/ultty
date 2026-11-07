@@ -9,6 +9,7 @@ use ultty_protocol::{
     PROTOCOL_VERSION,
 };
 
+use super::content_limits::{text_bytes, trim_region_text, MAX_SESSION_TEXT_BYTES};
 use super::errors::NativeProtocolError;
 use super::{NativeSession, StyleAnimation, TERMINAL_CAPABILITIES};
 use crate::scene::region::Region;
@@ -338,6 +339,10 @@ impl NativeSession {
 
     /// Handle SetContent.
     fn handle_set_content(&mut self, id: RegionId, content: Content) {
+        if self.scene.get(id).is_some() && !self.admit_text(text_bytes(&content)) {
+            self.refuse_text_over_limit(id);
+            return;
+        }
         if let Some(region) = self.scene.get_mut(id) {
             region.content = content;
             region.mark_dirty();
@@ -349,7 +354,14 @@ impl NativeSession {
     }
 
     /// Handle AppendContent - append text to existing region content.
+    ///
+    /// The region keeps only its newest text past a limit, like scrollback,
+    /// and the session as a whole has a ceiling (see `content_limits`).
     fn handle_append_content(&mut self, id: RegionId, text: String) {
+        if self.scene.get(id).is_some() && !self.admit_text(text.len()) {
+            self.refuse_text_over_limit(id);
+            return;
+        }
         if let Some(region) = self.scene.get_mut(id) {
             match &mut region.content {
                 Content::Text(tc) => {
@@ -384,12 +396,24 @@ impl NativeSession {
                     return;
                 }
             }
+            trim_region_text(&mut region.content);
             region.mark_dirty();
             self.mark_region_visual_changed(id);
         } else {
             warn!("AppendContent for unknown region {:?}", id);
             self.queue_protocol_error(NativeProtocolError::region_not_found(id));
         }
+    }
+
+    fn refuse_text_over_limit(&mut self, id: RegionId) {
+        warn!(
+            "Session {} content for region {:?} refused: over {} bytes of text",
+            self.session_id, id, MAX_SESSION_TEXT_BYTES
+        );
+        self.queue_protocol_error(NativeProtocolError::bad_request(format!(
+            "session text would exceed {MAX_SESSION_TEXT_BYTES} bytes; content of region {} unchanged",
+            id.0
+        )));
     }
 
     /// Handle SetRegionMetadata.
