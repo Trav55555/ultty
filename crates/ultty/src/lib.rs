@@ -54,6 +54,5 @@ pub mod session;
 pub mod tabs;
 pub mod terminal_manager;
 pub mod testing;
-pub mod tmux;
 pub mod url;
 pub mod vim;

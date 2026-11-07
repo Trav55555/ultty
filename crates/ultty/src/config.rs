@@ -26,8 +26,6 @@ pub struct Config {
     pub behavior: BehaviorConfig,
     /// Launch profiles
     pub profiles: ProfilesConfig,
-    /// Tmux integration configuration
-    pub tmux: TmuxConfig,
 }
 
 impl Config {
@@ -799,29 +797,6 @@ impl Default for BehaviorConfig {
     }
 }
 
-/// Tmux integration configuration.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct TmuxConfig {
-    /// Enable tmux passthrough for escape sequences when running inside tmux.
-    /// This allows OSC 52 clipboard, sixel graphics, etc. to reach the outer terminal.
-    pub passthrough: bool,
-    /// Automatically detect when running inside tmux and adjust behavior.
-    pub auto_detect: bool,
-    /// Session name for control mode (if launching tmux).
-    pub session_name: Option<String>,
-}
-
-impl Default for TmuxConfig {
-    fn default() -> Self {
-        Self {
-            passthrough: true,
-            auto_detect: true,
-            session_name: None,
-        }
-    }
-}
-
 /// Launch profiles configuration.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
@@ -1085,14 +1060,6 @@ copy = "ctrl+c"
     }
 
     #[test]
-    fn tmux_config_defaults() {
-        let config = TmuxConfig::default();
-        assert!(config.passthrough);
-        assert!(config.auto_detect);
-        assert!(config.session_name.is_none());
-    }
-
-    #[test]
     fn font_size_is_clamped_to_sane_range() {
         assert_eq!(clamp_font_size(0.0), MIN_FONT_SIZE);
         assert_eq!(clamp_font_size(-3.0), MIN_FONT_SIZE);
@@ -1120,18 +1087,10 @@ copy = "ctrl+c"
     }
 
     #[test]
-    fn parse_tmux_config() {
-        let toml_str = r##"
-[tmux]
-passthrough = false
-auto_detect = true
-session_name = "dev"
-"##;
-
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(!config.tmux.passthrough);
-        assert!(config.tmux.auto_detect);
-        assert_eq!(config.tmux.session_name, Some("dev".to_string()));
+    fn config_with_retired_tmux_table_still_loads() {
+        let config: Config =
+            toml::from_str("[tmux]\npassthrough = true\n[font]\nfamily = \"Fira Code\"\n").unwrap();
+        assert_eq!(config.font.family, "Fira Code");
     }
 
     #[test]

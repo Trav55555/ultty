@@ -18,7 +18,6 @@ use ultty::protocol::ProtocolServer;
 use ultty::renderer::Renderer;
 use ultty::tabs::TabBarState;
 use ultty::terminal_manager::{TabId, TerminalManager};
-use ultty::tmux::TmuxController;
 use ultty::url::UrlDetector;
 use ultty::vim::{CopyMode, Selection as VimSelection};
 use winit::application::ApplicationHandler;
@@ -153,8 +152,6 @@ pub struct App {
     cursor_blink_visible: bool,
     /// Last time cursor blink state changed
     last_cursor_blink: Instant,
-    /// Tmux integration controller
-    tmux: TmuxController,
     /// Auto-dump countdown (frames remaining until dump, 0 = disabled)
     auto_dump_frames: u32,
     /// Native protocol server for TUI apps
@@ -305,12 +302,6 @@ impl App {
         // Build shortcuts list before moving config
         let shortcuts_list = Self::build_shortcuts_list(&config.keybindings);
 
-        // Initialize tmux controller for passthrough support
-        let tmux = TmuxController::new();
-        if tmux.is_nested() && config.tmux.auto_detect {
-            tracing::info!("Running inside tmux, passthrough mode enabled");
-        }
-
         let mut app = Self {
             window,
             surface,
@@ -341,7 +332,6 @@ impl App {
             shortcuts_list,
             cursor_blink_visible: true,
             last_cursor_blink: Instant::now(),
-            tmux,
             // Check for auto-dump environment variable (number of frames to wait)
             auto_dump_frames: std::env::var("ULTTY_AUTO_DUMP")
                 .ok()

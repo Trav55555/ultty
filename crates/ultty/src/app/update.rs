@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 
 use super::App;
 use ultty::event_loop::TerminalEvent;
-use ultty::tmux::TmuxController;
 
 impl App {
     pub(super) fn next_update_deadline(&self, now: Instant) -> Instant {
@@ -254,24 +253,10 @@ impl App {
                                 // Set clipboard content (OSC 52)
                                 // Only handle from focused terminal for security
                                 if Some(terminal_id) == focused_id {
-                                    // If running inside tmux, use passthrough to reach outer terminal
-                                    if self.tmux.is_nested() && self.config.tmux.passthrough {
-                                        // Send OSC 52 wrapped in tmux passthrough
-                                        use base64::Engine;
-                                        let encoded =
-                                            base64::engine::general_purpose::STANDARD.encode(&data);
-                                        let osc52 = format!("\x1b]52;c;{}\x07", encoded);
-                                        let passthrough =
-                                            TmuxController::wrap_passthrough(osc52.as_bytes());
-                                        // Write to stdout to reach outer terminal
-                                        use std::io::Write;
-                                        let _ = std::io::stdout().write_all(&passthrough);
-                                        let _ = std::io::stdout().flush();
-                                        tracing::debug!(
-                                            "Set clipboard via OSC 52 passthrough: {} chars",
-                                            data.len()
-                                        );
-                                    } else if let Some(ref mut cb) = self.clipboard {
+                                    // Ultty owns a window and talks to the system clipboard
+                                    // directly. It never forwards OSC 52 to its own stdout,
+                                    // even when it was started from inside tmux.
+                                    if let Some(ref mut cb) = self.clipboard {
                                         if let Err(e) = cb.set_text(&data) {
                                             tracing::warn!("Failed to set clipboard: {}", e);
                                         } else {
