@@ -165,6 +165,8 @@ pub struct App {
     cursor_blink: blink::CursorBlink,
     /// Auto-dump countdown (frames remaining until dump, 0 = disabled)
     auto_dump_frames: u32,
+    /// Frames drawn so far (saturating); marks the first in the startup log.
+    frames_drawn: u32,
     /// Native protocol server for TUI apps
     protocol_server: Option<ProtocolServer>,
     /// Control server for CLI automation (ulttyctl)
@@ -228,6 +230,7 @@ impl App {
         );
         let window = event_loop.create_window(attributes)?;
         let window = Arc::new(window);
+        tracing::debug!(target: "ultty::startup", "window created");
         // winit leaves input methods off; without this, fcitx and ibus
         // users cannot type Chinese, Japanese or Korean.
         window.set_ime_allowed(true);
@@ -254,6 +257,7 @@ impl App {
             ..Default::default()
         }))
         .map_err(|e| anyhow::anyhow!("Failed to find suitable GPU adapter: {e}"))?;
+        tracing::debug!(target: "ultty::startup", "GPU adapter ready");
 
         // Scale font size to physical pixels so cosmic-text metrics match
         // the orthographic projection (which uses physical window dimensions).
@@ -270,6 +274,7 @@ impl App {
             &scaled_font,
         ))?;
 
+        tracing::debug!(target: "ultty::startup", "renderer ready");
         // Set window opacity
         renderer.set_opacity(config.behavior.opacity);
 
@@ -294,6 +299,7 @@ impl App {
         // Create terminal manager - with launch profile if configured
         let mut terminal_manager =
             Self::create_terminal_manager(&config, cols, rows, &mut protocol_server)?;
+        tracing::debug!(target: "ultty::startup", "shell started");
         terminal_manager.set_theme_colors(config.colors.theme_colors());
         terminal_manager.set_scrollback_lines(config.behavior.scrollback_lines);
         terminal_manager.set_close_on_exit(config.behavior.close_on_exit);
@@ -363,6 +369,7 @@ impl App {
             shortcuts_list,
             cursor_blink: blink::CursorBlink::new(),
             // Check for auto-dump environment variable (number of frames to wait)
+            frames_drawn: 0,
             auto_dump_frames: std::env::var("ULTTY_AUTO_DUMP")
                 .ok()
                 .and_then(|s| s.parse().ok())
