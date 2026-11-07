@@ -7,7 +7,7 @@
 //! checker backs the `vt_terminal` libFuzzer target in `fuzz/`.
 
 use proptest::prelude::*;
-use ultty_vt::ansi::AnsiParser;
+use ultty_vt::ansi::{AnsiOutput, AnsiParser};
 use ultty_vt::grid::{Dimensions, Terminal, TerminalHandler};
 
 #[derive(Debug, Clone)]
@@ -88,14 +88,24 @@ fn step() -> impl Strategy<Value = Step> {
     ]
 }
 
-fn run(cols: u16, rows: u16, steps: &[Step]) -> Result<(), String> {
+/// Feed `steps` to a fresh terminal, checking it after each. With `spans`,
+/// bytes go through the ASCII-span path the terminal uses for PTY output
+/// rather than one action per character.
+fn run(cols: u16, rows: u16, steps: &[Step], spans: bool) -> Result<(), String> {
     let mut terminal = Terminal::new(Dimensions::new(cols, rows));
     let mut parser = AnsiParser::new();
     for (index, step) in steps.iter().enumerate() {
         match step {
             Step::Bytes(bytes) => {
                 let mut handler = TerminalHandler::new(&mut terminal);
-                parser.feed(bytes, |action| handler.handle(action));
+                if spans {
+                    parser.feed_with_ascii_spans(bytes, |output| match output {
+                        AnsiOutput::Action(action) => handler.handle(action),
+                        AnsiOutput::PrintAscii(bytes) => handler.handle_ascii_span(bytes),
+                    });
+                } else {
+                    parser.feed(bytes, |action| handler.handle(action));
+                }
             }
             Step::Resize(c, r) => terminal.resize(Dimensions::new(*c, *r)),
         }
@@ -115,8 +125,10 @@ proptest! {
         rows in 1u16..=12,
         steps in prop::collection::vec(step(), 1..48),
     ) {
-        if let Err(violation) = run(cols, rows, &steps) {
-            prop_assert!(false, "{}", violation);
+        for spans in [false, true] {
+            if let Err(violation) = run(cols, rows, &steps, spans) {
+                prop_assert!(false, "spans {}: {}", spans, violation);
+            }
         }
     }
 }
