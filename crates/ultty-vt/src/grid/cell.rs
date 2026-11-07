@@ -413,6 +413,20 @@ impl Cell {
         };
     }
 
+    /// Whether this cell equals [`Cell::default`]. Unlike `==`, it checks
+    /// every field without branching, so a scan over many cells can be
+    /// vectorised.
+    #[inline]
+    pub(crate) fn is_default(&self) -> bool {
+        ((self.c as u32 ^ ' ' as u32)
+            | self.fg.0
+            | self.bg.0
+            | u32::from(self.flags.0)
+            | self.hyperlink_id
+            | self.underline_color.0)
+            == 0
+    }
+
     /// Check if this is a blank cell.
     #[inline]
     pub fn is_blank(&self) -> bool {
@@ -490,6 +504,25 @@ mod tests {
         assert_eq!(cell.bg(), Color::Default);
         assert!(cell.flags().is_empty());
         assert!(cell.is_blank());
+        assert!(cell.is_default());
+    }
+
+    #[test]
+    fn any_changed_field_makes_a_cell_not_default() {
+        let changes: [fn(&mut Cell); 6] = [
+            |c| c.set_char('x'),
+            |c| c.set_fg(Color::Indexed(0)),
+            |c| c.set_bg(Color::Indexed(0)),
+            |c| c.set_flag(CellFlags::WIDE_CHAR_SPACER),
+            |c| c.hyperlink_id = 3,
+            |c| c.set_underline_color(Color::Indexed(0)),
+        ];
+        for change in changes {
+            let mut cell = Cell::default();
+            change(&mut cell);
+            assert_ne!(cell, Cell::default());
+            assert!(!cell.is_default(), "{cell:?}");
+        }
     }
 
     #[test]
