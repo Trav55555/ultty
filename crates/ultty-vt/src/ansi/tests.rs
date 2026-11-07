@@ -1289,3 +1289,60 @@ fn utf8_sequence_split_across_feeds_decodes() {
     parser.feed(b"\xAC", |a| actions.push(a));
     assert_eq!(actions, vec![Action::Print('\u{20AC}')]);
 }
+
+/// Bytes biased towards UTF-8: whole characters of every length, broken
+/// and overlong sequences, controls and escapes.
+fn utf8_heavy_bytes() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+    use proptest::prelude::*;
+    let piece = prop_oneof![
+        4 => any::<char>().prop_map(|c| c.to_string().into_bytes()),
+        2 => prop::sample::select(vec!["é", "中", "😀", "\u{301}", "€", "\u{10FFFF}"])
+            .prop_map(|s| s.as_bytes().to_vec()),
+        1 => prop::collection::vec(0x80u8..=0xFF, 1..4),
+        1 => prop::sample::select(vec![
+            &b"\xC0\xAF"[..], b"\xE0\x80\x80", b"\xED\xA0\x80", b"\xF4\x90\x80\x80",
+            b"\xE2\x82", b"\xF0\x9F\x98", b"\x1b[1m", b"\x1b(0", b"\x1b(B", b"\r\n",
+            b"\x1b]0;t\xC3\xA9\x07",
+        ])
+        .prop_map(<[u8]>::to_vec),
+        1 => any::<u8>().prop_map(|b| vec![b]),
+    ];
+    prop::collection::vec(piece, 0..24).prop_map(|v| v.concat())
+}
+
+proptest::proptest! {
+    /// Span feeding is an optimisation only: split anywhere, it yields
+    /// exactly the characters and actions that byte-wise feeding does.
+    #[test]
+    fn ascii_span_feed_matches_feed(
+        bytes in utf8_heavy_bytes(),
+        cuts in proptest::collection::vec(proptest::prelude::any::<usize>(), 0..4),
+    ) {
+        let mut cuts: Vec<usize> = cuts.iter().map(|c| c % (bytes.len() + 1)).collect();
+        cuts.sort_unstable();
+        let mut chunks = Vec::new();
+        let mut start = 0;
+        for cut in cuts.into_iter().chain([bytes.len()]) {
+            chunks.push(&bytes[start..cut]);
+            start = cut;
+        }
+
+        let mut expected = Vec::new();
+        let mut parser = AnsiParser::new();
+        for chunk in &chunks {
+            parser.feed(chunk, |a| expected.push(a));
+        }
+
+        let mut actual = Vec::new();
+        let mut parser = AnsiParser::new();
+        for chunk in &chunks {
+            parser.feed_with_ascii_spans(chunk, |out| match out {
+                AnsiOutput::Action(a) => actual.push(a),
+                AnsiOutput::PrintAscii(span) => {
+                    actual.extend(span.iter().map(|&b| Action::Print(b as char)));
+                }
+            });
+        }
+        proptest::prop_assert_eq!(actual, expected);
+    }
+}
