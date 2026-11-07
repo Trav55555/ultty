@@ -538,8 +538,6 @@ impl Buffer {
 
     /// Write a character, saving to history if scrolling occurs.
     pub fn write_char(&mut self, c: char) {
-        use unicode_width::UnicodeWidthChar;
-
         self.scroll_offset = 0;
 
         let cursor_col = self.grid.cursor().position.col;
@@ -550,11 +548,8 @@ impl Buffer {
         let max_col = self.grid.dimensions().cols;
         // A codepoint that joins the previous grapheme cluster takes no new
         // column, so it can never wrap or scroll.
-        let char_width = if self.grid.continues_cluster(c) {
-            0
-        } else {
-            c.width().unwrap_or(0) as u16
-        };
+        let width = self.grid.print_width(c);
+        let char_width = width.unwrap_or(0);
 
         // Determine if this write will cause scrolling.
         // With pending wrap behavior:
@@ -579,7 +574,8 @@ impl Buffer {
             self.save_scrolled_rows(1);
         }
 
-        self.grid.write_char(c);
+        // Saving rows leaves the grid as it was, so the width still holds.
+        self.grid.write_measured_char(c, width);
     }
 
     /// Write a contiguous printable ASCII span, saving scrolled rows to history.

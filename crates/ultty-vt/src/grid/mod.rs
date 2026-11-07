@@ -599,17 +599,32 @@ impl Grid {
 
     /// Write a character at the cursor position and advance.
     pub fn write_char(&mut self, c: char) {
+        let width = self.print_width(c);
+        self.write_measured_char(c, width);
+    }
+
+    /// The columns printing `c` takes: `None` when it joins the previous
+    /// grapheme cluster, else its width (0 for control characters and
+    /// combining marks that start no cluster, 1 normally, 2 for wide).
+    pub(super) fn print_width(&self, c: char) -> Option<u16> {
         use unicode_width::UnicodeWidthChar;
 
         if self.continues_cluster(c) {
+            None
+        } else {
+            Some(c.width().unwrap_or(0) as u16)
+        }
+    }
+
+    /// [`Grid::write_char`] with `width` from [`Grid::print_width`] for the
+    /// current state, so a caller that needed it first does not pay twice.
+    pub(super) fn write_measured_char(&mut self, c: char, width: Option<u16>) {
+        let Some(width) = width else {
             if let Some((row, col)) = self.cluster_base() {
                 self.extend_cluster(row, col, c);
             }
             return;
-        }
-
-        // Get character width (0 for control chars, 1 for normal, 2 for wide)
-        let width = c.width().unwrap_or(0) as u16;
+        };
 
         if width == 0 {
             // Zero-width character - could be combining mark or control char
