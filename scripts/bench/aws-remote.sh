@@ -89,7 +89,9 @@ fetch_verified() {
 setup_ghostty() {
   local have
   have=$(/usr/local/bin/ghostty --version 2>/dev/null | awk '/^Ghostty/ {print $2; exit}' || true)
-  if [[ "$have" == "$EXPECT_GHOSTTY" ]]; then return; fi
+  # A tarball build without git metadata may report "<version>-dev+0000000";
+  # the source itself was checked against the release signature.
+  if [[ "${have%%-dev+*}" == "$EXPECT_GHOSTTY" ]]; then return; fi
   log "building Ghostty $EXPECT_GHOSTTY from source (Zig $ZIG_VERSION)"
   apt_install minisign libgtk-4-dev libadwaita-1-dev gettext libxml2-utils
   local zig_tar ghostty_tar build="$WORK/ghostty-build"
@@ -104,7 +106,7 @@ setup_ghostty() {
   tar -xzf "$ghostty_tar" -C "$build"
   (cd "$build/ghostty-$EXPECT_GHOSTTY" &&
     "$build/zig-x86_64-linux-$ZIG_VERSION/zig" build -Doptimize=ReleaseFast \
-      -fno-sys=gtk4-layer-shell -p "$build/install")
+      -fno-sys=gtk4-layer-shell -Dversion-string="$EXPECT_GHOSTTY" -p "$build/install")
   sudo install -m 0755 "$build/install/bin/ghostty" /usr/local/bin/ghostty
   # The bundled gtk4-layer-shell is a shared library next to the binary.
   if [[ -d "$build/install/lib" ]]; then
@@ -113,7 +115,7 @@ setup_ghostty() {
   fi
   sudo cp -r "$build/install/share/." /usr/local/share/
   have=$(/usr/local/bin/ghostty --version 2>/dev/null | awk '/^Ghostty/ {print $2; exit}')
-  [[ "$have" == "$EXPECT_GHOSTTY" ]] || die "built Ghostty reports $have, expected $EXPECT_GHOSTTY"
+  [[ "${have%%-dev+*}" == "$EXPECT_GHOSTTY" ]] || die "built Ghostty reports $have, expected $EXPECT_GHOSTTY"
 }
 
 setup_terminals() {
