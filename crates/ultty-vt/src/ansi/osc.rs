@@ -51,7 +51,9 @@ impl AnsiParser {
             _ => {
                 self.dispatch_osc(StringTerminator::St, callback);
                 self.reset();
-                // Reprocess this byte from ground state
+                // The ESC ended the string and starts the next sequence
+                // (xterm), so `byte` is read after it, not printed.
+                self.process_byte(0x1b, callback);
                 self.process_byte(byte, callback);
             }
         }
@@ -282,7 +284,9 @@ impl AnsiParser {
             _ => {
                 self.dispatch_dcs(callback);
                 self.reset();
-                // Reprocess this byte from ground state
+                // The ESC ended the string and starts the next sequence
+                // (xterm), so `byte` is read after it, not printed.
+                self.process_byte(0x1b, callback);
                 self.process_byte(byte, callback);
             }
         }

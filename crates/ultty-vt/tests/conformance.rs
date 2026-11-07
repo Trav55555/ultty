@@ -802,6 +802,22 @@ fn can_cancels_a_sequence_without_printing_it() {
 }
 
 #[test]
+fn an_escape_ending_a_string_starts_the_next_sequence() {
+    // OSC and DCS ended by ESC plus something other than `\`: the ESC begins
+    // the next sequence, whose bytes must not be printed.
+    let (text, _) = screen(20, 1, b"a\x1b]0;title\x1b[1mb");
+    assert_eq!(text, rows(&["ab"]));
+    let (text, _) = screen(20, 1, b"a\x1bP$qm\x1b[1mb");
+    assert_eq!(text, rows(&["ab"]));
+    let term = run(20, 1, b"\x1b]0;title\x1b[1mb");
+    assert!(term
+        .grid()
+        .cell(0, 0)
+        .expect("cell")
+        .has_flag(CellFlags::BOLD));
+}
+
+#[test]
 fn malformed_sequences_are_swallowed_whole() {
     let (text, _) = screen(10, 1, b"a\x1b[1?2hb\x1b[1 2qc\x1b[1\xc3\xa92md");
     assert_eq!(text, rows(&["abcd"]));
