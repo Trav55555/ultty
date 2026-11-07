@@ -1,0 +1,30 @@
+{
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)",
+  "valgrind": "valgrind-3.27.1",
+  "size_mib": 1,
+  "geometry": "120x40",
+  "instructions": {
+    "parse/ascii": 10072802,
+    "vt/ascii": 88339013,
+    "parse/sgr-dense": 46370473,
+    "vt/sgr-dense": 77171445,
+    "parse/unicode-mixed": 75382436,
+    "vt/unicode-mixed": 1059795452,
+    "parse/cjk": 79787193,
+    "vt/cjk": 864118714,
+    "parse/emoji-zwj": 76421090,
+    "vt/emoji-zwj": 1471060127,
+    "parse/combining": 84794047,
+    "vt/combining": 1651374547,
+    "parse/cursor-redraw": 21062109,
+    "vt/cursor-redraw": 29155337,
+    "parse/scroll": 26731302,
+    "vt/scroll": 575907050,
+    "parse/scroll-region": 14363914,
+    "vt/scroll-region": 40611855,
+    "parse/alt-screen": 41337274,
+    "vt/alt-screen": 52034596,
+    "parse/wide-wrap": 8470494,
+    "vt/wide-wrap": 74758767
+  }
+}
