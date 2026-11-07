@@ -49,7 +49,6 @@ pub mod in_band;
 mod layout;
 mod messages;
 mod style;
-pub mod vim;
 
 pub use codec::{Decode, Encode, MAX_REGION_COUNT};
 pub use content::{
@@ -72,7 +71,6 @@ pub use style::{
     BorderEdges, BorderStyle, BorderType, Color, Easing, NamedColor, Style, Transition,
     TRANSITION_ALL, TRANSITION_BG, TRANSITION_BORDER_COLOR, TRANSITION_FG, TRANSITION_OPACITY,
 };
-pub use vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimRegister, VimState};
 
 /// Region identifier, unique within a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

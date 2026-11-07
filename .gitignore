@@ -46,3 +46,6 @@ a.out
 
 # Editor config (project-specific)
 rust-analyzer.toml
+
+# Vim swap files (.foo.swp, .foo.swo, ... .foo.sua)
+.*.s[a-w][a-z]

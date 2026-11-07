@@ -66,7 +66,7 @@ use ratatui::text::Line;
 
 use super::View;
 use crate::theme::Theme;
-use ultty_protocol::vim::{VimAction, VimMode};
+use ultty_protocol::{Key, Modifiers};
 ```
 
 Prefer explicit imports over globs. Preludes exist in `ulttui::prelude` for convenience re-exports.

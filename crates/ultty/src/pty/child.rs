@@ -1,6 +1,7 @@
 //! Child process management for PTY.
 
 use super::{current_dir, default_shell, Pty, PtyError, PtySize, Result, SlavePty};
+use crate::grid::DEFAULT_TERMINAL_NAME;
 use nix::libc;
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
@@ -20,6 +21,8 @@ pub struct Child {
     exited: bool,
     /// Exit status (if exited)
     exit_status: Option<i32>,
+    /// The `TERM` the child was started with
+    term: String,
 }
 
 impl Child {
@@ -52,6 +55,9 @@ impl Child {
     /// entries override inherited variables of the same name. Passing the
     /// extra variables per spawn keeps them out of `std::env`, which is
     /// unsound to mutate in a multithreaded process.
+    ///
+    /// `TERM` is never inherited: it is the `TERM` in `env`, or
+    /// [`DEFAULT_TERMINAL_NAME`] when `env` has none.
     pub fn spawn(
         program: &str,
         args: &[&str],
@@ -65,9 +71,19 @@ impl Child {
         // else (a tmux pane, a `script` recording) that inherited the
         // variables can tell the socket is not for it.
         let mut env = env.to_vec();
+        // Tell commands in the shell which Ultty they run in, so `ulttyctl`
+        // controls this window rather than the newest one.
+        env.push(("ULTTY_PID".into(), std::process::id().to_string().into()));
         if env.iter().any(|(key, _)| key == "ULTTY_SOCKET") {
             env.push(("ULTTY_TTY".into(), pty.slave_name().into()));
         }
+        let term = match env.iter().find(|(key, _)| key == "TERM") {
+            Some((_, value)) => value.to_string_lossy().into_owned(),
+            None => {
+                env.push(("TERM".into(), DEFAULT_TERMINAL_NAME.into()));
+                DEFAULT_TERMINAL_NAME.to_string()
+            }
+        };
         let exec_plan = ChildExec::new(program, args, working_dir, &env)?;
 
         // SAFETY: the child path only performs session/fd setup and execve with
@@ -83,6 +99,7 @@ impl Child {
                     pid: child,
                     exited: false,
                     exit_status: None,
+                    term,
                 })
             }
             ForkResult::Child => {
@@ -121,6 +138,11 @@ impl Child {
     /// Get the exit status (if exited).
     pub fn exit_status(&self) -> Option<i32> {
         self.exit_status
+    }
+
+    /// The `TERM` the child was started with.
+    pub fn term(&self) -> &str {
+        &self.term
     }
 
     /// Resize the PTY and notify the child.
@@ -265,6 +287,9 @@ struct ChildExec {
     _env: Vec<CString>,
     envp: Vec<*const c_char>,
     working_dir: CString,
+    /// One past the highest fd the child may have open, read before fork
+    /// for the fallback in [`close_inherited_fds`].
+    fd_limit: libc::c_int,
 }
 
 impl ChildExec {
@@ -302,7 +327,6 @@ impl ChildExec {
         for (key, value) in extra_env {
             env.push(env_entry(key, value)?);
         }
-        env.push(cstring_from_bytes(b"TERM=xterm-256color")?);
         env.push(cstring_from_bytes(b"COLORTERM=truecolor")?);
 
         let mut argv = arg_strings
@@ -321,7 +345,46 @@ impl ChildExec {
             _env: env,
             envp,
             working_dir,
+            fd_limit: open_fd_limit(),
         })
+    }
+}
+
+/// Highest fd number plus one that this process can hold, capped so the
+/// fallback close loop stays short when the limit is "unlimited".
+fn open_fd_limit() -> libc::c_int {
+    const CAP: libc::rlim_t = 1 << 20;
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes into the rlimit struct we pass.
+    let current = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+        limit.rlim_cur
+    } else {
+        CAP
+    };
+    libc::c_int::try_from(current.min(CAP)).unwrap_or(libc::c_int::MAX)
+}
+
+/// Close every fd above stderr in the child, so descriptors this process
+/// opened without CLOEXEC (GPU drivers do, for buffers that may hold screen
+/// contents) never reach the shell. Async-signal-safe: plain syscalls only.
+fn close_inherited_fds(fd_limit: libc::c_int) {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: close_range(3, ~0, 0) only closes descriptors; nothing
+        // after this point uses an fd above stderr.
+        if unsafe { libc::syscall(libc::SYS_close_range, 3, libc::c_uint::MAX, 0) } == 0 {
+            return;
+        }
+    }
+    // Kernels before 5.9 and other Unixes: close them one by one.
+    for fd in 3..fd_limit {
+        // SAFETY: closing an fd that is not open just returns EBADF.
+        unsafe {
+            libc::close(fd);
+        }
     }
 }
 
@@ -400,6 +463,8 @@ fn setup_child(slave: SlavePty, exec_plan: &ChildExec) -> ! {
             libc::close(slave_fd);
         }
     }
+
+    close_inherited_fds(exec_plan.fd_limit);
 
     // Change to working directory
     // SAFETY: working_dir is a NUL-terminated CString built before fork and
@@ -600,6 +665,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn child_inherits_only_the_standard_fds() {
+        // An fd opened without CLOEXEC (as some GPU drivers do) must not
+        // reach the shell.
+        // SAFETY: the path is a NUL-terminated literal; the fd is closed below.
+        let leaked = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+        assert!(leaked > 2, "open failed: {leaked}");
+
+        // `ls` opens the directory it lists, so 3 is its own fd.
+        let output = run_in_pty("echo FDS $(ls /proc/self/fd); echo DONE");
+
+        // SAFETY: `leaked` is the fd opened above and still owned here.
+        unsafe { libc::close(leaked) };
+        let fds = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("FDS "))
+            .unwrap_or_else(|| panic!("no fd list in {output:?}"));
+        assert_eq!(
+            fds.trim(),
+            "0 1 2 3",
+            "child inherited extra fds: {output:?}"
+        );
+    }
+
+    #[test]
     fn a_child_offered_a_protocol_socket_learns_its_own_terminal() {
         let env = [(
             OsString::from("ULTTY_SOCKET"),
@@ -651,6 +741,30 @@ mod tests {
             output.contains("value=[]"),
             "per-spawn env leaked into another child: {output:?}"
         );
+    }
+
+    #[test]
+    fn term_comes_from_the_spawn_env_or_defaults_to_xterm_256color() {
+        let env = [(OsString::from("TERM"), OsString::from("xterm-ultty"))];
+        let output = run_in_pty_with_env("echo \"term=[$TERM]\"; echo DONE", &env);
+        assert!(output.contains("term=[xterm-ultty]"), "got {output:?}");
+
+        let output = run_in_pty("echo \"term=[$TERM]\"; echo DONE");
+        assert!(output.contains("term=[xterm-256color]"), "got {output:?}");
+    }
+
+    #[test]
+    fn child_remembers_the_term_it_was_started_with() {
+        let env = [(OsString::from("TERM"), OsString::from("xterm-ultty"))];
+        let mut child = Child::spawn("/bin/true", &[], &current_dir(), PtySize::default(), &env)
+            .expect("Failed to spawn true");
+        assert_eq!(child.term(), "xterm-ultty");
+        let _ = child.wait();
+
+        let mut child = Child::spawn("/bin/true", &[], &current_dir(), PtySize::default(), &[])
+            .expect("Failed to spawn true");
+        assert_eq!(child.term(), DEFAULT_TERMINAL_NAME);
+        let _ = child.wait();
     }
 
     #[test]

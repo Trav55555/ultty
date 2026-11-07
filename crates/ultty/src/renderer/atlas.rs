@@ -87,6 +87,8 @@ struct AtlasLayout {
     needs_eviction: bool,
     /// At least one glyph could not be placed this frame.
     frame_incomplete: bool,
+    /// Bumped by every reset; UVs handed out are valid only while it holds.
+    epoch: u64,
 }
 
 impl AtlasLayout {
@@ -100,6 +102,7 @@ impl AtlasLayout {
             cache_misses: 0,
             needs_eviction: false,
             frame_incomplete: false,
+            epoch: 0,
         }
     }
 
@@ -246,6 +249,7 @@ impl AtlasLayout {
         self.rows.clear();
         self.current_y = RESERVED_ROWS;
         self.needs_eviction = false;
+        self.epoch += 1;
 
         tracing::debug!("Evicted all {} glyphs from atlas", evicted);
     }
@@ -410,6 +414,15 @@ impl GlyphAtlas {
     /// The caller should schedule another frame so it gets drawn.
     pub fn frame_incomplete(&self) -> bool {
         self.layout.frame_incomplete()
+    }
+
+    /// Changes whenever the atlas drops its glyphs, which moves them: quads
+    /// kept from an earlier epoch sample the wrong texels. A frame that
+    /// skipped a glyph always ends one (its eviction runs at the next
+    /// `begin_frame`), so geometry built while glyphs were missing is never
+    /// reused either.
+    pub fn epoch(&self) -> u64 {
+        self.layout.epoch
     }
 
     /// Get or cache a glyph.
@@ -604,6 +617,17 @@ mod tests {
         }
         assert!(!layout.frame_incomplete());
         assert_eq!(layout.stats().cached_glyphs, missing.len());
+    }
+
+    #[test]
+    fn evicting_starts_a_new_epoch_and_a_quiet_frame_does_not() {
+        let mut layout = AtlasLayout::new();
+        place(&mut layout, 1);
+        layout.begin_frame();
+        assert_eq!(layout.epoch, 0);
+        layout.needs_eviction = true;
+        layout.begin_frame();
+        assert_eq!(layout.epoch, 1);
     }
 
     #[test]

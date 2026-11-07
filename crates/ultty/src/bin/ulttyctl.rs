@@ -2,10 +2,12 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
+use std::path::Path;
+
 use ultty::control::format_response;
+use ultty::control::paths::{control_dir, ControlEndpoint};
 use ultty_protocol::control::{
-    auth_token_path, control_socket_path, ControlData, ControlEnvelope, ControlRequest,
-    ControlResponse, OutputFormat,
+    ControlData, ControlEnvelope, ControlRequest, ControlResponse, OutputFormat,
 };
 use ultty_protocol::{Key, Modifiers};
 
@@ -45,7 +47,14 @@ fn main() {
         }
     };
     let read_timeout = read_timeout_for(&request, timeout_secs);
-    let request = with_auth_token(request, read_auth_token());
+    let endpoint = match find_instance() {
+        Ok(endpoint) => endpoint,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let request = with_auth_token(request, read_auth_token(&endpoint.token));
     // Always ask for JSON so the reply can be parsed and the exit status set
     // from it; text output is rendered here with the server's formatter.
     let envelope = ControlEnvelope {
@@ -55,7 +64,9 @@ fn main() {
     let command =
         serde_json::to_string(&envelope).expect("control request envelope should serialize");
 
-    let response = match send_command(&command, read_timeout).and_then(|raw| parse_response(&raw)) {
+    let response = match send_command(&endpoint.socket, &command, read_timeout)
+        .and_then(|raw| parse_response(&raw))
+    {
         Ok(response) => response,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -103,18 +114,33 @@ fn response_is_failure(response: &ControlResponse) -> bool {
     )
 }
 
-/// Read the control auth token ultty wrote at startup, if any.
+/// The Ultty this command runs inside (`ULTTY_PID`) while it is still
+/// running, else the most recently started one.
+fn find_instance() -> Result<ControlEndpoint, String> {
+    let dir = control_dir().map_err(|e| format!("cannot use the control directory: {}", e))?;
+    let own_pid = std::env::var("ULTTY_PID")
+        .ok()
+        .and_then(|pid| pid.parse().ok());
+    ultty::control::paths::find_instance(&dir, own_pid).ok_or_else(|| {
+        format!(
+            "no running ultty has a control socket in {} (is it running?)",
+            dir.display()
+        )
+    })
+}
+
+/// Read the control auth token that instance wrote at startup, if any.
 ///
 /// `ULTTY_AUTH_TOKEN` overrides the file so scripts can pass a token in
 /// explicitly.
-fn read_auth_token() -> Option<String> {
+fn read_auth_token(token_path: &Path) -> Option<String> {
     if let Ok(token) = std::env::var("ULTTY_AUTH_TOKEN") {
         let token = token.trim().to_string();
         if !token.is_empty() {
             return Some(token);
         }
     }
-    std::fs::read_to_string(auth_token_path())
+    std::fs::read_to_string(token_path)
         .ok()
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty())
@@ -372,10 +398,8 @@ fn version_output() -> String {
     format!("ulttyctl {}", env!("CARGO_PKG_VERSION"))
 }
 
-fn send_command(command: &str, timeout_secs: u64) -> Result<String, String> {
-    let socket_path = control_socket_path();
-
-    let mut stream = UnixStream::connect(&socket_path)
+fn send_command(socket_path: &Path, command: &str, timeout_secs: u64) -> Result<String, String> {
+    let mut stream = UnixStream::connect(socket_path)
         .map_err(|e| format!("failed to connect to ultty (is it running?): {}", e))?;
 
     stream
@@ -470,8 +494,13 @@ EXECUTION:
     run <command> [args]    Run a command in current tab
 
 AUTHENTICATION:
-    Every command is authenticated automatically with the token ultty writes
-    to $XDG_RUNTIME_DIR/ultty-auth.token at startup (override with the
+    Inside an ultty window, ulttyctl talks to that window's ultty (found
+    through ULTTY_PID, which ultty sets for its shells); elsewhere it talks
+    to the most recently started ultty that is running. Each
+    ultty listens on $XDG_RUNTIME_DIR/ultty-ctl-<pid>.sock (or, without
+    XDG_RUNTIME_DIR, in a private ultty-<uid> directory under $TMPDIR or
+    /tmp). Every command is authenticated automatically with the token that
+    instance writes next to it, ultty-auth-<pid>.token (override with the
     ULTTY_AUTH_TOKEN environment variable).
     auth <token>            Check a token explicitly
 

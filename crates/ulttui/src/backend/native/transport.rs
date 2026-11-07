@@ -36,16 +36,13 @@ pub(super) enum FrameError {
 }
 
 impl NativeBackend {
-    pub(super) fn send_message(&mut self, msg: &AppMessage) -> anyhow::Result<()> {
+    pub(super) fn send_message(&mut self, msg: &AppMessage) -> crate::Result<()> {
         let bytes = msg.encode_to_bytes();
         if let Some(tty) = self.in_band.as_mut() {
             tty.write_frames(&bytes)?;
             return Ok(());
         }
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let stream = self.stream.as_mut().ok_or(crate::Error::NotConnected)?;
         stream.write_all(&bytes)?;
         Ok(())
     }
@@ -58,7 +55,7 @@ impl NativeBackend {
     /// Read everything currently available without blocking past the socket's
     /// read timeout. Returns `Closed` on EOF instead of an error so callers can
     /// turn a disconnect into an orderly quit.
-    pub(super) fn read_available(&mut self) -> anyhow::Result<ReadOutcome> {
+    pub(super) fn read_available(&mut self) -> crate::Result<ReadOutcome> {
         if let Some(tty) = self.in_band.as_mut() {
             let read_buf = &mut self.read_buf;
             let status = tty.read(
@@ -71,10 +68,7 @@ impl NativeBackend {
                 ultty_client::in_band::ReadStatus::Closed => ReadOutcome::Closed,
             });
         }
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
+        let stream = self.stream.as_mut().ok_or(crate::Error::NotConnected)?;
 
         let mut buf = [0u8; 4096];
         loop {

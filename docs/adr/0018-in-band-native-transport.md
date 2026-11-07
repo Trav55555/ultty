@@ -143,9 +143,29 @@ Known costs:
 - A remote app that dies without `Disconnect` leaves its scene up for up to
   10 s. Keys typed meanwhile are sent as in-band strings into the remote
   shell's input, where they show up as junk on the command line.
-- A `cat`ed file holding a valid `ClientHello` opens a session that blanks
-  the tab until the idle timeout. A remote host could already clear the
-  screen with ANSI, so this adds no new capability.
+- A `cat`ed file holding a valid `ClientHello` opens a session. Since
+  2026-11-07 a session stays unconfirmed until in-band data arrives in a
+  later read than its hello, and ends if none comes within 2 s
+  ([spec §1.3](../PROTOCOL_SPEC.md)). While unconfirmed, its scene is not
+  drawn, keys are not sent to it, and replies other than the hello answer
+  are held, so a file with just a hello (or a hello and frames in one
+  burst) shows nothing and has nothing typed into the shell. Before, it
+  blanked the tab for up to 10 s and the user's keys went into the shell's
+  input as in-band strings.
+- What remains:
+  - The hello answer (`ServerHello`, `SessionReady`) is always sent,
+    because the probe depends on it arriving before the DA1 reply. For a
+    stray hello it reaches the shell's input as one in-band string.
+  - Confirmation cannot tell an app from content that arrives in two
+    reads. A crafted file that pads its frames far enough behind its hello
+    (or output trickled by a remote host) still opens a shown session,
+    which lasts until the idle timeout. A remote host could already clear
+    the screen with ANSI, so this adds no new capability. Closing it fully
+    needs the app to echo a value from `SessionReady`, which is a protocol
+    change.
+- Text a session holds is bounded (spec §8.2: a 4 MiB ring per region,
+  64 MiB per session), so in-band data cannot grow the terminal's memory
+  without limit.
 
 ## Follow-ups
 

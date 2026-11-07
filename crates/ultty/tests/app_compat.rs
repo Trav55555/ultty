@@ -20,6 +20,12 @@
 use std::time::Duration;
 use ultty::event_loop::{EventLoop, TerminalEvent};
 
+/// How long an app gets to start and draw. The waits below end as soon as
+/// the app is ready, so this only matters when it is slow: on a loaded
+/// machine (load average 40 and up) htop and nvim have taken more than
+/// five seconds to draw their first screen.
+const APP_START_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Test harness for running terminal applications headlessly.
 pub struct AppTester {
     event_loop: EventLoop,
@@ -40,7 +46,9 @@ impl AppTester {
         })
     }
 
-    /// Create a new tester that runs a specific command.
+    /// Create a new tester that runs a specific command. `args` is the
+    /// whole argv, starting with the program name; empty means just the
+    /// program.
     pub fn new_command(
         program: &str,
         args: &[&str],
@@ -291,7 +299,7 @@ fn test_htop_launches() {
     let mut tester = AppTester::new_command("htop", &[], 120, 40).expect("Failed to spawn htop");
 
     let grid = tester
-        .wait_for_content(Duration::from_secs(5), |grid| {
+        .wait_for_content(APP_START_TIMEOUT, |grid| {
             grid.contains("CPU")
                 || grid.contains("Mem")
                 || grid.contains("%")
@@ -324,32 +332,20 @@ fn test_nvim_launches() {
         return;
     }
 
-    let mut tester =
-        AppTester::new_command("nvim", &["--clean"], 120, 40).expect("Failed to spawn nvim");
-
-    // Wait for nvim to initialize
-    tester
-        .wait_until_stable(Duration::from_millis(500), Duration::from_secs(5))
-        .expect("nvim did not stabilize");
+    let mut tester = AppTester::new_command("nvim", &["nvim", "--clean"], 120, 40)
+        .expect("Failed to spawn nvim");
 
     assert!(
         tester
-            .wait_for_alternate_screen(Duration::from_secs(5))
+            .wait_for_alternate_screen(APP_START_TIMEOUT)
             .expect("nvim alternate screen check failed"),
         "nvim should use alternate screen"
     );
-
-    let grid = tester.capture_grid();
+    // `~` marks the empty buffer's lines once nvim has drawn.
+    let grid = tester
+        .wait_for_content(APP_START_TIMEOUT, |grid| grid.contains('~'))
+        .expect("nvim should draw its empty buffer");
     println!("=== nvim grid ===\n{}", grid);
-
-    assert!(
-        grid.contains("~")
-            || grid.contains("NVIM")
-            || grid.contains("Neovim")
-            || grid.contains("Lazy")
-            || !grid.is_empty(),
-        "nvim should show content"
-    );
 
     tester.send_escape().ok();
     std::thread::sleep(Duration::from_millis(100));
@@ -370,18 +366,17 @@ fn test_vim_launches() {
     }
 
     let mut tester =
-        AppTester::new_command("vim", &["-u", "NONE"], 80, 24).expect("Failed to spawn vim");
-
-    tester
-        .wait_until_stable(Duration::from_millis(500), Duration::from_secs(5))
-        .expect("vim did not stabilize");
+        AppTester::new_command("vim", &["vim", "-u", "NONE"], 80, 24).expect("Failed to spawn vim");
 
     assert!(
         tester
-            .wait_for_alternate_screen(Duration::from_secs(5))
+            .wait_for_alternate_screen(APP_START_TIMEOUT)
             .expect("vim alternate screen check failed"),
         "vim should use alternate screen"
     );
+    tester
+        .wait_for_content(APP_START_TIMEOUT, |grid| grid.contains('~'))
+        .expect("vim should draw its empty buffer");
 
     let grid = tester.capture_grid();
     println!("=== vim grid ===\n{}", grid);

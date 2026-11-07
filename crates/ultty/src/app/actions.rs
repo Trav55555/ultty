@@ -33,6 +33,7 @@ impl ScreenshotOverlayState {
                 .then_some(self.keybindings.as_slice()),
             protocol_status: None,
             cursor_blink_visible: self.cursor_blink_visible,
+            ime_preedit: None,
         }
     }
 }
@@ -57,7 +58,7 @@ impl App {
                 .unwrap_or(false),
             shortcuts_visible: self.shortcuts_visible,
             keybindings: self.shortcuts_list.clone(),
-            cursor_blink_visible: self.cursor_blink_visible,
+            cursor_blink_visible: self.cursor_blink.visible(),
         }
     }
 
@@ -74,7 +75,7 @@ impl App {
         let overlay = overlay_state.as_overlay();
         let locked = super::render::lock_active_panes(
             &self.terminal_manager,
-            self.window.inner_size(),
+            self.renderer.surface_size().into(),
             self.tab_bar.content_top(),
         );
         let panes: Vec<(&ultty::grid::Terminal, ultty::renderer::PaneInfo)> = locked
@@ -275,6 +276,12 @@ impl App {
             .set_color_scheme(ultty::renderer::ColorScheme::from_config(
                 &new_config.colors,
             ));
+        self.terminal_manager
+            .set_theme_colors(new_config.colors.theme_colors());
+        self.terminal_manager
+            .set_scrollback_lines(new_config.behavior.scrollback_lines);
+        self.terminal_manager
+            .set_close_on_exit(new_config.behavior.close_on_exit);
 
         // Update opacity
         self.renderer.set_opacity(new_config.behavior.opacity);
@@ -488,6 +495,8 @@ impl App {
                 .set_color_scheme(ultty::renderer::ColorScheme::from_config(
                     &self.config.colors,
                 ));
+            self.terminal_manager
+                .set_theme_colors(self.config.colors.theme_colors());
 
             self.needs_redraw = true;
             tracing::info!("Switched to theme: {}", theme.name);

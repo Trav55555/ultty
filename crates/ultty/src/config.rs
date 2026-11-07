@@ -24,10 +24,10 @@ pub struct Config {
     pub keybindings: KeybindingConfig,
     /// Behavior configuration
     pub behavior: BehaviorConfig,
+    /// What programs in the terminal are told about it
+    pub terminal: TerminalConfig,
     /// Launch profiles
     pub profiles: ProfilesConfig,
-    /// Tmux integration configuration
-    pub tmux: TmuxConfig,
 }
 
 impl Config {
@@ -46,6 +46,9 @@ impl Config {
         let mut config: Self = toml::from_str(&contents).map_err(ConfigError::Parse)?;
         config.warn_on_duplicate_keybindings();
         config.font.clamp_size();
+        config.font.clamp_line_height();
+        config.behavior.clamp_scrollback();
+        config.terminal.validate_term();
         Ok(config)
     }
 
@@ -250,6 +253,18 @@ impl ColorConfig {
         self.selection = theme.selection;
         if let Some(ref palette) = theme.palette {
             self.palette = palette.clone();
+        }
+    }
+
+    /// The colours terminals report to applications that ask (OSC 4, 10,
+    /// 11, 12): the ones they are drawn with.
+    pub fn theme_colors(&self) -> crate::grid::ThemeColors {
+        let rgb = |c: RgbColor| [c.r, c.g, c.b];
+        crate::grid::ThemeColors {
+            foreground: rgb(self.foreground),
+            background: rgb(self.background),
+            cursor: rgb(self.cursor),
+            ansi: self.palette.to_array().map(rgb),
         }
     }
 }
@@ -469,7 +484,9 @@ pub struct FontConfig {
     pub family: String,
     /// Font size in points
     pub size: f32,
-    /// Line height multiplier
+    /// Line height as a multiple of the font size: the cell height is
+    /// `size * line_height`, rounded up to whole pixels. Clamped to
+    /// [`MIN_LINE_HEIGHT`]..=[`MAX_LINE_HEIGHT`].
     pub line_height: f32,
     /// Draw font ligatures (`=>`, `!=`, `===` in fonts such as Fira Code).
     ///
@@ -523,6 +540,32 @@ impl FontConfig {
                 self.size, clamped, MIN_FONT_SIZE, MAX_FONT_SIZE
             );
             self.size = clamped;
+        }
+    }
+}
+
+/// Smallest `font.line_height` accepted.
+pub const MIN_LINE_HEIGHT: f32 = 0.5;
+
+/// Largest `font.line_height` accepted.
+pub const MAX_LINE_HEIGHT: f32 = 3.0;
+
+impl FontConfig {
+    /// Clamp `line_height` into [`MIN_LINE_HEIGHT`]..=[`MAX_LINE_HEIGHT`],
+    /// warning when it was out of range or not a number. A zero or NaN
+    /// multiplier would give one-pixel cells.
+    pub fn clamp_line_height(&mut self) {
+        let clamped = if self.line_height.is_nan() {
+            FontConfig::default().line_height
+        } else {
+            self.line_height.clamp(MIN_LINE_HEIGHT, MAX_LINE_HEIGHT)
+        };
+        if clamped != self.line_height {
+            warn!(
+                "font.line_height {} is out of range; using {} (allowed {}..={})",
+                self.line_height, clamped, MIN_LINE_HEIGHT, MAX_LINE_HEIGHT
+            );
+            self.line_height = clamped;
         }
     }
 }
@@ -766,7 +809,9 @@ pub struct ParsedKeybinding {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct BehaviorConfig {
-    /// Scrollback buffer size (lines)
+    /// Lines of scrollback each pane keeps, at most
+    /// [`MAX_SCROLLBACK_LINES`]. A config reload applies it to open panes
+    /// too; lowering it drops their oldest lines.
     pub scrollback_lines: usize,
     /// Enable URL detection
     pub url_detection: bool,
@@ -774,9 +819,24 @@ pub struct BehaviorConfig {
     pub copy_on_select: bool,
     /// Enable visual bell (border flash)
     pub bell_visual: bool,
-    /// Enable audio bell (system sound) - off by default
-    pub bell_sound: bool,
-    /// Close window when shell exits
+    /// Mark the window as wanting attention (the taskbar urgency hint) when
+    /// a pane rings the bell while the window is unfocused. Ultty has no
+    /// audible bell.
+    pub bell_urgent: bool,
+    /// Let the cursor blink when a program asks for a blinking cursor (the
+    /// default shape blinks). When false the cursor is always steady. It
+    /// blinks only in the focused window.
+    pub cursor_blink: bool,
+    /// Whether programs may set the clipboard with OSC 52.
+    ///
+    /// `"allow"` (the default) lets the focused pane write the clipboard;
+    /// `"deny"` ignores every OSC 52 write. Any program whose output reaches
+    /// the pane can write, including a `cat`ed file or a remote host over ssh.
+    /// OSC 52 clipboard reads are always refused.
+    pub clipboard_write: ClipboardWrite,
+    /// Close a pane when its program exits, and the window when its last
+    /// pane closes. When false, a pane whose program exited stays open with
+    /// its last output until it is closed by hand.
     pub close_on_exit: bool,
     /// Window opacity (0.0-1.0, 1.0 = fully opaque)
     pub opacity: f32,
@@ -791,7 +851,9 @@ impl Default for BehaviorConfig {
             url_detection: true,
             copy_on_select: true,
             bell_visual: true,
-            bell_sound: false, // Sound off by default
+            bell_urgent: true,
+            cursor_blink: true,
+            clipboard_write: ClipboardWrite::Allow,
             close_on_exit: true,
             opacity: 1.0,
             restore_session: false, // Disabled by default
@@ -799,27 +861,78 @@ impl Default for BehaviorConfig {
     }
 }
 
-/// Tmux integration configuration.
+/// What programs in the terminal are told about it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct TmuxConfig {
-    /// Enable tmux passthrough for escape sequences when running inside tmux.
-    /// This allows OSC 52 clipboard, sixel graphics, etc. to reach the outer terminal.
-    pub passthrough: bool,
-    /// Automatically detect when running inside tmux and adjust behavior.
-    pub auto_detect: bool,
-    /// Session name for control mode (if launching tmux).
-    pub session_name: Option<String>,
+pub struct TerminalConfig {
+    /// `TERM` for shells and commands started in new tabs (splits share
+    /// their tab's).
+    ///
+    /// `"xterm-256color"` (the default) is installed almost everywhere.
+    /// `"xterm-ultty"` describes what Ultty implements more accurately, but
+    /// needs its terminfo entry on every host it reaches, including hosts
+    /// reached over ssh.
+    pub term: String,
 }
 
-impl Default for TmuxConfig {
+impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
-            passthrough: true,
-            auto_detect: true,
-            session_name: None,
+            term: crate::grid::DEFAULT_TERMINAL_NAME.to_string(),
         }
     }
+}
+
+impl TerminalConfig {
+    /// Fall back to the default `term`, with a warning, unless it is a
+    /// plausible terminfo name: 1 to 64 ASCII letters, digits, `.`, `_`,
+    /// `+` or `-`. Anything else could not name an entry and would break
+    /// every program that looks `TERM` up.
+    pub fn validate_term(&mut self) {
+        let valid = (1..=64).contains(&self.term.len())
+            && self
+                .term
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b));
+        if !valid {
+            let default = Self::default().term;
+            warn!(
+                "terminal.term {:?} is not a terminfo name; using {}",
+                self.term, default
+            );
+            self.term = default;
+        }
+    }
+}
+
+/// Largest `behavior.scrollback_lines` accepted. History is stored
+/// compactly, but a million long lines is still hundreds of megabytes per
+/// pane.
+pub const MAX_SCROLLBACK_LINES: usize = 1_000_000;
+
+impl BehaviorConfig {
+    /// Clamp `scrollback_lines` to [`MAX_SCROLLBACK_LINES`], warning when it
+    /// was larger.
+    pub fn clamp_scrollback(&mut self) {
+        if self.scrollback_lines > MAX_SCROLLBACK_LINES {
+            warn!(
+                "behavior.scrollback_lines {} is too large; using {}",
+                self.scrollback_lines, MAX_SCROLLBACK_LINES
+            );
+            self.scrollback_lines = MAX_SCROLLBACK_LINES;
+        }
+    }
+}
+
+/// Policy for clipboard writes requested by programs (OSC 52).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipboardWrite {
+    /// The focused pane may set the clipboard.
+    #[default]
+    Allow,
+    /// OSC 52 writes are ignored.
+    Deny,
 }
 
 /// Launch profiles configuration.
@@ -1013,6 +1126,35 @@ mod tests {
     }
 
     #[test]
+    fn terminal_term_defaults_to_xterm_256color() {
+        assert_eq!(Config::default().terminal.term, "xterm-256color");
+        let config: Config = toml::from_str("[behavior]\nopacity = 1.0\n").unwrap();
+        assert_eq!(config.terminal.term, "xterm-256color");
+    }
+
+    #[test]
+    fn terminal_term_is_read_from_the_terminal_section() {
+        let config: Config = toml::from_str("[terminal]\nterm = \"xterm-ultty\"\n").unwrap();
+        assert_eq!(config.terminal.term, "xterm-ultty");
+    }
+
+    #[test]
+    fn invalid_terminal_term_falls_back_to_the_default() {
+        for bad in ["", "xterm 256color", "a=b", "x\u{0}y", &"x".repeat(65)] {
+            let mut terminal = TerminalConfig {
+                term: bad.to_string(),
+            };
+            terminal.validate_term();
+            assert_eq!(terminal.term, "xterm-256color", "for {bad:?}");
+        }
+        let mut terminal = TerminalConfig {
+            term: "xterm-ultty".to_string(),
+        };
+        terminal.validate_term();
+        assert_eq!(terminal.term, "xterm-ultty");
+    }
+
+    #[test]
     fn parse_rgb_color() {
         let color = RgbColor::from_hex("#FF8800").unwrap();
         assert_eq!(color.r, 0xFF);
@@ -1085,14 +1227,6 @@ copy = "ctrl+c"
     }
 
     #[test]
-    fn tmux_config_defaults() {
-        let config = TmuxConfig::default();
-        assert!(config.passthrough);
-        assert!(config.auto_detect);
-        assert!(config.session_name.is_none());
-    }
-
-    #[test]
     fn font_size_is_clamped_to_sane_range() {
         assert_eq!(clamp_font_size(0.0), MIN_FONT_SIZE);
         assert_eq!(clamp_font_size(-3.0), MIN_FONT_SIZE);
@@ -1120,18 +1254,68 @@ copy = "ctrl+c"
     }
 
     #[test]
-    fn parse_tmux_config() {
-        let toml_str = r##"
-[tmux]
-passthrough = false
-auto_detect = true
-session_name = "dev"
-"##;
+    fn loaded_config_clamps_line_height_and_scrollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[font]\nline_height = 0.0\n[behavior]\nscrollback_lines = 99999999999\n",
+        )
+        .unwrap();
 
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(!config.tmux.passthrough);
-        assert!(config.tmux.auto_detect);
-        assert_eq!(config.tmux.session_name, Some("dev".to_string()));
+        let config = Config::load_from_path(&path).unwrap();
+
+        assert_eq!(config.font.line_height, MIN_LINE_HEIGHT);
+        assert_eq!(config.behavior.scrollback_lines, MAX_SCROLLBACK_LINES);
+
+        let mut font = FontConfig {
+            line_height: f32::NAN,
+            ..Default::default()
+        };
+        font.clamp_line_height();
+        assert_eq!(font.line_height, 1.0);
+        font.line_height = 1.4;
+        font.clamp_line_height();
+        assert_eq!(font.line_height, 1.4);
+    }
+
+    #[test]
+    fn loaded_config_rejects_an_invalid_terminal_term() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[terminal]\nterm = \"not a name\"\n").unwrap();
+
+        let config = Config::load_from_path(&path).unwrap();
+
+        assert_eq!(config.terminal.term, "xterm-256color");
+    }
+
+    #[test]
+    fn clipboard_write_defaults_to_allow_and_parses_deny() {
+        assert_eq!(
+            Config::default().behavior.clipboard_write,
+            ClipboardWrite::Allow
+        );
+
+        let config: Config = toml::from_str("[behavior]\nclipboard_write = \"deny\"\n").unwrap();
+        assert_eq!(config.behavior.clipboard_write, ClipboardWrite::Deny);
+
+        assert!(toml::from_str::<Config>("[behavior]\nclipboard_write = \"maybe\"\n").is_err());
+    }
+
+    #[test]
+    fn cursor_blink_defaults_on_and_can_be_turned_off() {
+        assert!(Config::default().behavior.cursor_blink);
+
+        let config: Config = toml::from_str("[behavior]\ncursor_blink = false\n").unwrap();
+        assert!(!config.behavior.cursor_blink);
+    }
+
+    #[test]
+    fn config_with_retired_tmux_table_still_loads() {
+        let config: Config =
+            toml::from_str("[tmux]\npassthrough = true\n[font]\nfamily = \"Fira Code\"\n").unwrap();
+        assert_eq!(config.font.family, "Fira Code");
     }
 
     #[test]

@@ -2,12 +2,14 @@
 //!
 //! Builds vertex data for vim copy-mode overlays (cursor, selection,
 //! search highlights), URL underlines, visual bell border, vim mode
-//! indicator, and the keyboard shortcuts modal.
+//! indicator, input method composition text, and the keyboard shortcuts
+//! modal.
 
-use super::{OverlayState, Renderer, Rgba, Vertex};
+use super::{ImePreedit, OverlayState, Renderer, Rgba, Vertex};
 use crate::grid::Terminal;
+use crate::vim::VimMode;
 use crate::vim::{CopyMode, Selection as VimSelection};
-use ultty_protocol::vim::VimMode;
+use unicode_width::UnicodeWidthStr;
 use wgpu::util::DeviceExt;
 
 /// Map an absolute buffer row (history + grid) to a viewport row.
@@ -300,8 +302,6 @@ impl Renderer {
                 let query = copy_mode.search_query();
                 format!("/ {}", query)
             }
-            VimMode::Command => ": ".to_string(),
-            VimMode::Insert => "-- INSERT --".to_string(),
         };
 
         // Position at bottom-left with some padding
@@ -336,7 +336,6 @@ impl Renderer {
                 Rgba::new(0.8, 0.6, 0.2, 1.0) // Orange
             }
             VimMode::Search => Rgba::new(0.5, 0.7, 1.0, 1.0), // Blue
-            _ => self.color_scheme.foreground,
         };
 
         let (text_vertices, text_indices) = self.text_renderer.build_label_vertices(
@@ -554,6 +553,63 @@ impl Renderer {
     ) {
         let (bg_vertices, bg_indices, text_vertices, text_indices) =
             self.build_shortcuts_overlay_vertices(keybindings);
+        self.draw_overlay_layers(
+            encoder,
+            view,
+            (&bg_vertices, &bg_indices),
+            (&text_vertices, &text_indices),
+        );
+    }
+
+    /// Draw the text an input method is composing over the cursor cell,
+    /// underlined on an opaque background so it hides the cells beneath
+    /// and reads as not yet typed.
+    pub(super) fn render_ime_preedit(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        preedit: ImePreedit,
+    ) {
+        if preedit.text.is_empty() {
+            return;
+        }
+        let width = UnicodeWidthStr::width(preedit.text).max(1) as f32 * self.cell_width;
+        let max_width = (self.config.width as f32 - preedit.x).max(self.cell_width);
+        let width = width.min(max_width);
+        let background = Rgba {
+            a: 1.0,
+            ..self.color_scheme.background
+        };
+        let foreground = self.color_scheme.foreground;
+        let underline = (self.cell_height / 16.0).round().max(1.0);
+
+        let mut bg_vertices = Vec::new();
+        let mut bg_indices = Vec::new();
+        self.emit_rect(
+            &mut bg_vertices,
+            &mut bg_indices,
+            preedit.x,
+            preedit.y,
+            width,
+            self.cell_height,
+            background,
+        );
+        self.emit_rect(
+            &mut bg_vertices,
+            &mut bg_indices,
+            preedit.x,
+            preedit.y + self.cell_height - underline,
+            width,
+            underline,
+            foreground,
+        );
+        let (text_vertices, text_indices) = self.text_renderer.build_label_vertices(
+            preedit.text,
+            preedit.x,
+            preedit.y,
+            max_width,
+            foreground,
+        );
         self.draw_overlay_layers(
             encoder,
             view,

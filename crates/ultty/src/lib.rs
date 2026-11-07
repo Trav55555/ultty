@@ -47,6 +47,7 @@ pub mod protocol;
 pub mod pty;
 
 pub mod event_loop;
+pub mod keys;
 pub mod pane_layout;
 pub mod renderer;
 pub mod scene;
@@ -54,6 +55,5 @@ pub mod session;
 pub mod tabs;
 pub mod terminal_manager;
 pub mod testing;
-pub mod tmux;
 pub mod url;
 pub mod vim;

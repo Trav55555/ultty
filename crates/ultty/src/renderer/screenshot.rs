@@ -397,7 +397,9 @@ impl Renderer {
             &mut encoder,
             &view,
             terminal,
-            &self.color_scheme,
+            &self
+                .color_scheme
+                .for_terminal(terminal.palette(), terminal.modes().reverse_video),
             self.cell_width,
             self.cell_height,
             self.tab_bar_height,
@@ -499,7 +501,9 @@ impl Renderer {
             &mut encoder,
             &view,
             terminal,
-            &self.color_scheme,
+            &self
+                .color_scheme
+                .for_terminal(terminal.palette(), terminal.modes().reverse_video),
             self.cell_width,
             self.cell_height,
             self.tab_bar_height,

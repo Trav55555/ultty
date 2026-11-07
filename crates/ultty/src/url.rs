@@ -198,10 +198,35 @@ impl UrlDetector {
         self.url_at(col, row).is_some()
     }
 
-    /// Open a URL in the default browser.
+    /// Open a URL with the desktop's handler for its scheme.
+    ///
+    /// Only the schemes in [`OPENABLE_SCHEMES`] are opened. Links come from
+    /// terminal output (OSC 8 lets any program label a link with text that
+    /// differs from its target), so a `file:` link to a `.desktop` file or
+    /// a link to some other registered scheme handler would let a `cat`ed
+    /// file or a remote host start local programs. `file:` is refused for
+    /// the same reason, even for paths on this host.
     pub fn open_url(url: &str) -> Result<(), UrlError> {
+        if !is_openable(url) {
+            return Err(UrlError::SchemeNotAllowed(url.to_string()));
+        }
         open::that(url).map_err(|e| UrlError::OpenFailed(e.to_string()))
     }
+}
+
+/// URI schemes that Ctrl+click opens.
+pub const OPENABLE_SCHEMES: &[&str] = &["http", "https", "mailto", "ftp"];
+
+/// Whether `url` has one of the [`OPENABLE_SCHEMES`] (case-insensitive).
+fn is_openable(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return false;
+    };
+    !rest.is_empty()
+        && !url.chars().any(char::is_control)
+        && OPENABLE_SCHEMES
+            .iter()
+            .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
 }
 
 /// Error opening a URL.
@@ -209,12 +234,19 @@ impl UrlDetector {
 pub enum UrlError {
     /// Failed to open the URL
     OpenFailed(String),
+    /// The URL's scheme is not one Ultty opens
+    SchemeNotAllowed(String),
 }
 
 impl std::fmt::Display for UrlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UrlError::OpenFailed(e) => write!(f, "Failed to open URL: {}", e),
+            UrlError::SchemeNotAllowed(url) => write!(
+                f,
+                "Refused to open {url:?}: only {} links are opened",
+                OPENABLE_SCHEMES.join(", ")
+            ),
         }
     }
 }
@@ -237,6 +269,46 @@ mod tests {
 
     fn urls_from(text: &str) -> Vec<String> {
         detect_line(text).into_iter().map(|u| u.url).collect()
+    }
+
+    #[test]
+    fn web_and_mail_links_are_openable() {
+        for url in [
+            "https://docs.rs/ultty",
+            "http://example.com/a?b=c",
+            "HTTPS://EXAMPLE.COM",
+            "mailto:someone@example.com",
+            "ftp://ftp.example.com/pub",
+        ] {
+            assert!(is_openable(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn other_schemes_are_refused() {
+        for url in [
+            "file:///home/user/evil.desktop",
+            "file://localhost/etc/passwd",
+            "smb://host/share",
+            "ssh://host",
+            "javascript:alert(1)",
+            "vscode://file/x",
+            "/usr/bin/xterm",
+            "-x",
+            "https:",
+            "https://example.com/\nnext",
+            "",
+        ] {
+            assert!(!is_openable(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn open_url_refuses_a_file_link_before_launching_anything() {
+        assert!(matches!(
+            UrlDetector::open_url("file:///tmp/x.desktop"),
+            Err(UrlError::SchemeNotAllowed(_))
+        ));
     }
 
     // ==================== Basic protocol matching ====================

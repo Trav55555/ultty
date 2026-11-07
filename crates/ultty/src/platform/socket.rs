@@ -141,6 +141,61 @@ pub fn peer_uid(stream: &UnixStream) -> io::Result<libc::uid_t> {
     Ok(uid)
 }
 
+/// Process id of the process that connected the other end of a Unix socket.
+#[cfg(target_os = "linux")]
+pub fn peer_pid(stream: &UnixStream) -> io::Result<libc::pid_t> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: as in `peer_uid`: a valid socket fd and a writable, properly
+    // sized ucred.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(cred.pid)
+}
+
+/// Process id of the process that connected the other end of a Unix socket.
+#[cfg(target_os = "macos")]
+pub fn peer_pid(stream: &UnixStream) -> io::Result<libc::pid_t> {
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: `stream` owns a valid socket fd; `pid` is a writable pid_t and
+    // `len` holds its size, which is what LOCAL_PEERPID requires.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            &mut pid as *mut libc::pid_t as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(pid)
+}
+
+/// Process group of `pid`, if it still runs.
+pub fn process_group(pid: libc::pid_t) -> Option<libc::pid_t> {
+    // SAFETY: getpgid only reads kernel process metadata.
+    let pgid = unsafe { libc::getpgid(pid) };
+    (pgid > 0).then_some(pgid)
+}
+
 /// Returns true when the peer of `stream` runs as the same user as this process.
 pub fn peer_is_current_user(stream: &UnixStream) -> io::Result<bool> {
     Ok(peer_uid(stream)? == current_uid())
@@ -197,6 +252,15 @@ mod tests {
         let (a, b) = UnixStream::pair().unwrap();
         assert_eq!(peer_uid(&a).unwrap(), current_uid());
         assert!(peer_is_current_user(&b).unwrap());
+    }
+
+    #[test]
+    fn peer_pid_of_socket_pair_is_this_process() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        assert_eq!(peer_pid(&a).unwrap() as u32, std::process::id());
+        // SAFETY: getpgrp has no preconditions.
+        let own_group = unsafe { libc::getpgrp() };
+        assert_eq!(process_group(peer_pid(&a).unwrap()), Some(own_group));
     }
 
     #[test]

@@ -26,7 +26,6 @@ futures-core = { workspace = true }
 futures-util = { workspace = true }
 
 # Utilities
-anyhow = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

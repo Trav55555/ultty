@@ -29,20 +29,23 @@
 
 mod buffer;
 mod cell;
+mod cluster;
 mod history;
 mod image;
+mod palette;
 mod row;
 mod term_handler;
 mod terminal;
 
-pub use buffer::Buffer;
-pub use cell::{Cell, CellFlags, Color};
+pub use buffer::{Buffer, DEFAULT_SCROLLBACK};
+pub use cell::{Cell, CellFlags, Color, UnderlineStyle};
 pub use image::{decode_sixel, ImageId, ImageStore, TerminalImage};
+pub use palette::{format_color_spec, Palette, Rgb, ThemeColors};
 pub use row::Row;
 pub use term_handler::TerminalHandler;
 pub use terminal::{
     MouseButton, MouseEncoding, MouseMode, MouseModifiers, Selection, SelectionMode,
-    SelectionPoint, ShellIntegration, Terminal, TerminalModes,
+    SelectionPoint, ShellIntegration, Terminal, TerminalModes, DEFAULT_TERMINAL_NAME,
 };
 
 use std::ops::{Index, IndexMut};
@@ -288,6 +291,17 @@ impl Grid {
         &mut self.cursor
     }
 
+    /// Put the saved cursor back to its power-on state (DECSTR): home,
+    /// default attributes, autowrap on, origin mode off.
+    pub fn reset_saved_cursor(&mut self) {
+        self.cursor.saved = Some(SavedCursorState {
+            position: CursorPosition::origin(),
+            attrs: Cell::default(),
+            auto_wrap: true,
+            origin_mode: false,
+        });
+    }
+
     /// Save cursor state (DECSC): position, text attributes, auto-wrap, and origin mode.
     pub fn save_cursor(&mut self, origin_mode: bool) {
         self.cursor.saved = Some(SavedCursorState {
@@ -522,11 +536,19 @@ impl Grid {
         let Some((row, col)) = self.cluster_base() else {
             return false;
         };
-        let Some(mut cluster) = self.rows.get(row as usize).and_then(|r| r.grapheme(col)) else {
+        let Some(r) = self.rows.get(row as usize) else {
             return false;
         };
-        cluster.push(c);
-        cluster.graphemes(true).nth(1).is_none()
+        let Some(base) = r.get(col) else {
+            return false;
+        };
+        if let Some(joins) = cluster::joins(base.char(), r.grapheme_extra(col).unwrap_or(&[]), c) {
+            return joins;
+        }
+        r.with_grapheme_str(col, Some(c), |cluster| {
+            cluster.graphemes(true).nth(1).is_none()
+        })
+        .unwrap_or(false)
     }
 
     /// Append `c` to the cluster at `(row, col)`, widening the cell to two
@@ -540,11 +562,14 @@ impl Grid {
         };
         r.push_grapheme_char(col, c, MAX_COMBINING_PER_CELL);
         let was_wide = r.get(col).is_some_and(|cell| cell.is_wide());
-        let cluster_width = r.grapheme(col).map_or(1, |g| g.width());
         let room = col.saturating_add(1) < self.dims.cols;
         let at_cursor = !self.cursor.wrap_pending && self.cursor.position.col == col + 1;
+        let widens = !was_wide
+            && room
+            && at_cursor
+            && r.with_grapheme_str(col, None, |g| g.width()).unwrap_or(1) >= 2;
 
-        if !was_wide && cluster_width >= 2 && room && at_cursor {
+        if widens {
             let next = col + 1;
             // The spacer overwrites whatever was at `next`; a wide char there
             // would leave its own spacer orphaned.
@@ -576,17 +601,32 @@ impl Grid {
 
     /// Write a character at the cursor position and advance.
     pub fn write_char(&mut self, c: char) {
+        let width = self.print_width(c);
+        self.write_measured_char(c, width);
+    }
+
+    /// The columns printing `c` takes: `None` when it joins the previous
+    /// grapheme cluster, else its width (0 for control characters and
+    /// combining marks that start no cluster, 1 normally, 2 for wide).
+    pub(super) fn print_width(&self, c: char) -> Option<u16> {
         use unicode_width::UnicodeWidthChar;
 
         if self.continues_cluster(c) {
+            None
+        } else {
+            Some(c.width().unwrap_or(0) as u16)
+        }
+    }
+
+    /// [`Grid::write_char`] with `width` from [`Grid::print_width`] for the
+    /// current state, so a caller that needed it first does not pay twice.
+    pub(super) fn write_measured_char(&mut self, c: char, width: Option<u16>) {
+        let Some(width) = width else {
             if let Some((row, col)) = self.cluster_base() {
                 self.extend_cluster(row, col, c);
             }
             return;
-        }
-
-        // Get character width (0 for control chars, 1 for normal, 2 for wide)
-        let width = c.width().unwrap_or(0) as u16;
+        };
 
         if width == 0 {
             // Zero-width character - could be combining mark or control char
@@ -632,9 +672,13 @@ impl Grid {
             return;
         }
 
-        // Check if wide char would wrap (needs 2 columns but only 1 left)
+        // A wide char with too few columns left wraps first, respecting the
+        // scroll region. Without autowrap it has nowhere to go and is
+        // dropped, as xterm does, rather than split or moved to a new row.
         if width > 1 && col + width > self.dims.cols {
-            // Wrap to next line before writing, respecting scroll region
+            if !self.auto_wrap {
+                return;
+            }
             self.wrap_pending_cursor();
         }
 
@@ -974,6 +1018,19 @@ impl Grid {
         self.tab_stops = (0..self.dims.cols).step_by(8).collect();
     }
 
+    /// Fit the tab stops to a new width: new columns get the default stop
+    /// every 8 columns, as in xterm, and stops beyond the width go. Stops in
+    /// the columns both widths share are kept, custom or not.
+    fn resize_tab_stops(&mut self, new_cols: u16) {
+        let old_cols = self.dims.cols;
+        if new_cols > old_cols {
+            self.tab_stops
+                .extend((old_cols..new_cols).filter(|c| c % 8 == 0));
+        } else {
+            self.tab_stops.retain(|&col| col < new_cols);
+        }
+    }
+
     /// Set the scroll region (1-based top and bottom, inclusive).
     /// Pass (1, rows) to reset to full screen.
     pub fn set_scroll_region(&mut self, top: u16, bottom: u16) {
@@ -988,9 +1045,10 @@ impl Grid {
             .min(self.dims.rows.saturating_sub(1));
 
         if top >= bottom {
-            // Invalid region, reset to full screen
-            self.scroll_region = None;
-        } else if top == 0 && bottom >= self.dims.rows.saturating_sub(1) {
+            // xterm ignores a region of less than two lines, cursor and all.
+            return;
+        }
+        if top == 0 && bottom >= self.dims.rows.saturating_sub(1) {
             // Full screen, no need to track
             self.scroll_region = None;
         } else {
@@ -1000,6 +1058,11 @@ impl Grid {
         // DECSTBM homes cursor to absolute (0,0)
         self.cursor.position.row = 0;
         self.cursor.position.col = 0;
+    }
+
+    /// Drop the scroll region without moving the cursor (DECSTR, RIS).
+    pub fn reset_scroll_region(&mut self) {
+        self.scroll_region = None;
     }
 
     /// Get the current scroll region.
@@ -1051,10 +1114,7 @@ impl Grid {
             self.rows[row_idx].erase(bg);
         }
 
-        // Mark affected rows dirty
-        for row_idx in region.top..=region.bottom {
-            self.mark_dirty(row_idx);
-        }
+        self.mark_rows_dirty(region.top..=region.bottom);
     }
 
     /// Scroll the grid down by n lines (within scroll region).
@@ -1085,10 +1145,7 @@ impl Grid {
             self.rows[row_idx].erase(bg);
         }
 
-        // Mark affected rows dirty
-        for row_idx in region.top..=region.bottom {
-            self.mark_dirty(row_idx);
-        }
+        self.mark_rows_dirty(region.top..=region.bottom);
     }
 
     /// Insert n blank lines at the cursor position (IL).
@@ -1139,10 +1196,7 @@ impl Grid {
             }
         }
 
-        // Mark affected rows dirty
-        for row_idx in cursor_row..=region.bottom {
-            self.mark_dirty(row_idx);
-        }
+        self.mark_rows_dirty(cursor_row..=region.bottom);
     }
 
     /// Delete n lines at the cursor position (DL).
@@ -1193,10 +1247,7 @@ impl Grid {
             }
         }
 
-        // Mark affected rows dirty
-        for row_idx in cursor_row..=region.bottom {
-            self.mark_dirty(row_idx);
-        }
+        self.mark_rows_dirty(cursor_row..=region.bottom);
     }
 
     /// Erase from cursor to end of display.
@@ -1251,12 +1302,7 @@ impl Grid {
         }
         let bg = self.attrs.bg();
         if let Some(r) = self.rows.get_mut(row as usize) {
-            r.clear_graphemes(start, end);
-            for col in start..end {
-                if let Some(cell) = r.get_mut(col) {
-                    cell.erase(bg);
-                }
-            }
+            r.erase_range(start, end, bg);
         }
         self.mark_dirty(row);
     }
@@ -1339,18 +1385,7 @@ impl Grid {
         // Reset scroll region — apps that need one will re-set it after resize
         self.scroll_region = None;
 
-        // Update tab stops for new width
-        let old_cols = self.dims.cols;
-        if new_dims.cols > old_cols {
-            // Extend tab stops to cover any new columns
-            for col in (old_cols..new_dims.cols).filter(|c| c % 8 == 0) {
-                self.tab_stops.insert(col);
-            }
-        } else if new_dims.cols < old_cols {
-            // Remove tab stops beyond new width
-            self.tab_stops.retain(|&col| col < new_dims.cols);
-        }
-
+        self.resize_tab_stops(new_dims.cols);
         self.dims = new_dims;
         self.dirty = vec![true; new_dims.rows as usize];
         self.content_version = self.content_version.wrapping_add(1);
@@ -1360,6 +1395,7 @@ impl Grid {
     /// Set rows directly (used by Buffer during reflow).
     pub fn set_rows(&mut self, rows: Vec<Row>, new_dims: Dimensions) {
         self.rows = rows;
+        self.resize_tab_stops(new_dims.cols);
         self.dims = new_dims;
 
         // Row indices changed, so any scroll region is meaningless now.
@@ -1443,6 +1479,17 @@ impl Grid {
         }
         if let Some(d) = self.dirty.get_mut(row as usize) {
             *d = true;
+        }
+    }
+
+    /// Mark `rows` dirty as one change: they all get the same new version.
+    fn mark_rows_dirty(&mut self, rows: std::ops::RangeInclusive<u16>) {
+        self.content_version = self.content_version.wrapping_add(1);
+        let start = *rows.start() as usize;
+        let end = (*rows.end() as usize + 1).min(self.dirty.len());
+        if start < end {
+            self.row_versions[start..end].fill(self.content_version);
+            self.dirty[start..end].fill(true);
         }
     }
 

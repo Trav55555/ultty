@@ -10,6 +10,7 @@ mod atlas;
 pub mod block_chars;
 pub mod color;
 mod cursor;
+mod decoration;
 mod image;
 mod native_render;
 mod overlays;
@@ -19,6 +20,7 @@ mod powerline;
 mod screenshot;
 mod tabbar;
 mod text;
+mod text_cache;
 
 pub use atlas::{AtlasStats, GlyphAtlas};
 pub use color::{ColorScheme, Rgba};
@@ -89,6 +91,17 @@ pub struct OverlayState<'a> {
     pub protocol_status: Option<&'a [(String, String)]>,
     /// Whether cursor should be visible in current blink phase
     pub cursor_blink_visible: bool,
+    /// Text the input method is composing, drawn over the cursor
+    pub ime_preedit: Option<ImePreedit<'a>>,
+}
+
+/// Uncommitted input method text and where it goes: the top-left corner of
+/// the cursor cell, in window pixels.
+#[derive(Debug, Clone, Copy)]
+pub struct ImePreedit<'a> {
+    pub text: &'a str,
+    pub x: f32,
+    pub y: f32,
 }
 
 impl<'a> Default for OverlayState<'a> {
@@ -103,6 +116,7 @@ impl<'a> Default for OverlayState<'a> {
             keybindings: None,
             protocol_status: None,
             cursor_blink_visible: true, // Default visible
+            ime_preedit: None,
         }
     }
 }
@@ -260,6 +274,9 @@ pub struct Renderer {
     scroll_adjustments_cache: std::collections::HashMap<ultty_protocol::RegionId, (f32, f32)>,
     /// Reused per-frame cache for native clip rectangles.
     clip_rects_cache: std::collections::HashMap<ultty_protocol::RegionId, (f32, f32, f32, f32)>,
+    /// The GPU adapter in use, recorded so benchmarks and diagnostics can
+    /// say whether a number came from a real GPU or a software rasterizer.
+    adapter_info: wgpu::AdapterInfo,
 }
 
 type NativeBufferSet = (wgpu::Buffer, wgpu::Buffer, u32);
@@ -340,6 +357,25 @@ pub fn grid_dimensions_for(
     (axis(width_px, cell_width), axis(height_px, cell_height))
 }
 
+/// The surface size for a `width` x `height` window, with each axis clamped
+/// to the device's largest 2D texture. wgpu treats a larger surface as a
+/// fatal error, so a window spanning several monitors (or an oversized
+/// `resize` request) must never reach `Surface::configure` unclamped.
+pub fn clamp_surface_size(width: u32, height: u32, max_texture_dimension: u32) -> (u32, u32) {
+    let clamped = (
+        width.min(max_texture_dimension),
+        height.min(max_texture_dimension),
+    );
+    if clamped != (width, height) {
+        tracing::warn!(
+            "Window {width}x{height} exceeds the GPU texture limit {max_texture_dimension}; drawing {}x{}",
+            clamped.0,
+            clamped.1
+        );
+    }
+    clamped
+}
+
 impl Renderer {
     /// Create a new renderer with configuration.
     pub async fn with_config(
@@ -367,10 +403,17 @@ impl Renderer {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("ultty_device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                // Allow windows as large as the adapter can draw, not just
+                // the 8192 px default.
+                required_limits: wgpu::Limits {
+                    max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d,
+                    ..wgpu::Limits::default()
+                },
                 ..Default::default()
             })
             .await?;
+        let (width, height) =
+            clamp_surface_size(width, height, device.limits().max_texture_dimension_2d);
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
@@ -480,6 +523,7 @@ impl Renderer {
             prev_text_count: (0, 0),
             scroll_adjustments_cache: std::collections::HashMap::new(),
             clip_rects_cache: std::collections::HashMap::new(),
+            adapter_info: adapter.get_info(),
         })
     }
 
@@ -609,27 +653,23 @@ impl Renderer {
             prev_text_count: (0, 0),
             scroll_adjustments_cache: std::collections::HashMap::new(),
             clip_rects_cache: std::collections::HashMap::new(),
+            adapter_info: adapter.get_info(),
         })
     }
 
-    /// Render to a texture (headless) and return timing information.
-    ///
-    /// This is useful for benchmarking the render pipeline without a window.
-    /// Returns the time taken to render in microseconds.
-    pub fn render_to_texture(
-        &mut self,
-        terminal: &Terminal,
-        overlay: &OverlayState,
-    ) -> anyhow::Result<()> {
-        let width = self.config.width;
-        let height = self.config.height;
+    /// The GPU adapter this renderer runs on.
+    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
+        &self.adapter_info
+    }
 
-        // Create render target texture
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("bench_render_texture"),
+    /// An offscreen render target the size and format of this renderer's
+    /// configuration, for [`Renderer::render_to_view`].
+    pub fn create_offscreen_target(&self) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen_render_target"),
             size: wgpu::Extent3d {
-                width,
-                height,
+                width: self.config.width,
+                height: self.config.height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -638,9 +678,20 @@ impl Renderer {
             format: self.config.format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
-        });
+        })
+    }
 
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    /// Render one frame into `view` (headless) and wait for the GPU.
+    ///
+    /// Used by benchmarks; create the target once with
+    /// [`Renderer::create_offscreen_target`] and reuse it, as a swapchain
+    /// would, so texture allocation is not timed as part of the frame.
+    pub fn render_to_view(
+        &mut self,
+        view: &wgpu::TextureView,
+        terminal: &Terminal,
+        overlay: &OverlayState,
+    ) -> anyhow::Result<()> {
         self.tab_bar_height = overlay
             .tab_bar
             .map_or(crate::tabs::TERMINAL_TOP_PADDING, |tb| tb.content_top());
@@ -677,7 +728,7 @@ impl Renderer {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bench_bg_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -701,9 +752,11 @@ impl Renderer {
         // Render text
         self.text_renderer.render(
             &mut encoder,
-            &view,
+            view,
             terminal,
-            &self.color_scheme,
+            &self
+                .color_scheme
+                .for_terminal(terminal.palette(), terminal.modes().reverse_video),
             self.cell_width,
             self.cell_height,
             self.tab_bar_height,
@@ -733,7 +786,7 @@ impl Renderer {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bench_overlay_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -780,6 +833,13 @@ impl Renderer {
         )
     }
 
+    /// The surface size in physical pixels: the window size clamped to the
+    /// GPU texture limit. Layout and drawing use this, never the raw window
+    /// size.
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
     /// The pixel area below the bar that terminal panes share.
     pub fn terminal_area(&self) -> (f32, f32) {
         (
@@ -804,6 +864,8 @@ impl Renderer {
             return;
         }
 
+        let (width, height) =
+            clamp_surface_size(width, height, self.device.limits().max_texture_dimension_2d);
         self.config.width = width;
         self.config.height = height;
         surface.configure(&self.device, &self.config);
@@ -1083,7 +1145,9 @@ impl Renderer {
             &mut encoder,
             &view,
             terminal,
-            &self.color_scheme,
+            &self
+                .color_scheme
+                .for_terminal(terminal.palette(), terminal.modes().reverse_video),
             self.cell_width,
             self.cell_height,
             self.tab_bar_height,
@@ -1244,6 +1308,10 @@ impl Renderer {
             }
         }
 
+        if let Some(preedit) = overlay.ime_preedit {
+            self.render_ime_preedit(&mut encoder, &view, preedit);
+        }
+
         // Render keyboard shortcuts overlay if visible
         if overlay.shortcuts_visible {
             if let Some(keybindings) = overlay.keybindings {
@@ -1386,7 +1454,9 @@ impl Renderer {
                 &mut encoder,
                 &view,
                 terminal,
-                &self.color_scheme,
+                &self
+                    .color_scheme
+                    .for_terminal(terminal.palette(), terminal.modes().reverse_video),
                 self.cell_width,
                 self.cell_height,
                 self.tab_bar_height,
@@ -1412,6 +1482,9 @@ impl Renderer {
             }
         }
 
+        if let Some(preedit) = overlay.ime_preedit {
+            self.render_ime_preedit(&mut encoder, &view, preedit);
+        }
         if overlay.shortcuts_visible {
             if let Some(keybindings) = overlay.keybindings {
                 self.render_shortcuts_overlay(&mut encoder, &view, keybindings);
@@ -1577,6 +1650,9 @@ impl Renderer {
 
         // Window border (1px, slightly lighter than bg)
         let bg = self.color_scheme.background;
+        let scheme = self
+            .color_scheme
+            .for_terminal(terminal.palette(), terminal.modes().reverse_video);
         let w = self.config.width as f32;
         let h = self.config.height as f32;
         let border_color = Rgba::new(
@@ -1607,7 +1683,15 @@ impl Renderer {
             border_color,
         );
         // Inner background
-        self.emit_rect(&mut vertices, &mut indices, 1.0, 1.0, w - 2.0, h - 2.0, bg);
+        self.emit_rect(
+            &mut vertices,
+            &mut indices,
+            1.0,
+            1.0,
+            w - 2.0,
+            h - 2.0,
+            scheme.background,
+        );
 
         let selection = terminal.selection();
         for row_idx in 0..dims.rows {
@@ -1619,7 +1703,7 @@ impl Renderer {
             // Track runs of same background color
             let mut run_start = 0u16;
             let mut run_color: Option<Rgba> = None;
-            let selection_bg = self.color_scheme.selection_background();
+            let selection_bg = scheme.selection_background();
 
             for col_idx in 0..dims.cols {
                 let cell = match row.get(col_idx) {
@@ -1631,9 +1715,9 @@ impl Renderer {
                 let bg_color = if is_selected {
                     selection_bg
                 } else if cell.has_flag(CellFlags::REVERSE) {
-                    self.color_scheme.resolve(cell.fg(), true)
+                    scheme.resolve(cell.fg(), true)
                 } else {
-                    self.color_scheme.resolve(cell.bg(), false)
+                    scheme.resolve(cell.bg(), false)
                 };
 
                 // Check if we should extend the run or start a new one
@@ -1648,7 +1732,7 @@ impl Renderer {
                 if should_flush {
                     if let Some(color) = run_color {
                         // Only emit non-default backgrounds
-                        if color != self.color_scheme.background {
+                        if color != scheme.background {
                             self.emit_quad(
                                 &mut vertices,
                                 &mut indices,
@@ -1667,7 +1751,7 @@ impl Renderer {
 
             // Flush final run
             if let Some(color) = run_color {
-                if color != self.color_scheme.background {
+                if color != scheme.background {
                     self.emit_quad(
                         &mut vertices,
                         &mut indices,
@@ -1694,9 +1778,9 @@ impl Renderer {
                 let ch = cell.char();
                 if let Some((rects, count)) = block_char_rects(ch) {
                     let fg = if cell.has_flag(CellFlags::REVERSE) {
-                        self.color_scheme.resolve(cell.bg(), false)
+                        scheme.resolve(cell.bg(), false)
                     } else {
-                        self.color_scheme.resolve(cell.fg(), true)
+                        scheme.resolve(cell.fg(), true)
                     };
                     let fg = if cell.has_flag(CellFlags::DIM) {
                         Rgba::new(fg.r * 0.65, fg.g * 0.65, fg.b * 0.65, fg.a)
@@ -1765,9 +1849,9 @@ impl Renderer {
                 };
 
                 let fg = if cell.has_flag(CellFlags::REVERSE) {
-                    self.color_scheme.resolve(cell.bg(), false)
+                    scheme.resolve(cell.bg(), false)
                 } else {
-                    self.color_scheme.resolve(cell.fg(), true)
+                    scheme.resolve(cell.fg(), true)
                 };
                 let fg = if cell.has_flag(CellFlags::DIM) {
                     Rgba::new(fg.r * 0.65, fg.g * 0.65, fg.b * 0.65, fg.a)
@@ -1798,7 +1882,7 @@ impl Renderer {
             && !terminal.buffer().is_scrolled();
 
         if should_show_cursor {
-            let cursor_color = self.color_scheme.cursor;
+            let cursor_color = scheme.cursor;
             let col = cursor.position.col;
             let row = cursor.position.row;
 
@@ -1895,6 +1979,18 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn surface_size_is_clamped_to_the_texture_limit() {
+        assert_eq!(super::clamp_surface_size(800, 600, 8192), (800, 600));
+        assert_eq!(super::clamp_surface_size(8192, 8192, 8192), (8192, 8192));
+        assert_eq!(super::clamp_surface_size(17000, 600, 8192), (8192, 600));
+        assert_eq!(super::clamp_surface_size(600, 17000, 8192), (600, 8192));
+        assert_eq!(
+            super::clamp_surface_size(u32::MAX, u32::MAX, 16384),
+            (16384, 16384)
+        );
+    }
+
     #[test]
     fn grid_dimensions_are_clamped_to_sane_range() {
         assert_eq!(

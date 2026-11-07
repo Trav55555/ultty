@@ -15,6 +15,7 @@ members = [
     "examples/split-panes",
     "examples/async-fetch",
     "examples/sysmon",
+    "tools/ultty-bench",
 ]
 # porygon-tui is a standalone client for a private daemon; it builds from its own
 # directory and is intentionally kept out of the workspace build and test set.

@@ -309,7 +309,7 @@ fn kitty_keyboard_protocol() {
     assert_eq!(parse(b"\x1b[>3u"), vec![Action::KittyKeyboardPush(3)]);
 
     // CSI < u - pop keyboard mode
-    assert_eq!(parse(b"\x1b[<u"), vec![Action::KittyKeyboardPop]);
+    assert_eq!(parse(b"\x1b[<u"), vec![Action::KittyKeyboardPop(1)]);
 
     // CSI ? u - query keyboard mode
     assert_eq!(parse(b"\x1b[?u"), vec![Action::KittyKeyboardQuery]);
@@ -1029,9 +1029,20 @@ fn osc_clipboard() {
 
 #[test]
 fn osc_query_colors() {
-    assert_eq!(parse(b"\x1b]10;?\x07"), vec![Action::QueryForegroundColor]);
-    assert_eq!(parse(b"\x1b]11;?\x07"), vec![Action::QueryBackgroundColor]);
-    assert_eq!(parse(b"\x1b]12;?\x07"), vec![Action::QueryCursorColor]);
+    use super::{DynamicColor, StringTerminator};
+    for (bytes, color) in [
+        (b"\x1b]10;?\x07", DynamicColor::Foreground),
+        (b"\x1b]11;?\x07", DynamicColor::Background),
+        (b"\x1b]12;?\x07", DynamicColor::Cursor),
+    ] {
+        assert_eq!(
+            parse(bytes),
+            vec![Action::QueryDynamicColor {
+                color,
+                terminator: StringTerminator::Bel
+            }]
+        );
+    }
 }
 
 // ---------------------------------------------------------------
@@ -1215,4 +1226,131 @@ fn application_keypad_mode() {
 #[test]
 fn normal_keypad_mode() {
     assert_eq!(parse(b"\x1b>"), vec![Action::NormalKeypadMode]);
+}
+
+/// The characters `input` prints.
+fn printed(input: &[u8]) -> String {
+    parse(input)
+        .into_iter()
+        .map(|action| match action {
+            Action::Print(c) => c,
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn utf8_ill_formed_sequences_become_one_replacement_per_maximal_subpart() {
+    // An F5 lead and an encoded surrogate: each byte is its own subpart.
+    assert_eq!(
+        printed(b"a\xF5\x80\x80\x80b\xED\xA0\x80c"),
+        "a\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}b\u{FFFD}\u{FFFD}\u{FFFD}c"
+    );
+    // Overlong forms: C0/C1 leads, and E0 / F0 followed by too small a byte.
+    assert_eq!(printed(b"\xC0\xAF"), "\u{FFFD}\u{FFFD}");
+    assert_eq!(printed(b"\xE0\x80\xAF"), "\u{FFFD}\u{FFFD}\u{FFFD}");
+    assert_eq!(
+        printed(b"\xF0\x8F\xBF\xBF"),
+        "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}"
+    );
+    // Above U+10FFFF.
+    assert_eq!(
+        printed(b"\xF4\x90\x80\x80"),
+        "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}"
+    );
+    // A truncated sequence is one replacement, then the next byte.
+    assert_eq!(printed(b"\xE2\x82X"), "\u{FFFD}X");
+    assert_eq!(printed(b"\xF0\x9F\x98X"), "\u{FFFD}X");
+    // The Unicode Standard's own example (section 3.9, table 3-8).
+    assert_eq!(
+        printed(b"\x61\xF1\x80\x80\xE1\x80\xC2\x62\x80\x63\x80\xBF\x64"),
+        "a\u{FFFD}\u{FFFD}\u{FFFD}b\u{FFFD}c\u{FFFD}\u{FFFD}d"
+    );
+}
+
+#[test]
+fn utf8_boundaries_of_the_well_formed_ranges_decode() {
+    assert_eq!(printed(b"\xC2\x80\xDF\xBF"), "\u{80}\u{7FF}");
+    assert_eq!(
+        printed(b"\xE0\xA0\x80\xED\x9F\xBF\xEE\x80\x80"),
+        "\u{800}\u{D7FF}\u{E000}"
+    );
+    assert_eq!(
+        printed(b"\xF0\x90\x80\x80\xF4\x8F\xBF\xBF"),
+        "\u{10000}\u{10FFFF}"
+    );
+}
+
+#[test]
+fn utf8_sequence_split_across_feeds_decodes() {
+    let mut parser = AnsiParser::new();
+    let mut actions = Vec::new();
+    parser.feed(b"\xE2\x82", |a| actions.push(a));
+    parser.feed(b"\xAC", |a| actions.push(a));
+    assert_eq!(actions, vec![Action::Print('\u{20AC}')]);
+}
+
+/// Bytes biased towards UTF-8: whole characters of every length, broken
+/// and overlong sequences, controls and escapes.
+fn utf8_heavy_bytes() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+    use proptest::prelude::*;
+    let piece = prop_oneof![
+        4 => any::<char>().prop_map(|c| c.to_string().into_bytes()),
+        2 => prop::sample::select(vec!["é", "中", "😀", "\u{301}", "€", "\u{10FFFF}"])
+            .prop_map(|s| s.as_bytes().to_vec()),
+        1 => prop::collection::vec(0x80u8..=0xFF, 1..4),
+        1 => prop::sample::select(vec![
+            &b"\xC0\xAF"[..], b"\xE0\x80\x80", b"\xED\xA0\x80", b"\xF4\x90\x80\x80",
+            b"\xE2\x82", b"\xF0\x9F\x98", b"\x1b[1m", b"\x1b(0", b"\x1b(B", b"\r\n",
+            b"\x1b]0;t\xC3\xA9\x07",
+        ])
+        .prop_map(<[u8]>::to_vec),
+        1 => any::<u8>().prop_map(|b| vec![b]),
+        // Fragments of control sequences, so CSI parameters, markers,
+        // cancels and controls land in every state and across chunk cuts.
+        3 => prop::sample::select(vec![
+            &b"\x1b"[..], b"[", b"\x1b[", b"0", b"1", b"38", b"255", b"65535999", b";", b":",
+            b"?", b">", b"=", b"m", b"H", b"J", b"u", b"$p", b" q", b"\x18", b"\r", b"\n",
+            b"\t", b"\x7f",
+        ])
+        .prop_map(<[u8]>::to_vec),
+    ];
+    prop::collection::vec(piece, 0..32).prop_map(|v| v.concat())
+}
+
+proptest::proptest! {
+    /// Span feeding is an optimisation only: split anywhere, it yields
+    /// exactly the characters and actions that byte-wise feeding does.
+    #[test]
+    fn ascii_span_feed_matches_feed(
+        bytes in utf8_heavy_bytes(),
+        cuts in proptest::collection::vec(proptest::prelude::any::<usize>(), 0..4),
+    ) {
+        let mut cuts: Vec<usize> = cuts.iter().map(|c| c % (bytes.len() + 1)).collect();
+        cuts.sort_unstable();
+        let mut chunks = Vec::new();
+        let mut start = 0;
+        for cut in cuts.into_iter().chain([bytes.len()]) {
+            chunks.push(&bytes[start..cut]);
+            start = cut;
+        }
+
+        let mut expected = Vec::new();
+        let mut parser = AnsiParser::new();
+        for chunk in &chunks {
+            parser.feed(chunk, |a| expected.push(a));
+        }
+
+        let mut actual = Vec::new();
+        let mut parser = AnsiParser::new();
+        for chunk in &chunks {
+            parser.feed_with_ascii_spans(chunk, |out| match out {
+                AnsiOutput::Action(a) => actual.push(a),
+                AnsiOutput::PrintAscii(span) => {
+                    actual.extend(span.iter().map(|&b| Action::Print(b as char)));
+                }
+            });
+        }
+        proptest::prop_assert_eq!(actual, expected);
+    }
 }

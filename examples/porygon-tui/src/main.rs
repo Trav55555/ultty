@@ -322,5 +322,6 @@ fn weather_enabled_from_env() -> bool {
 }
 
 fn main() -> anyhow::Result<()> {
-    PorygonTui::new().run_with_theme(porygon_theme())
+    PorygonTui::new().run_with_theme(porygon_theme())?;
+    Ok(())
 }

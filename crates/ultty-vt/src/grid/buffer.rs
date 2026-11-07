@@ -228,6 +228,21 @@ impl Buffer {
         self.history.len()
     }
 
+    /// How many lines of history the buffer keeps.
+    pub fn max_history(&self) -> usize {
+        self.max_history
+    }
+
+    /// Keep at most `max_history` lines of history from now on, dropping
+    /// the oldest lines beyond it. Returns how many lines were dropped.
+    pub fn set_max_history(&mut self, max_history: usize) -> usize {
+        self.max_history = max_history;
+        let excess = self.history.len().saturating_sub(max_history);
+        self.history.drain(..excess);
+        self.scroll_offset = self.scroll_offset.min(self.history.len());
+        excess
+    }
+
     /// Resize the buffer with proper reflow.
     pub fn resize(&mut self, new_dims: Dimensions) {
         let old_dims = self.grid.dimensions();
@@ -523,8 +538,6 @@ impl Buffer {
 
     /// Write a character, saving to history if scrolling occurs.
     pub fn write_char(&mut self, c: char) {
-        use unicode_width::UnicodeWidthChar;
-
         self.scroll_offset = 0;
 
         let cursor_col = self.grid.cursor().position.col;
@@ -535,11 +548,8 @@ impl Buffer {
         let max_col = self.grid.dimensions().cols;
         // A codepoint that joins the previous grapheme cluster takes no new
         // column, so it can never wrap or scroll.
-        let char_width = if self.grid.continues_cluster(c) {
-            0
-        } else {
-            c.width().unwrap_or(0) as u16
-        };
+        let width = self.grid.print_width(c);
+        let char_width = width.unwrap_or(0);
 
         // Determine if this write will cause scrolling.
         // With pending wrap behavior:
@@ -561,16 +571,11 @@ impl Buffer {
         };
 
         if will_scroll {
-            // Save the row that will be displaced by the scroll.
-            // Only save to history when scrolling the full screen (no scroll region),
-            // since scroll regions are used by apps on the alternate screen which
-            // has no meaningful scrollback.
-            if self.grid.scroll_region().is_none() {
-                self.save_top_rows(1);
-            }
+            self.save_scrolled_rows(1);
         }
 
-        self.grid.write_char(c);
+        // Saving rows leaves the grid as it was, so the width still holds.
+        self.grid.write_measured_char(c, width);
     }
 
     /// Write a contiguous printable ASCII span, saving scrolled rows to history.
@@ -589,11 +594,10 @@ impl Buffer {
         self.scroll_offset = 0;
         let mut remaining = bytes;
         while !remaining.is_empty() {
-            if self.grid.cursor().wrap_pending && self.grid.scroll_region().is_none() {
-                let scroll_bottom = self.grid.dimensions().rows.saturating_sub(1);
-                if self.grid.cursor().position.row >= scroll_bottom {
-                    self.save_top_rows(1);
-                }
+            if self.grid.cursor().wrap_pending
+                && self.grid.cursor().position.row == self.grid.effective_scroll_region().bottom
+            {
+                self.save_scrolled_rows(1);
             }
 
             let cols = self.grid.dimensions().cols;
@@ -612,18 +616,23 @@ impl Buffer {
         }
     }
 
-    /// Scroll grid up, moving top line to history.
-    pub fn scroll_grid_up(&mut self, n: u16) {
-        let n_usize = n as usize;
-
-        if self.grid.scroll_region().is_none() {
-            // Full-screen scroll — save top rows to history
-            self.save_top_rows(n_usize);
+    /// Before the scroll region scrolls up `n` lines, keep the lines that
+    /// leave it. As in xterm, lines are saved whenever the region's top
+    /// margin is the top of the screen, so a tool that keeps a status line
+    /// below its output (apt, progress bars) still fills the scrollback.
+    /// Lines leaving a region that starts lower are discarded.
+    fn save_scrolled_rows(&mut self, n: usize) {
+        let region = self.grid.effective_scroll_region();
+        if region.top == 0 {
+            let height = usize::from(region.bottom - region.top) + 1;
+            self.save_top_rows(n.min(height));
         }
-        // With a scroll region, rows displaced from region.top are discarded
-        // (scroll regions are used by apps on the alternate screen which has
-        // no meaningful scrollback).
+    }
 
+    /// Scroll the scroll region up, keeping lines that leave the top of the
+    /// screen in history.
+    pub fn scroll_grid_up(&mut self, n: u16) {
+        self.save_scrolled_rows(n as usize);
         self.grid.scroll_up(n);
     }
 
@@ -634,13 +643,7 @@ impl Buffer {
         let scroll_bottom = self.grid.effective_scroll_region().bottom;
 
         if cursor_row == scroll_bottom {
-            if self.grid.scroll_region().is_none() {
-                // Full-screen scroll — save top row to history
-                self.scroll_grid_up(1);
-            } else {
-                // Scroll within region — no history capture
-                self.grid.newline();
-            }
+            self.scroll_grid_up(1);
         } else {
             self.grid.newline();
         }
@@ -708,6 +711,34 @@ mod tests {
         }
 
         assert_eq!(buf.history_len(), 100);
+    }
+
+    #[test]
+    fn lowering_the_history_limit_drops_the_oldest_lines() {
+        let mut buf = Buffer::with_scrollback(Dimensions::new(10, 2), 100);
+        for i in 0..50 {
+            let mut row = Row::new(10);
+            row[0].set_char(char::from(b'0' + (i % 10) as u8));
+            buf.push_to_history(vec![row]);
+        }
+        buf.scroll_up(40);
+
+        assert_eq!(buf.set_max_history(20), 30);
+
+        assert_eq!(buf.history_len(), 20);
+        assert_eq!(buf.max_history(), 20);
+        // Line 30 is now the oldest.
+        assert_eq!(buf.history[0].decode()[0].char(), '0');
+        assert_eq!(buf.history[1].decode()[0].char(), '1');
+        assert_eq!(buf.scroll_offset(), 20);
+        assert!(buf.check_integrity().is_ok());
+
+        // Raising the limit keeps what is there and lets history grow.
+        assert_eq!(buf.set_max_history(30), 0);
+        for _ in 0..15 {
+            buf.push_to_history(vec![Row::new(10)]);
+        }
+        assert_eq!(buf.history_len(), 30);
     }
 
     #[test]

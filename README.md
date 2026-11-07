@@ -9,15 +9,25 @@
 
 A GPU-accelerated terminal that replaces ANSI escape sequences with a native binary protocol for TUI applications.
 
-## The Problem
+## Why
 
-Every terminal application today renders through the same 1970s pipeline:
+A TUI that draws with ANSI escape sequences turns its layout into characters
+at fixed cells before the terminal sees anything. The terminal gets a grid of
+cells, not the structure behind it. It cannot tell a sidebar from a log, so it
+cannot scroll, resize, or select inside one part of the screen without the app
+redrawing it, and every app carries its own layout engine (ratatui, ncurses,
+Bubble Tea) to do that work.
 
-```
-App computes layout → Serializes to ANSI escape sequences → Terminal parses escapes → Terminal re-renders
-```
+Speed and tearing are not the problem. Parsing escape sequences is cheap:
+Ultty parses and applies more than 100 MiB/s of terminal output
+([measurements](docs/perf/2026-11-05-io-thread.md)). Synchronized output (mode
+2026), which Ultty and most current terminals support, already lets an app
+mark frame boundaries so a half-drawn frame is never shown.
 
-This means layout is computed twice (app and terminal), every frame is serialized and re-parsed as text, there are no layout primitives (apps manually position every character), and partial updates cause tearing because there's no frame boundary.
+Ultty tests whether moving layout into the terminal, with the structure on the
+wire, makes TUIs simpler to write and lets the terminal do more for them. The
+native protocol is experimental. ANSI support is the baseline, and every
+ordinary terminal program runs as it would in xterm.
 
 ## The Solution
 
@@ -46,41 +56,34 @@ App declares constraints ──→ Binary protocol ──→ Terminal computes l
 cargo run -p ultty --bin ultty
 ```
 
-This opens Ultty as a GPU-accelerated terminal emulator. It runs any existing terminal application (vim, htop, tmux, etc.) through full VT100/xterm ANSI compatibility.
+This opens Ultty as a GPU-accelerated terminal emulator. It runs existing terminal programs (vim, htop, tmux, and so on) through its xterm-compatible emulation; see [ANSI Compatibility](#ansi-compatibility) for what is and is not implemented.
 
-Platform status: Ultty is Unix-first today. Linux and macOS are the supported runtime targets; Windows support is future work that requires a native transport and PTY platform boundary.
+Platform status: Ultty is Unix-first. Release builds exist for Linux x86_64 only. Building from source on macOS is expected to work, but there are no macOS release builds and CI does not test macOS. Windows support is future work that requires a native transport and PTY platform boundary.
 
 Linux desktop packages install `dist/ultty.desktop` and the Ultty app icon from the hicolor icon set. Brand asset usage is documented in [docs/brand.md](docs/brand.md).
 
 ### Installing a release build
 
-On Linux or macOS:
+Release builds exist for Linux x86_64 only. On other platforms, build from
+source as above.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Trav55555/ultty/main/install.sh | sh
 ```
 
-[`install.sh`](install.sh) downloads the latest release for your OS and CPU,
-checks it against the release's `SHA256SUMS`, and installs `ultty` and
-`ulttyctl` into `~/.local/bin` (on Linux also the application-menu entry and
-icons). It needs no root. Set `ULTTY_VERSION=v0.1.0` for a specific release or
+[`install.sh`](install.sh) downloads the latest release, checks it against
+the release's `SHA256SUMS`, and installs `ultty` and `ulttyctl` into
+`~/.local/bin`, the application-menu entry and icons into `~/.local/share`, and
+the `xterm-ultty` terminfo entry into `~/.terminfo` when `tic` is available.
+It needs no root, and on any platform other than Linux x86_64 it stops with an
+error. Set `ULTTY_VERSION=v0.1.0` for a specific release or
 `ULTTY_INSTALL_DIR` for another location.
 
-Release tarballs, `.deb`, and `.rpm` packages are published from the
-[Release workflow](.github/workflows/release.yml), together with a `SHA256SUMS`
-file and a rendered Homebrew formula. Verify a download against `SHA256SUMS`
-before installing it.
+`SHA256SUMS` comes from the same release as the tarball, so it catches a
+corrupted download, not a tampered release.
 
-macOS binaries are not signed or notarized. Gatekeeper will quarantine them.
-After extracting the tarball, clear the quarantine attribute:
-
-```bash
-xattr -d com.apple.quarantine ./ultty ./ulttyctl
-```
-
-Or right-click the binary in Finder and choose Open, then confirm. Signing and
-notarization are tracked in
-[docs/ISSUE_BACKLOG_30_60_90.md](docs/ISSUE_BACKLOG_30_60_90.md).
+The release also has a Linux x86_64 tarball, `.deb` and `.rpm` packages, and
+`SHA256SUMS`. Changes between releases are in [CHANGELOG.md](CHANGELOG.md).
 
 Useful runtime overlays:
 
@@ -114,16 +117,48 @@ Native apps auto-detect whether they're talking to Ultty. On an Ultty tab's own 
 
 ## ANSI Compatibility
 
-Ultty is a fully functional terminal emulator. ANSI support is not an afterthought — it's the baseline:
+Ultty emulates an xterm-style terminal; ordinary terminal programs are the
+baseline, not an afterthought. `TERM` is `xterm-256color` by default, or
+`xterm-ultty` with `terminal.term` (see [Configuration](docs/configuration.md#terminal-type)).
 
-- VT100/VT220/xterm escape sequences
-- 256-color and 24-bit true color
-- Mouse tracking (SGR, X10, normal)
-- Bracketed paste, focus reporting
-- Sixel graphics
-- Alternate screen buffer
-- Synchronized update (mode 2026)
-- Tabs, splits, scrollback, clipboard (OSC 52)
+Implemented:
+
+- VT100/VT220 control sequences: cursor movement, scroll regions (DECSTBM),
+  origin mode, insert and delete, erase, tab stops, character sets, DECSC and
+  DECRC, DECSTR, RIS, insert mode, LNM, and DECCOLM behind mode 40
+- 256 colours and 24-bit colour, OSC 4/104 palette changes, OSC 10/11/12
+  colour queries that report the live theme
+- Underline styles (single, double, curly, dotted, dashed; `SGR 4:x`) and
+  underline colour (`SGR 58`/`59`), with colon sub-parameters
+- Keyboard: xterm encoding, modifyOtherKeys (levels 1 and 2), the kitty
+  keyboard protocol (flags 1, 2, 4, 8 and 16), input methods (IME)
+- Mouse reporting: X10, normal, button and any-event tracking, SGR (1006),
+  UTF-8 (1005), urxvt (1015), alternate scroll (1007)
+- Bracketed paste (pasted text has ESC and C1 controls removed), focus
+  reporting
+- Alternate screen (47, 1047, 1049), synchronized output (2026), grapheme
+  clustering (2027), DECSCNM reverse video
+- Sixel graphics, OSC 8 hyperlinks, OSC 52 clipboard writes (reads are
+  refused), OSC 7 working directory, OSC 133 prompt marks, OSC 9 and 777
+  notifications
+- Queries: DA1, DA2, DSR, DECXCPR, DECRQM, DECRQSS, XTVERSION, XTGETTCAP,
+  XTWINOPS 14/16/18, the title stack (XTWINOPS 22/23)
+- Tabs, splits, scrollback, vim-style copy mode
+
+Not implemented:
+
+- Left and right margins (DECSLRM, mode 69). `xterm-256color` advertises them
+  (`smglr`); `xterm-ultty` does not.
+- Setting the cursor colour (OSC 12 with a colour, OSC 112). Queries work.
+- Printer port (media copy), HP memory lock, meta mode (1034).
+- Protected cells (DECSCA). DECSED and DECSEL erase like ED and EL.
+- Rectangular area operations (DECFRA, DECERA, DECCRA and the rest) and VT52
+  mode.
+
+The conformance suite in
+[`crates/ultty-vt/tests/conformance.rs`](crates/ultty-vt/tests/conformance.rs)
+checks expected screens and replies for these areas. vttest has not been run
+against this version.
 
 ## Framework: ulttui
 
@@ -167,7 +202,7 @@ impl Application for App {
     }
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> ulttui::Result<()> {
     App { count: 0 }.run()
 }
 ```
@@ -200,17 +235,27 @@ Current dated reports:
 | Idle CPU/GPU work | near-zero when terminal and native app state are unchanged |
 | Layout recompute | < 1ms |
 | Frame render | < 5ms |
-| Input latency | < 10ms |
+| Input latency | < 10ms (target; not measured) |
 | Memory (terminal) | < 50MB |
+
+The input latency row is a target. A keystroke's echo is drawn without waiting
+for the 16 ms frame interval, so Ultty adds no pacing delay to it, but the time
+from key press to pixels on screen (including GPU and compositor) has not been
+measured on real hardware. The `input_latency` bench measures only parsing and
+grid updates, in nanoseconds to microseconds.
 
 Run the published benchmark set:
 
 ```bash
 timeout 900s cargo bench -p ultty --bench layout -- --noplot
-timeout 900s cargo bench -p ultty --bench input_latency -- --noplot
+timeout 900s cargo bench -p ultty --bench vt_small_writes -- --noplot
 timeout 900s cargo bench -p ultty --bench render -- --noplot
-timeout 900s cargo bench -p ultty --bench memory -- --noplot
+cargo test -p ultty --bench memory    # heap-byte budgets; fails when over
 ```
+
+Headless VT throughput over deterministic CRLF corpora, the A/B and A/A
+statistics, the instruction-count gate and the comparative live suite are
+described in [docs/perf/README.md](docs/perf/README.md#benchmark-suite).
 
 Run the dependency security audit separately from the normal local build/test
 loop:
@@ -248,10 +293,13 @@ smoke commands and artifact meanings.
 
 ```
 crates/
-├── ultty/            Terminal emulator — GPU renderer (wgpu), ANSI parser,
-│                     native protocol handler, scene graph, tabs/splits
+├── ultty/            Terminal emulator — GPU renderer (wgpu), PTY, native
+│                     protocol server, scene graph, tabs/splits, ulttyctl
+├── ultty-vt/         VT parser and screen model (grid, scrollback, reflow);
+│                     no I/O or GPU dependencies
 ├── ulttui/           TUI framework — Application trait, widgets, Elm architecture,
 │                     dual-mode rendering (Ultty-native + ANSI mode)
+├── ultty-client/     Low-level client: terminal detection, in-band transport
 └── ultty-protocol/   Wire protocol — Message definitions, layout types,
                       content types, shared between terminal and apps
 examples/           Nine workspace example apps: hello-native, counter-app,
@@ -266,7 +314,7 @@ examples/           Nine workspace example apps: hello-native, counter-app,
 - Native binary protocol with retained scene graph
 - Append-oriented native protocol updates for streaming text
 - GPU-accelerated rendering via wgpu
-- Full VT100/xterm ANSI compatibility
+- xterm-compatible emulation (see [ANSI Compatibility](#ansi-compatibility))
 - Framework with Elm architecture and widget system
 - Markdown streaming affordance for partial assistant responses
 - Dual-mode apps (Ultty-native mode inside Ultty, ANSI mode on supported Unix terminals)
@@ -279,12 +327,14 @@ examples/           Nine workspace example apps: hello-native, counter-app,
 - Animation primitives
 - Image widget (native protocol)
 - Scrollback search in native regions
-- Package for distribution
+- Release builds for macOS and Linux aarch64
 
 ## Documentation
 
 - [Contributing](CONTRIBUTING.md) — Toolchain, checks, and pull request expectations
 - [Getting Started](docs/GETTING_STARTED.md) — Installation and first app
+- [Configuration](docs/configuration.md) — `TERM`, scrollback, exit, clipboard, paste, and link settings
+- [Changelog](CHANGELOG.md) — Changes in each release
 - [Architecture](docs/ARCHITECTURE.md) — System design and components
 - [Architecture Vocabulary](CONTEXT.md) — Stable terms for core seams
 - [Protocol Specification](docs/PROTOCOL_SPEC.md) — Native protocol details

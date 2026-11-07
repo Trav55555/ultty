@@ -50,10 +50,10 @@ impl View for OverlayView<'_> {
     fn render_child_native(
         &self,
         index: usize,
-        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        send_message: &mut dyn FnMut(&AppMessage) -> crate::Result<()>,
         parent: RegionId,
         next_id: &mut u32,
-    ) -> anyhow::Result<Option<RegionId>> {
+    ) -> crate::Result<Option<RegionId>> {
         let base_count = self.base.children_count();
         if index < base_count {
             return self
@@ -125,12 +125,12 @@ pub trait Application: Sized {
     fn view(&self) -> impl View;
 
     /// Run the application.
-    fn run(self) -> anyhow::Result<()> {
+    fn run(self) -> crate::Result<()> {
         App::new(self).run()
     }
 
     /// Run the application with a specific theme.
-    fn run_with_theme(self, theme: crate::theme::Theme) -> anyhow::Result<()> {
+    fn run_with_theme(self, theme: crate::theme::Theme) -> crate::Result<()> {
         App::new_with_theme(self, theme).run()
     }
 }
@@ -250,7 +250,7 @@ impl<A: Application> App<A> {
     /// 5. Poll spawned tasks → enqueue messages
     /// 6. Drain message queue again (from subs/spawns)
     /// 7. Render view
-    pub fn run(mut self) -> anyhow::Result<()> {
+    pub fn run(mut self) -> crate::Result<()> {
         let rt = Runtime::new()?;
         self.backend.init()?;
         self.backend_initialized = true;
@@ -272,7 +272,7 @@ impl<A: Application> App<A> {
     /// Run one pass of the application event loop.
     ///
     /// Returns false when the runner should stop.
-    fn run_tick(&mut self, rt: &Runtime) -> anyhow::Result<bool> {
+    fn run_tick(&mut self, rt: &Runtime) -> crate::Result<bool> {
         // 1. Poll backend for events
         if let Some(mut event) = self.backend.poll_event()? {
             if matches!(&event, Event::Quit) {
@@ -394,7 +394,7 @@ impl<A: Application> App<A> {
         }
     }
 
-    fn shutdown_backend(&mut self) -> anyhow::Result<()> {
+    fn shutdown_backend(&mut self) -> crate::Result<()> {
         if self.backend_initialized && !self.backend_shutdown {
             self.backend.shutdown()?;
             self.backend_shutdown = true;
@@ -446,7 +446,7 @@ impl<A: Application> App<A> {
     /// Render the current view, managing focus and theme thread-locals.
     ///
     /// Uses an RAII guard so thread-local state is restored even if rendering panics.
-    fn render(&mut self) -> anyhow::Result<()> {
+    fn render(&mut self) -> crate::Result<()> {
         struct ThreadLocalGuard {
             old_focus: Option<FocusManager>,
             old_theme: Option<Theme>,
@@ -469,7 +469,7 @@ impl<A: Application> App<A> {
             old_theme: Some(Theme::replace_current(self.theme.clone())),
         };
 
-        let render_result = (|| -> anyhow::Result<()> {
+        let render_result = (|| -> crate::Result<()> {
             FocusManager::with_current_mut(|fm| fm.begin_frame());
             let overlay = if self.active_toasts.is_empty() {
                 None

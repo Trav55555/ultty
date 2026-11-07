@@ -4,6 +4,7 @@
 //! It owns the scene graph and layout engine for that connection.
 
 mod commands;
+mod content_limits;
 mod dirty;
 mod errors;
 mod frame;
@@ -42,6 +43,14 @@ const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
 /// died, a ping would land in the shell's input as typed text.
 pub const IN_BAND_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long an in-band app has, after the terminal answers its
+/// `ClientHello`, to send its next message (spec §1.3).
+///
+/// Bytes that merely contain a hello, such as a file being displayed,
+/// never answer, so their session ends this soon instead of after
+/// [`IN_BAND_IDLE_TIMEOUT`], and it is never shown or sent keys.
+pub const IN_BAND_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Maximum read buffer size (16 MB). Sessions exceeding this are disconnected.
 const MAX_READ_BUF: usize = 16 * 1024 * 1024;
 const MAX_RECENT_PROTOCOL_ERRORS: usize = 5;
@@ -57,10 +66,17 @@ pub struct NativeSession {
     tab_id: TabId,
     /// Scene tree for this session.
     scene: SceneTree,
+    /// Upper bound on the bytes of text in `scene`; see
+    /// [`NativeSession::admit_text`].
+    text_bytes_bound: usize,
     /// Layout engine.
     layout: LayoutEngine,
     /// How the app is connected.
     link: Link,
+    /// For a socket session, the process that connected (`SO_PEERCRED`).
+    /// Keys go to it only while its process group is in the foreground of
+    /// the focused pane.
+    peer_pid: Option<i32>,
     /// Read buffer.
     read_buf: BytesMut,
     /// Write buffer.
@@ -134,7 +150,21 @@ enum Link {
         pgrp: Option<i32>,
         /// Non-shell processes in that group then. One of them is the app.
         pids: Vec<i32>,
+        /// How far the app has shown it is a live app reading its input.
+        phase: InBandPhase,
     },
+}
+
+/// Progress of an in-band session from hello to a confirmed app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InBandPhase {
+    /// The `ClientHello` is being answered.
+    Hello,
+    /// Answered at the given time; nothing has come back since. The scene is
+    /// not shown, keys are not sent, and replies are held.
+    Unconfirmed(std::time::Instant),
+    /// The app sent more after the answer, so it reads its input.
+    Confirmed,
 }
 
 fn process_exists(pid: i32) -> bool {
@@ -168,7 +198,12 @@ impl NativeSession {
     /// Create a new session from a connection accepted on `tab_id`'s socket.
     pub fn new(stream: UnixStream, session_id: u64, tab_id: TabId) -> io::Result<Self> {
         stream.set_nonblocking(true)?;
-        Ok(Self::with_link(Link::Socket(stream), session_id, tab_id))
+        let peer_pid = crate::platform::socket::peer_pid(&stream)
+            .map_err(|e| warn!("Session {session_id}: cannot read peer pid: {e}"))
+            .ok();
+        let mut session = Self::with_link(Link::Socket(stream), session_id, tab_id);
+        session.peer_pid = peer_pid;
+        Ok(session)
     }
 
     /// Create a session whose app talks in-band on `tab_id`'s PTY, which had
@@ -180,6 +215,7 @@ impl NativeSession {
                 outgoing: Vec::new(),
                 pgrp,
                 pids,
+                phase: InBandPhase::Hello,
             },
             session_id,
             tab_id,
@@ -199,8 +235,10 @@ impl NativeSession {
             session_id,
             tab_id,
             scene,
+            text_bytes_bound: 0,
             layout: LayoutEngine::new(),
             link,
+            peer_pid: None,
             read_buf: BytesMut::with_capacity(8192),
             write_buf: BytesMut::with_capacity(8192),
             viewport_width: 80.0,
@@ -410,6 +448,19 @@ impl NativeSession {
         let idle = now.duration_since(self.last_activity);
 
         if self.is_in_band() {
+            if let Link::InBand {
+                phase: InBandPhase::Unconfirmed(since),
+                ..
+            } = self.link
+            {
+                if now.duration_since(since) > IN_BAND_CONFIRM_TIMEOUT {
+                    info!(
+                        "In-band session {} never answered its hello reply",
+                        self.session_id
+                    );
+                    return Ok(false);
+                }
+            }
             if idle > IN_BAND_IDLE_TIMEOUT {
                 info!(
                     "In-band session {} silent for {}s",
@@ -658,6 +709,50 @@ impl NativeSession {
         matches!(self.link, Link::InBand { .. })
     }
 
+    /// Whether the app has shown it is live: always for a socket session; for
+    /// an in-band one, once it sent something after the hello was answered.
+    ///
+    /// Until then the session's scene is not shown, it gets no input, and
+    /// replies other than the hello answer are held back, so a stray hello
+    /// (a `cat`ed file, say) neither blanks the tab nor has input typed
+    /// into the shell on its behalf.
+    pub fn is_confirmed(&self) -> bool {
+        match &self.link {
+            Link::Socket(_) => true,
+            Link::InBand { phase, .. } => *phase == InBandPhase::Confirmed,
+        }
+    }
+
+    /// Note that more in-band data reached an answered session, which
+    /// confirms it (see [`NativeSession::is_confirmed`]).
+    pub fn confirm_in_band(&mut self) {
+        if let Link::InBand { phase, .. } = &mut self.link {
+            if matches!(phase, InBandPhase::Unconfirmed(_)) {
+                *phase = InBandPhase::Confirmed;
+                self.render_dirty = true;
+            }
+        }
+    }
+
+    /// After an in-band hello is answered, send the answer and hold what
+    /// follows until the app confirms.
+    pub(super) fn end_in_band_hello(&mut self) -> io::Result<()> {
+        if !matches!(
+            self.link,
+            Link::InBand {
+                phase: InBandPhase::Hello,
+                ..
+            }
+        ) {
+            return Ok(());
+        }
+        self.flush_writes()?;
+        if let Link::InBand { phase, .. } = &mut self.link {
+            *phase = InBandPhase::Unconfirmed(std::time::Instant::now());
+        }
+        Ok(())
+    }
+
     /// For an in-band session, the PTY's foreground process group when it
     /// started.
     pub fn in_band_pgrp(&self) -> Option<i32> {
@@ -778,6 +873,24 @@ impl NativeSession {
             }
         }
         RegionId::ROOT
+    }
+
+    /// Whether keys typed into a pane whose PTY has `foreground_pgrp` in the
+    /// foreground may reach this session.
+    ///
+    /// An in-band app talks over that PTY and its session ends when the
+    /// foreground changes, so it qualifies. A socket session qualifies only
+    /// while the process that connected is in the foreground group: a
+    /// background job that subscribed to keys must not see what the user
+    /// types to the shell or to another program.
+    pub fn is_in_foreground(&self, foreground_pgrp: Option<i32>) -> bool {
+        if self.is_in_band() {
+            return true;
+        }
+        let peer_group = self
+            .peer_pid
+            .and_then(crate::platform::socket::process_group);
+        peer_group.is_some() && peer_group == foreground_pgrp
     }
 
     /// Returns true if any region in this session is subscribed to key events.
@@ -1861,6 +1974,30 @@ mod tests {
     }
 
     #[test]
+    fn unanswered_in_band_hello_expires_after_the_confirm_timeout() {
+        let mut session = NativeSession::new_in_band(1, TabId::new(0), Some(9), Vec::new());
+        negotiate_all_test_capabilities(&mut session);
+        assert!(!session.is_confirmed());
+        assert!(session.check_keepalive().unwrap());
+
+        let answered = std::time::Instant::now()
+            - IN_BAND_CONFIRM_TIMEOUT
+            - std::time::Duration::from_millis(100);
+        session.link = Link::InBand {
+            outgoing: Vec::new(),
+            pgrp: Some(9),
+            pids: Vec::new(),
+            phase: InBandPhase::Unconfirmed(answered),
+        };
+        // Far inside the idle timeout, but the app never answered.
+        assert!(!session.check_keepalive().unwrap());
+
+        session.confirm_in_band();
+        assert!(session.is_confirmed());
+        assert!(session.check_keepalive().unwrap(), "a confirmed app stays");
+    }
+
+    #[test]
     fn in_band_app_is_gone_when_its_group_changes_or_a_process_exits() {
         let spawn = || {
             std::process::Command::new("sleep")
@@ -1888,5 +2025,112 @@ mod tests {
             unknown.in_band_app_alive(Some(5)),
             "no pids: group check only"
         );
+    }
+
+    fn create_text_region(session: &mut NativeSession, id: RegionId) {
+        session
+            .handle_message(AppMessage::CreateRegion {
+                id,
+                parent: RegionId::ROOT,
+                insert_index: -1,
+                constraints: ultty_protocol::Constraints::default(),
+                style: ultty_protocol::Style::default(),
+            })
+            .unwrap();
+    }
+
+    fn append(session: &mut NativeSession, id: RegionId, text: &str) {
+        session
+            .handle_message(AppMessage::AppendContent {
+                id,
+                text: text.to_string(),
+            })
+            .unwrap();
+    }
+
+    fn region_text_len(session: &NativeSession, id: RegionId) -> usize {
+        content_limits::text_bytes(&session.scene.get(id).unwrap().content)
+    }
+
+    /// What the in-band flood generator sends: one region, 1 MiB appends.
+    #[test]
+    fn append_flood_keeps_a_region_to_its_newest_text() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        let id = RegionId::new(1);
+        create_text_region(&mut session, id);
+        let chunk = "A".repeat(1024 * 1024 - 64);
+
+        for _ in 0..64 {
+            append(&mut session, id, &chunk);
+            assert!(region_text_len(&session, id) <= content_limits::MAX_REGION_TEXT_BYTES);
+        }
+        append(&mut session, id, "NEWEST");
+
+        let Content::Text(text) = &session.scene.get(id).unwrap().content else {
+            panic!("expected text");
+        };
+        assert!(text.text.ends_with("NEWEST"));
+        assert!(text.text.len() >= content_limits::TRIMMED_REGION_TEXT_BYTES);
+        assert_eq!(session.recent_protocol_errors().count(), 0);
+    }
+
+    #[test]
+    fn session_text_is_capped_across_regions() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        let chunk = "B".repeat(1024 * 1024);
+        let per_region = content_limits::MAX_REGION_TEXT_BYTES / chunk.len();
+        let regions =
+            content_limits::MAX_SESSION_TEXT_BYTES / content_limits::MAX_REGION_TEXT_BYTES;
+
+        for n in 1..=regions + 4 {
+            let id = RegionId::new(n as u32);
+            create_text_region(&mut session, id);
+            for _ in 0..per_region {
+                append(&mut session, id, &chunk);
+            }
+        }
+
+        let total: usize = session
+            .scene
+            .iter_depth_first()
+            .map(|region| content_limits::text_bytes(&region.content))
+            .sum();
+        assert!(total <= content_limits::MAX_SESSION_TEXT_BYTES, "{total}");
+        assert!(session.recent_protocol_errors().count() > 0);
+
+        // Freeing a region makes room again.
+        session
+            .handle_message(AppMessage::DeleteRegion {
+                id: RegionId::new(1),
+            })
+            .unwrap();
+        let last = RegionId::new((regions + 4) as u32);
+        let before = region_text_len(&session, last);
+        append(&mut session, last, &chunk);
+        assert_eq!(region_text_len(&session, last), before + chunk.len());
+    }
+
+    #[test]
+    fn set_content_counts_toward_the_session_limit() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        let chunk = "C".repeat(1024 * 1024);
+        let count = content_limits::MAX_SESSION_TEXT_BYTES / chunk.len() + 1;
+
+        for n in 1..=count {
+            let id = RegionId::new(n as u32);
+            create_text_region(&mut session, id);
+            session
+                .handle_message(AppMessage::SetContent {
+                    id,
+                    content: Content::Text(ultty_protocol::TextContent::new(chunk.clone())),
+                })
+                .unwrap();
+        }
+
+        assert_eq!(region_text_len(&session, RegionId::new(count as u32)), 0);
+        assert_eq!(session.recent_protocol_errors().count(), 1);
     }
 }

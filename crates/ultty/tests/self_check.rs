@@ -14,6 +14,10 @@ const WAIT_LONG: Duration = Duration::from_secs(5);
 /// quit. Generous: on a loaded machine (the full parallel suite) editors
 /// take seconds to exit.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long an app gets to start and draw its first screen. The wait ends
+/// as soon as it has; under load average 40 and up, nvim has needed more
+/// than five seconds.
+const APP_START_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn command_exists(cmd: &str) -> bool {
     std::process::Command::new("which")
@@ -212,13 +216,20 @@ fn self_check_nvim() {
     let mut term = TestTerminal::hermetic(80, 24).expect("create terminal");
     term.wait_for_output(WAIT_SHORT).unwrap();
 
-    let result = term.test_app(
-        "nvim",
-        &[AppCheck::AlternateScreen(true), AppCheck::MinRows(5)],
-    );
-
-    println!("nvim test: {}", result.summary());
+    // Wait for nvim to draw, not for its output to pause: on a loaded
+    // machine the shell can sit quiet for seconds before nvim starts.
+    // `--clean` skips the user's config and plugins.
+    term.send("nvim --clean\r").unwrap();
+    let started = term
+        .wait_until(APP_START_TIMEOUT, |t| {
+            t.is_alternate_screen() && t.snapshot().contains("~")
+        })
+        .unwrap();
     println!("{}", term.debug());
+    assert!(
+        started,
+        "nvim should draw its empty buffer on the alternate screen"
+    );
 
     // Quit nvim.
     // Escape on its own first: sent together with ":" it can read as
@@ -231,12 +242,6 @@ fn self_check_nvim() {
         .wait_until(QUIT_TIMEOUT, |t| !t.is_alternate_screen())
         .unwrap();
     assert!(left, "Should exit alternate screen");
-
-    if !result.is_success() {
-        for fail in &result.failed {
-            println!("  FAIL: {}", fail);
-        }
-    }
 }
 
 #[test]

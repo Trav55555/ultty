@@ -49,7 +49,7 @@ impl Backend {
     /// Initialize the backend.
     ///
     /// For native backends, if the connection fails, automatically falls back to ANSI.
-    pub fn init(&mut self) -> anyhow::Result<()> {
+    pub fn init(&mut self) -> crate::Result<()> {
         match self {
             Backend::Native(b) => match b.init() {
                 Ok(()) => Ok(()),
@@ -76,7 +76,7 @@ impl Backend {
     }
 
     /// Shutdown the backend.
-    pub fn shutdown(&mut self) -> anyhow::Result<()> {
+    pub fn shutdown(&mut self) -> crate::Result<()> {
         match self {
             Backend::Native(b) => b.shutdown(),
             Backend::Ansi(b) => b.shutdown(),
@@ -86,7 +86,7 @@ impl Backend {
     }
 
     /// Render a view.
-    pub fn render(&mut self, view: &impl View) -> anyhow::Result<()> {
+    pub fn render(&mut self, view: &impl View) -> crate::Result<()> {
         match self {
             Backend::Native(b) => b.render(view),
             Backend::Ansi(b) => b.render(view),
@@ -96,7 +96,7 @@ impl Backend {
     }
 
     /// Poll for events.
-    pub fn poll_event(&mut self) -> anyhow::Result<Option<Event>> {
+    pub fn poll_event(&mut self) -> crate::Result<Option<Event>> {
         match self {
             Backend::Native(b) => b.poll_event(),
             Backend::Ansi(b) => b.poll_event(),

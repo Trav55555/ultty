@@ -7,12 +7,14 @@ use ultty::config::KeybindingConfig;
 use ultty::grid::{
     MouseButton as TerminalMouseButton, MouseModifiers, SelectionMode, SelectionPoint,
 };
+use ultty::keys::{self, KeyAction, KeyInput, KeyModes, Mods};
 use ultty::terminal_manager::SplitDirection;
 use ultty::url::UrlDetector;
 use ultty::vim::CopyModeResult;
 use ultty_protocol::{Key as ProtocolKey, Modifiers as ProtocolModifiers};
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::keyboard::{Key, NamedKey};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::keyboard::{Key, NamedKey, PhysicalKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 impl App {
     /// Handle window event. Returns true if should exit.
@@ -62,11 +64,23 @@ impl App {
                 tracing::debug!("WindowEvent::MouseWheel received: delta={:?}", delta);
                 self.handle_scroll(delta);
             }
-            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+            WindowEvent::Ime(Ime::Enabled) => {
+                tracing::debug!("Input method enabled");
+            }
+            WindowEvent::Ime(Ime::Disabled) => {
+                tracing::debug!("Input method disabled");
+                self.set_ime_preedit(String::new());
+            }
+            WindowEvent::Ime(Ime::Preedit(text, _cursor)) => {
+                self.set_ime_preedit(text);
+            }
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                self.set_ime_preedit(String::new());
                 // Forward IME committed text to native protocol sessions as TextInput
+                let foreground = self.focused_foreground_pgrp();
                 if let Some(ref mut server) = self.protocol_server {
                     if server.session_count() > 0 {
-                        server.broadcast_text_input(text.clone());
+                        server.broadcast_text_input(text.clone(), foreground);
                     }
                 }
                 // Also send the text to the terminal PTY
@@ -78,12 +92,16 @@ impl App {
                 // Redraw requests are delivery events, not state changes. Dirty state is
                 // set by input, PTY output, native protocol updates, timers, and resize.
             }
-            WindowEvent::Focused(focused)
-                if self.terminal().is_some_and(|t| t.modes().focus_reporting) =>
-            {
-                // Send focus in/out escape sequence
-                let seq = if focused { b"\x1b[I" } else { b"\x1b[O" };
-                let _ = self.send_input(seq);
+            WindowEvent::Focused(focused) => {
+                if focused {
+                    // Clear a bell's urgency hint; X11 keeps it until cleared.
+                    self.window.request_user_attention(None);
+                }
+                if self.terminal().is_some_and(|t| t.modes().focus_reporting) {
+                    // Send focus in/out escape sequence
+                    let seq = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                    let _ = self.send_report(seq);
+                }
             }
             _ => {}
         }
@@ -388,7 +406,7 @@ impl App {
                     if let Some(url) = self.url_detector.url_at(col, row) {
                         let url_str = url.url.clone();
                         if let Err(e) = UrlDetector::open_url(&url_str) {
-                            tracing::warn!("Failed to open URL: {}", e);
+                            tracing::warn!("{}", e);
                         } else {
                             tracing::info!("Opened URL: {}", url_str);
                         }
@@ -523,7 +541,7 @@ impl App {
             if let Some(bytes) = self.terminal().and_then(|t| {
                 t.encode_mouse_event(TerminalMouseButton::Left, col, row, true, true, mods)
             }) {
-                let _ = self.send_input(&bytes);
+                let _ = self.send_report(&bytes);
             }
             return;
         }
@@ -550,7 +568,7 @@ impl App {
         if let Some(bytes) = self.terminal().and_then(|t| {
             t.encode_mouse_event(TerminalMouseButton::Release, col, row, true, true, mods)
         }) {
-            let _ = self.send_input(&bytes);
+            let _ = self.send_report(&bytes);
         }
     }
 
@@ -844,18 +862,9 @@ impl App {
         if let Some(clipboard) = &mut self.clipboard {
             match clipboard.get_text() {
                 Ok(text) => {
-                    // Check for bracketed paste mode
                     let bracketed = self.terminal().is_some_and(|t| t.modes().bracketed_paste);
-                    if bracketed {
-                        let _ = self.send_input(b"\x1b[200~");
-                    }
-
-                    if let Err(e) = self.send_input(text.as_bytes()) {
+                    if let Err(e) = self.send_input(&paste_payload(&text, bracketed)) {
                         tracing::warn!("Failed to paste: {}", e);
-                    }
-
-                    if bracketed {
-                        let _ = self.send_input(b"\x1b[201~");
                     }
                 }
                 Err(e) => {
@@ -865,16 +874,31 @@ impl App {
         }
     }
 
+    /// Show the input method's composition text, or clear it with an
+    /// empty string.
+    fn set_ime_preedit(&mut self, text: String) {
+        if self.ime_preedit != text {
+            self.ime_preedit = text;
+            self.needs_redraw = true;
+        }
+    }
+
     /// Handle keyboard input.
     fn handle_key(&mut self, event: KeyEvent) {
+        // While the input method is composing, keys are its to handle: the
+        // text arrives as a commit, and must not also be sent as keys.
+        if !self.ime_preedit.is_empty() {
+            return;
+        }
         if event.state == ElementState::Released {
+            // Only a program that asked for release events gets any bytes.
+            self.send_key_to_terminal(&event);
             self.forward_key_up_to_native_sessions(&event);
             return;
         }
 
         // Reset cursor blink on key press (cursor should be visible while typing)
-        self.cursor_blink_visible = true;
-        self.last_cursor_blink = Instant::now();
+        self.cursor_blink.restart(Instant::now());
 
         // Check for vim mode toggle (Ctrl+Shift+Space)
         if self.check_keybinding(&event, &self.config.keybindings.vim_mode.clone()) {
@@ -1111,216 +1135,94 @@ impl App {
             return;
         }
 
-        // Check if application cursor keys mode is enabled (DECCKM)
-        let app_cursor = self
-            .terminal()
-            .is_some_and(|t| t.modes().application_cursor_keys);
+        self.send_key_to_terminal(&event);
 
-        // Compute xterm modifier code: Shift=2, Alt=3, Shift+Alt=4, Ctrl=5,
-        // Shift+Ctrl=6, Alt+Ctrl=7, Shift+Alt+Ctrl=8
-        let modifier_code = {
-            let mut m = 0u8;
-            if self.modifiers.shift_key() {
-                m |= 1;
-            }
-            if self.modifiers.alt_key() {
-                m |= 2;
-            }
-            if self.modifiers.control_key() {
-                m |= 4;
-            }
-            if m > 0 {
-                m + 1
-            } else {
-                0
-            }
-        };
+        self.forward_key_to_native_sessions(&event);
+    }
 
-        // Helper: send a dynamically formatted sequence and return early
-        macro_rules! send_modified {
-            ($self:expr, $seq:expr) => {{
-                if let Err(e) = $self.send_input($seq.as_bytes()) {
-                    tracing::warn!("Failed to send input: {}", e);
-                }
-                $self.forward_key_to_native_sessions(&event);
-                return;
-            }};
+    /// Send a key to the focused terminal, encoded for its keyboard modes.
+    fn send_key_to_terminal(&mut self, event: &KeyEvent) {
+        let bytes = self.encode_key(event);
+        if bytes.is_empty() {
+            return;
         }
+        if let Err(e) = self.send_input(&bytes) {
+            tracing::warn!("Failed to send input: {}", e);
+        }
+    }
 
-        // Convert key to terminal input
-        let input: Option<&[u8]> = match &event.logical_key {
-            Key::Named(named) => match named {
-                NamedKey::Space => Some(b" "),
-                NamedKey::Enter => Some(b"\r"),
-                NamedKey::Backspace => Some(b"\x7f"),
-                NamedKey::Tab => Some(b"\t"),
-                NamedKey::Escape => Some(b"\x1b"),
-
-                // Arrow keys: modified → CSI 1;{mod} X, unmodified → SS3 X or CSI X
-                NamedKey::ArrowUp
-                | NamedKey::ArrowDown
-                | NamedKey::ArrowRight
-                | NamedKey::ArrowLeft => {
-                    let suffix = match named {
-                        NamedKey::ArrowUp => 'A',
-                        NamedKey::ArrowDown => 'B',
-                        NamedKey::ArrowRight => 'C',
-                        _ => 'D',
-                    };
-                    if modifier_code > 0 {
-                        send_modified!(self, format!("\x1b[1;{}{}", modifier_code, suffix));
-                    }
-                    Some(if app_cursor {
-                        match suffix {
-                            'A' => &b"\x1bOA"[..],
-                            'B' => &b"\x1bOB"[..],
-                            'C' => &b"\x1bOC"[..],
-                            _ => &b"\x1bOD"[..],
-                        }
-                    } else {
-                        match suffix {
-                            'A' => &b"\x1b[A"[..],
-                            'B' => &b"\x1b[B"[..],
-                            'C' => &b"\x1b[C"[..],
-                            _ => &b"\x1b[D"[..],
-                        }
-                    })
-                }
-
-                // Home/End: modified → CSI 1;{mod} H/F
-                NamedKey::Home | NamedKey::End => {
-                    let suffix = if matches!(named, NamedKey::Home) {
-                        'H'
-                    } else {
-                        'F'
-                    };
-                    if modifier_code > 0 {
-                        send_modified!(self, format!("\x1b[1;{}{}", modifier_code, suffix));
-                    }
-                    Some(match (app_cursor, suffix) {
-                        (true, 'H') => &b"\x1bOH"[..],
-                        (true, _) => &b"\x1bOF"[..],
-                        (false, 'H') => &b"\x1b[H"[..],
-                        (false, _) => &b"\x1b[F"[..],
-                    })
-                }
-
-                // Tilde-encoded keys: modified → CSI {n};{mod} ~
-                NamedKey::PageUp | NamedKey::PageDown | NamedKey::Insert | NamedKey::Delete => {
-                    let n = match named {
-                        NamedKey::Insert => 2,
-                        NamedKey::Delete => 3,
-                        NamedKey::PageUp => 5,
-                        _ => 6,
-                    };
-                    if modifier_code > 0 {
-                        send_modified!(self, format!("\x1b[{};{}~", n, modifier_code));
-                    }
-                    match n {
-                        2 => Some(&b"\x1b[2~"[..]),
-                        3 => Some(&b"\x1b[3~"[..]),
-                        5 => Some(&b"\x1b[5~"[..]),
-                        _ => Some(&b"\x1b[6~"[..]),
-                    }
-                }
-
-                // F1-F4: modified → CSI 1;{mod} P/Q/R/S
-                NamedKey::F1 | NamedKey::F2 | NamedKey::F3 | NamedKey::F4 => {
-                    let suffix = match named {
-                        NamedKey::F1 => 'P',
-                        NamedKey::F2 => 'Q',
-                        NamedKey::F3 => 'R',
-                        _ => 'S',
-                    };
-                    if modifier_code > 0 {
-                        send_modified!(self, format!("\x1b[1;{}{}", modifier_code, suffix));
-                    }
-                    match suffix {
-                        'P' => Some(&b"\x1bOP"[..]),
-                        'Q' => Some(&b"\x1bOQ"[..]),
-                        'R' => Some(&b"\x1bOR"[..]),
-                        _ => Some(&b"\x1bOS"[..]),
-                    }
-                }
-
-                // F5-F12: modified → CSI {n};{mod} ~
-                NamedKey::F5
-                | NamedKey::F6
-                | NamedKey::F7
-                | NamedKey::F8
-                | NamedKey::F9
-                | NamedKey::F10
-                | NamedKey::F11
-                | NamedKey::F12 => {
-                    let n = match named {
-                        NamedKey::F5 => 15,
-                        NamedKey::F6 => 17,
-                        NamedKey::F7 => 18,
-                        NamedKey::F8 => 19,
-                        NamedKey::F9 => 20,
-                        NamedKey::F10 => 21,
-                        NamedKey::F11 => 23,
-                        _ => 24,
-                    };
-                    if modifier_code > 0 {
-                        send_modified!(self, format!("\x1b[{};{}~", n, modifier_code));
-                    }
-                    match n {
-                        15 => Some(&b"\x1b[15~"[..]),
-                        17 => Some(&b"\x1b[17~"[..]),
-                        18 => Some(&b"\x1b[18~"[..]),
-                        19 => Some(&b"\x1b[19~"[..]),
-                        20 => Some(&b"\x1b[20~"[..]),
-                        21 => Some(&b"\x1b[21~"[..]),
-                        23 => Some(&b"\x1b[23~"[..]),
-                        _ => Some(&b"\x1b[24~"[..]),
-                    }
-                }
-
+    /// The bytes a key event sends to the focused terminal's program.
+    fn encode_key(&self, event: &KeyEvent) -> Vec<u8> {
+        let unmodified = event.key_without_modifiers();
+        let Some(key) = keys::key_from_winit(&event.logical_key, &unmodified, event.location)
+        else {
+            return Vec::new();
+        };
+        let pressed = event.state == ElementState::Pressed;
+        let mut mods = Mods::new(
+            self.modifiers.shift_key(),
+            self.modifiers.alt_key(),
+            self.modifiers.control_key(),
+            self.modifiers.super_key(),
+        );
+        // A modifier key's own bit reflects this event: set when it goes
+        // down, clear when it comes up.
+        if let Key::Named(named) = &event.logical_key {
+            let own = match named {
+                NamedKey::Shift => Some(Mods::SHIFT),
+                NamedKey::Alt => Some(Mods::ALT),
+                NamedKey::Control => Some(Mods::CTRL),
+                NamedKey::Super => Some(Mods::SUPER),
                 _ => None,
-            },
-            Key::Character(c) => {
-                let ch = c.chars().next().unwrap_or('\0');
-                // Handle Ctrl+key combinations
-                if self.modifiers.control_key()
-                    && !self.modifiers.shift_key()
-                    && ch.is_ascii_alphabetic()
-                {
-                    let ctrl_char = (ch.to_ascii_lowercase() as u8 - b'a' + 1) as char;
-                    if let Err(e) = self.send_input(&[ctrl_char as u8]) {
-                        tracing::warn!("Failed to send input: {}", e);
-                    }
-                    self.forward_key_to_native_sessions(&event);
-                    return;
-                }
-                // Handle Alt+key combinations (ESC prefix)
-                if self.modifiers.alt_key() {
-                    let mut buf = [0u8; 5]; // ESC + up to 4 UTF-8 bytes
-                    buf[0] = 0x1b;
-                    let encoded = ch.encode_utf8(&mut buf[1..]);
-                    let len = 1 + encoded.len();
-                    if let Err(e) = self.send_input(&buf[..len]) {
-                        tracing::warn!("Failed to send input: {}", e);
-                    }
-                    self.forward_key_to_native_sessions(&event);
-                    return;
-                }
-                None
+            };
+            if let Some(own) = own {
+                mods = if pressed {
+                    mods.union(own)
+                } else {
+                    mods.without(own)
+                };
+            }
+        }
+        let shifted = match &event.logical_key {
+            Key::Character(s) if mods.contains(Mods::SHIFT) => {
+                s.chars().next().filter(|&c| keys::Key::Char(c) != key)
             }
             _ => None,
         };
-
-        if let Some(bytes) = input {
-            if let Err(e) = self.send_input(bytes) {
-                tracing::warn!("Failed to send input: {}", e);
+        let base = match (key, event.physical_key) {
+            (keys::Key::Char(_), PhysicalKey::Code(code)) => {
+                keys::base_layout_key(code).filter(|&b| keys::Key::Char(b) != key)
             }
-        } else if let Key::Character(c) = &event.logical_key {
-            if let Err(e) = self.send_input(c.as_bytes()) {
-                tracing::warn!("Failed to send input: {}", e);
-            }
-        }
-
-        self.forward_key_to_native_sessions(&event);
+            _ => None,
+        };
+        let action = match (pressed, event.repeat) {
+            (false, _) => KeyAction::Release,
+            (true, true) => KeyAction::Repeat,
+            (true, false) => KeyAction::Press,
+        };
+        let modes = self
+            .terminal()
+            .map(|t| {
+                let modes = t.modes();
+                KeyModes {
+                    application_cursor: modes.application_cursor_keys,
+                    kitty_flags: modes.kitty_keyboard_flags,
+                    modify_other_keys: modes.modify_other_keys,
+                    linefeed_newline: modes.linefeed_newline,
+                }
+            })
+            .unwrap_or_default();
+        keys::encode(
+            &KeyInput {
+                key,
+                shifted,
+                base,
+                mods,
+                action,
+                text: event.text.as_deref(),
+            },
+            modes,
+        )
     }
 
     /// Convert a winit key event into protocol key + modifiers.
@@ -1381,11 +1283,12 @@ impl App {
         let Some((key, modifiers)) = self.convert_key_event(event) else {
             return;
         };
+        let foreground = self.focused_foreground_pgrp();
         let Some(ref mut server) = self.protocol_server else {
             return;
         };
         if server.session_count() > 0 {
-            server.broadcast_key(key, modifiers);
+            server.broadcast_key(key, modifiers, foreground);
         }
     }
 
@@ -1393,11 +1296,12 @@ impl App {
         let Some((key, modifiers)) = self.convert_key_event(event) else {
             return;
         };
+        let foreground = self.focused_foreground_pgrp();
         let Some(ref mut server) = self.protocol_server else {
             return;
         };
         if server.session_count() > 0 {
-            server.broadcast_key_up(key, modifiers);
+            server.broadcast_key_up(key, modifiers, foreground);
         }
     }
 
@@ -1609,6 +1513,32 @@ impl App {
     }
 }
 
+/// The bytes a paste of `text` sends to the pty.
+///
+/// With bracketed paste on, the text is wrapped in `ESC[200~` / `ESC[201~`.
+/// Every ESC and C1 control (U+0080-U+009F, which includes the 8-bit CSI)
+/// is removed from the text first, so the clipboard can never close the
+/// bracket early and have the rest run as typed input. Without bracketed
+/// paste the program cannot tell a paste from typing, so newlines become
+/// carriage returns, the byte the Enter key sends. Multi-line pastes are not
+/// confirmed; a shell without bracketed paste runs each line as it arrives.
+fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let mut out = Vec::with_capacity(text.len() + 12);
+        out.extend_from_slice(b"\x1b[200~");
+        let mut buf = [0u8; 4];
+        for c in text.chars() {
+            if c != '\x1b' && !('\u{80}'..='\u{9f}').contains(&c) {
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+        out.extend_from_slice(b"\x1b[201~");
+        out
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+    }
+}
+
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-' || c == '.'
 }
@@ -1700,6 +1630,27 @@ mod tests {
         assert!(is_word_char('文'));
         // Cyrillic
         assert!(is_word_char('Д'));
+    }
+
+    #[test]
+    fn bracketed_paste_cannot_end_the_bracket_early() {
+        let payload = paste_payload("x\x1b[201~;touch PWNED\n", true);
+        assert_eq!(payload, b"\x1b[200~x[201~;touch PWNED\n\x1b[201~");
+    }
+
+    #[test]
+    fn bracketed_paste_strips_escape_and_c1_controls() {
+        // ESC[200~, a raw ESC, and the 8-bit CSI (U+009B) followed by 201~.
+        let payload = paste_payload("a\x1b[200~b\x1bc\u{9b}201~d\u{85}é\tz", true);
+        assert_eq!(payload, "\x1b[200~a[200~bc201~dé\tz\x1b[201~".as_bytes());
+    }
+
+    #[test]
+    fn plain_paste_sends_newlines_as_carriage_returns() {
+        assert_eq!(
+            paste_payload("one\ntwo\r\nthree", false),
+            b"one\rtwo\rthree"
+        );
     }
 
     #[test]

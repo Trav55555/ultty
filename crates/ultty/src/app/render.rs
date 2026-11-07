@@ -5,16 +5,24 @@ use std::time::Instant;
 use super::update::pipeline_trace_enabled;
 use super::App;
 use ultty::event_loop::TerminalGuard;
-use ultty::renderer::{OverlayState, PaneInfo};
+use ultty::renderer::{ImePreedit, OverlayState, PaneInfo};
 use ultty::terminal_manager::TerminalManager;
 
 impl App {
     /// Render the terminal.
     pub(super) fn render(&mut self) {
         self.update_window_corner_radius();
+        if self.frames_drawn == 0 {
+            tracing::debug!(target: "ultty::startup", "drawing the first frame");
+        }
+        self.frames_drawn = self.frames_drawn.saturating_add(1);
 
         let trace_start = pipeline_trace_enabled().then(Instant::now);
         let pane_count = self.terminal_manager.pane_count();
+        // Where the cursor is, read before the frame is acquired and the
+        // terminals are locked for drawing.
+        let cursor_cell = self.cursor_cell_rect();
+        self.update_ime_cursor_area(cursor_cell);
 
         // Acquire the frame before locking any terminal: this can block
         // until the next vsync, and the terminals' I/O threads must keep
@@ -38,9 +46,9 @@ impl App {
         };
 
         if pane_count > 1 {
-            self.render_multi_pane(output);
+            self.render_multi_pane(output, cursor_cell);
         } else {
-            self.render_single_pane(output);
+            self.render_single_pane(output, cursor_cell);
         }
 
         // Clear dirty flags after successful render
@@ -77,6 +85,55 @@ impl App {
         }
     }
 
+    /// The focused terminal's cursor cell in window pixels, or `None` when
+    /// no terminal has focus.
+    fn cursor_cell_rect(&self) -> Option<CellRect> {
+        let (width, height) = self.renderer.cell_dimensions();
+        let top = self.renderer.tab_bar_height();
+        let (origin_x, origin_y) = if self.terminal_manager.pane_count() > 1 {
+            let size = self.window.inner_size();
+            let focused = self.terminal_manager.focused_terminal_id()?;
+            let (_, (x, y, _, _)) = self
+                .terminal_manager
+                .active_pane_rects(size.width as f32, size.height as f32 - top)
+                .into_iter()
+                .find(|(id, _)| *id == focused)?;
+            (x, y + top)
+        } else {
+            (0.0, top)
+        };
+        let terminal = self.terminal()?;
+        let cursor = terminal.buffer().grid().cursor().position;
+        Some(CellRect {
+            x: origin_x + f32::from(cursor.col) * width,
+            y: origin_y + f32::from(cursor.row) * height,
+            width,
+            height,
+        })
+    }
+
+    /// Tell the input method where the cursor is, so its candidate window
+    /// opens next to it. Only a change is sent.
+    fn update_ime_cursor_area(&mut self, cursor_cell: Option<CellRect>) {
+        let Some(cell) = cursor_cell else {
+            return;
+        };
+        let area = [
+            cell.x.round() as i32,
+            cell.y.round() as i32,
+            cell.width.round() as i32,
+            cell.height.round() as i32,
+        ];
+        if self.ime_cursor_area == Some(area) {
+            return;
+        }
+        self.ime_cursor_area = Some(area);
+        self.window.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(area[0], area[1]),
+            winit::dpi::PhysicalSize::new(area[2].max(1) as u32, area[3].max(1) as u32),
+        );
+    }
+
     /// Configure the surface again for the window's current size.
     fn reconfigure_surface(&mut self) {
         let size = self.window.inner_size();
@@ -84,7 +141,7 @@ impl App {
     }
 
     /// Render a single terminal pane.
-    fn render_single_pane(&mut self, output: wgpu::SurfaceTexture) {
+    fn render_single_pane(&mut self, output: wgpu::SurfaceTexture, cursor_cell: Option<CellRect>) {
         let Some(terminal) = self
             .terminal_manager
             .focused_terminal()
@@ -126,7 +183,14 @@ impl App {
                 None
             },
             protocol_status: protocol_status_rows.as_deref(),
-            cursor_blink_visible: self.cursor_blink_visible,
+            cursor_blink_visible: self.cursor_blink.visible(),
+            ime_preedit: cursor_cell
+                .filter(|_| !self.ime_preedit.is_empty())
+                .map(|cell| ImePreedit {
+                    text: &self.ime_preedit,
+                    x: cell.x,
+                    y: cell.y,
+                }),
         };
 
         // Only the visible tab's native sessions are drawn; a session in a
@@ -164,13 +228,13 @@ impl App {
     }
 
     /// Render multiple panes.
-    fn render_multi_pane(&mut self, output: wgpu::SurfaceTexture) {
+    fn render_multi_pane(&mut self, output: wgpu::SurfaceTexture, cursor_cell: Option<CellRect>) {
         // One lock per pane, held for this frame. Everything below reads the
         // panes through these guards; locking a pane's terminal again here
         // would deadlock.
         let locked = lock_active_panes(
             &self.terminal_manager,
-            self.window.inner_size(),
+            self.renderer.surface_size().into(),
             self.tab_bar.content_top(),
         );
         if locked.is_empty() {
@@ -215,11 +279,27 @@ impl App {
                 None
             },
             protocol_status: protocol_status_rows.as_deref(),
-            cursor_blink_visible: self.cursor_blink_visible,
+            cursor_blink_visible: self.cursor_blink.visible(),
+            ime_preedit: cursor_cell
+                .filter(|_| !self.ime_preedit.is_empty())
+                .map(|cell| ImePreedit {
+                    text: &self.ime_preedit,
+                    x: cell.x,
+                    y: cell.y,
+                }),
         };
 
         self.renderer.render_panes(output, &panes, &overlay)
     }
+}
+
+/// A cell's rectangle in window pixels.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CellRect {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
 }
 
 /// Lock every pane of the active tab once, paired with its rectangle and

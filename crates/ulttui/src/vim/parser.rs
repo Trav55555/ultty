@@ -3,7 +3,7 @@
 //! Converts raw key events into vim commands and actions.
 
 use super::ParseResult;
-use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimState};
+use crate::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimState};
 use ultty_protocol::{Key, Modifiers};
 
 /// Parser for vim key sequences.

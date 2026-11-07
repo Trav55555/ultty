@@ -222,7 +222,9 @@ impl Renderer {
                 encoder,
                 view,
                 terminal,
-                &self.color_scheme,
+                &self
+                    .color_scheme
+                    .for_terminal(terminal.palette(), terminal.modes().reverse_video),
                 self.cell_width,
                 self.cell_height,
                 self.pane_offset_x,
@@ -426,6 +428,10 @@ impl Renderer {
             }
         }
 
+        if let Some(preedit) = overlay.ime_preedit {
+            self.render_ime_preedit(encoder, view, preedit);
+        }
+
         // Render keyboard shortcuts overlay if visible
         if overlay.shortcuts_visible {
             if let Some(keybindings) = overlay.keybindings {
@@ -448,7 +454,14 @@ impl Renderer {
     ) -> (Vec<Vertex>, Vec<u32>) {
         let buffer = terminal.buffer();
         let dims = terminal.dimensions();
-        let selection_bg = self.color_scheme.selection_background();
+        let scheme = self
+            .color_scheme
+            .for_terminal(terminal.palette(), terminal.modes().reverse_video);
+        // Cells in this color need no quad: the frame was cleared to it.
+        // Under reverse video the screen's default background differs from
+        // it, so those cells are drawn too.
+        let cleared = self.color_scheme.background;
+        let selection_bg = scheme.selection_background();
         let selection = terminal.selection();
         // Pre-allocate based on terminal size: ~1 bg run per row on average = rows quads
         let est_quads = dims.rows as usize * 4;
@@ -474,9 +487,9 @@ impl Renderer {
                 let bg_color = if is_selected {
                     selection_bg
                 } else if cell.has_flag(CellFlags::REVERSE) {
-                    self.color_scheme.resolve(cell.fg(), true)
+                    scheme.resolve(cell.fg(), true)
                 } else {
-                    self.color_scheme.resolve(cell.bg(), false)
+                    scheme.resolve(cell.bg(), false)
                 };
 
                 let should_flush = match run_color {
@@ -486,7 +499,7 @@ impl Renderer {
 
                 if should_flush {
                     if let Some(color) = run_color {
-                        if color != self.color_scheme.background {
+                        if color != cleared {
                             self.emit_quad_with_offset(
                                 &mut vertices,
                                 &mut indices,
@@ -504,7 +517,7 @@ impl Renderer {
             }
 
             if let Some(color) = run_color {
-                if color != self.color_scheme.background {
+                if color != cleared {
                     self.emit_quad_with_offset(
                         &mut vertices,
                         &mut indices,
@@ -531,9 +544,9 @@ impl Renderer {
                 let ch = cell.char();
                 if let Some((rects, count)) = block_char_rects(ch) {
                     let fg = if cell.has_flag(CellFlags::REVERSE) {
-                        self.color_scheme.resolve(cell.bg(), false)
+                        scheme.resolve(cell.bg(), false)
                     } else {
-                        self.color_scheme.resolve(cell.fg(), true)
+                        scheme.resolve(cell.fg(), true)
                     };
                     let fg = if cell.has_flag(CellFlags::DIM) {
                         Rgba::new(fg.r * 0.65, fg.g * 0.65, fg.b * 0.65, fg.a)
@@ -601,9 +614,9 @@ impl Renderer {
                 };
 
                 let fg = if cell.has_flag(CellFlags::REVERSE) {
-                    self.color_scheme.resolve(cell.bg(), false)
+                    scheme.resolve(cell.bg(), false)
                 } else {
-                    self.color_scheme.resolve(cell.fg(), true)
+                    scheme.resolve(cell.fg(), true)
                 };
                 let fg = if cell.has_flag(CellFlags::DIM) {
                     Rgba::new(fg.r * 0.65, fg.g * 0.65, fg.b * 0.65, fg.a)
@@ -628,7 +641,7 @@ impl Renderer {
         let should_show_cursor = cursor.visible && (!cursor.blinking || cursor_blink_visible);
 
         if should_show_cursor {
-            let cursor_color = self.color_scheme.cursor;
+            let cursor_color = scheme.cursor;
             let col = cursor.position.col;
             let row = cursor.position.row;
 

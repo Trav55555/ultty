@@ -1,18 +1,31 @@
 #!/usr/bin/env bash
 # Capture opt-in live pipeline timing while running the stress smoke.
 #
-# The script launches Ultty with `ULTTY_TRACE_PIPELINE=1`, runs selected live
-# stress workloads through ulttyctl, and writes both a trace log and stress
-# report under the chosen output directory.
+# The script builds release binaries, launches a private Ultty (its own
+# XDG_RUNTIME_DIR, so it never talks to or collides with a running Ultty)
+# with `ULTTY_TRACE_PIPELINE=1`, runs selected live stress workloads
+# through ulttyctl, and writes a trace log and stress report under the
+# chosen output directory.
+#
+# Trace lines are only emitted at `ultty::perf=info`; the default RUST_LOG
+# below includes it. With RUST_LOG=warn the trace is empty and the script
+# fails rather than reporting nothing.
+#
+# The result is live evidence for whatever display it ran on. Under Xvfb
+# with lavapipe it is `live-swrast` (correctness and relative CPU-side
+# work only); see docs/perf/README.md for what each claim class supports.
 
 set -euo pipefail
 
-OUT_DIR="${1:-/tmp/ultty-live-pipeline-trace}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+OUT_DIR="${1:-target/bench-results/live-pipeline-trace}"
 RUNS="${ULTTY_TRACE_RUNS:-2}"
 TESTS="${ULTTY_TRACE_TESTS:-1,6,8}"
-ULTTYCTL="${ULTTYCTL:-target/debug/ulttyctl}"
 
-mkdir -p "$OUT_DIR"
+mkdir -p "$OUT_DIR/bin"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 TRACE_LOG="$OUT_DIR/pipeline.log"
 STRESS_REPORT="$OUT_DIR/stress-report.md"
@@ -24,15 +37,22 @@ MAX_DRAIN_MS="${ULTTY_TRACE_MAX_DRAIN_MS:-1000}"
 MAX_RENDER_TOTAL_MS="${ULTTY_TRACE_MAX_RENDER_TOTAL_MS:-400}"
 MAX_RENDER_FRAME_MS="${ULTTY_TRACE_MAX_RENDER_FRAME_MS:-50}"
 
-if "$ULTTYCTL" ping >/dev/null 2>&1; then
-  echo "A live Ultty control socket is already running." >&2
-  echo "Stop it first so this script can capture a complete launch trace." >&2
-  exit 1
-fi
+# Release build (opt-level 3, LTO). Copy the binaries so a concurrent build
+# into a shared target dir cannot replace them mid-run.
+cargo build --release -p ultty --bins
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+cp "$TARGET_DIR/release/ultty" "$TARGET_DIR/release/ulttyctl" "$OUT_DIR/bin/"
+ULTTYCTL="$OUT_DIR/bin/ulttyctl"
+export ULTTYCTL
+
+RUNTIME_DIR="$(mktemp -d /tmp/ultty-trace.XXXXXX)"
+chmod 700 "$RUNTIME_DIR"
+export XDG_RUNTIME_DIR="$RUNTIME_DIR"
+unset TMUX
 
 RUST_LOG="${RUST_LOG:-ultty=info,ultty::perf=info,wgpu=warn}" \
 ULTTY_TRACE_PIPELINE=1 \
-cargo run -p ultty --bin ultty >"$TRACE_LOG" 2>&1 &
+"$OUT_DIR/bin/ultty" >"$TRACE_LOG" 2>&1 &
 ULTTY_PID=$!
 
 cleanup() {
@@ -40,6 +60,7 @@ cleanup() {
     kill "$ULTTY_PID" >/dev/null 2>&1 || true
     wait "$ULTTY_PID" >/dev/null 2>&1 || true
   fi
+  rm -rf "$RUNTIME_DIR"
 }
 trap cleanup EXIT
 
@@ -59,7 +80,6 @@ fi
 ULTTY_PERF_SMOKE_RUNS="$RUNS" \
 ULTTY_PERF_SMOKE_TESTS="$TESTS" \
 ULTTY_PERF_SMOKE_TIMEOUT_SECS="${ULTTY_TRACE_TIMEOUT_SECS:-180}" \
-ULTTY_REQUIRE_LIVE=1 \
 scripts/perf-smoke.sh "$STRESS_REPORT"
 
 if ! grep -q "pipeline_pty_drain" "$TRACE_LOG"; then
@@ -128,6 +148,8 @@ awk \
     if (drain_ms > max_drain_ms) failed = 1
     if (render_ms > max_render_total_ms) failed = 1
     if (max_render_ms > max_render_frame_ms) failed = 1
+    # Nothing measured is a failure, not a pass with zeros.
+    if (parse_bytes == 0 || parse_entries == 0 || render_frames == 0) failed = 1
 
     print "# Ultty Live Pipeline Trace Summary"
     print ""

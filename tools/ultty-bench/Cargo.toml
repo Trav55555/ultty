@@ -1,0 +1,17 @@
+[package]
+name = "ultty-bench"
+description = "Benchmark harness for Ultty: deterministic corpora, headless VT throughput, and terminal-neutral PTY drivers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Measurement tooling only; never packaged or shipped with the terminal.
+publish = false
+
+[dependencies]
+ultty-vt = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+nix = { version = "0.29", features = ["term", "poll", "fs"] }
+x11rb = { version = "0.13", features = ["xtest"] }

@@ -1,6 +1,7 @@
 //! Terminal application state and main loop.
 
 mod actions;
+mod blink;
 mod control;
 mod control_wait;
 mod input;
@@ -18,7 +19,6 @@ use ultty::protocol::ProtocolServer;
 use ultty::renderer::Renderer;
 use ultty::tabs::TabBarState;
 use ultty::terminal_manager::{TabId, TerminalManager};
-use ultty::tmux::TmuxController;
 use ultty::url::UrlDetector;
 use ultty::vim::{CopyMode, Selection as VimSelection};
 use winit::application::ApplicationHandler;
@@ -59,16 +59,19 @@ const WINDOW_CORNER_RADIUS: f32 = 10.0;
 /// Tolerance for recognizing compositor-tiled half/quarter window sizes.
 const TILED_WINDOW_SIZE_TOLERANCE_PX: u32 = 48;
 
-/// Cursor blink interval (how long cursor stays on/off).
-const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
-
 /// Minimum spacing between rendered frames.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// How soon after the user's input PTY output still counts as its echo and
+/// is drawn without waiting out [`FRAME_INTERVAL`]; see `should_render`.
+const INPUT_ECHO_WINDOW: Duration = Duration::from_millis(50);
 
 /// Maximum time to suppress drawing during synchronized update mode.
 const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(200);
 
-/// Low-frequency maintenance wakeup for timers and config reloads.
+/// Maintenance tick while native sessions (keepalives, animations) or
+/// `ulttyctl wait-for` timeouts need checking. Nothing else polls: with
+/// neither, an idle window sleeps until input, output or a socket wakes it.
 const MAINTENANCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Faster PTY polling while a frame is dirty but not ready to render.
@@ -77,7 +80,8 @@ const PTY_CATCHUP_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// Duration to keep tab widths stable after a tab close.
 const TAB_CLOSE_WIDTH_FREEZE_DURATION: Duration = Duration::from_secs(3);
 
-/// Cadence for best-effort active app/path tab title refreshes.
+/// Most frequent best-effort tab title refresh (foreground program and
+/// directory) while panes produce output.
 const TAB_TITLE_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 /// User events sent to the winit application loop.
@@ -109,8 +113,16 @@ pub struct App {
     tab_width_freeze: Option<TabWidthFreeze>,
     /// Last render time for frame limiting
     last_render: Instant,
+    /// When input was last sent to the focused terminal, until a frame has
+    /// drawn the output that followed it.
+    input_sent_at: Option<Instant>,
+    /// The focused terminal produced output after `input_sent_at`.
+    output_since_input: bool,
     /// Last time best-effort tab display titles were refreshed.
     last_tab_title_refresh: Instant,
+    /// The latest PTY output not yet followed by a settled tab title
+    /// refresh; see `update::title_activity_after_refresh`.
+    tab_title_activity: Option<Instant>,
     /// Whether we need to redraw
     needs_redraw: bool,
     /// Pending close request (from window control button).
@@ -149,14 +161,12 @@ pub struct App {
     protocol_status_visible: bool,
     /// Cached list of keybindings for display
     shortcuts_list: Vec<(String, String)>,
-    /// Whether cursor is currently visible in blink cycle
-    cursor_blink_visible: bool,
-    /// Last time cursor blink state changed
-    last_cursor_blink: Instant,
-    /// Tmux integration controller
-    tmux: TmuxController,
+    /// The focused cursor's blink phase.
+    cursor_blink: blink::CursorBlink,
     /// Auto-dump countdown (frames remaining until dump, 0 = disabled)
     auto_dump_frames: u32,
+    /// Frames drawn so far (saturating); marks the first in the startup log.
+    frames_drawn: u32,
     /// Native protocol server for TUI apps
     protocol_server: Option<ProtocolServer>,
     /// Control server for CLI automation (ulttyctl)
@@ -189,6 +199,12 @@ pub struct App {
     min_window_size: Option<PhysicalSize<u32>>,
     /// When the window opened; drives the title's typing animation.
     launched_at: Instant,
+    /// Text the input method is composing (empty when it is not). While
+    /// it is non-empty, keys belong to the input method.
+    ime_preedit: String,
+    /// The cursor rectangle last given to the input method, in window
+    /// pixels, so it is only sent again when the cursor moves.
+    ime_cursor_area: Option<[i32; 4]>,
 }
 
 impl App {
@@ -214,29 +230,27 @@ impl App {
         );
         let window = event_loop.create_window(attributes)?;
         let window = Arc::new(window);
+        tracing::debug!(target: "ultty::startup", "window created");
+        // winit leaves input methods off; without this, fcitx and ibus
+        // users cannot type Chinese, Japanese or Korean.
+        window.set_ime_allowed(true);
 
         let size = window.inner_size();
         let scale_factor = window.scale_factor() as f32;
 
-        // Create wgpu instance
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            // GL presents through the display connection (Wayland needs it).
-            display: Some(Box::new(event_loop.owned_display_handle())),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-
-        // Create surface
-        let surface = instance.create_surface(window.clone())?;
-
-        // Get adapter
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            ..Default::default()
-        }))
-        .map_err(|e| anyhow::anyhow!("Failed to find suitable GPU adapter: {e}"))?;
+        // Vulkan (or the platform's primary API) first, GL only if that
+        // finds no adapter. An instance with every backend brings up GL as
+        // well, which loads and initializes the EGL driver even when Vulkan
+        // is then chosen: startup time and resident memory for nothing.
+        let (surface, adapter) = match request_gpu(event_loop, &window, wgpu::Backends::PRIMARY) {
+            Ok(gpu) => gpu,
+            Err(primary) => {
+                tracing::info!("No primary GPU backend ({primary:#}); trying GL");
+                request_gpu(event_loop, &window, wgpu::Backends::SECONDARY)
+                    .map_err(|gl| anyhow::anyhow!("{primary:#}; with GL: {gl:#}"))?
+            }
+        };
+        tracing::debug!(target: "ultty::startup", "GPU adapter ready");
 
         // Scale font size to physical pixels so cosmic-text metrics match
         // the orthographic projection (which uses physical window dimensions).
@@ -253,6 +267,7 @@ impl App {
             &scaled_font,
         ))?;
 
+        tracing::debug!(target: "ultty::startup", "renderer ready");
         // Set window opacity
         renderer.set_opacity(config.behavior.opacity);
 
@@ -277,6 +292,10 @@ impl App {
         // Create terminal manager - with launch profile if configured
         let mut terminal_manager =
             Self::create_terminal_manager(&config, cols, rows, &mut protocol_server)?;
+        tracing::debug!(target: "ultty::startup", "shell started");
+        terminal_manager.set_theme_colors(config.colors.theme_colors());
+        terminal_manager.set_scrollback_lines(config.behavior.scrollback_lines);
+        terminal_manager.set_close_on_exit(config.behavior.close_on_exit);
         // Each terminal's I/O thread parses on its own and pokes the UI
         // through this proxy when there is something new to draw.
         let pty_proxy = std::sync::Mutex::new(event_proxy.clone());
@@ -285,7 +304,10 @@ impl App {
                 let _ = proxy.send_event(AppEvent::RuntimeReadable);
             }
         }));
-        let socket_wakeup = wakeup::SocketWakeup::new(event_proxy);
+        let socket_proxy = event_proxy.clone();
+        let socket_wakeup = wakeup::SocketWakeup::new(move || {
+            socket_proxy.send_event(AppEvent::RuntimeReadable).is_ok()
+        });
 
         // Try to create clipboard
         let clipboard = Clipboard::new().ok();
@@ -297,19 +319,15 @@ impl App {
         let url_detector = UrlDetector::new(config.behavior.url_detection);
 
         // Create config watcher for hot-reload
-        let config_watcher = ConfigWatcher::new();
+        let config_watcher = ConfigWatcher::new(move || {
+            let _ = event_proxy.send_event(AppEvent::RuntimeReadable);
+        });
         if config_watcher.is_some() {
             tracing::info!("Config hot-reload enabled");
         }
 
         // Build shortcuts list before moving config
         let shortcuts_list = Self::build_shortcuts_list(&config.keybindings);
-
-        // Initialize tmux controller for passthrough support
-        let tmux = TmuxController::new();
-        if tmux.is_nested() && config.tmux.auto_detect {
-            tracing::info!("Running inside tmux, passthrough mode enabled");
-        }
 
         let mut app = Self {
             window,
@@ -319,7 +337,10 @@ impl App {
             tab_bar,
             tab_width_freeze: None,
             last_render: Instant::now(),
+            input_sent_at: None,
+            output_since_input: false,
             last_tab_title_refresh: Instant::now() - TAB_TITLE_REFRESH_INTERVAL,
+            tab_title_activity: None,
             needs_redraw: true,
             pending_close: false,
             modifiers: ModifiersState::empty(),
@@ -339,10 +360,9 @@ impl App {
             shortcuts_visible: false,
             protocol_status_visible: false,
             shortcuts_list,
-            cursor_blink_visible: true,
-            last_cursor_blink: Instant::now(),
-            tmux,
+            cursor_blink: blink::CursorBlink::new(),
             // Check for auto-dump environment variable (number of frames to wait)
+            frames_drawn: 0,
             auto_dump_frames: std::env::var("ULTTY_AUTO_DUMP")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -362,6 +382,8 @@ impl App {
             scroll_line_accum: 0.0,
             scale_factor,
             min_window_size: None,
+            ime_preedit: String::new(),
+            ime_cursor_area: None,
             launched_at: Instant::now(),
         };
 
@@ -383,7 +405,7 @@ impl App {
 
         // The server fails closed without a token file, so a token we cannot
         // write means nobody can use the socket; say so loudly.
-        let token_path = ultty_protocol::control::auth_token_path();
+        let token_path = server.token_path().to_path_buf();
         match control::write_auth_token(&token_path) {
             Ok(_) => tracing::info!(
                 "Control server started at {:?} (auth token in {:?})",
@@ -417,7 +439,13 @@ impl App {
                     "Restoring previous session with {} tabs",
                     session.tabs.len()
                 );
-                match Self::create_manager_from_session(&session, cols, rows, protocol_server) {
+                match Self::create_manager_from_session(
+                    &session,
+                    &config.terminal.term,
+                    cols,
+                    rows,
+                    protocol_server,
+                ) {
                     Ok(manager) => return Ok(manager),
                     Err(e) => {
                         tracing::warn!("Failed to restore session: {}, using default", e);
@@ -430,7 +458,13 @@ impl App {
         if let Some(ref profile_name) = config.profiles.default {
             if let Some(profile) = config.profiles.profiles.get(profile_name) {
                 tracing::info!("Using launch profile: {}", profile_name);
-                return Self::create_manager_from_profile(profile, cols, rows, protocol_server);
+                return Self::create_manager_from_profile(
+                    profile,
+                    &config.terminal.term,
+                    cols,
+                    rows,
+                    protocol_server,
+                );
             } else {
                 tracing::warn!(
                     "Default profile '{}' not found, using default shell",
@@ -441,7 +475,7 @@ impl App {
 
         // No profile configured, use default shell
         TerminalManager::with_tab_env(cols, rows, &mut |tab_id| {
-            protocol_tab_env(protocol_server, tab_id)
+            tab_shell_env(protocol_server, &config.terminal.term, tab_id)
         })
         .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e))
     }
@@ -449,13 +483,14 @@ impl App {
     /// Create terminal manager from a launch profile.
     fn create_manager_from_profile(
         profile: &ultty::config::LaunchProfile,
+        term: &str,
         cols: u16,
         rows: u16,
         protocol_server: &mut Option<ProtocolServer>,
     ) -> Result<TerminalManager> {
         // Create an empty manager first
         let mut manager = TerminalManager::with_tab_env(cols, rows, &mut |tab_id| {
-            protocol_tab_env(protocol_server, tab_id)
+            tab_shell_env(protocol_server, term, tab_id)
         })
         .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e))?;
 
@@ -490,7 +525,7 @@ impl App {
                         &tab_config.args,
                         working_dir,
                         title,
-                        &mut |tab_id| protocol_tab_env(protocol_server, tab_id),
+                        &mut |tab_id| tab_shell_env(protocol_server, term, tab_id),
                     )
                     .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
 
@@ -508,12 +543,13 @@ impl App {
     /// Create terminal manager from a saved session.
     fn create_manager_from_session(
         session: &ultty::session::SessionData,
+        term: &str,
         cols: u16,
         rows: u16,
         protocol_server: &mut Option<ProtocolServer>,
     ) -> Result<TerminalManager> {
         TerminalManager::from_session(session, cols, rows, &mut |tab_id| {
-            protocol_tab_env(protocol_server, tab_id)
+            tab_shell_env(protocol_server, term, tab_id)
         })
         .map_err(|e| anyhow::anyhow!("Failed to restore session: {}", e))
     }
@@ -554,8 +590,13 @@ impl App {
 
     /// Create a new tab whose shell is wired to its own protocol socket.
     fn create_tab(&mut self) -> std::io::Result<TabId> {
-        self.terminal_manager
-            .create_tab_with_env(&mut |tab_id| protocol_tab_env(&mut self.protocol_server, tab_id))
+        self.terminal_manager.create_tab_with_env(&mut |tab_id| {
+            tab_shell_env(
+                &mut self.protocol_server,
+                &self.config.terminal.term,
+                tab_id,
+            )
+        })
     }
 
     /// Create a new tab running `command`, wired to its own protocol socket.
@@ -571,7 +612,13 @@ impl App {
             args,
             working_dir,
             title,
-            &mut |tab_id| protocol_tab_env(&mut self.protocol_server, tab_id),
+            &mut |tab_id| {
+                tab_shell_env(
+                    &mut self.protocol_server,
+                    &self.config.terminal.term,
+                    tab_id,
+                )
+            },
         )
     }
 
@@ -610,9 +657,9 @@ impl App {
         if self.update() {
             event_loop.exit();
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            self.next_update_deadline(Instant::now()),
-        ));
+        // The sockets have been drained; let them wake the loop again.
+        self.socket_wakeup.rearm();
+        event_loop.set_control_flow(control_flow(self.next_update_deadline(Instant::now())));
     }
 
     /// Get the terminal state of the focused terminal.
@@ -620,6 +667,14 @@ impl App {
         self.terminal_manager
             .focused_terminal()
             .map(|t| t.event_loop.terminal())
+    }
+
+    /// Process group in the foreground of the focused pane's PTY: the only
+    /// program whose native sessions receive what the user types.
+    fn focused_foreground_pgrp(&self) -> Option<i32> {
+        self.terminal_manager
+            .focused_terminal()
+            .and_then(|terminal| terminal.event_loop.foreground_pgrp())
     }
 
     /// Get mutable terminal state of the focused terminal.
@@ -632,9 +687,22 @@ impl App {
     /// Send input to the focused terminal.
     fn send_input(&mut self, data: &[u8]) -> std::io::Result<()> {
         if let Some(terminal) = self.terminal_manager.focused_terminal_mut() {
+            self.input_sent_at = Some(Instant::now());
+            self.output_since_input = false;
             terminal.event_loop.send_input(data)
         } else {
             Ok(())
+        }
+    }
+
+    /// Send a report the terminal generates on its own (mouse motion,
+    /// focus changes). Unlike [`Self::send_input`] it does not mark the
+    /// output that follows as an echo to draw at once: a moving mouse in
+    /// vim or htop would otherwise force a frame for every motion event.
+    fn send_report(&mut self, data: &[u8]) -> std::io::Result<()> {
+        match self.terminal_manager.focused_terminal_mut() {
+            Some(terminal) => terminal.event_loop.send_input(data),
+            None => Ok(()),
         }
     }
 
@@ -673,9 +741,12 @@ impl App {
 
     fn update_tab_bar(&mut self) {
         self.sync_protocol_tabs();
-        self.last_tab_title_refresh = Instant::now();
+        let now = Instant::now();
+        self.last_tab_title_refresh = now;
+        self.tab_title_activity =
+            update::title_activity_after_refresh(self.tab_title_activity, now);
 
-        let total_width = self.window.inner_size().width as f32;
+        let total_width = self.renderer.surface_size().0 as f32;
         let active_tab_id = self
             .terminal_manager
             .active_tab()
@@ -742,14 +813,16 @@ impl App {
     /// Socket fds the wakeup bridge watches. PTYs are not among them: each
     /// terminal's I/O thread wakes the UI itself.
     fn refresh_runtime_wakeup_fds(&mut self) {
-        let mut fds = Vec::new();
+        let mut readable = Vec::new();
+        let mut writable = Vec::new();
         if let Some(server) = self.protocol_server.as_ref() {
-            fds.extend(server.readiness_fds());
+            readable.extend(server.readiness_fds());
         }
         if let Some(server) = self.control_server.as_ref() {
-            fds.extend(server.readiness_fds());
+            readable.extend(server.readiness_fds());
+            writable.extend(server.writable_fds());
         }
-        self.socket_wakeup.set_fds(fds);
+        self.socket_wakeup.set_fds(readable, writable);
     }
 
     /// Extract text from a vim selection.
@@ -1310,30 +1383,62 @@ fn resize_direction_at_window_edge(
     }
 }
 
-/// Shell environment for a new tab: its own native protocol socket.
+/// Shell environment for a new tab: `TERM` (from `terminal.term`) and the
+/// tab's own native protocol socket.
 ///
 /// Opens the tab's listener on `server` before the shell is spawned so the
 /// shell (and every app it launches) sees a socket that already exists. If
 /// the listener cannot be opened the tab still works, without native
 /// protocol support, and apps fall back to ANSI rendering.
-fn protocol_tab_env(
+fn tab_shell_env(
     server: &mut Option<ProtocolServer>,
+    term: &str,
     tab_id: TabId,
 ) -> std::io::Result<ultty::terminal_manager::TabEnv> {
+    let mut env = vec![("TERM".into(), term.into())];
     let Some(server) = server.as_mut() else {
-        return Ok(Vec::new());
+        return Ok(env);
     };
     match server.open_tab(tab_id) {
-        Ok(path) => Ok(vec![("ULTTY_SOCKET".into(), path.into_os_string())]),
+        Ok(path) => env.push(("ULTTY_SOCKET".into(), path.into_os_string())),
         Err(e) => {
             tracing::warn!(
                 "Failed to open protocol socket for tab {}: {}; tab runs without native protocol",
                 tab_id.raw(),
                 e
             );
-            Ok(Vec::new())
         }
     }
+    Ok(env)
+}
+
+/// A surface for `window` and an adapter that can draw to it, from an
+/// instance limited to `backends`.
+fn request_gpu(
+    event_loop: &ActiveEventLoop,
+    window: &Arc<Window>,
+    backends: wgpu::Backends,
+) -> Result<(wgpu::Surface<'static>, wgpu::Adapter)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends,
+        // GL presents through the display connection (Wayland needs it).
+        display: Some(Box::new(event_loop.owned_display_handle())),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let surface = instance.create_surface(Arc::clone(window))?;
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: Some(&surface),
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .map_err(|e| anyhow::anyhow!("Failed to find suitable GPU adapter: {e}"))?;
+    Ok((surface, adapter))
+}
+
+/// Sleep until `deadline`, or with none, until an event arrives.
+fn control_flow(deadline: Option<Instant>) -> ControlFlow {
+    deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
 }
 
 /// Drives [`App`] from winit. The window, and so the app, is created on the
@@ -1354,9 +1459,7 @@ impl ApplicationHandler<AppEvent> for AppHandler {
             Ok(mut app) => {
                 app.update_tab_bar();
                 app.relayout_terminals();
-                event_loop.set_control_flow(ControlFlow::WaitUntil(
-                    app.next_update_deadline(Instant::now()),
-                ));
+                event_loop.set_control_flow(control_flow(app.next_update_deadline(Instant::now())));
                 self.app = Some(app);
             }
             Err(error) => {

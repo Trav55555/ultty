@@ -133,8 +133,8 @@ pub enum ControlRequest {
     /// Authenticate and execute `request` in one round trip.
     ///
     /// The control server handles one request per connection, so clients
-    /// (ulttyctl) wrap their request with the token from
-    /// [`auth_token_path`]. The response is the inner request's response.
+    /// (ulttyctl) wrap their request with the token the
+    /// instance wrote at start. The response is the inner request's response.
     WithToken {
         token: String,
         request: Box<ControlRequest>,
@@ -274,18 +274,6 @@ pub struct VersionInfo {
     pub protocol_version: u16,
     /// Optional VCS revision hash.
     pub git_hash: Option<String>,
-}
-
-/// Path to the Unix domain socket used by the control server.
-pub fn control_socket_path() -> std::path::PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(runtime_dir).join("ultty-ctl.sock")
-}
-
-/// Path to the control auth token file.
-pub fn auth_token_path() -> std::path::PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(runtime_dir).join("ultty-auth.token")
 }
 
 /// Control protocol frame magic (`"UC"`).

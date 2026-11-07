@@ -125,6 +125,10 @@ impl NativeSession {
     pub(super) fn flush_writes(&mut self) -> io::Result<()> {
         let stream = match &mut self.link {
             Link::Socket(stream) => stream,
+            Link::InBand {
+                phase: super::InBandPhase::Unconfirmed(_),
+                ..
+            } => return Ok(()),
             Link::InBand { outgoing, .. } => {
                 outgoing.extend_from_slice(&self.write_buf);
                 self.write_buf.clear();

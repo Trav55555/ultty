@@ -8,8 +8,8 @@ use ratatui::Frame;
 use super::{expand_tabs, expand_tabs_from_column, View};
 use crate::theme::{to_ratatui_color, Theme};
 use crate::vim::{KeyParser, VimConfig, VimHandler, VimResult};
+use crate::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimState};
 use crate::{impl_vim_ext, impl_vim_handler_accessors};
-use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimState};
 
 /// Plain text widget.
 #[derive(Debug, Clone)]

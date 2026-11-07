@@ -1,6 +1,8 @@
 //! Terminal state management with alternate screen support.
 
-use super::{Buffer, CursorPosition, Dimensions, Grid, ImageStore, TerminalImage};
+use super::{
+    Buffer, CursorPosition, Dimensions, Grid, ImageStore, Palette, TerminalImage, ThemeColors,
+};
 
 /// Maximum number of distinct OSC 8 hyperlink URIs remembered per terminal.
 ///
@@ -8,6 +10,21 @@ use super::{Buffer, CursorPosition, Dimensions, Grid, ImageStore, TerminalImage}
 /// When the map is full the oldest link is forgotten; cells that still
 /// reference it simply stop resolving to a URI.
 pub const MAX_HYPERLINKS: usize = 4096;
+
+/// Deepest the title stack (XTWINOPS 22/23) grows; a push beyond it
+/// forgets the oldest entry.
+pub const MAX_TITLE_STACK: usize = 10;
+
+/// Entries the Kitty keyboard mode stack keeps per screen; older ones are
+/// dropped.
+pub const KITTY_KEYBOARD_STACK_LIMIT: usize = 8;
+
+/// The `TERM` a terminal reports until its embedder says otherwise.
+pub const DEFAULT_TERMINAL_NAME: &str = "xterm-256color";
+
+/// Largest value a mode 1005 mouse report encodes: xterm stops at 2047,
+/// the last two-byte UTF-8 code point, so coordinates top out at 2015.
+const MAX_UTF8_MOUSE_VALUE: u32 = 2047;
 
 /// Mouse tracking mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -64,6 +81,8 @@ pub struct TerminalModes {
     /// Bits: 0=disambiguate, 1=report event types, 2=report alternate keys,
     ///       3=report all keys as escape, 4=report associated text
     pub kitty_keyboard_flags: u8,
+    /// xterm modifyOtherKeys level, 0 (off) to 2 (XTMODKEYS)
+    pub modify_other_keys: u8,
     /// Application keypad mode (DECKPAM/DECKPNM — ESC = / ESC >)
     pub application_keypad: bool,
     /// Alternate scroll mode - when enabled, scroll events scroll the alternate screen
@@ -71,6 +90,15 @@ pub struct TerminalModes {
     pub alternate_scroll: bool,
     /// Synchronized update mode - batches screen updates for flicker-free rendering
     pub synchronized_update: bool,
+    /// Line feed/new line mode (LNM, ANSI mode 20): LF, VT and FF also
+    /// return the carriage, and Enter should send CR LF.
+    pub linefeed_newline: bool,
+    /// DECCOLM may switch between 80 and 132 columns (mode 40). Off by
+    /// default, so `reset` and `tput init` (which send `CSI ?3 l`) leave
+    /// the window alone, as in xterm.
+    pub allow_column_mode_switch: bool,
+    /// 132-column mode (DECCOLM, mode 3) was last set.
+    pub column_mode_132: bool,
 }
 
 impl Default for TerminalModes {
@@ -87,9 +115,13 @@ impl Default for TerminalModes {
             mouse_encoding: MouseEncoding::X10,
             reverse_video: false,
             kitty_keyboard_flags: 0,
+            modify_other_keys: 0,
             // Enable by default so mouse wheel works in less, vim, etc.
             alternate_scroll: true,
             synchronized_update: false,
+            linefeed_newline: false,
+            allow_column_mode_switch: false,
+            column_mode_132: false,
         }
     }
 }
@@ -148,6 +180,13 @@ pub struct Terminal {
     selection_started_scrolled: bool,
     /// Window title
     title: String,
+    /// Titles saved by XTWINOPS 22, newest last
+    title_stack: Vec<String>,
+    /// Size of one character cell in pixels, `(width, height)`, as the
+    /// embedder last reported it; answers XTWINOPS 14 and 16.
+    cell_pixel_size: Option<(u16, u16)>,
+    /// The embedder's colours and the application's palette changes
+    palette: Palette,
     /// Shell integration state
     shell_integration: ShellIntegration,
     /// Inline images (Sixel, etc.)
@@ -164,10 +203,17 @@ pub struct Terminal {
     next_hyperlink_id: u32,
     /// Current hyperlink ID (0 = none, applied to new cells)
     current_hyperlink_id: u32,
-    /// Stack of Kitty keyboard mode flags
+    /// Kitty keyboard flags saved by pushes on the active screen; the
+    /// current flags are `modes.kitty_keyboard_flags`.
     kitty_keyboard_stack: Vec<u8>,
+    /// The other screen's current flags and stack: the main and alternate
+    /// screens keep independent keyboard modes (kitty spec).
+    inactive_kitty_keyboard: (u8, Vec<u8>),
     /// Pending column mode resize request (132 or 80 columns, DECCOLM)
     pending_column_resize: Option<u16>,
+    /// The `TERM` the program in this terminal was started with, which
+    /// XTGETTCAP reports as `TN`.
+    terminal_name: String,
     /// Dimensions the inactive alternate buffer still has to be resized to.
     /// Reflowing it on every drag frame is wasted work while it is hidden.
     pending_alternate_resize: Option<Dimensions>,
@@ -215,6 +261,9 @@ impl Terminal {
             selection_content_version: 0,
             selection_started_scrolled: false,
             title: String::new(),
+            title_stack: Vec::new(),
+            cell_pixel_size: None,
+            palette: Palette::default(),
             shell_integration: ShellIntegration::default(),
             images: ImageStore::new(),
             pending_responses: Vec::new(),
@@ -224,9 +273,23 @@ impl Terminal {
             next_hyperlink_id: 1, // 0 means no hyperlink
             current_hyperlink_id: 0,
             kitty_keyboard_stack: Vec::new(),
+            inactive_kitty_keyboard: (0, Vec::new()),
             pending_column_resize: None,
+            terminal_name: DEFAULT_TERMINAL_NAME.to_string(),
             pending_alternate_resize: None,
         }
+    }
+
+    /// Tell the terminal which `TERM` its program was started with, so
+    /// XTGETTCAP reports that name.
+    pub fn set_terminal_name(&mut self, name: impl Into<String>) {
+        self.terminal_name = name.into();
+    }
+
+    /// The `TERM` this terminal reports; [`DEFAULT_TERMINAL_NAME`] unless
+    /// [`Terminal::set_terminal_name`] changed it.
+    pub fn terminal_name(&self) -> &str {
+        &self.terminal_name
     }
 
     /// Queue a response to send back to the PTY.
@@ -242,6 +305,15 @@ impl Terminal {
     /// Check if there are pending responses.
     pub fn has_pending_responses(&self) -> bool {
         !self.pending_responses.is_empty()
+    }
+
+    /// Keep at most `lines` lines of main-screen scrollback, dropping the
+    /// oldest lines beyond it. The alternate screen has no scrollback.
+    pub fn set_scrollback_limit(&mut self, lines: usize) {
+        if self.main.set_max_history(lines) > 0 && !self.using_alternate {
+            // Rows the selection refers to may be gone or renumbered.
+            self.clear_selection();
+        }
     }
 
     /// Get the active buffer.
@@ -291,6 +363,7 @@ impl Terminal {
         if !self.using_alternate {
             self.apply_pending_alternate_resize();
             self.using_alternate = true;
+            self.swap_kitty_keyboard_state();
             self.selection = None;
         }
     }
@@ -300,6 +373,7 @@ impl Terminal {
         if !self.using_alternate {
             self.apply_pending_alternate_resize();
             self.using_alternate = true;
+            self.swap_kitty_keyboard_state();
             self.alternate.grid_mut().clear();
             self.alternate.grid_mut().cursor_mut().position = CursorPosition::origin();
             self.selection = None;
@@ -310,6 +384,7 @@ impl Terminal {
     pub fn leave_alternate_screen(&mut self) {
         if self.using_alternate {
             self.using_alternate = false;
+            self.swap_kitty_keyboard_state();
             self.selection = None;
         }
     }
@@ -484,6 +559,55 @@ impl Terminal {
         self.title = title;
     }
 
+    /// Save the title on the title stack (XTWINOPS 22).
+    pub fn push_title(&mut self) {
+        if self.title_stack.len() >= MAX_TITLE_STACK {
+            self.title_stack.remove(0);
+        }
+        self.title_stack.push(self.title.clone());
+    }
+
+    /// Restore the most recently saved title (XTWINOPS 23). Returns whether
+    /// there was one.
+    pub fn pop_title(&mut self) -> bool {
+        match self.title_stack.pop() {
+            Some(title) => {
+                self.title = title;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Tell the terminal how big a character cell is on screen, in pixels,
+    /// so it can answer the XTWINOPS size reports image tools ask for.
+    pub fn set_cell_pixel_size(&mut self, width: u16, height: u16) {
+        self.cell_pixel_size = Some((width, height));
+    }
+
+    /// Size of a character cell in pixels, `(width, height)`, if known.
+    pub fn cell_pixel_size(&self) -> Option<(u16, u16)> {
+        self.cell_pixel_size
+    }
+
+    /// Tell the terminal which colours it is drawn with, so colour queries
+    /// report the live theme. Palette changes applications made stay.
+    pub fn set_theme_colors(&mut self, theme: ThemeColors) {
+        self.palette.set_theme(theme);
+    }
+
+    /// The palette: theme colours and the entries applications changed
+    /// with OSC 4. Renderers draw indexed colours through
+    /// [`Palette::override_for`].
+    pub fn palette(&self) -> &Palette {
+        &self.palette
+    }
+
+    /// Mutable palette, for OSC 4 / 104.
+    pub fn palette_mut(&mut self) -> &mut Palette {
+        &mut self.palette
+    }
+
     /// Get shell integration state.
     pub fn shell_integration(&self) -> &ShellIntegration {
         &self.shell_integration
@@ -618,24 +742,64 @@ impl Terminal {
         &self.hyperlinks
     }
 
-    /// Push Kitty keyboard mode with given flags onto the stack.
+    /// Push the current Kitty keyboard flags and switch to `flags`
+    /// (`CSI > flags u`). The stack keeps the newest
+    /// [`KITTY_KEYBOARD_STACK_LIMIT`] entries.
     pub fn push_kitty_keyboard_mode(&mut self, flags: u8) {
-        self.kitty_keyboard_stack.push(flags);
+        if self.kitty_keyboard_stack.len() == KITTY_KEYBOARD_STACK_LIMIT {
+            self.kitty_keyboard_stack.remove(0);
+        }
+        self.kitty_keyboard_stack
+            .push(self.modes.kitty_keyboard_flags);
         self.modes.kitty_keyboard_flags = flags;
         tracing::debug!("Pushed Kitty keyboard mode: flags={}", flags);
     }
 
-    /// Pop Kitty keyboard mode from the stack.
-    pub fn pop_kitty_keyboard_mode(&mut self) {
-        if self.kitty_keyboard_stack.pop().is_some() {
-            // Restore previous flags or 0 if stack is empty
-            self.modes.kitty_keyboard_flags =
-                self.kitty_keyboard_stack.last().copied().unwrap_or(0);
-            tracing::debug!(
-                "Popped Kitty keyboard mode: flags={}",
-                self.modes.kitty_keyboard_flags
-            );
+    /// Pop `count` entries (`CSI < count u`), restoring the flags saved by
+    /// the matching push. Popping more than was pushed empties the stack
+    /// and turns the protocol off, so a program that set flags without
+    /// pushing still leaves the shell with legacy keys.
+    pub fn pop_kitty_keyboard_modes(&mut self, count: u16) {
+        for _ in 0..count.max(1) {
+            match self.kitty_keyboard_stack.pop() {
+                Some(flags) => self.modes.kitty_keyboard_flags = flags,
+                None => {
+                    self.modes.kitty_keyboard_flags = 0;
+                    break;
+                }
+            }
         }
+        tracing::debug!(
+            "Popped Kitty keyboard mode: flags={}",
+            self.modes.kitty_keyboard_flags
+        );
+    }
+
+    /// Swap the active screen's Kitty keyboard state with the other screen's.
+    fn swap_kitty_keyboard_state(&mut self) {
+        std::mem::swap(
+            &mut self.modes.kitty_keyboard_flags,
+            &mut self.inactive_kitty_keyboard.0,
+        );
+        std::mem::swap(
+            &mut self.kitty_keyboard_stack,
+            &mut self.inactive_kitty_keyboard.1,
+        );
+    }
+
+    /// Change the current Kitty keyboard flags in place (`CSI = flags ; mode u`):
+    /// mode 1 replaces them, 2 sets the given bits, 3 clears them. Other
+    /// modes are ignored. The stack is left alone.
+    pub fn set_kitty_keyboard_mode(&mut self, flags: u8, mode: u8) {
+        let current = self.modes.kitty_keyboard_flags;
+        let new = match mode {
+            1 => flags,
+            2 => current | flags,
+            3 => current & !flags,
+            _ => return,
+        };
+        self.modes.kitty_keyboard_flags = new;
+        tracing::debug!("Set Kitty keyboard mode: flags={new}");
     }
 
     /// Check if Kitty keyboard protocol is active.
@@ -719,6 +883,9 @@ impl Terminal {
         self.current_hyperlink_id = 0;
         self.selection = None;
         self.kitty_keyboard_stack.clear();
+        self.inactive_kitty_keyboard = (0, Vec::new());
+        self.title_stack.clear();
+        self.palette.reset(None);
         self.pending_column_resize = None;
     }
 
@@ -811,8 +978,11 @@ impl Terminal {
             MouseEncoding::Sgr => {
                 Some(self.encode_mouse_sgr(button, x, y, pressed, motion, modifiers))
             }
-            MouseEncoding::X10 | MouseEncoding::Utf8 => {
+            MouseEncoding::X10 => {
                 Some(self.encode_mouse_x10(button, x, y, pressed, motion, modifiers))
+            }
+            MouseEncoding::Utf8 => {
+                Some(self.encode_mouse_utf8(button, x, y, pressed, motion, modifiers))
             }
             MouseEncoding::Urxvt => {
                 Some(self.encode_mouse_urxvt(button, x, y, pressed, motion, modifiers))
@@ -856,16 +1026,15 @@ impl Terminal {
         format!("\x1b[<{};{};{}{}", cb, x + 1, y + 1, suffix).into_bytes()
     }
 
-    /// Encode mouse event in X10 format.
-    fn encode_mouse_x10(
+    /// The button code shared by the X10 and UTF-8 encodings: a release
+    /// reports button 3, as those encodings cannot say which was released.
+    fn mouse_button_code(
         &self,
         button: MouseButton,
-        x: u16,
-        y: u16,
         pressed: bool,
         motion: bool,
         modifiers: MouseModifiers,
-    ) -> Vec<u8> {
+    ) -> u8 {
         let mut cb = match button {
             MouseButton::Left => 0,
             MouseButton::Middle => 1,
@@ -884,13 +1053,47 @@ impl Terminal {
         if !pressed && !matches!(button, MouseButton::ScrollUp | MouseButton::ScrollDown) {
             cb = 3 + modifiers.bits(); // Release with modifiers
         }
+        cb
+    }
 
+    /// Encode mouse event in X10 format.
+    fn encode_mouse_x10(
+        &self,
+        button: MouseButton,
+        x: u16,
+        y: u16,
+        pressed: bool,
+        motion: bool,
+        modifiers: MouseModifiers,
+    ) -> Vec<u8> {
         // Add 32 to make printable, clamp to 223
-        let cb = cb + 32;
+        let cb = self.mouse_button_code(button, pressed, motion, modifiers) + 32;
         let cx = ((x + 1).min(223) + 32) as u8;
         let cy = ((y + 1).min(223) + 32) as u8;
 
         vec![b'\x1b', b'[', b'M', cb, cx, cy]
+    }
+
+    /// Encode mouse event in the UTF-8 format (mode 1005): the X10 report,
+    /// but each value is sent as the UTF-8 encoding of the character with
+    /// that code, so coordinates past 223 fit and the bytes stay valid
+    /// UTF-8. Values below 128 are the same single bytes as in X10.
+    fn encode_mouse_utf8(
+        &self,
+        button: MouseButton,
+        x: u16,
+        y: u16,
+        pressed: bool,
+        motion: bool,
+        modifiers: MouseModifiers,
+    ) -> Vec<u8> {
+        let cb = u32::from(self.mouse_button_code(button, pressed, motion, modifiers));
+        let mut out = String::from("\x1b[M");
+        for value in [cb + 32, u32::from(x) + 33, u32::from(y) + 33] {
+            // Every value up to the cap is a valid, non-surrogate scalar.
+            out.extend(char::from_u32(value.min(MAX_UTF8_MOUSE_VALUE)));
+        }
+        out.into_bytes()
     }
 
     /// Encode mouse event in URXVT format.

@@ -1,0 +1,44 @@
+# Terminfo entry for Ultty.
+#
+# Compile and install for the current user:
+#     tic -x -o "$HOME/.terminfo" dist/terminfo/ultty.terminfo
+# Copy it to a remote host that lacks it:
+#     infocmp -x xterm-ultty | ssh host tic -x -
+#
+# The entry starts from xterm-256color and then cancels what Ultty does not
+# implement, so programs never send sequences that would be ignored or
+# misread. Keep it in step with crates/ultty-vt (the parser and grid).
+xterm-ultty|Ultty terminal emulator,
+# Truecolor. Tc is the flag tmux and Neovim read; every shell also gets
+# COLORTERM=truecolor.
+	Tc,
+# Extended underlines: SGR 4:1 to 4:5 (single, double, curly, dotted,
+# dashed) and SGR 58/59 underline colour in the colon form.
+	Su,
+	Smulx=\E[4:%p1%dm,
+	Setulc=\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%dm,
+# Synchronized output (mode 2026).
+	Sync=\E[?2026%?%p1%{1}%-%tl%eh%;,
+# Clipboard write with OSC 52. Reads ("?") are refused, and
+# behavior.clipboard_write = "deny" ignores writes too.
+	Ms=\E]52;%p1%s;%p2%s\007,
+# Inherited from xterm-256color and implemented: cursor style (Ss, Se),
+# bracketed paste (BE, BD, PS, PE), focus reporting (fe, fd), SGR mouse
+# (XM, xm, kmous), XTVERSION (XR), DA2 (RV), OSC 4/104 palette (initc, oc),
+# DECSCNM flash, and the title stack in smcup/rmcup.
+#
+# Not implemented, so cancelled:
+# DECSLRM (left and right margins, mode 69).
+	smglr@, smglp@, smgrp@, mgc@,
+# Media copy (printer port).
+	mc0@, mc4@, mc5@, mc5i@,
+# HP memory lock and unlock.
+	meml@, memu@,
+# Meta mode (mode 1034). Alt still sends an ESC prefix.
+	smm@, rmm@,
+# Setting the cursor colour (OSC 12, OSC 112). Queries are answered.
+	Cs@, Cr@,
+# Patterns for xterm's own DA2 and XTVERSION replies, which Ultty's
+# replies do not match.
+	rv@, xr@,
+	use=xterm-256color,

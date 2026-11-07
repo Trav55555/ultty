@@ -46,10 +46,10 @@ impl<V: View> View for Inset<V> {
     fn render_child_native(
         &self,
         index: usize,
-        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        send_message: &mut dyn FnMut(&AppMessage) -> crate::Result<()>,
         parent: RegionId,
         next_id: &mut u32,
-    ) -> anyhow::Result<Option<RegionId>> {
+    ) -> crate::Result<Option<RegionId>> {
         self.child
             .render_child_native(index, send_message, parent, next_id)
     }
@@ -150,10 +150,10 @@ impl View for Section {
     fn render_child_native(
         &self,
         index: usize,
-        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        send_message: &mut dyn FnMut(&AppMessage) -> crate::Result<()>,
         parent: RegionId,
         next_id: &mut u32,
-    ) -> anyhow::Result<Option<RegionId>> {
+    ) -> crate::Result<Option<RegionId>> {
         if let Some(title_text) = &self.title {
             if index == 0 {
                 let title = Title::new(title_text.clone());
@@ -314,10 +314,10 @@ impl View for Card {
     fn render_child_native(
         &self,
         index: usize,
-        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        send_message: &mut dyn FnMut(&AppMessage) -> crate::Result<()>,
         parent: RegionId,
         next_id: &mut u32,
-    ) -> anyhow::Result<Option<RegionId>> {
+    ) -> crate::Result<Option<RegionId>> {
         if let Some(child) = self.children.get(index) {
             Ok(Some(render_view_to_native(
                 child.as_ref(),
