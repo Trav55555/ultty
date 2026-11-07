@@ -10,6 +10,7 @@ mod atlas;
 pub mod block_chars;
 pub mod color;
 mod cursor;
+mod decoration;
 mod image;
 mod native_render;
 mod overlays;
@@ -19,6 +20,7 @@ mod powerline;
 mod screenshot;
 mod tabbar;
 mod text;
+mod text_cache;
 
 pub use atlas::{AtlasStats, GlyphAtlas};
 pub use color::{ColorScheme, Rgba};
