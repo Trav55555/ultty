@@ -1609,6 +1609,7 @@ impl Renderer {
         // Inner background
         self.emit_rect(&mut vertices, &mut indices, 1.0, 1.0, w - 2.0, h - 2.0, bg);
 
+        let selection = terminal.selection();
         for row_idx in 0..dims.rows {
             let row = match buffer.visible_row(row_idx) {
                 Some(r) => r,
@@ -1626,7 +1627,7 @@ impl Renderer {
                     None => continue,
                 };
 
-                let is_selected = terminal.is_selected(col_idx, row_idx);
+                let is_selected = selection.is_some_and(|sel| sel.contains(col_idx, row_idx));
                 let bg_color = if is_selected {
                     selection_bg
                 } else if cell.has_flag(CellFlags::REVERSE) {
