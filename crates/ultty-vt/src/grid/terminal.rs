@@ -64,6 +64,8 @@ pub struct TerminalModes {
     /// Bits: 0=disambiguate, 1=report event types, 2=report alternate keys,
     ///       3=report all keys as escape, 4=report associated text
     pub kitty_keyboard_flags: u8,
+    /// xterm modifyOtherKeys level, 0 (off) to 2 (XTMODKEYS)
+    pub modify_other_keys: u8,
     /// Application keypad mode (DECKPAM/DECKPNM — ESC = / ESC >)
     pub application_keypad: bool,
     /// Alternate scroll mode - when enabled, scroll events scroll the alternate screen
@@ -87,6 +89,7 @@ impl Default for TerminalModes {
             mouse_encoding: MouseEncoding::X10,
             reverse_video: false,
             kitty_keyboard_flags: 0,
+            modify_other_keys: 0,
             // Enable by default so mouse wheel works in less, vim, etc.
             alternate_scroll: true,
             synchronized_update: false,

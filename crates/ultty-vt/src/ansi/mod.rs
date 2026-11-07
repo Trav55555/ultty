@@ -232,6 +232,10 @@ pub enum Action {
     /// 3 clears them.
     KittyKeyboardSet { flags: u8, mode: u8 },
 
+    /// xterm modifyOtherKeys level (XTMODKEYS: CSI > 4 ; level m, and
+    /// CSI > 4 n to turn it off). 0 is off.
+    SetModifyOtherKeys(u8),
+
     /// Sixel image data (DCS q ... ST)
     /// Contains: aspect ratio params and raw sixel data
     SixelImage {
