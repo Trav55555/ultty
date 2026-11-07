@@ -469,7 +469,10 @@ impl Event<'_> {
             Key::End => (1, 'F'),
             Key::F(1) => (1, 'P'),
             Key::F(2) => (1, 'Q'),
-            // Not `CSI 1 ; mods R`: that is a cursor position report.
+            // xterm (and so terminfo's kf15, kf27...) sends `CSI 1 ; mods R`.
+            // The kitty protocol uses `CSI 13 ~` instead, because that form
+            // can be mistaken for a cursor position report.
+            Key::F(3) if self.flags == 0 => (1, 'R'),
             Key::F(3) => (13, '~'),
             Key::F(4) => (1, 'S'),
             Key::F(5) => (15, '~'),
@@ -995,7 +998,7 @@ mod tests {
             (Key::PageDown, "\x1b[6~", 6, '~'),
             (Key::F(1), "\x1bOP", 1, 'P'),
             (Key::F(2), "\x1bOQ", 1, 'Q'),
-            (Key::F(3), "\x1bOR", 13, '~'),
+            (Key::F(3), "\x1bOR", 1, 'R'),
             (Key::F(4), "\x1bOS", 1, 'S'),
             (Key::F(5), "\x1b[15~", 15, '~'),
             (Key::F(6), "\x1b[17~", 17, '~'),
