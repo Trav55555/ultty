@@ -774,6 +774,13 @@ pub struct BehaviorConfig {
     pub bell_visual: bool,
     /// Enable audio bell (system sound) - off by default
     pub bell_sound: bool,
+    /// Whether programs may set the clipboard with OSC 52.
+    ///
+    /// `"allow"` (the default) lets the focused pane write the clipboard;
+    /// `"deny"` ignores every OSC 52 write. Any program whose output reaches
+    /// the pane can write, including a `cat`ed file or a remote host over ssh.
+    /// OSC 52 clipboard reads are always refused.
+    pub clipboard_write: ClipboardWrite,
     /// Close window when shell exits
     pub close_on_exit: bool,
     /// Window opacity (0.0-1.0, 1.0 = fully opaque)
@@ -790,11 +797,23 @@ impl Default for BehaviorConfig {
             copy_on_select: true,
             bell_visual: true,
             bell_sound: false, // Sound off by default
+            clipboard_write: ClipboardWrite::Allow,
             close_on_exit: true,
             opacity: 1.0,
             restore_session: false, // Disabled by default
         }
     }
+}
+
+/// Policy for clipboard writes requested by programs (OSC 52).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipboardWrite {
+    /// The focused pane may set the clipboard.
+    #[default]
+    Allow,
+    /// OSC 52 writes are ignored.
+    Deny,
 }
 
 /// Launch profiles configuration.
@@ -1084,6 +1103,19 @@ copy = "ctrl+c"
         let config = Config::load_from_path(&path).unwrap();
 
         assert_eq!(config.font.size, MIN_FONT_SIZE);
+    }
+
+    #[test]
+    fn clipboard_write_defaults_to_allow_and_parses_deny() {
+        assert_eq!(
+            Config::default().behavior.clipboard_write,
+            ClipboardWrite::Allow
+        );
+
+        let config: Config = toml::from_str("[behavior]\nclipboard_write = \"deny\"\n").unwrap();
+        assert_eq!(config.behavior.clipboard_write, ClipboardWrite::Deny);
+
+        assert!(toml::from_str::<Config>("[behavior]\nclipboard_write = \"maybe\"\n").is_err());
     }
 
     #[test]

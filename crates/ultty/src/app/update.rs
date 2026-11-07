@@ -3,6 +3,7 @@
 use std::time::{Duration, Instant};
 
 use super::App;
+use ultty::config::ClipboardWrite;
 use ultty::event_loop::TerminalEvent;
 
 impl App {
@@ -252,7 +253,11 @@ impl App {
                             TerminalEvent::SetClipboard { clipboard: _, data } => {
                                 // Set clipboard content (OSC 52)
                                 // Only handle from focused terminal for security
-                                if Some(terminal_id) == focused_id {
+                                if self.config.behavior.clipboard_write == ClipboardWrite::Deny {
+                                    tracing::debug!(
+                                        "Ignored OSC 52 clipboard write: behavior.clipboard_write = \"deny\""
+                                    );
+                                } else if Some(terminal_id) == focused_id {
                                     // Ultty owns a window and talks to the system clipboard
                                     // directly. It never forwards OSC 52 to its own stdout,
                                     // even when it was started from inside tmux.
