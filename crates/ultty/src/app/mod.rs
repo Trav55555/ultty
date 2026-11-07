@@ -373,7 +373,7 @@ impl App {
 
         // The server fails closed without a token file, so a token we cannot
         // write means nobody can use the socket; say so loudly.
-        let token_path = ultty_protocol::control::auth_token_path();
+        let token_path = server.token_path().to_path_buf();
         match control::write_auth_token(&token_path) {
             Ok(_) => tracing::info!(
                 "Control server started at {:?} (auth token in {:?})",
