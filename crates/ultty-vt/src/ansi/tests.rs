@@ -1306,8 +1306,16 @@ fn utf8_heavy_bytes() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
         ])
         .prop_map(<[u8]>::to_vec),
         1 => any::<u8>().prop_map(|b| vec![b]),
+        // Fragments of control sequences, so CSI parameters, markers,
+        // cancels and controls land in every state and across chunk cuts.
+        3 => prop::sample::select(vec![
+            &b"\x1b"[..], b"[", b"\x1b[", b"0", b"1", b"38", b"255", b"65535999", b";", b":",
+            b"?", b">", b"=", b"m", b"H", b"J", b"u", b"$p", b" q", b"\x18", b"\r", b"\n",
+            b"\t", b"\x7f",
+        ])
+        .prop_map(<[u8]>::to_vec),
     ];
-    prop::collection::vec(piece, 0..24).prop_map(|v| v.concat())
+    prop::collection::vec(piece, 0..32).prop_map(|v| v.concat())
 }
 
 proptest::proptest! {

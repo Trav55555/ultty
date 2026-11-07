@@ -681,49 +681,84 @@ impl AnsiParser {
     {
         let mut index = 0;
         while index < data.len() {
-            // In-band payloads are long runs without ESC; copy them whole.
-            if self.state == State::ApcString && self.apc_kind != ApcKind::Unknown {
-                let run = data[index..]
-                    .iter()
-                    .position(|&b| b == 0x1B)
-                    .unwrap_or(data.len() - index);
-                if run > 0 {
-                    self.apc_extend(&data[index..index + run]);
-                    index += run;
-                    continue;
-                }
-            }
-            let byte = data[index];
-            if self.can_emit_ascii_span() {
-                if is_printable_ascii(byte) {
-                    let start = index;
-                    index += 1;
-                    while index < data.len() && is_printable_ascii(data[index]) {
-                        index += 1;
+            // Fast paths for the states most bytes arrive in. Whatever a
+            // fast path does not take goes to the byte-wise state machine.
+            match self.state {
+                State::Ground => {
+                    if self.utf8_remaining == 0 && !self.is_graphics_charset_active() {
+                        let byte = data[index];
+                        if is_printable_ascii(byte) {
+                            let start = index;
+                            index += 1;
+                            while index < data.len() && is_printable_ascii(data[index]) {
+                                index += 1;
+                            }
+                            callback(AnsiOutput::PrintAscii(&data[start..index]));
+                            continue;
+                        }
+                        // The controls that end nearly every line and
+                        // start every escape sequence, as ground() takes them.
+                        match byte {
+                            0x1B => {
+                                self.state = State::Escape;
+                                index += 1;
+                                continue;
+                            }
+                            b'\r' => {
+                                callback(AnsiOutput::Action(Action::CarriageReturn));
+                                index += 1;
+                                continue;
+                            }
+                            b'\n' => {
+                                callback(AnsiOutput::Action(Action::Newline));
+                                index += 1;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                        if byte >= 0xC2 {
+                            let len = print_utf8_run(&data[index..], &mut callback);
+                            if len > 0 {
+                                index += len;
+                                continue;
+                            }
+                        }
                     }
-                    callback(AnsiOutput::PrintAscii(&data[start..index]));
+                }
+                // ESC [ and the first parameter byte, as the escape and
+                // CSI entry states would take them.
+                State::Escape if data[index] == b'[' => {
+                    self.state = State::CsiEntry;
+                    self.clear_csi();
+                    index += 1;
                     continue;
                 }
-                if byte >= 0xC2 {
-                    let len = print_utf8_run(&data[index..], &mut callback);
-                    if len > 0 {
-                        index += len;
+                State::CsiEntry | State::CsiParam if matches!(data[index], b'0'..=b'9' | b';') => {
+                    self.state = State::CsiParam;
+                    index += self.csi_param_run(&data[index..]);
+                    continue;
+                }
+                // In-band payloads are long runs without ESC; copy them whole.
+                State::ApcString if self.apc_kind != ApcKind::Unknown => {
+                    let run = data[index..]
+                        .iter()
+                        .position(|&b| b == 0x1B)
+                        .unwrap_or(data.len() - index);
+                    if run > 0 {
+                        self.apc_extend(&data[index..index + run]);
+                        index += run;
                         continue;
                     }
                 }
+                _ => {}
             }
+            let byte = data[index];
 
             self.process_byte(byte, &mut |action| {
                 callback(AnsiOutput::Action(action));
             });
             index += 1;
         }
-    }
-
-    fn can_emit_ascii_span(&self) -> bool {
-        self.state == State::Ground
-            && self.utf8_remaining == 0
-            && !self.is_graphics_charset_active()
     }
 
     /// Process a single byte.

@@ -153,6 +153,37 @@ impl AnsiParser {
         }
     }
 
+    /// Consume the run of digits and `;` at the start of `bytes` while in
+    /// the parameter state, returning how many bytes it took. These are
+    /// most of the bytes of SGR-heavy output, and handling them here keeps
+    /// them off the per-byte state machine call. Everything else (`:`,
+    /// controls, the final byte) is left to [`Self::csi_param`].
+    #[inline]
+    pub(super) fn csi_param_run(&mut self, bytes: &[u8]) -> usize {
+        let mut taken = 0;
+        for &byte in bytes {
+            match byte {
+                b'0'..=b'9' => {
+                    let digit = u16::from(byte - b'0');
+                    self.current_param = Some(
+                        self.current_param
+                            .unwrap_or(0)
+                            .saturating_mul(10)
+                            .saturating_add(digit),
+                    );
+                }
+                b';' => {
+                    let value = self.current_param.take().unwrap_or(0);
+                    self.push_csi_param(value);
+                    self.param_is_sub = false;
+                }
+                _ => break,
+            }
+            taken += 1;
+        }
+        taken
+    }
+
     /// CSI intermediate - saw an intermediate byte (e.g. space in DECSCUSR).
     pub(super) fn csi_intermediate<F>(&mut self, byte: u8, callback: &mut F)
     where
