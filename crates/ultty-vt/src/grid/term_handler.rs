@@ -3,7 +3,7 @@
 use crate::ansi::{Action, Attribute, Color as AnsiColor, Mode, NamedColor};
 use crate::grid::{decode_sixel, CellFlags, MouseEncoding, MouseMode, Terminal, TerminalImage};
 
-use super::cell::Color;
+use super::cell::{Color, UnderlineStyle};
 
 /// Applies parser actions to a Terminal.
 ///
@@ -374,6 +374,9 @@ impl<'a> TerminalHandler<'a> {
             Action::KittyKeyboardPop => {
                 self.terminal.pop_kitty_keyboard_mode();
             }
+            Action::KittyKeyboardSet { flags, mode } => {
+                self.terminal.set_kitty_keyboard_mode(flags, mode);
+            }
             Action::KittyKeyboardQuery => {
                 // Send current keyboard mode flags
                 let flags = self.terminal.modes().kitty_keyboard_flags;
@@ -556,14 +559,17 @@ impl<'a> TerminalHandler<'a> {
             Attribute::Bold => new_attrs.flags_mut().set(CellFlags::BOLD),
             Attribute::Dim => new_attrs.flags_mut().set(CellFlags::DIM),
             Attribute::Italic => new_attrs.flags_mut().set(CellFlags::ITALIC),
-            Attribute::Underline => new_attrs.flags_mut().set(CellFlags::UNDERLINE),
+            Attribute::Underline => new_attrs.set_underline_style(UnderlineStyle::Single),
             Attribute::Blink => new_attrs.flags_mut().set(CellFlags::BLINK),
             Attribute::Reverse => new_attrs.flags_mut().set(CellFlags::REVERSE),
             Attribute::Hidden => new_attrs.flags_mut().set(CellFlags::HIDDEN),
             Attribute::Strikethrough => new_attrs.flags_mut().set(CellFlags::STRIKETHROUGH),
-            Attribute::DoubleUnderline => {
-                new_attrs.flags_mut().set(CellFlags::DOUBLE_UNDERLINE);
-                new_attrs.flags_mut().set(CellFlags::UNDERLINE);
+            Attribute::DoubleUnderline => new_attrs.set_underline_style(UnderlineStyle::Double),
+            Attribute::CurlyUnderline => new_attrs.set_underline_style(UnderlineStyle::Curly),
+            Attribute::DottedUnderline => new_attrs.set_underline_style(UnderlineStyle::Dotted),
+            Attribute::DashedUnderline => new_attrs.set_underline_style(UnderlineStyle::Dashed),
+            Attribute::UnderlineColor(color) => {
+                new_attrs.set_underline_color(convert_color(color));
             }
             Attribute::Overline => new_attrs.flags_mut().set(CellFlags::OVERLINE),
 
@@ -573,10 +579,7 @@ impl<'a> TerminalHandler<'a> {
                 new_attrs.flags_mut().unset(CellFlags::DIM);
             }
             Attribute::NoItalic => new_attrs.flags_mut().unset(CellFlags::ITALIC),
-            Attribute::NoUnderline => {
-                new_attrs.flags_mut().unset(CellFlags::UNDERLINE);
-                new_attrs.flags_mut().unset(CellFlags::DOUBLE_UNDERLINE);
-            }
+            Attribute::NoUnderline => new_attrs.set_underline_style(UnderlineStyle::None),
             Attribute::NoBlink => new_attrs.flags_mut().unset(CellFlags::BLINK),
             Attribute::NoReverse => new_attrs.flags_mut().unset(CellFlags::REVERSE),
             Attribute::NoHidden => new_attrs.flags_mut().unset(CellFlags::HIDDEN),

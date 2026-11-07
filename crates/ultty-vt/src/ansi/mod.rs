@@ -227,6 +227,11 @@ pub enum Action {
     /// Kitty keyboard protocol: query mode (CSI ? u)
     KittyKeyboardQuery,
 
+    /// Kitty keyboard protocol: change the current flags in place
+    /// (CSI = flags ; mode u). Mode 1 replaces them, 2 sets the given bits,
+    /// 3 clears them.
+    KittyKeyboardSet { flags: u8, mode: u8 },
+
     /// Sixel image data (DCS q ... ST)
     /// Contains: aspect ratio params and raw sixel data
     SixelImage {
@@ -311,7 +316,16 @@ pub enum Attribute {
     BackgroundColor(Color),
 
     DoubleUnderline,
+    /// SGR 4:3
+    CurlyUnderline,
+    /// SGR 4:4
+    DottedUnderline,
+    /// SGR 4:5
+    DashedUnderline,
     Overline,
+
+    /// Underline color (SGR 58); `Default` (SGR 59) follows the foreground.
+    UnderlineColor(Color),
 
     // Disable specific attributes
     NoBold,
@@ -418,10 +432,12 @@ pub(super) enum State {
     Escape,
     /// In CSI sequence (ESC [), collecting parameters
     CsiEntry,
-    /// In CSI sequence with private marker (ESC [ ?)
-    CsiPrivate,
-    /// Collecting CSI parameters (digits and semicolons)
+    /// Collecting CSI parameters (digits, `;` and `:`), after any private marker
     CsiParam,
+    /// Saw a CSI intermediate byte (0x20-0x2F); expecting the final byte
+    CsiIntermediate,
+    /// Inside a malformed CSI sequence; consumed up to its final byte
+    CsiIgnore,
     /// In OSC sequence (ESC ])
     OscString,
     /// Saw ESC while in OSC, expecting \ for ST (String Terminator)
@@ -476,8 +492,14 @@ pub(super) enum ApcKind {
 pub struct AnsiParser {
     pub(super) state: State,
     pub(super) params: Vec<u16>,
+    /// Bit `i` set: `params[i]` followed a `:`, so it is a sub-parameter of
+    /// the parameter before it.
+    pub(super) subparams: u32,
     pub(super) current_param: Option<u16>,
-    pub(super) is_private: bool,
+    /// The parameter being collected followed a `:`.
+    pub(super) param_is_sub: bool,
+    /// CSI private marker: `?`, `>`, `<` or `=`.
+    pub(super) marker: Option<u8>,
     /// Intermediate byte for CSI sequences (e.g., space in `CSI Ps SP q`)
     pub(super) intermediate: Option<u8>,
     pub(super) osc_buffer: Vec<u8>,
@@ -487,10 +509,15 @@ pub struct AnsiParser {
     pub(super) apc_kind: ApcKind,
     /// Text of an in-band APC string being collected.
     pub(super) apc_buffer: Vec<u8>,
-    /// Buffer for accumulating UTF-8 multi-byte sequences
-    utf8_buffer: Vec<u8>,
+    /// Code point bits of the UTF-8 sequence being decoded
+    utf8_codepoint: u32,
     /// Number of remaining bytes expected in current UTF-8 sequence
     utf8_remaining: u8,
+    /// Allowed range of the next continuation byte. Narrower than 80-BF
+    /// right after E0, ED, F0 and F4, which is what rules out overlong
+    /// forms, surrogates and code points above U+10FFFF.
+    utf8_lower: u8,
+    utf8_upper: u8,
     /// Active character set for G0 (false = ASCII, true = DEC Special Graphics)
     g0_charset_graphics: bool,
     /// Active character set for G1
@@ -505,16 +532,20 @@ impl AnsiParser {
         Self {
             state: State::Ground,
             params: Vec::with_capacity(16),
+            subparams: 0,
             current_param: None,
-            is_private: false,
+            param_is_sub: false,
+            marker: None,
             intermediate: None,
             osc_buffer: Vec::new(),
             dcs_buffer: Vec::new(),
             dcs_params: Vec::new(),
             apc_kind: ApcKind::Unknown,
             apc_buffer: Vec::new(),
-            utf8_buffer: Vec::with_capacity(4),
+            utf8_codepoint: 0,
             utf8_remaining: 0,
+            utf8_lower: 0x80,
+            utf8_upper: 0xBF,
             g0_charset_graphics: false,
             g1_charset_graphics: false,
             using_g1: false,
@@ -590,7 +621,9 @@ impl AnsiParser {
             State::Ground => self.ground(byte, callback),
             State::Escape => self.escape(byte, callback),
             State::CsiEntry => self.csi_entry(byte, callback),
-            State::CsiPrivate | State::CsiParam => self.csi_param(byte, callback),
+            State::CsiParam => self.csi_param(byte, callback),
+            State::CsiIntermediate => self.csi_intermediate(byte, callback),
+            State::CsiIgnore => self.csi_ignore(byte, callback),
             State::OscString => self.osc_string(byte, callback),
             State::OscStringEsc => self.osc_string_esc(byte, callback),
             State::DcsString => self.dcs_string(byte, callback),
@@ -617,14 +650,10 @@ impl AnsiParser {
     /// Note: charset state is preserved across resets (only cleared on hard reset).
     pub(super) fn reset(&mut self) {
         self.state = State::Ground;
-        self.params.clear();
-        self.current_param = None;
-        self.is_private = false;
-        self.intermediate = None;
+        self.clear_csi();
         self.osc_buffer.clear();
         self.dcs_buffer.clear();
         self.dcs_params.clear();
-        self.utf8_buffer.clear();
         self.utf8_remaining = 0;
         // Note: g0/g1 charset state is intentionally NOT reset here
         // as it persists across escape sequences
@@ -635,30 +664,23 @@ impl AnsiParser {
     where
         F: FnMut(Action),
     {
-        // If we're in the middle of a UTF-8 sequence, handle continuation
         if self.utf8_remaining > 0 {
-            if byte & 0xC0 == 0x80 {
-                // Valid continuation byte
-                self.utf8_buffer.push(byte);
+            if (self.utf8_lower..=self.utf8_upper).contains(&byte) {
+                self.utf8_codepoint = (self.utf8_codepoint << 6) | (byte & 0x3F) as u32;
                 self.utf8_remaining -= 1;
-
+                self.utf8_lower = 0x80;
+                self.utf8_upper = 0xBF;
                 if self.utf8_remaining == 0 {
-                    // Complete sequence - decode and emit
-                    if let Ok(s) = std::str::from_utf8(&self.utf8_buffer) {
-                        for c in s.chars() {
-                            callback(Action::Print(c));
-                        }
-                    }
-                    self.utf8_buffer.clear();
+                    // The ranges above admit only scalar values.
+                    let c = char::from_u32(self.utf8_codepoint).unwrap_or('\u{FFFD}');
+                    callback(Action::Print(c));
                 }
                 return;
-            } else {
-                // Invalid continuation - emit replacement char and process this byte normally
-                callback(Action::Print('\u{FFFD}'));
-                self.utf8_buffer.clear();
-                self.utf8_remaining = 0;
-                // Fall through to process current byte
             }
+            // The sequence so far is a maximal subpart of an ill-formed
+            // sequence: one U+FFFD for it, then this byte on its own.
+            callback(Action::Print('\u{FFFD}'));
+            self.utf8_remaining = 0;
         }
 
         match byte {
@@ -666,20 +688,7 @@ impl AnsiParser {
             0x1B => {
                 self.state = State::Escape;
             }
-            // C0 control codes
-            0x07 => callback(Action::Bell),
-            0x08 => callback(Action::Backspace),
-            0x09 => callback(Action::Tab),
-            0x0A..=0x0C => callback(Action::Newline),
-            0x0D => callback(Action::CarriageReturn),
-            0x0E => {
-                self.using_g1 = true;
-            }
-            0x0F => {
-                self.using_g1 = false;
-            }
-            // Other C0 controls
-            0x00..=0x1F => callback(Action::Execute(byte)),
+            0x00..=0x1F => self.control(byte, callback),
             0x20..=0x7E => {
                 let ch = if self.is_graphics_charset_active() {
                     Self::translate_dec_graphics(byte).unwrap_or(byte as char)
@@ -690,32 +699,48 @@ impl AnsiParser {
             }
             // DEL - ignore
             0x7F => {}
-            // UTF-8 continuation byte without lead - invalid, emit replacement
-            0x80..=0xBF => {
-                callback(Action::Print('\u{FFFD}'));
-            }
-            // UTF-8 2-byte sequence lead (0xC0-0xDF)
-            0xC0..=0xDF => {
-                self.utf8_buffer.clear();
-                self.utf8_buffer.push(byte);
-                self.utf8_remaining = 1;
-            }
-            // UTF-8 3-byte sequence lead (0xE0-0xEF)
-            0xE0..=0xEF => {
-                self.utf8_buffer.clear();
-                self.utf8_buffer.push(byte);
-                self.utf8_remaining = 2;
-            }
-            // UTF-8 4-byte sequence lead (0xF0-0xF7)
-            0xF0..=0xF7 => {
-                self.utf8_buffer.clear();
-                self.utf8_buffer.push(byte);
-                self.utf8_remaining = 3;
-            }
-            // Invalid UTF-8 lead bytes (0xF8-0xFF) - emit replacement
-            0xF8..=0xFF => {
-                callback(Action::Print('\u{FFFD}'));
-            }
+            0xC2..=0xF4 => self.utf8_start(byte),
+            // A continuation byte without a lead, an overlong lead (C0, C1)
+            // or a lead past U+10FFFF (F5-FF).
+            _ => callback(Action::Print('\u{FFFD}')),
+        }
+    }
+
+    /// Start decoding a multi-byte UTF-8 sequence at lead byte `lead`
+    /// (C2-F4), following the Unicode Standard's table of well-formed
+    /// byte sequences (section 3.9, table 3-7).
+    fn utf8_start(&mut self, lead: u8) {
+        let (remaining, bits) = match lead {
+            0xC2..=0xDF => (1, lead & 0x1F),
+            0xE0..=0xEF => (2, lead & 0x0F),
+            _ => (3, lead & 0x07),
+        };
+        self.utf8_remaining = remaining;
+        self.utf8_codepoint = bits as u32;
+        (self.utf8_lower, self.utf8_upper) = match lead {
+            0xE0 => (0xA0, 0xBF),
+            0xED => (0x80, 0x9F),
+            0xF0 => (0x90, 0xBF),
+            0xF4 => (0x80, 0x8F),
+            _ => (0x80, 0xBF),
+        };
+    }
+
+    /// Execute a C0 control other than ESC. Shared by the ground state and
+    /// the CSI states, which execute controls without ending the sequence.
+    pub(super) fn control<F>(&mut self, byte: u8, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        match byte {
+            0x07 => callback(Action::Bell),
+            0x08 => callback(Action::Backspace),
+            0x09 => callback(Action::Tab),
+            0x0A..=0x0C => callback(Action::Newline),
+            0x0D => callback(Action::CarriageReturn),
+            0x0E => self.using_g1 = true,
+            0x0F => self.using_g1 = false,
+            _ => callback(Action::Execute(byte)),
         }
     }
 
@@ -728,9 +753,7 @@ impl AnsiParser {
             // CSI - Control Sequence Introducer
             b'[' => {
                 self.state = State::CsiEntry;
-                self.params.clear();
-                self.current_param = None;
-                self.is_private = false;
+                self.clear_csi();
             }
             // OSC - Operating System Command
             b']' => {

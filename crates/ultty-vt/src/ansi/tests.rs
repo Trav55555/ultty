@@ -1216,3 +1216,65 @@ fn application_keypad_mode() {
 fn normal_keypad_mode() {
     assert_eq!(parse(b"\x1b>"), vec![Action::NormalKeypadMode]);
 }
+
+/// The characters `input` prints.
+fn printed(input: &[u8]) -> String {
+    parse(input)
+        .into_iter()
+        .map(|action| match action {
+            Action::Print(c) => c,
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn utf8_ill_formed_sequences_become_one_replacement_per_maximal_subpart() {
+    // An F5 lead and an encoded surrogate: each byte is its own subpart.
+    assert_eq!(
+        printed(b"a\xF5\x80\x80\x80b\xED\xA0\x80c"),
+        "a\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}b\u{FFFD}\u{FFFD}\u{FFFD}c"
+    );
+    // Overlong forms: C0/C1 leads, and E0 / F0 followed by too small a byte.
+    assert_eq!(printed(b"\xC0\xAF"), "\u{FFFD}\u{FFFD}");
+    assert_eq!(printed(b"\xE0\x80\xAF"), "\u{FFFD}\u{FFFD}\u{FFFD}");
+    assert_eq!(
+        printed(b"\xF0\x8F\xBF\xBF"),
+        "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}"
+    );
+    // Above U+10FFFF.
+    assert_eq!(
+        printed(b"\xF4\x90\x80\x80"),
+        "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}"
+    );
+    // A truncated sequence is one replacement, then the next byte.
+    assert_eq!(printed(b"\xE2\x82X"), "\u{FFFD}X");
+    assert_eq!(printed(b"\xF0\x9F\x98X"), "\u{FFFD}X");
+    // The Unicode Standard's own example (section 3.9, table 3-8).
+    assert_eq!(
+        printed(b"\x61\xF1\x80\x80\xE1\x80\xC2\x62\x80\x63\x80\xBF\x64"),
+        "a\u{FFFD}\u{FFFD}\u{FFFD}b\u{FFFD}c\u{FFFD}\u{FFFD}d"
+    );
+}
+
+#[test]
+fn utf8_boundaries_of_the_well_formed_ranges_decode() {
+    assert_eq!(printed(b"\xC2\x80\xDF\xBF"), "\u{80}\u{7FF}");
+    assert_eq!(
+        printed(b"\xE0\xA0\x80\xED\x9F\xBF\xEE\x80\x80"),
+        "\u{800}\u{D7FF}\u{E000}"
+    );
+    assert_eq!(
+        printed(b"\xF0\x90\x80\x80\xF4\x8F\xBF\xBF"),
+        "\u{10000}\u{10FFFF}"
+    );
+}
+
+#[test]
+fn utf8_sequence_split_across_feeds_decodes() {
+    let mut parser = AnsiParser::new();
+    let mut actions = Vec::new();
+    parser.feed(b"\xE2\x82", |a| actions.push(a));
+    parser.feed(b"\xAC", |a| actions.push(a));
+    assert_eq!(actions, vec![Action::Print('\u{20AC}')]);
+}

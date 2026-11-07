@@ -638,6 +638,24 @@ impl Terminal {
         }
     }
 
+    /// Change the current Kitty keyboard flags in place (`CSI = flags ; mode u`):
+    /// mode 1 replaces them, 2 sets the given bits, 3 clears them. Other
+    /// modes are ignored. Like a push, the result is the stack top.
+    pub fn set_kitty_keyboard_mode(&mut self, flags: u8, mode: u8) {
+        let current = self.modes.kitty_keyboard_flags;
+        let new = match mode {
+            1 => flags,
+            2 => current | flags,
+            3 => current & !flags,
+            _ => return,
+        };
+        if let Some(top) = self.kitty_keyboard_stack.last_mut() {
+            *top = new;
+        }
+        self.modes.kitty_keyboard_flags = new;
+        tracing::debug!("Set Kitty keyboard mode: flags={new}");
+    }
+
     /// Check if Kitty keyboard protocol is active.
     pub fn kitty_keyboard_active(&self) -> bool {
         self.modes.kitty_keyboard_flags != 0
