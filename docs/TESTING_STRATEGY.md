@@ -73,48 +73,36 @@ proptest! {
 - Edge cases: empty content, max lengths, all unicode planes
 - Invalid input rejects gracefully
 
-## Layer 3: Reference Tests (Parser)
+## Layer 3: Reference and Conformance Tests (Parser and Screen)
 
-**Location**: `crates/ultty/tests/ref/`
+Two suites check VT behaviour against expected results written by hand from
+xterm's documented behaviour (ctlseqs) and the DEC manuals.
 
-**Pattern** (Alacritty-inspired):
-```
-tests/ref/
-├── cursor_up/
-│   ├── input.bin         # Raw escape bytes: 1b 5b 35 41
-│   └── expected.json     # {"actions": [{"action": "CursorUp", "params": 5}]}
-├── sgr_colors/
-│   ├── input.bin
-│   └── expected.json
-└── ...
-```
+**Parser reference tests**: `crates/ultty/tests/ref/` and `ref.rs`. Each case
+is an `input.bin` of raw bytes and an `expected.json` of the parser actions
+it must produce. There are 13 cases (cursor movement, erases, scrolling, SGR,
+save and restore cursor).
 
-**Macro-driven test generation**:
-```rust
-macro_rules! ref_tests {
-    ($($name:ident),* $(,)?) => {
-        $(
-            #[test]
-            fn $name() {
-                run_ref_test(stringify!($name));
-            }
-        )*
-    };
-}
+**Conformance suite**: `crates/ultty-vt/tests/conformance.rs`. Each test
+feeds bytes to an `ultty_vt::Terminal` and checks the resulting screen,
+cursor, modes, or the replies the terminal sends back. About 55 tests cover
+tab stops across resize, DECCOLM and mode 40, ED and EL, DECSTBM with IL and
+DL at the margins, DECOM, scrollback from scroll regions, DECSTR, DECSC and
+DECRC, the alternate screens, wide characters at the margin, LNM, identity
+and status reports (DA1, DA2, DSR, XTVERSION), DECRQM, DECRQSS, XTGETTCAP,
+mouse mode 1005, sixel placement, colour queries and the palette, SGR
+underline styles and colour, private-marker dispatch, and UTF-8 decoding.
+A rule that no byte of a control sequence ever reaches the screen is also a
+property test in `crates/ultty-vt/tests/integrity.rs`.
 
-ref_tests! {
-    cursor_up, cursor_down, cursor_position,
-    erase_display, erase_line,
-    sgr_bold, sgr_colors, sgr_reset,
-    scroll_up, scroll_down,
-    // ... 100+ test cases
-}
+```bash
+cargo test -p ultty-vt --test conformance
+cargo test -p ultty --test ref
 ```
 
-**Ground truth sources**:
-- VT100 spec compliance
-- Compare against xterm/Alacritty behavior
-- vttest output capture
+**Not done yet**: vttest has not been run against this version, and no vttest
+output is captured in the tree. Running vttest by hand and turning each
+difference into a conformance case is the next step for this layer.
 
 ## Layer 4: Snapshot Tests (Widget Rendering)
 
@@ -201,15 +189,15 @@ differences make every run a false failure.
 
 ## Layer 7: Performance Benchmarks
 
-**Location**: `benches/`
+**Location**: `crates/ultty/benches/`
 
-**Framework**: Criterion
+**Framework**: Criterion (the code below is a sketch of the shape)
 
 **Benchmarks**:
 ```rust
 // benches/parser.rs
 fn parser_throughput(c: &mut Criterion) {
-    let input = include_bytes!("../testdata/vttest_output.bin");
+    let input = generate_terminal_output(1024 * 1024); // synthetic SGR text
 
     c.bench_function("parse_1mb", |b| {
         b.iter(|| {
@@ -244,7 +232,8 @@ criterion_main!(benches);
 ### Phase 1: Fix Foundations
 1. **Fix proptest roundtrip.rs** - Resolve trait bound compilation errors
 2. **Wire up ANSI parser** - Connect actual parser to reference tests
-3. **Expand reference test cases** - Add 50+ vttest-derived cases
+3. **Run vttest** - Run it by hand and add a conformance case for each
+   difference (the conformance suite exists; vttest has not been run)
 
 ### Phase 2: Add Snapshots
 4. **Add insta to ulttui** - Snapshot all widget outputs
@@ -271,6 +260,7 @@ pull request to `main`:
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` |
 | `test` | `cargo test --workspace`, the ignored protocol roundtrip tests, and the snapshot tests |
 | `msrv` | `cargo check --workspace --all-targets` on the MSRV toolchain |
+| `porygon-tui` | `cargo check --locked` of `examples/porygon-tui`, which is outside the workspace |
 | `vt-integrity` | The deep property run of `cargo test -p ultty-vt --test integrity` |
 | `fuzz` | Short cargo-fuzz runs of the VT parser, protocol decoders, and in-band splitter |
 | `gui-smoke` | `scripts/ci-gui-smoke.sh`: Ultty under Xvfb with software Vulkan, driven by the live smokes |
@@ -283,8 +273,9 @@ through `.github/workflows/live-smoke.yml` on manual dispatch. Benchmarks are ru
 ## Test Data Management
 
 ### Reference test data sources:
-1. **vttest** - Standard VT100 compliance suite
-2. **xterm** - De facto terminal behavior
+1. **xterm** - De facto terminal behavior (ctlseqs), the reference for the
+   conformance suite
+2. **vttest** - Standard VT100 compliance suite; not yet used
 3. **Alacritty ref tests** - Borrowed test cases
 4. **Manual capture** - Edge cases discovered in development
 

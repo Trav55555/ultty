@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run install.sh against a fake release served from localhost and check what
 # it installs, including the desktop entry's Exec= line for an install
-# directory full of characters that need quoting.
+# directory full of characters that need quoting, and the terminfo entry.
+# Also check that it refuses platforms with no release build.
 #
 #   scripts/install-sh-test.sh [path/to/install.sh]
 #
@@ -19,21 +20,41 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Platforms without a release build fail before downloading anything.
+mkdir -p "$work/fake-uname"
+cat >"$work/fake-uname/uname" <<'SH'
+#!/bin/sh
+case "$1" in
+  -s) echo Darwin ;;
+  -m) echo arm64 ;;
+esac
+SH
+chmod 755 "$work/fake-uname/uname"
+if out="$(PATH="$work/fake-uname:$PATH" HOME="$work/home" ULTTY_VERSION=v0.0.0-test \
+  ULTTY_RELEASES="http://127.0.0.1:9" sh "$INSTALL_SH" 2>&1)"; then
+  echo "install.sh accepted Darwin arm64: $out" >&2
+  exit 1
+fi
+case "$out" in
+  *"Linux x86_64 only"*) ;;
+  *) echo "unclear error for an unsupported platform: $out" >&2; exit 1 ;;
+esac
+
 case "$(uname -m)" in
-  x86_64 | amd64) arch=x86_64 ;;
-  aarch64 | arm64) arch=aarch64 ;;
-  *) echo "skip: unsupported CPU"; exit 0 ;;
+  x86_64 | amd64) ;;
+  *) echo "skip: release builds are x86_64 only"; exit 0 ;;
 esac
 version=v0.0.0-test
-archive="ultty-$version-$arch-unknown-linux-gnu.tar.gz"
+archive="ultty-$version-x86_64-unknown-linux-gnu.tar.gz"
 
-# A fake release: two stub binaries and the real desktop entry.
+# A fake release: two stub binaries, the real desktop entry and terminfo.
 stage="$work/stage"
-mkdir -p "$stage/dist" "$work/www/download/$version"
+mkdir -p "$stage/dist/terminfo" "$work/www/download/$version"
 for bin in ultty ulttyctl; do
   printf '#!/bin/sh\necho %s\n' "$bin" >"$stage/$bin"
 done
 cp "$(dirname "$INSTALL_SH")/dist/ultty.desktop" "$stage/dist/ultty.desktop"
+cp "$(dirname "$INSTALL_SH")/dist/terminfo/ultty.terminfo" "$stage/dist/terminfo/"
 tar czf "$work/www/download/$version/$archive" -C "$stage" .
 (cd "$work/www/download/$version" && sha256sum "$archive" >SHA256SUMS)
 
@@ -59,6 +80,11 @@ HOME="$work/home" XDG_DATA_HOME="$data_dir" \
 for bin in ultty ulttyctl; do
   [ "$("$install_dir/$bin")" = "$bin" ] || { echo "$bin not installed" >&2; exit 1; }
 done
+
+if command -v tic >/dev/null 2>&1; then
+  TERMINFO="$work/home/.terminfo" infocmp -x xterm-ultty >/dev/null ||
+    { echo "xterm-ultty terminfo entry not installed" >&2; exit 1; }
+fi
 
 entry="$data_dir/applications/ultty.desktop"
 if command -v desktop-file-validate >/dev/null 2>&1; then

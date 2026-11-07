@@ -75,9 +75,27 @@ evidence that the release process and live renderer remain stable.
 
 ## Current Status
 
-As of this checklist, Ultty is suitable for maintainer dogfood when the dogfood
-commands above pass locally. It is not ready to describe as general-use
-software.
+As of 2026-11-07:
+
+- **v0.1.0 is published**, built for Linux x86_64 only. There are no macOS or
+  Linux aarch64 builds, and `install.sh` refuses those platforms. Changes and
+  known limitations are in [CHANGELOG.md](../CHANGELOG.md).
+- **Dogfood**: the gates are met for maintainers running from source. Gitea
+  CI runs fmt, clippy, tests, MSRV, the deep VT integrity property run, fuzz
+  smoke runs, a GUI smoke under Xvfb, and a check of `examples/porygon-tui`.
+- **Public alpha**: these gates are still open.
+  - The release workflow does not run tests before publishing, builds
+    without `--locked`, and uses unpinned actions with write permission on
+    every job. GitHub runs no CI on pull requests.
+  - `SHA256SUMS` comes from the same release as the artifacts, so it detects
+    a corrupted download, not a tampered release. There is no signature or
+    build provenance.
+  - There is no fresh performance artifact for the current candidate, and
+    the input latency target has not been measured end to end on real
+    hardware.
+  - vttest has not been run. Terminal correctness rests on the conformance
+    suite (`crates/ultty-vt/tests/conformance.rs`) and the property tests.
+- **General use**: not ready.
 
 The shortest path to a credible public alpha is:
 
