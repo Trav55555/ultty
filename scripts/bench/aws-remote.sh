@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs ON the benchmark instance (Ubuntu 24.04), driven by scripts/bench-aws.sh.
+# Runs ON the benchmark instance (Ubuntu 24.04, or 26.04 when Ghostty is
+# compared), driven by scripts/bench-aws.sh.
 # Every step is idempotent: rerunning skips work that is already done, and
 # any failure stops the step with a message.
 #
@@ -18,7 +19,8 @@
 #                 drive the NVIDIA driver, so it never opened a window.
 #   GNOME Terminal Ubuntu 24.04 apt package; the version is recorded, and
 #                 EXPECT_GNOME_TERMINAL (a dpkg version) fails the setup on drift
-#   NVIDIA driver nvidia-driver-${NVIDIA_DRIVER:-550} (GPU role only)
+#   NVIDIA driver nvidia-driver-${NVIDIA_DRIVER:-580} (GPU role only; 550 on
+#                 24.04 pulled in 580 anyway)
 set -euo pipefail
 
 WORK="${UBENCH_WORK:-$HOME/ubench}"
@@ -32,7 +34,7 @@ GHOSTTY_MINISIGN_KEY=RWQlAjJC23149WL2sEpT/l0QKy7hMIFhYdQOFy0Z7z7PbneUgvlsnYcV
 ZIG_VERSION=0.17.0
 ZIG_SHA256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
 ZIG_MINISIGN_KEY=RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
-NVIDIA_DRIVER="${NVIDIA_DRIVER:-550}"
+NVIDIA_DRIVER="${NVIDIA_DRIVER:-580}"
 # /snap/bin last: the source-built Ghostty in /usr/local/bin must win.
 export PATH="$HOME/.cargo/bin:$WORK/alacritty/bin:$PATH:/snap/bin"
 
@@ -43,7 +45,10 @@ require_ubuntu_2404() {
   local id version
   id=$(awk -F= '$1 == "ID" {gsub(/"/, "", $2); print $2}' /etc/os-release)
   version=$(awk -F= '$1 == "VERSION_ID" {gsub(/"/, "", $2); print $2}' /etc/os-release)
-  [[ "$id" == ubuntu && "$version" == 24.04 ]] || die "expected Ubuntu 24.04, found $id $version"
+  # 26.04 for a run that includes Ghostty: 1.4 needs GTK 4.18 and
+  # libadwaita 1.7, newer than 24.04 ships.
+  [[ "$id" == ubuntu && ( "$version" == 24.04 || "$version" == 26.04 ) ]] ||
+    die "expected Ubuntu 24.04 or 26.04, found $id $version"
 }
 
 apt_install() {
