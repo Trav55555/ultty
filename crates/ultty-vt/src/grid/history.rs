@@ -103,7 +103,7 @@ impl CompactRow {
         self.runs.clear();
         self.graphemes.clear();
 
-        let cells = row.cell_slice();
+        let cells = row.used_cells();
         let cells = &cells[..used_len(cells)];
         self.text.reserve(cells.len());
 

@@ -15,6 +15,11 @@ pub struct Row {
     dirty: bool,
     /// Whether this row is wrapped (continues on next line due to soft wrap)
     wrapped: bool,
+    /// Every cell at or after this column is [`Cell::default`]. It may
+    /// overstate the used part of the row, never understate it, so code
+    /// that only cares about non-default cells (history encoding, erasing a
+    /// row that is already blank) can skip the tail without looking at it.
+    used: u16,
     /// Codepoints after the base character of a multi-codepoint grapheme
     /// cluster (combining marks, ZWJ sequences, variation selectors), keyed by
     /// column. An entry is only meaningful while the cell at that column has
@@ -31,6 +36,16 @@ impl Row {
     /// grapheme codepoints than `max_extra`.
     pub fn check_integrity(&self, max_extra: usize) -> Result<(), String> {
         let cells = &self.cells;
+        if let Some(col) = cells[(self.used as usize).min(cells.len())..]
+            .iter()
+            .position(|cell| !cell.is_default())
+        {
+            return Err(format!(
+                "cell at col {} is past the used mark {} but not default",
+                self.used as usize + col,
+                self.used
+            ));
+        }
         for (col, cell) in cells.iter().enumerate() {
             if cell.is_wide() && cell.is_wide_spacer() {
                 return Err(format!("cell at col {col} is both wide and a spacer"));
@@ -59,6 +74,7 @@ impl Row {
             cells: vec![Cell::default(); width as usize],
             dirty: true,
             wrapped: false,
+            used: 0,
             graphemes: BTreeMap::new(),
         }
     }
@@ -75,6 +91,7 @@ impl Row {
             *cell = template;
             cell.set_char(byte as char);
         }
+        self.mark_used(end);
         self.dirty = true;
     }
 
@@ -83,6 +100,7 @@ impl Row {
         self.cells.clone_from(&other.cells);
         self.graphemes.clone_from(&other.graphemes);
         self.wrapped = other.wrapped;
+        self.used = other.used;
         self.dirty = true;
     }
 
@@ -119,6 +137,7 @@ impl Row {
             // Whatever is stored for this column belonged to earlier content.
             self.graphemes.remove(&col);
             cell.set_flag(CellFlags::HAS_COMBINING);
+            self.mark_used(col as usize + 1);
         }
         let extra = self.graphemes.entry(col).or_default();
         if extra.len() < cap {
@@ -138,6 +157,7 @@ impl Row {
         } else {
             cell.set_flag(CellFlags::HAS_COMBINING);
             self.graphemes.insert(col, extra.to_vec());
+            self.mark_used(col as usize + 1);
         }
         self.dirty = true;
     }
@@ -217,22 +237,39 @@ impl Row {
     #[inline]
     pub fn get_mut(&mut self, index: u16) -> Option<&mut Cell> {
         self.dirty = true;
+        self.mark_used(index as usize + 1);
         self.cells.get_mut(index as usize)
+    }
+
+    /// Record that cells before `end` may no longer be default.
+    #[inline]
+    fn mark_used(&mut self, end: usize) {
+        let end = end.min(self.cells.len()) as u16;
+        self.used = self.used.max(end);
+    }
+
+    /// The cells up to the used mark: every cell after them is default.
+    pub(crate) fn used_cells(&self) -> &[Cell] {
+        &self.cells[..self.used as usize]
     }
 
     /// Clear all cells in the row.
     pub fn clear(&mut self) {
-        self.cells.fill(Cell::default());
-        self.graphemes.clear();
-        self.wrapped = false;
-        self.dirty = true;
+        self.erase(super::cell::Color::Default);
     }
 
     /// Erase all cells per ECMA-48: reset to space, preserve given background.
     pub fn erase(&mut self, bg: super::cell::Color) {
         let mut blank = Cell::default();
         blank.set_bg(bg);
-        self.cells.fill(blank);
+        if blank.is_default() {
+            // Cells past the used mark are already default.
+            self.cells[..self.used as usize].fill(blank);
+            self.used = 0;
+        } else {
+            self.cells.fill(blank);
+            self.used = self.width();
+        }
         self.graphemes.clear();
         self.wrapped = false;
         self.dirty = true;
@@ -241,13 +278,9 @@ impl Row {
     /// Resize the row.
     pub fn resize(&mut self, new_width: u16) {
         self.cells.resize(new_width as usize, Cell::default());
+        self.used = self.used.min(new_width);
         self.graphemes.retain(|&col, _| col < new_width);
         self.dirty = true;
-    }
-
-    /// The row's cells as a slice.
-    pub(crate) fn cell_slice(&self) -> &[Cell] {
-        &self.cells
     }
 
     /// Check if the row is dirty.
@@ -281,6 +314,7 @@ impl Row {
     /// Iterate over cells mutably.
     pub fn cells_mut(&mut self) -> impl Iterator<Item = &mut Cell> {
         self.dirty = true;
+        self.used = self.width();
         self.cells.iter_mut()
     }
 
@@ -356,6 +390,7 @@ impl Row {
             self.cells.copy_within(at..src_end, at + count);
         }
         self.shift_graphemes(at as u16, count as i32);
+        self.used = self.width();
 
         // Fill inserted cells with background color
         for i in at..(at + count).min(len) {
@@ -393,6 +428,7 @@ impl Row {
             self.cells.copy_within(src_start..len, at);
         }
         self.drop_grapheme_entries(at as u16, src_start as u16);
+        self.used = self.width();
         self.shift_graphemes(src_start as u16, -(count as i32));
 
         // Fill vacated cells at end with background color. A count running
@@ -409,6 +445,7 @@ impl Row {
         for i in from as usize..self.cells.len() {
             self.cells[i].clear();
         }
+        self.used = self.used.min(from);
         self.clear_graphemes(from, self.width());
         self.dirty = true;
     }
@@ -436,6 +473,7 @@ impl Index<u16> for Row {
 impl IndexMut<u16> for Row {
     fn index_mut(&mut self, index: u16) -> &mut Self::Output {
         self.dirty = true;
+        self.mark_used(index as usize + 1);
         &mut self.cells[index as usize]
     }
 }
