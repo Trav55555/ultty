@@ -31,3 +31,12 @@ end the bracket early and have the rest run as typed input.
 Without bracketed paste, newlines are sent as carriage returns, the byte the
 Enter key sends. Ultty does not ask before a multi-line paste, so in a program
 without bracketed paste each pasted line runs as it arrives.
+
+## Links
+
+Ctrl+click opens a link only when its scheme is `http`, `https`, `mailto`, or
+`ftp`. Anything else is refused and logged, including `file:` links to paths
+on this machine. Link targets come from terminal output, and OSC 8 lets a
+program show one text and link to another, so a `file:` link to a `.desktop`
+file or a link to another registered scheme handler would let a `cat`ed file
+or a remote host start local programs. This list is not configurable.

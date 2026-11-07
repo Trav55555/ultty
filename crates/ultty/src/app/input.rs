@@ -388,7 +388,7 @@ impl App {
                     if let Some(url) = self.url_detector.url_at(col, row) {
                         let url_str = url.url.clone();
                         if let Err(e) = UrlDetector::open_url(&url_str) {
-                            tracing::warn!("Failed to open URL: {}", e);
+                            tracing::warn!("{}", e);
                         } else {
                             tracing::info!("Opened URL: {}", url_str);
                         }
