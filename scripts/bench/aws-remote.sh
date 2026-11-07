@@ -92,11 +92,14 @@ setup_ghostty() {
     "$ZIG_SHA256" "$ZIG_MINISIGN_KEY")
   ghostty_tar=$(fetch_verified "https://release.files.ghostty.org/$EXPECT_GHOSTTY/ghostty-$EXPECT_GHOSTTY.tar.gz" \
     "$GHOSTTY_SHA256" "$GHOSTTY_MINISIGN_KEY")
+  # Ubuntu 24.04 does not package gtk4-layer-shell, so Ghostty builds its
+  # bundled copy (-fno-sys=gtk4-layer-shell).
   rm -rf "$build" && mkdir -p "$build"
   tar -xJf "$zig_tar" -C "$build"
   tar -xzf "$ghostty_tar" -C "$build"
   (cd "$build/ghostty-$EXPECT_GHOSTTY" &&
-    "$build/zig-x86_64-linux-$ZIG_VERSION/zig" build -Doptimize=ReleaseFast -p "$build/install")
+    "$build/zig-x86_64-linux-$ZIG_VERSION/zig" build -Doptimize=ReleaseFast \
+      -fno-sys=gtk4-layer-shell -p "$build/install")
   sudo install -m 0755 "$build/install/bin/ghostty" /usr/local/bin/ghostty
   sudo cp -r "$build/install/share/." /usr/local/share/
   have=$(/usr/local/bin/ghostty --version 2>/dev/null | awk '/^Ghostty/ {print $2; exit}')
