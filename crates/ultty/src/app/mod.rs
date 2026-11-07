@@ -65,6 +65,10 @@ const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
 /// Minimum spacing between rendered frames.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
+/// How soon after the user's input PTY output still counts as its echo and
+/// is drawn without waiting out [`FRAME_INTERVAL`]; see `should_render`.
+const INPUT_ECHO_WINDOW: Duration = Duration::from_millis(50);
+
 /// Maximum time to suppress drawing during synchronized update mode.
 const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(200);
 
@@ -109,6 +113,11 @@ pub struct App {
     tab_width_freeze: Option<TabWidthFreeze>,
     /// Last render time for frame limiting
     last_render: Instant,
+    /// When input was last sent to the focused terminal, until a frame has
+    /// drawn the output that followed it.
+    input_sent_at: Option<Instant>,
+    /// The focused terminal produced output after `input_sent_at`.
+    output_since_input: bool,
     /// Last time best-effort tab display titles were refreshed.
     last_tab_title_refresh: Instant,
     /// Whether we need to redraw
@@ -319,6 +328,8 @@ impl App {
             tab_bar,
             tab_width_freeze: None,
             last_render: Instant::now(),
+            input_sent_at: None,
+            output_since_input: false,
             last_tab_title_refresh: Instant::now() - TAB_TITLE_REFRESH_INTERVAL,
             needs_redraw: true,
             pending_close: false,
@@ -632,6 +643,8 @@ impl App {
     /// Send input to the focused terminal.
     fn send_input(&mut self, data: &[u8]) -> std::io::Result<()> {
         if let Some(terminal) = self.terminal_manager.focused_terminal_mut() {
+            self.input_sent_at = Some(Instant::now());
+            self.output_since_input = false;
             terminal.event_loop.send_input(data)
         } else {
             Ok(())
