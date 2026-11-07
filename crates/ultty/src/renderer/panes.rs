@@ -171,9 +171,12 @@ impl Renderer {
         for (terminal, pane) in panes {
             self.pane_offset_x = pane.x;
             self.pane_offset_y = pane.y + self.tab_bar_height;
+            let cursor_blink_visible =
+                pane_cursor_blink_visible(overlay.cursor_blink_visible, pane.is_focused);
 
             // Render pane backgrounds
-            let (bg_v, bg_i) = self.build_background_vertices_with_offset(terminal, overlay);
+            let (bg_v, bg_i) =
+                self.build_background_vertices_with_offset(terminal, cursor_blink_visible);
             if !bg_v.is_empty() {
                 let vb = self
                     .device
@@ -224,7 +227,7 @@ impl Renderer {
                 self.cell_height,
                 self.pane_offset_x,
                 self.pane_offset_y,
-                overlay.cursor_blink_visible,
+                cursor_blink_visible,
                 &self.uniform_bind_group,
             );
 
@@ -441,7 +444,7 @@ impl Renderer {
     pub(super) fn build_background_vertices_with_offset(
         &self,
         terminal: &Terminal,
-        overlay: &OverlayState,
+        cursor_blink_visible: bool,
     ) -> (Vec<Vertex>, Vec<u32>) {
         let buffer = terminal.buffer();
         let dims = terminal.dimensions();
@@ -621,8 +624,7 @@ impl Renderer {
 
         // Draw cursor
         let cursor = terminal.buffer().grid().cursor();
-        let should_show_cursor =
-            cursor.visible && (!cursor.blinking || overlay.cursor_blink_visible);
+        let should_show_cursor = cursor.visible && (!cursor.blinking || cursor_blink_visible);
 
         if should_show_cursor {
             let cursor_color = self.color_scheme.cursor;
@@ -755,5 +757,24 @@ impl Renderer {
         );
 
         (vertices, indices)
+    }
+}
+
+/// Whether a pane's blinking cursor is lit this frame: only the focused pane
+/// blinks; the others hold their cursor steady.
+fn pane_cursor_blink_visible(blink_phase_visible: bool, pane_focused: bool) -> bool {
+    blink_phase_visible || !pane_focused
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pane_cursor_blink_visible;
+
+    #[test]
+    fn only_the_focused_pane_blinks() {
+        assert!(pane_cursor_blink_visible(true, true));
+        assert!(!pane_cursor_blink_visible(false, true));
+        assert!(pane_cursor_blink_visible(true, false));
+        assert!(pane_cursor_blink_visible(false, false));
     }
 }
