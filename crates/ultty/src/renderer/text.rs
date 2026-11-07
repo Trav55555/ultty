@@ -42,6 +42,11 @@ impl CellStyle {
             italic: flags.contains(CellFlags::ITALIC),
         }
     }
+
+    /// Index of the face this style selects, in `0..4`.
+    fn face(self) -> usize {
+        usize::from(self.bold) | usize::from(self.italic) << 1
+    }
 }
 
 /// Key for the per-character shaping cache. Bold and italic select a
@@ -51,8 +56,45 @@ fn shaping_cache_key(ch: char, ligatures: bool, style: CellStyle) -> ShapingCach
     (ch, bits)
 }
 
-/// Most distinct runs kept in the run shaping cache before it is cleared.
-const MAX_RUN_CACHE_ENTRIES: usize = 4096;
+/// Most distinct texts kept per face in a [`TextShapeCache`] before it is
+/// cleared.
+const MAX_TEXT_CACHE_ENTRIES: usize = 4096;
+
+/// Shaped glyphs by text, one map per face (bold, italic). Keyed by
+/// `String` so a lookup borrows the text instead of allocating.
+///
+/// Shaping a text costs tens of microseconds (font fallback, building a
+/// shape plan), so text seen again, as in output scrolling past, must not
+/// be shaped again.
+struct TextShapeCache<G> {
+    faces: [HashMap<String, Vec<G>>; 4],
+}
+
+impl<G> Default for TextShapeCache<G> {
+    fn default() -> Self {
+        Self {
+            faces: Default::default(),
+        }
+    }
+}
+
+impl<G> TextShapeCache<G> {
+    fn get(&self, style: CellStyle, text: &str) -> Option<&[G]> {
+        self.faces[style.face()].get(text).map(Vec::as_slice)
+    }
+
+    fn insert(&mut self, style: CellStyle, text: String, glyphs: Vec<G>) {
+        let cache = &mut self.faces[style.face()];
+        if cache.len() >= MAX_TEXT_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(text, glyphs);
+    }
+
+    fn clear(&mut self) {
+        self.faces.iter_mut().for_each(HashMap::clear);
+    }
+}
 
 /// Shaped glyphs of a run, each with the index (from the run's first cell)
 /// of the cell its cluster starts at.
@@ -278,13 +320,15 @@ pub struct TextRenderer {
     face_styles: FaceStyles,
     ligatures: bool,
     shaping_cache: HashMap<ShapingCacheKey, ShapedGlyph>,
-    /// Shaped runs for ligatures by text, one map per face (bold, italic);
-    /// see [`ligature_run_end`]. Keyed by `String` so a lookup borrows the
-    /// run text instead of allocating.
-    run_cache: [HashMap<String, RunGlyphs>; 4],
+    /// Shaped runs for ligatures; see [`ligature_run_end`].
+    run_cache: TextShapeCache<(u16, ShapedGlyph)>,
     /// Reused per run: the run's text, and a copy of its glyphs to draw.
     run_text: String,
     run_glyphs: RunGlyphs,
+    /// Shaped multi-codepoint graphemes (combining marks, ZWJ emoji, flags).
+    cluster_cache: TextShapeCache<ShapedGlyph>,
+    /// Reused per grapheme: its text.
+    cluster_text: String,
     styled_text_buffer: Buffer,
     byte_to_char_offsets: Vec<usize>,
     queue: Arc<wgpu::Queue>,
@@ -389,6 +433,8 @@ impl TextRenderer {
             run_cache: Default::default(),
             run_text: String::new(),
             run_glyphs: Vec::new(),
+            cluster_cache: TextShapeCache::default(),
+            cluster_text: String::new(),
             styled_text_buffer,
             byte_to_char_offsets: Vec::with_capacity(256),
             queue,
@@ -552,21 +598,37 @@ impl TextRenderer {
     /// Put the glyphs of the run in `self.run_text` into `self.run_glyphs`,
     /// shaping it only if this face has not seen the text before.
     fn load_run_glyphs(&mut self, buffer: &mut Buffer, style: CellStyle) {
-        let face = usize::from(style.bold) | usize::from(style.italic) << 1;
         self.run_glyphs.clear();
-        if let Some(cached) = self.run_cache[face].get(self.run_text.as_str()) {
+        if let Some(cached) = self.run_cache.get(style, &self.run_text) {
             self.run_glyphs.extend_from_slice(cached);
             return;
         }
         let text = std::mem::take(&mut self.run_text);
         let glyphs = self.shape_run(buffer, &text, style);
         self.run_glyphs.extend_from_slice(&glyphs);
-        let cache = &mut self.run_cache[face];
-        if cache.len() >= MAX_RUN_CACHE_ENTRIES {
-            cache.clear();
-        }
-        cache.insert(text.clone(), glyphs);
+        self.run_cache.insert(style, text.clone(), glyphs);
         self.run_text = text;
+    }
+
+    /// Put the glyphs of the grapheme in `self.cluster_text` into `out`,
+    /// shaping it only if this face has not seen it before. Always full
+    /// shaping, so the font's composition rules apply.
+    fn load_cluster_glyphs(
+        &mut self,
+        buffer: &mut Buffer,
+        style: CellStyle,
+        out: &mut Vec<ShapedGlyph>,
+    ) {
+        out.clear();
+        if let Some(cached) = self.cluster_cache.get(style, &self.cluster_text) {
+            out.extend_from_slice(cached);
+            return;
+        }
+        let text = std::mem::take(&mut self.cluster_text);
+        let glyphs = self.shape_text(buffer, &text, style, Shaping::Advanced);
+        out.extend_from_slice(&glyphs);
+        self.cluster_cache.insert(style, text.clone(), glyphs);
+        self.cluster_text = text;
     }
 
     /// Rasterize (or fetch) `shaped` and emit its quad for the cell at
@@ -714,7 +776,8 @@ impl TextRenderer {
         // Clear caches since metrics changed
         self.atlas.clear();
         self.shaping_cache.clear();
-        self.run_cache.iter_mut().for_each(HashMap::clear);
+        self.run_cache.clear();
+        self.cluster_cache.clear();
         self.grid_caches.iter_mut().for_each(GridTextCache::clear);
         self.decoration = self.measure_decoration_metrics(baseline);
     }
@@ -1071,6 +1134,7 @@ impl TextRenderer {
         let block_cursor = cursor_col.map(|col| (col, row_idx));
         let solid_uv = self.atlas.solid_uv();
         let mut quads: Vec<Quad> = Vec::new();
+        let mut cluster_glyphs: Vec<ShapedGlyph> = Vec::new();
         // Cells before this column had their glyphs drawn by a run.
         let mut run_drawn_until = 0u16;
 
@@ -1184,15 +1248,13 @@ impl TextRenderer {
 
             // Multi-codepoint graphemes (combining marks, ZWJ emoji,
             // flags) live on the row itself, so history rows render them
-            // too. They are always shaped with full shaping so the font's
-            // composition rules apply, and every resulting glyph is drawn.
-            let cluster_glyphs: Vec<ShapedGlyph>;
+            // too. Every glyph of the grapheme is drawn.
             let single_glyph: Option<ShapedGlyph>;
             let glyphs: &[ShapedGlyph] = if let Some(extra) = row.grapheme_extra(col_idx) {
-                let mut text = String::with_capacity(4 * (1 + extra.len()));
-                text.push(ch);
-                text.extend(extra);
-                cluster_glyphs = self.shape_text(buffer, &text, style, Shaping::Advanced);
+                self.cluster_text.clear();
+                self.cluster_text.push(ch);
+                self.cluster_text.extend(extra);
+                self.load_cluster_glyphs(buffer, style, &mut cluster_glyphs);
                 &cluster_glyphs
             } else {
                 let cache_key_lookup = shaping_cache_key(ch, self.ligatures, style);
@@ -1597,6 +1659,61 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
+    }
+
+    #[test]
+    fn text_shape_cache_keeps_each_face_apart() {
+        let plain = CellStyle::default();
+        let styles = [
+            plain,
+            CellStyle {
+                bold: true,
+                ..plain
+            },
+            CellStyle {
+                italic: true,
+                ..plain
+            },
+            CellStyle {
+                bold: true,
+                italic: true,
+            },
+        ];
+        let mut cache = TextShapeCache::default();
+        for (glyph, style) in styles.into_iter().enumerate() {
+            cache.insert(style, "é̃".to_string(), vec![glyph]);
+        }
+        for (glyph, style) in styles.into_iter().enumerate() {
+            assert_eq!(cache.get(style, "é̃"), Some(&[glyph][..]));
+        }
+        assert_eq!(cache.get(plain, "x̧̌"), None);
+
+        cache.clear();
+        assert_eq!(cache.get(plain, "é̃"), None);
+    }
+
+    #[test]
+    fn text_shape_cache_starts_over_when_a_face_fills_up() {
+        let plain = CellStyle::default();
+        let bold = CellStyle {
+            bold: true,
+            ..plain
+        };
+        let mut cache = TextShapeCache::default();
+        cache.insert(bold, "kept".to_string(), vec![0u8]);
+        for i in 0..MAX_TEXT_CACHE_ENTRIES {
+            cache.insert(plain, i.to_string(), vec![0u8]);
+        }
+        assert_eq!(cache.get(plain, "0"), Some(&[0u8][..]));
+
+        cache.insert(plain, "next".to_string(), vec![1]);
+        assert_eq!(cache.get(plain, "0"), None, "the full face starts over");
+        assert_eq!(cache.get(plain, "next"), Some(&[1u8][..]));
+        assert_eq!(
+            cache.get(bold, "kept"),
+            Some(&[0u8][..]),
+            "other faces stay"
+        );
     }
 
     #[test]
