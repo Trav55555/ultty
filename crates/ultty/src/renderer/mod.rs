@@ -703,7 +703,7 @@ impl Renderer {
             &mut encoder,
             &view,
             terminal,
-            &self.color_scheme,
+            &self.color_scheme.for_screen(terminal.modes().reverse_video),
             self.cell_width,
             self.cell_height,
             self.tab_bar_height,
@@ -1083,7 +1083,7 @@ impl Renderer {
             &mut encoder,
             &view,
             terminal,
-            &self.color_scheme,
+            &self.color_scheme.for_screen(terminal.modes().reverse_video),
             self.cell_width,
             self.cell_height,
             self.tab_bar_height,
@@ -1386,7 +1386,7 @@ impl Renderer {
                 &mut encoder,
                 &view,
                 terminal,
-                &self.color_scheme,
+                &self.color_scheme.for_screen(terminal.modes().reverse_video),
                 self.cell_width,
                 self.cell_height,
                 self.tab_bar_height,
@@ -1577,6 +1577,7 @@ impl Renderer {
 
         // Window border (1px, slightly lighter than bg)
         let bg = self.color_scheme.background;
+        let scheme = self.color_scheme.for_screen(terminal.modes().reverse_video);
         let w = self.config.width as f32;
         let h = self.config.height as f32;
         let border_color = Rgba::new(
@@ -1607,7 +1608,15 @@ impl Renderer {
             border_color,
         );
         // Inner background
-        self.emit_rect(&mut vertices, &mut indices, 1.0, 1.0, w - 2.0, h - 2.0, bg);
+        self.emit_rect(
+            &mut vertices,
+            &mut indices,
+            1.0,
+            1.0,
+            w - 2.0,
+            h - 2.0,
+            scheme.background,
+        );
 
         let selection = terminal.selection();
         for row_idx in 0..dims.rows {
@@ -1619,7 +1628,7 @@ impl Renderer {
             // Track runs of same background color
             let mut run_start = 0u16;
             let mut run_color: Option<Rgba> = None;
-            let selection_bg = self.color_scheme.selection_background();
+            let selection_bg = scheme.selection_background();
 
             for col_idx in 0..dims.cols {
                 let cell = match row.get(col_idx) {
@@ -1631,9 +1640,9 @@ impl Renderer {
                 let bg_color = if is_selected {
                     selection_bg
                 } else if cell.has_flag(CellFlags::REVERSE) {
-                    self.color_scheme.resolve(cell.fg(), true)
+                    scheme.resolve(cell.fg(), true)
                 } else {
-                    self.color_scheme.resolve(cell.bg(), false)
+                    scheme.resolve(cell.bg(), false)
                 };
 
                 // Check if we should extend the run or start a new one
@@ -1648,7 +1657,7 @@ impl Renderer {
                 if should_flush {
                     if let Some(color) = run_color {
                         // Only emit non-default backgrounds
-                        if color != self.color_scheme.background {
+                        if color != scheme.background {
                             self.emit_quad(
                                 &mut vertices,
                                 &mut indices,
@@ -1667,7 +1676,7 @@ impl Renderer {
 
             // Flush final run
             if let Some(color) = run_color {
-                if color != self.color_scheme.background {
+                if color != scheme.background {
                     self.emit_quad(
                         &mut vertices,
                         &mut indices,
@@ -1694,9 +1703,9 @@ impl Renderer {
                 let ch = cell.char();
                 if let Some((rects, count)) = block_char_rects(ch) {
                     let fg = if cell.has_flag(CellFlags::REVERSE) {
-                        self.color_scheme.resolve(cell.bg(), false)
+                        scheme.resolve(cell.bg(), false)
                     } else {
-                        self.color_scheme.resolve(cell.fg(), true)
+                        scheme.resolve(cell.fg(), true)
                     };
                     let fg = if cell.has_flag(CellFlags::DIM) {
                         Rgba::new(fg.r * 0.65, fg.g * 0.65, fg.b * 0.65, fg.a)
@@ -1765,9 +1774,9 @@ impl Renderer {
                 };
 
                 let fg = if cell.has_flag(CellFlags::REVERSE) {
-                    self.color_scheme.resolve(cell.bg(), false)
+                    scheme.resolve(cell.bg(), false)
                 } else {
-                    self.color_scheme.resolve(cell.fg(), true)
+                    scheme.resolve(cell.fg(), true)
                 };
                 let fg = if cell.has_flag(CellFlags::DIM) {
                     Rgba::new(fg.r * 0.65, fg.g * 0.65, fg.b * 0.65, fg.a)

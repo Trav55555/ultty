@@ -68,7 +68,7 @@ impl Default for Rgba {
 /// Terminal color scheme.
 ///
 /// Maps terminal colors to RGB values for rendering.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ColorScheme {
     /// 16 named colors (0-15)
     pub named: [Rgba; 16],
@@ -159,6 +159,18 @@ impl ColorScheme {
         }
     }
 
+    /// The scheme a screen is drawn with. While the screen is in reverse
+    /// video (DECSCNM, mode 5) the default foreground and background trade
+    /// places, which is what makes `tput flash` and vim's visual bell visible.
+    pub fn for_screen(&self, reverse_video: bool) -> std::borrow::Cow<'_, ColorScheme> {
+        if !reverse_video {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut reversed = self.clone();
+        std::mem::swap(&mut reversed.foreground, &mut reversed.background);
+        std::borrow::Cow::Owned(reversed)
+    }
+
     /// Resolve a terminal color to RGBA.
     pub fn resolve(&self, color: crate::grid::Color, is_fg: bool) -> Rgba {
         match color {
@@ -241,6 +253,21 @@ mod tests {
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < EPS
+    }
+
+    #[test]
+    fn reverse_video_swaps_only_the_default_colors() {
+        let scheme = ColorScheme::dark();
+        assert_eq!(*scheme.for_screen(false), scheme);
+
+        let reversed = scheme.for_screen(true);
+        assert_eq!(reversed.resolve(Color::Default, true), scheme.background);
+        assert_eq!(reversed.resolve(Color::Default, false), scheme.foreground);
+        assert_eq!(
+            reversed.resolve(Color::RED, true),
+            scheme.resolve(Color::RED, true)
+        );
+        assert_eq!(reversed.cursor, scheme.cursor);
     }
 
     #[test]
