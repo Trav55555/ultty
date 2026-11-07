@@ -2,8 +2,10 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
+use ultty::control::format_response;
 use ultty_protocol::control::{
-    auth_token_path, control_socket_path, ControlEnvelope, ControlRequest, OutputFormat,
+    auth_token_path, control_socket_path, ControlData, ControlEnvelope, ControlRequest,
+    ControlResponse, OutputFormat,
 };
 use ultty_protocol::{Key, Modifiers};
 
@@ -42,27 +44,63 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let read_timeout = read_timeout_for(&request, timeout_secs);
     let request = with_auth_token(request, read_auth_token());
+    // Always ask for JSON so the reply can be parsed and the exit status set
+    // from it; text output is rendered here with the server's formatter.
     let envelope = ControlEnvelope {
-        output_format: if use_json {
-            OutputFormat::Json
-        } else {
-            OutputFormat::Text
-        },
+        output_format: OutputFormat::Json,
         request,
     };
     let command =
         serde_json::to_string(&envelope).expect("control request envelope should serialize");
 
-    match send_command(&command, timeout_secs) {
-        Ok(response) => {
-            print!("{}", response);
-        }
+    let response = match send_command(&command, read_timeout).and_then(|raw| parse_response(&raw)) {
+        Ok(response) => response,
         Err(e) => {
             eprintln!("error: {}", e);
             std::process::exit(1);
         }
+    };
+    let format = if use_json {
+        OutputFormat::Json
+    } else {
+        OutputFormat::Text
+    };
+    print!("{}", format_response(&response, format));
+    if response_is_failure(&response) {
+        std::process::exit(1);
     }
+}
+
+/// Socket read timeout for `request`: long enough to outlast a `wait-for`,
+/// which the server answers only when its own timeout runs out.
+fn read_timeout_for(request: &ControlRequest, read_timeout_secs: u64) -> u64 {
+    const WAIT_FOR_MARGIN_SECS: u64 = 5;
+    match request {
+        ControlRequest::WaitFor { timeout_ms, .. } => {
+            read_timeout_secs.max(timeout_ms.div_ceil(1000) + WAIT_FOR_MARGIN_SECS)
+        }
+        _ => read_timeout_secs,
+    }
+}
+
+/// Parse the server's JSON reply. An empty reply means the server closed the
+/// connection without answering, which is an error, not a silent success.
+fn parse_response(raw: &str) -> Result<ControlResponse, String> {
+    if raw.trim().is_empty() {
+        return Err("ultty closed the connection without replying".to_string());
+    }
+    serde_json::from_str(raw.trim()).map_err(|e| format!("unreadable reply from ultty: {}", e))
+}
+
+/// Whether `response` should make ulttyctl exit non-zero: an error, or a
+/// `wait-for` that timed out.
+fn response_is_failure(response: &ControlResponse) -> bool {
+    matches!(
+        response,
+        ControlResponse::Error { .. } | ControlResponse::Data(ControlData::WaitTimeout)
+    )
 }
 
 /// Read the control auth token ultty wrote at startup, if any.
@@ -396,7 +434,8 @@ USAGE:
 
 GLOBAL FLAGS:
     --json                  Output in JSON format
-    --read-timeout <secs>   Socket read timeout in seconds (default: 5)
+    --read-timeout <secs>   Socket read timeout in seconds (default: 5;
+                            wait-for always waits out its own timeout)
     -V, --version           Show ulttyctl version without connecting to Ultty
     -h, --help              Show this help
 
@@ -460,6 +499,10 @@ EXAMPLES:
     ulttyctl resize 1920 1080
     ulttyctl run nvim src/main.rs
     ulttyctl --json info
+
+EXIT STATUS:
+    0 on success, 1 when Ultty reports an error, a wait-for times out, or
+    Ultty cannot be reached, 2 for a bad command line.
 "#
     );
 }
@@ -467,7 +510,8 @@ EXAMPLES:
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_cli_request, read_response, should_print_version, version_output, with_auth_token,
+        parse_cli_request, parse_response, read_response, read_timeout_for, response_is_failure,
+        should_print_version, version_output, with_auth_token,
     };
 
     use std::io::Write;
@@ -475,7 +519,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use ultty_protocol::control::ControlRequest;
+    use ultty_protocol::control::{ControlData, ControlRequest, ControlResponse};
 
     #[test]
     fn read_response_retries_until_delayed_writer_closes() {
@@ -597,5 +641,49 @@ mod tests {
             parse_cli_request(&["info".to_string()]).unwrap(),
             ControlRequest::GetInfo
         );
+    }
+
+    #[test]
+    fn empty_reply_is_an_error() {
+        assert!(parse_response("").is_err());
+        assert!(parse_response("\n").is_err());
+    }
+
+    #[test]
+    fn reply_parses_as_control_response() {
+        let raw = serde_json::to_string(&ControlResponse::Data(ControlData::Pong)).unwrap();
+        assert_eq!(
+            parse_response(&format!("{raw}\n")),
+            Ok(ControlResponse::Data(ControlData::Pong))
+        );
+    }
+
+    #[test]
+    fn errors_and_wait_timeouts_fail() {
+        assert!(response_is_failure(&ControlResponse::Error {
+            code: 403,
+            message: "Authentication required".to_string(),
+        }));
+        assert!(response_is_failure(&ControlResponse::Data(
+            ControlData::WaitTimeout
+        )));
+        assert!(!response_is_failure(&ControlResponse::Data(
+            ControlData::WaitMatched { line: 0, col: 0 }
+        )));
+        assert!(!response_is_failure(&ControlResponse::Text {
+            text: "ERROR on screen".to_string(),
+        }));
+    }
+
+    #[test]
+    fn wait_for_read_timeout_outlasts_the_wait() {
+        let wait = ControlRequest::WaitFor {
+            pattern: "DONE".to_string(),
+            regex: false,
+            timeout_ms: 10_000,
+        };
+        assert_eq!(read_timeout_for(&wait, 5), 15);
+        assert_eq!(read_timeout_for(&wait, 60), 60);
+        assert_eq!(read_timeout_for(&ControlRequest::Ping, 5), 5);
     }
 }

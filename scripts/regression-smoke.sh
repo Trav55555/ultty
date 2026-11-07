@@ -43,6 +43,23 @@ for attempt in 1 2; do
 done
 echo "PASS info answers"
 
+# wait-for returned at once with no answer and exit status 0 whenever its
+# pattern was not already on screen: the server took the client's half-close
+# for a disconnect and dropped it.
+"$ULTTYCTL" new-tab "$BASH_BIN" -c 'sleep 1; echo LATE_DONE; sleep 60' >/dev/null
+"$ULTTYCTL" wait-for LATE_DONE --timeout 10000 >"$ARTIFACT_DIR/wait-late.txt" ||
+  fail "wait-for LATE_DONE did not match"
+"$ULTTYCTL" text >"$ARTIFACT_DIR/wait-late-screen.txt"
+grep -q LATE_DONE "$ARTIFACT_DIR/wait-late-screen.txt" ||
+  fail "wait-for returned before its pattern appeared"
+if "$ULTTYCTL" wait-for NEVER_PRINTED --timeout 300 >"$ARTIFACT_DIR/wait-timeout.txt"; then
+  fail "wait-for exited 0 on a timeout"
+fi
+grep -qx TIMEOUT "$ARTIFACT_DIR/wait-timeout.txt" ||
+  fail "wait-for did not report its timeout"
+"$ULTTYCTL" close-tab >/dev/null
+echo "PASS wait-for waits for late output"
+
 # Shrinking the screen (the tab bar appearing for a second tab) pushed the
 # first lines of a fresh tab into scrollback.
 "$ULTTYCTL" new-tab "$BASH_BIN" -c \

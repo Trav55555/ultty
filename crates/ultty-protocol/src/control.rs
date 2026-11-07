@@ -188,24 +188,27 @@ impl AgentStatusUpdate {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ControlResponse {
     Ok,
-    Text(String),
+    Text { text: String },
     Data(ControlData),
     Error { code: u16, message: String },
 }
 
 /// Structured payload for successful control responses.
+///
+/// Variants carry named fields: serde's internal `type` tag cannot wrap a
+/// bare string, list or option, so such a variant would fail to serialize.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlData {
     Info(TerminalInfo),
-    Tabs(Vec<TabInfo>),
-    Selection(Option<String>),
+    Tabs { tabs: Vec<TabInfo> },
+    Selection { text: Option<String> },
     Version(VersionInfo),
     Pong,
-    ScreenshotSaved(String),
-    ScreenshotData(Vec<u8>),
-    SearchResults(Vec<SearchMatch>),
-    BatchResults(Vec<ControlResponse>),
+    ScreenshotSaved { path: String },
+    ScreenshotData { data: Vec<u8> },
+    SearchResults { matches: Vec<SearchMatch> },
+    BatchResults { results: Vec<ControlResponse> },
     Authenticated,
     WaitMatched { line: usize, col: usize },
     WaitTimeout,
@@ -290,3 +293,87 @@ pub const CONTROL_MAGIC: [u8; 2] = [0x55, 0x43]; // "UC"
 
 /// Current control protocol version.
 pub const CONTROL_VERSION: u16 = 1;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn every_response() -> Vec<ControlResponse> {
+        let data = vec![
+            ControlData::Info(TerminalInfo {
+                cols: 80,
+                rows: 24,
+                cursor_col: 1,
+                cursor_row: 2,
+                current_tab: 0,
+                tab_count: 1,
+                focused: true,
+                cwd: Some("/home".to_string()),
+            }),
+            ControlData::Tabs {
+                tabs: vec![TabInfo {
+                    index: 0,
+                    title: "zsh".to_string(),
+                    active: true,
+                    pid: Some(42),
+                    cwd: None,
+                }],
+            },
+            ControlData::Selection {
+                text: Some("picked".to_string()),
+            },
+            ControlData::Selection { text: None },
+            ControlData::Version(VersionInfo {
+                version: "0.1.0".to_string(),
+                protocol_version: 1,
+                git_hash: None,
+            }),
+            ControlData::Pong,
+            ControlData::ScreenshotSaved {
+                path: "/tmp/shot.png".to_string(),
+            },
+            ControlData::ScreenshotData {
+                data: vec![1, 2, 3],
+            },
+            ControlData::SearchResults {
+                matches: vec![SearchMatch {
+                    line: 3,
+                    col: 4,
+                    text: "needle".to_string(),
+                    context_before: "a ".to_string(),
+                    context_after: " b".to_string(),
+                }],
+            },
+            ControlData::BatchResults {
+                results: vec![ControlResponse::Ok],
+            },
+            ControlData::Authenticated,
+            ControlData::WaitMatched { line: 1, col: 2 },
+            ControlData::WaitTimeout,
+        ];
+        let mut responses = vec![
+            ControlResponse::Ok,
+            ControlResponse::Text {
+                text: "screen".to_string(),
+            },
+            ControlResponse::Error {
+                code: 4,
+                message: "nope".to_string(),
+            },
+        ];
+        responses.extend(data.into_iter().map(ControlResponse::Data));
+        responses
+    }
+
+    /// ulttyctl reads every reply as JSON, so each one must survive the trip.
+    #[test]
+    fn every_response_round_trips_through_json() {
+        for response in every_response() {
+            let json = serde_json::to_string(&response)
+                .unwrap_or_else(|e| panic!("{response:?} does not serialize: {e}"));
+            let back: ControlResponse = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{json} does not parse back: {e}"));
+            assert_eq!(back, response);
+        }
+    }
+}
