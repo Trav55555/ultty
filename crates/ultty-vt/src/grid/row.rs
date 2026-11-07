@@ -391,6 +391,32 @@ impl Row {
         self.dirty = true;
     }
 
+    /// Erase cells `start..end` per ECMA-48: spaces on background `bg`,
+    /// with no grapheme data.
+    pub fn erase_range(&mut self, start: u16, end: u16, bg: super::cell::Color) {
+        let end = end.min(self.width());
+        if start >= end {
+            return;
+        }
+        self.drop_grapheme_entries(start, end);
+        let mut blank = Cell::default();
+        blank.set_bg(bg);
+        if blank.is_default() {
+            // Cells past the used mark are already default.
+            let fill_end = end.min(self.used);
+            if start < fill_end {
+                self.cells[start as usize..fill_end as usize].fill(blank);
+            }
+            if end >= self.used {
+                self.used = self.used.min(start);
+            }
+        } else {
+            self.cells[start as usize..end as usize].fill(blank);
+            self.mark_used(end as usize);
+        }
+        self.dirty = true;
+    }
+
     /// Resize the row.
     pub fn resize(&mut self, new_width: u16) {
         self.cells.resize(new_width as usize, Cell::default());
@@ -823,6 +849,29 @@ mod tests {
         let expected: String = std::iter::once(' ').chain(long).chain(['x']).collect();
         let got = row.with_grapheme_str(2, Some('x'), str::to_string);
         assert_eq!(got.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn erase_range_blanks_cells_with_the_background() {
+        use crate::grid::cell::Color;
+        let mut row = Row::new(10);
+        row.write_ascii(0, b"abcdef", Cell::default());
+        row.set_grapheme_extra(4, &['\u{301}']);
+
+        row.erase_range(2, 5, Color::Default);
+        assert_eq!(row.text(), "ab   f    ");
+        assert_eq!(row.grapheme_extra(4), None);
+        assert_eq!(row.check_integrity(16), Ok(()));
+
+        row.erase_range(4, 10, Color::Default);
+        assert_eq!(row.text_trimmed(), "ab");
+        assert_eq!(row.check_integrity(16), Ok(()));
+
+        row.erase_range(6, 8, Color::Indexed(4));
+        assert_eq!(row[5].bg(), Color::Default);
+        assert!((6..8).all(|col| row[col].bg() == Color::Indexed(4)));
+        assert_eq!(row[8].bg(), Color::Default);
+        assert_eq!(row.check_integrity(16), Ok(()));
     }
 
     #[test]

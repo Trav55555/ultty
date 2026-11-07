@@ -1302,12 +1302,7 @@ impl Grid {
         }
         let bg = self.attrs.bg();
         if let Some(r) = self.rows.get_mut(row as usize) {
-            r.clear_graphemes(start, end);
-            for col in start..end {
-                if let Some(cell) = r.get_mut(col) {
-                    cell.erase(bg);
-                }
-            }
+            r.erase_range(start, end, bg);
         }
         self.mark_dirty(row);
     }
