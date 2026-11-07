@@ -207,10 +207,14 @@ Run the published benchmark set:
 
 ```bash
 timeout 900s cargo bench -p ultty --bench layout -- --noplot
-timeout 900s cargo bench -p ultty --bench input_latency -- --noplot
+timeout 900s cargo bench -p ultty --bench vt_small_writes -- --noplot
 timeout 900s cargo bench -p ultty --bench render -- --noplot
-timeout 900s cargo bench -p ultty --bench memory -- --noplot
+cargo test -p ultty --bench memory    # heap-byte budgets; fails when over
 ```
+
+Headless VT throughput over deterministic CRLF corpora, the A/B and A/A
+statistics, the instruction-count gate and the comparative live suite are
+described in [docs/perf/README.md](docs/perf/README.md#benchmark-suite).
 
 Run the dependency security audit separately from the normal local build/test
 loop:

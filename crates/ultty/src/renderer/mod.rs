@@ -274,6 +274,9 @@ pub struct Renderer {
     scroll_adjustments_cache: std::collections::HashMap<ultty_protocol::RegionId, (f32, f32)>,
     /// Reused per-frame cache for native clip rectangles.
     clip_rects_cache: std::collections::HashMap<ultty_protocol::RegionId, (f32, f32, f32, f32)>,
+    /// The GPU adapter in use, recorded so benchmarks and diagnostics can
+    /// say whether a number came from a real GPU or a software rasterizer.
+    adapter_info: wgpu::AdapterInfo,
 }
 
 type NativeBufferSet = (wgpu::Buffer, wgpu::Buffer, u32);
@@ -520,6 +523,7 @@ impl Renderer {
             prev_text_count: (0, 0),
             scroll_adjustments_cache: std::collections::HashMap::new(),
             clip_rects_cache: std::collections::HashMap::new(),
+            adapter_info: adapter.get_info(),
         })
     }
 
@@ -649,27 +653,23 @@ impl Renderer {
             prev_text_count: (0, 0),
             scroll_adjustments_cache: std::collections::HashMap::new(),
             clip_rects_cache: std::collections::HashMap::new(),
+            adapter_info: adapter.get_info(),
         })
     }
 
-    /// Render to a texture (headless) and return timing information.
-    ///
-    /// This is useful for benchmarking the render pipeline without a window.
-    /// Returns the time taken to render in microseconds.
-    pub fn render_to_texture(
-        &mut self,
-        terminal: &Terminal,
-        overlay: &OverlayState,
-    ) -> anyhow::Result<()> {
-        let width = self.config.width;
-        let height = self.config.height;
+    /// The GPU adapter this renderer runs on.
+    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
+        &self.adapter_info
+    }
 
-        // Create render target texture
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("bench_render_texture"),
+    /// An offscreen render target the size and format of this renderer's
+    /// configuration, for [`Renderer::render_to_view`].
+    pub fn create_offscreen_target(&self) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen_render_target"),
             size: wgpu::Extent3d {
-                width,
-                height,
+                width: self.config.width,
+                height: self.config.height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -678,9 +678,20 @@ impl Renderer {
             format: self.config.format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
-        });
+        })
+    }
 
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    /// Render one frame into `view` (headless) and wait for the GPU.
+    ///
+    /// Used by benchmarks; create the target once with
+    /// [`Renderer::create_offscreen_target`] and reuse it, as a swapchain
+    /// would, so texture allocation is not timed as part of the frame.
+    pub fn render_to_view(
+        &mut self,
+        view: &wgpu::TextureView,
+        terminal: &Terminal,
+        overlay: &OverlayState,
+    ) -> anyhow::Result<()> {
         self.tab_bar_height = overlay
             .tab_bar
             .map_or(crate::tabs::TERMINAL_TOP_PADDING, |tb| tb.content_top());
@@ -717,7 +728,7 @@ impl Renderer {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bench_bg_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -741,7 +752,7 @@ impl Renderer {
         // Render text
         self.text_renderer.render(
             &mut encoder,
-            &view,
+            view,
             terminal,
             &self
                 .color_scheme
@@ -775,7 +786,7 @@ impl Renderer {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bench_overlay_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
