@@ -106,6 +106,11 @@ setup_ghostty() {
     "$build/zig-x86_64-linux-$ZIG_VERSION/zig" build -Doptimize=ReleaseFast \
       -fno-sys=gtk4-layer-shell -p "$build/install")
   sudo install -m 0755 "$build/install/bin/ghostty" /usr/local/bin/ghostty
+  # The bundled gtk4-layer-shell is a shared library next to the binary.
+  if [[ -d "$build/install/lib" ]]; then
+    sudo cp -a "$build/install/lib/." /usr/local/lib/
+    sudo ldconfig
+  fi
   sudo cp -r "$build/install/share/." /usr/local/share/
   have=$(/usr/local/bin/ghostty --version 2>/dev/null | awk '/^Ghostty/ {print $2; exit}')
   [[ "$have" == "$EXPECT_GHOSTTY" ]] || die "built Ghostty reports $have, expected $EXPECT_GHOSTTY"
