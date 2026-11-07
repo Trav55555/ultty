@@ -403,6 +403,10 @@ impl<'a> TerminalHandler<'a> {
             Action::KittyKeyboardSet { flags, mode } => {
                 self.terminal.set_kitty_keyboard_mode(flags, mode);
             }
+            Action::SetModifyOtherKeys(level) => {
+                // Levels above 2 are xterm's 3, which adds nothing we send.
+                self.terminal.modes_mut().modify_other_keys = level.min(2);
+            }
             Action::KittyKeyboardQuery => {
                 // Send current keyboard mode flags
                 let flags = self.terminal.modes().kitty_keyboard_flags;
@@ -1035,6 +1039,20 @@ mod tests {
 
     fn cursor_col(term: &Terminal) -> u16 {
         term.grid().cursor().position.col
+    }
+
+    #[test]
+    fn xtmodkeys_sets_the_modify_other_keys_level() {
+        let mut term = Terminal::new(Dimensions::new(10, 5));
+        process(&mut term, b"\x1b[>4;2m");
+        assert_eq!(term.modes().modify_other_keys, 2);
+        assert!(term.grid().attrs().flags().is_empty(), "not SGR");
+        process(&mut term, b"\x1b[>4;1m");
+        assert_eq!(term.modes().modify_other_keys, 1);
+        process(&mut term, b"\x1b[>4m");
+        assert_eq!(term.modes().modify_other_keys, 0);
+        process(&mut term, b"\x1b[>4;2m\x1b[>4n");
+        assert_eq!(term.modes().modify_other_keys, 0);
     }
 
     #[test]

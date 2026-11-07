@@ -33,6 +33,7 @@ impl ScreenshotOverlayState {
                 .then_some(self.keybindings.as_slice()),
             protocol_status: None,
             cursor_blink_visible: self.cursor_blink_visible,
+            ime_preedit: None,
         }
     }
 }

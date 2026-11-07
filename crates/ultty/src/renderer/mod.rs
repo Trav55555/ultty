@@ -89,6 +89,17 @@ pub struct OverlayState<'a> {
     pub protocol_status: Option<&'a [(String, String)]>,
     /// Whether cursor should be visible in current blink phase
     pub cursor_blink_visible: bool,
+    /// Text the input method is composing, drawn over the cursor
+    pub ime_preedit: Option<ImePreedit<'a>>,
+}
+
+/// Uncommitted input method text and where it goes: the top-left corner of
+/// the cursor cell, in window pixels.
+#[derive(Debug, Clone, Copy)]
+pub struct ImePreedit<'a> {
+    pub text: &'a str,
+    pub x: f32,
+    pub y: f32,
 }
 
 impl<'a> Default for OverlayState<'a> {
@@ -103,6 +114,7 @@ impl<'a> Default for OverlayState<'a> {
             keybindings: None,
             protocol_status: None,
             cursor_blink_visible: true, // Default visible
+            ime_preedit: None,
         }
     }
 }
@@ -1279,6 +1291,10 @@ impl Renderer {
             }
         }
 
+        if let Some(preedit) = overlay.ime_preedit {
+            self.render_ime_preedit(&mut encoder, &view, preedit);
+        }
+
         // Render keyboard shortcuts overlay if visible
         if overlay.shortcuts_visible {
             if let Some(keybindings) = overlay.keybindings {
@@ -1447,6 +1463,9 @@ impl Renderer {
             }
         }
 
+        if let Some(preedit) = overlay.ime_preedit {
+            self.render_ime_preedit(&mut encoder, &view, preedit);
+        }
         if overlay.shortcuts_visible {
             if let Some(keybindings) = overlay.keybindings {
                 self.render_shortcuts_overlay(&mut encoder, &view, keybindings);

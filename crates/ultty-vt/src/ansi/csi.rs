@@ -260,7 +260,14 @@ impl AnsiParser {
                 callback(Action::SoftReset);
             }
 
-            // Everything else, including `CSI > Ps ; Ps m` (XTMODKEYS),
+            // XTMODKEYS for modifyOtherKeys (resource 4); vim and neovim
+            // send `CSI > 4 ; 2 m` at startup. A missing level resets it.
+            (Some(b'>'), None, b'm') if p1 == 4 => callback(Action::SetModifyOtherKeys(
+                byte_param(self.params.get(1).copied().unwrap_or(0)),
+            )),
+            (Some(b'>'), None, b'n') if p1 == 4 => callback(Action::SetModifyOtherKeys(0)),
+
+            // Everything else, including the other XTMODKEYS resources,
             // `CSI = c` (DA3) and `CSI ? Ps s` (XTSAVE), is not ours to act on.
             _ => {}
         }
@@ -1078,8 +1085,12 @@ mod tests {
     #[test]
     fn xtmodkeys_is_not_sgr() {
         // vim and neovim send this at startup.
-        assert_eq!(parse(b"\x1b[>4;2m"), vec![]);
-        assert_eq!(parse(b"\x1b[>4m"), vec![]);
+        assert_eq!(parse(b"\x1b[>4;2m"), vec![Action::SetModifyOtherKeys(2)]);
+        assert_eq!(parse(b"\x1b[>4;1m"), vec![Action::SetModifyOtherKeys(1)]);
+        assert_eq!(parse(b"\x1b[>4m"), vec![Action::SetModifyOtherKeys(0)]);
+        assert_eq!(parse(b"\x1b[>4n"), vec![Action::SetModifyOtherKeys(0)]);
+        // Other resources (1 cursor keys, 2 function keys) are ignored.
+        assert_eq!(parse(b"\x1b[>1;2m"), vec![]);
     }
 
     #[test]
