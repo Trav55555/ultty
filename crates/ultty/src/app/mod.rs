@@ -305,7 +305,10 @@ impl App {
                 let _ = proxy.send_event(AppEvent::RuntimeReadable);
             }
         }));
-        let socket_wakeup = wakeup::SocketWakeup::new(event_proxy.clone());
+        let socket_proxy = event_proxy.clone();
+        let socket_wakeup = wakeup::SocketWakeup::new(move || {
+            socket_proxy.send_event(AppEvent::RuntimeReadable).is_ok()
+        });
 
         // Try to create clipboard
         let clipboard = Clipboard::new().ok();
@@ -654,6 +657,8 @@ impl App {
         if self.update() {
             event_loop.exit();
         }
+        // The sockets have been drained; let them wake the loop again.
+        self.socket_wakeup.rearm();
         event_loop.set_control_flow(control_flow(self.next_update_deadline(Instant::now())));
     }
 
