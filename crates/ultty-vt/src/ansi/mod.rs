@@ -693,17 +693,27 @@ impl AnsiParser {
                     continue;
                 }
             }
-            if self.can_emit_ascii_span() && is_printable_ascii(data[index]) {
-                let start = index;
-                index += 1;
-                while index < data.len() && is_printable_ascii(data[index]) {
+            let byte = data[index];
+            if self.can_emit_ascii_span() {
+                if is_printable_ascii(byte) {
+                    let start = index;
                     index += 1;
+                    while index < data.len() && is_printable_ascii(data[index]) {
+                        index += 1;
+                    }
+                    callback(AnsiOutput::PrintAscii(&data[start..index]));
+                    continue;
                 }
-                callback(AnsiOutput::PrintAscii(&data[start..index]));
-                continue;
+                if byte >= 0xC2 {
+                    let len = print_utf8_run(&data[index..], &mut callback);
+                    if len > 0 {
+                        index += len;
+                        continue;
+                    }
+                }
             }
 
-            self.process_byte(data[index], &mut |action| {
+            self.process_byte(byte, &mut |action| {
                 callback(AnsiOutput::Action(action));
             });
             index += 1;
@@ -1096,6 +1106,39 @@ impl Default for AnsiParser {
 
 fn is_printable_ascii(byte: u8) -> bool {
     (0x20..=0x7E).contains(&byte)
+}
+
+/// Print the run of whole, well-formed multi-byte UTF-8 characters at the
+/// start of `bytes`, returning how many bytes it took.
+///
+/// Each decodes to the one `Print` the byte-wise state machine would reach
+/// from the ground state; whatever ends the run (ASCII, a sequence split
+/// across reads, ill-formed bytes) is left to it. Kept out of line so the
+/// byte loop it is called from stays small for escape-heavy input.
+#[inline(never)]
+fn print_utf8_run<'a, F>(bytes: &'a [u8], callback: &mut F) -> usize
+where
+    F: FnMut(AnsiOutput<'a>),
+{
+    let mut index = 0;
+    while let Some(&lead) = bytes.get(index) {
+        let len = match lead {
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            _ => break,
+        };
+        let Some(c) = bytes
+            .get(index..index + len)
+            .and_then(|seq| std::str::from_utf8(seq).ok())
+            .and_then(|s| s.chars().next())
+        else {
+            break;
+        };
+        callback(AnsiOutput::Action(Action::Print(c)));
+        index += len;
+    }
+    index
 }
 
 #[cfg(test)]
