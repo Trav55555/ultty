@@ -165,10 +165,10 @@ impl View for TableRow<'_> {
     fn render_child_native(
         &self,
         index: usize,
-        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        send_message: &mut dyn FnMut(&AppMessage) -> crate::Result<()>,
         parent: RegionId,
         next_id: &mut u32,
-    ) -> anyhow::Result<Option<RegionId>> {
+    ) -> crate::Result<Option<RegionId>> {
         match self.cells.get(index) {
             Some(cell) => Ok(Some(super::render_view_to_native(
                 cell,
@@ -232,10 +232,10 @@ impl View for Table {
     fn render_child_native(
         &self,
         index: usize,
-        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        send_message: &mut dyn FnMut(&AppMessage) -> crate::Result<()>,
         parent: RegionId,
         next_id: &mut u32,
-    ) -> anyhow::Result<Option<RegionId>> {
+    ) -> crate::Result<Option<RegionId>> {
         let theme = Theme::current();
         let row = if index == 0 {
             self.row_view(&self.headers, header_style(&theme))

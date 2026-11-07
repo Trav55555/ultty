@@ -113,10 +113,10 @@ pub(crate) fn is_widget_focused(widget_id: Option<&str>) -> bool {
 /// This is the same walk the native backend performs for child views. It is
 /// exposed so tests and the mock backend can inspect the exact message tree a
 /// view produces without a terminal connection.
-pub fn render_view_messages(view: &dyn View) -> anyhow::Result<Vec<AppMessage>> {
+pub fn render_view_messages(view: &dyn View) -> crate::Result<Vec<AppMessage>> {
     let mut messages = Vec::new();
     let mut next_id = 1u32;
-    let mut sink = |msg: &AppMessage| -> anyhow::Result<()> {
+    let mut sink = |msg: &AppMessage| -> crate::Result<()> {
         messages.push(msg.clone());
         Ok(())
     };
@@ -126,11 +126,11 @@ pub fn render_view_messages(view: &dyn View) -> anyhow::Result<Vec<AppMessage>> 
 
 pub(crate) fn render_view_to_native(
     child: &dyn View,
-    send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+    send_message: &mut dyn FnMut(&AppMessage) -> crate::Result<()>,
     parent: RegionId,
     next_id: &mut u32,
     constraint_overrides: Option<Constraints>,
-) -> anyhow::Result<RegionId> {
+) -> crate::Result<RegionId> {
     let region_id = RegionId::new(*next_id);
     *next_id += 1;
 
@@ -190,10 +190,10 @@ pub trait View {
     fn render_child_native(
         &self,
         _index: usize,
-        _send_message: &mut dyn FnMut(&ultty_protocol::AppMessage) -> anyhow::Result<()>,
+        _send_message: &mut dyn FnMut(&ultty_protocol::AppMessage) -> crate::Result<()>,
         _parent: ultty_protocol::RegionId,
         _next_id: &mut u32,
-    ) -> anyhow::Result<Option<ultty_protocol::RegionId>> {
+    ) -> crate::Result<Option<ultty_protocol::RegionId>> {
         Ok(None)
     }
 
@@ -282,10 +282,10 @@ impl<T: View> View for &T {
     fn render_child_native(
         &self,
         index: usize,
-        send_message: &mut dyn FnMut(&ultty_protocol::AppMessage) -> anyhow::Result<()>,
+        send_message: &mut dyn FnMut(&ultty_protocol::AppMessage) -> crate::Result<()>,
         parent: ultty_protocol::RegionId,
         next_id: &mut u32,
-    ) -> anyhow::Result<Option<ultty_protocol::RegionId>> {
+    ) -> crate::Result<Option<ultty_protocol::RegionId>> {
         (*self).render_child_native(index, send_message, parent, next_id)
     }
 
@@ -435,7 +435,7 @@ mod tests {
         let v = EmptyView;
         let mut next_id = 1u32;
         let parent = ultty_protocol::RegionId::new(0);
-        let mut send = |_msg: &ultty_protocol::AppMessage| -> anyhow::Result<()> { Ok(()) };
+        let mut send = |_msg: &ultty_protocol::AppMessage| -> crate::Result<()> { Ok(()) };
         let result = v.render_child_native(0, &mut send, parent, &mut next_id);
         assert!(result.unwrap().is_none());
     }

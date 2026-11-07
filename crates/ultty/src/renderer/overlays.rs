@@ -7,8 +7,8 @@
 
 use super::{ImePreedit, OverlayState, Renderer, Rgba, Vertex};
 use crate::grid::Terminal;
+use crate::vim::VimMode;
 use crate::vim::{CopyMode, Selection as VimSelection};
-use ultty_protocol::vim::VimMode;
 use unicode_width::UnicodeWidthStr;
 use wgpu::util::DeviceExt;
 
@@ -302,8 +302,6 @@ impl Renderer {
                 let query = copy_mode.search_query();
                 format!("/ {}", query)
             }
-            VimMode::Command => ": ".to_string(),
-            VimMode::Insert => "-- INSERT --".to_string(),
         };
 
         // Position at bottom-left with some padding
@@ -338,7 +336,6 @@ impl Renderer {
                 Rgba::new(0.8, 0.6, 0.2, 1.0) // Orange
             }
             VimMode::Search => Rgba::new(0.5, 0.7, 1.0, 1.0), // Blue
-            _ => self.color_scheme.foreground,
         };
 
         let (text_vertices, text_indices) = self.text_renderer.build_label_vertices(

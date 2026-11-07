@@ -101,6 +101,9 @@ assets = [
     { source = "../../dist/icons/hicolor/64x64/apps/ultty.png", dest = "/usr/share/icons/hicolor/64x64/apps/ultty.png", mode = "644" },
     { source = "../../dist/icons/hicolor/128x128/apps/ultty.png", dest = "/usr/share/icons/hicolor/128x128/apps/ultty.png", mode = "644" },
     { source = "../../dist/icons/hicolor/256x256/apps/ultty.png", dest = "/usr/share/icons/hicolor/256x256/apps/ultty.png", mode = "644" },
+    # Compiled from dist/terminfo/ultty.terminfo by the release workflow:
+    # tic -x -o target/terminfo dist/terminfo/ultty.terminfo
+    { source = "../../target/terminfo/x/xterm-ultty", dest = "/usr/share/terminfo/x/xterm-ultty", mode = "644" },
 ]
 
 [package.metadata.generate-rpm.requires]
@@ -117,6 +120,9 @@ assets = [
     ["../../dist/icons/hicolor/64x64/apps/ultty.png", "usr/share/icons/hicolor/64x64/apps/ultty.png", "644"],
     ["../../dist/icons/hicolor/128x128/apps/ultty.png", "usr/share/icons/hicolor/128x128/apps/ultty.png", "644"],
     ["../../dist/icons/hicolor/256x256/apps/ultty.png", "usr/share/icons/hicolor/256x256/apps/ultty.png", "644"],
+    # Compiled from dist/terminfo/ultty.terminfo by the release workflow:
+    # tic -x -o target/terminfo dist/terminfo/ultty.terminfo
+    ["../../target/terminfo/x/xterm-ultty", "usr/share/terminfo/x/xterm-ultty", "644"],
 ]
 
 [[bench]]

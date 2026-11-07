@@ -92,5 +92,6 @@ impl Application for CounterApp {
 }
 
 fn main() -> anyhow::Result<()> {
-    CounterApp::new().run()
+    CounterApp::new().run()?;
+    Ok(())
 }

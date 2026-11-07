@@ -160,5 +160,6 @@ impl FetchApp {
 }
 
 fn main() -> anyhow::Result<()> {
-    FetchApp::new().run()
+    FetchApp::new().run()?;
+    Ok(())
 }

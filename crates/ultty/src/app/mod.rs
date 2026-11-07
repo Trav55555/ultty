@@ -293,6 +293,8 @@ impl App {
         let mut terminal_manager =
             Self::create_terminal_manager(&config, cols, rows, &mut protocol_server)?;
         terminal_manager.set_theme_colors(config.colors.theme_colors());
+        terminal_manager.set_scrollback_lines(config.behavior.scrollback_lines);
+        terminal_manager.set_close_on_exit(config.behavior.close_on_exit);
         // Each terminal's I/O thread parses on its own and pokes the UI
         // through this proxy when there is something new to draw.
         let pty_proxy = std::sync::Mutex::new(event_proxy.clone());
@@ -430,7 +432,13 @@ impl App {
                     "Restoring previous session with {} tabs",
                     session.tabs.len()
                 );
-                match Self::create_manager_from_session(&session, cols, rows, protocol_server) {
+                match Self::create_manager_from_session(
+                    &session,
+                    &config.terminal.term,
+                    cols,
+                    rows,
+                    protocol_server,
+                ) {
                     Ok(manager) => return Ok(manager),
                     Err(e) => {
                         tracing::warn!("Failed to restore session: {}, using default", e);
@@ -443,7 +451,13 @@ impl App {
         if let Some(ref profile_name) = config.profiles.default {
             if let Some(profile) = config.profiles.profiles.get(profile_name) {
                 tracing::info!("Using launch profile: {}", profile_name);
-                return Self::create_manager_from_profile(profile, cols, rows, protocol_server);
+                return Self::create_manager_from_profile(
+                    profile,
+                    &config.terminal.term,
+                    cols,
+                    rows,
+                    protocol_server,
+                );
             } else {
                 tracing::warn!(
                     "Default profile '{}' not found, using default shell",
@@ -454,7 +468,7 @@ impl App {
 
         // No profile configured, use default shell
         TerminalManager::with_tab_env(cols, rows, &mut |tab_id| {
-            protocol_tab_env(protocol_server, tab_id)
+            tab_shell_env(protocol_server, &config.terminal.term, tab_id)
         })
         .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e))
     }
@@ -462,13 +476,14 @@ impl App {
     /// Create terminal manager from a launch profile.
     fn create_manager_from_profile(
         profile: &ultty::config::LaunchProfile,
+        term: &str,
         cols: u16,
         rows: u16,
         protocol_server: &mut Option<ProtocolServer>,
     ) -> Result<TerminalManager> {
         // Create an empty manager first
         let mut manager = TerminalManager::with_tab_env(cols, rows, &mut |tab_id| {
-            protocol_tab_env(protocol_server, tab_id)
+            tab_shell_env(protocol_server, term, tab_id)
         })
         .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e))?;
 
@@ -503,7 +518,7 @@ impl App {
                         &tab_config.args,
                         working_dir,
                         title,
-                        &mut |tab_id| protocol_tab_env(protocol_server, tab_id),
+                        &mut |tab_id| tab_shell_env(protocol_server, term, tab_id),
                     )
                     .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
 
@@ -521,12 +536,13 @@ impl App {
     /// Create terminal manager from a saved session.
     fn create_manager_from_session(
         session: &ultty::session::SessionData,
+        term: &str,
         cols: u16,
         rows: u16,
         protocol_server: &mut Option<ProtocolServer>,
     ) -> Result<TerminalManager> {
         TerminalManager::from_session(session, cols, rows, &mut |tab_id| {
-            protocol_tab_env(protocol_server, tab_id)
+            tab_shell_env(protocol_server, term, tab_id)
         })
         .map_err(|e| anyhow::anyhow!("Failed to restore session: {}", e))
     }
@@ -567,8 +583,13 @@ impl App {
 
     /// Create a new tab whose shell is wired to its own protocol socket.
     fn create_tab(&mut self) -> std::io::Result<TabId> {
-        self.terminal_manager
-            .create_tab_with_env(&mut |tab_id| protocol_tab_env(&mut self.protocol_server, tab_id))
+        self.terminal_manager.create_tab_with_env(&mut |tab_id| {
+            tab_shell_env(
+                &mut self.protocol_server,
+                &self.config.terminal.term,
+                tab_id,
+            )
+        })
     }
 
     /// Create a new tab running `command`, wired to its own protocol socket.
@@ -584,7 +605,13 @@ impl App {
             args,
             working_dir,
             title,
-            &mut |tab_id| protocol_tab_env(&mut self.protocol_server, tab_id),
+            &mut |tab_id| {
+                tab_shell_env(
+                    &mut self.protocol_server,
+                    &self.config.terminal.term,
+                    tab_id,
+                )
+            },
         )
     }
 
@@ -1346,30 +1373,33 @@ fn resize_direction_at_window_edge(
     }
 }
 
-/// Shell environment for a new tab: its own native protocol socket.
+/// Shell environment for a new tab: `TERM` (from `terminal.term`) and the
+/// tab's own native protocol socket.
 ///
 /// Opens the tab's listener on `server` before the shell is spawned so the
 /// shell (and every app it launches) sees a socket that already exists. If
 /// the listener cannot be opened the tab still works, without native
 /// protocol support, and apps fall back to ANSI rendering.
-fn protocol_tab_env(
+fn tab_shell_env(
     server: &mut Option<ProtocolServer>,
+    term: &str,
     tab_id: TabId,
 ) -> std::io::Result<ultty::terminal_manager::TabEnv> {
+    let mut env = vec![("TERM".into(), term.into())];
     let Some(server) = server.as_mut() else {
-        return Ok(Vec::new());
+        return Ok(env);
     };
     match server.open_tab(tab_id) {
-        Ok(path) => Ok(vec![("ULTTY_SOCKET".into(), path.into_os_string())]),
+        Ok(path) => env.push(("ULTTY_SOCKET".into(), path.into_os_string())),
         Err(e) => {
             tracing::warn!(
                 "Failed to open protocol socket for tab {}: {}; tab runs without native protocol",
                 tab_id.raw(),
                 e
             );
-            Ok(Vec::new())
         }
     }
+    Ok(env)
 }
 
 /// Drives [`App`] from winit. The window, and so the app, is created on the

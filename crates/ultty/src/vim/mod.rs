@@ -13,14 +13,42 @@
 //! - Yank: y (copies selection to clipboard)
 //! - Exit: Esc, q, Enter (with selection copies and exits)
 
-use ultty_protocol::vim::{VimMode, VimState};
 use ultty_protocol::{Key, Modifiers};
+
+/// What copy mode is doing: moving the cursor, selecting, or reading a
+/// search query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VimMode {
+    /// Moving the cursor.
+    #[default]
+    Normal,
+    /// Character-wise selection (`v`).
+    Visual,
+    /// Line-wise selection (`V`).
+    VisualLine,
+    /// Block selection (Ctrl-v).
+    VisualBlock,
+    /// Typing a search query (`/` or `?`).
+    Search,
+}
+
+impl VimMode {
+    /// Returns true if this is a selection mode.
+    pub fn is_visual(&self) -> bool {
+        matches!(
+            self,
+            VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock
+        )
+    }
+}
 
 /// Terminal copy mode state.
 #[derive(Debug, Clone)]
 pub struct CopyMode {
     active: bool,
-    vim_state: VimState,
+    mode: VimMode,
+    /// Direction of the last search: true for `/`, false for `?`.
+    search_forward: bool,
     cursor_row: usize,
     cursor_col: usize,
     selection_anchor: Option<(usize, usize)>,
@@ -44,7 +72,8 @@ impl Default for CopyMode {
     fn default() -> Self {
         Self {
             active: false,
-            vim_state: VimState::new(),
+            mode: VimMode::Normal,
+            search_forward: false,
             cursor_row: 0,
             cursor_col: 0,
             selection_anchor: None,
@@ -72,7 +101,8 @@ impl CopyMode {
 
     pub fn enter(&mut self, total_rows: usize, viewport_rows: usize, viewport_cols: usize) {
         self.active = true;
-        self.vim_state = VimState::new();
+        self.mode = VimMode::Normal;
+        self.search_forward = false;
         self.total_rows = total_rows;
         self.viewport_rows = viewport_rows;
         self.viewport_cols = viewport_cols;
@@ -86,7 +116,7 @@ impl CopyMode {
 
     pub fn enter_search(&mut self, total_rows: usize, viewport_rows: usize, viewport_cols: usize) {
         self.enter(total_rows, viewport_rows, viewport_cols);
-        self.vim_state.mode = VimMode::Search;
+        self.mode = VimMode::Search;
         self.search_query.clear();
     }
 
@@ -122,7 +152,7 @@ impl CopyMode {
         self.selection_anchor = None;
         self.pending_g = false;
         self.count = None;
-        self.vim_state.reset_to_normal();
+        self.mode = VimMode::Normal;
     }
 
     pub fn cursor_position(&self) -> (usize, usize) {
@@ -143,7 +173,7 @@ impl CopyMode {
                 (self.cursor_row, self.cursor_col, anchor_row, anchor_col)
             };
 
-            match self.vim_state.mode {
+            match self.mode {
                 VimMode::Visual => Selection::Char {
                     start_row,
                     start_col,
@@ -168,7 +198,7 @@ impl CopyMode {
     }
 
     pub fn vim_mode(&self) -> VimMode {
-        self.vim_state.mode
+        self.mode
     }
 
     /// Handle a key with no knowledge of the cursor row's text.
@@ -190,7 +220,7 @@ impl CopyMode {
             return CopyModeResult::NotHandled;
         }
 
-        if self.vim_state.mode == VimMode::Search {
+        if self.mode == VimMode::Search {
             return self.handle_search_key(key, modifiers);
         }
 
@@ -230,9 +260,9 @@ impl CopyMode {
                     // Cancel a pending count only
                     return CopyModeResult::Handled;
                 }
-                if self.vim_state.mode.is_visual() {
+                if self.mode.is_visual() {
                     self.selection_anchor = None;
-                    self.vim_state.mode = VimMode::Normal;
+                    self.mode = VimMode::Normal;
                     CopyModeResult::Handled
                 } else {
                     self.exit();
@@ -356,32 +386,32 @@ impl CopyMode {
             }
 
             Key::Char('v') if !modifiers.ctrl() => {
-                if self.vim_state.mode == VimMode::Visual {
+                if self.mode == VimMode::Visual {
                     self.selection_anchor = None;
-                    self.vim_state.mode = VimMode::Normal;
+                    self.mode = VimMode::Normal;
                 } else {
                     self.selection_anchor = Some((self.cursor_row, self.cursor_col));
-                    self.vim_state.mode = VimMode::Visual;
+                    self.mode = VimMode::Visual;
                 }
                 CopyModeResult::Handled
             }
             Key::Char('V') => {
-                if self.vim_state.mode == VimMode::VisualLine {
+                if self.mode == VimMode::VisualLine {
                     self.selection_anchor = None;
-                    self.vim_state.mode = VimMode::Normal;
+                    self.mode = VimMode::Normal;
                 } else {
                     self.selection_anchor = Some((self.cursor_row, 0));
-                    self.vim_state.mode = VimMode::VisualLine;
+                    self.mode = VimMode::VisualLine;
                 }
                 CopyModeResult::Handled
             }
             Key::Char('v') if modifiers.ctrl() => {
-                if self.vim_state.mode == VimMode::VisualBlock {
+                if self.mode == VimMode::VisualBlock {
                     self.selection_anchor = None;
-                    self.vim_state.mode = VimMode::Normal;
+                    self.mode = VimMode::Normal;
                 } else {
                     self.selection_anchor = Some((self.cursor_row, self.cursor_col));
-                    self.vim_state.mode = VimMode::VisualBlock;
+                    self.mode = VimMode::VisualBlock;
                 }
                 CopyModeResult::Handled
             }
@@ -390,7 +420,7 @@ impl CopyMode {
                 if self.selection_anchor.is_some() {
                     let selection = self.selection();
                     self.selection_anchor = None;
-                    self.vim_state.mode = VimMode::Normal;
+                    self.mode = VimMode::Normal;
                     CopyModeResult::Copy(selection)
                 } else {
                     CopyModeResult::Handled
@@ -398,14 +428,14 @@ impl CopyMode {
             }
 
             Key::Char('/') => {
-                self.vim_state.mode = VimMode::Search;
-                self.vim_state.search_forward = true;
+                self.mode = VimMode::Search;
+                self.search_forward = true;
                 self.search_query.clear();
                 CopyModeResult::Handled
             }
             Key::Char('?') => {
-                self.vim_state.mode = VimMode::Search;
-                self.vim_state.search_forward = false;
+                self.mode = VimMode::Search;
+                self.search_forward = false;
                 self.search_query.clear();
                 CopyModeResult::Handled
             }
@@ -425,14 +455,13 @@ impl CopyMode {
     fn handle_search_key(&mut self, key: &Key, _modifiers: Modifiers) -> CopyModeResult {
         match key {
             Key::Escape => {
-                self.vim_state.mode = VimMode::Normal;
+                self.mode = VimMode::Normal;
                 self.search_query.clear();
                 CopyModeResult::Handled
             }
             Key::Enter => {
-                self.vim_state.mode = VimMode::Normal;
+                self.mode = VimMode::Normal;
                 if !self.search_query.is_empty() {
-                    self.vim_state.last_search = Some(self.search_query.clone());
                     CopyModeResult::Search(self.search_query.clone())
                 } else {
                     CopyModeResult::Handled
@@ -532,7 +561,7 @@ impl CopyMode {
             return;
         }
 
-        let forward = self.vim_state.search_forward;
+        let forward = self.search_forward;
         if forward {
             self.current_match = (self.current_match + 1) % self.search_matches.len();
         } else if self.current_match == 0 {
@@ -552,7 +581,7 @@ impl CopyMode {
             return;
         }
 
-        let forward = self.vim_state.search_forward;
+        let forward = self.search_forward;
         if !forward {
             self.current_match = (self.current_match + 1) % self.search_matches.len();
         } else if self.current_match == 0 {

@@ -3,9 +3,11 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Trav55555/ultty/main/install.sh | sh
 #
-# Installs ultty and ulttyctl into ~/.local/bin, and on Linux the desktop entry
-# and icons into ~/.local/share. No root needed. The download is checked
-# against the release's SHA256SUMS before anything is installed.
+# Installs ultty and ulttyctl into ~/.local/bin, the desktop entry and icons
+# into ~/.local/share, and the xterm-ultty terminfo entry into ~/.terminfo
+# when tic is available. No root needed. The download is checked against the
+# release's SHA256SUMS before anything is installed. Releases are built for
+# Linux x86_64 only.
 #
 # Environment:
 #   ULTTY_VERSION      release tag to install, such as v0.1.0 (default: latest)
@@ -31,19 +33,14 @@ need() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required"
 }
 
-# The Rust target triple for this machine.
+# The Rust target triple for this machine. Releases are built for Linux
+# x86_64 only; other platforms build from source (see the README).
 detect_target() {
   os="$(uname -s)"
   arch="$(uname -m)"
-  case "$arch" in
-    x86_64 | amd64) arch=x86_64 ;;
-    aarch64 | arm64) arch=aarch64 ;;
-    *) die "unsupported CPU: $arch" ;;
-  esac
-  case "$os" in
-    Linux) echo "$arch-unknown-linux-gnu" ;;
-    Darwin) echo "$arch-apple-darwin" ;;
-    *) die "unsupported OS: $os (Ultty runs on Linux and macOS)" ;;
+  case "$os/$arch" in
+    Linux/x86_64 | Linux/amd64) echo "x86_64-unknown-linux-gnu" ;;
+    *) die "no release build for $os $arch: releases are Linux x86_64 only; build from source instead (https://github.com/Trav55555/ultty#quick-start)" ;;
   esac
 }
 
@@ -101,6 +98,21 @@ install_desktop_entry() {
   say "added Ultty to the application menu"
 }
 
+# Compile the xterm-ultty terminfo entry into ~/.terminfo, so terminal.term
+# can be set to xterm-ultty. Skipped quietly without tic or in a release
+# that does not ship the entry.
+install_terminfo() {
+  source="$1/dist/terminfo/ultty.terminfo"
+  [ -f "$source" ] || return 0
+  command -v tic >/dev/null 2>&1 || return 0
+  mkdir -p "$HOME/.terminfo"
+  if tic -x -o "$HOME/.terminfo" "$source" >/dev/null 2>&1; then
+    say "installed the xterm-ultty terminfo entry to $HOME/.terminfo"
+  else
+    say "could not compile the xterm-ultty terminfo entry; TERM stays xterm-256color"
+  fi
+}
+
 main() {
   need curl
   need tar
@@ -139,9 +151,8 @@ main() {
   done
   say "installed ultty and ulttyctl to $INSTALL_DIR"
 
-  if [ "$(uname -s)" = Linux ]; then
-    install_desktop_entry "$tmp/x"
-  fi
+  install_desktop_entry "$tmp/x"
+  install_terminfo "$tmp/x"
 
   case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;

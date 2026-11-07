@@ -127,5 +127,6 @@ impl ChatApp {
 }
 
 fn main() -> anyhow::Result<()> {
-    ChatApp::new().run()
+    ChatApp::new().run()?;
+    Ok(())
 }

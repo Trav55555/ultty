@@ -26,6 +26,9 @@ class Ultty < Formula
     bin.install "ultty"
     bin.install "ulttyctl"
 
+    (share/"terminfo").mkpath
+    system "tic", "-x", "-o", share/"terminfo", "dist/terminfo/ultty.terminfo"
+
     if OS.linux?
       (share/"applications").install "dist/ultty.desktop"
       (share/"icons").install "dist/icons/hicolor"

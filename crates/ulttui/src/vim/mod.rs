@@ -6,11 +6,10 @@
 //! - `VimConfig` for customizing vim behavior
 
 mod parser;
+mod types;
 
 pub use parser::KeyParser;
-pub use ultty_protocol::vim::{
-    VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimRegister, VimState,
-};
+pub use types::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimRegister, VimState};
 
 use ultty_protocol::{Key, Modifiers};
 
@@ -283,7 +282,7 @@ macro_rules! impl_vim_ext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ultty_protocol::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimState};
+    use super::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimState};
     use ultty_protocol::{Key, Modifiers};
 
     // --- VimResult ---

@@ -169,5 +169,6 @@ impl Application for DashboardApp {
 }
 
 fn main() -> anyhow::Result<()> {
-    DashboardApp::new().run()
+    DashboardApp::new().run()?;
+    Ok(())
 }

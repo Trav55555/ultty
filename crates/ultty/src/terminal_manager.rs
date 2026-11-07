@@ -233,6 +233,12 @@ pub struct TerminalManager {
     /// The colours terminals are drawn with, which they report to
     /// applications. Handed to every terminal, like the waker.
     theme_colors: ThemeColors,
+    /// Lines of scrollback each terminal keeps (`behavior.scrollback_lines`).
+    scrollback_lines: usize,
+    /// Whether a pane closes when its program exits
+    /// (`behavior.close_on_exit`). When false, the pane stays, showing its
+    /// last output, until it is closed by hand.
+    close_on_exit: bool,
     /// Where panes are laid out, once the window has a size. Splits,
     /// closes and divider drags re-lay panes out within it.
     pane_area: Option<PaneArea>,
@@ -260,6 +266,27 @@ impl TerminalManager {
         self.theme_colors = theme;
     }
 
+    /// Set how many lines of scrollback terminals keep, for existing
+    /// terminals and any created later. Lowering it drops the oldest lines.
+    pub fn set_scrollback_lines(&mut self, lines: usize) {
+        for terminal in &self.terminals {
+            terminal.event_loop.terminal().set_scrollback_limit(lines);
+        }
+        self.scrollback_lines = lines;
+    }
+
+    /// Set whether a pane closes when its program exits. When false,
+    /// [`TerminalManager::cleanup_exited`] keeps exited panes and the window
+    /// stays open until every pane has been closed by hand.
+    pub fn set_close_on_exit(&mut self, close: bool) {
+        self.close_on_exit = close;
+    }
+
+    /// Whether panes close when their program exits.
+    pub fn close_on_exit(&self) -> bool {
+        self.close_on_exit
+    }
+
     fn push_terminal(&mut self, terminal: ManagedTerminal) {
         if let Some(waker) = &self.waker {
             terminal.event_loop.set_waker(Arc::clone(waker));
@@ -267,6 +294,7 @@ impl TerminalManager {
         {
             let mut state = terminal.event_loop.terminal();
             state.set_theme_colors(self.theme_colors.clone());
+            state.set_scrollback_limit(self.scrollback_lines);
             if let Some(area) = self.pane_area {
                 let (width, height) = area.cell_pixel_size();
                 state.set_cell_pixel_size(width, height);
@@ -296,6 +324,8 @@ impl TerminalManager {
             default_rows: rows,
             waker: None,
             theme_colors: ThemeColors::default(),
+            scrollback_lines: crate::grid::DEFAULT_SCROLLBACK,
+            close_on_exit: true,
             pane_area: None,
         };
 
@@ -617,6 +647,16 @@ impl TerminalManager {
 
         for terminal in &mut self.terminals {
             let events = terminal.process()?;
+            if !self.close_on_exit {
+                for event in &events {
+                    if let TerminalEvent::ChildExited { status } = event {
+                        // The pane stays open; say why nothing answers.
+                        let note =
+                            format!("\r\n\x1b[0;7m[process exited with status {status}]\x1b[0m");
+                        terminal.event_loop.write_local(note.as_bytes());
+                    }
+                }
+            }
             if !events.is_empty() {
                 if let Some(title) = events.iter().rev().find_map(|event| match event {
                     TerminalEvent::TitleChanged(title) => Some(title),
@@ -632,8 +672,12 @@ impl TerminalManager {
         Ok(all_events)
     }
 
-    /// Remove exited terminals and their empty tabs.
+    /// Remove exited terminals and their empty tabs, unless panes are set
+    /// to stay open after their program exits.
     pub fn cleanup_exited(&mut self) {
+        if !self.close_on_exit {
+            return;
+        }
         // Find exited terminals
         let exited: Vec<TerminalId> = self
             .terminals
@@ -677,9 +721,11 @@ impl TerminalManager {
         }
     }
 
-    /// Check if all terminals have exited.
+    /// Whether the window has nothing left to show: no terminals, or, when
+    /// panes close on exit, only terminals whose program has exited.
     pub fn all_exited(&self) -> bool {
-        self.terminals.is_empty() || self.terminals.iter().all(|t| t.has_exited())
+        self.terminals.is_empty()
+            || (self.close_on_exit && self.terminals.iter().all(|t| t.has_exited()))
     }
 
     /// Split the focused pane side by side.
@@ -1053,6 +1099,8 @@ impl TerminalManager {
             default_rows: rows,
             waker: None,
             theme_colors: ThemeColors::default(),
+            scrollback_lines: crate::grid::DEFAULT_SCROLLBACK,
+            close_on_exit: true,
             pane_area: None,
         };
 
@@ -1529,6 +1577,87 @@ mod tests {
 
         assert_eq!(manager.tab_count(), 1);
         assert_eq!(manager.active_tab, second_tab);
+    }
+
+    /// Open a tab running `/bin/true` and return its terminal.
+    fn tab_that_exits(manager: &mut TerminalManager) -> TerminalId {
+        manager
+            .create_tab_with_command("/bin/true", &[], None, None, &mut no_tab_env)
+            .unwrap();
+        manager.focused_terminal_id().unwrap()
+    }
+
+    /// Process and clean up until `done`, or panic after a generous deadline.
+    fn run_until(manager: &mut TerminalManager, done: impl Fn(&TerminalManager) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !done(manager) {
+            assert!(std::time::Instant::now() < deadline, "timed out");
+            manager.process_all().unwrap();
+            manager.cleanup_exited();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_pane_closes_when_its_program_exits_by_default() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let exiting = tab_that_exits(&mut manager);
+        assert_eq!(manager.tab_count(), 2);
+
+        run_until(&mut manager, |m| m.terminal(exiting).is_none());
+
+        assert_eq!(manager.tab_count(), 1);
+    }
+
+    #[test]
+    fn without_close_on_exit_an_exited_pane_stays_with_a_note() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        manager.set_close_on_exit(false);
+        let exiting = tab_that_exits(&mut manager);
+
+        let shows_note = |m: &TerminalManager| {
+            let terminal = m.terminal(exiting).unwrap().event_loop.terminal();
+            let shown = terminal
+                .grid()
+                .rows()
+                .any(|row| row.text().contains("[process exited with status 0]"));
+            shown
+        };
+        run_until(&mut manager, shows_note);
+
+        assert_eq!(manager.tab_count(), 2);
+        assert!(manager.terminal(exiting).unwrap().has_exited());
+        assert!(!manager.all_exited(), "the window would close");
+
+        // Closing the tab by hand still works.
+        let tab = manager.active_tab().unwrap().id;
+        assert!(manager.close_tab(tab));
+        assert!(manager.terminal(exiting).is_none());
+    }
+
+    #[test]
+    fn scrollback_lines_apply_to_open_and_new_terminals() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let first = manager.focused_terminal_id().unwrap();
+        let max_history = |m: &TerminalManager, id| {
+            m.terminal(id)
+                .unwrap()
+                .event_loop
+                .terminal()
+                .buffer()
+                .max_history()
+        };
+        assert_eq!(
+            max_history(&manager, first),
+            crate::grid::DEFAULT_SCROLLBACK
+        );
+
+        manager.set_scrollback_lines(500);
+        manager.create_tab().unwrap();
+        let second = manager.focused_terminal_id().unwrap();
+
+        assert_eq!(max_history(&manager, first), 500);
+        assert_eq!(max_history(&manager, second), 500);
     }
 
     #[test]

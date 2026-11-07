@@ -272,8 +272,8 @@ pub struct EventLoop {
     last_drain_bytes: usize,
     /// When `waitpid` first reported the child's exit.
     exit_seen_at: Option<Instant>,
-    /// Whether `ChildExited` went out before the PTY closed.
-    exit_reported_early: bool,
+    /// Whether `ChildExited` has gone out. It goes out once.
+    exit_reported: bool,
 }
 
 impl EventLoop {
@@ -303,9 +303,11 @@ impl EventLoop {
     /// Use this when the child needs spawn options the convenience
     /// constructors do not take, such as per-child environment variables.
     pub fn from_child(child: Child, cols: u16, rows: u16) -> io::Result<Self> {
+        let mut terminal = Terminal::new(Dimensions::new(cols, rows));
+        terminal.set_terminal_name(child.term());
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
-                terminal: Terminal::new(Dimensions::new(cols, rows)),
+                terminal,
                 events: Vec::new(),
                 output_pending: false,
                 bytes_since_collect: 0,
@@ -347,7 +349,7 @@ impl EventLoop {
             foreground_name_cache: RefCell::new(None),
             last_drain_bytes: 0,
             exit_seen_at: None,
-            exit_reported_early: false,
+            exit_reported: false,
         })
     }
 
@@ -541,8 +543,8 @@ impl EventLoop {
     ///
     /// Returns one [`TerminalEvent::Redraw`] if any output was parsed,
     /// followed by bells, titles, clipboard, and notification events in the
-    /// order they arrived, and [`TerminalEvent::ChildExited`] once the child
-    /// has exited.
+    /// order they arrived, and, once, [`TerminalEvent::ChildExited`] after
+    /// the child has exited.
     pub fn process(&mut self) -> io::Result<Vec<TerminalEvent>> {
         self.shared.wake_pending.store(false, Ordering::Release);
         let mut events = Vec::new();
@@ -563,16 +565,25 @@ impl EventLoop {
         // while the final chunk can still be unread.
         if self.child.try_wait().map_err(io::Error::other)? {
             let seen_at = *self.exit_seen_at.get_or_insert_with(Instant::now);
-            let report =
-                closed || (!self.exit_reported_early && seen_at.elapsed() >= EXIT_DRAIN_GRACE);
+            let report = !self.exit_reported && (closed || seen_at.elapsed() >= EXIT_DRAIN_GRACE);
             if report {
-                self.exit_reported_early |= !closed;
+                self.exit_reported = true;
                 if let Some(status) = self.child.exit_status() {
                     events.push(TerminalEvent::ChildExited { status });
                 }
             }
         }
         Ok(events)
+    }
+
+    /// Draw `bytes` as if the program had written them, for notes from the
+    /// terminal itself such as "process exited". Replies the bytes would
+    /// cause are dropped, not sent to the program.
+    pub fn write_local(&self, bytes: &[u8]) {
+        let mut state = self.shared.lock();
+        parse_into(&mut state, &mut AnsiParser::new(), bytes);
+        state.terminal.take_responses();
+        state.output_pending = true;
     }
 
     /// Wait up to `timeout` for output or an exit, then [`EventLoop::process`].
@@ -1090,6 +1101,55 @@ mod tests {
         assert!(!event_loop.has_exited());
         assert_eq!(event_loop.terminal().dimensions().cols, 80);
         assert_eq!(event_loop.terminal().dimensions().rows, 24);
+    }
+
+    #[test]
+    fn child_exit_is_reported_once() {
+        let mut event_loop =
+            EventLoop::with_command("/bin/true", &["/bin/true"], 80, 24).expect("create");
+        event_loop
+            .run(|_, event| !matches!(event, TerminalEvent::ChildExited { .. }))
+            .expect("run");
+        for _ in 0..5 {
+            let events = event_loop.wait(Duration::from_millis(20)).expect("wait");
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, TerminalEvent::ChildExited { .. })),
+                "ChildExited reported again: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_local_draws_without_replying_to_the_program() {
+        let mut event_loop =
+            EventLoop::with_command("/bin/sleep", &["/bin/sleep", "5"], 20, 3).expect("create");
+        // DA1 would make a real program's output send a reply.
+        event_loop.write_local(b"NOTE\x1b[c");
+        {
+            let mut terminal = event_loop.terminal();
+            assert_eq!(terminal.grid().row(0).unwrap().text_trimmed(), "NOTE");
+            assert!(terminal.take_responses().is_empty(), "a reply is queued");
+        }
+        let events = event_loop.process().expect("process");
+        assert!(events.iter().any(|e| matches!(e, TerminalEvent::Redraw)));
+    }
+
+    /// XTGETTCAP's `TN` must name the `TERM` the program actually got.
+    #[test]
+    fn terminal_reports_the_term_its_child_was_started_with() {
+        let env = [("TERM".into(), "xterm-ultty".into())];
+        let child = Child::spawn(
+            "/bin/sh",
+            &["/bin/sh", "-c", "sleep 1"],
+            &crate::pty::current_dir(),
+            PtySize::new(80, 24),
+            &env,
+        )
+        .expect("spawn");
+        let event_loop = EventLoop::from_child(child, 80, 24).expect("create event loop");
+        assert_eq!(event_loop.terminal().terminal_name(), "xterm-ultty");
     }
 
     /// A child that prints and exits at once must not have its last output

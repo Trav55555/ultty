@@ -254,5 +254,6 @@ impl Application for SysMon {
 // ── Main ──────────────────────────────────────────────────────────────
 
 fn main() -> anyhow::Result<()> {
-    SysMon::new().run()
+    SysMon::new().run()?;
+    Ok(())
 }

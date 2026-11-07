@@ -278,6 +278,10 @@ impl App {
             ));
         self.terminal_manager
             .set_theme_colors(new_config.colors.theme_colors());
+        self.terminal_manager
+            .set_scrollback_lines(new_config.behavior.scrollback_lines);
+        self.terminal_manager
+            .set_close_on_exit(new_config.behavior.close_on_exit);
 
         // Update opacity
         self.renderer.set_opacity(new_config.behavior.opacity);

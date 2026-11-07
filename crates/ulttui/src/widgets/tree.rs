@@ -170,10 +170,10 @@ impl View for Tree {
     fn render_child_native(
         &self,
         index: usize,
-        send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+        send_message: &mut dyn FnMut(&AppMessage) -> crate::Result<()>,
         parent: RegionId,
         next_id: &mut u32,
-    ) -> anyhow::Result<Option<RegionId>> {
+    ) -> crate::Result<Option<RegionId>> {
         let flat = self.visible_nodes();
         let Some(node) = flat.get(index).copied() else {
             return Ok(None);
@@ -298,11 +298,11 @@ impl View for Tree {
 }
 
 fn create_text_region(
-    send_message: &mut dyn FnMut(&AppMessage) -> anyhow::Result<()>,
+    send_message: &mut dyn FnMut(&AppMessage) -> crate::Result<()>,
     parent: RegionId,
     next_id: &mut u32,
     text: &str,
-) -> anyhow::Result<()> {
+) -> crate::Result<()> {
     let region_id = RegionId::new(*next_id);
     *next_id += 1;
 

@@ -19,6 +19,9 @@ pub const MAX_TITLE_STACK: usize = 10;
 /// dropped.
 pub const KITTY_KEYBOARD_STACK_LIMIT: usize = 8;
 
+/// The `TERM` a terminal reports until its embedder says otherwise.
+pub const DEFAULT_TERMINAL_NAME: &str = "xterm-256color";
+
 /// Largest value a mode 1005 mouse report encodes: xterm stops at 2047,
 /// the last two-byte UTF-8 code point, so coordinates top out at 2015.
 const MAX_UTF8_MOUSE_VALUE: u32 = 2047;
@@ -208,6 +211,9 @@ pub struct Terminal {
     inactive_kitty_keyboard: (u8, Vec<u8>),
     /// Pending column mode resize request (132 or 80 columns, DECCOLM)
     pending_column_resize: Option<u16>,
+    /// The `TERM` the program in this terminal was started with, which
+    /// XTGETTCAP reports as `TN`.
+    terminal_name: String,
     /// Dimensions the inactive alternate buffer still has to be resized to.
     /// Reflowing it on every drag frame is wasted work while it is hidden.
     pending_alternate_resize: Option<Dimensions>,
@@ -269,8 +275,21 @@ impl Terminal {
             kitty_keyboard_stack: Vec::new(),
             inactive_kitty_keyboard: (0, Vec::new()),
             pending_column_resize: None,
+            terminal_name: DEFAULT_TERMINAL_NAME.to_string(),
             pending_alternate_resize: None,
         }
+    }
+
+    /// Tell the terminal which `TERM` its program was started with, so
+    /// XTGETTCAP reports that name.
+    pub fn set_terminal_name(&mut self, name: impl Into<String>) {
+        self.terminal_name = name.into();
+    }
+
+    /// The `TERM` this terminal reports; [`DEFAULT_TERMINAL_NAME`] unless
+    /// [`Terminal::set_terminal_name`] changed it.
+    pub fn terminal_name(&self) -> &str {
+        &self.terminal_name
     }
 
     /// Queue a response to send back to the PTY.
@@ -286,6 +305,15 @@ impl Terminal {
     /// Check if there are pending responses.
     pub fn has_pending_responses(&self) -> bool {
         !self.pending_responses.is_empty()
+    }
+
+    /// Keep at most `lines` lines of main-screen scrollback, dropping the
+    /// oldest lines beyond it. The alternate screen has no scrollback.
+    pub fn set_scrollback_limit(&mut self, lines: usize) {
+        if self.main.set_max_history(lines) > 0 && !self.using_alternate {
+            // Rows the selection refers to may be gone or renumbered.
+            self.clear_selection();
+        }
     }
 
     /// Get the active buffer.

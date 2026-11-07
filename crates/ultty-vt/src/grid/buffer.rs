@@ -228,6 +228,21 @@ impl Buffer {
         self.history.len()
     }
 
+    /// How many lines of history the buffer keeps.
+    pub fn max_history(&self) -> usize {
+        self.max_history
+    }
+
+    /// Keep at most `max_history` lines of history from now on, dropping
+    /// the oldest lines beyond it. Returns how many lines were dropped.
+    pub fn set_max_history(&mut self, max_history: usize) -> usize {
+        self.max_history = max_history;
+        let excess = self.history.len().saturating_sub(max_history);
+        self.history.drain(..excess);
+        self.scroll_offset = self.scroll_offset.min(self.history.len());
+        excess
+    }
+
     /// Resize the buffer with proper reflow.
     pub fn resize(&mut self, new_dims: Dimensions) {
         let old_dims = self.grid.dimensions();
@@ -700,6 +715,34 @@ mod tests {
         }
 
         assert_eq!(buf.history_len(), 100);
+    }
+
+    #[test]
+    fn lowering_the_history_limit_drops_the_oldest_lines() {
+        let mut buf = Buffer::with_scrollback(Dimensions::new(10, 2), 100);
+        for i in 0..50 {
+            let mut row = Row::new(10);
+            row[0].set_char(char::from(b'0' + (i % 10) as u8));
+            buf.push_to_history(vec![row]);
+        }
+        buf.scroll_up(40);
+
+        assert_eq!(buf.set_max_history(20), 30);
+
+        assert_eq!(buf.history_len(), 20);
+        assert_eq!(buf.max_history(), 20);
+        // Line 30 is now the oldest.
+        assert_eq!(buf.history[0].decode()[0].char(), '0');
+        assert_eq!(buf.history[1].decode()[0].char(), '1');
+        assert_eq!(buf.scroll_offset(), 20);
+        assert!(buf.check_integrity().is_ok());
+
+        // Raising the limit keeps what is there and lets history grow.
+        assert_eq!(buf.set_max_history(30), 0);
+        for _ in 0..15 {
+            buf.push_to_history(vec![Row::new(10)]);
+        }
+        assert_eq!(buf.history_len(), 30);
     }
 
     #[test]
