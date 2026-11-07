@@ -36,7 +36,11 @@ recording PTY is ignored (`ULTTY_FORCE_NATIVE=1` overrides this). The socket
 reaches only programs on the same machine. A session belongs to the tab whose
 socket accepted it: input events and clipboard reads are delivered only while
 that tab is visible, and closing the tab unlinks its socket and disconnects
-its sessions.
+its sessions. Keyboard input (`KeyDown`, `KeyUp`, `TextInput`) also goes only
+to a session whose connecting process (its peer pid) is in the foreground
+process group of the focused pane's PTY, so a background job that subscribes
+to keys sees nothing the user types. In-band sessions talk over the PTY
+itself and qualify while they last.
 
 **In-band** ([ADR 0018](adr/0018-in-band-native-transport.md)). Frames travel
 in the terminal byte stream, so native mode works wherever that stream goes:
@@ -87,10 +91,25 @@ reply first, or nothing within a timeout (`ulttui`: 1 s), uses ANSI.
 **Sessions.** A terminal opens an in-band session only when a well-formed
 `ClientHello` starts the data, so stray strings, such as a file being
 displayed, cannot open one. Ultty allows one in-band session per tab, and
-only on a tab with a single pane. A session ends when any of these happen:
+only on a tab with a single pane.
+
+**Confirmation.** A hello alone does not show that a live app is reading
+the terminal's answers: a displayed file or a remote host's output can hold
+one. So the terminal answers `ClientHello` (`ServerHello`, `SessionReady`)
+at once, then treats the session as unconfirmed until in-band data arrives
+in a later read than the hello, after the answer was written. An app must
+send its next message (any message: `ulttui` sends `Subscribe`) within 2 s
+of `SessionReady`, and must not send anything after its hello until it has
+read the answer. While a session is unconfirmed, Ultty does not draw its
+scene, sends it no input, and holds every other reply; on confirmation the
+held replies are sent. Data that arrives in the same read as the hello is
+applied but does not confirm.
+
+A session ends when any of these happen:
 
 - the app sends `Disconnect`;
 - the stream is malformed;
+- it is not confirmed within 2 s of the hello answer;
 - the app has been silent for 10 s;
 - the terminal sees the app is gone: Ultty checks the PTY's foreground
   process group and the processes it held at hello.
@@ -351,6 +370,21 @@ A `Dimension` is a `u8` tag followed immediately by an `f32` LE value only for t
 ### 8.2 Text Content
 
 `TextContent`: string, then `wrap: u8` (`None=0`, `Char=1`, `Word=2`), `align: u8` (`Left=0`, `Center=1`, `Right=2`), `overflow: u8` (`Clip=0`, `Ellipsis=1`, `Fade=2`).
+
+**Text limits.** Terminals bound the text a session holds, since
+`AppendContent` adds up even though each message is size-limited. Ultty's
+limits:
+
+- **Per region: 4 MiB, as a ring.** When `AppendContent` takes a region's
+  text (`Text`, `RichText` spans, or `Markdown` source) past 4 MiB, the
+  oldest text is dropped until about 3 MiB remain, cutting after a line
+  break when one is near. Streaming apps such as logs and chat keep working
+  and keep their newest output; an app that needs its whole history must
+  keep it itself or split it across regions.
+- **Per session: 64 MiB.** A `SetContent` or `AppendContent` that would take
+  the text of all the session's regions past 64 MiB is refused: the region
+  keeps its content and the app gets `Error` 400. Deleting regions or
+  replacing their content frees room.
 
 ### 8.3 Rich Text Content
 

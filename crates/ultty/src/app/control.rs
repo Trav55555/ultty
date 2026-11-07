@@ -252,9 +252,10 @@ impl App {
             }
 
             ControlRequest::SendText { text } => {
+                let foreground = self.focused_foreground_pgrp();
                 if let Some(ref mut server) = self.protocol_server {
-                    if server.has_key_subscribers() {
-                        server.broadcast_text_input(text);
+                    if server.has_key_subscribers(foreground) {
+                        server.broadcast_text_input(text, foreground);
                         return ControlResponse::Ok;
                     }
                 }
@@ -271,9 +272,10 @@ impl App {
             }
 
             ControlRequest::SendKey { key, modifiers } => {
+                let foreground = self.focused_foreground_pgrp();
                 if let Some(ref mut server) = self.protocol_server {
-                    if server.has_key_subscribers() {
-                        server.broadcast_key(key, modifiers);
+                    if server.has_key_subscribers(foreground) {
+                        server.broadcast_key(key, modifiers, foreground);
                         return ControlResponse::Ok;
                     }
                 }
