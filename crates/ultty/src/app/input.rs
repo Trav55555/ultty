@@ -844,18 +844,9 @@ impl App {
         if let Some(clipboard) = &mut self.clipboard {
             match clipboard.get_text() {
                 Ok(text) => {
-                    // Check for bracketed paste mode
                     let bracketed = self.terminal().is_some_and(|t| t.modes().bracketed_paste);
-                    if bracketed {
-                        let _ = self.send_input(b"\x1b[200~");
-                    }
-
-                    if let Err(e) = self.send_input(text.as_bytes()) {
+                    if let Err(e) = self.send_input(&paste_payload(&text, bracketed)) {
                         tracing::warn!("Failed to paste: {}", e);
-                    }
-
-                    if bracketed {
-                        let _ = self.send_input(b"\x1b[201~");
                     }
                 }
                 Err(e) => {
@@ -1609,6 +1600,32 @@ impl App {
     }
 }
 
+/// The bytes a paste of `text` sends to the pty.
+///
+/// With bracketed paste on, the text is wrapped in `ESC[200~` / `ESC[201~`.
+/// Every ESC and C1 control (U+0080-U+009F, which includes the 8-bit CSI)
+/// is removed from the text first, so the clipboard can never close the
+/// bracket early and have the rest run as typed input. Without bracketed
+/// paste the program cannot tell a paste from typing, so newlines become
+/// carriage returns, the byte the Enter key sends. Multi-line pastes are not
+/// confirmed; a shell without bracketed paste runs each line as it arrives.
+fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let mut out = Vec::with_capacity(text.len() + 12);
+        out.extend_from_slice(b"\x1b[200~");
+        let mut buf = [0u8; 4];
+        for c in text.chars() {
+            if c != '\x1b' && !('\u{80}'..='\u{9f}').contains(&c) {
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+        out.extend_from_slice(b"\x1b[201~");
+        out
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+    }
+}
+
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-' || c == '.'
 }
@@ -1700,6 +1717,27 @@ mod tests {
         assert!(is_word_char('文'));
         // Cyrillic
         assert!(is_word_char('Д'));
+    }
+
+    #[test]
+    fn bracketed_paste_cannot_end_the_bracket_early() {
+        let payload = paste_payload("x\x1b[201~;touch PWNED\n", true);
+        assert_eq!(payload, b"\x1b[200~x[201~;touch PWNED\n\x1b[201~");
+    }
+
+    #[test]
+    fn bracketed_paste_strips_escape_and_c1_controls() {
+        // ESC[200~, a raw ESC, and the 8-bit CSI (U+009B) followed by 201~.
+        let payload = paste_payload("a\x1b[200~b\x1bc\u{9b}201~d\u{85}é\tz", true);
+        assert_eq!(payload, "\x1b[200~a[200~bc201~dé\tz\x1b[201~".as_bytes());
+    }
+
+    #[test]
+    fn plain_paste_sends_newlines_as_carriage_returns() {
+        assert_eq!(
+            paste_payload("one\ntwo\r\nthree", false),
+            b"one\rtwo\rthree"
+        );
     }
 
     #[test]
