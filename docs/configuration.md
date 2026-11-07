@@ -129,3 +129,14 @@ bell_urgent = true   # mark an unfocused window as wanting attention
 ```
 
 Ultty has no audible bell. The old `bell_sound` key is ignored.
+
+## Cursor
+
+```toml
+[behavior]
+cursor_blink = true   # false keeps the cursor steady
+```
+
+The cursor blinks only while the window has focus and the program has not
+asked for a steady cursor (`DECSCUSR` 2, 4 or 6). With `cursor_blink = false`
+it never blinks, and an idle window does not wake up at all.

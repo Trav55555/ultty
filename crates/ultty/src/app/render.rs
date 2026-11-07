@@ -179,7 +179,7 @@ impl App {
                 None
             },
             protocol_status: protocol_status_rows.as_deref(),
-            cursor_blink_visible: self.cursor_blink_visible,
+            cursor_blink_visible: self.cursor_blink.visible(),
             ime_preedit: cursor_cell
                 .filter(|_| !self.ime_preedit.is_empty())
                 .map(|cell| ImePreedit {
@@ -275,7 +275,7 @@ impl App {
                 None
             },
             protocol_status: protocol_status_rows.as_deref(),
-            cursor_blink_visible: self.cursor_blink_visible,
+            cursor_blink_visible: self.cursor_blink.visible(),
             ime_preedit: cursor_cell
                 .filter(|_| !self.ime_preedit.is_empty())
                 .map(|cell| ImePreedit {

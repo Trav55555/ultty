@@ -21,7 +21,9 @@ impl App {
             }
         }
 
-        deadline = deadline.min(self.last_cursor_blink + super::CURSOR_BLINK_INTERVAL);
+        if let Some(toggle) = self.cursor_blink.next_toggle() {
+            deadline = deadline.min(toggle);
+        }
 
         if let Some(freeze) = self.tab_width_freeze {
             deadline = deadline.min(freeze.until);
@@ -121,6 +123,18 @@ impl App {
         }
     }
 
+    /// Whether the focused pane's cursor should blink: the config allows
+    /// it, the window has focus, and the cursor is shown in a blinking
+    /// style. Anything else draws a steady cursor and runs no blink timer.
+    fn cursor_blinks(&self) -> bool {
+        self.config.behavior.cursor_blink
+            && self.window.has_focus()
+            && self.terminal().is_some_and(|terminal| {
+                let cursor = terminal.buffer().grid().cursor();
+                cursor.visible && cursor.blinking
+            })
+    }
+
     fn sync_update_active(&self) -> bool {
         self.terminal_manager
             .focused_terminal()
@@ -192,9 +206,7 @@ impl App {
         let now = Instant::now();
         self.expire_tab_width_freeze(now);
 
-        if now.duration_since(self.last_cursor_blink) >= super::CURSOR_BLINK_INTERVAL {
-            self.cursor_blink_visible = !self.cursor_blink_visible;
-            self.last_cursor_blink = now;
+        if self.cursor_blink.update(self.cursor_blinks(), now) {
             self.needs_redraw = true;
         }
 

@@ -1,6 +1,7 @@
 //! Terminal application state and main loop.
 
 mod actions;
+mod blink;
 mod control;
 mod control_wait;
 mod input;
@@ -57,9 +58,6 @@ const WINDOW_CORNER_RADIUS: f32 = 10.0;
 
 /// Tolerance for recognizing compositor-tiled half/quarter window sizes.
 const TILED_WINDOW_SIZE_TOLERANCE_PX: u32 = 48;
-
-/// Cursor blink interval (how long cursor stays on/off).
-const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
 /// Minimum spacing between rendered frames.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -157,10 +155,8 @@ pub struct App {
     protocol_status_visible: bool,
     /// Cached list of keybindings for display
     shortcuts_list: Vec<(String, String)>,
-    /// Whether cursor is currently visible in blink cycle
-    cursor_blink_visible: bool,
-    /// Last time cursor blink state changed
-    last_cursor_blink: Instant,
+    /// The focused cursor's blink phase.
+    cursor_blink: blink::CursorBlink,
     /// Auto-dump countdown (frames remaining until dump, 0 = disabled)
     auto_dump_frames: u32,
     /// Native protocol server for TUI apps
@@ -353,8 +349,7 @@ impl App {
             shortcuts_visible: false,
             protocol_status_visible: false,
             shortcuts_list,
-            cursor_blink_visible: true,
-            last_cursor_blink: Instant::now(),
+            cursor_blink: blink::CursorBlink::new(),
             // Check for auto-dump environment variable (number of frames to wait)
             auto_dump_frames: std::env::var("ULTTY_AUTO_DUMP")
                 .ok()

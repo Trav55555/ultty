@@ -58,7 +58,7 @@ impl App {
                 .unwrap_or(false),
             shortcuts_visible: self.shortcuts_visible,
             keybindings: self.shortcuts_list.clone(),
-            cursor_blink_visible: self.cursor_blink_visible,
+            cursor_blink_visible: self.cursor_blink.visible(),
         }
     }
 
