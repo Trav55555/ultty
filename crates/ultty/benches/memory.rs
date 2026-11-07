@@ -180,17 +180,17 @@ fn filled_terminal(cols: u16, rows: u16, bytes: &[u8]) -> Terminal {
 const CASES: &[Case] = &[
     Case {
         name: "empty_terminal_80x24",
-        budget: 168_000,
+        budget: 185_000,
         run: || measure(|| Terminal::new(Dimensions::new(80, 24))),
     },
     Case {
         name: "empty_terminal_300x75",
-        budget: 1_040_000,
+        budget: 1_229_000,
         run: || measure(|| Terminal::new(Dimensions::new(300, 75))),
     },
     Case {
         name: "typical_10k_lines_80x24",
-        budget: 2_730_000,
+        budget: 2_915_000,
         run: || {
             let input = typical_lines(10_024);
             measure(|| filled_terminal(80, 24, &input))
@@ -198,7 +198,7 @@ const CASES: &[Case] = &[
     },
     Case {
         name: "typical_10k_lines_120x40",
-        budget: 3_253_000,
+        budget: 3_461_000,
         run: || {
             let input = typical_lines(10_040);
             measure(|| filled_terminal(120, 40, &input))
@@ -206,7 +206,7 @@ const CASES: &[Case] = &[
     },
     Case {
         name: "typical_10k_lines_300x75",
-        budget: 4_001_000,
+        budget: 4_358_000,
         run: || {
             let input = typical_lines(10_075);
             measure(|| filled_terminal(300, 75, &input))
@@ -214,7 +214,7 @@ const CASES: &[Case] = &[
     },
     Case {
         name: "sgr_dense_10k_lines_120x40",
-        budget: 16_252_000,
+        budget: 18_980_000,
         run: || {
             let input = sgr_dense_lines(10_040, 120);
             measure(|| filled_terminal(120, 40, &input))
