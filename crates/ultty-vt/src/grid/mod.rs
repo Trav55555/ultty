@@ -1087,10 +1087,7 @@ impl Grid {
             self.rows[row_idx].erase(bg);
         }
 
-        // Mark affected rows dirty
-        for row_idx in region.top..=region.bottom {
-            self.mark_dirty(row_idx);
-        }
+        self.mark_rows_dirty(region.top..=region.bottom);
     }
 
     /// Scroll the grid down by n lines (within scroll region).
@@ -1121,10 +1118,7 @@ impl Grid {
             self.rows[row_idx].erase(bg);
         }
 
-        // Mark affected rows dirty
-        for row_idx in region.top..=region.bottom {
-            self.mark_dirty(row_idx);
-        }
+        self.mark_rows_dirty(region.top..=region.bottom);
     }
 
     /// Insert n blank lines at the cursor position (IL).
@@ -1175,10 +1169,7 @@ impl Grid {
             }
         }
 
-        // Mark affected rows dirty
-        for row_idx in cursor_row..=region.bottom {
-            self.mark_dirty(row_idx);
-        }
+        self.mark_rows_dirty(cursor_row..=region.bottom);
     }
 
     /// Delete n lines at the cursor position (DL).
@@ -1229,10 +1220,7 @@ impl Grid {
             }
         }
 
-        // Mark affected rows dirty
-        for row_idx in cursor_row..=region.bottom {
-            self.mark_dirty(row_idx);
-        }
+        self.mark_rows_dirty(cursor_row..=region.bottom);
     }
 
     /// Erase from cursor to end of display.
@@ -1469,6 +1457,17 @@ impl Grid {
         }
         if let Some(d) = self.dirty.get_mut(row as usize) {
             *d = true;
+        }
+    }
+
+    /// Mark `rows` dirty as one change: they all get the same new version.
+    fn mark_rows_dirty(&mut self, rows: std::ops::RangeInclusive<u16>) {
+        self.content_version = self.content_version.wrapping_add(1);
+        let start = *rows.start() as usize;
+        let end = (*rows.end() as usize + 1).min(self.dirty.len());
+        if start < end {
+            self.row_versions[start..end].fill(self.content_version);
+            self.dirty[start..end].fill(true);
         }
     }
 
