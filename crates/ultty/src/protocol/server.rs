@@ -13,8 +13,12 @@
 //! [`ProtocolServer::take_in_band_output`] returns back to the PTY. A tab
 //! has at most one in-band session. It starts only on a well-formed
 //! `ClientHello`, so stray in-band strings (a `cat`ed file, say) cannot
-//! open one, and it ends when the app disconnects, falls silent for 10 s
-//! (`IN_BAND_IDLE_TIMEOUT`), or the PTY's foreground process group changes.
+//! open one. The session is not shown or sent input until the app sends
+//! more after the hello was answered, so bytes that merely contain a hello
+//! cannot take the tab over; it ends if that does not happen within 2 s
+//! (`IN_BAND_CONFIRM_TIMEOUT`), when the app disconnects, falls silent for
+//! 10 s (`IN_BAND_IDLE_TIMEOUT`), or the PTY's foreground process group
+//! changes.
 //!
 //! Anything that can write to the tab can send in-band data, including a
 //! remote host over ssh, so in-band sessions never read the clipboard.
@@ -246,20 +250,22 @@ impl ProtocolServer {
         }
     }
 
-    /// Sessions that belong to the active tab.
+    /// Sessions that belong to the active tab and are shown there: an
+    /// in-band session only once confirmed (see
+    /// [`NativeSession::is_confirmed`]).
     pub fn active_tab_sessions(&self) -> impl Iterator<Item = &NativeSession> {
         let active = self.active_tab;
         self.sessions
             .values()
-            .filter(move |session| Some(session.tab_id()) == active)
+            .filter(move |session| Some(session.tab_id()) == active && session.is_confirmed())
     }
 
-    /// Sessions that belong to the active tab (mutable).
+    /// Sessions that belong to the active tab and are shown there (mutable).
     pub fn active_tab_sessions_mut(&mut self) -> impl Iterator<Item = &mut NativeSession> {
         let active = self.active_tab;
         self.sessions
             .values_mut()
-            .filter(move |session| Some(session.tab_id()) == active)
+            .filter(move |session| Some(session.tab_id()) == active && session.is_confirmed())
     }
 
     fn allocate_key(&mut self) -> usize {
@@ -465,6 +471,12 @@ impl ProtocolServer {
                 return;
             }
         };
+        if !bytes.is_empty() {
+            // Data in a later read than the hello: the app read the answer.
+            if let Some(session) = self.sessions.get_mut(&key) {
+                session.confirm_in_band();
+            }
+        }
         self.feed_session(key, bytes);
     }
 
@@ -1525,6 +1537,86 @@ mod tests {
         assert!(server.has_key_subscribers(foreground));
         server.broadcast_key(key, mods, foreground);
         assert_eq!(key_downs(&socket_replies(&mut client)), 1);
+    }
+
+    /// What a `cat`ed file holding a hello looks like: the hello and more
+    /// frames in one burst, and nothing after.
+    fn stray_hello_burst() -> Vec<u8> {
+        let mut burst = hello_bytes();
+        for msg in [
+            AppMessage::CreateRegion {
+                id: ultty_protocol::RegionId::new(1),
+                parent: ultty_protocol::RegionId::ROOT,
+                insert_index: -1,
+                constraints: ultty_protocol::Constraints::default(),
+                style: ultty_protocol::Style::default(),
+            },
+            AppMessage::Subscribe {
+                id: ultty_protocol::RegionId::ROOT,
+                events: ultty_protocol::EVENT_KEY,
+            },
+            // Draws an error reply.
+            AppMessage::SetContent {
+                id: ultty_protocol::RegionId::new(99),
+                content: ultty_protocol::Content::None,
+            },
+        ] {
+            burst.extend(encode(&msg));
+        }
+        burst
+    }
+
+    #[test]
+    fn unconfirmed_in_band_session_is_not_shown_and_gets_no_keys() {
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
+        server.in_band_input(TAB_A, Some(42), Vec::new, &stray_hello_burst(), false);
+        assert_eq!(server.session_count(), 1);
+
+        // Only the hello answer goes back; the probe needs it.
+        let replies = in_band_output(&mut server, TAB_A);
+        assert!(
+            matches!(
+                replies.as_slice(),
+                [
+                    TerminalMessage::ServerHello { .. },
+                    TerminalMessage::SessionReady { .. }
+                ]
+            ),
+            "{replies:?}"
+        );
+
+        assert_eq!(server.active_tab_sessions().count(), 0, "not drawn");
+        assert!(!server.has_key_subscribers(Some(42)));
+        server.broadcast_key(
+            ultty_protocol::Key::Char('x'),
+            ultty_protocol::Modifiers::NONE,
+            Some(42),
+        );
+        server.broadcast_resize(100, 30);
+        assert!(
+            in_band_output(&mut server, TAB_A).is_empty(),
+            "nothing is typed into the shell for it"
+        );
+    }
+
+    #[test]
+    fn in_band_session_confirmed_by_later_data_is_shown_and_gets_held_replies() {
+        let dir = TempDir::new();
+        let (mut server, _path) = server_with_tab(&dir);
+        server.in_band_input(TAB_A, Some(42), Vec::new, &stray_hello_burst(), false);
+        let _hello_answer = in_band_output(&mut server, TAB_A);
+
+        server.in_band_input(TAB_A, Some(42), Vec::new, &encode(&AppMessage::Pong), false);
+
+        assert_eq!(server.active_tab_sessions().count(), 1);
+        assert!(server.has_key_subscribers(Some(42)));
+        let held = in_band_output(&mut server, TAB_A);
+        assert!(
+            held.iter()
+                .any(|m| matches!(m, TerminalMessage::Error { .. })),
+            "replies held while unconfirmed are sent: {held:?}"
+        );
     }
 
     #[test]

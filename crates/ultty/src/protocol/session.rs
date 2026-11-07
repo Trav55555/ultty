@@ -43,6 +43,14 @@ const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
 /// died, a ping would land in the shell's input as typed text.
 pub const IN_BAND_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long an in-band app has, after the terminal answers its
+/// `ClientHello`, to send its next message (spec §1.3).
+///
+/// Bytes that merely contain a hello, such as a file being displayed,
+/// never answer, so their session ends this soon instead of after
+/// [`IN_BAND_IDLE_TIMEOUT`], and it is never shown or sent keys.
+pub const IN_BAND_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Maximum read buffer size (16 MB). Sessions exceeding this are disconnected.
 const MAX_READ_BUF: usize = 16 * 1024 * 1024;
 const MAX_RECENT_PROTOCOL_ERRORS: usize = 5;
@@ -142,7 +150,21 @@ enum Link {
         pgrp: Option<i32>,
         /// Non-shell processes in that group then. One of them is the app.
         pids: Vec<i32>,
+        /// How far the app has shown it is a live app reading its input.
+        phase: InBandPhase,
     },
+}
+
+/// Progress of an in-band session from hello to a confirmed app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InBandPhase {
+    /// The `ClientHello` is being answered.
+    Hello,
+    /// Answered at the given time; nothing has come back since. The scene is
+    /// not shown, keys are not sent, and replies are held.
+    Unconfirmed(std::time::Instant),
+    /// The app sent more after the answer, so it reads its input.
+    Confirmed,
 }
 
 fn process_exists(pid: i32) -> bool {
@@ -193,6 +215,7 @@ impl NativeSession {
                 outgoing: Vec::new(),
                 pgrp,
                 pids,
+                phase: InBandPhase::Hello,
             },
             session_id,
             tab_id,
@@ -425,6 +448,19 @@ impl NativeSession {
         let idle = now.duration_since(self.last_activity);
 
         if self.is_in_band() {
+            if let Link::InBand {
+                phase: InBandPhase::Unconfirmed(since),
+                ..
+            } = self.link
+            {
+                if now.duration_since(since) > IN_BAND_CONFIRM_TIMEOUT {
+                    info!(
+                        "In-band session {} never answered its hello reply",
+                        self.session_id
+                    );
+                    return Ok(false);
+                }
+            }
             if idle > IN_BAND_IDLE_TIMEOUT {
                 info!(
                     "In-band session {} silent for {}s",
@@ -671,6 +707,50 @@ impl NativeSession {
     /// Whether the app talks in-band on the tab's PTY.
     pub fn is_in_band(&self) -> bool {
         matches!(self.link, Link::InBand { .. })
+    }
+
+    /// Whether the app has shown it is live: always for a socket session; for
+    /// an in-band one, once it sent something after the hello was answered.
+    ///
+    /// Until then the session's scene is not shown, it gets no input, and
+    /// replies other than the hello answer are held back, so a stray hello
+    /// (a `cat`ed file, say) neither blanks the tab nor has input typed
+    /// into the shell on its behalf.
+    pub fn is_confirmed(&self) -> bool {
+        match &self.link {
+            Link::Socket(_) => true,
+            Link::InBand { phase, .. } => *phase == InBandPhase::Confirmed,
+        }
+    }
+
+    /// Note that more in-band data reached an answered session, which
+    /// confirms it (see [`NativeSession::is_confirmed`]).
+    pub fn confirm_in_band(&mut self) {
+        if let Link::InBand { phase, .. } = &mut self.link {
+            if matches!(phase, InBandPhase::Unconfirmed(_)) {
+                *phase = InBandPhase::Confirmed;
+                self.render_dirty = true;
+            }
+        }
+    }
+
+    /// After an in-band hello is answered, send the answer and hold what
+    /// follows until the app confirms.
+    pub(super) fn end_in_band_hello(&mut self) -> io::Result<()> {
+        if !matches!(
+            self.link,
+            Link::InBand {
+                phase: InBandPhase::Hello,
+                ..
+            }
+        ) {
+            return Ok(());
+        }
+        self.flush_writes()?;
+        if let Link::InBand { phase, .. } = &mut self.link {
+            *phase = InBandPhase::Unconfirmed(std::time::Instant::now());
+        }
+        Ok(())
     }
 
     /// For an in-band session, the PTY's foreground process group when it
@@ -1891,6 +1971,30 @@ mod tests {
             std::time::Instant::now() - IN_BAND_IDLE_TIMEOUT - std::time::Duration::from_secs(1);
         assert!(!session.check_keepalive().unwrap());
         assert!(session.take_in_band_output().is_empty());
+    }
+
+    #[test]
+    fn unanswered_in_band_hello_expires_after_the_confirm_timeout() {
+        let mut session = NativeSession::new_in_band(1, TabId::new(0), Some(9), Vec::new());
+        negotiate_all_test_capabilities(&mut session);
+        assert!(!session.is_confirmed());
+        assert!(session.check_keepalive().unwrap());
+
+        let answered = std::time::Instant::now()
+            - IN_BAND_CONFIRM_TIMEOUT
+            - std::time::Duration::from_millis(100);
+        session.link = Link::InBand {
+            outgoing: Vec::new(),
+            pgrp: Some(9),
+            pids: Vec::new(),
+            phase: InBandPhase::Unconfirmed(answered),
+        };
+        // Far inside the idle timeout, but the app never answered.
+        assert!(!session.check_keepalive().unwrap());
+
+        session.confirm_in_band();
+        assert!(session.is_confirmed());
+        assert!(session.check_keepalive().unwrap(), "a confirmed app stays");
     }
 
     #[test]

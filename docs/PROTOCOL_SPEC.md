@@ -91,10 +91,25 @@ reply first, or nothing within a timeout (`ulttui`: 1 s), uses ANSI.
 **Sessions.** A terminal opens an in-band session only when a well-formed
 `ClientHello` starts the data, so stray strings, such as a file being
 displayed, cannot open one. Ultty allows one in-band session per tab, and
-only on a tab with a single pane. A session ends when any of these happen:
+only on a tab with a single pane.
+
+**Confirmation.** A hello alone does not show that a live app is reading
+the terminal's answers: a displayed file or a remote host's output can hold
+one. So the terminal answers `ClientHello` (`ServerHello`, `SessionReady`)
+at once, then treats the session as unconfirmed until in-band data arrives
+in a later read than the hello, after the answer was written. An app must
+send its next message (any message: `ulttui` sends `Subscribe`) within 2 s
+of `SessionReady`, and must not send anything after its hello until it has
+read the answer. While a session is unconfirmed, Ultty does not draw its
+scene, sends it no input, and holds every other reply; on confirmation the
+held replies are sent. Data that arrives in the same read as the hello is
+applied but does not confirm.
+
+A session ends when any of these happen:
 
 - the app sends `Disconnect`;
 - the stream is malformed;
+- it is not confirmed within 2 s of the hello answer;
 - the app has been silent for 10 s;
 - the terminal sees the app is gone: Ultty checks the PTY's foreground
   process group and the processes it held at hello.

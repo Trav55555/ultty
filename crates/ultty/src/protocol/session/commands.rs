@@ -217,7 +217,14 @@ impl NativeSession {
     }
 
     /// Handle ClientHello - send ServerHello and SessionReady.
+    /// Answer `ClientHello`. In-band, the answer goes out at once and what
+    /// follows is held until the app confirms.
     fn handle_client_hello(&mut self, version: u16, requested: u32) -> io::Result<()> {
+        self.answer_client_hello(version, requested)?;
+        self.end_in_band_hello()
+    }
+
+    fn answer_client_hello(&mut self, version: u16, requested: u32) -> io::Result<()> {
         info!(
             "Session {} client hello: version={}, caps=0x{:04x}",
             self.session_id, version, requested
