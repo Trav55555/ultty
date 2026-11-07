@@ -127,12 +127,43 @@ RUNTIME="$(mktemp -d /tmp/ubench.XXXXXX)"
 chmod 700 "$RUNTIME"
 export XDG_RUNTIME_DIR="$RUNTIME"
 unset TMUX
-cleanup() {
+# Every process this run starts inherits UBENCH_RUN, including daemons that
+# D-Bus activates on a private bus (dconf, and any portal or gvfs daemon a
+# toolkit starts despite the opt-outs below), so they can be found and
+# stopped without touching anything else of the user's.
+UBENCH_RUN="${RUNTIME##*/}-$$"
+export UBENCH_RUN
+# Keep GTK from starting the document portal and gvfs: both would mount
+# FUSE file systems inside the private runtime dir, and the portal one
+# exposes the user's real document store there.
+export GTK_USE_PORTAL=0 GDK_DEBUG=no-portals GIO_USE_VFS=local GVFS_DISABLE_FUSE=1
+
+kill_run_processes() {
   local pid
+  for pid in $(pgrep -u "$(id -u)" 2>/dev/null); do
+    [[ "$pid" == "$$" ]] && continue
+    if tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qx "UBENCH_RUN=$UBENCH_RUN"; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
+cleanup() {
+  local pid mnt
   for pid in "${LIVE_PIDS[@]:-}"; do [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true; done
   for pid in "${SESSION_PIDS[@]:-}"; do [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true; done
+  kill_run_processes
   wait 2>/dev/null || true
-  rm -rf "$RUNTIME"
+  # Unmount anything mounted under the runtime dir before removing it, and
+  # never let rm cross into another file system.
+  while read -r _ mnt _; do
+    case "$mnt" in "$RUNTIME"/*) fusermount3 -u "$mnt" 2>/dev/null || fusermount -u "$mnt" 2>/dev/null || true ;; esac
+  done </proc/mounts
+  if grep -q " $RUNTIME/" /proc/mounts; then
+    echo "compare.sh: leaving $RUNTIME in place: something is still mounted under it" >&2
+  else
+    rm -rf --one-file-system "$RUNTIME"
+  fi
 }
 trap cleanup EXIT
 LIVE_PIDS=()
@@ -368,6 +399,15 @@ stop_term() {
     [[ -n "$server" ]] && stop "$server"
   fi
   stop "$TERM_PID"
+  if [[ "$term" == gnome-terminal ]]; then
+    # dbus-run-session can leave its bus and activated services running.
+    local pid
+    for pid in $(pgrep -u "$(id -u)" 2>/dev/null); do
+      if tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qx "UBENCH_TOKEN=$title"; then
+        kill "$pid" 2>/dev/null || true
+      fi
+    done
+  fi
 }
 
 wait_done() {

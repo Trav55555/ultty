@@ -210,14 +210,23 @@ fn run(o: &Options) -> Result<(), String> {
         }
         before = again;
     }
-    tap(&conn, root, keys[0])?;
-    std::thread::sleep(Duration::from_millis(800));
-    let after = grab(&conn, root, search)?;
-    let cell = changed_box(&before, &after, search).ok_or(
-        "no pixels changed after a key press: is ubench-echo running and the window focused?",
+    // A slow terminal may not be reading keys yet: try a few times.
+    let mut found = None;
+    for attempt in 0..4 {
+        tap(&conn, root, keys[attempt % 2])?;
+        std::thread::sleep(Duration::from_millis(800));
+        let after = grab(&conn, root, search)?;
+        if let Some(cell) = changed_box(&before, &after, search) {
+            found = Some((cell, attempt));
+            break;
+        }
+        before = after;
+    }
+    let (cell, last) = found.ok_or(
+        "no pixels changed after four key presses: is ubench-echo running and the window focused?",
     )?;
     let first = grab(&conn, root, cell)?;
-    tap(&conn, root, keys[1])?;
+    tap(&conn, root, keys[(last + 1) % 2])?;
     std::thread::sleep(Duration::from_millis(800));
     if grab(&conn, root, cell)? == first {
         return Err(format!(
@@ -243,8 +252,8 @@ fn run(o: &Options) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(gap));
 
         let baseline = grab(&conn, root, cell)?;
-        // Calibration left keys[1] on screen, so start with keys[0].
-        tap(&conn, root, keys[i % 2])?;
+        // Calibration left keys[(last + 1) % 2] on screen.
+        tap(&conn, root, keys[(last + i) % 2])?;
         let start = Instant::now();
         loop {
             let poll_start = Instant::now();
