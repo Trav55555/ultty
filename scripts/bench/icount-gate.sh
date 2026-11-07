@@ -62,8 +62,11 @@ VALGRIND_VERSION=$(valgrind --version)
 measure() {
   local suite="$1" corpus="$2" fn file
   case "$suite" in
-    vt) fn='*run_vt_pass*' ;;
-    parse) fn='*run_parse_pass*' ;;
+    # Exact names: a wildcard would also match the parser's generic
+    # instantiations over the pass's closures (`...<ultty_bench::run_vt_pass::
+    # {closure#0}>`), and entering one of those toggles collection off again.
+    vt) fn='ultty_bench::run_vt_pass' ;;
+    parse) fn='ultty_bench::run_parse_pass' ;;
   esac
   file="$OUT/callgrind.$suite.$corpus.out"
   valgrind --tool=callgrind --callgrind-out-file="$file" --toggle-collect="$fn" \
