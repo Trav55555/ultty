@@ -967,7 +967,7 @@ fn termcap_value(name: &str) -> Option<&'static str> {
 /// Decode XTGETTCAP's hex-encoded name; `None` unless it is whole bytes of
 /// hex digits forming UTF-8.
 fn decode_hex(hex: &str) -> Option<String> {
-    if hex.is_empty() || hex.len() % 2 != 0 {
+    if hex.is_empty() || !hex.len().is_multiple_of(2) {
         return None;
     }
     let bytes = (0..hex.len())

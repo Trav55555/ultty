@@ -643,7 +643,7 @@ fn utf8_mouse_encodes_large_coordinates_as_utf8() {
 fn sixel_images_span_cells_of_the_reported_size() {
     // An 18 x 36 pixel image: six bands of 18 columns.
     let band = "!18~";
-    let sixel = format!("\x1bPq#0;2;100;0;0#0{}\x1b\\", vec![band; 6].join("-"));
+    let sixel = format!("\x1bPq#0;2;100;0;0#0{}\x1b\\", [band; 6].join("-"));
     let spans = |cell: Option<(u16, u16)>| {
         let mut term = run(20, 10, b"");
         if let Some((w, h)) = cell {

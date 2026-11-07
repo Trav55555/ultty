@@ -159,7 +159,7 @@ impl AnsiParser {
                 // Palette entries (OSC 4): pairs of index and `?` or a colour.
                 "4" => {
                     let items: Vec<&str> = data.split(';').collect();
-                    for pair in items.chunks_exact(2) {
+                    for pair in items.as_chunks::<2>().0 {
                         let Ok(index) = pair[0].parse::<u8>() else {
                             continue;
                         };
@@ -445,7 +445,7 @@ pub(super) fn parse_color_spec(spec: &str) -> Option<[u8; 3]> {
     }
 
     let digits = spec.strip_prefix('#')?;
-    if digits.is_empty() || digits.len() % 3 != 0 || digits.len() > 12 {
+    if digits.is_empty() || !digits.len().is_multiple_of(3) || digits.len() > 12 {
         return None;
     }
     let width = digits.len() / 3;
