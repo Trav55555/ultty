@@ -772,8 +772,10 @@ pub struct BehaviorConfig {
     pub copy_on_select: bool,
     /// Enable visual bell (border flash)
     pub bell_visual: bool,
-    /// Enable audio bell (system sound) - off by default
-    pub bell_sound: bool,
+    /// Mark the window as wanting attention (the taskbar urgency hint) when
+    /// a pane rings the bell while the window is unfocused. Ultty has no
+    /// audible bell.
+    pub bell_urgent: bool,
     /// Whether programs may set the clipboard with OSC 52.
     ///
     /// `"allow"` (the default) lets the focused pane write the clipboard;
@@ -796,7 +798,7 @@ impl Default for BehaviorConfig {
             url_detection: true,
             copy_on_select: true,
             bell_visual: true,
-            bell_sound: false, // Sound off by default
+            bell_urgent: true,
             clipboard_write: ClipboardWrite::Allow,
             close_on_exit: true,
             opacity: 1.0,

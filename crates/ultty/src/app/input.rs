@@ -78,12 +78,16 @@ impl App {
                 // Redraw requests are delivery events, not state changes. Dirty state is
                 // set by input, PTY output, native protocol updates, timers, and resize.
             }
-            WindowEvent::Focused(focused)
-                if self.terminal().is_some_and(|t| t.modes().focus_reporting) =>
-            {
-                // Send focus in/out escape sequence
-                let seq = if focused { b"\x1b[I" } else { b"\x1b[O" };
-                let _ = self.send_input(seq);
+            WindowEvent::Focused(focused) => {
+                if focused {
+                    // Clear a bell's urgency hint; X11 keeps it until cleared.
+                    self.window.request_user_attention(None);
+                }
+                if self.terminal().is_some_and(|t| t.modes().focus_reporting) {
+                    // Send focus in/out escape sequence
+                    let seq = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                    let _ = self.send_input(seq);
+                }
             }
             _ => {}
         }

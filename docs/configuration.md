@@ -40,3 +40,13 @@ on this machine. Link targets come from terminal output, and OSC 8 lets a
 program show one text and link to another, so a `file:` link to a `.desktop`
 file or a link to another registered scheme handler would let a `cat`ed file
 or a remote host start local programs. This list is not configurable.
+
+## Bell
+
+```toml
+[behavior]
+bell_visual = true   # flash the border when the focused pane rings
+bell_urgent = true   # mark an unfocused window as wanting attention
+```
+
+Ultty has no audible bell. The old `bell_sound` key is ignored.
