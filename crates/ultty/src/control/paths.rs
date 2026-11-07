@@ -108,6 +108,21 @@ mod tests {
         assert_eq!(pid_from_socket_name("ultty-ctl-42.token"), None);
     }
 
+    /// Wait until `probe` returns `expected`. A dropped listener can keep
+    /// accepting for a moment: a test running in parallel may fork a child,
+    /// and the child holds copies of every open fd until it execs.
+    fn eventually<T: PartialEq + std::fmt::Debug>(expected: T, mut probe: impl FnMut() -> T) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let got = probe();
+            if got == expected || std::time::Instant::now() > deadline {
+                assert_eq!(got, expected);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn a_window_prefers_its_own_instance_while_it_listens() {
         let dir = tempfile::tempdir().unwrap();
@@ -122,7 +137,7 @@ mod tests {
         // An instance that is gone falls back to the newest.
         assert_eq!(find_instance(dir.path(), Some(300)), Some(newer.clone()));
         drop(own_listener);
-        assert_eq!(find_instance(dir.path(), Some(100)), Some(newer));
+        eventually(Some(newer), || find_instance(dir.path(), Some(100)));
     }
 
     #[test]
@@ -143,7 +158,7 @@ mod tests {
         // A crashed instance leaves its socket file behind; the older one
         // is still found.
         drop(newer_listener);
-        assert_eq!(find_running_instance(dir.path()), Some(older));
+        eventually(Some(older), || find_running_instance(dir.path()));
     }
 
     #[test]
