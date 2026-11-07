@@ -221,8 +221,8 @@ pub enum Action {
     /// Kitty keyboard protocol: push mode with flags (CSI > flags u)
     KittyKeyboardPush(u8),
 
-    /// Kitty keyboard protocol: pop mode (CSI < u)
-    KittyKeyboardPop,
+    /// Kitty keyboard protocol: pop this many entries (CSI < n u, n >= 1)
+    KittyKeyboardPop(u16),
 
     /// Kitty keyboard protocol: query mode (CSI ? u)
     KittyKeyboardQuery,

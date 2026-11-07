@@ -15,6 +15,10 @@ pub const MAX_HYPERLINKS: usize = 4096;
 /// forgets the oldest entry.
 pub const MAX_TITLE_STACK: usize = 10;
 
+/// Entries the Kitty keyboard mode stack keeps per screen; older ones are
+/// dropped.
+pub const KITTY_KEYBOARD_STACK_LIMIT: usize = 8;
+
 /// Largest value a mode 1005 mouse report encodes: xterm stops at 2047,
 /// the last two-byte UTF-8 code point, so coordinates top out at 2015.
 const MAX_UTF8_MOUSE_VALUE: u32 = 2047;
@@ -196,8 +200,12 @@ pub struct Terminal {
     next_hyperlink_id: u32,
     /// Current hyperlink ID (0 = none, applied to new cells)
     current_hyperlink_id: u32,
-    /// Stack of Kitty keyboard mode flags
+    /// Kitty keyboard flags saved by pushes on the active screen; the
+    /// current flags are `modes.kitty_keyboard_flags`.
     kitty_keyboard_stack: Vec<u8>,
+    /// The other screen's current flags and stack: the main and alternate
+    /// screens keep independent keyboard modes (kitty spec).
+    inactive_kitty_keyboard: (u8, Vec<u8>),
     /// Pending column mode resize request (132 or 80 columns, DECCOLM)
     pending_column_resize: Option<u16>,
     /// Dimensions the inactive alternate buffer still has to be resized to.
@@ -259,6 +267,7 @@ impl Terminal {
             next_hyperlink_id: 1, // 0 means no hyperlink
             current_hyperlink_id: 0,
             kitty_keyboard_stack: Vec::new(),
+            inactive_kitty_keyboard: (0, Vec::new()),
             pending_column_resize: None,
             pending_alternate_resize: None,
         }
@@ -326,6 +335,7 @@ impl Terminal {
         if !self.using_alternate {
             self.apply_pending_alternate_resize();
             self.using_alternate = true;
+            self.swap_kitty_keyboard_state();
             self.selection = None;
         }
     }
@@ -335,6 +345,7 @@ impl Terminal {
         if !self.using_alternate {
             self.apply_pending_alternate_resize();
             self.using_alternate = true;
+            self.swap_kitty_keyboard_state();
             self.alternate.grid_mut().clear();
             self.alternate.grid_mut().cursor_mut().position = CursorPosition::origin();
             self.selection = None;
@@ -345,6 +356,7 @@ impl Terminal {
     pub fn leave_alternate_screen(&mut self) {
         if self.using_alternate {
             self.using_alternate = false;
+            self.swap_kitty_keyboard_state();
             self.selection = None;
         }
     }
@@ -702,29 +714,54 @@ impl Terminal {
         &self.hyperlinks
     }
 
-    /// Push Kitty keyboard mode with given flags onto the stack.
+    /// Push the current Kitty keyboard flags and switch to `flags`
+    /// (`CSI > flags u`). The stack keeps the newest
+    /// [`KITTY_KEYBOARD_STACK_LIMIT`] entries.
     pub fn push_kitty_keyboard_mode(&mut self, flags: u8) {
-        self.kitty_keyboard_stack.push(flags);
+        if self.kitty_keyboard_stack.len() == KITTY_KEYBOARD_STACK_LIMIT {
+            self.kitty_keyboard_stack.remove(0);
+        }
+        self.kitty_keyboard_stack
+            .push(self.modes.kitty_keyboard_flags);
         self.modes.kitty_keyboard_flags = flags;
         tracing::debug!("Pushed Kitty keyboard mode: flags={}", flags);
     }
 
-    /// Pop Kitty keyboard mode from the stack.
-    pub fn pop_kitty_keyboard_mode(&mut self) {
-        if self.kitty_keyboard_stack.pop().is_some() {
-            // Restore previous flags or 0 if stack is empty
-            self.modes.kitty_keyboard_flags =
-                self.kitty_keyboard_stack.last().copied().unwrap_or(0);
-            tracing::debug!(
-                "Popped Kitty keyboard mode: flags={}",
-                self.modes.kitty_keyboard_flags
-            );
+    /// Pop `count` entries (`CSI < count u`), restoring the flags saved by
+    /// the matching push. Popping more than was pushed empties the stack
+    /// and turns the protocol off, so a program that set flags without
+    /// pushing still leaves the shell with legacy keys.
+    pub fn pop_kitty_keyboard_modes(&mut self, count: u16) {
+        for _ in 0..count.max(1) {
+            match self.kitty_keyboard_stack.pop() {
+                Some(flags) => self.modes.kitty_keyboard_flags = flags,
+                None => {
+                    self.modes.kitty_keyboard_flags = 0;
+                    break;
+                }
+            }
         }
+        tracing::debug!(
+            "Popped Kitty keyboard mode: flags={}",
+            self.modes.kitty_keyboard_flags
+        );
+    }
+
+    /// Swap the active screen's Kitty keyboard state with the other screen's.
+    fn swap_kitty_keyboard_state(&mut self) {
+        std::mem::swap(
+            &mut self.modes.kitty_keyboard_flags,
+            &mut self.inactive_kitty_keyboard.0,
+        );
+        std::mem::swap(
+            &mut self.kitty_keyboard_stack,
+            &mut self.inactive_kitty_keyboard.1,
+        );
     }
 
     /// Change the current Kitty keyboard flags in place (`CSI = flags ; mode u`):
     /// mode 1 replaces them, 2 sets the given bits, 3 clears them. Other
-    /// modes are ignored. Like a push, the result is the stack top.
+    /// modes are ignored. The stack is left alone.
     pub fn set_kitty_keyboard_mode(&mut self, flags: u8, mode: u8) {
         let current = self.modes.kitty_keyboard_flags;
         let new = match mode {
@@ -733,9 +770,6 @@ impl Terminal {
             3 => current & !flags,
             _ => return,
         };
-        if let Some(top) = self.kitty_keyboard_stack.last_mut() {
-            *top = new;
-        }
         self.modes.kitty_keyboard_flags = new;
         tracing::debug!("Set Kitty keyboard mode: flags={new}");
     }
@@ -821,6 +855,7 @@ impl Terminal {
         self.current_hyperlink_id = 0;
         self.selection = None;
         self.kitty_keyboard_stack.clear();
+        self.inactive_kitty_keyboard = (0, Vec::new());
         self.title_stack.clear();
         self.palette.reset(None);
         self.pending_column_resize = None;

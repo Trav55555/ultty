@@ -397,8 +397,8 @@ impl<'a> TerminalHandler<'a> {
             Action::KittyKeyboardPush(flags) => {
                 self.terminal.push_kitty_keyboard_mode(flags);
             }
-            Action::KittyKeyboardPop => {
-                self.terminal.pop_kitty_keyboard_mode();
+            Action::KittyKeyboardPop(count) => {
+                self.terminal.pop_kitty_keyboard_modes(count);
             }
             Action::KittyKeyboardSet { flags, mode } => {
                 self.terminal.set_kitty_keyboard_mode(flags, mode);

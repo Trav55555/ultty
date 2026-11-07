@@ -902,6 +902,42 @@ fn kitty_keyboard_set_changes_the_current_flags() {
     assert_eq!(flags(b"\x1b[=1u\x1b[=4;9u"), 1);
 }
 
+#[test]
+fn kitty_keyboard_pops_restore_what_was_pushed() {
+    let flags = |bytes: &[u8]| run(10, 1, bytes).modes().kitty_keyboard_flags;
+    // Set without a push, then a pop: the shell must get legacy keys back.
+    assert_eq!(flags(b"\x1b[=1;1u\x1b[<u"), 0);
+    // A pop restores the flags from before the matching push.
+    assert_eq!(flags(b"\x1b[=2u\x1b[>1u\x1b[<u"), 2);
+    // CSI < n u pops n entries; popping past the bottom turns it off.
+    assert_eq!(flags(b"\x1b[>1u\x1b[>2u\x1b[>4u\x1b[<2u"), 1);
+    assert_eq!(flags(b"\x1b[>1u\x1b[>2u\x1b[<5u"), 0);
+}
+
+#[test]
+fn kitty_keyboard_stack_is_bounded() {
+    let mut bytes = Vec::new();
+    for flags in 1..=20u8 {
+        bytes.extend_from_slice(format!("\x1b[>{flags}u").as_bytes());
+    }
+    // Only the newest eight saved entries remain: popping them all lands on
+    // the flags pushed twelfth, not on the original zero.
+    bytes.extend_from_slice(b"\x1b[<8u");
+    assert_eq!(run(10, 1, &bytes).modes().kitty_keyboard_flags, 12);
+}
+
+#[test]
+fn main_and_alternate_screens_keep_their_own_kitty_keyboard_modes() {
+    let mut term = run(10, 2, b"\x1b[>1u");
+    feed(&mut term, b"\x1b[?1049h");
+    assert_eq!(term.modes().kitty_keyboard_flags, 0);
+    feed(&mut term, b"\x1b[>3u");
+    feed(&mut term, b"\x1b[?1049l");
+    assert_eq!(term.modes().kitty_keyboard_flags, 1);
+    feed(&mut term, b"\x1b[?1049h");
+    assert_eq!(term.modes().kitty_keyboard_flags, 3);
+}
+
 // ----------------------------------------------------------------------
 // UTF-8 decoding
 // ----------------------------------------------------------------------

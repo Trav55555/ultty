@@ -309,7 +309,7 @@ fn kitty_keyboard_protocol() {
     assert_eq!(parse(b"\x1b[>3u"), vec![Action::KittyKeyboardPush(3)]);
 
     // CSI < u - pop keyboard mode
-    assert_eq!(parse(b"\x1b[<u"), vec![Action::KittyKeyboardPop]);
+    assert_eq!(parse(b"\x1b[<u"), vec![Action::KittyKeyboardPop(1)]);
 
     // CSI ? u - query keyboard mode
     assert_eq!(parse(b"\x1b[?u"), vec![Action::KittyKeyboardQuery]);

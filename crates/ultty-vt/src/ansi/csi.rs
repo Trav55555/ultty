@@ -236,7 +236,7 @@ impl AnsiParser {
             (Some(b'>'), None, b'u') => {
                 callback(Action::KittyKeyboardPush(byte_param(first_or_zero)))
             }
-            (Some(b'<'), None, b'u') => callback(Action::KittyKeyboardPop),
+            (Some(b'<'), None, b'u') => callback(Action::KittyKeyboardPop(p1.max(1))),
             (Some(b'='), None, b'u') => {
                 let mode = self.params.get(1).copied().filter(|&m| m != 0).unwrap_or(1);
                 callback(Action::KittyKeyboardSet {
@@ -953,7 +953,7 @@ mod tests {
 
     #[test]
     fn kitty_keyboard_pop() {
-        assert_eq!(parse(b"\x1b[<u"), vec![Action::KittyKeyboardPop]);
+        assert_eq!(parse(b"\x1b[<u"), vec![Action::KittyKeyboardPop(1)]);
     }
 
     #[test]
@@ -1098,7 +1098,7 @@ mod tests {
         assert_eq!(parse(b"\x1b[?u"), vec![Action::KittyKeyboardQuery]);
         assert_eq!(parse(b"\x1b[>5u"), vec![Action::KittyKeyboardPush(5)]);
         assert_eq!(parse(b"\x1b[>u"), vec![Action::KittyKeyboardPush(0)]);
-        assert_eq!(parse(b"\x1b[<u"), vec![Action::KittyKeyboardPop]);
+        assert_eq!(parse(b"\x1b[<u"), vec![Action::KittyKeyboardPop(1)]);
         assert_eq!(
             parse(b"\x1b[=1;1u"),
             vec![Action::KittyKeyboardSet { flags: 1, mode: 1 }]
