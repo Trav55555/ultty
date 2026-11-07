@@ -70,7 +70,7 @@ impl Default for Rgba {
 /// Terminal color scheme.
 ///
 /// Maps terminal colors to RGB values for rendering.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ColorScheme {
     /// 16 named colors (0-15)
     pub named: [Rgba; 16],
@@ -184,6 +184,31 @@ impl ColorScheme {
         })
     }
 
+    /// The scheme a screen is drawn with. While the screen is in reverse
+    /// video (DECSCNM, mode 5) the default foreground and background trade
+    /// places, which is what makes `tput flash` and vim's visual bell visible.
+    pub fn for_screen(&self, reverse_video: bool) -> Cow<'_, ColorScheme> {
+        if !reverse_video {
+            return Cow::Borrowed(self);
+        }
+        let mut reversed = self.clone();
+        std::mem::swap(&mut reversed.foreground, &mut reversed.background);
+        Cow::Owned(reversed)
+    }
+
+    /// The scheme a terminal is drawn with: its OSC 4 palette changes, then
+    /// reverse video.
+    pub fn for_terminal(
+        &self,
+        palette: &crate::grid::Palette,
+        reverse_video: bool,
+    ) -> Cow<'_, ColorScheme> {
+        match self.for_palette(palette) {
+            Cow::Borrowed(scheme) => scheme.for_screen(reverse_video),
+            Cow::Owned(scheme) => Cow::Owned(scheme.for_screen(reverse_video).into_owned()),
+        }
+    }
+
     /// Resolve a terminal color to RGBA.
     pub fn resolve(&self, color: crate::grid::Color, is_fg: bool) -> Rgba {
         match color {
@@ -273,6 +298,21 @@ mod tests {
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < EPS
+    }
+
+    #[test]
+    fn reverse_video_swaps_only_the_default_colors() {
+        let scheme = ColorScheme::dark();
+        assert_eq!(*scheme.for_screen(false), scheme);
+
+        let reversed = scheme.for_screen(true);
+        assert_eq!(reversed.resolve(Color::Default, true), scheme.background);
+        assert_eq!(reversed.resolve(Color::Default, false), scheme.foreground);
+        assert_eq!(
+            reversed.resolve(Color::RED, true),
+            scheme.resolve(Color::RED, true)
+        );
+        assert_eq!(reversed.cursor, scheme.cursor);
     }
 
     #[test]
@@ -399,6 +439,27 @@ mod tests {
         let scheme = ColorScheme::dark();
         let c = scheme.resolve(Color::Named(1), true);
         assert_eq!(c, scheme.named[1]);
+    }
+
+    #[test]
+    fn a_terminal_scheme_combines_its_palette_and_reverse_video() {
+        let scheme = ColorScheme::dark();
+        let mut palette = crate::grid::Palette::default();
+        assert!(matches!(
+            scheme.for_terminal(&palette, false),
+            Cow::Borrowed(_)
+        ));
+
+        palette.set(1, [10, 20, 30]);
+        let both = scheme.for_terminal(&palette, true);
+        assert_eq!(
+            both.resolve(Color::Indexed(1), true),
+            Rgba::from_u8(10, 20, 30)
+        );
+        assert_eq!(both.resolve(Color::Default, false), scheme.foreground);
+        // The row cache keys on the scheme, so a palette change must make
+        // the scheme compare unequal.
+        assert_ne!(*scheme.for_terminal(&palette, false), scheme);
     }
 
     #[test]

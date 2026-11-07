@@ -222,7 +222,9 @@ impl Renderer {
                 encoder,
                 view,
                 terminal,
-                &self.color_scheme.for_palette(terminal.palette()),
+                &self
+                    .color_scheme
+                    .for_terminal(terminal.palette(), terminal.modes().reverse_video),
                 self.cell_width,
                 self.cell_height,
                 self.pane_offset_x,
@@ -452,7 +454,13 @@ impl Renderer {
     ) -> (Vec<Vertex>, Vec<u32>) {
         let buffer = terminal.buffer();
         let dims = terminal.dimensions();
-        let scheme = self.color_scheme.for_palette(terminal.palette());
+        let scheme = self
+            .color_scheme
+            .for_terminal(terminal.palette(), terminal.modes().reverse_video);
+        // Cells in this color need no quad: the frame was cleared to it.
+        // Under reverse video the screen's default background differs from
+        // it, so those cells are drawn too.
+        let cleared = self.color_scheme.background;
         let selection_bg = scheme.selection_background();
         let selection = terminal.selection();
         // Pre-allocate based on terminal size: ~1 bg run per row on average = rows quads
@@ -491,7 +499,7 @@ impl Renderer {
 
                 if should_flush {
                     if let Some(color) = run_color {
-                        if color != scheme.background {
+                        if color != cleared {
                             self.emit_quad_with_offset(
                                 &mut vertices,
                                 &mut indices,
@@ -509,7 +517,7 @@ impl Renderer {
             }
 
             if let Some(color) = run_color {
-                if color != scheme.background {
+                if color != cleared {
                     self.emit_quad_with_offset(
                         &mut vertices,
                         &mut indices,

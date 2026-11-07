@@ -1,11 +1,13 @@
 //! Text rendering with cosmic-text and glyph atlas.
 
 use super::atlas::GlyphAtlas;
+use super::decoration::{strikethrough_quad, underline_quads, DecorationMetrics, Quad};
 use super::pipeline::TextPipeline;
 use super::powerline::is_powerline_triangle;
+use super::text_cache::{GridTextCache, GridTextKey};
 use super::{ColorScheme, Rgba, Vertex};
 use crate::config::FontConfig;
-use crate::grid::{Cell, CellFlags, CursorShape, Terminal};
+use crate::grid::{Cell, CellFlags, Color, CursorShape, Row, Terminal, UnderlineStyle};
 use cosmic_text::{
     Attrs, Buffer, CacheKey, CacheKeyFlags, Family, FontSystem, Metrics, Shaping, Style, Weight,
 };
@@ -31,25 +33,14 @@ struct ShapedGlyph {
 struct CellStyle {
     bold: bool,
     italic: bool,
-    underline: bool,
-    double_underline: bool,
-    strikethrough: bool,
 }
 
 impl CellStyle {
     fn from_flags(flags: CellFlags) -> Self {
-        let double_underline = flags.contains(CellFlags::DOUBLE_UNDERLINE);
         Self {
             bold: flags.contains(CellFlags::BOLD),
             italic: flags.contains(CellFlags::ITALIC),
-            underline: double_underline || flags.contains(CellFlags::UNDERLINE),
-            double_underline,
-            strikethrough: flags.contains(CellFlags::STRIKETHROUGH),
         }
-    }
-
-    fn has_decorations(self) -> bool {
-        self.underline || self.strikethrough
     }
 }
 
@@ -147,52 +138,22 @@ fn brighten(color: Rgba) -> Rgba {
     )
 }
 
-/// Vertical metrics, in pixels from the cell top, used to place decorations.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct DecorationMetrics {
-    baseline: f32,
-    x_height: f32,
-    thickness: f32,
+/// Color of a cell's underline: its underline color (SGR 58) when set,
+/// otherwise `text_color`, the color its glyph is drawn in.
+fn underline_color(cell: &Cell, text_color: Rgba, color_scheme: &ColorScheme) -> Rgba {
+    match cell.underline_color() {
+        Color::Default => text_color,
+        color => color_scheme.resolve(color, true),
+    }
 }
 
-/// `(x, y, width, height)` in pixels.
-type Rect = (f32, f32, f32, f32);
-
-/// Decoration quads for one cell: underline (single or double) at one pixel
-/// below the baseline and strikethrough through the middle of the x-height.
-/// Lines are kept inside the cell so they never bleed into the next row.
-fn decoration_rects(
-    style: CellStyle,
-    cell: Rect,
-    metrics: DecorationMetrics,
-) -> ([Rect; 3], usize) {
-    let (cell_x, cell_y, width, height) = cell;
-    let t = metrics.thickness;
-    let lowest = cell_y + height - t;
-    let mut rects = [(0.0, 0.0, 0.0, 0.0); 3];
-    let mut count = 0;
-
-    if style.underline {
-        let first = (cell_y + metrics.baseline + 1.0).round().min(lowest);
-        if style.double_underline {
-            let second = (first + 2.0 * t).min(lowest);
-            let first = second - 2.0 * t;
-            rects[count] = (cell_x, first, width, t);
-            rects[count + 1] = (cell_x, second, width, t);
-            count += 2;
-        } else {
-            rects[count] = (cell_x, first, width, t);
-            count += 1;
-        }
+/// The quad index list for `quads` quads drawn from consecutive groups of
+/// four vertices, extended in place (indices never change, only grow).
+fn extend_quad_indices(indices: &mut Vec<u32>, quads: usize) {
+    for quad in indices.len() / 6..quads {
+        let base = (quad * 4) as u32;
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
-
-    if style.strikethrough {
-        let y = (cell_y + metrics.baseline - metrics.x_height * 0.5 - t * 0.5).round();
-        rects[count] = (cell_x, y.clamp(cell_y, lowest), width, t);
-        count += 1;
-    }
-
-    (rects, count)
 }
 
 /// Cell the block cursor is drawn over, if it is drawn this frame.
@@ -333,6 +294,14 @@ pub struct TextRenderer {
     /// last write.
     grid_buffers: Vec<GridBuffers>,
     grid_buffers_used: usize,
+    /// Cached row vertices per grid draw of a frame (one per pane), in draw
+    /// order; see [`GridTextCache`].
+    grid_caches: Vec<GridTextCache>,
+    grid_draws: usize,
+    /// This draw's vertices, gathered from the cached rows, and the quad
+    /// index list shared by every draw (all grid geometry is quads).
+    frame_vertices: Vec<Vertex>,
+    quad_indices: Vec<u32>,
 }
 
 /// One reusable vertex + index buffer pair.
@@ -419,6 +388,10 @@ impl TextRenderer {
             queue,
             grid_buffers: Vec::new(),
             grid_buffers_used: 0,
+            grid_caches: Vec::new(),
+            grid_draws: 0,
+            frame_vertices: Vec::new(),
+            quad_indices: Vec::new(),
         };
         renderer.decoration = renderer.measure_decoration_metrics(baseline);
         Ok(renderer)
@@ -630,6 +603,9 @@ impl TextRenderer {
     pub fn begin_frame(&mut self) {
         self.atlas.begin_frame();
         self.grid_buffers_used = 0;
+        // Drop the caches of panes that are gone.
+        self.grid_caches.truncate(self.grid_draws.max(1));
+        self.grid_draws = 0;
     }
 
     /// Upload this draw's vertices and indices into the next pooled slot,
@@ -700,6 +676,7 @@ impl TextRenderer {
     /// Enable or disable ligatures.
     pub fn set_ligatures(&mut self, enabled: bool) {
         self.ligatures = enabled;
+        self.grid_caches.iter_mut().for_each(GridTextCache::clear);
     }
 
     /// Check if ligatures are enabled.
@@ -732,6 +709,7 @@ impl TextRenderer {
         self.atlas.clear();
         self.shaping_cache.clear();
         self.run_cache.iter_mut().for_each(HashMap::clear);
+        self.grid_caches.iter_mut().for_each(GridTextCache::clear);
         self.decoration = self.measure_decoration_metrics(baseline);
     }
 
@@ -916,7 +894,7 @@ impl TextRenderer {
         cursor_blink_visible: bool,
         uniform_bind_group: &wgpu::BindGroup,
     ) {
-        let (vertices, indices) = self.build_text_vertices_with_offset(
+        self.build_text_vertices_with_offset(
             terminal,
             color_scheme,
             cell_width,
@@ -926,13 +904,18 @@ impl TextRenderer {
             cursor_blink_visible,
         );
 
-        if vertices.is_empty() {
+        if self.frame_vertices.is_empty() {
             return;
         }
 
-        let slot = self.upload_grid(&vertices, &indices);
+        let vertices = std::mem::take(&mut self.frame_vertices);
+        let indices = std::mem::take(&mut self.quad_indices);
+        let index_count = vertices.len() / 4 * 6;
+        let slot = self.upload_grid(&vertices, &indices[..index_count]);
         let vertex_bytes = std::mem::size_of_val(vertices.as_slice()) as u64;
-        let index_bytes = std::mem::size_of_val(indices.as_slice()) as u64;
+        let index_bytes = (index_count * std::mem::size_of::<u32>()) as u64;
+        self.frame_vertices = vertices;
+        self.quad_indices = indices;
         let buffers = &self.grid_buffers[slot];
 
         // Render pass for text
@@ -962,10 +945,14 @@ impl TextRenderer {
                 buffers.index.slice(..index_bytes),
                 wgpu::IndexFormat::Uint32,
             );
-            render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+            render_pass.draw_indexed(0..index_count as u32, 0, 0..1);
         }
     }
 
+    /// Gather this draw's grid vertices into `frame_vertices` (and make
+    /// `quad_indices` long enough for them), rebuilding only the rows whose
+    /// content, cursor, or drawing parameters changed since the same draw
+    /// in the previous frame.
     #[allow(clippy::too_many_arguments)]
     fn build_text_vertices_with_offset(
         &mut self,
@@ -976,183 +963,259 @@ impl TextRenderer {
         x_offset: f32,
         y_offset: f32,
         cursor_blink_visible: bool,
-    ) -> (Vec<Vertex>, Vec<u32>) {
+    ) {
+        let draw = self.grid_draws;
+        self.grid_draws += 1;
+        if self.grid_caches.len() <= draw {
+            self.grid_caches
+                .resize_with(draw + 1, GridTextCache::default);
+        }
+        let mut cache = std::mem::take(&mut self.grid_caches[draw]);
+
         let term_buffer = terminal.buffer();
         let dims = terminal.dimensions();
-        // Estimate ~half of cells have visible glyphs
-        let est_glyphs = (dims.rows as usize * dims.cols as usize) / 2;
-        let mut vertices = Vec::with_capacity(est_glyphs * 4);
-        let mut indices = Vec::with_capacity(est_glyphs * 6);
+        cache.begin(
+            GridTextKey {
+                scheme: color_scheme.clone(),
+                cell_size: (cell_width, cell_height),
+                origin: (x_offset, y_offset),
+                atlas_epoch: self.atlas.epoch(),
+                ligatures: self.ligatures,
+            },
+            dims.rows,
+        );
+        let block_cursor = block_cursor_cell(terminal, cursor_blink_visible);
+        let mut buffers: Option<(Buffer, Buffer)> = None;
 
+        for row_idx in 0..dims.rows {
+            let Some(row) = term_buffer.visible_row(row_idx) else {
+                cache.store_empty(row_idx);
+                continue;
+            };
+            let cursor_col = block_cursor
+                .filter(|&(_, cursor_row)| cursor_row == row_idx)
+                .map(|(col, _)| col);
+            if cache.is_current(row_idx, &row, cursor_col) {
+                continue;
+            }
+            let (buffer, run_buffer) = buffers
+                .get_or_insert_with(|| self.shaping_buffers(cell_width, cell_height, dims.cols));
+            let mut vertices = cache.take_vertices(row_idx);
+            self.build_row_vertices(
+                &mut vertices,
+                buffer,
+                run_buffer,
+                &row,
+                row_idx,
+                cursor_col,
+                color_scheme,
+                (cell_width, cell_height),
+                (x_offset, y_offset),
+                dims.cols,
+            );
+            debug_assert_eq!(vertices.len() % 4, 0, "grid geometry is quads");
+            cache.store(row_idx, &row, cursor_col, vertices);
+        }
+
+        self.frame_vertices.clear();
+        for row in cache.vertices() {
+            self.frame_vertices.extend_from_slice(row);
+        }
+        extend_quad_indices(&mut self.quad_indices, self.frame_vertices.len() / 4);
+        self.grid_caches[draw] = cache;
+    }
+
+    /// Scratch buffers for shaping single cells and ligature runs (which
+    /// span up to a whole row, so that buffer must not wrap).
+    fn shaping_buffers(
+        &mut self,
+        cell_width: f32,
+        cell_height: f32,
+        cols: u16,
+    ) -> (Buffer, Buffer) {
         let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
         buffer.set_size(Some(cell_width * 4.0), Some(cell_height * 2.0));
-        let block_cursor = block_cursor_cell(terminal, cursor_blink_visible);
-        let solid_uv = self.atlas.solid_uv();
-        // Ligature runs span up to a whole row; this buffer must not wrap.
         let mut run_buffer = Buffer::new(&mut self.font_system, self.metrics);
         run_buffer.set_wrap(cosmic_text::Wrap::None);
         run_buffer.set_size(
-            Some(cell_width * (f32::from(dims.cols) + 1.0)),
+            Some(cell_width * (f32::from(cols) + 1.0)),
             Some(cell_height * 2.0),
         );
+        (buffer, run_buffer)
+    }
 
-        for row_idx in 0..dims.rows {
-            let row = match term_buffer.visible_row(row_idx) {
-                Some(r) => r,
+    /// Append the glyph and decoration quads of screen row `row_idx`.
+    #[allow(clippy::too_many_arguments)]
+    fn build_row_vertices(
+        &mut self,
+        vertices: &mut Vec<Vertex>,
+        buffer: &mut Buffer,
+        run_buffer: &mut Buffer,
+        row: &Row,
+        row_idx: u16,
+        cursor_col: Option<u16>,
+        color_scheme: &ColorScheme,
+        (cell_width, cell_height): (f32, f32),
+        (x_offset, y_offset): (f32, f32),
+        cols: u16,
+    ) {
+        // Glyph quads index themselves; the draw uses the shared quad
+        // index list instead.
+        let mut indices = Vec::new();
+        let block_cursor = cursor_col.map(|col| (col, row_idx));
+        let solid_uv = self.atlas.solid_uv();
+        let mut quads: Vec<Quad> = Vec::new();
+        // Cells before this column had their glyphs drawn by a run.
+        let mut run_drawn_until = 0u16;
+
+        for col_idx in 0..cols {
+            let cell = match row.get(col_idx) {
+                Some(c) => c,
                 None => continue,
             };
-            // Cells before this column had their glyphs drawn by a run.
-            let mut run_drawn_until = 0u16;
 
-            for col_idx in 0..dims.cols {
-                let cell = match row.get(col_idx) {
-                    Some(c) => c,
-                    None => continue,
-                };
+            if cell.has_flag(CellFlags::HIDDEN) {
+                continue;
+            }
 
-                if cell.has_flag(CellFlags::HIDDEN) {
-                    continue;
+            let style = CellStyle::from_flags(cell.flags());
+            let under_block_cursor = block_cursor == Some((col_idx, row_idx));
+            let base_color = if under_block_cursor {
+                cursor_glyph_color(cell, color_scheme)
+            } else {
+                cell_foreground(cell, color_scheme)
+            };
+
+            // Decorations apply to blank cells and wide-char spacers too,
+            // so an underlined run stays continuous.
+            let underline = cell.underline_style();
+            let strikethrough = cell.has_flag(CellFlags::STRIKETHROUGH);
+            if underline != UnderlineStyle::None || strikethrough {
+                let cell_rect = (
+                    col_idx as f32 * cell_width + x_offset,
+                    row_idx as f32 * cell_height + y_offset,
+                    cell_width,
+                    cell_height,
+                );
+                quads.clear();
+                underline_quads(underline, cell_rect, self.decoration, &mut quads);
+                let line_color = underline_color(cell, base_color, color_scheme);
+                for quad in &quads {
+                    Self::emit_solid_quad(vertices, &mut indices, quad, line_color, solid_uv);
                 }
-
-                let style = CellStyle::from_flags(cell.flags());
-                let under_block_cursor = block_cursor == Some((col_idx, row_idx));
-                let base_color = if under_block_cursor {
-                    cursor_glyph_color(cell, color_scheme)
-                } else {
-                    cell_foreground(cell, color_scheme)
-                };
-
-                // Decorations apply to blank cells and wide-char spacers too,
-                // so an underlined run stays continuous.
-                if style.has_decorations() {
-                    let cell_rect = (
-                        col_idx as f32 * cell_width + x_offset,
-                        row_idx as f32 * cell_height + y_offset,
-                        cell_width,
-                        cell_height,
-                    );
-                    let (rects, count) = decoration_rects(style, cell_rect, self.decoration);
-                    for rect in &rects[..count] {
-                        Self::emit_solid_quad(
-                            &mut vertices,
-                            &mut indices,
-                            *rect,
-                            base_color,
-                            solid_uv,
-                        );
-                    }
-                }
-
-                let ch = cell.char();
-
-                if ch == ' ' || cell.has_flag(CellFlags::WIDE_CHAR_SPACER) {
-                    continue;
-                }
-
-                // Skip cell-filling symbols rendered procedurally in the background pass.
-                if is_procedural_cell_symbol(ch) {
-                    continue;
-                }
-
-                if col_idx < run_drawn_until {
-                    continue;
-                }
-
-                // With ligatures on, shape a run of ASCII cells together so
-                // the font can join them (`=>`, `!=`). Each glyph is drawn
-                // at, and in the color of, the cell its cluster starts at.
-                if self.ligatures {
-                    let mut end = ligature_run_end(&row, col_idx, dims.cols);
-                    // The block cursor's cell is drawn on its own, in the
-                    // inverted color, so a ligature never straddles it.
-                    if let Some((cursor_col, cursor_row)) = block_cursor {
-                        // A run before the cursor stops at it; a cursor at the
-                        // run's start leaves it empty, so that cell takes the
-                        // per-cell path and the next run starts after it.
-                        if cursor_row == row_idx && (col_idx..end).contains(&cursor_col) {
-                            end = cursor_col;
-                        }
-                    }
-                    if end - col_idx >= 2 {
-                        self.run_text.clear();
-                        self.run_text.extend(
-                            (col_idx..end).filter_map(|col| row.get(col).map(|cell| cell.char())),
-                        );
-                        if could_ligate(&self.run_text) {
-                            self.load_run_glyphs(&mut run_buffer, style);
-                            let glyphs = std::mem::take(&mut self.run_glyphs);
-                            for &(offset, shaped) in &glyphs {
-                                let col = col_idx + offset;
-                                let Some(glyph_cell) = row.get(col) else {
-                                    continue;
-                                };
-                                let under_cursor = block_cursor == Some((col, row_idx));
-                                let color = if under_cursor {
-                                    cursor_glyph_color(glyph_cell, color_scheme)
-                                } else {
-                                    cell_foreground(glyph_cell, color_scheme)
-                                };
-                                self.push_glyph(
-                                    &mut vertices,
-                                    &mut indices,
-                                    shaped,
-                                    (col, row_idx),
-                                    (cell_width, cell_height),
-                                    (x_offset, y_offset),
-                                    color,
-                                    under_cursor,
-                                );
-                            }
-                            self.run_glyphs = glyphs;
-                            run_drawn_until = end;
-                            continue;
-                        }
-                    }
-                }
-
-                // Multi-codepoint graphemes (combining marks, ZWJ emoji,
-                // flags) live on the row itself, so history rows render them
-                // too. They are always shaped with full shaping so the font's
-                // composition rules apply, and every resulting glyph is drawn.
-                let cluster_glyphs: Vec<ShapedGlyph>;
-                let single_glyph: Option<ShapedGlyph>;
-                let glyphs: &[ShapedGlyph] = if let Some(extra) = row.grapheme_extra(col_idx) {
-                    let mut text = String::with_capacity(4 * (1 + extra.len()));
-                    text.push(ch);
-                    text.extend(extra);
-                    cluster_glyphs = self.shape_text(&mut buffer, &text, style, Shaping::Advanced);
-                    &cluster_glyphs
-                } else {
-                    let cache_key_lookup = shaping_cache_key(ch, self.ligatures, style);
-                    single_glyph = match self.shaping_cache.get(&cache_key_lookup) {
-                        Some(&cached) => Some(cached),
-                        None => {
-                            let shaped = self.shape_cell(&mut buffer, &ch.to_string(), style);
-                            if let Some(shaped) = shaped {
-                                self.shaping_cache.insert(cache_key_lookup, shaped);
-                            }
-                            shaped
-                        }
-                    };
-                    single_glyph.as_slice()
-                };
-
-                for &shaped in glyphs {
-                    self.push_glyph(
-                        &mut vertices,
-                        &mut indices,
-                        shaped,
-                        (col_idx, row_idx),
-                        (cell_width, cell_height),
-                        (x_offset, y_offset),
-                        base_color,
-                        under_block_cursor,
-                    );
+                if strikethrough {
+                    let quad = strikethrough_quad(cell_rect, self.decoration);
+                    Self::emit_solid_quad(vertices, &mut indices, &quad, base_color, solid_uv);
                 }
             }
-        }
 
-        (vertices, indices)
+            let ch = cell.char();
+
+            if ch == ' ' || cell.has_flag(CellFlags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+
+            // Skip cell-filling symbols rendered procedurally in the background pass.
+            if is_procedural_cell_symbol(ch) {
+                continue;
+            }
+
+            if col_idx < run_drawn_until {
+                continue;
+            }
+
+            // With ligatures on, shape a run of ASCII cells together so
+            // the font can join them (`=>`, `!=`). Each glyph is drawn
+            // at, and in the color of, the cell its cluster starts at.
+            if self.ligatures {
+                let mut end = ligature_run_end(row, col_idx, cols);
+                // The block cursor's cell is drawn on its own, in the
+                // inverted color, so a ligature never straddles it.
+                if let Some(cursor_col) = cursor_col {
+                    // A run before the cursor stops at it; a cursor at the
+                    // run's start leaves it empty, so that cell takes the
+                    // per-cell path and the next run starts after it.
+                    if (col_idx..end).contains(&cursor_col) {
+                        end = cursor_col;
+                    }
+                }
+                if end - col_idx >= 2 {
+                    self.run_text.clear();
+                    self.run_text.extend(
+                        (col_idx..end).filter_map(|col| row.get(col).map(|cell| cell.char())),
+                    );
+                    if could_ligate(&self.run_text) {
+                        self.load_run_glyphs(run_buffer, style);
+                        let glyphs = std::mem::take(&mut self.run_glyphs);
+                        for &(offset, shaped) in &glyphs {
+                            let col = col_idx + offset;
+                            let Some(glyph_cell) = row.get(col) else {
+                                continue;
+                            };
+                            let under_cursor = block_cursor == Some((col, row_idx));
+                            let color = if under_cursor {
+                                cursor_glyph_color(glyph_cell, color_scheme)
+                            } else {
+                                cell_foreground(glyph_cell, color_scheme)
+                            };
+                            self.push_glyph(
+                                vertices,
+                                &mut indices,
+                                shaped,
+                                (col, row_idx),
+                                (cell_width, cell_height),
+                                (x_offset, y_offset),
+                                color,
+                                under_cursor,
+                            );
+                        }
+                        self.run_glyphs = glyphs;
+                        run_drawn_until = end;
+                        continue;
+                    }
+                }
+            }
+
+            // Multi-codepoint graphemes (combining marks, ZWJ emoji,
+            // flags) live on the row itself, so history rows render them
+            // too. They are always shaped with full shaping so the font's
+            // composition rules apply, and every resulting glyph is drawn.
+            let cluster_glyphs: Vec<ShapedGlyph>;
+            let single_glyph: Option<ShapedGlyph>;
+            let glyphs: &[ShapedGlyph] = if let Some(extra) = row.grapheme_extra(col_idx) {
+                let mut text = String::with_capacity(4 * (1 + extra.len()));
+                text.push(ch);
+                text.extend(extra);
+                cluster_glyphs = self.shape_text(buffer, &text, style, Shaping::Advanced);
+                &cluster_glyphs
+            } else {
+                let cache_key_lookup = shaping_cache_key(ch, self.ligatures, style);
+                single_glyph = match self.shaping_cache.get(&cache_key_lookup) {
+                    Some(&cached) => Some(cached),
+                    None => {
+                        let shaped = self.shape_cell(buffer, &ch.to_string(), style);
+                        if let Some(shaped) = shaped {
+                            self.shaping_cache.insert(cache_key_lookup, shaped);
+                        }
+                        shaped
+                    }
+                };
+                single_glyph.as_slice()
+            };
+
+            for &shaped in glyphs {
+                self.push_glyph(
+                    vertices,
+                    &mut indices,
+                    shaped,
+                    (col_idx, row_idx),
+                    (cell_width, cell_height),
+                    (x_offset, y_offset),
+                    base_color,
+                    under_block_cursor,
+                );
+            }
+        }
     }
 
     /// Emit a solid quad through the text pipeline by sampling the atlas's
@@ -1160,21 +1223,17 @@ impl TextRenderer {
     fn emit_solid_quad(
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
-        rect: Rect,
+        quad: &Quad,
         color: Rgba,
         solid_uv: [f32; 2],
     ) {
-        let (x0, y0, width, height) = rect;
-        let x1 = x0 + width;
-        let y1 = y0 + height;
         let base_idx = vertices.len() as u32;
-        let color_arr = color.to_array();
 
-        for position in [[x0, y0], [x1, y0], [x1, y1], [x0, y1]] {
+        for (position, coverage) in quad.corners.into_iter().zip(quad.coverage) {
             vertices.push(Vertex {
                 position,
                 tex_coord: solid_uv,
-                color: color_arr,
+                color: [color.r, color.g, color.b, color.a * coverage],
                 is_color: 0,
             });
         }
@@ -1365,6 +1424,7 @@ impl TextRenderer {
     /// Clear the glyph cache.
     pub fn clear_cache(&mut self) {
         self.atlas.clear();
+        self.grid_caches.iter_mut().for_each(GridTextCache::clear);
     }
 
     /// Get cache statistics.
@@ -1475,12 +1535,6 @@ mod tests {
     use super::*;
     use crate::grid::Dimensions;
 
-    const METRICS: DecorationMetrics = DecorationMetrics {
-        baseline: 14.0,
-        x_height: 7.0,
-        thickness: 1.0,
-    };
-
     #[test]
     fn cell_style_maps_attribute_flags() {
         assert_eq!(CellStyle::from_flags(CellFlags::NONE), CellStyle::default());
@@ -1493,18 +1547,18 @@ mod tests {
             CellStyle {
                 bold: true,
                 italic: true,
-                underline: true,
-                double_underline: false,
-                strikethrough: true,
             }
         );
 
-        let double = CellStyle::from_flags(CellFlags::DOUBLE_UNDERLINE);
-        assert!(double.underline && double.double_underline);
-
-        // Flags handled elsewhere (color, visibility) do not affect the style.
+        // Flags handled elsewhere (color, visibility, decorations) do not
+        // affect the face.
         assert_eq!(
-            CellStyle::from_flags(CellFlags::REVERSE | CellFlags::DIM | CellFlags::BLINK),
+            CellStyle::from_flags(
+                CellFlags::REVERSE
+                    | CellFlags::DIM
+                    | CellFlags::BLINK
+                    | CellFlags::DOUBLE_UNDERLINE
+            ),
             CellStyle::default()
         );
     }
@@ -1523,7 +1577,6 @@ mod tests {
         let bold_italic = CellStyle {
             bold: true,
             italic: true,
-            ..plain
         };
 
         let keys = [
@@ -1538,17 +1591,6 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
-
-        // Decorations do not change shaping, so they share the entry.
-        let underlined = CellStyle {
-            underline: true,
-            strikethrough: true,
-            ..plain
-        };
-        assert_eq!(
-            shaping_cache_key('a', false, underlined),
-            shaping_cache_key('a', false, plain)
-        );
     }
 
     #[test]
@@ -1556,7 +1598,6 @@ mod tests {
         let bold_italic = CellStyle {
             bold: true,
             italic: true,
-            ..CellStyle::default()
         };
 
         // Real bold italic face: nothing to synthesize.
@@ -1595,58 +1636,28 @@ mod tests {
     }
 
     #[test]
-    fn decoration_rects_underline_sits_one_pixel_below_baseline() {
-        let style = CellStyle {
-            underline: true,
-            ..CellStyle::default()
-        };
-        let (rects, count) = decoration_rects(style, (30.0, 40.0, 10.0, 18.0), METRICS);
+    fn underline_color_is_the_sgr_58_color_or_the_text_color() {
+        let scheme = ColorScheme::dark();
+        let text = Rgba::rgb(0.5, 0.5, 0.5);
+        let mut cell = Cell::default();
+        assert_eq!(underline_color(&cell, text, &scheme), text);
 
-        assert_eq!(count, 1);
-        assert_eq!(rects[0], (30.0, 55.0, 10.0, 1.0));
-    }
-
-    #[test]
-    fn decoration_rects_strikethrough_crosses_mid_x_height() {
-        let style = CellStyle {
-            strikethrough: true,
-            ..CellStyle::default()
-        };
-        let (rects, count) = decoration_rects(style, (0.0, 0.0, 10.0, 18.0), METRICS);
-
-        assert_eq!(count, 1);
-        // baseline 14 - x_height/2 (3.5) - thickness/2 (0.5) = 10
-        assert_eq!(rects[0], (0.0, 10.0, 10.0, 1.0));
-    }
-
-    #[test]
-    fn decoration_rects_double_underline_stays_inside_the_cell() {
-        let style = CellStyle {
-            underline: true,
-            double_underline: true,
-            ..CellStyle::default()
-        };
-        let (rects, count) = decoration_rects(style, (0.0, 0.0, 10.0, 16.0), METRICS);
-
-        assert_eq!(count, 2);
-        // The second line would land at y=17; it is pulled up to the last
-        // row (15) and the first line keeps its 2px gap above it.
-        assert_eq!(rects[0], (0.0, 13.0, 10.0, 1.0));
-        assert_eq!(rects[1], (0.0, 15.0, 10.0, 1.0));
-    }
-
-    #[test]
-    fn decoration_rects_emits_nothing_for_plain_or_bold_only_cells() {
-        let bold = CellStyle {
-            bold: true,
-            italic: true,
-            ..CellStyle::default()
-        };
-        assert_eq!(decoration_rects(bold, (0.0, 0.0, 10.0, 18.0), METRICS).1, 0);
+        cell.set_underline_color(Color::Rgb(255, 0, 0));
         assert_eq!(
-            decoration_rects(CellStyle::default(), (0.0, 0.0, 10.0, 18.0), METRICS).1,
-            0
+            underline_color(&cell, text, &scheme),
+            scheme.resolve(Color::Rgb(255, 0, 0), true)
         );
+    }
+
+    #[test]
+    fn quad_indices_grow_in_whole_quads_without_changing() {
+        let mut indices = Vec::new();
+        extend_quad_indices(&mut indices, 1);
+        assert_eq!(indices, [0, 1, 2, 0, 2, 3]);
+        extend_quad_indices(&mut indices, 2);
+        assert_eq!(indices, [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
+        extend_quad_indices(&mut indices, 1);
+        assert_eq!(indices.len(), 12, "never shrinks");
     }
 
     #[test]

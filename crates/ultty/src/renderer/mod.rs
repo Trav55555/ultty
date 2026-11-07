@@ -10,6 +10,7 @@ mod atlas;
 pub mod block_chars;
 pub mod color;
 mod cursor;
+mod decoration;
 mod image;
 mod native_render;
 mod overlays;
@@ -19,6 +20,7 @@ mod powerline;
 mod screenshot;
 mod tabbar;
 mod text;
+mod text_cache;
 
 pub use atlas::{AtlasStats, GlyphAtlas};
 pub use color::{ColorScheme, Rgba};
@@ -741,7 +743,9 @@ impl Renderer {
             &mut encoder,
             &view,
             terminal,
-            &self.color_scheme.for_palette(terminal.palette()),
+            &self
+                .color_scheme
+                .for_terminal(terminal.palette(), terminal.modes().reverse_video),
             self.cell_width,
             self.cell_height,
             self.tab_bar_height,
@@ -1130,7 +1134,9 @@ impl Renderer {
             &mut encoder,
             &view,
             terminal,
-            &self.color_scheme.for_palette(terminal.palette()),
+            &self
+                .color_scheme
+                .for_terminal(terminal.palette(), terminal.modes().reverse_video),
             self.cell_width,
             self.cell_height,
             self.tab_bar_height,
@@ -1437,7 +1443,9 @@ impl Renderer {
                 &mut encoder,
                 &view,
                 terminal,
-                &self.color_scheme.for_palette(terminal.palette()),
+                &self
+                    .color_scheme
+                    .for_terminal(terminal.palette(), terminal.modes().reverse_video),
                 self.cell_width,
                 self.cell_height,
                 self.tab_bar_height,
@@ -1629,10 +1637,11 @@ impl Renderer {
         let mut vertices = Vec::with_capacity(est_quads * 4);
         let mut indices = Vec::with_capacity(est_quads * 6);
 
-        let scheme = self.color_scheme.for_palette(terminal.palette());
-
         // Window border (1px, slightly lighter than bg)
-        let bg = scheme.background;
+        let bg = self.color_scheme.background;
+        let scheme = self
+            .color_scheme
+            .for_terminal(terminal.palette(), terminal.modes().reverse_video);
         let w = self.config.width as f32;
         let h = self.config.height as f32;
         let border_color = Rgba::new(
@@ -1663,7 +1672,15 @@ impl Renderer {
             border_color,
         );
         // Inner background
-        self.emit_rect(&mut vertices, &mut indices, 1.0, 1.0, w - 2.0, h - 2.0, bg);
+        self.emit_rect(
+            &mut vertices,
+            &mut indices,
+            1.0,
+            1.0,
+            w - 2.0,
+            h - 2.0,
+            scheme.background,
+        );
 
         let selection = terminal.selection();
         for row_idx in 0..dims.rows {

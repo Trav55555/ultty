@@ -209,12 +209,43 @@ fn bench_render_large(c: &mut Criterion) {
     group.finish();
 }
 
+/// A full screen of code where one row changes between frames, as when a
+/// shell echoes a keystroke or a status line ticks: the frame should cost
+/// about one row of text work, not a whole screen.
+fn bench_render_one_dirty_row(c: &mut Criterion) {
+    let mut group = c.benchmark_group("render_one_dirty_row");
+    group.sample_size(30);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (cols, rows) = (300u16, 75u16);
+    let mut renderer = rt.block_on(async {
+        Renderer::new_headless(cols as u32 * 10, rows as u32 * 20)
+            .await
+            .unwrap()
+    });
+    let mut terminal = create_code_terminal(cols, rows);
+    let overlay = OverlayState::default();
+    let mut frame = 0u16;
+    group.bench_function("300x75_code", |b| {
+        b.iter(|| {
+            frame = frame.wrapping_add(1);
+            let grid = terminal.grid_mut();
+            grid.set_cursor_position(frame % cols, frame % rows);
+            grid.write_char(char::from(b'a' + (frame % 26) as u8));
+            renderer
+                .render_to_texture(black_box(&terminal), black_box(&overlay))
+                .unwrap();
+        })
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_render_empty,
     bench_render_filled,
     bench_render_mixed,
     bench_render_large,
-    bench_render_code
+    bench_render_code,
+    bench_render_one_dirty_row
 );
 criterion_main!(benches);

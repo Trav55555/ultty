@@ -218,6 +218,7 @@ impl App {
                                 // Only update URL detection for focused terminal
                                 if Some(terminal_id) == focused_id {
                                     content_changed = true;
+                                    self.output_since_input = self.input_sent_at.is_some();
                                 }
                             }
                             TerminalEvent::ChildExited { status } => {
@@ -343,8 +344,12 @@ impl App {
         let now = Instant::now();
         let sync_active = self.sync_update_active();
         let frame_elapsed = now.duration_since(self.last_render);
+        let echo_after = self
+            .input_sent_at
+            .filter(|_| self.output_since_input)
+            .map(|sent| now.saturating_duration_since(sent));
 
-        if should_render(self.needs_redraw, frame_elapsed, sync_active) {
+        if should_render(self.needs_redraw, frame_elapsed, sync_active, echo_after) {
             if pipeline_trace_enabled() {
                 tracing::info!(
                     target: "ultty::perf",
@@ -355,6 +360,10 @@ impl App {
             }
             self.render();
             self.last_render = now;
+            if self.output_since_input {
+                self.input_sent_at = None;
+                self.output_since_input = false;
+            }
             // A frame that skipped glyphs (atlas overflow) must draw again
             // once the deferred eviction has run.
             self.needs_redraw = self.renderer.frame_incomplete();
@@ -372,12 +381,29 @@ fn render_delay_for_sync_state(sync_active: bool) -> std::time::Duration {
     }
 }
 
+/// Whether to draw a frame now.
+///
+/// Frames are paced to at most one per [`FRAME_INTERVAL`](super::FRAME_INTERVAL)
+/// since the last one, so a flood of output is drawn in coalesced frames
+/// instead of one per chunk. Waiting out that interval would add up to a
+/// frame of latency to every keystroke, though, so the output that follows
+/// user input is the exception: `echo_after` is how long after the input
+/// the focused terminal's output arrived (`None` if none has since), and if
+/// that is within [`INPUT_ECHO_WINDOW`](super::INPUT_ECHO_WINDOW) the frame
+/// is drawn at once. That is one early frame per input, so a command that
+/// floods output after Enter is paced again from its second frame on.
+/// A synchronized update (mode 2026) holds every frame, the echo included.
 fn should_render(
     needs_redraw: bool,
     frame_elapsed: std::time::Duration,
     sync_active: bool,
+    echo_after: Option<std::time::Duration>,
 ) -> bool {
-    needs_redraw && frame_elapsed >= render_delay_for_sync_state(sync_active)
+    if !needs_redraw {
+        return false;
+    }
+    let echo_due = !sync_active && echo_after.is_some_and(|d| d <= super::INPUT_ECHO_WINDOW);
+    echo_due || frame_elapsed >= render_delay_for_sync_state(sync_active)
 }
 
 fn catchup_poll_deadline(
@@ -487,18 +513,42 @@ mod tests {
 
     #[test]
     fn should_render_when_dirty_and_frame_interval_elapsed() {
-        assert!(should_render(true, Duration::from_millis(16), false));
+        assert!(should_render(true, Duration::from_millis(16), false, None));
+        assert!(!should_render(true, Duration::from_millis(15), false, None));
     }
 
     #[test]
     fn should_not_render_when_redraw_is_not_dirty() {
-        assert!(!should_render(false, Duration::from_secs(1), false));
+        assert!(!should_render(false, Duration::from_secs(1), false, None));
+        let echo = Some(Duration::from_millis(1));
+        assert!(!should_render(false, Duration::ZERO, false, echo));
     }
 
     #[test]
     fn should_hold_synchronized_update_until_timeout() {
-        assert!(!should_render(true, Duration::from_millis(199), true));
-        assert!(should_render(true, Duration::from_millis(200), true));
+        assert!(!should_render(true, Duration::from_millis(199), true, None));
+        assert!(should_render(true, Duration::from_millis(200), true, None));
+    }
+
+    #[test]
+    fn echo_of_input_renders_without_waiting_for_the_frame_interval() {
+        let just_drew = Duration::from_millis(2);
+        let echo = |ms| Some(Duration::from_millis(ms));
+        assert!(should_render(true, just_drew, false, echo(3)));
+        assert!(should_render(true, just_drew, false, echo(50)));
+    }
+
+    #[test]
+    fn output_long_after_input_is_paced_like_any_output() {
+        let late = Some(Duration::from_millis(51));
+        assert!(!should_render(true, Duration::from_millis(2), false, late));
+        assert!(should_render(true, Duration::from_millis(16), false, late));
+    }
+
+    #[test]
+    fn synchronized_update_holds_the_echo_too() {
+        let echo = Some(Duration::from_millis(3));
+        assert!(!should_render(true, Duration::from_millis(2), true, echo));
     }
 
     #[test]
