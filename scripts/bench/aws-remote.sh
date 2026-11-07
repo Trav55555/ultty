@@ -12,7 +12,10 @@
 #   Rust          from rust-toolchain.toml (rustup, minimal profile)
 #   Alacritty     0.16.1, built with `cargo install --locked` (Ubuntu 24.04's
 #                 apt package is older; this matches the local comparison box)
-#   Ghostty       snap latest/stable, must report 1.4.0 (EXPECT_GHOSTTY), then held
+#   Ghostty       1.4.0 built from the signed source release with Zig 0.17.0
+#                 (both checked against pinned SHA-256s and the projects'
+#                 minisign keys). The snap bundles its own Mesa, which cannot
+#                 drive the NVIDIA driver, so it never opened a window.
 #   GNOME Terminal Ubuntu 24.04 apt package; the version is recorded, and
 #                 EXPECT_GNOME_TERMINAL (a dpkg version) fails the setup on drift
 #   NVIDIA driver nvidia-driver-${NVIDIA_DRIVER:-550} (GPU role only)
@@ -24,8 +27,14 @@ TARGET="$WORK/target"
 RESULTS="$WORK/results"
 ALACRITTY_VERSION="${ALACRITTY_VERSION:-0.16.1}"
 EXPECT_GHOSTTY="${EXPECT_GHOSTTY:-1.4.0}"
+GHOSTTY_SHA256=cb188ac6c3a8278d5fd7bfef15d8c017104c87f638b5560eb38024a71ae0f005
+GHOSTTY_MINISIGN_KEY=RWQlAjJC23149WL2sEpT/l0QKy7hMIFhYdQOFy0Z7z7PbneUgvlsnYcV
+ZIG_VERSION=0.17.0
+ZIG_SHA256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+ZIG_MINISIGN_KEY=RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
 NVIDIA_DRIVER="${NVIDIA_DRIVER:-550}"
-export PATH="$HOME/.cargo/bin:$WORK/alacritty/bin:/snap/bin:$PATH"
+# /snap/bin last: the source-built Ghostty in /usr/local/bin must win.
+export PATH="$HOME/.cargo/bin:$WORK/alacritty/bin:$PATH:/snap/bin"
 
 die() { echo "aws-remote: $*" >&2; exit 1; }
 log() { echo "[aws-remote $(date +%T)] $*" >&2; }
@@ -59,6 +68,41 @@ setup_common() {
   fi
 }
 
+# fetch_verified URL SHA256 MINISIGN_KEY: download URL and its .minisig into
+# $WORK/dl, check both the pinned hash and the signature, print the path.
+fetch_verified() {
+  local url="$1" sha="$2" key="$3" file
+  mkdir -p "$WORK/dl"
+  file="$WORK/dl/$(basename "$url")"
+  [[ -f "$file" ]] || curl -fsSL -o "$file" "$url"
+  [[ -f "$file.minisig" ]] || curl -fsSL -o "$file.minisig" "$url.minisig"
+  echo "$sha  $file" | sha256sum -c --quiet - || die "$file does not match its pinned SHA-256"
+  minisign -Vqm "$file" -P "$key" || die "$file has no valid signature"
+  echo "$file"
+}
+
+setup_ghostty() {
+  local have
+  have=$(/usr/local/bin/ghostty --version 2>/dev/null | awk '/^Ghostty/ {print $2; exit}' || true)
+  if [[ "$have" == "$EXPECT_GHOSTTY" ]]; then return; fi
+  log "building Ghostty $EXPECT_GHOSTTY from source (Zig $ZIG_VERSION)"
+  apt_install minisign libgtk-4-dev libadwaita-1-dev gettext libxml2-utils
+  local zig_tar ghostty_tar build="$WORK/ghostty-build"
+  zig_tar=$(fetch_verified "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz" \
+    "$ZIG_SHA256" "$ZIG_MINISIGN_KEY")
+  ghostty_tar=$(fetch_verified "https://release.files.ghostty.org/$EXPECT_GHOSTTY/ghostty-$EXPECT_GHOSTTY.tar.gz" \
+    "$GHOSTTY_SHA256" "$GHOSTTY_MINISIGN_KEY")
+  rm -rf "$build" && mkdir -p "$build"
+  tar -xJf "$zig_tar" -C "$build"
+  tar -xzf "$ghostty_tar" -C "$build"
+  (cd "$build/ghostty-$EXPECT_GHOSTTY" &&
+    "$build/zig-x86_64-linux-$ZIG_VERSION/zig" build -Doptimize=ReleaseFast -p "$build/install")
+  sudo install -m 0755 "$build/install/bin/ghostty" /usr/local/bin/ghostty
+  sudo cp -r "$build/install/share/." /usr/local/share/
+  have=$(/usr/local/bin/ghostty --version 2>/dev/null | awk '/^Ghostty/ {print $2; exit}')
+  [[ "$have" == "$EXPECT_GHOSTTY" ]] || die "built Ghostty reports $have, expected $EXPECT_GHOSTTY"
+}
+
 setup_terminals() {
   apt_install xvfb xserver-xorg-core x11-utils x11-xserver-utils xdotool dbus-x11 dbus-user-session \
     gnome-terminal dconf-cli sway grim wtype mesa-vulkan-drivers mesa-utils openbox
@@ -66,13 +110,7 @@ setup_terminals() {
     have=$(dpkg-query -W -f='${Version}' gnome-terminal)
     [[ "$have" == "$EXPECT_GNOME_TERMINAL" ]] || die "gnome-terminal is $have, expected $EXPECT_GNOME_TERMINAL"
   fi
-  if ! snap list ghostty >/dev/null 2>&1; then
-    log "installing Ghostty (snap)"
-    sudo snap install ghostty --classic --channel=latest/stable
-  fi
-  have=$(/snap/bin/ghostty --version 2>/dev/null | awk '/^Ghostty/ {print $2; exit}')
-  [[ "$have" == "$EXPECT_GHOSTTY" ]] || die "Ghostty is $have, expected $EXPECT_GHOSTTY (set EXPECT_GHOSTTY to accept it)"
-  sudo snap refresh --hold ghostty >/dev/null
+  setup_ghostty
   if [[ "$("$WORK/alacritty/bin/alacritty" --version 2>/dev/null)" != "alacritty $ALACRITTY_VERSION"* ]]; then
     log "building Alacritty $ALACRITTY_VERSION"
     rustup toolchain install stable --profile minimal
