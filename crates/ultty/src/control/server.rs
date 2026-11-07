@@ -17,6 +17,15 @@ use ultty_protocol::control::{
 const LISTENER_KEY: usize = 0;
 const CLIENT_KEY_BASE: usize = 100;
 
+/// Largest request the control socket accepts.
+///
+/// A request ends at its first newline or when the client half-closes its
+/// write side, whichever comes first. One bigger than this gets an error
+/// reply instead of growing the buffer.
+pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
+const READ_CHUNK: usize = 64 * 1024;
+
 pub struct ControlServer {
     listener: UnixListener,
     socket_path: PathBuf,
@@ -30,13 +39,56 @@ struct ClientState {
     stream: UnixStream,
     output_format: OutputFormat,
     authenticated: bool,
+    /// Request bytes received so far.
+    request: Vec<u8>,
+    /// The request outgrew [`MAX_REQUEST_BYTES`]; the rest of it is being
+    /// read and dropped.
+    oversized: bool,
     /// The client has sent its one request and is waiting for the answer.
     ///
-    /// It is no longer polled: ulttyctl half-closes its write side after the
-    /// request, and that EOF must not count as a disconnect, or a deferred
-    /// answer (`wait-for`) would find the client gone and close the socket
-    /// unanswered.
+    /// It is no longer polled for reading: ulttyctl half-closes its write
+    /// side after the request, and that EOF must not count as a disconnect,
+    /// or a deferred answer (`wait-for`) would find the client gone and close
+    /// the socket unanswered.
     awaiting_response: bool,
+    /// Reply bytes the socket has not taken yet. While non-empty the client
+    /// is polled for writability; it is closed once the reply is out.
+    reply: Vec<u8>,
+}
+
+impl ClientState {
+    /// Write as much of the reply as the socket takes now.
+    ///
+    /// Returns `Ok(true)` once the whole reply is out.
+    fn flush_reply(&mut self) -> io::Result<bool> {
+        let mut written = 0;
+        let result = loop {
+            if written == self.reply.len() {
+                break Ok(true);
+            }
+            match self.stream.write(&self.reply[written..]) {
+                Ok(0) => break Err(io::ErrorKind::WriteZero.into()),
+                Ok(n) => written += n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break Ok(false),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => break Err(e),
+            }
+        };
+        self.reply.drain(..written);
+        result
+    }
+}
+
+/// What reading a client that is still sending its request produced.
+enum ReadOutcome {
+    /// More bytes may follow.
+    Incomplete,
+    /// The request is complete.
+    Request(Vec<u8>),
+    /// The request outgrew [`MAX_REQUEST_BYTES`].
+    TooLarge,
+    /// The client went away without sending anything.
+    Gone,
 }
 
 struct ParsedControlRequest {
@@ -100,6 +152,16 @@ impl ControlServer {
         fds
     }
 
+    /// File descriptors that should wake the UI loop when writable: clients
+    /// whose reply did not fit in the socket buffer.
+    pub fn writable_fds(&self) -> Vec<RawFd> {
+        self.clients
+            .values()
+            .filter(|client| !client.reply.is_empty())
+            .map(|client| client.stream.as_raw_fd())
+            .collect()
+    }
+
     pub fn poll(&mut self, timeout: Option<Duration>) -> io::Result<()> {
         let mut events = Events::new();
         self.poller.wait(&mut events, timeout)?;
@@ -107,6 +169,8 @@ impl ControlServer {
         for event in events.iter() {
             if event.key == LISTENER_KEY {
                 self.accept_connections()?;
+            } else if event.writable {
+                self.continue_reply(event.key)?;
             } else {
                 self.handle_client_event(event.key)?;
             }
@@ -134,7 +198,10 @@ impl ControlServer {
                             stream,
                             output_format: OutputFormat::Text,
                             authenticated: false,
+                            request: Vec::new(),
+                            oversized: false,
                             awaiting_response: false,
+                            reply: Vec::new(),
                         },
                     );
                     debug!("Control client connected: {}", key);
@@ -151,76 +218,123 @@ impl ControlServer {
     }
 
     fn handle_client_event(&mut self, key: usize) -> io::Result<()> {
-        let mut should_remove = false;
-        let mut request_data: Option<Vec<u8>> = None;
-        let mut need_modify = false;
-
-        if let Some(client) = self.clients.get_mut(&key) {
-            let mut buf = [0u8; 4096];
-            match client.stream.read(&mut buf) {
-                Ok(0) => {
-                    debug!("Control client disconnected: {}", key);
-                    should_remove = true;
-                }
-                Ok(n) => {
-                    request_data = Some(buf[..n].to_vec());
-                    need_modify = true;
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    need_modify = true;
-                }
-                Err(e) => {
-                    error!("Control client error: {}", e);
-                    should_remove = true;
-                }
-            }
+        let Some(client) = self.clients.get_mut(&key) else {
+            return Ok(());
+        };
+        if client.awaiting_response {
+            return Ok(());
         }
 
-        if let Some(data) = request_data {
-            if let Some(parsed) = self.parse_request(&data) {
-                if let Some(client) = self.clients.get_mut(&key) {
-                    client.output_format = parsed.output_format;
-                    client.awaiting_response = true;
-                    need_modify = false;
-                    if let Err(e) = self.poller.delete(&client.stream) {
-                        warn!("Failed to stop polling control client {}: {}", key, e);
-                    }
-                }
+        let data = match read_request(client) {
+            Ok(ReadOutcome::Incomplete) => {
+                self.poller.modify(&client.stream, Event::readable(key))?;
+                return Ok(());
+            }
+            Ok(ReadOutcome::Gone) => {
+                debug!("Control client disconnected: {}", key);
+                self.remove_client(key);
+                return Ok(());
+            }
+            Err(e) => {
+                error!("Control client error: {}", e);
+                self.remove_client(key);
+                return Ok(());
+            }
+            Ok(ReadOutcome::TooLarge) => None,
+            Ok(ReadOutcome::Request(data)) => Some(data),
+        };
+
+        client.awaiting_response = true;
+        if let Err(e) = self.poller.delete(&client.stream) {
+            warn!("Failed to stop polling control client {}: {}", key, e);
+        }
+
+        let Some(data) = data else {
+            warn!("Control client {} sent an oversized request", key);
+            let response = ControlResponse::Error {
+                code: 413,
+                message: format!("request exceeds {MAX_REQUEST_BYTES} bytes"),
+            };
+            self.send_response(key, &response);
+            return Ok(());
+        };
+
+        match parse_request(&data) {
+            Some(parsed) => {
+                client.output_format = parsed.output_format;
                 self.pending_requests.push((key, parsed.request));
             }
-        }
-
-        if need_modify {
-            if let Some(client) = self.clients.get(&key) {
-                self.poller.modify(&client.stream, Event::readable(key))?;
+            None => {
+                // A client that spoke JSON reads a JSON reply.
+                if data.trim_ascii_start().starts_with(b"{") {
+                    client.output_format = OutputFormat::Json;
+                }
+                let response = ControlResponse::Error {
+                    code: 400,
+                    message: "malformed or unknown request".to_string(),
+                };
+                self.send_response(key, &response);
             }
         }
-
-        if should_remove {
-            if let Some(client) = self.clients.remove(&key) {
-                let _ = self.poller.delete(&client.stream);
-            }
-        }
-
         Ok(())
     }
 
-    fn parse_request(&self, data: &[u8]) -> Option<ParsedControlRequest> {
-        parse_request(data)
+    /// Write more of a reply that filled the socket buffer earlier.
+    fn continue_reply(&mut self, key: usize) -> io::Result<()> {
+        let Some(client) = self.clients.get_mut(&key) else {
+            return Ok(());
+        };
+        match client.flush_reply() {
+            Ok(true) => self.remove_client(key),
+            Ok(false) => self.poller.modify(&client.stream, Event::writable(key))?,
+            Err(e) => {
+                warn!("Failed to send response to client {}: {}", key, e);
+                self.remove_client(key);
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_client(&mut self, key: usize) {
+        if let Some(client) = self.clients.remove(&key) {
+            // A client awaiting its answer with nothing left to write is
+            // already out of the poller; that delete fails harmlessly.
+            let _ = self.poller.delete(&client.stream);
+        }
     }
 
     pub fn take_pending_requests(&mut self) -> Vec<(usize, ControlRequest)> {
         std::mem::take(&mut self.pending_requests)
     }
 
+    /// Answer a client's request and close the connection once the whole
+    /// answer is written. A reply bigger than the socket buffer is finished
+    /// from [`ControlServer::poll`] as the client reads it.
     pub fn send_response(&mut self, client_key: usize, response: &ControlResponse) {
-        if let Some(mut client) = self.clients.remove(&client_key) {
-            let text = format_response(response, client.output_format);
-            if let Err(e) = client.stream.write_all(text.as_bytes()) {
-                warn!("Failed to send response to client {}: {}", client_key, e);
+        let Some(client) = self.clients.get_mut(&client_key) else {
+            return;
+        };
+        if !client.reply.is_empty() {
+            warn!("Control client {} already has a reply", client_key);
+            return;
+        }
+        client
+            .reply
+            .extend_from_slice(format_response(response, client.output_format).as_bytes());
+        match client.flush_reply() {
+            Ok(true) => self.remove_client(client_key),
+            Ok(false) => {
+                // SAFETY: the stream fd stays valid while the client is in
+                // self.clients, and remove_client deletes it from the poller.
+                let added = unsafe { self.poller.add(&client.stream, Event::writable(client_key)) };
+                if let Err(e) = added {
+                    warn!("Failed to poll control client {}: {}", client_key, e);
+                    self.remove_client(client_key);
+                }
             }
-            if !client.awaiting_response {
-                let _ = self.poller.delete(&client.stream);
+            Err(e) => {
+                warn!("Failed to send response to client {}: {}", client_key, e);
+                self.remove_client(client_key);
             }
         }
     }
@@ -242,6 +356,50 @@ impl ControlServer {
             .get(&client_key)
             .map(|c| c.authenticated)
             .unwrap_or(false)
+    }
+}
+
+/// Read what the client has sent so far and decide whether its request is
+/// complete: it ends at the first newline, or at EOF when the client
+/// half-closes.
+///
+/// An oversized request is read to its end and dropped, so the client is
+/// done writing and reads the error reply instead of having its write fail.
+fn read_request(client: &mut ClientState) -> io::Result<ReadOutcome> {
+    let mut chunk = vec![0u8; READ_CHUNK];
+    loop {
+        let n = match client.stream.read(&mut chunk) {
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(ReadOutcome::Incomplete),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if n == 0 {
+            return Ok(if client.oversized {
+                ReadOutcome::TooLarge
+            } else if client.request.is_empty() {
+                ReadOutcome::Gone
+            } else {
+                ReadOutcome::Request(std::mem::take(&mut client.request))
+            });
+        }
+        let received = &chunk[..n];
+        let newline = received.iter().position(|&b| b == b'\n');
+        if !client.oversized {
+            let end = newline.unwrap_or(n);
+            client.request.extend_from_slice(&received[..end]);
+            if client.request.len() > MAX_REQUEST_BYTES {
+                client.oversized = true;
+                client.request = Vec::new();
+            }
+        }
+        if newline.is_some() {
+            return Ok(if client.oversized {
+                ReadOutcome::TooLarge
+            } else {
+                ReadOutcome::Request(std::mem::take(&mut client.request))
+            });
+        }
     }
 }
 
@@ -916,5 +1074,142 @@ mod tests {
             assert_eq!(response, "PONG\n");
             assert!(server.clients.is_empty());
         }
+    }
+
+    /// Poll the server until `client` finishes reading in its own thread.
+    fn read_reply_while_polling(server: &mut ControlServer, mut client: UnixStream) -> String {
+        let reader = std::thread::spawn(move || {
+            let mut reply = String::new();
+            client.read_to_string(&mut reply).map(|_| reply)
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !reader.is_finished() {
+            assert!(Instant::now() < deadline, "timed out waiting for reply");
+            server.poll(Some(Duration::from_millis(10))).unwrap();
+        }
+        reader.join().unwrap().unwrap()
+    }
+
+    fn json_request(request: ControlRequest) -> Vec<u8> {
+        serde_json::to_vec(&ControlEnvelope {
+            output_format: OutputFormat::Json,
+            request,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn request_larger_than_one_read_is_answered() {
+        let mut server = test_server("large-request");
+        let mut client = UnixStream::connect(server.socket_path()).unwrap();
+        let text = "x".repeat(5000);
+
+        client
+            .write_all(&json_request(ControlRequest::SendText {
+                text: text.clone(),
+            }))
+            .unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let pending = poll_until_pending(&mut server);
+        assert_eq!(pending[0].1, ControlRequest::SendText { text });
+        server.send_response(pending[0].0, &ControlResponse::Ok);
+        assert_eq!(
+            read_reply_while_polling(&mut server, client),
+            format_response(&ControlResponse::Ok, OutputFormat::Json)
+        );
+    }
+
+    #[test]
+    fn request_split_across_writes_ends_at_newline() {
+        let mut server = test_server("split-request");
+        let mut client = UnixStream::connect(server.socket_path()).unwrap();
+
+        client.write_all(b"send-text hel").unwrap();
+        for _ in 0..3 {
+            server.poll(Some(Duration::from_millis(10))).unwrap();
+        }
+        assert!(server.take_pending_requests().is_empty());
+
+        // No half-close: the newline ends the request.
+        client.write_all(b"lo\n").unwrap();
+        let pending = poll_until_pending(&mut server);
+        assert_eq!(
+            pending[0].1,
+            ControlRequest::SendText {
+                text: "hello".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn reply_larger_than_socket_buffer_arrives_intact() {
+        let mut server = test_server("large-reply");
+        let mut client = UnixStream::connect(server.socket_path()).unwrap();
+        client.write_all(b"text --scrollback").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let pending = poll_until_pending(&mut server);
+
+        let text: String = (0..9000)
+            .map(|i| format!("line {i:05} of scrollback\n"))
+            .collect();
+        assert!(text.len() > 200 * 1024);
+        server.send_response(pending[0].0, &ControlResponse::Text { text: text.clone() });
+
+        assert_eq!(
+            read_reply_while_polling(&mut server, client),
+            format!("{text}\n")
+        );
+        assert!(server.clients.is_empty());
+    }
+
+    #[test]
+    fn malformed_json_request_gets_json_error() {
+        let mut server = test_server("malformed");
+        let client = UnixStream::connect(server.socket_path()).unwrap();
+        // What `ulttyctl opacity NaN` sends: NaN serialises as null.
+        (&client)
+            .write_all(
+                br#"{"output_format":"json","request":{"type":"set_opacity","opacity":null}}"#,
+            )
+            .unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let reply = read_reply_while_polling(&mut server, client);
+        let response: ControlResponse = serde_json::from_str(reply.trim()).unwrap();
+        assert!(
+            matches!(response, ControlResponse::Error { code: 400, .. }),
+            "{response:?}"
+        );
+        assert!(server.take_pending_requests().is_empty());
+    }
+
+    #[test]
+    fn unknown_text_request_gets_text_error() {
+        let mut server = test_server("unknown-text");
+        let mut client = UnixStream::connect(server.socket_path()).unwrap();
+        client.write_all(b"frobnicate\n").unwrap();
+
+        let reply = read_reply_while_polling(&mut server, client);
+        assert!(reply.starts_with("ERROR 400:"), "{reply}");
+    }
+
+    #[test]
+    fn oversized_request_gets_error_instead_of_growing() {
+        let mut server = test_server("oversized");
+        let client = UnixStream::connect(server.socket_path()).unwrap();
+        let mut writer = client.try_clone().unwrap();
+        let sender = std::thread::spawn(move || {
+            // The server drains the whole request, so the write completes.
+            writer
+                .write_all(&vec![b'a'; MAX_REQUEST_BYTES + 2 * READ_CHUNK])
+                .unwrap();
+            writer.shutdown(std::net::Shutdown::Write).unwrap();
+        });
+
+        let reply = read_reply_while_polling(&mut server, client);
+        sender.join().unwrap();
+        assert!(reply.starts_with("ERROR 413:"), "{reply}");
+        assert!(server.take_pending_requests().is_empty());
     }
 }

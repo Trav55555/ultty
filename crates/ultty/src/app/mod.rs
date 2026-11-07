@@ -742,14 +742,16 @@ impl App {
     /// Socket fds the wakeup bridge watches. PTYs are not among them: each
     /// terminal's I/O thread wakes the UI itself.
     fn refresh_runtime_wakeup_fds(&mut self) {
-        let mut fds = Vec::new();
+        let mut readable = Vec::new();
+        let mut writable = Vec::new();
         if let Some(server) = self.protocol_server.as_ref() {
-            fds.extend(server.readiness_fds());
+            readable.extend(server.readiness_fds());
         }
         if let Some(server) = self.control_server.as_ref() {
-            fds.extend(server.readiness_fds());
+            readable.extend(server.readiness_fds());
+            writable.extend(server.writable_fds());
         }
-        self.socket_wakeup.set_fds(fds);
+        self.socket_wakeup.set_fds(readable, writable);
     }
 
     /// Extract text from a vim selection.

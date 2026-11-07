@@ -17,16 +17,20 @@ const WATCH_TIMEOUT: Duration = Duration::from_millis(100);
 const WAKE_COALESCE: Duration = Duration::from_millis(1);
 const REREGISTER_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Sends a winit user event when any tracked runtime fd becomes readable.
+/// A runtime fd and whether it should also wake the loop when writable.
+type WatchedFd = (RawFd, bool);
+
+/// Sends a winit user event when any tracked runtime fd becomes readable,
+/// or writable for the fds asked to be watched for that.
 pub(super) struct SocketWakeup {
-    fds: Arc<Mutex<Vec<RawFd>>>,
+    fds: Arc<Mutex<Vec<WatchedFd>>>,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl SocketWakeup {
     pub(super) fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
-        let fds = Arc::new(Mutex::new(Vec::<RawFd>::new()));
+        let fds = Arc::new(Mutex::new(Vec::<WatchedFd>::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let thread_fds = Arc::clone(&fds);
         let thread_stop = Arc::clone(&stop);
@@ -39,8 +43,10 @@ impl SocketWakeup {
         Self { fds, stop, handle }
     }
 
-    pub(super) fn set_fds(&self, mut next: Vec<RawFd>) {
-        normalize_fds(&mut next);
+    /// Watch `readable` for reading and `writable` for writing. An fd may
+    /// appear in both.
+    pub(super) fn set_fds(&self, readable: Vec<RawFd>, writable: Vec<RawFd>) {
+        let next = watched_fds(readable, writable);
 
         if let Ok(mut current) = self.fds.lock() {
             if *current != next {
@@ -60,7 +66,7 @@ impl Drop for SocketWakeup {
 }
 
 fn watch_runtime_readiness(
-    fds: Arc<Mutex<Vec<RawFd>>>,
+    fds: Arc<Mutex<Vec<WatchedFd>>>,
     stop: Arc<AtomicBool>,
     proxy: EventLoopProxy<AppEvent>,
 ) {
@@ -71,7 +77,7 @@ fn watch_runtime_readiness(
             return;
         }
     };
-    let mut registered: Vec<RawFd> = Vec::new();
+    let mut registered: Vec<WatchedFd> = Vec::new();
     let mut last_registration = Instant::now();
     let mut events = Events::new();
 
@@ -81,28 +87,28 @@ fn watch_runtime_readiness(
         // set of numbers stays the same, silently dropping its epoll
         // registration; re-registering now and then recovers from that.
         if wanted != registered || last_registration.elapsed() >= REREGISTER_INTERVAL {
-            for &fd in &registered {
+            for &(fd, _) in &registered {
                 // SAFETY: only used to name the fd for removal; a closed or
                 // reused number makes epoll_ctl fail, which is ignored.
                 let _ = poller.delete(unsafe { BorrowedFd::borrow_raw(fd) });
             }
             registered.clear();
-            for (index, &fd) in wanted.iter().enumerate() {
-                // SAFETY: the fds are listener sockets owned by the UI
-                // thread's servers; a stale number fails registration and
-                // is skipped until the next refresh.
-                if unsafe { poller.add(fd, PollEvent::readable(index)) }.is_ok() {
-                    registered.push(fd);
+            for (index, &(fd, writable)) in wanted.iter().enumerate() {
+                // SAFETY: the fds are sockets owned by the UI thread's
+                // servers; a stale number fails registration and is skipped
+                // until the next refresh.
+                if unsafe { poller.add(fd, interest(index, writable)) }.is_ok() {
+                    registered.push((fd, writable));
                 }
             }
             last_registration = Instant::now();
         } else {
             // Readiness is one-shot; re-arm everything for the next wait.
-            for (index, &fd) in registered.iter().enumerate() {
+            for (index, &(fd, writable)) in registered.iter().enumerate() {
                 // SAFETY: as above; failures are ignored.
                 let _ = poller.modify(
                     unsafe { BorrowedFd::borrow_raw(fd) },
-                    PollEvent::readable(index),
+                    interest(index, writable),
                 );
             }
         }
@@ -121,19 +127,43 @@ fn watch_runtime_readiness(
     }
 }
 
-fn normalize_fds(fds: &mut Vec<RawFd>) {
-    fds.sort_unstable();
-    fds.dedup();
+fn interest(key: usize, writable: bool) -> PollEvent {
+    if writable {
+        PollEvent::all(key)
+    } else {
+        PollEvent::readable(key)
+    }
+}
+
+/// Merge the read and write sets into one sorted entry per fd; epoll takes
+/// each fd once.
+fn watched_fds(mut readable: Vec<RawFd>, writable: Vec<RawFd>) -> Vec<WatchedFd> {
+    readable.extend(&writable);
+    readable.sort_unstable();
+    readable.dedup();
+    readable
+        .into_iter()
+        .map(|fd| (fd, writable.contains(&fd)))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_fds;
+    use super::watched_fds;
 
     #[test]
-    fn normalize_fds_sorts_and_deduplicates() {
-        let mut fds = vec![3, 2, 3];
-        normalize_fds(&mut fds);
-        assert_eq!(fds, vec![2, 3]);
+    fn watched_fds_sorts_and_deduplicates() {
+        assert_eq!(
+            watched_fds(vec![3, 2, 3], vec![]),
+            vec![(2, false), (3, false)]
+        );
+    }
+
+    #[test]
+    fn watched_fds_merges_writable_interest() {
+        assert_eq!(
+            watched_fds(vec![4, 2], vec![5, 2]),
+            vec![(2, true), (4, false), (5, true)]
+        );
     }
 }
