@@ -4640,6 +4640,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ultty-bench"
+version = "0.1.0"
+dependencies = [
+ "nix 0.29.0",
+ "serde_json",
+ "sha2",
+ "ultty-vt",
+ "x11rb",
+]
+
+[[package]]
 name = "ultty-client"
 version = "0.1.0"
 dependencies = [
