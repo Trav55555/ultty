@@ -271,6 +271,7 @@ ligatures = false
 [behavior]
 scrollback_lines = 10000
 restore_session = false
+cursor_blink = false
 EOF
 cat >"$OUT/cfg/ghostty/config" <<EOF
 font-family = $FONT

@@ -898,8 +898,7 @@ impl App {
         }
 
         // Reset cursor blink on key press (cursor should be visible while typing)
-        self.cursor_blink_visible = true;
-        self.last_cursor_blink = Instant::now();
+        self.cursor_blink.restart(Instant::now());
 
         // Check for vim mode toggle (Ctrl+Shift+Space)
         if self.check_keybinding(&event, &self.config.keybindings.vim_mode.clone()) {

@@ -74,6 +74,14 @@ const EXIT_POKES: usize = 250;
 /// process the child left behind still holds it.
 const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(200);
 
+/// Where the child's exit cannot be watched (no pidfd), how often the I/O
+/// thread pokes the UI to check for it.
+const EXIT_CHECK_FALLBACK_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Poller keys in the I/O thread.
+const PTY_KEY: usize = 0;
+const EXIT_KEY: usize = 1;
+
 use bytes::{Buf, BytesMut};
 use polling::{Event, Events, Poller};
 
@@ -330,15 +338,16 @@ impl EventLoop {
         // SAFETY: `reader_pty` owns the registered fd and is moved into the
         // I/O thread, which deletes the registration before dropping it.
         unsafe {
-            poller.add(&reader_pty, Event::readable(0))?;
+            poller.add(&reader_pty, Event::readable(PTY_KEY))?;
         }
+        let exit_watch = ExitWatch::new(child.pid().as_raw(), &poller);
 
         let reader = std::thread::Builder::new()
             .name(format!("ultty-pty-{}", child.pid()))
             .spawn({
                 let shared = Arc::clone(&shared);
                 let poller = Arc::clone(&poller);
-                move || run_reader(reader_pty, &shared, &poller)
+                move || run_reader(reader_pty, &shared, &poller, exit_watch)
             })?;
 
         Ok(Self {
@@ -640,7 +649,7 @@ impl Drop for EventLoop {
 }
 
 /// The I/O thread: read, parse, answer queries, wake the UI, repeat.
-fn run_reader(pty: Pty, shared: &Shared, poller: &Poller) {
+fn run_reader(pty: Pty, shared: &Shared, poller: &Poller, mut exit_watch: ExitWatch) {
     let mut parser = AnsiParser::new();
     let mut buf = vec![0u8; READ_CHUNK];
     let mut poll_events = Events::new();
@@ -666,11 +675,14 @@ fn run_reader(pty: Pty, shared: &Shared, poller: &Poller) {
         // Readiness is one-shot; re-arm before sleeping. If an output wake
         // was skipped, sleep no longer than it takes to become due.
         poll_events.clear();
-        let timeout = wakes.flush_due_in();
+        let timeout = match (wakes.flush_due_in(), exit_watch.poke_due_in()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         let interest = if shared.lock().outbound.is_empty() {
-            Event::readable(0)
+            Event::readable(PTY_KEY)
         } else {
-            Event::all(0)
+            Event::all(PTY_KEY)
         };
         if let Err(err) = poller
             .modify(pty.as_fd(), interest)
@@ -680,15 +692,25 @@ fn run_reader(pty: Pty, shared: &Shared, poller: &Poller) {
             close(shared);
             break;
         }
+        if poll_events.iter().any(|event| event.key == EXIT_KEY) {
+            exit_watch.child_exited(poller);
+        }
+        if exit_watch.poke_if_due() {
+            shared.notify();
+        }
         // Readable with nothing to read means the other side hung up on
         // platforms that report EOF as a zero-length read.
-        if !poll_events.is_empty() && hung_up(&pty) && !has_pending_input(&pty) {
+        if poll_events.iter().any(|event| event.key == PTY_KEY)
+            && hung_up(&pty)
+            && !has_pending_input(&pty)
+        {
             close(shared);
             break;
         }
         wakes.flush_if_due(shared);
     }
     let _ = poller.delete(pty.as_fd());
+    exit_watch.stop(poller);
 
     // The UI reaps the child; keep nudging it until it has, or we are told
     // to stop. A stopped UI drops the EventLoop, which sets `stop`.
@@ -699,6 +721,97 @@ fn run_reader(pty: Pty, shared: &Shared, poller: &Poller) {
         std::thread::sleep(EXIT_POKE_INTERVAL);
         shared.notify();
     }
+}
+
+/// Tells the UI when the child exits while its PTY stays open.
+///
+/// The PTY usually closes when the child exits, which ends the I/O loop and
+/// starts the exit pokes. A background process the child left behind can
+/// keep the PTY open, though, and the UI only reaps the child and reports
+/// the exit when something wakes it. On Linux a pidfd makes the exit itself
+/// that wakeup; the UI is then poked every [`EXIT_POKE_INTERVAL`] until it
+/// has reported the exit (after [`EXIT_DRAIN_GRACE`]) and dropped or
+/// stopped the loop. Without a pidfd the UI is poked every
+/// [`EXIT_CHECK_FALLBACK_INTERVAL`] for as long as the PTY is open.
+struct ExitWatch {
+    pidfd: Option<std::os::fd::OwnedFd>,
+    /// When to poke the UI next, and how many exit pokes are left.
+    next_poke: Option<Instant>,
+    pokes_left: usize,
+}
+
+impl ExitWatch {
+    fn new(pid: i32, poller: &Poller) -> Self {
+        let pidfd = open_pidfd(pid).filter(|pidfd| {
+            // SAFETY: the watch owns `pidfd` and deletes it from the poller
+            // before dropping it (`child_exited` or `stop`).
+            unsafe { poller.add(pidfd, Event::readable(EXIT_KEY)) }.is_ok()
+        });
+        let next_poke = pidfd
+            .is_none()
+            .then(|| Instant::now() + EXIT_CHECK_FALLBACK_INTERVAL);
+        Self {
+            pidfd,
+            next_poke,
+            pokes_left: 0,
+        }
+    }
+
+    /// The pidfd reported the exit: poke the UI now, then until it is done.
+    fn child_exited(&mut self, poller: &Poller) {
+        self.stop(poller);
+        self.next_poke = Some(Instant::now());
+        self.pokes_left = EXIT_POKES;
+    }
+
+    fn poke_due_in(&self) -> Option<Duration> {
+        self.next_poke
+            .map(|at| at.saturating_duration_since(Instant::now()))
+    }
+
+    /// Whether to poke the UI now; schedules the next poke if so.
+    fn poke_if_due(&mut self) -> bool {
+        let now = Instant::now();
+        if self.next_poke.is_none_or(|at| at > now) {
+            return false;
+        }
+        self.next_poke = if self.pidfd.is_none() && self.pokes_left == 0 {
+            Some(now + EXIT_CHECK_FALLBACK_INTERVAL)
+        } else {
+            self.pokes_left = self.pokes_left.saturating_sub(1);
+            (self.pokes_left > 0).then(|| now + EXIT_POKE_INTERVAL)
+        };
+        true
+    }
+
+    /// Stop watching the pidfd.
+    fn stop(&mut self, poller: &Poller) {
+        if let Some(pidfd) = self.pidfd.take() {
+            let _ = poller.delete(&pidfd);
+        }
+    }
+}
+
+/// A pidfd for `pid`, readable once the process exits.
+#[cfg(target_os = "linux")]
+fn open_pidfd(pid: i32) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: pidfd_open takes a pid and flags and returns a new fd or -1.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if fd < 0 {
+        tracing::debug!(
+            "pidfd_open({pid}) failed: {}; polling for the child's exit",
+            io::Error::last_os_error()
+        );
+        return None;
+    }
+    // SAFETY: the syscall returned a new fd that nothing else owns.
+    Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_pidfd(_pid: i32) -> Option<std::os::fd::OwnedFd> {
+    None
 }
 
 /// Read and parse everything currently available.
@@ -1198,6 +1311,43 @@ mod tests {
             "exit took {:?}; it waited for the background sleep",
             start.elapsed()
         );
+    }
+
+    /// The UI sleeps until a terminal wakes it. A child that exits while a
+    /// background process holds its PTY produces no output and no hangup,
+    /// so the exit itself must wake the UI, or the pane never closes. The
+    /// sleep ignores SIGHUP, which the kernel sends the foreground group
+    /// when sh exits, so it really does hold the PTY open.
+    #[test]
+    fn exit_behind_a_held_pty_wakes_the_ui() {
+        let mut event_loop = EventLoop::with_command(
+            "/bin/sh",
+            &["/bin/sh", "-c", "trap '' HUP; sleep 5 & echo STARTED"],
+            80,
+            24,
+        )
+        .expect("create event loop");
+        let (woke_tx, woke_rx) = std::sync::mpsc::channel();
+        let woke_tx = Mutex::new(woke_tx);
+        event_loop.set_waker(Arc::new(move || {
+            let _ = woke_tx.lock().unwrap().send(());
+        }));
+
+        let start = Instant::now();
+        loop {
+            // Like the UI: only look at the terminal when woken.
+            woke_rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("the exit never woke the UI");
+            let events = event_loop.process().expect("process");
+            if events
+                .iter()
+                .any(|e| matches!(e, TerminalEvent::ChildExited { .. }))
+            {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(4), "no exit reported");
+        }
     }
 
     #[test]

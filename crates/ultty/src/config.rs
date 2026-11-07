@@ -823,6 +823,10 @@ pub struct BehaviorConfig {
     /// a pane rings the bell while the window is unfocused. Ultty has no
     /// audible bell.
     pub bell_urgent: bool,
+    /// Let the cursor blink when a program asks for a blinking cursor (the
+    /// default shape blinks). When false the cursor is always steady. It
+    /// blinks only in the focused window.
+    pub cursor_blink: bool,
     /// Whether programs may set the clipboard with OSC 52.
     ///
     /// `"allow"` (the default) lets the focused pane write the clipboard;
@@ -848,6 +852,7 @@ impl Default for BehaviorConfig {
             copy_on_select: true,
             bell_visual: true,
             bell_urgent: true,
+            cursor_blink: true,
             clipboard_write: ClipboardWrite::Allow,
             close_on_exit: true,
             opacity: 1.0,
@@ -1296,6 +1301,14 @@ copy = "ctrl+c"
         assert_eq!(config.behavior.clipboard_write, ClipboardWrite::Deny);
 
         assert!(toml::from_str::<Config>("[behavior]\nclipboard_write = \"maybe\"\n").is_err());
+    }
+
+    #[test]
+    fn cursor_blink_defaults_on_and_can_be_turned_off() {
+        assert!(Config::default().behavior.cursor_blink);
+
+        let config: Config = toml::from_str("[behavior]\ncursor_blink = false\n").unwrap();
+        assert!(!config.behavior.cursor_blink);
     }
 
     #[test]

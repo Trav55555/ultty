@@ -1,6 +1,7 @@
 //! Terminal application state and main loop.
 
 mod actions;
+mod blink;
 mod control;
 mod control_wait;
 mod input;
@@ -58,9 +59,6 @@ const WINDOW_CORNER_RADIUS: f32 = 10.0;
 /// Tolerance for recognizing compositor-tiled half/quarter window sizes.
 const TILED_WINDOW_SIZE_TOLERANCE_PX: u32 = 48;
 
-/// Cursor blink interval (how long cursor stays on/off).
-const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
-
 /// Minimum spacing between rendered frames.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
@@ -71,7 +69,9 @@ const INPUT_ECHO_WINDOW: Duration = Duration::from_millis(50);
 /// Maximum time to suppress drawing during synchronized update mode.
 const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(200);
 
-/// Low-frequency maintenance wakeup for timers and config reloads.
+/// Maintenance tick while native sessions (keepalives, animations) or
+/// `ulttyctl wait-for` timeouts need checking. Nothing else polls: with
+/// neither, an idle window sleeps until input, output or a socket wakes it.
 const MAINTENANCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Faster PTY polling while a frame is dirty but not ready to render.
@@ -80,7 +80,8 @@ const PTY_CATCHUP_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// Duration to keep tab widths stable after a tab close.
 const TAB_CLOSE_WIDTH_FREEZE_DURATION: Duration = Duration::from_secs(3);
 
-/// Cadence for best-effort active app/path tab title refreshes.
+/// Most frequent best-effort tab title refresh (foreground program and
+/// directory) while panes produce output.
 const TAB_TITLE_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 /// User events sent to the winit application loop.
@@ -119,6 +120,9 @@ pub struct App {
     output_since_input: bool,
     /// Last time best-effort tab display titles were refreshed.
     last_tab_title_refresh: Instant,
+    /// The latest PTY output not yet followed by a settled tab title
+    /// refresh; see `update::title_activity_after_refresh`.
+    tab_title_activity: Option<Instant>,
     /// Whether we need to redraw
     needs_redraw: bool,
     /// Pending close request (from window control button).
@@ -157,12 +161,12 @@ pub struct App {
     protocol_status_visible: bool,
     /// Cached list of keybindings for display
     shortcuts_list: Vec<(String, String)>,
-    /// Whether cursor is currently visible in blink cycle
-    cursor_blink_visible: bool,
-    /// Last time cursor blink state changed
-    last_cursor_blink: Instant,
+    /// The focused cursor's blink phase.
+    cursor_blink: blink::CursorBlink,
     /// Auto-dump countdown (frames remaining until dump, 0 = disabled)
     auto_dump_frames: u32,
+    /// Frames drawn so far (saturating); marks the first in the startup log.
+    frames_drawn: u32,
     /// Native protocol server for TUI apps
     protocol_server: Option<ProtocolServer>,
     /// Control server for CLI automation (ulttyctl)
@@ -226,6 +230,7 @@ impl App {
         );
         let window = event_loop.create_window(attributes)?;
         let window = Arc::new(window);
+        tracing::debug!(target: "ultty::startup", "window created");
         // winit leaves input methods off; without this, fcitx and ibus
         // users cannot type Chinese, Japanese or Korean.
         window.set_ime_allowed(true);
@@ -233,25 +238,19 @@ impl App {
         let size = window.inner_size();
         let scale_factor = window.scale_factor() as f32;
 
-        // Create wgpu instance
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            // GL presents through the display connection (Wayland needs it).
-            display: Some(Box::new(event_loop.owned_display_handle())),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-
-        // Create surface
-        let surface = instance.create_surface(window.clone())?;
-
-        // Get adapter
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            ..Default::default()
-        }))
-        .map_err(|e| anyhow::anyhow!("Failed to find suitable GPU adapter: {e}"))?;
+        // Vulkan (or the platform's primary API) first, GL only if that
+        // finds no adapter. An instance with every backend brings up GL as
+        // well, which loads and initializes the EGL driver even when Vulkan
+        // is then chosen: startup time and resident memory for nothing.
+        let (surface, adapter) = match request_gpu(event_loop, &window, wgpu::Backends::PRIMARY) {
+            Ok(gpu) => gpu,
+            Err(primary) => {
+                tracing::info!("No primary GPU backend ({primary:#}); trying GL");
+                request_gpu(event_loop, &window, wgpu::Backends::SECONDARY)
+                    .map_err(|gl| anyhow::anyhow!("{primary:#}; with GL: {gl:#}"))?
+            }
+        };
+        tracing::debug!(target: "ultty::startup", "GPU adapter ready");
 
         // Scale font size to physical pixels so cosmic-text metrics match
         // the orthographic projection (which uses physical window dimensions).
@@ -268,6 +267,7 @@ impl App {
             &scaled_font,
         ))?;
 
+        tracing::debug!(target: "ultty::startup", "renderer ready");
         // Set window opacity
         renderer.set_opacity(config.behavior.opacity);
 
@@ -292,6 +292,7 @@ impl App {
         // Create terminal manager - with launch profile if configured
         let mut terminal_manager =
             Self::create_terminal_manager(&config, cols, rows, &mut protocol_server)?;
+        tracing::debug!(target: "ultty::startup", "shell started");
         terminal_manager.set_theme_colors(config.colors.theme_colors());
         terminal_manager.set_scrollback_lines(config.behavior.scrollback_lines);
         terminal_manager.set_close_on_exit(config.behavior.close_on_exit);
@@ -303,7 +304,10 @@ impl App {
                 let _ = proxy.send_event(AppEvent::RuntimeReadable);
             }
         }));
-        let socket_wakeup = wakeup::SocketWakeup::new(event_proxy);
+        let socket_proxy = event_proxy.clone();
+        let socket_wakeup = wakeup::SocketWakeup::new(move || {
+            socket_proxy.send_event(AppEvent::RuntimeReadable).is_ok()
+        });
 
         // Try to create clipboard
         let clipboard = Clipboard::new().ok();
@@ -315,7 +319,9 @@ impl App {
         let url_detector = UrlDetector::new(config.behavior.url_detection);
 
         // Create config watcher for hot-reload
-        let config_watcher = ConfigWatcher::new();
+        let config_watcher = ConfigWatcher::new(move || {
+            let _ = event_proxy.send_event(AppEvent::RuntimeReadable);
+        });
         if config_watcher.is_some() {
             tracing::info!("Config hot-reload enabled");
         }
@@ -334,6 +340,7 @@ impl App {
             input_sent_at: None,
             output_since_input: false,
             last_tab_title_refresh: Instant::now() - TAB_TITLE_REFRESH_INTERVAL,
+            tab_title_activity: None,
             needs_redraw: true,
             pending_close: false,
             modifiers: ModifiersState::empty(),
@@ -353,9 +360,9 @@ impl App {
             shortcuts_visible: false,
             protocol_status_visible: false,
             shortcuts_list,
-            cursor_blink_visible: true,
-            last_cursor_blink: Instant::now(),
+            cursor_blink: blink::CursorBlink::new(),
             // Check for auto-dump environment variable (number of frames to wait)
+            frames_drawn: 0,
             auto_dump_frames: std::env::var("ULTTY_AUTO_DUMP")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -650,9 +657,9 @@ impl App {
         if self.update() {
             event_loop.exit();
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            self.next_update_deadline(Instant::now()),
-        ));
+        // The sockets have been drained; let them wake the loop again.
+        self.socket_wakeup.rearm();
+        event_loop.set_control_flow(control_flow(self.next_update_deadline(Instant::now())));
     }
 
     /// Get the terminal state of the focused terminal.
@@ -734,7 +741,10 @@ impl App {
 
     fn update_tab_bar(&mut self) {
         self.sync_protocol_tabs();
-        self.last_tab_title_refresh = Instant::now();
+        let now = Instant::now();
+        self.last_tab_title_refresh = now;
+        self.tab_title_activity =
+            update::title_activity_after_refresh(self.tab_title_activity, now);
 
         let total_width = self.renderer.surface_size().0 as f32;
         let active_tab_id = self
@@ -1402,6 +1412,35 @@ fn tab_shell_env(
     Ok(env)
 }
 
+/// A surface for `window` and an adapter that can draw to it, from an
+/// instance limited to `backends`.
+fn request_gpu(
+    event_loop: &ActiveEventLoop,
+    window: &Arc<Window>,
+    backends: wgpu::Backends,
+) -> Result<(wgpu::Surface<'static>, wgpu::Adapter)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends,
+        // GL presents through the display connection (Wayland needs it).
+        display: Some(Box::new(event_loop.owned_display_handle())),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let surface = instance.create_surface(Arc::clone(window))?;
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: Some(&surface),
+        force_fallback_adapter: false,
+        ..Default::default()
+    }))
+    .map_err(|e| anyhow::anyhow!("Failed to find suitable GPU adapter: {e}"))?;
+    Ok((surface, adapter))
+}
+
+/// Sleep until `deadline`, or with none, until an event arrives.
+fn control_flow(deadline: Option<Instant>) -> ControlFlow {
+    deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
+}
+
 /// Drives [`App`] from winit. The window, and so the app, is created on the
 /// first `resumed`, as winit 0.30 requires.
 struct AppHandler {
@@ -1420,9 +1459,7 @@ impl ApplicationHandler<AppEvent> for AppHandler {
             Ok(mut app) => {
                 app.update_tab_bar();
                 app.relayout_terminals();
-                event_loop.set_control_flow(ControlFlow::WaitUntil(
-                    app.next_update_deadline(Instant::now()),
-                ));
+                event_loop.set_control_flow(control_flow(app.next_update_deadline(Instant::now())));
                 self.app = Some(app);
             }
             Err(error) => {
