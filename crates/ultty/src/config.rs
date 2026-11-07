@@ -252,6 +252,18 @@ impl ColorConfig {
             self.palette = palette.clone();
         }
     }
+
+    /// The colours terminals report to applications that ask (OSC 4, 10,
+    /// 11, 12): the ones they are drawn with.
+    pub fn theme_colors(&self) -> crate::grid::ThemeColors {
+        let rgb = |c: RgbColor| [c.r, c.g, c.b];
+        crate::grid::ThemeColors {
+            foreground: rgb(self.foreground),
+            background: rgb(self.background),
+            cursor: rgb(self.cursor),
+            ansi: self.palette.to_array().map(rgb),
+        }
+    }
 }
 
 /// 16-color palette configuration.
