@@ -26,7 +26,9 @@ xvfb_pid=$!
 for _ in $(seq 50); do [ -s "$work/display" ] && break; sleep 0.1; done
 [ -s "$work/display" ] || { echo "Xvfb did not start" >&2; cat "$work/xvfb.log" >&2; exit 1; }
 
-DISPLAY=":$(cat "$work/display")" target/release/ultty >"$work/ultty.log" 2>&1 &
+# Without this, a Wayland session in the environment wins over DISPLAY
+# and the window opens on the desktop instead of Xvfb.
+env -u WAYLAND_DISPLAY DISPLAY=":$(cat "$work/display")" target/release/ultty >"$work/ultty.log" 2>&1 &
 ultty_pid=$!
 export ULTTY_PID=$ultty_pid PATH="$PWD/target/release:$PATH"
 for _ in $(seq 80); do ulttyctl ping >/dev/null 2>&1 && break; sleep 0.25; done
