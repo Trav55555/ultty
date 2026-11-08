@@ -184,6 +184,7 @@ impl CompactRow {
     /// Encode `cells` cell by cell, leaving the [`IMPLIED`] flags out of
     /// the styles if `IMPLY`. Returns `false`, with this row half written,
     /// when a cell's implied flags do not follow from its marks.
+    #[inline(never)]
     fn encode_cells<const IMPLY: bool>(&mut self, row: &Row, cells: &[Cell]) -> bool {
         let implied = if IMPLY { IMPLIED } else { CellFlags::NONE };
         let mut col = 0;
