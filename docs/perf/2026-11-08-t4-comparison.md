@@ -16,9 +16,9 @@ the run.
 
 | | Ultty | Ghostty | Alacritty |
 |---|---:|---:|---:|
-| keypress to pixel, idle (median, n=600) | 3.56 ms | 22.4 ms | 3.53 ms |
-| keypress to pixel, under 10 MiB/s output | 5.53 ms | 14.8 ms | 4.60 ms |
-| keypress to pixel, under maximum output | 21.9 ms | 34.2 ms | 12.4 ms |
+| keypress to pixel, idle (median / p99, n=600) | 3.56 / 3.70 ms | 22.4 / 30.9 ms | 3.53 / 3.67 ms |
+| keypress to pixel, under 10 MiB/s output | 5.53 / 8.33 ms | 14.9 / 26.0 ms | 4.62 / 7.70 ms |
+| keypress to pixel, under maximum output | 21.9 / 24.8 ms | 34.2 / 57.9 ms | 12.4 / 19.8 ms |
 | throughput, ascii (MiB/s, n=9) | 82.2 | 124 | 47.3 |
 | throughput, cursor-redraw | 91.9 | 86.4 | 59.6 |
 | throughput, sgr-dense | 45.3 | 26.1 | 53.2 |
