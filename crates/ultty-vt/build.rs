@@ -15,7 +15,7 @@ mod char_class;
 /// and the CJK ideographs in planes 2 and 3.
 const LIMIT: u32 = 0x40000;
 /// Codepoints per block.
-const BLOCK: u32 = 64;
+const BLOCK: u32 = 128;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");

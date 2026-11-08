@@ -46,9 +46,12 @@
 //! behaviour.
 
 pub(super) use super::char_class::JoinClass;
-use super::char_class::{in_ranges, is_extend, is_plain, props_bits, CLASS_SHIFT, ZWJ};
 #[cfg(test)]
-use super::char_class::{is_joiner, CONSONANT, EXTEND, LINKER, PLAIN, SPACING_MARK};
+use super::char_class::{
+    in_ranges, is_extend, is_joiner, is_plain, is_regional_indicator, CONSONANT, EXTEND, LINKER,
+    PICTOGRAPHIC, PLAIN, SPACING_MARK,
+};
+use super::char_class::{props_bits, CLASS_SHIFT, ZWJ};
 
 // The table `build.rs` generates from `props_bits`: TABLE_LIMIT, BLOCK_SHIFT,
 // BLOCK_INDEX and BLOCKS.
@@ -88,173 +91,11 @@ impl CharProps {
             3 => JoinClass::Linker,
             4 => JoinClass::SpacingMark,
             5 => JoinClass::Consonant,
+            6 => JoinClass::RegionalIndicator,
+            7 => JoinClass::Pictograph,
             _ => JoinClass::Other,
         }
     }
-}
-
-/// The Extended_Pictographic codepoints of the plain class, as sorted,
-/// disjoint ranges: exactly those (the tests check every plain codepoint).
-const PICTOGRAPHIC: &[(char, char)] = &[
-    ('\u{A9}', '\u{A9}'),
-    ('\u{AE}', '\u{AE}'),
-    ('\u{203C}', '\u{203C}'),
-    ('\u{2049}', '\u{2049}'),
-    ('\u{2122}', '\u{2122}'),
-    ('\u{2139}', '\u{2139}'),
-    ('\u{2194}', '\u{2199}'),
-    ('\u{21A9}', '\u{21AA}'),
-    ('\u{231A}', '\u{231B}'),
-    ('\u{2328}', '\u{2328}'),
-    ('\u{23CF}', '\u{23CF}'),
-    ('\u{23E9}', '\u{23F3}'),
-    ('\u{23F8}', '\u{23FA}'),
-    ('\u{24C2}', '\u{24C2}'),
-    ('\u{25AA}', '\u{25AB}'),
-    ('\u{25B6}', '\u{25B6}'),
-    ('\u{25C0}', '\u{25C0}'),
-    ('\u{25FB}', '\u{25FE}'),
-    ('\u{2600}', '\u{2604}'),
-    ('\u{260E}', '\u{260E}'),
-    ('\u{2611}', '\u{2611}'),
-    ('\u{2614}', '\u{2615}'),
-    ('\u{2618}', '\u{2618}'),
-    ('\u{261D}', '\u{261D}'),
-    ('\u{2620}', '\u{2620}'),
-    ('\u{2622}', '\u{2623}'),
-    ('\u{2626}', '\u{2626}'),
-    ('\u{262A}', '\u{262A}'),
-    ('\u{262E}', '\u{262F}'),
-    ('\u{2638}', '\u{263A}'),
-    ('\u{2640}', '\u{2640}'),
-    ('\u{2642}', '\u{2642}'),
-    ('\u{2648}', '\u{2653}'),
-    ('\u{265F}', '\u{2660}'),
-    ('\u{2663}', '\u{2663}'),
-    ('\u{2665}', '\u{2666}'),
-    ('\u{2668}', '\u{2668}'),
-    ('\u{267B}', '\u{267B}'),
-    ('\u{267E}', '\u{267F}'),
-    ('\u{2692}', '\u{2697}'),
-    ('\u{2699}', '\u{2699}'),
-    ('\u{269B}', '\u{269C}'),
-    ('\u{26A0}', '\u{26A1}'),
-    ('\u{26A7}', '\u{26A7}'),
-    ('\u{26AA}', '\u{26AB}'),
-    ('\u{26B0}', '\u{26B1}'),
-    ('\u{26BD}', '\u{26BE}'),
-    ('\u{26C4}', '\u{26C5}'),
-    ('\u{26C8}', '\u{26C8}'),
-    ('\u{26CE}', '\u{26CF}'),
-    ('\u{26D1}', '\u{26D1}'),
-    ('\u{26D3}', '\u{26D4}'),
-    ('\u{26E9}', '\u{26EA}'),
-    ('\u{26F0}', '\u{26F5}'),
-    ('\u{26F7}', '\u{26FA}'),
-    ('\u{26FD}', '\u{26FD}'),
-    ('\u{2702}', '\u{2702}'),
-    ('\u{2705}', '\u{2705}'),
-    ('\u{2708}', '\u{270D}'),
-    ('\u{270F}', '\u{270F}'),
-    ('\u{2712}', '\u{2712}'),
-    ('\u{2714}', '\u{2714}'),
-    ('\u{2716}', '\u{2716}'),
-    ('\u{271D}', '\u{271D}'),
-    ('\u{2721}', '\u{2721}'),
-    ('\u{2728}', '\u{2728}'),
-    ('\u{2733}', '\u{2734}'),
-    ('\u{2744}', '\u{2744}'),
-    ('\u{2747}', '\u{2747}'),
-    ('\u{274C}', '\u{274C}'),
-    ('\u{274E}', '\u{274E}'),
-    ('\u{2753}', '\u{2755}'),
-    ('\u{2757}', '\u{2757}'),
-    ('\u{2763}', '\u{2764}'),
-    ('\u{2795}', '\u{2797}'),
-    ('\u{27A1}', '\u{27A1}'),
-    ('\u{27B0}', '\u{27B0}'),
-    ('\u{27BF}', '\u{27BF}'),
-    ('\u{2934}', '\u{2935}'),
-    ('\u{2B05}', '\u{2B07}'),
-    ('\u{2B1B}', '\u{2B1C}'),
-    ('\u{2B50}', '\u{2B50}'),
-    ('\u{2B55}', '\u{2B55}'),
-    ('\u{3030}', '\u{3030}'),
-    ('\u{303D}', '\u{303D}'),
-    ('\u{3297}', '\u{3297}'),
-    ('\u{3299}', '\u{3299}'),
-    ('\u{1F004}', '\u{1F004}'),
-    ('\u{1F02C}', '\u{1F02F}'),
-    ('\u{1F094}', '\u{1F09F}'),
-    ('\u{1F0AF}', '\u{1F0B0}'),
-    ('\u{1F0C0}', '\u{1F0C0}'),
-    ('\u{1F0CF}', '\u{1F0D0}'),
-    ('\u{1F0F6}', '\u{1F0FF}'),
-    ('\u{1F170}', '\u{1F171}'),
-    ('\u{1F17E}', '\u{1F17F}'),
-    ('\u{1F18E}', '\u{1F18E}'),
-    ('\u{1F191}', '\u{1F19A}'),
-    ('\u{1F1AE}', '\u{1F1E5}'),
-    ('\u{1F201}', '\u{1F20F}'),
-    ('\u{1F21A}', '\u{1F21A}'),
-    ('\u{1F22F}', '\u{1F22F}'),
-    ('\u{1F232}', '\u{1F23A}'),
-    ('\u{1F23C}', '\u{1F23F}'),
-    ('\u{1F249}', '\u{1F25F}'),
-    ('\u{1F266}', '\u{1F321}'),
-    ('\u{1F324}', '\u{1F393}'),
-    ('\u{1F396}', '\u{1F397}'),
-    ('\u{1F399}', '\u{1F39B}'),
-    ('\u{1F39E}', '\u{1F3F0}'),
-    ('\u{1F3F3}', '\u{1F3F5}'),
-    ('\u{1F3F7}', '\u{1F3FA}'),
-    ('\u{1F400}', '\u{1F4FD}'),
-    ('\u{1F4FF}', '\u{1F53D}'),
-    ('\u{1F549}', '\u{1F54E}'),
-    ('\u{1F550}', '\u{1F567}'),
-    ('\u{1F56F}', '\u{1F570}'),
-    ('\u{1F573}', '\u{1F57A}'),
-    ('\u{1F587}', '\u{1F587}'),
-    ('\u{1F58A}', '\u{1F58D}'),
-    ('\u{1F590}', '\u{1F590}'),
-    ('\u{1F595}', '\u{1F596}'),
-    ('\u{1F5A4}', '\u{1F5A5}'),
-    ('\u{1F5A8}', '\u{1F5A8}'),
-    ('\u{1F5B1}', '\u{1F5B2}'),
-    ('\u{1F5BC}', '\u{1F5BC}'),
-    ('\u{1F5C2}', '\u{1F5C4}'),
-    ('\u{1F5D1}', '\u{1F5D3}'),
-    ('\u{1F5DC}', '\u{1F5DE}'),
-    ('\u{1F5E1}', '\u{1F5E1}'),
-    ('\u{1F5E3}', '\u{1F5E3}'),
-    ('\u{1F5E8}', '\u{1F5E8}'),
-    ('\u{1F5EF}', '\u{1F5EF}'),
-    ('\u{1F5F3}', '\u{1F5F3}'),
-    ('\u{1F5FA}', '\u{1F64F}'),
-    ('\u{1F680}', '\u{1F6C5}'),
-    ('\u{1F6CB}', '\u{1F6D2}'),
-    ('\u{1F6D5}', '\u{1F6E5}'),
-    ('\u{1F6E9}', '\u{1F6E9}'),
-    ('\u{1F6EB}', '\u{1F6F0}'),
-    ('\u{1F6F3}', '\u{1F6FF}'),
-    ('\u{1F7DA}', '\u{1F7FF}'),
-    ('\u{1F80C}', '\u{1F80F}'),
-    ('\u{1F848}', '\u{1F84F}'),
-    ('\u{1F85A}', '\u{1F85F}'),
-    ('\u{1F888}', '\u{1F88F}'),
-    ('\u{1F8AE}', '\u{1F8AF}'),
-    ('\u{1F8BC}', '\u{1F8BF}'),
-    ('\u{1F8C2}', '\u{1F8CF}'),
-    ('\u{1F8D9}', '\u{1F8FF}'),
-    ('\u{1F90C}', '\u{1F93A}'),
-    ('\u{1F93C}', '\u{1F945}'),
-    ('\u{1F947}', '\u{1F9FF}'),
-    ('\u{1FA58}', '\u{1FA5F}'),
-    ('\u{1FA6E}', '\u{1FAFF}'),
-];
-
-fn is_regional_indicator(c: char) -> bool {
-    matches!(c, '\u{1F1E6}'..='\u{1F1FF}')
 }
 
 /// The classes [`joins_by_rules`] knows the rules for.
@@ -268,37 +109,44 @@ enum Class {
 
 impl Class {
     fn of(c: char) -> Option<Self> {
-        if c == ZWJ {
-            Some(Self::Zwj)
-        } else if is_regional_indicator(c) {
-            Some(Self::RegionalIndicator)
-        } else if is_extend(c) {
-            Some(Self::Extend)
-        } else if is_plain(c) {
-            Some(Self::Plain {
-                pictographic: in_ranges(PICTOGRAPHIC, c),
-            })
-        } else {
-            None
+        match CharProps::of(c).class() {
+            JoinClass::Joiner if c == ZWJ => Some(Self::Zwj),
+            JoinClass::Joiner => Some(Self::Extend),
+            JoinClass::RegionalIndicator => Some(Self::RegionalIndicator),
+            JoinClass::Plain => Some(Self::Plain {
+                pictographic: false,
+            }),
+            JoinClass::Pictograph => Some(Self::Plain { pictographic: true }),
+            _ => None,
         }
     }
 }
 
 /// How a printed cluster ends, as far as [`joins_tail`] needs to know:
-/// its last codepoint and whether it ends in an Indic conjunct.
+/// its last codepoint, and whether it ends in an emoji sequence waiting
+/// for a pictograph, an Indic conjunct or half a flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tail {
-    /// A plain, extend, linker or spacing-mark codepoint, not in a
-    /// conjunct: extend, ZWJ, linkers and spacing marks join, nothing else.
+    /// A plain, extend, linker or spacing-mark codepoint, not in any of
+    /// the sequences below: extend, ZWJ, linkers and spacing marks join,
+    /// nothing else.
     Settled,
+    /// A pictograph, then perhaps extends: as `Settled`.
+    Pictograph,
+    /// A pictograph, extends and a ZWJ: as `Settled`, and a pictograph
+    /// joins too (GB11).
+    PictographZwj,
+    /// Another ZWJ: as `Settled`, except that a consonant may join (GB9c,
+    /// if the ZWJ is in a conjunct).
+    Zwj,
     /// A consonant, then perhaps extends: as `Settled`.
     Consonant,
     /// A consonant, then extends and linkers with at least one linker:
     /// as `Settled`, and a consonant joins too (GB9c).
     Conjunct,
-    /// ZWJ: extend, ZWJ, linkers and spacing marks join; a plain codepoint
-    /// may (GB11) and a consonant may (GB9c).
-    Zwj,
+    /// An unpaired regional indicator: as `Settled`, and a regional
+    /// indicator joins too (GB12, GB13).
+    RegionalIndicator,
     /// Anything else.
     Other,
 }
@@ -312,23 +160,35 @@ impl Tail {
             JoinClass::Plain | JoinClass::Joiner | JoinClass::Linker | JoinClass::SpacingMark => {
                 Self::Settled
             }
+            JoinClass::Pictograph => Self::Pictograph,
             JoinClass::Consonant => Self::Consonant,
+            JoinClass::RegionalIndicator => Self::RegionalIndicator,
             JoinClass::Other => Self::Other,
         }
     }
 
     /// The end of this cluster with `c` appended.
     pub(super) fn then(self, c: char) -> Self {
+        use JoinClass as J;
         match (CharProps::of(c).class(), self) {
-            (JoinClass::Joiner, _) if c == ZWJ => Self::Zwj,
-            (JoinClass::Plain | JoinClass::SpacingMark, _) => Self::Settled,
-            (JoinClass::Consonant, _) => Self::Consonant,
-            // Extends keep a conjunct going; linkers start one after a
-            // consonant (GB9c).
-            (JoinClass::Joiner, Self::Settled | Self::Consonant | Self::Conjunct) => self,
-            (JoinClass::Linker, Self::Settled) => Self::Settled,
-            (JoinClass::Linker, Self::Consonant | Self::Conjunct) => Self::Conjunct,
-            // After ZWJ the conjunct state is not known.
+            (J::Joiner, Self::Pictograph) if c == ZWJ => Self::PictographZwj,
+            (J::Joiner, Self::Other) if c == ZWJ => Self::Other,
+            (J::Joiner, _) if c == ZWJ => Self::Zwj,
+            (J::Plain | J::SpacingMark, _) => Self::Settled,
+            (J::Pictograph, _) => Self::Pictograph,
+            (J::Consonant, _) => Self::Consonant,
+            (J::RegionalIndicator, Self::RegionalIndicator) => Self::Settled,
+            // Extends and linkers (which are extends too) keep a
+            // pictograph or a conjunct going; linkers start a conjunct
+            // after a consonant (GB9c). Both end a flag.
+            (J::Joiner | J::Linker, Self::Pictograph) => Self::Pictograph,
+            (J::Joiner, Self::Consonant | Self::Conjunct) => self,
+            (J::Linker, Self::Consonant | Self::Conjunct) => Self::Conjunct,
+            (
+                J::Joiner | J::Linker,
+                Self::Settled | Self::PictographZwj | Self::RegionalIndicator,
+            ) => Self::Settled,
+            // After another ZWJ a conjunct may still be open.
             _ => Self::Other,
         }
     }
@@ -339,18 +199,18 @@ impl Tail {
 /// cluster.
 ///
 /// Extend, ZWJ, linkers and spacing marks join whatever is not a control
-/// (GB9, GB9a). A plain codepoint joins none of these ends (only ZWJ
-/// before it could, GB11), and a consonant only a conjunct (GB9c).
+/// (GB9, GB9a). A plain codepoint joins none of these ends, a pictograph
+/// only one waiting for it after a ZWJ (GB11), a consonant only a
+/// conjunct (GB9c) and a regional indicator only another (GB12, GB13).
 #[inline]
 pub(super) fn joins_tail(tail: Tail, class: JoinClass) -> Option<bool> {
     use JoinClass as J;
     match (class, tail) {
-        (J::Joiner | J::Linker | J::SpacingMark, Tail::Other) => None,
-        (J::Joiner | J::Linker | J::SpacingMark, _) => Some(true),
-        (J::Plain, Tail::Settled | Tail::Consonant | Tail::Conjunct) => Some(false),
-        (J::Consonant, Tail::Settled | Tail::Consonant) => Some(false),
-        (J::Consonant, Tail::Conjunct) => Some(true),
-        _ => None,
+        (_, Tail::Other) | (J::Other, _) | (J::Consonant, Tail::Zwj) => None,
+        (J::Joiner | J::Linker | J::SpacingMark, _) | (J::Plain, _) => Some(class != J::Plain),
+        (J::Pictograph, _) => Some(tail == Tail::PictographZwj),
+        (J::Consonant, _) => Some(tail == Tail::Conjunct),
+        (J::RegionalIndicator, _) => Some(tail == Tail::RegionalIndicator),
     }
 }
 
@@ -360,14 +220,14 @@ pub(super) fn joins(base: char, extra: &[char], c: char) -> Option<bool> {
     let class = |c| CharProps::of(c).class();
     // The common cases first: plain text, and marks on a plain character.
     match class(c) {
-        JoinClass::Plain => {
+        JoinClass::Plain | JoinClass::Pictograph => {
             let last = extra.last().copied().unwrap_or(base);
             if last != ZWJ && class(last) != JoinClass::Other {
                 return Some(false);
             }
         }
         JoinClass::Joiner
-            if class(base) == JoinClass::Plain
+            if matches!(class(base), JoinClass::Plain | JoinClass::Pictograph)
                 && extra.iter().all(|&e| class(e) == JoinClass::Joiner) =>
         {
             return Some(true);
@@ -446,7 +306,9 @@ mod tests {
             let props = CharProps::of(c);
             assert_eq!(props, CharProps(props_bits(c)), "{c:?}");
             assert_eq!(props.width(), c.width().unwrap_or(0) as u16, "{c:?}");
-            let class = if is_plain(c) {
+            let class = if is_plain(c) && in_ranges(PICTOGRAPHIC, c) {
+                JoinClass::Pictograph
+            } else if is_plain(c) {
                 JoinClass::Plain
             } else if is_joiner(c) {
                 JoinClass::Joiner
@@ -456,6 +318,8 @@ mod tests {
                 JoinClass::SpacingMark
             } else if in_ranges(CONSONANT, c) {
                 JoinClass::Consonant
+            } else if is_regional_indicator(c) {
+                JoinClass::RegionalIndicator
             } else {
                 JoinClass::Other
             };
@@ -506,10 +370,18 @@ mod tests {
             let befores: &[&str] = match CharProps::of(t).class() {
                 JoinClass::Other => continue,
                 JoinClass::Plain => &[""],
+                JoinClass::Pictograph => &["", "\u{1F600}\u{200D}"],
+                JoinClass::RegionalIndicator => &["", "\u{1F1EF}"],
                 JoinClass::Consonant => &["", "\u{915}\u{94D}"],
-                JoinClass::Joiner | JoinClass::Linker | JoinClass::SpacingMark => {
-                    &["a", "\u{1F600}", "\u{915}", "\u{915}\u{94D}", "a\u{301}"]
-                }
+                JoinClass::Joiner | JoinClass::Linker | JoinClass::SpacingMark => &[
+                    "a",
+                    "\u{1F600}",
+                    "\u{915}",
+                    "\u{915}\u{94D}",
+                    "a\u{301}",
+                    "\u{1F1EF}",
+                    "\u{1F600}\u{200D}",
+                ],
             };
             for before in befores {
                 let cluster: Vec<char> = before.chars().chain([t]).collect();
