@@ -267,6 +267,8 @@ pub struct Renderer {
     has_animations: bool,
     /// Cached native session GPU buffers.
     cached_native_buffers: NativeBufferCache<NativeBufferSet>,
+    /// The glyph atlas epoch those buffers' UVs belong to.
+    cached_native_atlas_epoch: u64,
     /// Previous frame vertex/index counts for smarter pre-allocation
     prev_bg_count: (usize, usize),
     prev_text_count: (usize, usize),
@@ -519,6 +521,7 @@ impl Renderer {
             animated_progress: std::collections::HashMap::new(),
             has_animations: false,
             cached_native_buffers: NativeBufferCache::default(),
+            cached_native_atlas_epoch: 0,
             prev_bg_count: (0, 0),
             prev_text_count: (0, 0),
             scroll_adjustments_cache: std::collections::HashMap::new(),
@@ -649,6 +652,7 @@ impl Renderer {
             animated_progress: std::collections::HashMap::new(),
             has_animations: false,
             cached_native_buffers: NativeBufferCache::default(),
+            cached_native_atlas_epoch: 0,
             prev_bg_count: (0, 0),
             prev_text_count: (0, 0),
             scroll_adjustments_cache: std::collections::HashMap::new(),
@@ -1467,7 +1471,10 @@ impl Renderer {
 
         let any_dirty = sessions.iter().any(|s| s.is_render_dirty());
 
-        if !any_dirty && self.has_cached_native_buffers() {
+        // Cached text quads sample the atlas; after it grows or empties
+        // their UVs point at the wrong glyphs.
+        let atlas_unchanged = self.cached_native_atlas_epoch == self.text_renderer.atlas_epoch();
+        if !any_dirty && atlas_unchanged && self.has_cached_native_buffers() {
             self.draw_cached_native_buffers(&mut encoder, &view);
         } else {
             self.clear_cached_native_buffers();

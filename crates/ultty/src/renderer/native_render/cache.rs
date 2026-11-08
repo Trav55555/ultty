@@ -25,6 +25,7 @@ impl Renderer {
     ) {
         self.prev_bg_count = (bg_vertices.len(), bg_indices.len());
         self.prev_text_count = (text_vertices.len(), text_indices.len());
+        self.cached_native_atlas_epoch = self.text_renderer.atlas_epoch();
 
         if let Some(buffer_set) =
             self.upload_and_draw_native_bg(encoder, view, bg_vertices, bg_indices)

@@ -51,6 +51,8 @@ The current dated evidence set is:
 - [`2026-11-07-unicode-throughput.md`](./2026-11-07-unicode-throughput.md) for
   the non-ASCII and scrolling instruction cuts, and corrected instruction
   counts (the earlier gate undercounted).
+- [`2026-11-08-glyph-atlas.md`](./2026-11-08-glyph-atlas.md) for the glyph
+  atlas starting at 1024x1024 and growing (GPU memory 22.9 to 11.4 MB).
 - [`2026-11-08-control-latency.md`](./2026-11-08-control-latency.md) for
   control request and event delivery latency, and background tabs no longer
   redrawing the window.

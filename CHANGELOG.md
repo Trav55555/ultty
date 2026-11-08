@@ -116,6 +116,9 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Changed
 
+- The glyph atlas starts at 1024x1024 and grows to 2048x2048 only when it
+  fills, halving GPU memory for a typical session (22.9 to 11.4 MB under
+  lavapipe).
 - Output in a background tab no longer redraws the window. A hidden tab
   streaming 100 lines a second cost 272 frames and 0.24 s of CPU per 5 s;
   now none beyond the cursor blink, and 0.05 s.
