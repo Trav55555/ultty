@@ -51,8 +51,8 @@ requests are in `crates/ultty-protocol/src/control.rs`:
 | Synchronise | `WaitFor` (pattern with timeout), `Batch` |
 | Agent | `SetAgentStatus` (cost, budget, pressure, model, step, agent name) |
 
-`mcp/ultty-mcp-server.py` wraps ten of these as MCP tools by shelling out to
-the CLI.
+`mcp/ultty-mcp-server.py` wrapped ten of these as MCP tools by shelling out
+to the CLI (replaced by `ulttyctl mcp` in A7).
 
 This already covers two real jobs: end-to-end tests for TUIs
 (send keys, wait for text, read text or screenshot) and letting an agent run
@@ -95,7 +95,7 @@ a protocol, schema or public contract and needs sign-off first.
 | A4 | `WaitFor` becomes event-driven on top of A3 (pattern, command-finished, bell, quiet-for-N-ms). Drops the maintenance tick while a wait is pending. | Idle wakeup bench shows zero switches/s with a pending `wait-for`. | — (done 2026-11-07) |
 | A5 | Command output query: `last-command [--target]` returns the command line, output and exit code from OSC 133 marks. | Test with bash and zsh shell integration. | gate |
 | A6 | Generic pane status replaces `SetAgentStatus`: `label`, `state` (idle/working/waiting/error), optional `progress`, optional `attention` flag, free-form `detail`. Shown in the tab bar; `attention` also marks the window urgent like `bell_urgent`. Old request kept one release as a deprecated alias. | Snapshot of tab bar per state; deprecation noted in CHANGELOG. | gate |
-| A7 | MCP server as a supported binary (`ulttyctl mcp`, Rust, stdio), exposing A1-A6. Retire the Python script. | MCP conformance test in CI: list tools, run a command in a target pane, wait for finish, read output. | — |
+| A7 | MCP server as a supported binary (`ulttyctl mcp`, Rust, stdio), exposing A1-A6. Retire the Python script. | MCP conformance test in CI: list tools, run a command in a target pane, wait for finish, read output. | — (done 2026-11-07) |
 | A8 | Guide: "Test your TUI with ulttyctl" and "Drive Ultty from an agent", with a worked example for a ratatui app and for Claude Code via MCP. | Examples run in CI headless where possible. | — |
 
 ### B. Native protocol for agents and TUIs

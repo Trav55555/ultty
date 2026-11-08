@@ -820,7 +820,7 @@ fn parse_request_only(data: &[u8]) -> Option<ControlRequest> {
     parse_request(data).map(|parsed| parsed.request)
 }
 
-fn parse_key(s: &str) -> Option<ultty_protocol::Key> {
+pub(crate) fn parse_key(s: &str) -> Option<ultty_protocol::Key> {
     match s.to_lowercase().as_str() {
         "enter" | "return" => Some(ultty_protocol::Key::Enter),
         "tab" => Some(ultty_protocol::Key::Tab),
@@ -854,7 +854,7 @@ fn parse_display_tab_index(s: &str) -> Option<usize> {
     s.parse::<usize>().ok()?.checked_sub(1)
 }
 
-fn parse_modifiers(s: &str) -> ultty_protocol::Modifiers {
+pub(crate) fn parse_modifiers(s: &str) -> ultty_protocol::Modifiers {
     let mut mods = ultty_protocol::Modifiers::NONE;
     let lower = s.to_lowercase();
     if lower.contains("shift") {

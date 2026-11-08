@@ -51,6 +51,13 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   `title_changed` and `process_exited`. An idle subscriber costs no
   wakeups. A subscriber more than 1 MiB behind is disconnected, and at most
   64 can be open.
+- `ulttyctl mcp` serves Ultty's control plane to AI agents over MCP
+  (stdio): list panes, read text, type text, send keys, run a command, wait
+  (for text, a finished command with its exit code, the bell, or quiet),
+  search, open a tab (returns its pane id), screenshot and info. Every pane
+  tool takes a pane id. For Claude Code: `claude mcp add ultty -- ulttyctl
+  mcp`. It replaces `mcp/ultty-mcp-server.py`, which framed messages with
+  `Content-Length` headers that MCP's stdio transport does not use.
 - `ulttyctl wait-for --command-done` (exits with the command's status),
   `--bell` and `--quiet <ms>` wait for the next command to finish, the next
   bell, or a period without output, instead of for text. Control request:

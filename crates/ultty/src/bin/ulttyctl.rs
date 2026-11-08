@@ -25,6 +25,16 @@ fn main() {
         std::process::exit(0);
     }
 
+    if args.first().map(String::as_str) == Some("mcp") {
+        std::process::exit(match run_mcp() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                1
+            }
+        });
+    }
+
     let use_json = args.iter().any(|a| a == "--json");
     let timeout_secs: u64 = args
         .windows(2)
@@ -514,6 +524,32 @@ fn send_command(socket_path: &Path, command: &str, timeout_secs: u64) -> Result<
     read_response(&mut stream, timeout_secs)
 }
 
+/// Serve MCP on stdin and stdout. Each tool call finds the running Ultty
+/// afresh, so the server outlives a restarted terminal.
+fn run_mcp() -> std::io::Result<()> {
+    const MCP_READ_TIMEOUT_SECS: u64 = 10;
+    let mut send = |request: ControlRequest| {
+        let endpoint = find_instance()?;
+        let read_timeout = read_timeout_for(&request, MCP_READ_TIMEOUT_SECS);
+        let envelope = ControlEnvelope {
+            output_format: OutputFormat::Json,
+            request: with_auth_token(request, read_auth_token(&endpoint.token)),
+        };
+        let command = serde_json::to_string(&envelope)
+            .map_err(|e| format!("failed to encode request: {}", e))?;
+        send_command(&endpoint.socket, &command, read_timeout).and_then(|raw| parse_response(&raw))
+    };
+    // Screenshots go to the private control directory, not a shared /tmp.
+    let screenshot_dir = control_dir().ok();
+    let stdin = std::io::stdin();
+    ultty::control::mcp::serve(
+        stdin.lock(),
+        std::io::stdout().lock(),
+        &mut send,
+        screenshot_dir.as_deref(),
+    )
+}
+
 /// Subscribe and copy each event line to `out` until Ultty closes the
 /// stream. The write side stays open: shutting it down ends a subscription.
 fn stream_events(socket_path: &Path, command: &str, out: &mut impl Write) -> Result<(), String> {
@@ -632,6 +668,11 @@ WINDOW COMMANDS:
 
 EXECUTION:
     run <command> [args]    Run a command in current tab
+
+MCP:
+    mcp                     Serve the tools above to an AI agent over MCP
+                            (stdio). For Claude Code:
+                            claude mcp add ultty -- ulttyctl mcp
 
 AUTHENTICATION:
     Inside an ultty window, ulttyctl talks to that window's ultty (found
