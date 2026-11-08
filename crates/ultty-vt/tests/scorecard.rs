@@ -6,7 +6,7 @@
 //! results, so a row reads "yes" only while its test passes.
 
 use ultty_vt::ansi::{Action, AnsiParser};
-use ultty_vt::grid::{Color, Dimensions, Terminal, TerminalHandler, UnderlineStyle};
+use ultty_vt::grid::{Color, Dimensions, Terminal, TerminalHandler, ThemeColors, UnderlineStyle};
 
 fn run(bytes: &[u8]) -> Terminal {
     let mut term = Terminal::new(Dimensions::new(20, 5));
@@ -160,6 +160,30 @@ fn scorecard_progress() {
         actions(b"\x1b]9;4;0\x07"),
         vec![Action::Progress(Progress::Clear)]
     );
+}
+
+#[test]
+fn scorecard_colour_scheme_updates() {
+    let with_background = |background| ThemeColors {
+        background,
+        ..ThemeColors::default()
+    };
+    let mut term = run(b"");
+    term.set_theme_colors(with_background([0x20, 0x20, 0x20]));
+    assert_eq!(replies(&mut term, b"\x1b[?996n"), "\x1b[?997;1n");
+    // Unasked reports only once the program turns them on.
+    term.set_theme_colors(with_background([0xf0, 0xf0, 0xf0]));
+    assert_eq!(replies(&mut term, b""), "");
+    assert_eq!(replies(&mut term, b"\x1b[?996n"), "\x1b[?997;2n");
+    assert_eq!(
+        replies(&mut term, b"\x1b[?2031h\x1b[?2031$p"),
+        "\x1b[?2031;1$y"
+    );
+    term.set_theme_colors(with_background([0x10, 0x10, 0x30]));
+    assert_eq!(replies(&mut term, b""), "\x1b[?997;1n");
+    // Another dark theme is not a change of scheme.
+    term.set_theme_colors(with_background([0x30, 0x10, 0x10]));
+    assert_eq!(replies(&mut term, b""), "");
 }
 
 #[test]

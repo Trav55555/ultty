@@ -299,6 +299,9 @@ pub enum Action {
     /// Device status report, operating status (DSR - CSI 5 n)
     DeviceStatusReport,
 
+    /// Report whether the theme is dark or light (CSI ? 996 n)
+    ReportColorScheme,
+
     /// Extended cursor position report (DECXCPR - CSI ? 6 n)
     ReportExtendedCursorPosition,
 
@@ -477,6 +480,9 @@ pub enum Mode {
     /// Grapheme cluster processing (CSI ?2027h/l) - multi-codepoint
     /// graphemes occupy one cell with their Unicode width
     GraphemeClustering,
+    /// Report light/dark theme changes (CSI ?2031h/l), as contour, kitty
+    /// and Ghostty do
+    ColorSchemeUpdates,
     /// Allow 80 <-> 132 column switching (CSI ?40h/l). DECCOLM is ignored
     /// unless this is set, as in xterm.
     AllowColumnModeSwitch,

@@ -288,13 +288,22 @@ impl TerminalManager {
     }
 
     /// Set the colours terminals are drawn with, for existing terminals and
-    /// any created later, so colour queries report the live theme.
+    /// any created later, so colour queries report the live theme. Programs
+    /// that asked (mode 2031) hear of a switch between dark and light.
     pub fn set_theme_colors(&mut self, theme: ThemeColors) {
-        for terminal in &self.terminals {
-            terminal
-                .event_loop
-                .terminal()
-                .set_theme_colors(theme.clone());
+        for terminal in &mut self.terminals {
+            let report = {
+                let mut state = terminal.event_loop.terminal();
+                state.set_theme_colors(theme.clone());
+                // The I/O thread sends replies as it parses, so anything
+                // queued now is the report.
+                state.take_responses().concat()
+            };
+            if !report.is_empty() {
+                if let Err(err) = terminal.event_loop.send_input(&report) {
+                    tracing::debug!("theme change report not sent: {err}");
+                }
+            }
         }
         self.theme_colors = theme;
     }
@@ -1527,6 +1536,57 @@ mod tests {
             .unwrap();
         manager.close_tab(first);
         manager
+    }
+
+    use std::time::{Duration, Instant};
+
+    /// Process output until the focused pane's screen contains `text`.
+    fn wait_for_screen(manager: &mut TerminalManager, text: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            manager.process_all().unwrap();
+            let screen = {
+                let state = manager.focused_terminal().unwrap().event_loop.terminal();
+                let grid = state.grid();
+                (0..grid.dimensions().rows)
+                    .filter_map(|r| grid.row(r).map(|row| row.text_trimmed()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            if screen.contains(text) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn a_program_that_asked_hears_the_theme_turn_light() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        manager.set_theme_colors(ThemeColors {
+            background: [0x20, 0x20, 0x20],
+            ..ThemeColors::default()
+        });
+        // Turn on mode 2031, then print the next 9 bytes of input.
+        let script = "stty raw -echo; printf '\\033[?2031hready'; \
+                      r=$(dd bs=1 count=9 2>/dev/null | tr '\\033' E); \
+                      printf ' got:%s' \"$r\"; sleep 5";
+        manager
+            .create_tab_with_command(
+                "/bin/sh",
+                &["-c".to_string(), script.to_string()],
+                None,
+                None,
+                &mut no_tab_env,
+            )
+            .unwrap();
+        assert!(wait_for_screen(&mut manager, "ready"));
+        manager.set_theme_colors(ThemeColors {
+            background: [0xf8, 0xf8, 0xf8],
+            ..ThemeColors::default()
+        });
+        assert!(wait_for_screen(&mut manager, "got:E[?997;2n"));
     }
 
     #[test]

@@ -148,7 +148,8 @@ Implemented:
 - Bracketed paste (pasted text has ESC and C1 controls removed), focus
   reporting
 - Alternate screen (47, 1047, 1049), synchronized output (2026), grapheme
-  clustering (2027), DECSCNM reverse video
+  clustering (2027), light/dark theme reports (2031 and `CSI ? 996 n`),
+  DECSCNM reverse video
 - Sixel graphics, OSC 8 hyperlinks, OSC 52 clipboard writes (reads are
   refused), OSC 7 working directory, OSC 133 prompt marks, OSC 9 and 777
   notifications, OSC 9;4 progress on the tab

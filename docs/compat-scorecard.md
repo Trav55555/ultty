@@ -23,7 +23,7 @@ and, for key encoding, `crates/ultty/src/keys.rs`. The README's
 | Working directory (OSC 7) | Yes | Opening a new tab where the shell is |  |
 | Desktop notifications (OSC 9, OSC 777) | Yes | "Done" or "needs input" from a long-running agent |  |
 | Progress (OSC 9;4) | Yes | A progress bar on the tab; ConEmu's sequence, also read by Windows Terminal and Ghostty |  |
-| Theme change reports (mode 2031) | No | Programs restyling when the system switches light/dark |  |
+| Theme change reports (mode 2031) | Yes | Programs restyling when the system switches light/dark |  |
 | Colour queries (OSC 10, 11) | Yes | Choosing a light or dark palette at start | Reports the live theme |
 | Terminal name (XTVERSION) | Yes | Detecting the terminal without guessing from TERM |  |
 | Sixel images | Yes | Inline images and plots |  |

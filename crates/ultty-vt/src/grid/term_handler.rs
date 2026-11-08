@@ -266,6 +266,10 @@ impl<'a> TerminalHandler<'a> {
                 self.reply(format!("\x1b[?{row};{col}R"));
             }
             Action::DeviceStatusReport => self.reply("\x1b[0n".to_string()),
+            Action::ReportColorScheme => {
+                let report = self.terminal.color_scheme_report();
+                self.terminal.queue_response(report);
+            }
             Action::DeviceAttributes => {
                 self.terminal
                     .queue_response(PRIMARY_DEVICE_ATTRIBUTES.to_vec());
@@ -552,6 +556,7 @@ impl<'a> TerminalHandler<'a> {
             2004 => modes.bracketed_paste,
             2026 => modes.synchronized_update,
             2027 => grid.grapheme_clustering(),
+            2031 => modes.color_scheme_updates,
             _ => return 0,
         };
         if set {
@@ -849,6 +854,9 @@ impl<'a> TerminalHandler<'a> {
             }
             Mode::GraphemeClustering => {
                 self.terminal.set_grapheme_clustering(enabled);
+            }
+            Mode::ColorSchemeUpdates => {
+                self.terminal.modes_mut().color_scheme_updates = enabled;
             }
         }
     }

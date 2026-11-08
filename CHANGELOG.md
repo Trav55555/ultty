@@ -109,6 +109,10 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 - LNM (mode 20), DECSCNM reverse video, and mode 1048.
 - A behavioural VT conformance suite (`crates/ultty-vt/tests/conformance.rs`).
 - `behavior.bell_urgent` marks an unfocused window as wanting attention.
+- Mode 2031 and `CSI ? 996 n`: programs can ask whether the theme is dark
+  or light, and hear when it switches, as in contour, kitty and Ghostty.
+- `docs/compat-scorecard.md`: which modern terminal features Ultty supports,
+  generated from tests by `scripts/compat-scorecard.sh`.
 
 ### Changed
 

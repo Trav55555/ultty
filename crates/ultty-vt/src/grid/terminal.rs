@@ -91,6 +91,8 @@ pub struct TerminalModes {
     pub alternate_scroll: bool,
     /// Synchronized update mode - batches screen updates for flicker-free rendering
     pub synchronized_update: bool,
+    /// Mode 2031: report light/dark theme changes unasked.
+    pub color_scheme_updates: bool,
     /// Line feed/new line mode (LNM, ANSI mode 20): LF, VT and FF also
     /// return the carriage, and Enter should send CR LF.
     pub linefeed_newline: bool,
@@ -120,6 +122,7 @@ impl Default for TerminalModes {
             // Enable by default so mouse wheel works in less, vim, etc.
             alternate_scroll: true,
             synchronized_update: false,
+            color_scheme_updates: false,
             linefeed_newline: false,
             allow_column_mode_switch: false,
             column_mode_132: false,
@@ -623,8 +626,36 @@ impl Terminal {
 
     /// Tell the terminal which colours it is drawn with, so colour queries
     /// report the live theme. Palette changes applications made stay.
+    ///
+    /// With mode 2031 set, a switch between a dark and a light theme queues
+    /// the same report `CSI ? 996 n` asks for.
     pub fn set_theme_colors(&mut self, theme: ThemeColors) {
+        let was_dark = self.is_dark();
         self.palette.set_theme(theme);
+        if self.modes.color_scheme_updates && self.is_dark() != was_dark {
+            self.queue_response(self.color_scheme_report());
+        }
+    }
+
+    /// Whether the theme's background is dark (relative luminance below
+    /// one half).
+    pub fn is_dark(&self) -> bool {
+        let [r, g, b] = self
+            .palette
+            .theme()
+            .background
+            .map(|c| f32::from(c) / 255.0);
+        0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5
+    }
+
+    /// The answer to `CSI ? 996 n`: `CSI ? 997 ; 1 n` for a dark theme,
+    /// `CSI ? 997 ; 2 n` for a light one.
+    pub fn color_scheme_report(&self) -> Vec<u8> {
+        if self.is_dark() {
+            b"\x1b[?997;1n".to_vec()
+        } else {
+            b"\x1b[?997;2n".to_vec()
+        }
     }
 
     /// The palette: theme colours and the entries applications changed

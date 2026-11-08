@@ -149,7 +149,7 @@ Where things stand ([2026-11-07 idle and footprint](perf/2026-11-07-idle-footpri
 
 | # | Slice | Done when |
 |---|---|---|
-| E1 | Public VT compatibility scorecard: mode 2026, kitty keyboard and graphics, OSC 8/52/133, mode 2031, OSC 9;4, grapheme width, against what agent CLIs need. Close gaps found. | Scorecard page generated from the conformance suite. |
+| E1 | Public VT compatibility scorecard: mode 2026, kitty keyboard and graphics, OSC 8/52/133, mode 2031, OSC 9;4, grapheme width, against what agent CLIs need. Close gaps found. | Scorecard page generated from the conformance suite. Done 2026-11-08: [`compat-scorecard.md`](compat-scorecard.md) from `scorecard_` tests; closed OSC 9;4 (was shown as a notification) and mode 2031. Kitty graphics remains a gap, too big for this slice. |
 | E2 | Fix the ssh-from-tmux false positive: a remote app probing from inside a local tmux pane renames that pane. Document multiplexer behaviour honestly. | Test reproduces the rename and passes after the fix. Done 2026-11-08: the probe asks XTVERSION first and sends its hello only to Ultty; tmux 3.6 with `TERM=xterm-256color` kept its pane title, in-band in Ultty still connects. |
 | E3 | Say "no account, no telemetry, no network calls" in the README and site; open GitHub Sponsors. | README section. README part done 2026-11-08 (checked: no socket, HTTP or telemetry code or dependency); Sponsors needs the maintainer's account. |
 
