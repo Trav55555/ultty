@@ -3,9 +3,12 @@
 use std::time::{Duration, Instant};
 
 use regex::Regex;
+use ultty::terminal_manager::TerminalId;
 
 pub(super) struct PendingControlWait {
     client_key: usize,
+    /// The pane being watched, fixed when the request arrived.
+    pane: TerminalId,
     matcher: WaitMatcher,
     start: Instant,
     timeout: Duration,
@@ -14,11 +17,13 @@ pub(super) struct PendingControlWait {
 impl PendingControlWait {
     pub(super) fn new(
         client_key: usize,
+        pane: TerminalId,
         matcher: WaitMatcher,
         timeout: Duration,
     ) -> PendingControlWait {
         PendingControlWait {
             client_key,
+            pane,
             matcher,
             start: Instant::now(),
             timeout,
@@ -27,6 +32,10 @@ impl PendingControlWait {
 
     pub(super) fn client_key(&self) -> usize {
         self.client_key
+    }
+
+    pub(super) fn pane(&self) -> TerminalId {
+        self.pane
     }
 
     pub(super) fn matcher(&self) -> &WaitMatcher {

@@ -180,6 +180,18 @@ fn remove_flag_with_value(args: Vec<String>, flag: &str) -> Vec<String> {
 }
 
 fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
+    // `--pane <id>` comes before the command, so it can never be mistaken
+    // for part of the text that send-text or search take.
+    if args.first().map(String::as_str) == Some("--pane") {
+        let id = args
+            .get(1)
+            .ok_or_else(|| "--pane requires a pane id (see `ulttyctl panes`)".to_string())?
+            .parse()
+            .map_err(|_| "--pane requires a numeric pane id".to_string())?;
+        let mut request = parse_cli_request(&args[2..])?;
+        return set_target(&mut request, id).map(|()| request);
+    }
+
     let command = args
         .first()
         .ok_or_else(|| "missing command".to_string())?
@@ -195,14 +207,15 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
         "text" => Ok(ControlRequest::GetText {
             include_scrollback: rest.iter().any(|arg| arg == "--scrollback"),
             scrollback_lines: None,
+            target: None,
         }),
-        "selection" => Ok(ControlRequest::GetSelection),
+        "selection" => Ok(ControlRequest::GetSelection { target: None }),
         "send-text" => {
             let text = rest.join(" ");
             if text.is_empty() {
                 Err("send-text requires text".to_string())
             } else {
-                Ok(ControlRequest::SendText { text })
+                Ok(ControlRequest::SendText { text, target: None })
             }
         }
         "send-key" => {
@@ -212,12 +225,16 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             )
             .ok_or_else(|| "unknown key".to_string())?;
             let modifiers = parse_modifiers(rest.get(1).map(String::as_str).unwrap_or(""));
-            Ok(ControlRequest::SendKey { key, modifiers })
+            Ok(ControlRequest::SendKey {
+                key,
+                modifiers,
+                target: None,
+            })
         }
         "send-raw" => {
             let hex = rest.join("");
             let data = hex_decode(&hex).ok_or_else(|| "send-raw requires valid hex".to_string())?;
-            Ok(ControlRequest::SendRaw { data })
+            Ok(ControlRequest::SendRaw { data, target: None })
         }
         "new-tab" => Ok(ControlRequest::NewTab {
             title: None,
@@ -254,6 +271,7 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             Ok(ControlRequest::RunCommand {
                 command,
                 args: rest.iter().skip(1).cloned().collect(),
+                target: None,
             })
         }
         "resize" => {
@@ -282,6 +300,7 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
                     regex: false,
                     case_sensitive: false,
                     include_scrollback: true,
+                    target: None,
                 })
             }
         }
@@ -324,7 +343,26 @@ fn parse_wait_for(args: &[String]) -> Result<ControlRequest, String> {
             pattern,
             regex: false,
             timeout_ms,
+            target: None,
         })
+    }
+}
+
+/// Point a pane-scoped request at pane `id`; other requests refuse `--pane`.
+fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
+    match request {
+        ControlRequest::GetText { target, .. }
+        | ControlRequest::GetSelection { target }
+        | ControlRequest::SendText { target, .. }
+        | ControlRequest::SendKey { target, .. }
+        | ControlRequest::SendRaw { target, .. }
+        | ControlRequest::RunCommand { target, .. }
+        | ControlRequest::Search { target, .. }
+        | ControlRequest::WaitFor { target, .. } => {
+            *target = Some(id);
+            Ok(())
+        }
+        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search and wait-for".to_string()),
     }
 }
 
@@ -461,6 +499,9 @@ GLOBAL FLAGS:
     --json                  Output in JSON format
     --read-timeout <secs>   Socket read timeout in seconds (default: 5;
                             wait-for always waits out its own timeout)
+    --pane <id>             Act on pane <id> (from `panes`) instead of the
+                            focused one. Goes before the command; applies to
+                            text, selection, send-*, run, search, wait-for
     -V, --version           Show ulttyctl version without connecting to Ultty
     -h, --help              Show this help
 
@@ -629,6 +670,7 @@ mod tests {
                     "-lc".to_string(),
                     "printf 'hello world\\n'".to_string(),
                 ],
+                target: None,
             }
         );
     }
@@ -678,6 +720,43 @@ mod tests {
         );
     }
 
+    fn args(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn leading_pane_flag_targets_pane_scoped_commands() {
+        assert_eq!(
+            parse_cli_request(&args("--pane 3 send-text hi there")).unwrap(),
+            ControlRequest::SendText {
+                text: "hi there".to_string(),
+                target: Some(3),
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("--pane 3 selection")).unwrap(),
+            ControlRequest::GetSelection { target: Some(3) }
+        );
+    }
+
+    #[test]
+    fn pane_flag_after_the_command_is_just_text() {
+        assert_eq!(
+            parse_cli_request(&args("send-text --pane 3")).unwrap(),
+            ControlRequest::SendText {
+                text: "--pane 3".to_string(),
+                target: None,
+            }
+        );
+    }
+
+    #[test]
+    fn pane_flag_is_refused_where_it_cannot_apply() {
+        assert!(parse_cli_request(&args("--pane 3 tabs")).is_err());
+        assert!(parse_cli_request(&args("--pane x text")).is_err());
+        assert!(parse_cli_request(&args("--pane")).is_err());
+    }
+
     #[test]
     fn empty_reply_is_an_error() {
         assert!(parse_response("").is_err());
@@ -716,6 +795,7 @@ mod tests {
             pattern: "DONE".to_string(),
             regex: false,
             timeout_ms: 10_000,
+            target: None,
         };
         assert_eq!(read_timeout_for(&wait, 5), 15);
         assert_eq!(read_timeout_for(&wait, 60), 60);

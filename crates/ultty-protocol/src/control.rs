@@ -38,15 +38,24 @@ pub enum ControlRequest {
     // === Input Injection ===
     SendText {
         text: String,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     SendKey {
         key: Key,
         modifiers: Modifiers,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     SendRaw {
         data: Vec<u8>,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     // === Command Execution ===
@@ -60,6 +69,9 @@ pub enum ControlRequest {
     RunCommand {
         command: String,
         args: Vec<String>,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     CloseTab {
@@ -70,9 +82,16 @@ pub enum ControlRequest {
     GetText {
         include_scrollback: bool,
         scrollback_lines: Option<usize>,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
-    GetSelection,
+    GetSelection {
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
 
     ListTabs,
 
@@ -87,13 +106,21 @@ pub enum ControlRequest {
         regex: bool,
         case_sensitive: bool,
         include_scrollback: bool,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     // === Wait Operations ===
+    /// Wait until `pattern` appears in a pane. The pane is fixed when the
+    /// request arrives: `target`, or the pane focused at that moment.
     WaitFor {
         pattern: String,
         regex: bool,
         timeout_ms: u64,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     // === Window Control ===
@@ -396,6 +423,29 @@ mod tests {
         ];
         responses.extend(data.into_iter().map(ControlResponse::Data));
         responses
+    }
+
+    /// Clients written before pane targets keep working: an omitted `target`
+    /// means the focused pane, and an unset one is not sent.
+    #[test]
+    fn target_is_optional_on_the_wire() {
+        let old: ControlRequest =
+            serde_json::from_str(r#"{"type":"send_text","text":"hi"}"#).unwrap();
+        assert_eq!(
+            old,
+            ControlRequest::SendText {
+                text: "hi".to_string(),
+                target: None
+            }
+        );
+        let old: ControlRequest = serde_json::from_str(r#"{"type":"get_selection"}"#).unwrap();
+        assert_eq!(old, ControlRequest::GetSelection { target: None });
+
+        let untargeted = serde_json::to_string(&ControlRequest::GetSelection { target: None });
+        assert_eq!(untargeted.unwrap(), r#"{"type":"get_selection"}"#);
+        let targeted: ControlRequest =
+            serde_json::from_str(r#"{"type":"get_selection","target":4}"#).unwrap();
+        assert_eq!(targeted, ControlRequest::GetSelection { target: Some(4) });
     }
 
     /// ulttyctl reads every reply as JSON, so each one must survive the trip.

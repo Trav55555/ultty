@@ -533,22 +533,27 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
             Some(ControlRequest::GetText {
                 include_scrollback,
                 scrollback_lines: None,
+                target: None,
             })
         }
-        "selection" => Some(ControlRequest::GetSelection),
+        "selection" => Some(ControlRequest::GetSelection { target: None }),
         "send-text" => {
             let text: String = parts.collect::<Vec<_>>().join(" ");
             if text.is_empty() {
                 None
             } else {
-                Some(ControlRequest::SendText { text })
+                Some(ControlRequest::SendText { text, target: None })
             }
         }
         "send-key" => {
             let key_str = parts.next()?;
             let key = parse_key(key_str)?;
             let modifiers = parse_modifiers(parts.next().unwrap_or(""));
-            Some(ControlRequest::SendKey { key, modifiers })
+            Some(ControlRequest::SendKey {
+                key,
+                modifiers,
+                target: None,
+            })
         }
         "new-tab" => {
             let command = parts.next().map(String::from);
@@ -577,12 +582,16 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
         "send-raw" => {
             let hex_str: String = parts.collect::<Vec<_>>().join("");
             let data = hex_decode(&hex_str)?;
-            Some(ControlRequest::SendRaw { data })
+            Some(ControlRequest::SendRaw { data, target: None })
         }
         "run" => {
             let command = parts.next()?.to_string();
             let args: Vec<String> = parts.map(String::from).collect();
-            Some(ControlRequest::RunCommand { command, args })
+            Some(ControlRequest::RunCommand {
+                command,
+                args,
+                target: None,
+            })
         }
         "resize" => {
             let width: u32 = parts.next()?.parse().ok()?;
@@ -603,6 +612,7 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
                     regex: false,
                     case_sensitive: false,
                     include_scrollback: true,
+                    target: None,
                 })
             }
         }
@@ -629,6 +639,7 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
                     pattern,
                     regex: false,
                     timeout_ms,
+                    target: None,
                 })
             }
         }
@@ -930,7 +941,8 @@ mod tests {
         assert_eq!(
             parse_request_only(b"send-text hello world"),
             Some(ControlRequest::SendText {
-                text: "hello world".to_string()
+                text: "hello world".to_string(),
+                target: None,
             })
         );
     }
@@ -940,7 +952,8 @@ mod tests {
         assert_eq!(
             parse_request_only(b"send-raw 1b5b41"),
             Some(ControlRequest::SendRaw {
-                data: vec![0x1b, 0x5b, 0x41]
+                data: vec![0x1b, 0x5b, 0x41],
+                target: None,
             })
         );
     }
@@ -970,7 +983,8 @@ mod tests {
             ControlRequest::WithToken {
                 token: "abc123".to_string(),
                 request: Box::new(ControlRequest::SendText {
-                    text: "hello world".to_string()
+                    text: "hello world".to_string(),
+                    target: None,
                 }),
             }
         );
@@ -1012,6 +1026,7 @@ mod tests {
                 pattern: "$".to_string(),
                 regex: false,
                 timeout_ms: 5000,
+                target: None,
             })
         );
     }
@@ -1025,6 +1040,7 @@ mod tests {
                 regex: false,
                 case_sensitive: false,
                 include_scrollback: true,
+                target: None,
             })
         );
     }
@@ -1193,7 +1209,8 @@ mod tests {
         assert_eq!(
             pending[0].1,
             ControlRequest::SendText {
-                text: "hi".to_string()
+                text: "hi".to_string(),
+                target: None,
             }
         );
     }
@@ -1252,12 +1269,16 @@ mod tests {
         client
             .write_all(&json_request(ControlRequest::SendText {
                 text: text.clone(),
+                target: None,
             }))
             .unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
 
         let pending = poll_until_pending(&mut server);
-        assert_eq!(pending[0].1, ControlRequest::SendText { text });
+        assert_eq!(
+            pending[0].1,
+            ControlRequest::SendText { text, target: None }
+        );
         server.send_response(pending[0].0, &ControlResponse::Ok);
         assert_eq!(
             read_reply_while_polling(&mut server, client),
@@ -1282,7 +1303,8 @@ mod tests {
         assert_eq!(
             pending[0].1,
             ControlRequest::SendText {
-                text: "hello".to_string()
+                text: "hello".to_string(),
+                target: None,
             }
         );
     }

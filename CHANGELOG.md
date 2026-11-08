@@ -39,6 +39,11 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   PID, working directory and size. Pane ids are unique within an Ultty
   process and never reused, so they stay valid across splits, focus changes
   and tab moves until the pane closes.
+- Control requests that read or drive a pane (`text`, `selection`,
+  `send-text`, `send-key`, `send-raw`, `run`, `search`, `wait-for`) take an
+  optional pane `target`; `ulttyctl --pane <id> <command>` sets it. Without
+  one they act on the focused pane, as before. An id naming no open pane is
+  error 6.
 - `behavior.cursor_blink` (default `true`); `false` keeps the cursor steady.
 - `dist/terminfo/ultty.terminfo`, the `xterm-ultty` entry, installed by
   `install.sh`, `make install`, the packages and the Homebrew formula.
@@ -62,6 +67,9 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Changed
 
+- A pending `wait-for` watches the pane that was focused when it was sent
+  (or its `--pane` target), not whichever pane has focus at each check, and
+  fails with error 6 if that pane closes first.
 - An idle window no longer wakes up. The cursor blinks only while the
   window has focus and the cursor is in a blinking style; nothing else
   polls unless a native app is connected or `ulttyctl wait-for` is waiting.

@@ -7,6 +7,7 @@ use super::App;
 use std::io;
 use std::path::Path;
 use std::time::Duration;
+use ultty::terminal_manager::TerminalId;
 use winit::dpi::PhysicalSize;
 
 /// Number of random bytes in a freshly generated control auth token.
@@ -99,6 +100,7 @@ impl App {
             pattern,
             regex: use_regex,
             timeout_ms,
+            target,
         } = request
         else {
             return None;
@@ -108,12 +110,17 @@ impl App {
             return Some(response);
         }
 
+        let pane = match resolve_control_target(&self.terminal_manager, *target) {
+            Ok(pane) => pane,
+            Err(response) => return Some(response),
+        };
+
         let matcher = match WaitMatcher::new(pattern, *use_regex) {
             Ok(matcher) => matcher,
             Err(message) => return Some(ControlResponse::Error { code: 4, message }),
         };
 
-        if let Some((line, col)) = self.find_wait_match(&matcher) {
+        if let Some((line, col)) = self.find_wait_match(pane, &matcher) {
             return Some(ControlResponse::Data(ControlData::WaitMatched {
                 line,
                 col,
@@ -122,6 +129,7 @@ impl App {
 
         self.pending_control_waits.push(PendingControlWait::new(
             client_key,
+            pane,
             matcher,
             Duration::from_millis(*timeout_ms),
         ));
@@ -134,7 +142,14 @@ impl App {
     ) -> Option<ultty_protocol::control::ControlResponse> {
         use ultty_protocol::control::{ControlData, ControlResponse};
 
-        if let Some((line, col)) = self.find_wait_match(wait.matcher()) {
+        if self.terminal_manager.terminal(wait.pane()).is_none() {
+            return Some(ControlResponse::Error {
+                code: PANE_NOT_FOUND,
+                message: format!("Pane {} closed while waiting", wait.pane().raw()),
+            });
+        }
+
+        if let Some((line, col)) = self.find_wait_match(wait.pane(), wait.matcher()) {
             return Some(ControlResponse::Data(ControlData::WaitMatched {
                 line,
                 col,
@@ -228,8 +243,13 @@ impl App {
             ControlRequest::GetText {
                 include_scrollback,
                 scrollback_lines,
+                target,
             } => {
-                if let Some(terminal) = self.terminal_manager.focused_terminal() {
+                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                if let Some(terminal) = self.terminal_manager.terminal(pane) {
                     let term = terminal.event_loop.terminal();
                     let history = if include_scrollback {
                         scrollback_lines.unwrap_or(usize::MAX)
@@ -247,16 +267,24 @@ impl App {
                 }
             }
 
-            ControlRequest::GetSelection => {
+            ControlRequest::GetSelection { target } => {
+                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
                 let text = self
                     .terminal_manager
-                    .focused_terminal()
+                    .terminal(pane)
                     .and_then(|terminal| terminal.event_loop.terminal().selected_text());
                 ControlResponse::Data(ControlData::Selection { text })
             }
 
-            ControlRequest::SendText { text } => {
-                let foreground = self.focused_foreground_pgrp();
+            ControlRequest::SendText { text, target } => {
+                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                let foreground = self.pane_foreground_pgrp(pane);
                 if let Some(ref mut server) = self.protocol_server {
                     if server.has_key_subscribers(foreground) {
                         server.broadcast_text_input(text, foreground);
@@ -264,7 +292,7 @@ impl App {
                     }
                 }
 
-                if let Some(terminal) = self.terminal_manager.focused_terminal_mut() {
+                if let Some(terminal) = self.terminal_manager.terminal_mut(pane) {
                     let _ = terminal.event_loop.send_input(text.as_bytes());
                     ControlResponse::Ok
                 } else {
@@ -275,8 +303,16 @@ impl App {
                 }
             }
 
-            ControlRequest::SendKey { key, modifiers } => {
-                let foreground = self.focused_foreground_pgrp();
+            ControlRequest::SendKey {
+                key,
+                modifiers,
+                target,
+            } => {
+                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                let foreground = self.pane_foreground_pgrp(pane);
                 if let Some(ref mut server) = self.protocol_server {
                     if server.has_key_subscribers(foreground) {
                         server.broadcast_key(key, modifiers, foreground);
@@ -284,12 +320,16 @@ impl App {
                     }
                 }
 
-                self.forward_key_to_pty(&key, modifiers);
+                self.forward_key_to_pty(pane, &key, modifiers);
                 ControlResponse::Ok
             }
 
-            ControlRequest::SendRaw { data } => {
-                if let Some(terminal) = self.terminal_manager.focused_terminal_mut() {
+            ControlRequest::SendRaw { data, target } => {
+                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                if let Some(terminal) = self.terminal_manager.terminal_mut(pane) {
                     let _ = terminal.event_loop.send_input(&data);
                     ControlResponse::Ok
                 } else {
@@ -375,8 +415,16 @@ impl App {
                 }
             }
 
-            ControlRequest::RunCommand { command, args } => {
-                if let Some(terminal) = self.terminal_manager.focused_terminal_mut() {
+            ControlRequest::RunCommand {
+                command,
+                args,
+                target,
+            } => {
+                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                if let Some(terminal) = self.terminal_manager.terminal_mut(pane) {
                     let cmd_line = if args.is_empty() {
                         format!("{}\n", command)
                     } else {
@@ -489,8 +537,13 @@ impl App {
                 regex: use_regex,
                 case_sensitive,
                 include_scrollback,
+                target,
             } => {
-                if let Some(terminal) = self.terminal_manager.focused_terminal() {
+                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                if let Some(terminal) = self.terminal_manager.terminal(pane) {
                     let compiled_regex = if use_regex {
                         let regex_pattern = if case_sensitive {
                             pattern.clone()
@@ -592,11 +645,7 @@ impl App {
                 }
             }
 
-            ControlRequest::WaitFor {
-                pattern: _,
-                regex: _,
-                timeout_ms: _,
-            } => ControlResponse::Error {
+            ControlRequest::WaitFor { .. } => ControlResponse::Error {
                 code: 5,
                 message: "wait-for cannot be used inside batch requests".to_string(),
             },
@@ -666,12 +715,20 @@ impl App {
         Ok(())
     }
 
+    /// Process group in the foreground of `pane`'s PTY.
+    fn pane_foreground_pgrp(&self, pane: TerminalId) -> Option<i32> {
+        self.terminal_manager
+            .terminal(pane)
+            .and_then(|terminal| terminal.event_loop.foreground_pgrp())
+    }
+
     fn forward_key_to_pty(
         &mut self,
+        pane: TerminalId,
         key: &ultty_protocol::Key,
         modifiers: ultty_protocol::Modifiers,
     ) {
-        let Some(terminal) = self.terminal_manager.focused_terminal_mut() else {
+        let Some(terminal) = self.terminal_manager.terminal_mut(pane) else {
             return;
         };
 
@@ -716,8 +773,8 @@ impl App {
         }
     }
 
-    fn find_wait_match(&self, matcher: &WaitMatcher) -> Option<(usize, usize)> {
-        let terminal = self.terminal_manager.focused_terminal()?;
+    fn find_wait_match(&self, pane: TerminalId, matcher: &WaitMatcher) -> Option<(usize, usize)> {
+        let terminal = self.terminal_manager.terminal(pane)?;
         let term = terminal.event_loop.terminal();
         let buffer = term.buffer();
         let total_lines = buffer.total_lines();
@@ -761,6 +818,35 @@ fn terminal_info(
         focused: true,
         cwd: terminal_working_directory(terminal),
     }
+}
+
+/// Error code for a `target` that names no open pane.
+const PANE_NOT_FOUND: u16 = 6;
+
+/// The pane a request acts on: `target` (an id from `ListPanes`), or the
+/// focused pane when it is omitted.
+fn resolve_control_target(
+    manager: &ultty::terminal_manager::TerminalManager,
+    target: Option<u64>,
+) -> Result<TerminalId, ultty_protocol::control::ControlResponse> {
+    use ultty_protocol::control::ControlResponse;
+
+    let Some(id) = target else {
+        return manager
+            .focused_terminal_id()
+            .ok_or_else(|| ControlResponse::Error {
+                code: 1,
+                message: "No active terminal".to_string(),
+            });
+    };
+    usize::try_from(id)
+        .ok()
+        .map(TerminalId::new)
+        .filter(|pane| manager.terminal(*pane).is_some())
+        .ok_or_else(|| ControlResponse::Error {
+            code: PANE_NOT_FOUND,
+            message: format!("No pane {id}; `ulttyctl panes` lists them"),
+        })
 }
 
 /// Every pane in every tab: tabs in order, each tab's panes in layout order.
@@ -892,7 +978,7 @@ fn control_request_requires_auth(request: &ultty_protocol::control::ControlReque
         | ControlRequest::ListTabs
         | ControlRequest::ListPanes
         | ControlRequest::GetText { .. }
-        | ControlRequest::GetSelection
+        | ControlRequest::GetSelection { .. }
         | ControlRequest::Search { .. }
         | ControlRequest::WaitFor { .. }
         | ControlRequest::SendText { .. }
@@ -1134,6 +1220,7 @@ mod tests {
     fn mutating_control_requests_require_auth() {
         assert!(control_request_requires_auth(&ControlRequest::SendText {
             text: "hello".to_string(),
+            target: None,
         }));
         assert!(control_request_requires_auth(&ControlRequest::NewTab {
             title: None,
@@ -1144,6 +1231,7 @@ mod tests {
         assert!(control_request_requires_auth(&ControlRequest::RunCommand {
             command: "make".to_string(),
             args: vec!["test".to_string()],
+            target: None,
         }));
     }
 
@@ -1152,18 +1240,23 @@ mod tests {
         assert!(control_request_requires_auth(&ControlRequest::GetText {
             include_scrollback: true,
             scrollback_lines: None,
+            target: None,
         }));
-        assert!(control_request_requires_auth(&ControlRequest::GetSelection));
+        assert!(control_request_requires_auth(
+            &ControlRequest::GetSelection { target: None }
+        ));
         assert!(control_request_requires_auth(&ControlRequest::Search {
             pattern: "needle".to_string(),
             regex: false,
             case_sensitive: false,
             include_scrollback: true,
+            target: None,
         }));
         assert!(control_request_requires_auth(&ControlRequest::WaitFor {
             pattern: "ready".to_string(),
             regex: false,
             timeout_ms: 100,
+            target: None,
         }));
         assert!(control_request_requires_auth(&ControlRequest::GetInfo));
         assert!(control_request_requires_auth(&ControlRequest::ListPanes));
@@ -1302,6 +1395,37 @@ mod tests {
             pane_ids(&pane_infos(&manager)),
             vec![(other, 0), (left, 1), (right, 1)]
         );
+    }
+
+    #[test]
+    fn target_resolves_to_the_named_pane_or_the_focused_one() {
+        let mut manager = ultty::terminal_manager::TerminalManager::new(80, 24).unwrap();
+        let focused = manager.focused_terminal_id().unwrap();
+        let other = manager.split_horizontal().unwrap().unwrap();
+
+        assert_eq!(resolve_control_target(&manager, None), Ok(focused));
+        assert_eq!(
+            resolve_control_target(&manager, Some(other.raw() as u64)),
+            Ok(other)
+        );
+    }
+
+    #[test]
+    fn target_naming_no_open_pane_is_an_error() {
+        let mut manager = ultty::terminal_manager::TerminalManager::new(80, 24).unwrap();
+        let closed = manager.split_horizontal().unwrap().unwrap();
+        manager.focus_terminal(closed);
+        assert!(manager.close_focused_pane());
+
+        for target in [closed.raw() as u64, 999, u64::MAX] {
+            match resolve_control_target(&manager, Some(target)) {
+                Err(ultty_protocol::control::ControlResponse::Error { code, message }) => {
+                    assert_eq!(code, PANE_NOT_FOUND);
+                    assert!(message.contains(&target.to_string()), "{message}");
+                }
+                other => panic!("target {target}: expected an error, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1708,7 +1832,7 @@ mod tests {
             commands: vec![
                 ControlRequest::Ping,
                 ControlRequest::Version,
-                ControlRequest::GetSelection,
+                ControlRequest::GetSelection { target: None },
             ],
         };
         let json = serde_json::to_string(&batch).unwrap();
@@ -1724,6 +1848,7 @@ mod tests {
             regex: true,
             case_sensitive: false,
             include_scrollback: true,
+            target: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ControlRequest = serde_json::from_str(&json).unwrap();
