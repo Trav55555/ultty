@@ -232,7 +232,7 @@ struct LastPrint {
     cursor: CursorPosition,
     wrap_pending: bool,
     content_version: u64,
-    /// The cluster's last stored codepoint.
+    /// How the cluster ends, as far as joining it goes.
     tail: cluster::Tail,
 }
 

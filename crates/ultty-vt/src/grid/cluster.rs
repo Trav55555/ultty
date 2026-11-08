@@ -26,9 +26,11 @@
 //! a [`Tail`], so [`joins_tail`] answers from that and the new
 //! codepoint's class, one table lookup.
 //!
-//! Emoji sequences need two more rules, so for clusters made only of plain,
-//! extend, ZWJ and regional indicator codepoints [`joins`] also runs the
-//! few UAX #29 rules that can apply to them:
+//! Emoji sequences need two more rules, which the [`Tail`] tracks too (a
+//! pictograph and extends, the ZWJ after one, half a flag). When the end
+//! of a cluster is not known, for clusters made only of plain, extend, ZWJ
+//! and regional indicator codepoints [`joins`] runs the few UAX #29 rules
+//! that can apply to them over the stored cluster:
 //!
 //! - GB9: extend and ZWJ join whatever comes before them.
 //! - GB11: an Extended_Pictographic codepoint joins after a ZWJ that
