@@ -8,34 +8,55 @@ env:
   CARGO_TERM_COLOR: always
   # Pinned to match rust-toolchain.toml and ci.yml. Bump all three together.
   RUST_TOOLCHAIN: 1.98.1
+  CROSS_VERSION: 0.2.5
 
+# Every job reads only, except `release`, which publishes.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  test:
+    name: Test before publishing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy, rustfmt
+      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+
   build:
     name: Build ${{ matrix.target }}
+    needs: test
     runs-on: ${{ matrix.os }}
+    # Targets marked optional may fail without stopping the release, so a
+    # Linux x86_64-only release can go out while the others are unavailable.
+    continue-on-error: ${{ matrix.optional }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            archive: tar.gz
+            optional: false
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            archive: tar.gz
             cross: true
+            optional: true
           - target: x86_64-apple-darwin
             os: macos-latest
-            archive: tar.gz
+            optional: true
           - target: aarch64-apple-darwin
             os: macos-latest
-            archive: tar.gz
+            optional: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
@@ -46,15 +67,15 @@ jobs:
 
       - name: Install cross
         if: matrix.cross
-        run: cargo install cross
+        run: cargo install cross --version "$CROSS_VERSION" --locked
 
       - name: Build (native)
         if: '!matrix.cross'
-        run: cargo build --release -p ultty --target ${{ matrix.target }}
+        run: cargo build --locked --release -p ultty --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release -p ultty --target ${{ matrix.target }}
+        run: cross build --locked --release -p ultty --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
@@ -64,9 +85,8 @@ jobs:
           cp ultty ulttyctl package/
           cp ../../../dist/ultty.desktop package/dist/
           cp -R ../../../dist/icons package/dist/
-          if [ "${{ matrix.archive }}" = "tar.gz" ]; then
-            tar czf ../../../ultty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C package .
-          fi
+          cp -R ../../../dist/terminfo package/dist/
+          tar czf ../../../ultty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C package .
 
       - name: Smoke tarball contents
         run: |
@@ -75,21 +95,97 @@ jobs:
             --homebrew dist/homebrew/ultty.rb
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ultty-${{ matrix.target }}
           path: ultty-${{ github.ref_name }}-${{ matrix.target }}.*
+
+  deb:
+    name: Build .deb
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev ncurses-bin
+      - name: Download x86_64 Linux artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ultty-x86_64-unknown-linux-gnu
+          path: artifacts
+      - run: |
+          mkdir -p target/x86_64-unknown-linux-gnu/release
+          tar xzf artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
+            -C target/x86_64-unknown-linux-gnu/release
+      - name: Compile the terminfo entry
+        run: mkdir -p target/terminfo && tic -x -o target/terminfo dist/terminfo/ultty.terminfo
+      - name: Smoke Linux tarball binaries
+        run: |
+          scripts/release-artifact-smoke.sh \
+            --tarball artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
+            --run-binaries
+      - run: cargo install cargo-deb --version 3.7.0 --locked
+      - run: cargo deb -p ultty --no-build --target x86_64-unknown-linux-gnu
+      - name: Smoke .deb artifact
+        run: scripts/release-artifact-smoke.sh --deb target/debian/*.deb
+      - name: Upload .deb
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ultty-deb
+          path: target/debian/*.deb
+
+  rpm:
+    name: Build .rpm
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev rpm ncurses-bin
+      - name: Download x86_64 Linux artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ultty-x86_64-unknown-linux-gnu
+          path: artifacts
+      - run: |
+          mkdir -p target/x86_64-unknown-linux-gnu/release
+          tar xzf artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
+            -C target/x86_64-unknown-linux-gnu/release
+      - name: Compile the terminfo entry
+        run: mkdir -p target/terminfo && tic -x -o target/terminfo dist/terminfo/ultty.terminfo
+      - name: Smoke Linux tarball binaries
+        run: |
+          scripts/release-artifact-smoke.sh \
+            --tarball artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
+            --run-binaries
+      - run: cargo install cargo-generate-rpm --version 0.21.0 --locked
+      - run: cargo generate-rpm -p crates/ultty --target x86_64-unknown-linux-gnu
+      - name: Smoke .rpm artifact
+        run: scripts/release-artifact-smoke.sh --rpm target/x86_64-unknown-linux-gnu/generate-rpm/*.rpm
+      - name: Upload .rpm
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ultty-rpm
+          path: target/x86_64-unknown-linux-gnu/generate-rpm/*.rpm
 
   release:
     name: Create Release
     # Depends on deb and rpm so SHA256SUMS covers every published artifact.
     needs: [build, deb, rpm]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload assets
+      id-token: write # sign the build provenance attestation
+      attestations: write # store the attestation
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
           merge-multiple: true
@@ -104,96 +200,59 @@ jobs:
             | xargs sha256sum >SHA256SUMS
           cat SHA256SUMS
 
+      # Signed build provenance for every artifact, verifiable with
+      # `gh attestation verify <file> --repo Trav55555/ultty`. The SHA must be
+      # filled in from the action's v2 release before this workflow is used.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            artifacts/*.tar.gz
+            artifacts/*.deb
+            artifacts/*.rpm
+            artifacts/SHA256SUMS
+
+      # The formula covers macOS and Linux, so it is published only when the
+      # macOS tarballs were built.
       - name: Render Homebrew formula
+        id: homebrew
         shell: bash
         run: |
+          tag="${{ github.ref_name }}"
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            if [ ! -f "artifacts/ultty-$tag-$target.tar.gz" ]; then
+              echo "::notice::no $target build; not publishing a Homebrew formula"
+              exit 0
+            fi
+          done
           scripts/render-homebrew-formula.sh \
-            --version "${{ github.ref_name }}" \
+            --version "$tag" \
             --artifact-dir artifacts \
             --out artifacts/ultty.rb
-
-      - name: Verify rendered Homebrew formula
-        shell: bash
-        run: |
-          version="${{ github.ref_name }}"
           scripts/release-artifact-smoke.sh \
-            --expected-version "${version#v}" \
+            --expected-version "${tag#v}" \
             --homebrew-rendered artifacts/ultty.rb
 
+      # The notes are the tag's section of CHANGELOG.md; a tag without one
+      # does not publish.
+      - name: Extract release notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md >"$RUNNER_TEMP/release-notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/release-notes.md"; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
-          generate_release_notes: true
+          body_path: ${{ runner.temp }}/release-notes.md
           files: artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  deb:
-    name: Build .deb
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
-      - name: Download x86_64 Linux artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ultty-x86_64-unknown-linux-gnu
-          path: artifacts
-      - run: |
-          mkdir -p target/x86_64-unknown-linux-gnu/release
-          tar xzf artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
-            -C target/x86_64-unknown-linux-gnu/release
-      - name: Smoke Linux tarball binaries
-        run: |
-          scripts/release-artifact-smoke.sh \
-            --tarball artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
-            --run-binaries
-      - run: cargo install cargo-deb --version 3.7.0 --locked
-      - run: cargo deb -p ultty --no-build --target x86_64-unknown-linux-gnu
-      - name: Smoke .deb artifact
-        run: scripts/release-artifact-smoke.sh --deb target/debian/*.deb
-      - name: Upload .deb
-        uses: actions/upload-artifact@v4
-        with:
-          name: ultty-deb
-          path: target/debian/*.deb
-
-  rpm:
-    name: Build .rpm
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev rpm
-      - name: Download x86_64 Linux artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ultty-x86_64-unknown-linux-gnu
-          path: artifacts
-      - run: |
-          mkdir -p target/x86_64-unknown-linux-gnu/release
-          tar xzf artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
-            -C target/x86_64-unknown-linux-gnu/release
-      - name: Smoke Linux tarball binaries
-        run: |
-          scripts/release-artifact-smoke.sh \
-            --tarball artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
-            --run-binaries
-      - run: cargo install cargo-generate-rpm --version 0.21.0 --locked
-      - run: cargo generate-rpm -p crates/ultty --target x86_64-unknown-linux-gnu
-      - name: Smoke .rpm artifact
-        run: scripts/release-artifact-smoke.sh --rpm target/x86_64-unknown-linux-gnu/generate-rpm/*.rpm
-      - name: Upload .rpm
-        uses: actions/upload-artifact@v4
-        with:
-          name: ultty-rpm
-          path: target/x86_64-unknown-linux-gnu/generate-rpm/*.rpm
