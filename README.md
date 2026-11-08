@@ -129,6 +129,8 @@ sockets that only your user can open.
 Ultty emulates an xterm-style terminal; ordinary terminal programs are the
 baseline, not an afterthought. `TERM` is `xterm-256color` by default, or
 `xterm-ultty` with `terminal.term` (see [Configuration](docs/configuration.md#terminal-type)).
+The [compatibility scorecard](docs/compat-scorecard.md) checks, from tests,
+the features that agent CLIs and other modern programs rely on.
 
 Implemented:
 
