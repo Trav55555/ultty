@@ -13,5 +13,8 @@ tracing = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = "1.12"
 
+[build-dependencies]
+unicode-width = { workspace = true }
+
 [dev-dependencies]
 proptest = { workspace = true }

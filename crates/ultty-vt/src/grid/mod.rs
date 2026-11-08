@@ -29,6 +29,7 @@
 
 mod buffer;
 mod cell;
+mod char_class;
 mod cluster;
 mod history;
 mod image;
@@ -609,12 +610,10 @@ impl Grid {
     /// grapheme cluster, else its width (0 for control characters and
     /// combining marks that start no cluster, 1 normally, 2 for wide).
     pub(super) fn print_width(&self, c: char) -> Option<u16> {
-        use unicode_width::UnicodeWidthChar;
-
         if self.continues_cluster(c) {
             None
         } else {
-            Some(c.width().unwrap_or(0) as u16)
+            Some(cluster::CharProps::of(c).width())
         }
     }
 

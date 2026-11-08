@@ -34,38 +34,50 @@
 //! them against the segmenter, so a Unicode update that moves one fails
 //! loudly instead of changing behaviour.
 
-/// The plain class (see the module docs) as sorted, disjoint ranges.
-const PLAIN: &[(char, char)] = &[
-    ('\u{20}', '\u{7E}'),
-    ('\u{A0}', '\u{AC}'),
-    ('\u{AE}', '\u{2FF}'),
-    ('\u{370}', '\u{482}'),
-    ('\u{48A}', '\u{52F}'),
-    ('\u{5D0}', '\u{5EA}'),
-    ('\u{620}', '\u{64A}'),
-    ('\u{1E00}', '\u{1FFF}'),
-    ('\u{2010}', '\u{2027}'),
-    ('\u{2030}', '\u{205F}'),
-    ('\u{2070}', '\u{20CF}'),
-    ('\u{2100}', '\u{2BFF}'),
-    ('\u{2E80}', '\u{2FDF}'),
-    ('\u{3000}', '\u{3029}'),
-    ('\u{3030}', '\u{303F}'),
-    ('\u{3041}', '\u{3096}'),
-    ('\u{309B}', '\u{30FF}'),
-    ('\u{3105}', '\u{312F}'),
-    ('\u{3131}', '\u{318E}'),
-    ('\u{31F0}', '\u{4DBF}'),
-    ('\u{4E00}', '\u{A48C}'),
-    ('\u{AC00}', '\u{D7A3}'),
-    ('\u{F900}', '\u{FAFF}'),
-    ('\u{FF01}', '\u{FF9D}'),
-    ('\u{FFE0}', '\u{FFEE}'),
-    ('\u{1F000}', '\u{1F1E5}'),
-    ('\u{1F200}', '\u{1F3FA}'),
-    ('\u{1F400}', '\u{1FAFF}'),
-    ('\u{20000}', '\u{3FFFD}'),
-];
+pub(super) use super::char_class::JoinClass;
+use super::char_class::{in_ranges, is_extend, is_plain, props_bits, CLASS_SHIFT, ZWJ};
+#[cfg(test)]
+use super::char_class::{is_joiner, PLAIN};
+
+// The table `build.rs` generates from `props_bits`: TABLE_LIMIT, BLOCK_SHIFT,
+// BLOCK_INDEX and BLOCKS.
+include!(concat!(env!("OUT_DIR"), "/char_props.rs"));
+
+/// What printing a codepoint needs to know about it: the columns it takes
+/// when it starts a cluster and its [`JoinClass`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CharProps(u8);
+
+impl CharProps {
+    /// `c`'s properties: a table lookup for all but the rarest codepoints.
+    #[inline]
+    pub(super) fn of(c: char) -> Self {
+        let cp = c as u32;
+        if cp < TABLE_LIMIT {
+            let block = BLOCK_INDEX[(cp >> BLOCK_SHIFT) as usize];
+            let offset = cp & ((1 << BLOCK_SHIFT) - 1);
+            Self(BLOCKS[usize::from(block)][offset as usize])
+        } else {
+            Self(props_bits(c))
+        }
+    }
+
+    /// Columns taken when the codepoint starts a cluster: 0 to 3, as
+    /// `unicode-width` has it (control characters take none).
+    #[inline]
+    pub(super) fn width(self) -> u16 {
+        u16::from(self.0 & ((1 << CLASS_SHIFT) - 1))
+    }
+
+    #[inline]
+    pub(super) fn class(self) -> JoinClass {
+        match self.0 >> CLASS_SHIFT {
+            1 => JoinClass::Plain,
+            2 => JoinClass::Joiner,
+            _ => JoinClass::Other,
+        }
+    }
+}
 
 /// The Extended_Pictographic codepoints of the plain class, as sorted,
 /// disjoint ranges: exactly those (the tests check every plain codepoint).
@@ -227,41 +239,6 @@ const PICTOGRAPHIC: &[(char, char)] = &[
     ('\u{1FA6E}', '\u{1FAFF}'),
 ];
 
-/// Whether `c` is in one of `ranges` (sorted and disjoint).
-fn in_ranges(ranges: &[(char, char)], c: char) -> bool {
-    // The first range starting after `c`; `c` is in one if the one before
-    // it reaches `c`.
-    let next = ranges.partition_point(|&(lo, _)| lo <= c);
-    next > 0 && c <= ranges[next - 1].1
-}
-
-/// Whether `c` is in the plain class.
-fn is_plain(c: char) -> bool {
-    in_ranges(PLAIN, c)
-}
-
-/// Whether `c` is in the extend class (see the module docs).
-fn is_extend(c: char) -> bool {
-    matches!(c,
-        '\u{300}'..='\u{36F}'
-        | '\u{483}'..='\u{489}'
-        | '\u{1DC0}'..='\u{1DFF}'
-        | '\u{20D0}'..='\u{20F0}'
-        | '\u{FE00}'..='\u{FE0F}'
-        | '\u{FE20}'..='\u{FE2F}'
-        | '\u{1F3FB}'..='\u{1F3FF}'
-        | '\u{E0020}'..='\u{E007F}'
-        | '\u{E0100}'..='\u{E01EF}'
-    )
-}
-
-const ZWJ: char = '\u{200D}';
-
-/// Whether `c` always joins a cluster of a plain codepoint and more such.
-fn is_joiner(c: char) -> bool {
-    c == ZWJ || is_extend(c)
-}
-
 fn is_regional_indicator(c: char) -> bool {
     matches!(c, '\u{1F1E6}'..='\u{1F1FF}')
 }
@@ -296,14 +273,22 @@ impl Class {
 /// Whether `c` joins the cluster `base` + `extra`, when that follows from
 /// the classes above; `None` when only the segmenter can tell.
 pub(super) fn joins(base: char, extra: &[char], c: char) -> Option<bool> {
+    let class = |c| CharProps::of(c).class();
     // The common cases first: plain text, and marks on a plain character.
-    if is_plain(c) {
-        let last = extra.last().copied().unwrap_or(base);
-        if is_plain(last) || is_extend(last) {
-            return Some(false);
+    match class(c) {
+        JoinClass::Plain => {
+            let last = extra.last().copied().unwrap_or(base);
+            if last != ZWJ && class(last) != JoinClass::Other {
+                return Some(false);
+            }
         }
-    } else if is_joiner(c) && is_plain(base) && extra.iter().copied().all(is_joiner) {
-        return Some(true);
+        JoinClass::Joiner
+            if class(base) == JoinClass::Plain
+                && extra.iter().all(|&e| class(e) == JoinClass::Joiner) =>
+        {
+            return Some(true);
+        }
+        _ => {}
     }
     // Rule out the codepoints the rules do not cover before walking the
     // cluster.
@@ -365,6 +350,27 @@ mod tests {
     /// What `joins` claims for a pair, checked by the segmenter.
     fn segmenter_joins(cluster: &str, c: char) -> bool {
         clusters(&format!("{cluster}{c}")) == 1
+    }
+
+    /// The generated table holds what [`props_bits`] computes for every
+    /// codepoint, and that is `unicode-width`'s width and the classes
+    /// above.
+    #[test]
+    fn char_props_match_unicode_width_and_the_classes_for_every_codepoint() {
+        use unicode_width::UnicodeWidthChar;
+        for c in (0..=0x10FFFF).filter_map(char::from_u32) {
+            let props = CharProps::of(c);
+            assert_eq!(props, CharProps(props_bits(c)), "{c:?}");
+            assert_eq!(props.width(), c.width().unwrap_or(0) as u16, "{c:?}");
+            let class = if is_plain(c) {
+                JoinClass::Plain
+            } else if is_joiner(c) {
+                JoinClass::Joiner
+            } else {
+                JoinClass::Other
+            };
+            assert_eq!(props.class(), class, "{c:?}");
+        }
     }
 
     #[test]
