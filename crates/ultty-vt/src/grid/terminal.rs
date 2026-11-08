@@ -1,9 +1,28 @@
 //! Terminal state management with alternate screen support.
 
 use super::{
-    Buffer, CursorPosition, Dimensions, Grid, ImageStore, Palette, RowMarks, TerminalImage,
-    ThemeColors,
+    Anchor, AnchorRefusal, Buffer, CursorPosition, Dimensions, Grid, ImageStore, Palette, RowMarks,
+    TerminalImage, ThemeColors,
 };
+
+/// Most anchor events kept for the embedder; past it the oldest go.
+pub const MAX_ANCHOR_EVENTS: usize = 4096;
+
+/// What happened to inline surface anchors (ADR 0020), for the embedder to
+/// pair with sessions. See [`Terminal::take_anchor_events`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorEvent {
+    /// Rows were reserved and tagged `tag` on the main screen.
+    Placed { tag: u16, anchor: Anchor },
+    /// The anchor reserved nothing.
+    Refused {
+        anchor: Anchor,
+        reason: AnchorRefusal,
+    },
+    /// The anchor's first row is gone: erased, cleared, reset, or evicted
+    /// from scrollback. Its tag is free again.
+    Lost { tag: u16, anchor: Anchor },
+}
 
 /// Maximum number of distinct OSC 8 hyperlink URIs remembered per terminal.
 ///
@@ -251,6 +270,11 @@ pub struct Terminal {
     /// Dimensions the inactive alternate buffer still has to be resized to.
     /// Reflowing it on every drag frame is wasted work while it is hidden.
     pending_alternate_resize: Option<Dimensions>,
+    /// Anchor events not yet taken by the embedder, oldest first.
+    anchor_events: std::collections::VecDeque<AnchorEvent>,
+    /// Anchors in the output reserve rows; see
+    /// [`Terminal::set_inline_anchors`].
+    inline_anchors: bool,
 }
 
 impl Terminal {
@@ -311,6 +335,8 @@ impl Terminal {
             pending_column_resize: None,
             terminal_name: DEFAULT_TERMINAL_NAME.to_string(),
             pending_alternate_resize: None,
+            anchor_events: std::collections::VecDeque::new(),
+            inline_anchors: false,
         }
     }
 
@@ -339,6 +365,65 @@ impl Terminal {
     /// Check if there are pending responses.
     pub fn has_pending_responses(&self) -> bool {
         !self.pending_responses.is_empty()
+    }
+
+    /// Whether inline surface anchors in the output reserve rows (ADR
+    /// 0020). Off by default: until the embedder pairs anchors with
+    /// sessions and releases them, anchors in output (a `cat`ed recording,
+    /// say) are parsed and ignored.
+    pub fn set_inline_anchors(&mut self, enabled: bool) {
+        self.inline_anchors = enabled;
+    }
+
+    /// Whether inline surface anchors reserve rows; see
+    /// [`Terminal::set_inline_anchors`].
+    pub fn inline_anchors(&self) -> bool {
+        self.inline_anchors
+    }
+
+    /// Apply an inline surface anchor at the cursor (ADR 0020). On the main
+    /// screen its rows are reserved and tagged; on the alternate screen
+    /// nothing is. Either way an [`AnchorEvent`] says what happened. With
+    /// inline anchors off this does nothing.
+    pub fn place_anchor(&mut self, anchor: Anchor) {
+        if !self.inline_anchors {
+            return;
+        }
+        // Free the tags of anchors already gone, so they can be reused.
+        self.sweep_anchors();
+        let event = if self.using_alternate {
+            AnchorEvent::Refused {
+                anchor,
+                reason: AnchorRefusal::AlternateScreen,
+            }
+        } else {
+            match self.main.place_anchor(anchor) {
+                Ok(tag) => AnchorEvent::Placed { tag, anchor },
+                Err(reason) => AnchorEvent::Refused { anchor, reason },
+            }
+        };
+        tracing::trace!(?event, "inline anchor");
+        self.push_anchor_event(event);
+    }
+
+    /// Anchor events since the last call, oldest first. Anchors whose first
+    /// row is gone are found now, so call this after feeding output.
+    pub fn take_anchor_events(&mut self) -> Vec<AnchorEvent> {
+        self.sweep_anchors();
+        self.anchor_events.drain(..).collect()
+    }
+
+    fn sweep_anchors(&mut self) {
+        for (tag, anchor) in self.main.sweep_anchors() {
+            self.push_anchor_event(AnchorEvent::Lost { tag, anchor });
+        }
+    }
+
+    fn push_anchor_event(&mut self, event: AnchorEvent) {
+        if self.anchor_events.len() >= MAX_ANCHOR_EVENTS {
+            self.anchor_events.pop_front();
+        }
+        self.anchor_events.push_back(event);
     }
 
     /// Keep at most `lines` lines of main-screen scrollback, dropping the
@@ -1032,6 +1117,11 @@ impl Terminal {
         self.alternate.grid_mut().cursor_mut().position = CursorPosition::origin();
         self.alternate.clear_history();
         self.main.clear_history();
+        // The main grid keeps its text when the reset came on the
+        // alternate screen, but no anchor survives a reset.
+        for (tag, anchor) in self.main.drop_all_anchors() {
+            self.push_anchor_event(AnchorEvent::Lost { tag, anchor });
+        }
         self.images.clear();
         self.hyperlinks.clear();
         self.hyperlink_ids.clear();

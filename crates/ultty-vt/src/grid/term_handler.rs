@@ -61,6 +61,16 @@ impl<'a> TerminalHandler<'a> {
             // Protocol data for the embedder; it does not touch the grid.
             Action::InBand(_) => {}
 
+            Action::InlineAnchor {
+                session_id,
+                surface_id,
+                rows,
+            } => self.terminal.place_anchor(crate::grid::Anchor {
+                session_id,
+                surface_id,
+                rows,
+            }),
+
             // Cursor movement
             Action::CursorUp(n) => self.terminal.grid_mut().cursor_up(n),
             Action::CursorDown(n) => self.terminal.grid_mut().cursor_down(n),

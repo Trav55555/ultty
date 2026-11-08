@@ -39,6 +39,47 @@ impl RowMarks {
     }
 }
 
+/// An inline surface's anchor tag on a row (ADR 0020).
+///
+/// The low bits hold the per-buffer tag, 0 for none; the top bit marks the
+/// first row of the reservation, which is where the surface is drawn and
+/// what decides whether it is still there. Two bytes, so a compact
+/// scrollback row keeps it in padding it already had.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AnchorTag(u16);
+
+impl AnchorTag {
+    /// No anchor.
+    pub const NONE: AnchorTag = AnchorTag(0);
+
+    const FIRST: u16 = 1 << 15;
+
+    /// Tag `tag` (1 to `0x7fff`), on the first row of its reservation when
+    /// `first` is set.
+    pub fn new(tag: u16, first: bool) -> AnchorTag {
+        let tag = tag & !Self::FIRST;
+        if first && tag != 0 {
+            AnchorTag(tag | Self::FIRST)
+        } else {
+            AnchorTag(tag)
+        }
+    }
+
+    /// The tag, 0 for none.
+    pub fn tag(self) -> u16 {
+        self.0 & !Self::FIRST
+    }
+
+    /// Whether this is the first row of the reservation.
+    pub fn is_first(self) -> bool {
+        self.0 & Self::FIRST != 0
+    }
+
+    pub fn is_none(self) -> bool {
+        self.0 == 0
+    }
+}
+
 /// A row of terminal cells.
 ///
 /// Provides efficient storage and manipulation of a single line
@@ -52,6 +93,8 @@ pub struct Row {
     wrapped: bool,
     /// Shell integration marks; see [`RowMarks`].
     marks: RowMarks,
+    /// Inline surface anchor; see [`AnchorTag`].
+    anchor: AnchorTag,
     /// Every cell at or after this column is [`Cell::default`]. It may
     /// overstate the used part of the row, never understate it, so code
     /// that only cares about non-default cells (history encoding, erasing a
@@ -229,6 +272,7 @@ impl Row {
             dirty: true,
             wrapped: false,
             marks: RowMarks::default(),
+            anchor: AnchorTag::NONE,
             used: 0,
             plain: true,
             graphemes: GraphemeMap::default(),
@@ -306,6 +350,7 @@ impl Row {
         self.graphemes.clone_from(&other.graphemes);
         self.wrapped = other.wrapped;
         self.marks = other.marks;
+        self.anchor = other.anchor;
         self.used = other.used;
         self.plain = other.plain;
         self.dirty = true;
@@ -461,6 +506,19 @@ impl Row {
         self.marks = marks;
     }
 
+    /// The row's inline surface anchor tag.
+    #[inline]
+    pub fn anchor(&self) -> AnchorTag {
+        self.anchor
+    }
+
+    /// Replace the row's anchor tag. Like marks, it does not change what is
+    /// drawn, so the row stays clean.
+    #[inline]
+    pub fn set_anchor(&mut self, anchor: AnchorTag) {
+        self.anchor = anchor;
+    }
+
     /// Get the width of the row.
     #[inline]
     pub fn width(&self) -> u16 {
@@ -522,6 +580,7 @@ impl Row {
         self.graphemes.clear();
         self.wrapped = false;
         self.marks = RowMarks::default();
+        self.anchor = AnchorTag::NONE;
         self.dirty = true;
     }
 
