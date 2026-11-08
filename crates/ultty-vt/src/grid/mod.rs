@@ -659,6 +659,43 @@ impl Grid {
     /// [`Grid::write_char`] with `width` from [`Grid::print_width`] for the
     /// current state, so a caller that needed it first does not pay twice.
     pub(super) fn write_measured_char(&mut self, c: char, width: Option<u16>) {
+        if !self.write_in_row(c, width) {
+            self.write_measured_char_slow(c, width);
+        }
+    }
+
+    /// Print `c`, `width` columns from [`Grid::print_width`], when that is
+    /// only writing its cells at the cursor: it starts a cluster of one or
+    /// two columns that fit on the row, no wrap is pending, insert mode is
+    /// off and it overwrites no part of a wide character. Returns `false`,
+    /// having changed nothing, otherwise.
+    ///
+    /// Most printed characters are this case; the result is what
+    /// [`Grid::write_measured_char_slow`] would do.
+    #[inline]
+    pub(super) fn write_in_row(&mut self, c: char, width: Option<u16>) -> bool {
+        let Some(width @ 1..=2) = width else {
+            return false;
+        };
+        let CursorPosition { col, row } = self.cursor.position;
+        if self.cursor.wrap_pending || self.insert_mode || col + width > self.dims.cols {
+            return false;
+        }
+        let Some(r) = self.rows.get_mut(row as usize) else {
+            return false;
+        };
+        if !r.write_char_in_place(col, c, width, self.attrs) {
+            return false;
+        }
+        self.mark_dirty(row);
+        self.last_char = c;
+        self.advance_cursor(width);
+        self.record_print(row, col, cluster::Tail::start(c));
+        true
+    }
+
+    /// [`Grid::write_measured_char`] for any character in any state.
+    pub(super) fn write_measured_char_slow(&mut self, c: char, width: Option<u16>) {
         let Some(width) = width else {
             if let Some((row, col)) = self.cluster_base() {
                 self.extend_cluster(row, col, c);
@@ -2468,5 +2505,80 @@ mod tests {
         assert_eq!(grid.cell(1, 0).unwrap().char(), 'X');
         assert_eq!(grid.cell(2, 0).unwrap().char(), 'B');
         assert_eq!(grid.cell(3, 0).unwrap().char(), 'C');
+    }
+
+    #[derive(Debug, Clone)]
+    enum PrintOp {
+        Print(char),
+        MoveTo(u16, u16),
+        InsertMode(bool),
+        AutoWrap(bool),
+        Bold(bool),
+    }
+
+    fn print_op() -> impl proptest::strategy::Strategy<Value = PrintOp> {
+        use proptest::prelude::*;
+        prop_oneof![
+            8 => prop::sample::select(vec![
+                'a', ' ', '\u{E9}', '\u{4E2D}', '\u{65E5}', '\u{1F600}', '\u{2764}', '\u{FE0F}',
+                '\u{301}', '\u{200D}', '\u{1F1EF}', '\u{1F1F5}', '\u{915}', '\u{94D}',
+                '\u{93F}', '\u{1100}', '\u{1161}', '\u{AD}', '\u{17D8}',
+            ])
+            .prop_map(PrintOp::Print),
+            1 => (0u16..8, 0u16..3).prop_map(|(col, row)| PrintOp::MoveTo(col, row)),
+            1 => any::<bool>().prop_map(PrintOp::InsertMode),
+            1 => any::<bool>().prop_map(PrintOp::AutoWrap),
+            1 => any::<bool>().prop_map(PrintOp::Bold),
+        ]
+    }
+
+    proptest::proptest! {
+        /// Printing through the in-place shortcut leaves the grid exactly as
+        /// the general path does.
+        #[test]
+        fn printing_in_place_matches_the_general_path(
+            cols in 1u16..8,
+            ops in proptest::collection::vec(print_op(), 0..60),
+        ) {
+            let dims = Dimensions::new(cols, 3);
+            let mut fast = Grid::new(dims);
+            let mut general = Grid::new(dims);
+            for op in ops {
+                for (grid, shortcut) in [(&mut fast, true), (&mut general, false)] {
+                    match op {
+                        PrintOp::Print(c) => {
+                            let width = grid.print_width(c);
+                            if shortcut {
+                                grid.write_measured_char(c, width);
+                            } else {
+                                grid.write_measured_char_slow(c, width);
+                            }
+                        }
+                        PrintOp::MoveTo(col, row) => grid.set_cursor_position(row + 1, col + 1),
+                        PrintOp::InsertMode(on) => grid.set_insert_mode(on),
+                        PrintOp::AutoWrap(on) => grid.set_auto_wrap(on),
+                        PrintOp::Bold(on) => {
+                            if on {
+                                grid.attrs_mut().set_flag(CellFlags::BOLD);
+                            } else {
+                                grid.attrs_mut().unset_flag(CellFlags::BOLD);
+                            }
+                        }
+                    }
+                }
+                proptest::prop_assert_eq!(fast.cursor.position, general.cursor.position);
+                proptest::prop_assert_eq!(fast.cursor.wrap_pending, general.cursor.wrap_pending);
+                proptest::prop_assert_eq!(fast.last_char, general.last_char);
+                proptest::prop_assert_eq!(fast.last_print, general.last_print);
+                for (a, b) in fast.rows.iter().zip(&general.rows) {
+                    proptest::prop_assert!(a.cells().eq(b.cells()), "{a:?}\n!=\n{b:?}");
+                    for col in 0..cols {
+                        proptest::prop_assert_eq!(a.grapheme_extra(col), b.grapheme_extra(col));
+                    }
+                    proptest::prop_assert_eq!(a.used_cells().len(), b.used_cells().len());
+                }
+                fast.check_integrity().map_err(proptest::test_runner::TestCaseError::fail)?;
+            }
+        }
     }
 }
