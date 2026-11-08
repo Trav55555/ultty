@@ -11,7 +11,8 @@ use crate::grid::{Cell, CellFlags, Color, CursorShape, Row, Terminal, UnderlineS
 use cosmic_text::{
     Attrs, Buffer, CacheKey, CacheKeyFlags, Family, FontSystem, Metrics, Shaping, Style, Weight,
 };
-use std::collections::HashMap;
+// Looked up for every drawn cell; SipHash was a third of a scrolling frame.
+use foldhash::{HashMap, HashMapExt};
 use std::sync::Arc;
 
 /// Character plus the shaping-relevant style bits (see [`shaping_cache_key`]).

@@ -9,7 +9,8 @@
 //! to schedule another frame.
 
 use cosmic_text::{CacheKey, SwashCache, SwashContent, SwashImage};
-use std::collections::HashMap;
+// Looked up for every drawn glyph; see the note in `text.rs`.
+use foldhash::{HashMap, HashMapExt};
 use std::sync::Arc;
 
 /// Size of the glyph atlas texture.

@@ -4610,6 +4610,7 @@ dependencies = [
  "cosmic-text",
  "criterion",
  "dirs",
+ "foldhash",
  "insta",
  "libc",
  "nix 0.29.0",

@@ -37,6 +37,9 @@ bytemuck = { workspace = true }
 
 # Text
 cosmic-text = { workspace = true }
+# Hasher for the per-cell glyph and shaping caches: seeded per process like
+# std's, several times cheaper than SipHash (already built for hashbrown).
+foldhash = "0.2"
 
 # Async
 tokio = { workspace = true }
