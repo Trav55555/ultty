@@ -11,27 +11,23 @@ use crate::grid::{CellFlags, CursorShape, Terminal};
 use wgpu::util::DeviceExt;
 
 impl Renderer {
-    /// Render multiple terminal panes to the surface and present.
+    /// Draw multiple terminal panes into `view`, without presenting the
+    /// frame.
     pub fn render_panes(
         &mut self,
-        output: wgpu::SurfaceTexture,
+        view: &wgpu::TextureView,
         panes: &[(&Terminal, PaneInfo)],
         overlay: &OverlayState,
     ) {
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("panes_render_encoder"),
             });
 
-        self.encode_panes(&mut encoder, &view, panes, overlay);
+        self.encode_panes(&mut encoder, view, panes, overlay);
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        self.queue.present(output);
     }
 
     /// Record the whole multi-pane frame (clear, chrome, panes, borders,
