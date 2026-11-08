@@ -34,6 +34,16 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Added
 
+- Shell integration for bash 4.4+ and zsh in `dist/shell-integration/`
+  (OSC 133 prompt, command and exit status marks), installed by
+  `install.sh`, `make install`, the packages and the Homebrew formula under
+  `share/ultty/shell-integration/`. `last-command`, `wait-for
+  --command-done` and command events need it. Guides: `docs/agents.md` and
+  `docs/testing-tuis.md`, with `scripts/e2e/counter-app.sh` and
+  `scripts/e2e/run-headless.sh`.
+- `ulttyctl new-tab` prints the new tab's pane id (control reply
+  `tab_opened`), so a script can write `pane=$(ulttyctl new-tab ...)`.
+- `make install` installs `ulttyctl` too.
 - `ulttyctl panes` (control request `list_panes`) lists every pane in every
   tab with a pane id, tab index, focus, title, foreground process, shell
   PID, working directory and size. Pane ids are unique within an Ultty
@@ -102,6 +112,13 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Changed
 
+- A command given by name runs the first executable file of that name on
+  `PATH`. A file without execute permission, such as the `~/.local/bin/env`
+  that uv installs to be sourced, no longer hides `/usr/bin/env` (it made
+  `ulttyctl new-tab env ...` fail).
+- `ulttyctl new-tab` with a working directory (the control request's
+  `working_dir`, the MCP tool's `cwd`) starts the command there; it was
+  ignored.
 - Naming the program in front of a pane (tab titles, `ulttyctl panes`, the
   native session foreground check) reads the process group's leader and
   walks only its relatives, not every process on the machine. With the

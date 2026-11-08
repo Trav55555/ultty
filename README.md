@@ -334,6 +334,8 @@ examples/           Nine workspace example apps: hello-native, counter-app,
 - [Contributing](CONTRIBUTING.md) — Toolchain, checks, and pull request expectations
 - [Getting Started](docs/GETTING_STARTED.md) — Installation and first app
 - [Configuration](docs/configuration.md) — `TERM`, scrollback, exit, clipboard, paste, and link settings
+- [Drive Ultty from an agent](docs/agents.md) — MCP, shell integration, panes, waits, last command, events
+- [Test your TUI with ulttyctl](docs/testing-tuis.md) — End-to-end tests that press keys and read the screen
 - [Changelog](CHANGELOG.md) — Changes in each release
 - [Architecture](docs/ARCHITECTURE.md) — System design and components
 - [Architecture Vocabulary](CONTEXT.md) — Stable terms for core seams

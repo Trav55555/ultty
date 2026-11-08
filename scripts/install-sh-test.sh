@@ -49,12 +49,13 @@ archive="ultty-$version-x86_64-unknown-linux-gnu.tar.gz"
 
 # A fake release: two stub binaries, the real desktop entry and terminfo.
 stage="$work/stage"
-mkdir -p "$stage/dist/terminfo" "$work/www/download/$version"
+mkdir -p "$stage/dist/terminfo" "$stage/dist/shell-integration" "$work/www/download/$version"
 for bin in ultty ulttyctl; do
   printf '#!/bin/sh\necho %s\n' "$bin" >"$stage/$bin"
 done
 cp "$(dirname "$INSTALL_SH")/dist/ultty.desktop" "$stage/dist/ultty.desktop"
 cp "$(dirname "$INSTALL_SH")/dist/terminfo/ultty.terminfo" "$stage/dist/terminfo/"
+cp "$(dirname "$INSTALL_SH")"/dist/shell-integration/ultty.* "$stage/dist/shell-integration/"
 tar czf "$work/www/download/$version/$archive" -C "$stage" .
 (cd "$work/www/download/$version" && sha256sum "$archive" >SHA256SUMS)
 
@@ -79,6 +80,12 @@ HOME="$work/home" XDG_DATA_HOME="$data_dir" \
 
 for bin in ultty ulttyctl; do
   [ "$("$install_dir/$bin")" = "$bin" ] || { echo "$bin not installed" >&2; exit 1; }
+done
+
+for script in ultty.bash ultty.zsh; do
+  cmp "$data_dir/ultty/shell-integration/$script" \
+    "$(dirname "$INSTALL_SH")/dist/shell-integration/$script" ||
+    { echo "shell integration $script not installed" >&2; exit 1; }
 done
 
 if command -v tic >/dev/null 2>&1; then

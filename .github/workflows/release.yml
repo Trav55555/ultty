@@ -63,7 +63,7 @@ jobs:
           mkdir -p package/dist
           cp ultty ulttyctl package/
           cp ../../../dist/ultty.desktop package/dist/
-          cp -R ../../../dist/icons package/dist/
+          cp -R ../../../dist/icons ../../../dist/terminfo ../../../dist/shell-integration package/dist/
           if [ "${{ matrix.archive }}" = "tar.gz" ]; then
             tar czf ../../../ultty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C package .
           fi

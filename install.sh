@@ -3,9 +3,9 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Trav55555/ultty/main/install.sh | sh
 #
-# Installs ultty and ulttyctl into ~/.local/bin, the desktop entry and icons
-# into ~/.local/share, and the xterm-ultty terminfo entry into ~/.terminfo
-# when tic is available. No root needed. The download is checked against the
+# Installs ultty and ulttyctl into ~/.local/bin, the desktop entry, icons and
+# shell integration scripts into ~/.local/share, and the xterm-ultty terminfo
+# entry into ~/.terminfo when tic is available. No root needed. The download is checked against the
 # release's SHA256SUMS before anything is installed. Releases are built for
 # Linux x86_64 only.
 #
@@ -98,6 +98,18 @@ install_desktop_entry() {
   say "added Ultty to the application menu"
 }
 
+# Copy the OSC 133 shell integration scripts and say how to load them.
+# Skipped quietly in a release that does not ship them.
+install_shell_integration() {
+  source="$1/dist/shell-integration"
+  [ -d "$source" ] || return 0
+  dest="$DATA_DIR/ultty/shell-integration"
+  mkdir -p "$dest"
+  cp "$source"/ultty.* "$dest/"
+  say "installed shell integration to $dest; to use it, add to ~/.bashrc or ~/.zshrc:"
+  say "  source $dest/ultty.bash   (or ultty.zsh)"
+}
+
 # Compile the xterm-ultty terminfo entry into ~/.terminfo, so terminal.term
 # can be set to xterm-ultty. Skipped quietly without tic or in a release
 # that does not ship the entry.
@@ -153,6 +165,7 @@ main() {
 
   install_desktop_entry "$tmp/x"
   install_terminfo "$tmp/x"
+  install_shell_integration "$tmp/x"
 
   case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
