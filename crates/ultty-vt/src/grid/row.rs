@@ -279,10 +279,11 @@ impl Row {
     /// Append a codepoint to the grapheme cluster at `col`.
     ///
     /// At most `cap` extra codepoints are kept per cell; the rest are dropped
-    /// so hostile output cannot grow a cell without bound.
-    pub fn push_grapheme_char(&mut self, col: u16, c: char, cap: usize) {
+    /// so hostile output cannot grow a cell without bound. Returns whether
+    /// `c` was kept.
+    pub fn push_grapheme_char(&mut self, col: u16, c: char, cap: usize) -> bool {
         let Some(cell) = self.cells.get_mut(col as usize) else {
-            return;
+            return false;
         };
         self.plain = false;
         let extra = self.graphemes.entry(col);
@@ -292,10 +293,12 @@ impl Row {
             cell.set_flag(CellFlags::HAS_COMBINING);
             self.used = self.used.max(col + 1);
         }
-        if extra.len() < cap {
+        let kept = extra.len() < cap;
+        if kept {
             extra.push(c);
         }
         self.dirty = true;
+        kept
     }
 
     /// Set the extra codepoints of the cluster at `col` (used by reflow).

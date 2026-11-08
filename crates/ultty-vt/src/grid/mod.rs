@@ -232,6 +232,8 @@ struct LastPrint {
     cursor: CursorPosition,
     wrap_pending: bool,
     content_version: u64,
+    /// The cluster's last stored codepoint.
+    tail: cluster::Tail,
 }
 
 impl Grid {
@@ -502,24 +504,32 @@ impl Grid {
         self.last_print = None;
     }
 
-    /// The cell holding the last printed grapheme, if nothing has moved the
-    /// cursor or changed the grid since it was printed.
-    fn cluster_base(&self) -> Option<(u16, u16)> {
+    /// The last printed grapheme, if nothing has moved the cursor or
+    /// changed the grid since it was printed.
+    fn last_print(&self) -> Option<LastPrint> {
         let last = self.last_print?;
         let unchanged = last.cursor == self.cursor.position
             && last.wrap_pending == self.cursor.wrap_pending
             && last.content_version == self.content_version;
-        unchanged.then_some((last.base_row, last.base_col))
+        unchanged.then_some(last)
     }
 
-    /// Record that a grapheme starting at `(row, col)` was just printed.
-    fn record_print(&mut self, row: u16, col: u16) {
+    /// The cell holding the last printed grapheme, if nothing has moved the
+    /// cursor or changed the grid since it was printed.
+    fn cluster_base(&self) -> Option<(u16, u16)> {
+        self.last_print().map(|last| (last.base_row, last.base_col))
+    }
+
+    /// Record that a grapheme starting at `(row, col)` and ending in a
+    /// codepoint of `tail` was just printed.
+    fn record_print(&mut self, row: u16, col: u16, tail: cluster::Tail) {
         self.last_print = Some(LastPrint {
             base_row: row,
             base_col: col,
             cursor: self.cursor.position,
             wrap_pending: self.cursor.wrap_pending,
             content_version: self.content_version,
+            tail,
         });
     }
 
@@ -527,6 +537,11 @@ impl Grid {
     /// starting a new one. Such a codepoint never advances to a new cell,
     /// so callers must treat it as zero-width when deciding to wrap.
     pub fn continues_cluster(&self, c: char) -> bool {
+        self.continues_cluster_with(c, cluster::CharProps::of(c))
+    }
+
+    /// [`Grid::continues_cluster`] for `c` with properties `props`.
+    fn continues_cluster_with(&self, c: char, props: cluster::CharProps) -> bool {
         use unicode_segmentation::UnicodeSegmentation;
 
         // Nothing below U+0300 extends a cluster (except CR LF, which is
@@ -534,9 +549,13 @@ impl Grid {
         if !self.grapheme_clustering || c < '\u{300}' {
             return false;
         }
-        let Some((row, col)) = self.cluster_base() else {
+        let Some(last) = self.last_print() else {
             return false;
         };
+        if let Some(joins) = cluster::joins_tail(last.tail, props.class()) {
+            return joins;
+        }
+        let (row, col) = (last.base_row, last.base_col);
         let Some(r) = self.rows.get(row as usize) else {
             return false;
         };
@@ -558,10 +577,19 @@ impl Grid {
     fn extend_cluster(&mut self, row: u16, col: u16, c: char) {
         use unicode_width::UnicodeWidthStr;
 
+        // A codepoint past the cap is dropped, leaving the cluster's end as
+        // it was.
+        let old_tail = self
+            .last_print
+            .map_or(cluster::Tail::Other, |last| last.tail);
         let Some(r) = self.rows.get_mut(row as usize) else {
             return;
         };
-        r.push_grapheme_char(col, c, MAX_COMBINING_PER_CELL);
+        let tail = if r.push_grapheme_char(col, c, MAX_COMBINING_PER_CELL) {
+            cluster::Tail::of(c)
+        } else {
+            old_tail
+        };
         let was_wide = r.get(col).is_some_and(|cell| cell.is_wide());
         let room = col.saturating_add(1) < self.dims.cols;
         let at_cursor = !self.cursor.wrap_pending && self.cursor.position.col == col + 1;
@@ -597,7 +625,7 @@ impl Grid {
             self.advance_cursor(1);
         }
         self.mark_dirty(row);
-        self.record_print(row, col);
+        self.record_print(row, col, tail);
     }
 
     /// Write a character at the cursor position and advance.
@@ -610,10 +638,11 @@ impl Grid {
     /// grapheme cluster, else its width (0 for control characters and
     /// combining marks that start no cluster, 1 normally, 2 for wide).
     pub(super) fn print_width(&self, c: char) -> Option<u16> {
-        if self.continues_cluster(c) {
+        let props = cluster::CharProps::of(c);
+        if self.continues_cluster_with(c, props) {
             None
         } else {
-            Some(cluster::CharProps::of(c).width())
+            Some(props.width())
         }
     }
 
@@ -751,7 +780,7 @@ impl Grid {
         self.last_char = c;
 
         self.advance_cursor(width);
-        self.record_print(row, col);
+        self.record_print(row, col, cluster::Tail::of(c));
     }
 
     /// Advance the cursor after printing `width` columns, parking it on the
@@ -819,7 +848,8 @@ impl Grid {
             } else {
                 self.cursor.position.col = end_col;
             }
-            self.record_print(row, end_col - 1);
+            // Printable ASCII is plain.
+            self.record_print(row, end_col - 1, cluster::Tail::Settled);
         }
     }
 
@@ -2308,6 +2338,26 @@ mod tests {
 
         let marks = grid.combining_chars(0, 0).unwrap();
         assert_eq!(marks.len(), MAX_COMBINING_PER_CELL);
+    }
+
+    /// A codepoint dropped at the cap does not end the cluster: what joins
+    /// next depends on the last one stored.
+    #[test]
+    fn a_codepoint_dropped_at_the_cap_leaves_the_cluster_end_alone() {
+        let mut grid = Grid::new(Dimensions::new(10, 2));
+        grid.write_char('\u{1F600}');
+        for _ in 1..MAX_COMBINING_PER_CELL {
+            grid.write_char('\u{0301}');
+        }
+        grid.write_char('\u{200D}');
+        // Joins, but there is no room left for it.
+        grid.write_char('\u{0302}');
+        assert_eq!(
+            grid.combining_chars(0, 0).unwrap().len(),
+            MAX_COMBINING_PER_CELL
+        );
+        // The stored cluster ends in ZWJ, so a pictograph joins it (GB11).
+        assert!(grid.continues_cluster('\u{1F603}'));
     }
 
     #[test]

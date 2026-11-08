@@ -270,6 +270,45 @@ impl Class {
     }
 }
 
+/// The last codepoint of a printed cluster, as far as [`joins_tail`]
+/// needs to know it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Tail {
+    /// A plain or extend codepoint: no plain codepoint joins the cluster,
+    /// every extend and ZWJ does.
+    Settled,
+    /// ZWJ: every extend and ZWJ joins; a plain codepoint may (GB11).
+    Zwj,
+    /// Anything else.
+    Other,
+}
+
+impl Tail {
+    #[inline]
+    pub(super) fn of(c: char) -> Self {
+        match CharProps::of(c).class() {
+            JoinClass::Plain => Self::Settled,
+            JoinClass::Joiner if c == ZWJ => Self::Zwj,
+            JoinClass::Joiner => Self::Settled,
+            JoinClass::Other => Self::Other,
+        }
+    }
+}
+
+/// Whether a codepoint of `class` joins a cluster ending in `tail`, when
+/// that follows from the two alone: nothing joins a plain codepoint to
+/// one ending in plain or extend (only ZWJ before it could, GB11), and
+/// extend and ZWJ join whatever is not a control (GB9). `None` when it
+/// takes the whole cluster.
+#[inline]
+pub(super) fn joins_tail(tail: Tail, class: JoinClass) -> Option<bool> {
+    match (class, tail) {
+        (JoinClass::Plain, Tail::Settled) => Some(false),
+        (JoinClass::Joiner, Tail::Settled | Tail::Zwj) => Some(true),
+        _ => None,
+    }
+}
+
 /// Whether `c` joins the cluster `base` + `extra`, when that follows from
 /// the classes above; `None` when only the segmenter can tell.
 pub(super) fn joins(base: char, extra: &[char], c: char) -> Option<bool> {
@@ -370,6 +409,49 @@ mod tests {
                 JoinClass::Other
             };
             assert_eq!(props.class(), class, "{c:?}");
+        }
+    }
+
+    /// Every codepoint whose [`Tail`] is not `Other`, ending a cluster
+    /// whose base is plain, with samples of each class after it:
+    /// `joins_tail` agrees with the segmenter whenever it answers.
+    #[test]
+    fn joins_tail_agrees_with_the_segmenter() {
+        let after = [
+            'b',
+            '\u{4E2D}',
+            '\u{AC00}',
+            '\u{AC01}',
+            '\u{1F600}',
+            '\u{A9}',
+            '\u{301}',
+            '\u{FE0F}',
+            '\u{1F3FD}',
+            '\u{E0067}',
+            ZWJ,
+        ];
+        for t in (0..=0x10FFFF).filter_map(char::from_u32) {
+            let tail = Tail::of(t);
+            if tail == Tail::Other {
+                continue;
+            }
+            let cases = if is_plain(t) {
+                vec![t.to_string()]
+            } else {
+                vec![
+                    format!("a{t}"),
+                    format!("\u{1F600}{t}"),
+                    format!("a\u{301}{t}"),
+                ]
+            };
+            for cluster in &cases {
+                assert_eq!(clusters(cluster), 1, "{cluster:?}");
+                for &c in &after {
+                    if let Some(joins) = joins_tail(tail, CharProps::of(c).class()) {
+                        assert_eq!(joins, segmenter_joins(cluster, c), "{cluster:?} + {c:?}");
+                    }
+                }
+            }
         }
     }
 
