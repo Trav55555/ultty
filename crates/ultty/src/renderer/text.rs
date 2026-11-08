@@ -639,7 +639,6 @@ impl TextRenderer {
     fn push_glyph(
         &mut self,
         vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u32>,
         shaped: ShapedGlyph,
         cell: (u16, u16),
         cell_size: (f32, f32),
@@ -664,7 +663,7 @@ impl TextRenderer {
         } else {
             color
         };
-        Self::emit_glyph_quad(vertices, indices, x, y, &glyph_info, color);
+        Self::push_glyph_vertices(vertices, x, y, &glyph_info, color);
     }
 
     /// Start a frame. Must precede any quad that samples the glyph atlas,
@@ -1129,9 +1128,6 @@ impl TextRenderer {
         (x_offset, y_offset): (f32, f32),
         cols: u16,
     ) {
-        // Glyph quads index themselves; the draw uses the shared quad
-        // index list instead.
-        let mut indices = Vec::new();
         let block_cursor = cursor_col.map(|col| (col, row_idx));
         let solid_uv = self.atlas.solid_uv();
         let mut quads: Vec<Quad> = Vec::new();
@@ -1172,11 +1168,11 @@ impl TextRenderer {
                 underline_quads(underline, cell_rect, self.decoration, &mut quads);
                 let line_color = underline_color(cell, base_color, color_scheme);
                 for quad in &quads {
-                    Self::emit_solid_quad(vertices, &mut indices, quad, line_color, solid_uv);
+                    Self::emit_solid_quad(vertices, quad, line_color, solid_uv);
                 }
                 if strikethrough {
                     let quad = strikethrough_quad(cell_rect, self.decoration);
-                    Self::emit_solid_quad(vertices, &mut indices, &quad, base_color, solid_uv);
+                    Self::emit_solid_quad(vertices, &quad, base_color, solid_uv);
                 }
             }
 
@@ -1231,7 +1227,6 @@ impl TextRenderer {
                             };
                             self.push_glyph(
                                 vertices,
-                                &mut indices,
                                 shaped,
                                 (col, row_idx),
                                 (cell_width, cell_height),
@@ -1275,7 +1270,6 @@ impl TextRenderer {
             for &shaped in glyphs {
                 self.push_glyph(
                     vertices,
-                    &mut indices,
                     shaped,
                     (col_idx, row_idx),
                     (cell_width, cell_height),
@@ -1288,16 +1282,9 @@ impl TextRenderer {
     }
 
     /// Emit a solid quad through the text pipeline by sampling the atlas's
-    /// reserved white block.
-    fn emit_solid_quad(
-        vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u32>,
-        quad: &Quad,
-        color: Rgba,
-        solid_uv: [f32; 2],
-    ) {
-        let base_idx = vertices.len() as u32;
-
+    /// reserved white block. Grid quads need no indices of their own; the
+    /// draw uses the shared quad index list.
+    fn emit_solid_quad(vertices: &mut Vec<Vertex>, quad: &Quad, color: Rgba, solid_uv: [f32; 2]) {
         for (position, coverage) in quad.corners.into_iter().zip(quad.coverage) {
             vertices.push(Vertex {
                 position,
@@ -1306,7 +1293,19 @@ impl TextRenderer {
                 is_color: 0,
             });
         }
+    }
 
+    /// Emit a quad for a glyph, with its indices.
+    fn emit_glyph_quad(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        x: f32,
+        y: f32,
+        glyph: &super::atlas::GlyphInfo,
+        color: Rgba,
+    ) {
+        let base_idx = vertices.len() as u32;
+        Self::push_glyph_vertices(vertices, x, y, glyph, color);
         indices.extend_from_slice(&[
             base_idx,
             base_idx + 1,
@@ -1317,16 +1316,14 @@ impl TextRenderer {
         ]);
     }
 
-    /// Emit a quad for a glyph.
-    fn emit_glyph_quad(
+    /// Push the four vertices of a glyph quad.
+    fn push_glyph_vertices(
         vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u32>,
         x: f32,
         y: f32,
         glyph: &super::atlas::GlyphInfo,
         color: Rgba,
     ) {
-        let base_idx = vertices.len() as u32;
         let color_arr = color.to_array();
         let is_color = if glyph.is_color { 1u32 } else { 0u32 };
 
@@ -1359,14 +1356,6 @@ impl TextRenderer {
             color: color_arr,
             is_color,
         });
-
-        // Two triangles per quad
-        indices.push(base_idx);
-        indices.push(base_idx + 1);
-        indices.push(base_idx + 2);
-        indices.push(base_idx);
-        indices.push(base_idx + 2);
-        indices.push(base_idx + 3);
     }
 
     /// Build vertices for a text label at a specific position.
