@@ -34,7 +34,7 @@ use crate::scene::tree::SceneTree;
 use crate::terminal_manager::TabId;
 
 /// A region's content kind as `ulttyctl regions` names it, and its text
-/// when it has some.
+/// when it has some. A password input's value is never reported.
 fn describe_content(content: &ultty_protocol::Content) -> (&'static str, Option<String>) {
     use ultty_protocol::{Content, WidgetContent};
     match content {
@@ -45,7 +45,9 @@ fn describe_content(content: &ultty_protocol::Content) -> (&'static str, Option<
             Some(rich.spans.iter().map(|span| span.text.as_str()).collect()),
         ),
         Content::Widget(widget) => match widget {
-            WidgetContent::Input(input) => ("input", Some(input.value.clone())),
+            WidgetContent::Input(input) => {
+                ("input", (!input.password).then(|| input.value.clone()))
+            }
             WidgetContent::Markdown(markdown) => ("markdown", Some(markdown.source.clone())),
             WidgetContent::Code(code) => ("code", Some(code.source.clone())),
             WidgetContent::Progress(_) => ("progress", None),
@@ -1747,6 +1749,43 @@ mod tests {
             label: Some("Build log".to_string()),
             live: ultty_protocol::Live::Polite,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn regions_never_report_a_password_input_value() {
+        use crate::control::format_response;
+        use ultty_protocol::control::{ControlData, ControlResponse, OutputFormat};
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        run_frame(
+            &mut session,
+            1,
+            vec![
+                create_region(1, 0),
+                AppMessage::SetContent {
+                    id: RegionId::new(1),
+                    content: Content::Widget(ultty_protocol::WidgetContent::Input(
+                        ultty_protocol::InputWidget {
+                            value: "hunter2".to_string(),
+                            password: true,
+                            ..Default::default()
+                        },
+                    )),
+                },
+            ],
+        );
+
+        let scene = session.describe();
+        assert_eq!(scene.regions[1].content, "input");
+        assert_eq!(scene.regions[1].text, None);
+        let response = ControlResponse::Data(ControlData::Regions {
+            scenes: vec![scene],
+        });
+        for format in [OutputFormat::Json, OutputFormat::Text] {
+            let shown = format_response(&response, format);
+            assert!(shown.contains("input"), "{shown}");
+            assert!(!shown.contains("hunter2"), "{format:?} leaks: {shown}");
         }
     }
 
