@@ -249,7 +249,9 @@ impl App {
         // finds no adapter. An instance with every backend brings up GL as
         // well, which loads and initializes the EGL driver even when Vulkan
         // is then chosen: startup time and resident memory for nothing.
-        let (surface, adapter) = match request_gpu(event_loop, &window, wgpu::Backends::PRIMARY) {
+        // `WGPU_BACKEND` (vulkan, gl, ...) picks one for diagnosis.
+        let primary = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY);
+        let (surface, adapter) = match request_gpu(event_loop, &window, primary) {
             Ok(gpu) => gpu,
             Err(primary) => {
                 tracing::info!("No primary GPU backend ({primary:#}); trying GL");
