@@ -54,6 +54,17 @@ impl CellFlags {
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
+
+    /// The flags set in both.
+    #[inline]
+    pub(crate) fn intersection(self, other: CellFlags) -> CellFlags {
+        CellFlags(self.0 & other.0)
+    }
+
+    /// The flags set in either; `|` for constants.
+    pub(crate) const fn union(self, other: CellFlags) -> CellFlags {
+        CellFlags(self.0 | other.0)
+    }
 }
 
 impl std::ops::BitOr for CellFlags {
