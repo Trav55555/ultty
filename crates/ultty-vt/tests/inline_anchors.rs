@@ -461,6 +461,22 @@ fn a_tagged_row_ends_the_line_that_wrapped_into_it() {
 }
 
 #[test]
+fn an_untagged_line_that_wrapped_into_a_reservation_ends_before_it() {
+    let mut term = Terminal::new(Dimensions::new(10, 5));
+    // A prompt wraps onto the row the anchor then reserves.
+    feed(&mut term, b"0123456789X\r");
+    let tag = place(&mut term, 1, 1);
+    feed(&mut term, b"card\r\nafter\r\n");
+    assert!(term.grid().row(0).unwrap().is_wrapped());
+    term.resize(Dimensions::new(20, 5));
+    assert_eq!(
+        lines(&term)[..3],
+        ["0123456789", "card", "after"].map(String::from)
+    );
+    assert_eq!(tags(&term)[..3], [0, tag, 0]);
+}
+
+#[test]
 fn reflow_keeps_the_cursor_on_its_tagged_row() {
     let mut term = Terminal::new(Dimensions::new(20, 4));
     let tag = place(&mut term, 1, 2);

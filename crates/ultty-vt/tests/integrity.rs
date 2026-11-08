@@ -74,6 +74,10 @@ fn text() -> impl Strategy<Value = Vec<u8>> {
         "\x1b]8;;\x1b\\",
         "\x1b]133;A\x07",
         "\x1b]0;title\x07",
+        // Inline surface anchors (ADR 0020).
+        "\x1b_u1;2;1\x1b\\",
+        "\x1b_u1;3;3\x1b\\",
+        "\x1b_u9;4;12\x1b\\",
     ]);
     prop::collection::vec(pieces, 1..8).prop_map(|v| v.concat().into_bytes())
 }
@@ -112,6 +116,21 @@ fn run(cols: u16, rows: u16, steps: &[Step], spans: bool) -> Result<(), String> 
         terminal
             .check_integrity()
             .map_err(|e| format!("after step {index} ({step:?}): {e}"))?;
+        // As the embedder does after each read: anchors still live after
+        // the sweep have a first row to draw at.
+        terminal.take_anchor_events();
+        let buffer = terminal.buffer();
+        if let Some((tag, _)) = buffer
+            .anchors()
+            .find(|&(tag, _)| buffer.anchor_line(tag).is_none())
+        {
+            return Err(format!(
+                "after step {index} ({step:?}): anchor {tag} is live with no first row"
+            ));
+        }
+        terminal
+            .check_integrity()
+            .map_err(|e| format!("after sweeping, step {index} ({step:?}): {e}"))?;
     }
     Ok(())
 }
