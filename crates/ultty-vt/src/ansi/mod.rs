@@ -689,10 +689,7 @@ impl AnsiParser {
                         let byte = data[index];
                         if is_printable_ascii(byte) {
                             let start = index;
-                            index += 1;
-                            while index < data.len() && is_printable_ascii(data[index]) {
-                                index += 1;
-                            }
+                            index += printable_ascii_prefix(&data[index..]);
                             callback(AnsiOutput::PrintAscii(&data[start..index]));
                             continue;
                         }
@@ -1141,6 +1138,42 @@ impl Default for AnsiParser {
 
 fn is_printable_ascii(byte: u8) -> bool {
     (0x20..=0x7E).contains(&byte)
+}
+
+/// Length of the printable ASCII run at the start of `bytes`.
+///
+/// Plain text output is mostly such runs, and a byte at a time this scan
+/// cost about eight instructions per byte, more than the rest of the parser.
+/// It tests eight bytes at once: in a little-endian word `x`, some byte is
+/// below 0x20 exactly when `(x - 0x20 in every byte) & !x` has a high bit
+/// set, and some byte is above 0x7E exactly when `(x + 1 in every byte) | x`
+/// does (carries only leave a byte that already has its high bit set).
+#[inline]
+fn printable_ascii_prefix(bytes: &[u8]) -> usize {
+    const ONES: u64 = u64::from_le_bytes([0x01; 8]);
+    const HIGH: u64 = u64::from_le_bytes([0x80; 8]);
+    // A run of one or two characters (a letter before a combining mark, a
+    // digit between escapes) is common enough to settle without a word.
+    let mut len = 0;
+    while len < 2 {
+        if len == bytes.len() || !is_printable_ascii(bytes[len]) {
+            return len;
+        }
+        len += 1;
+    }
+    for word in bytes[len..].as_chunks::<8>().0 {
+        let x = u64::from_le_bytes(*word);
+        let below = x.wrapping_sub(ONES * 0x20) & !x;
+        let above = x.wrapping_add(ONES) | x;
+        if (below | above) & HIGH != 0 {
+            break;
+        }
+        len += 8;
+    }
+    len + bytes[len..]
+        .iter()
+        .take_while(|&&byte| is_printable_ascii(byte))
+        .count()
 }
 
 /// Print the run of whole, well-formed multi-byte UTF-8 characters at the
