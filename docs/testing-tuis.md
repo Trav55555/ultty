@@ -48,20 +48,21 @@ ulttyctl --pane "$pane" text | grep -Eq '^│ *1 *│' || echo "wrong count"
 A program built with `ulttui` detects Ultty and draws through its native
 protocol. Native content is not in the terminal's text grid, so `text`
 and `wait-for` cannot see it. `regions` can: it prints the program's
-region tree, one region per line, with its content kind, position and
-size in cells, and its text. A widget with an id is named by it, and the
+region tree, one region per line, with its content kind, accessibility
+role (spec §10.5), position and size in cells, and its text. A widget with an id is named by it, and the
 focused region is marked.
 
 ```sh
 $ ulttyctl --pane "$pane" regions
 session 1 (socket), focus #12
 ...
-        #10 rich_text 44,18 1x1 "1"
-        #11 button 26,22 10x1 id=dec "-1"
-        #12 button 38,22 9x1 id=inc "+1"
+        #10 rich_text (text) 44,18 1x1 "1"
+        #11 button (button) 26,22 10x1 id=dec "-1"
+        #12 button (button) 38,22 9x1 id=inc "+1"
 ```
 
-`--json` gives every region's full text and metadata, for assertions:
+`--json` gives every region's full text, metadata and accessibility
+`role`, `label` and `live`, for assertions:
 
 ```sh
 regions() { ulttyctl --json --pane "$pane" regions; }

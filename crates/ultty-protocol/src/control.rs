@@ -512,6 +512,26 @@ pub struct RegionInfo {
     /// duplicate key wins).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
+    /// Effective accessibility role (spec §10.5), snake_case: `group`,
+    /// `text`, `log`, `input`, `button`, `list_item` and so on. Derived
+    /// from the content unless the app set one with `SetSemantics`.
+    /// Empty from a terminal that predates semantics.
+    #[serde(default)]
+    pub role: String,
+    /// Effective accessible name, if the region has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// `off`, `polite` or `assertive`; left out of JSON when `off`.
+    #[serde(default = "live_off", skip_serializing_if = "is_live_off")]
+    pub live: String,
+}
+
+fn live_off() -> String {
+    "off".to_string()
+}
+
+fn is_live_off(live: &str) -> bool {
+    live == "off"
 }
 
 /// Metadata describing a single pane (one terminal in a tab's layout).
@@ -674,6 +694,9 @@ mod tests {
                         content: "text".to_string(),
                         text: Some("log line".to_string()),
                         metadata: BTreeMap::from([("id".to_string(), "log".to_string())]),
+                        role: "log".to_string(),
+                        label: Some("Build log".to_string()),
+                        live: "polite".to_string(),
                     }],
                 }],
             },

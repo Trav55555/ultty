@@ -117,7 +117,8 @@ pub const CAP_ALL_KNOWN: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_WIDGET_SCROLL
     | CAP_APPEND_CONTENT
     | CAP_STREAM_LIFECYCLE
-    | CAP_REGION_METADATA;
+    | CAP_REGION_METADATA
+    | CAP_SEMANTICS;
 
 /// Default capability request for current clients.
 pub const CLIENT_DEFAULT_CAPABILITIES: u32 = CAP_ALL_KNOWN;

@@ -2,6 +2,7 @@
 
 pub mod layout;
 pub mod region;
+pub mod semantics;
 pub mod tree;
 
 pub use region::Region;

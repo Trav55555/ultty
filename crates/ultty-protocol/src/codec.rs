@@ -3327,7 +3327,7 @@ mod tests {
         assert_eq!(CAP_STREAM_LIFECYCLE, 0x0040);
         assert_eq!(CAP_REGION_METADATA, 0x0080);
         assert_eq!(CAP_SEMANTICS, 0x0200);
-        assert_eq!(CAP_ALL_KNOWN, 0x00F1);
+        assert_eq!(CAP_ALL_KNOWN, 0x02F1);
         assert_eq!(PROTOCOL_VERSION, 1);
         assert_eq!(MIN_PROTOCOL_VERSION, 1);
 
