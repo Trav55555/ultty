@@ -210,8 +210,7 @@ impl Row {
             self.plain = style.is_default();
         }
         for (cell, &byte) in self.cells[start..end].iter_mut().zip(bytes) {
-            *cell = template;
-            cell.set_char(byte as char);
+            *cell = template.with_char(byte as char);
         }
         self.mark_used(end);
         self.dirty = true;
