@@ -1095,49 +1095,99 @@ fn child_working_directory(_pid: u32) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn process_name_for_group(pgrp: i32) -> Option<String> {
-    let mut fallback = None;
-
-    for entry in fs::read_dir("/proc").ok()? {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        if entry.file_name().to_string_lossy().parse::<i32>().is_err() {
-            continue;
+    // The group leader is usually the program itself: one read.
+    if let Some(leader) = read_proc_stat(pgrp) {
+        if leader.pgrp == pgrp && !is_shell_process(&leader.name) {
+            return Some(leader.name);
         }
-        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
-            continue;
-        };
-        let Some(process) = parse_proc_stat(&stat) else {
-            continue;
-        };
-
-        if process.pgrp != pgrp || is_shell_process(&process.name) {
-            continue;
-        }
-
-        if process.pid == pgrp {
-            return Some(process.name);
-        }
-
-        fallback.get_or_insert(process.name);
     }
-
-    fallback
+    group_members(pgrp)
+        .into_iter()
+        .find(|process| !is_shell_process(&process.name))
+        .map(|process| process.name)
 }
 
 #[cfg(target_os = "linux")]
 fn pids_in_group(pgrp: i32) -> Vec<i32> {
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().parse::<i32>().is_ok())
-        .filter_map(|entry| fs::read_to_string(entry.path().join("stat")).ok())
-        .filter_map(|stat| parse_proc_stat(&stat))
-        .filter(|process| process.pgrp == pgrp && !is_shell_process(&process.name))
+    group_members(pgrp)
+        .into_iter()
+        .filter(|process| !is_shell_process(&process.name))
         .map(|process| process.pid)
         .collect()
+}
+
+/// Processes in group `pgrp`, lowest pid first.
+///
+/// A job's processes are its leader with the leader's siblings (a
+/// pipeline) and descendants (a subshell), so only the processes under
+/// the leader's parent that are in the group are read. Reading every
+/// process on the machine is the fallback, for when that walk cannot be
+/// made: the leader is gone, its parent is init, or the kernel has no
+/// `/proc/<pid>/task/<tid>/children`.
+#[cfg(target_os = "linux")]
+fn group_members(pgrp: i32) -> Vec<ProcStat> {
+    let mut members = group_members_from_tree(pgrp).unwrap_or_else(|| {
+        let Ok(entries) = fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
+            .filter_map(read_proc_stat)
+            .filter(|process| process.pgrp == pgrp)
+            .collect()
+    });
+    members.sort_by_key(|process| process.pid);
+    members
+}
+
+#[cfg(target_os = "linux")]
+fn group_members_from_tree(pgrp: i32) -> Option<Vec<ProcStat>> {
+    let leader = read_proc_stat(pgrp).filter(|leader| leader.pgrp == pgrp)?;
+    if leader.ppid <= 1 {
+        return None;
+    }
+    let mut members = Vec::new();
+    let mut parents = vec![leader.ppid];
+    while let Some(parent) = parents.pop() {
+        for child in child_pids(parent)? {
+            let Some(process) = read_proc_stat(child) else {
+                continue;
+            };
+            if process.pgrp == pgrp {
+                parents.push(process.pid);
+                members.push(process);
+            }
+        }
+    }
+    Some(members)
+}
+
+/// Children of every thread of `pid`, or `None` when the kernel does not
+/// list them.
+#[cfg(target_os = "linux")]
+fn child_pids(pid: i32) -> Option<Vec<i32>> {
+    let mut children: Vec<i32> = Vec::new();
+    for task in fs::read_dir(format!("/proc/{pid}/task")).ok()? {
+        let Ok(task) = task else {
+            continue;
+        };
+        match fs::read_to_string(task.path().join("children")) {
+            Ok(list) => children.extend(
+                list.split_whitespace()
+                    .filter_map(|c| c.parse::<i32>().ok()),
+            ),
+            // The process exited while being read; it has no children left.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+    Some(children)
+}
+
+#[cfg(target_os = "linux")]
+fn read_proc_stat(pid: i32) -> Option<ProcStat> {
+    parse_proc_stat(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1149,6 +1199,7 @@ fn pids_in_group(_pgrp: i32) -> Vec<i32> {
 #[derive(Debug, PartialEq, Eq)]
 struct ProcStat {
     pid: i32,
+    ppid: i32,
     pgrp: i32,
     name: String,
 }
@@ -1161,10 +1212,15 @@ fn parse_proc_stat(stat: &str) -> Option<ProcStat> {
     let name = stat[open + 1..close].to_string();
     let mut fields = stat[close + 1..].split_whitespace();
     let _state = fields.next()?;
-    let _ppid = fields.next()?;
+    let ppid = fields.next()?.parse().ok()?;
     let pgrp = fields.next()?.parse().ok()?;
 
-    Some(ProcStat { pid, pgrp, name })
+    Some(ProcStat {
+        pid,
+        ppid,
+        pgrp,
+        name,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1200,10 +1256,79 @@ mod tests {
             parse_proc_stat(stat),
             Some(ProcStat {
                 pid: 1234,
+                ppid: 1,
                 pgrp: 5678,
                 name: "name with space".to_string(),
             })
         );
+    }
+
+    /// A child of this test in its own process group, killed on drop.
+    #[cfg(target_os = "linux")]
+    struct GroupChild(std::process::Child);
+
+    #[cfg(target_os = "linux")]
+    impl GroupChild {
+        fn spawn(program: &str, args: &[&str], group: i32) -> Self {
+            use std::os::unix::process::CommandExt;
+            let child = std::process::Command::new(program)
+                .args(args)
+                .process_group(group)
+                .spawn()
+                .expect("spawn group child");
+            GroupChild(child)
+        }
+
+        fn pid(&self) -> i32 {
+            self.0.id() as i32
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for GroupChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn foreground_name_is_the_group_leader_when_it_is_not_a_shell() {
+        let leader = GroupChild::spawn("sleep", &["30"], 0);
+        assert_eq!(
+            process_name_for_group(leader.pid()).as_deref(),
+            Some("sleep")
+        );
+        assert_eq!(pids_in_group(leader.pid()), vec![leader.pid()]);
+    }
+
+    /// `bash script | less`: the shell leads the group and the program the
+    /// user sees is its sibling.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn foreground_name_finds_a_sibling_when_a_shell_leads_the_group() {
+        // `; :` keeps sh from exec'ing its command, so a shell leads.
+        let leader = GroupChild::spawn("sh", &["-c", "read never; :"], 0);
+        let sibling = GroupChild::spawn("sleep", &["31"], leader.pid());
+
+        let walked = group_members_from_tree(leader.pid()).expect("tree walk");
+        let walked: Vec<i32> = walked.iter().map(|process| process.pid).collect();
+        assert!(walked.contains(&sibling.pid()), "{walked:?}");
+
+        assert_eq!(
+            process_name_for_group(leader.pid()).as_deref(),
+            Some("sleep")
+        );
+        assert_eq!(pids_in_group(leader.pid()), vec![sibling.pid()]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_shell_alone_in_its_group_names_no_program() {
+        let shell = GroupChild::spawn("sh", &["-c", "read never; :"], 0);
+        assert_eq!(process_name_for_group(shell.pid()), None);
+        assert!(pids_in_group(shell.pid()).is_empty());
     }
 
     #[cfg(target_os = "linux")]

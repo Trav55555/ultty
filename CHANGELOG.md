@@ -78,6 +78,11 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Changed
 
+- Naming the program in front of a pane (tab titles, `ulttyctl panes`, the
+  native session foreground check) reads the process group's leader and
+  walks only its relatives, not every process on the machine. With the
+  shell in front, five commands' worth of title refreshes went from 7,805
+  `/proc` opens to 150.
 - A pending `wait-for` watches the pane that was focused when it was sent
   (or its `--pane` target), not whichever pane has focus at each check, and
   fails with error 6 if that pane closes first.
