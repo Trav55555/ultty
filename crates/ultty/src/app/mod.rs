@@ -255,6 +255,14 @@ impl App {
             }
         };
         tracing::debug!(target: "ultty::startup", "GPU adapter ready");
+        let info = adapter.get_info();
+        tracing::info!(
+            "GPU: {} ({:?}, {:?}, {})",
+            info.name,
+            info.backend,
+            info.device_type,
+            info.driver
+        );
 
         // Scale font size to physical pixels so cosmic-text metrics match
         // the orthographic projection (which uses physical window dimensions).
