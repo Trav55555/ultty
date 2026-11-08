@@ -32,7 +32,11 @@ def main():
         rows = [{k: float(v) for k, v in row.items()} for row in csv.DictReader(f)]
     if not rows:
         sys.exit("no samples")
-    steady = [r for r in rows if r["minute"] > args.warmup] or rows
+    steady = [r for r in rows if r["minute"] > args.warmup]
+    if len(steady) < 2:
+        print(f"{len(rows)} minutes sampled: too short to judge growth after a "
+              f"{args.warmup}-minute warm-up")
+        sys.exit(0)
     minutes = [r["minute"] for r in steady]
     rss_mib = [r["rss_kib"] / 1024 for r in steady]
     trend = slope(minutes, rss_mib) * 60
