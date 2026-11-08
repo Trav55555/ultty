@@ -3,12 +3,15 @@
 
     scripts/bench/soak-report.py <samples.csv> [--warmup MINUTES]
 
-Reports resident memory (RSS plus anything swapped out, when the CSV has
-swap_kib; RSS alone falls when the host swaps Ultty out) at the end of
-warm-up and at the end, its least-squares trend after warm-up in MiB per
-hour, the peak, and the frame time median and p99
+Reports Ultty's own memory, anonymous RSS plus swap (when the CSV has
+anon_kib and swap_kib), at the end of warm-up and at the end, its least-squares trend after warm-up in MiB per
+hour, the peak, and the RSS total, and the frame time median and p99
 across the run (the per-minute p99s' median and worst). Exits 1 when RSS
 grows by more than 1 MiB an hour after warm-up.
+
+Plain RSS is not judged: under memory pressure the kernel drops the
+mapped libraries' pages (the GPU driver is tens of MiB) and swaps heap
+out, so RSS can fall while a leak grows.
 """
 
 import argparse
@@ -35,7 +38,7 @@ def main():
     if not rows:
         sys.exit("no samples")
     for r in rows:
-        r["mem_kib"] = r["rss_kib"] + r.get("swap_kib", 0.0)
+        r["mem_kib"] = r.get("anon_kib", r["rss_kib"]) + r.get("swap_kib", 0.0)
     steady = [r for r in rows if r["minute"] > args.warmup]
     if len(steady) < 2:
         print(f"{len(rows)} minutes sampled: too short to judge growth after a "
@@ -48,10 +51,13 @@ def main():
     p50s = [r["frame_p50_us"] / 1000 for r in rows if r["frames"] > 0]
 
     print(f"minutes sampled: {len(rows)} (warm-up {args.warmup})")
-    label = "RSS + swap" if "swap_kib" in rows[0] else "RSS (swap not recorded)"
+    label = ("anonymous RSS + swap" if "anon_kib" in rows[0]
+             else "RSS (anonymous memory not recorded)")
     print(f"{label}: {steady[0]['mem_kib'] / 1024:.1f} MiB after warm-up, "
           f"{rows[-1]['mem_kib'] / 1024:.1f} MiB at the end, "
           f"peak {max(r['mem_kib'] for r in rows) / 1024:.1f} MiB")
+    print(f"RSS: {rows[-1]['rss_kib'] / 1024:.1f} MiB at the end, "
+          f"peak {max(r['rss_kib'] for r in rows) / 1024:.1f} MiB")
     if max(r.get("swap_kib", 0.0) for r in rows) > 0:
         print(f"swapped out at the end: {rows[-1]['swap_kib'] / 1024:.1f} MiB")
     print(f"memory trend after warm-up: {trend:+.2f} MiB/hour")
