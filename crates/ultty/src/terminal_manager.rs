@@ -1623,11 +1623,20 @@ mod tests {
                 &mut no_tab_env,
             )
             .unwrap();
-        let cwd = manager
-            .focused_terminal()
-            .unwrap()
-            .event_loop
-            .child_working_directory();
+        // The child changes directory between fork and exec, so poll
+        // briefly rather than racing it.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let cwd = loop {
+            let cwd = manager
+                .focused_terminal()
+                .unwrap()
+                .event_loop
+                .child_working_directory();
+            if cwd.as_deref() == dir.to_str() || Instant::now() > deadline {
+                break cwd;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert_eq!(cwd.as_deref(), dir.to_str());
     }
 
