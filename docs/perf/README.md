@@ -51,6 +51,9 @@ The current dated evidence set is:
 - [`2026-11-07-unicode-throughput.md`](./2026-11-07-unicode-throughput.md) for
   the non-ASCII and scrolling instruction cuts, and corrected instruction
   counts (the earlier gate undercounted).
+- [`2026-11-08-control-latency.md`](./2026-11-08-control-latency.md) for
+  control request and event delivery latency, and background tabs no longer
+  redrawing the window.
 - [`2026-11-07-idle-footprint.md`](./2026-11-07-idle-footprint.md) for idle
   wakeups (now none with the cursor steady), the memory breakdown, and the
   startup stage split.
