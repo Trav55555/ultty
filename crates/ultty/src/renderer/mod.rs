@@ -414,6 +414,7 @@ impl Renderer {
                 ..Default::default()
             })
             .await?;
+        tracing::debug!(target: "ultty::startup", "GPU device ready");
         let (width, height) =
             clamp_surface_size(width, height, device.limits().max_texture_dimension_2d);
 
@@ -450,6 +451,7 @@ impl Renderer {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
+        tracing::debug!(target: "ultty::startup", "surface configured");
 
         // Create uniform buffer
         let uniforms = Uniforms::orthographic(width as f32, height as f32);
@@ -486,6 +488,7 @@ impl Renderer {
 
         // Create render pipeline
         let bg_pipeline = RenderPipeline::new(&device, surface_format, &uniform_bind_group_layout)?;
+        tracing::debug!(target: "ultty::startup", "background pipeline ready");
 
         // Create text renderer
         let text_renderer = TextRenderer::with_config(
@@ -497,6 +500,7 @@ impl Renderer {
         )?;
 
         // Get cell dimensions from text renderer
+        tracing::debug!(target: "ultty::startup", "text renderer ready");
         let (cell_width, cell_height) = text_renderer.cell_dimensions();
 
         Ok(Self {
