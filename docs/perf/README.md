@@ -54,6 +54,9 @@ The current dated evidence set is:
 - [`2026-11-07-idle-footprint.md`](./2026-11-07-idle-footprint.md) for idle
   wakeups (now none with the cursor steady), the memory breakdown, and the
   startup stage split.
+- [`2026-11-08-nvidia-idle-wakeups.md`](./2026-11-08-nvidia-idle-wakeups.md)
+  for the ~113 idle wakeups/s on NVIDIA, which come from a driver thread, not
+  from Ultty.
 - [`2026-05-29-current-readiness.md`](./2026-05-29-current-readiness.md) for
   current benchmark refresh, fixed live-pipeline evidence, soft-wrap evidence,
   and process-level idle sample.
