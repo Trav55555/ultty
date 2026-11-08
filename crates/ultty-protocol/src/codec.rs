@@ -71,6 +71,14 @@ const MAX_METADATA_PAIRS: usize = 1024;
 /// Maximum total bytes across all metadata keys and values (1 MB).
 const MAX_METADATA_TOTAL_BYTES: usize = 1024 * 1024;
 
+/// Maximum bytes of one `Semantics` string (label, description,
+/// value_text). Accessible names are short; the session does not charge
+/// semantics against its text budget, so the codec bounds them.
+const MAX_SEMANTICS_STRING_LEN: usize = 4 * 1024;
+
+/// Maximum bytes across all strings of one `Semantics`.
+const MAX_SEMANTICS_TOTAL_BYTES: usize = 8 * 1024;
+
 // ============================================================================
 // Validation helpers
 // ============================================================================

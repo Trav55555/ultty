@@ -740,10 +740,11 @@ fn arb_semantics() -> impl Strategy<Value = Semantics> {
         proptest::array::uniform6(any::<bool>()),
         any::<u8>(),
     );
+    // Within the codec's semantics string limits (4 KiB each, 8 KiB total).
     let texts = (
-        proptest::option::of(".*"),
-        proptest::option::of(".*"),
-        proptest::option::of(".*"),
+        proptest::option::of(".{0,256}"),
+        proptest::option::of(".{0,256}"),
+        proptest::option::of(".{0,256}"),
     );
     let numbers = (
         proptest::option::of((arb_finite_f32(), arb_finite_f32(), arb_finite_f32())),

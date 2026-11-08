@@ -182,6 +182,8 @@ Integers are little-endian. Floats are IEEE-754 little-endian `f32`; NaN and inf
 | `MAX_SPAN_COUNT` | 10,000 |
 | `MAX_METADATA_PAIRS` | 1,024 |
 | `MAX_METADATA_TOTAL_BYTES` | 1 MiB |
+| `MAX_SEMANTICS_STRING_LEN` | 4 KiB per `Semantics` string |
+| `MAX_SEMANTICS_TOTAL_BYTES` | 8 KiB across one `Semantics`' strings |
 | `MAX_IMAGE_DATA_LEN` | 16 MiB, equal to the payload cap |
 | Image dimensions | width and height each at most 16,384; `width * height * 4 <= data_len` |
 
@@ -508,7 +510,9 @@ The payload after `id: u32`, in encoding order:
 | `described_by` | `Option<u32>` | Region whose text describes this one |
 | `controls` | `Option<u32>` | Region this one controls |
 
-An unknown `role`, `live`, `toggled` or `expanded` value, a flag bit outside `0x3F`, and a NaN or infinite `value` float are decode errors (`Error` 400). Relationship targets are not checked: apps create regions in any order inside a frame, and a target that does not exist is ignored when the tree is exposed.
+An unknown `role`, `live`, `toggled` or `expanded` value, a flag bit outside `0x3F`, a NaN or infinite `value` float, a `label`, `description` or `value_text` longer than 4 KiB (`MAX_SEMANTICS_STRING_LEN`), and more than 8 KiB across those three (`MAX_SEMANTICS_TOTAL_BYTES`) are decode errors (`Error` 400). Accessible names are short, and the limits bound what semantics can add to a session's memory.
+
+Out-of-range numbers are accepted and clamped when the tree is exposed: a `position` index is clamped to `1..=size`, a `value` with `min > max` is treated as having no known range, and otherwise `now` is clamped into `[min, max]`. Relationship targets are not checked: apps create regions in any order inside a frame, and a target that does not exist is ignored when the tree is exposed.
 
 `busy` marks work in progress; `hidden` leaves the region and its subtree out of the accessibility tree (decorative dividers, spacers); `atomic` asks for the whole region to be announced when part of it changes; `modal` marks a `Dialog` that blocks the rest of the app.
 

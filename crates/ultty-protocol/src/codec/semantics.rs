@@ -8,7 +8,10 @@
 
 use bytes::{Buf, BufMut, BytesMut};
 
-use super::{decode_option_string, encode_option_string, validate_f32, Decode, Encode};
+use super::{
+    decode_option_string, encode_option_string, validate_f32, Decode, Encode,
+    MAX_SEMANTICS_STRING_LEN, MAX_SEMANTICS_TOTAL_BYTES,
+};
 use crate::{
     semantics::{Expanded, Live, Role, SemanticValue, Semantics, SetPosition, Toggled},
     ProtocolError, RegionId, Result, SEMANTICS_FLAGS_ALL,
@@ -40,6 +43,30 @@ fn get_option_tag(buf: &mut impl Buf) -> Result<bool> {
 
 fn invalid(field: &str, value: u8) -> ProtocolError {
     ProtocolError::InvalidData(format!("invalid semantics {field}: {value}"))
+}
+
+/// Decode an optional semantics string, enforcing the per-string cap and
+/// adding its length to `total`, which is checked against the overall cap.
+fn decode_bounded_string(
+    buf: &mut impl Buf,
+    field: &str,
+    total: &mut usize,
+) -> Result<Option<String>> {
+    let value = decode_option_string(buf)?;
+    let len = value.as_ref().map_or(0, String::len);
+    if len > MAX_SEMANTICS_STRING_LEN {
+        return Err(ProtocolError::InvalidData(format!(
+            "semantics {field} length {len} exceeds maximum {MAX_SEMANTICS_STRING_LEN}"
+        )));
+    }
+    *total += len;
+    if *total > MAX_SEMANTICS_TOTAL_BYTES {
+        return Err(ProtocolError::InvalidData(format!(
+            "semantics strings total {} exceeds maximum {MAX_SEMANTICS_TOTAL_BYTES}",
+            *total
+        )));
+    }
+    Ok(value)
 }
 
 fn encode_option_region(id: Option<RegionId>, buf: &mut BytesMut) {
@@ -98,8 +125,9 @@ impl Decode for Semantics {
     fn decode(buf: &mut impl Buf) -> Result<Self> {
         let role = get_u8(buf)?;
         let role = Role::from_u8(role).ok_or_else(|| invalid("role", role))?;
-        let label = decode_option_string(buf)?;
-        let description = decode_option_string(buf)?;
+        let mut string_bytes = 0;
+        let label = decode_bounded_string(buf, "label", &mut string_bytes)?;
+        let description = decode_bounded_string(buf, "description", &mut string_bytes)?;
         let live = get_u8(buf)?;
         let live = Live::from_u8(live).ok_or_else(|| invalid("live", live))?;
         let flags = get_u8(buf)?;
@@ -120,7 +148,7 @@ impl Decode for Semantics {
         } else {
             None
         };
-        let value_text = decode_option_string(buf)?;
+        let value_text = decode_bounded_string(buf, "value_text", &mut string_bytes)?;
         let position = if get_option_tag(buf)? {
             need(buf, 8)?;
             Some(SetPosition {
@@ -281,6 +309,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn decode_strings(label: usize, description: usize, value_text: usize) -> Result<Semantics> {
+        let text = |len: usize| (len > 0).then(|| "x".repeat(len));
+        let semantics = Semantics {
+            label: text(label),
+            description: text(description),
+            value_text: text(value_text),
+            ..Semantics::default()
+        };
+        let mut buf = BytesMut::new();
+        semantics.encode(&mut buf);
+        Semantics::decode(&mut buf.as_ref())
+    }
+
+    #[test]
+    fn test_reject_oversized_semantics_string() {
+        assert!(decode_strings(MAX_SEMANTICS_STRING_LEN, 0, 0).is_ok());
+        for (label, description, value_text) in [
+            (MAX_SEMANTICS_STRING_LEN + 1, 0, 0),
+            (0, MAX_SEMANTICS_STRING_LEN + 1, 0),
+            (0, 0, MAX_SEMANTICS_STRING_LEN + 1),
+        ] {
+            assert!(matches!(
+                decode_strings(label, description, value_text),
+                Err(ProtocolError::InvalidData(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn test_reject_oversized_semantics_total_bytes() {
+        let half = MAX_SEMANTICS_TOTAL_BYTES / 2;
+        assert!(decode_strings(half, half, 0).is_ok());
+        assert!(matches!(
+            decode_strings(half, half, 1),
+            Err(ProtocolError::InvalidData(_))
+        ));
+        assert!(matches!(
+            decode_strings(MAX_SEMANTICS_STRING_LEN, 1, MAX_SEMANTICS_STRING_LEN),
+            Err(ProtocolError::InvalidData(_))
+        ));
     }
 
     #[test]

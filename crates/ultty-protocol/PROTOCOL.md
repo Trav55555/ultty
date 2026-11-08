@@ -22,7 +22,7 @@ Offset  Size  Field
 
 Integers and finite IEEE-754 `f32` values are little-endian. Strings are `u32` length plus UTF-8, options have a `u8` 0/1 tag, and booleans/enums use `u8`.
 
-Limits: payload 16 MiB; string 1 MiB; regions 10,000; tracks 1,000; spans 10,000; metadata pairs 1,024 and metadata bytes 1 MiB; image data 16 MiB; image width/height 16,384 each, with sufficient RGBA data.
+Limits: payload 16 MiB; string 1 MiB; regions 10,000; tracks 1,000; spans 10,000; metadata pairs 1,024 and metadata bytes 1 MiB; semantics strings 4 KiB each and 8 KiB together; image data 16 MiB; image width/height 16,384 each, with sufficient RGBA data.
 
 ## Message Types
 
