@@ -6,7 +6,8 @@
 #
 # Two tabs run scripts/bench/agent-stream.py: the one on screen and one in
 # the background. Every 5 minutes the window is resized. Every minute one
-# CSV row goes to <out-dir>/samples.csv: RSS, GPU memory that lives in host
+# CSV row goes to <out-dir>/samples.csv: RSS, memory swapped out (RSS
+# alone shrinks when the host swaps Ultty out, hiding growth), GPU memory that lives in host
 # memory (memfd; zero on a GPU with its own memory), CPU seconds, frames
 # drawn and their median and p99 time. scripts/bench/soak-report.py reads
 # it. Needs Xvfb; builds release binaries first.
@@ -55,7 +56,7 @@ frame_stats() {
     : >"$out/ultty.log"
 }
 
-echo "minute,rss_kib,gpu_kib,cpu_s,frames,frame_p50_us,frame_p99_us" >"$out/samples.csv"
+echo "minute,rss_kib,swap_kib,gpu_kib,cpu_s,frames,frame_p50_us,frame_p99_us" >"$out/samples.csv"
 hz=$(getconf CLK_TCK)
 sizes=("1600 1000" "1200 800" "1920 1150" "1000 700")
 for minute in $(seq 1 "$minutes"); do
@@ -66,8 +67,9 @@ for minute in $(seq 1 "$minutes"); do
         ulttyctl resize ${sizes[$(( (minute / 5) % 4 ))]} >/dev/null || true
     fi
     rss=$(awk '/^Rss:/{print $2}' "/proc/$ultty_pid/smaps_rollup")
+    swap=$(awk '/^VmSwap:/{print $2}' "/proc/$ultty_pid/status")
     cpu=$(awk -v hz="$hz" '{printf "%.2f", ($14+$15)/hz}' "/proc/$ultty_pid/stat")
-    echo "$minute,$rss,$(gpu_kib),$cpu,$(frame_stats)" >>"$out/samples.csv"
+    echo "$minute,$rss,$swap,$(gpu_kib),$cpu,$(frame_stats)" >>"$out/samples.csv"
 done
 echo "samples in $out/samples.csv"
 python3 scripts/bench/soak-report.py "$out/samples.csv"
