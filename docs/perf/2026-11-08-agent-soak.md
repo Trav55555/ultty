@@ -29,17 +29,23 @@ typically 1.3 ms).
 ## Memory: inconclusive
 
 At minute 47 RSS fell from 87 to 35 MiB and stayed at 33 to 34 MiB to the
-end. Ultty did not free 50 MiB: the host ran out of memory (its 10 GiB
-of swap was full when checked after the run), and the kernel swapped
-Ultty's pages out. The slow minutes (32 of the 35) fall in the same
-window, minutes 41 to 115. RSS does not count swapped pages, so a leak
-in that state is hidden: what leaks is touched once and then swapped out.
-The run only shows memory flat for the 15 minutes between warm-up and the
-swapping, which is too short to judge.
+end. Ultty did not free 50 MiB: the host was short of memory (its 10 GiB
+of swap was full when checked after the run), and the kernel reclaimed
+Ultty's pages. The slow minutes (32 of the 35) fall in the same window,
+minutes 41 to 115.
 
-`soak.sh` now records `VmSwap` beside RSS, and `soak-report.py` judges
-their sum. D5's memory criterion needs a rerun on a host with free
-memory.
+A second run, recording swap, saw the same drop at minute 42 (77 to 48
+MiB) with nothing swapped out. Most of what goes is file-backed: the
+mapped libraries, the GPU driver chief among them, which the kernel drops
+without swapping. At minute 137 of that run Ultty held 27 MiB of heap and
+stacks (`RssAnon`) and 9.6 MiB of file pages. Either way RSS cannot show
+a leak in this state: leaked heap is touched once and can then be swapped
+out, and RSS moves with page cache pressure from other processes.
+
+`soak.sh` now records `RssAnon` and `VmSwap`, and `soak-report.py` judges
+their sum. The first run only shows memory flat for the 15 minutes
+between warm-up and the reclaim, which is too short to judge. D5's memory
+criterion needs a run measured this way.
 
 ## Before this run
 
