@@ -1353,4 +1353,32 @@ proptest::proptest! {
         }
         proptest::prop_assert_eq!(actual, expected);
     }
+
+    #[test]
+    fn printable_ascii_prefix_matches_a_bytewise_scan(
+        bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..40),
+    ) {
+        let expected = bytes.iter().take_while(|&&b| is_printable_ascii(b)).count();
+        proptest::prop_assert_eq!(printable_ascii_prefix(&bytes), expected);
+    }
+}
+
+/// The word-at-a-time scan stops at the first byte outside 0x20..=0x7E,
+/// for every byte value at every offset in and across words.
+#[test]
+fn printable_ascii_prefix_stops_at_the_first_other_byte() {
+    for byte in 0..=u8::MAX {
+        for at in 0..20 {
+            let mut bytes = [b'a'; 20];
+            bytes[at] = byte;
+            let expected = if is_printable_ascii(byte) { 20 } else { at };
+            assert_eq!(
+                printable_ascii_prefix(&bytes),
+                expected,
+                "byte {byte:#04x} at {at}"
+            );
+        }
+    }
+    assert_eq!(printable_ascii_prefix(b""), 0);
+    assert_eq!(printable_ascii_prefix(b"~ !"), 3);
 }

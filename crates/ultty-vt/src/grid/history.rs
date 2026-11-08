@@ -107,6 +107,25 @@ impl CompactRow {
         let cells = &cells[..used_len(cells)];
         self.text.reserve(cells.len());
 
+        // Plain output: one style and only ASCII on the whole row. The text
+        // is then a straight copy, a fraction of the per-cell loop below.
+        // Other rows give up at their first style change or non-ASCII cell.
+        if let Some(first) = cells.first() {
+            let style = Style::of(first);
+            if !style.flags.contains(CellFlags::HAS_COMBINING)
+                && cells
+                    .iter()
+                    .all(|cell| cell.char().is_ascii() && Style::of(cell) == style)
+            {
+                self.text.extend(cells.iter().map(|cell| cell.char() as u8));
+                self.runs.push(Run {
+                    len: cells.len() as u16,
+                    style,
+                });
+                return;
+            }
+        }
+
         let mut col = 0;
         while col < cells.len() {
             let style = Style::of(&cells[col]);
@@ -290,5 +309,19 @@ mod tests {
         assert_eq!(compact.runs.len(), 1);
         assert_eq!(compact.text.len(), 43);
         assert!(compact.graphemes.is_empty());
+    }
+
+    /// A row of one style and only ASCII base characters takes the
+    /// straight-copy path, but combining marks on those characters must
+    /// still be kept.
+    #[test]
+    fn an_all_ascii_row_keeps_its_combining_marks() {
+        let mut row = Row::new(3);
+        for col in 0..3 {
+            row[col] = Cell::new('e');
+            row.set_grapheme_extra(col, &['\u{301}']);
+        }
+        let decoded = CompactRow::encode(&row).decode();
+        assert!(same(&row, &decoded), "{row:?}\n!=\n{decoded:?}");
     }
 }

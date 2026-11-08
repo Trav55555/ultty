@@ -11,7 +11,8 @@ use crate::grid::{Cell, CellFlags, Color, CursorShape, Row, Terminal, UnderlineS
 use cosmic_text::{
     Attrs, Buffer, CacheKey, CacheKeyFlags, Family, FontSystem, Metrics, Shaping, Style, Weight,
 };
-use std::collections::HashMap;
+// Looked up for every drawn cell; SipHash was a third of a scrolling frame.
+use foldhash::{HashMap, HashMapExt};
 use std::sync::Arc;
 
 /// Character plus the shaping-relevant style bits (see [`shaping_cache_key`]).
@@ -342,9 +343,9 @@ pub struct TextRenderer {
     /// order; see [`GridTextCache`].
     grid_caches: Vec<GridTextCache>,
     grid_draws: usize,
-    /// This draw's vertices, gathered from the cached rows, and the quad
-    /// index list shared by every draw (all grid geometry is quads).
-    frame_vertices: Vec<Vertex>,
+    /// Quads in this draw's cached rows, and the quad index list shared by
+    /// every draw (all grid geometry is quads).
+    frame_quads: usize,
     quad_indices: Vec<u32>,
 }
 
@@ -352,6 +353,9 @@ pub struct TextRenderer {
 struct GridBuffers {
     vertex: wgpu::Buffer,
     index: wgpu::Buffer,
+    /// Quads whose indices `index` already holds. The shared index list
+    /// only ever grows, so they stay valid for any draw up to that size.
+    indexed_quads: usize,
 }
 
 /// Smallest buffer the pool allocates, so ordinary frames never regrow.
@@ -442,7 +446,7 @@ impl TextRenderer {
             grid_buffers_used: 0,
             grid_caches: Vec::new(),
             grid_draws: 0,
-            frame_vertices: Vec::new(),
+            frame_quads: 0,
             quad_indices: Vec::new(),
         };
         renderer.decoration = renderer.measure_decoration_metrics(baseline);
@@ -638,7 +642,6 @@ impl TextRenderer {
     fn push_glyph(
         &mut self,
         vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u32>,
         shaped: ShapedGlyph,
         cell: (u16, u16),
         cell_size: (f32, f32),
@@ -663,7 +666,7 @@ impl TextRenderer {
         } else {
             color
         };
-        Self::emit_glyph_quad(vertices, indices, x, y, &glyph_info, color);
+        Self::push_glyph_vertices(vertices, x, y, &glyph_info, color);
     }
 
     /// Start a frame. Must precede any quad that samples the glyph atlas,
@@ -676,11 +679,17 @@ impl TextRenderer {
         self.grid_draws = 0;
     }
 
-    /// Upload this draw's vertices and indices into the next pooled slot,
-    /// growing it if needed, and return the slot.
-    fn upload_grid(&mut self, vertices: &[Vertex], indices: &[u32]) -> usize {
-        let vertex_bytes: &[u8] = bytemuck::cast_slice(vertices);
-        let index_bytes: &[u8] = bytemuck::cast_slice(indices);
+    /// Upload the vertices of grid draw `draw` (`self.frame_quads` quads)
+    /// into the next pooled slot, growing it if needed, and return the slot.
+    ///
+    /// The rows are copied from the row cache straight into the queue's
+    /// staging memory: gathering them into one vector first copied every
+    /// vertex of the frame one more time. Indices are uploaded only when the
+    /// slot holds fewer than this draw needs.
+    fn upload_grid(&mut self, draw: usize) -> usize {
+        let quads = self.frame_quads;
+        let vertex_len = (quads * 4 * std::mem::size_of::<Vertex>()) as u64;
+        let index_len = (quads * 6 * std::mem::size_of::<u32>()) as u64;
         let slot = self.grid_buffers_used;
         self.grid_buffers_used += 1;
         if slot == self.grid_buffers.len() {
@@ -689,35 +698,55 @@ impl TextRenderer {
                     &self.device,
                     "text_vertex_buffer",
                     wgpu::BufferUsages::VERTEX,
-                    vertex_bytes.len() as u64,
+                    vertex_len,
                 ),
                 index: grid_buffer(
                     &self.device,
                     "text_index_buffer",
                     wgpu::BufferUsages::INDEX,
-                    index_bytes.len() as u64,
+                    index_len,
                 ),
+                indexed_quads: 0,
             });
         }
         let buffers = &mut self.grid_buffers[slot];
-        if buffers.vertex.size() < vertex_bytes.len() as u64 {
+        if buffers.vertex.size() < vertex_len {
             buffers.vertex = grid_buffer(
                 &self.device,
                 "text_vertex_buffer",
                 wgpu::BufferUsages::VERTEX,
-                vertex_bytes.len() as u64,
+                vertex_len,
             );
         }
-        if buffers.index.size() < index_bytes.len() as u64 {
+        if buffers.index.size() < index_len {
             buffers.index = grid_buffer(
                 &self.device,
                 "text_index_buffer",
                 wgpu::BufferUsages::INDEX,
-                index_bytes.len() as u64,
+                index_len,
             );
+            buffers.indexed_quads = 0;
         }
-        self.queue.write_buffer(&buffers.vertex, 0, vertex_bytes);
-        self.queue.write_buffer(&buffers.index, 0, index_bytes);
+        if let Some(size) = wgpu::BufferSize::new(vertex_len) {
+            if let Some(mut view) = self.queue.write_buffer_with(&buffers.vertex, 0, size) {
+                let mut offset = 0;
+                for row in self.grid_caches[draw].vertices() {
+                    let bytes: &[u8] = bytemuck::cast_slice(row);
+                    view.slice(offset..offset + bytes.len())
+                        .copy_from_slice(bytes);
+                    offset += bytes.len();
+                }
+            }
+        }
+        if buffers.indexed_quads < quads {
+            extend_quad_indices(&mut self.quad_indices, quads);
+            self.queue.write_buffer(
+                &buffers.index,
+                0,
+                bytemuck::cast_slice(&self.quad_indices[..quads * 6]),
+            );
+            buffers.indexed_quads = quads;
+        }
         slot
     }
 
@@ -963,7 +992,7 @@ impl TextRenderer {
         cursor_blink_visible: bool,
         uniform_bind_group: &wgpu::BindGroup,
     ) {
-        self.build_text_vertices_with_offset(
+        let draw = self.build_text_vertices_with_offset(
             terminal,
             color_scheme,
             cell_width,
@@ -973,18 +1002,14 @@ impl TextRenderer {
             cursor_blink_visible,
         );
 
-        if self.frame_vertices.is_empty() {
+        if self.frame_quads == 0 {
             return;
         }
 
-        let vertices = std::mem::take(&mut self.frame_vertices);
-        let indices = std::mem::take(&mut self.quad_indices);
-        let index_count = vertices.len() / 4 * 6;
-        let slot = self.upload_grid(&vertices, &indices[..index_count]);
-        let vertex_bytes = std::mem::size_of_val(vertices.as_slice()) as u64;
+        let slot = self.upload_grid(draw);
+        let index_count = self.frame_quads * 6;
+        let vertex_bytes = (self.frame_quads * 4 * std::mem::size_of::<Vertex>()) as u64;
         let index_bytes = (index_count * std::mem::size_of::<u32>()) as u64;
-        self.frame_vertices = vertices;
-        self.quad_indices = indices;
         let buffers = &self.grid_buffers[slot];
 
         // Render pass for text
@@ -1018,10 +1043,10 @@ impl TextRenderer {
         }
     }
 
-    /// Gather this draw's grid vertices into `frame_vertices` (and make
-    /// `quad_indices` long enough for them), rebuilding only the rows whose
-    /// content, cursor, or drawing parameters changed since the same draw
-    /// in the previous frame.
+    /// Bring this draw's cached grid rows up to date, rebuilding only the
+    /// rows whose content, cursor, or drawing parameters changed since the
+    /// same draw in the previous frame. Returns the draw's index into
+    /// `grid_caches` and sets `frame_quads` to its number of quads.
     #[allow(clippy::too_many_arguments)]
     fn build_text_vertices_with_offset(
         &mut self,
@@ -1032,7 +1057,7 @@ impl TextRenderer {
         x_offset: f32,
         y_offset: f32,
         cursor_blink_visible: bool,
-    ) {
+    ) -> usize {
         let draw = self.grid_draws;
         self.grid_draws += 1;
         if self.grid_caches.len() <= draw {
@@ -1086,12 +1111,9 @@ impl TextRenderer {
             cache.store(row_idx, &row, cursor_col, vertices);
         }
 
-        self.frame_vertices.clear();
-        for row in cache.vertices() {
-            self.frame_vertices.extend_from_slice(row);
-        }
-        extend_quad_indices(&mut self.quad_indices, self.frame_vertices.len() / 4);
+        self.frame_quads = cache.vertices().map(<[Vertex]>::len).sum::<usize>() / 4;
         self.grid_caches[draw] = cache;
+        draw
     }
 
     /// Scratch buffers for shaping single cells and ligature runs (which
@@ -1128,9 +1150,6 @@ impl TextRenderer {
         (x_offset, y_offset): (f32, f32),
         cols: u16,
     ) {
-        // Glyph quads index themselves; the draw uses the shared quad
-        // index list instead.
-        let mut indices = Vec::new();
         let block_cursor = cursor_col.map(|col| (col, row_idx));
         let solid_uv = self.atlas.solid_uv();
         let mut quads: Vec<Quad> = Vec::new();
@@ -1171,11 +1190,11 @@ impl TextRenderer {
                 underline_quads(underline, cell_rect, self.decoration, &mut quads);
                 let line_color = underline_color(cell, base_color, color_scheme);
                 for quad in &quads {
-                    Self::emit_solid_quad(vertices, &mut indices, quad, line_color, solid_uv);
+                    Self::emit_solid_quad(vertices, quad, line_color, solid_uv);
                 }
                 if strikethrough {
                     let quad = strikethrough_quad(cell_rect, self.decoration);
-                    Self::emit_solid_quad(vertices, &mut indices, &quad, base_color, solid_uv);
+                    Self::emit_solid_quad(vertices, &quad, base_color, solid_uv);
                 }
             }
 
@@ -1230,7 +1249,6 @@ impl TextRenderer {
                             };
                             self.push_glyph(
                                 vertices,
-                                &mut indices,
                                 shaped,
                                 (col, row_idx),
                                 (cell_width, cell_height),
@@ -1274,7 +1292,6 @@ impl TextRenderer {
             for &shaped in glyphs {
                 self.push_glyph(
                     vertices,
-                    &mut indices,
                     shaped,
                     (col_idx, row_idx),
                     (cell_width, cell_height),
@@ -1287,16 +1304,9 @@ impl TextRenderer {
     }
 
     /// Emit a solid quad through the text pipeline by sampling the atlas's
-    /// reserved white block.
-    fn emit_solid_quad(
-        vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u32>,
-        quad: &Quad,
-        color: Rgba,
-        solid_uv: [f32; 2],
-    ) {
-        let base_idx = vertices.len() as u32;
-
+    /// reserved white block. Grid quads need no indices of their own; the
+    /// draw uses the shared quad index list.
+    fn emit_solid_quad(vertices: &mut Vec<Vertex>, quad: &Quad, color: Rgba, solid_uv: [f32; 2]) {
         for (position, coverage) in quad.corners.into_iter().zip(quad.coverage) {
             vertices.push(Vertex {
                 position,
@@ -1305,7 +1315,19 @@ impl TextRenderer {
                 is_color: 0,
             });
         }
+    }
 
+    /// Emit a quad for a glyph, with its indices.
+    fn emit_glyph_quad(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        x: f32,
+        y: f32,
+        glyph: &super::atlas::GlyphInfo,
+        color: Rgba,
+    ) {
+        let base_idx = vertices.len() as u32;
+        Self::push_glyph_vertices(vertices, x, y, glyph, color);
         indices.extend_from_slice(&[
             base_idx,
             base_idx + 1,
@@ -1316,16 +1338,14 @@ impl TextRenderer {
         ]);
     }
 
-    /// Emit a quad for a glyph.
-    fn emit_glyph_quad(
+    /// Push the four vertices of a glyph quad.
+    fn push_glyph_vertices(
         vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u32>,
         x: f32,
         y: f32,
         glyph: &super::atlas::GlyphInfo,
         color: Rgba,
     ) {
-        let base_idx = vertices.len() as u32;
         let color_arr = color.to_array();
         let is_color = if glyph.is_color { 1u32 } else { 0u32 };
 
@@ -1358,14 +1378,6 @@ impl TextRenderer {
             color: color_arr,
             is_color,
         });
-
-        // Two triangles per quad
-        indices.push(base_idx);
-        indices.push(base_idx + 1);
-        indices.push(base_idx + 2);
-        indices.push(base_idx);
-        indices.push(base_idx + 2);
-        indices.push(base_idx + 3);
     }
 
     /// Build vertices for a text label at a specific position.
