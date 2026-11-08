@@ -540,6 +540,18 @@ impl Buffer {
     pub fn write_char(&mut self, c: char) {
         self.scroll_offset = 0;
 
+        // A codepoint that joins the previous grapheme cluster takes no new
+        // column, and a character that fits on the row with no wrap pending
+        // writes only there, so neither can scroll.
+        let width = self.grid.print_width(c);
+        if width.is_none() {
+            self.grid.write_measured_char_slow(c, width);
+            return;
+        }
+        if self.grid.write_in_row(c, width) {
+            return;
+        }
+
         let cursor_col = self.grid.cursor().position.col;
         let cursor_row = self.grid.cursor().position.row;
         let wrap_pending = self.grid.cursor().wrap_pending;
@@ -548,7 +560,6 @@ impl Buffer {
         let max_col = self.grid.dimensions().cols;
         // A codepoint that joins the previous grapheme cluster takes no new
         // column, so it can never wrap or scroll.
-        let width = self.grid.print_width(c);
         let char_width = width.unwrap_or(0);
 
         // Determine if this write will cause scrolling.
@@ -575,7 +586,7 @@ impl Buffer {
         }
 
         // Saving rows leaves the grid as it was, so the width still holds.
-        self.grid.write_measured_char(c, width);
+        self.grid.write_measured_char_slow(c, width);
     }
 
     /// Write a contiguous printable ASCII span, saving scrolled rows to history.

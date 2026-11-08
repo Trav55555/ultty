@@ -216,6 +216,51 @@ impl Row {
         self.dirty = true;
     }
 
+    /// Write `c`, taking `width` (1 or 2) columns from `col`, as a copy of
+    /// `template` (and a spacer after a wide character), if those columns
+    /// hold no part of a wide character and fit on the row. Returns
+    /// `false`, having changed nothing, otherwise.
+    #[inline]
+    pub(crate) fn write_char_in_place(
+        &mut self,
+        col: u16,
+        c: char,
+        width: u16,
+        template: Cell,
+    ) -> bool {
+        let start = col as usize;
+        let end = start + width as usize;
+        let Some(cells) = self.cells.get_mut(start..end) else {
+            return false;
+        };
+        if cells
+            .iter()
+            .any(|cell| cell.is_wide() || cell.is_wide_spacer())
+        {
+            return false;
+        }
+        let mut written = template;
+        written.set_char(c);
+        written.unset_flag(CellFlags::HAS_COMBINING);
+        written.unset_flag(CellFlags::WIDE_CHAR_SPACER);
+        if width > 1 {
+            written.set_flag(CellFlags::WIDE_CHAR);
+            let mut spacer = template;
+            spacer.set_char(' ');
+            spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
+            spacer.unset_flag(CellFlags::WIDE_CHAR);
+            cells[1] = spacer;
+        } else {
+            written.unset_flag(CellFlags::WIDE_CHAR);
+        }
+        cells[0] = written;
+        self.drop_grapheme_entries(col, col + 1);
+        self.plain = false;
+        self.mark_used(end);
+        self.dirty = true;
+        true
+    }
+
     /// Make this row a copy of `other`, reusing this row's allocations.
     pub fn copy_from(&mut self, other: &Row) {
         self.cells.clone_from(&other.cells);
@@ -279,10 +324,11 @@ impl Row {
     /// Append a codepoint to the grapheme cluster at `col`.
     ///
     /// At most `cap` extra codepoints are kept per cell; the rest are dropped
-    /// so hostile output cannot grow a cell without bound.
-    pub fn push_grapheme_char(&mut self, col: u16, c: char, cap: usize) {
+    /// so hostile output cannot grow a cell without bound. Returns whether
+    /// `c` was kept.
+    pub fn push_grapheme_char(&mut self, col: u16, c: char, cap: usize) -> bool {
         let Some(cell) = self.cells.get_mut(col as usize) else {
-            return;
+            return false;
         };
         self.plain = false;
         let extra = self.graphemes.entry(col);
@@ -292,10 +338,12 @@ impl Row {
             cell.set_flag(CellFlags::HAS_COMBINING);
             self.used = self.used.max(col + 1);
         }
-        if extra.len() < cap {
+        let kept = extra.len() < cap;
+        if kept {
             extra.push(c);
         }
         self.dirty = true;
+        kept
     }
 
     /// Set the extra codepoints of the cluster at `col` (used by reflow).

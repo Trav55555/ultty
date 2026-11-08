@@ -111,6 +111,7 @@ fn bench_pty_flood(c: &mut Criterion) {
     for corpus in [
         Corpus::Ascii,
         Corpus::UnicodeMixed,
+        Corpus::Cjk,
         Corpus::CursorRedraw,
         Corpus::SgrDense,
     ] {

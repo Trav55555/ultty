@@ -3,22 +3,34 @@
 //!
 //! The general answer runs the UAX #29 segmenter over the stored cluster
 //! plus the new codepoint, which costs a few hundred instructions per
-//! printed character. For most text the answer follows from two small
-//! classes of codepoint:
+//! printed character. For most text the answer follows from a few classes
+//! of codepoint (`char_class.rs`):
 //!
 //! - *plain*: Grapheme_Cluster_Break is Other (including
 //!   Extended_Pictographic), LV or LVT, and the codepoint is not an Indic
 //!   conjunct consonant.
-//! - *extend*: Grapheme_Cluster_Break is Extend: combining diacritics,
+//! - *extend*: Grapheme_Cluster_Break is Extend and Indic_Conjunct_Break
+//!   is Extend: combining diacritics, Indic vowel signs and nuktas,
 //!   variation selectors, emoji modifiers, tags.
+//! - *linker*: the Indic viramas that make conjuncts
+//!   (Indic_Conjunct_Break=Linker); Grapheme_Cluster_Break is Extend.
+//! - *spacing mark*: Grapheme_Cluster_Break is SpacingMark (Indic vowel
+//!   signs that take a column).
+//! - *consonant*: Indic_Conjunct_Break is Consonant.
 //!
-//! Nothing joins a plain codepoint to a cluster ending in plain or extend
-//! (only a ZWJ before it could), and extend codepoints and ZWJ always
-//! join a cluster made of a plain codepoint followed by more of them.
+//! Extend, ZWJ, linkers and spacing marks join any cluster whose last
+//! codepoint is in these classes (GB9, GB9a). A plain codepoint joins none
+//! of them (only a ZWJ before it could), and a consonant only a conjunct:
+//! a consonant, then extends and linkers with at least one linker (GB9c).
+//! The grid keeps track of which of these a printed cluster ends with as
+//! a [`Tail`], so [`joins_tail`] answers from that and the new
+//! codepoint's class, one table lookup.
 //!
-//! Emoji sequences need two more rules, so for clusters made only of plain,
-//! extend, ZWJ and regional indicator codepoints [`joins`] also runs the
-//! few UAX #29 rules that can apply to them:
+//! Emoji sequences need two more rules, which the [`Tail`] tracks too (a
+//! pictograph and extends, the ZWJ after one, half a flag). When the end
+//! of a cluster is not known, for clusters made only of plain, extend, ZWJ
+//! and regional indicator codepoints [`joins`] runs the few UAX #29 rules
+//! that can apply to them over the stored cluster:
 //!
 //! - GB9: extend and ZWJ join whatever comes before them.
 //! - GB11: an Extended_Pictographic codepoint joins after a ZWJ that
@@ -27,243 +39,65 @@
 //! - GB12/13: regional indicators join in pairs (`🇯🇵`).
 //!
 //! Every other rule needs a codepoint outside these classes (controls,
-//! Prepend, SpacingMark for GB9a, Hangul jamo, Indic conjuncts for GB9c),
-//! so meeting one leaves the answer to the segmenter.
+//! Prepend, Hangul jamo), so meeting one leaves the answer to the
+//! segmenter.
 //!
-//! The ranges are a conservative subset; the tests check every codepoint in
-//! them against the segmenter, so a Unicode update that moves one fails
-//! loudly instead of changing behaviour.
+//! The ranges are a conservative subset (the consonants and linkers are
+//! exact); the tests check every codepoint in them against the segmenter,
+//! so a Unicode update that moves one fails loudly instead of changing
+//! behaviour.
 
-/// The plain class (see the module docs) as sorted, disjoint ranges.
-const PLAIN: &[(char, char)] = &[
-    ('\u{20}', '\u{7E}'),
-    ('\u{A0}', '\u{AC}'),
-    ('\u{AE}', '\u{2FF}'),
-    ('\u{370}', '\u{482}'),
-    ('\u{48A}', '\u{52F}'),
-    ('\u{5D0}', '\u{5EA}'),
-    ('\u{620}', '\u{64A}'),
-    ('\u{1E00}', '\u{1FFF}'),
-    ('\u{2010}', '\u{2027}'),
-    ('\u{2030}', '\u{205F}'),
-    ('\u{2070}', '\u{20CF}'),
-    ('\u{2100}', '\u{2BFF}'),
-    ('\u{2E80}', '\u{2FDF}'),
-    ('\u{3000}', '\u{3029}'),
-    ('\u{3030}', '\u{303F}'),
-    ('\u{3041}', '\u{3096}'),
-    ('\u{309B}', '\u{30FF}'),
-    ('\u{3105}', '\u{312F}'),
-    ('\u{3131}', '\u{318E}'),
-    ('\u{31F0}', '\u{4DBF}'),
-    ('\u{4E00}', '\u{A48C}'),
-    ('\u{AC00}', '\u{D7A3}'),
-    ('\u{F900}', '\u{FAFF}'),
-    ('\u{FF01}', '\u{FF9D}'),
-    ('\u{FFE0}', '\u{FFEE}'),
-    ('\u{1F000}', '\u{1F1E5}'),
-    ('\u{1F200}', '\u{1F3FA}'),
-    ('\u{1F400}', '\u{1FAFF}'),
-    ('\u{20000}', '\u{3FFFD}'),
-];
+pub(super) use super::char_class::JoinClass;
+#[cfg(test)]
+use super::char_class::{
+    in_ranges, is_extend, is_joiner, is_plain, is_regional_indicator, CONSONANT, EXTEND, LINKER,
+    PICTOGRAPHIC, PLAIN, SPACING_MARK,
+};
+use super::char_class::{props_bits, CLASS_SHIFT, ZWJ};
 
-/// The Extended_Pictographic codepoints of the plain class, as sorted,
-/// disjoint ranges: exactly those (the tests check every plain codepoint).
-const PICTOGRAPHIC: &[(char, char)] = &[
-    ('\u{A9}', '\u{A9}'),
-    ('\u{AE}', '\u{AE}'),
-    ('\u{203C}', '\u{203C}'),
-    ('\u{2049}', '\u{2049}'),
-    ('\u{2122}', '\u{2122}'),
-    ('\u{2139}', '\u{2139}'),
-    ('\u{2194}', '\u{2199}'),
-    ('\u{21A9}', '\u{21AA}'),
-    ('\u{231A}', '\u{231B}'),
-    ('\u{2328}', '\u{2328}'),
-    ('\u{23CF}', '\u{23CF}'),
-    ('\u{23E9}', '\u{23F3}'),
-    ('\u{23F8}', '\u{23FA}'),
-    ('\u{24C2}', '\u{24C2}'),
-    ('\u{25AA}', '\u{25AB}'),
-    ('\u{25B6}', '\u{25B6}'),
-    ('\u{25C0}', '\u{25C0}'),
-    ('\u{25FB}', '\u{25FE}'),
-    ('\u{2600}', '\u{2604}'),
-    ('\u{260E}', '\u{260E}'),
-    ('\u{2611}', '\u{2611}'),
-    ('\u{2614}', '\u{2615}'),
-    ('\u{2618}', '\u{2618}'),
-    ('\u{261D}', '\u{261D}'),
-    ('\u{2620}', '\u{2620}'),
-    ('\u{2622}', '\u{2623}'),
-    ('\u{2626}', '\u{2626}'),
-    ('\u{262A}', '\u{262A}'),
-    ('\u{262E}', '\u{262F}'),
-    ('\u{2638}', '\u{263A}'),
-    ('\u{2640}', '\u{2640}'),
-    ('\u{2642}', '\u{2642}'),
-    ('\u{2648}', '\u{2653}'),
-    ('\u{265F}', '\u{2660}'),
-    ('\u{2663}', '\u{2663}'),
-    ('\u{2665}', '\u{2666}'),
-    ('\u{2668}', '\u{2668}'),
-    ('\u{267B}', '\u{267B}'),
-    ('\u{267E}', '\u{267F}'),
-    ('\u{2692}', '\u{2697}'),
-    ('\u{2699}', '\u{2699}'),
-    ('\u{269B}', '\u{269C}'),
-    ('\u{26A0}', '\u{26A1}'),
-    ('\u{26A7}', '\u{26A7}'),
-    ('\u{26AA}', '\u{26AB}'),
-    ('\u{26B0}', '\u{26B1}'),
-    ('\u{26BD}', '\u{26BE}'),
-    ('\u{26C4}', '\u{26C5}'),
-    ('\u{26C8}', '\u{26C8}'),
-    ('\u{26CE}', '\u{26CF}'),
-    ('\u{26D1}', '\u{26D1}'),
-    ('\u{26D3}', '\u{26D4}'),
-    ('\u{26E9}', '\u{26EA}'),
-    ('\u{26F0}', '\u{26F5}'),
-    ('\u{26F7}', '\u{26FA}'),
-    ('\u{26FD}', '\u{26FD}'),
-    ('\u{2702}', '\u{2702}'),
-    ('\u{2705}', '\u{2705}'),
-    ('\u{2708}', '\u{270D}'),
-    ('\u{270F}', '\u{270F}'),
-    ('\u{2712}', '\u{2712}'),
-    ('\u{2714}', '\u{2714}'),
-    ('\u{2716}', '\u{2716}'),
-    ('\u{271D}', '\u{271D}'),
-    ('\u{2721}', '\u{2721}'),
-    ('\u{2728}', '\u{2728}'),
-    ('\u{2733}', '\u{2734}'),
-    ('\u{2744}', '\u{2744}'),
-    ('\u{2747}', '\u{2747}'),
-    ('\u{274C}', '\u{274C}'),
-    ('\u{274E}', '\u{274E}'),
-    ('\u{2753}', '\u{2755}'),
-    ('\u{2757}', '\u{2757}'),
-    ('\u{2763}', '\u{2764}'),
-    ('\u{2795}', '\u{2797}'),
-    ('\u{27A1}', '\u{27A1}'),
-    ('\u{27B0}', '\u{27B0}'),
-    ('\u{27BF}', '\u{27BF}'),
-    ('\u{2934}', '\u{2935}'),
-    ('\u{2B05}', '\u{2B07}'),
-    ('\u{2B1B}', '\u{2B1C}'),
-    ('\u{2B50}', '\u{2B50}'),
-    ('\u{2B55}', '\u{2B55}'),
-    ('\u{3030}', '\u{3030}'),
-    ('\u{303D}', '\u{303D}'),
-    ('\u{3297}', '\u{3297}'),
-    ('\u{3299}', '\u{3299}'),
-    ('\u{1F004}', '\u{1F004}'),
-    ('\u{1F02C}', '\u{1F02F}'),
-    ('\u{1F094}', '\u{1F09F}'),
-    ('\u{1F0AF}', '\u{1F0B0}'),
-    ('\u{1F0C0}', '\u{1F0C0}'),
-    ('\u{1F0CF}', '\u{1F0D0}'),
-    ('\u{1F0F6}', '\u{1F0FF}'),
-    ('\u{1F170}', '\u{1F171}'),
-    ('\u{1F17E}', '\u{1F17F}'),
-    ('\u{1F18E}', '\u{1F18E}'),
-    ('\u{1F191}', '\u{1F19A}'),
-    ('\u{1F1AE}', '\u{1F1E5}'),
-    ('\u{1F201}', '\u{1F20F}'),
-    ('\u{1F21A}', '\u{1F21A}'),
-    ('\u{1F22F}', '\u{1F22F}'),
-    ('\u{1F232}', '\u{1F23A}'),
-    ('\u{1F23C}', '\u{1F23F}'),
-    ('\u{1F249}', '\u{1F25F}'),
-    ('\u{1F266}', '\u{1F321}'),
-    ('\u{1F324}', '\u{1F393}'),
-    ('\u{1F396}', '\u{1F397}'),
-    ('\u{1F399}', '\u{1F39B}'),
-    ('\u{1F39E}', '\u{1F3F0}'),
-    ('\u{1F3F3}', '\u{1F3F5}'),
-    ('\u{1F3F7}', '\u{1F3FA}'),
-    ('\u{1F400}', '\u{1F4FD}'),
-    ('\u{1F4FF}', '\u{1F53D}'),
-    ('\u{1F549}', '\u{1F54E}'),
-    ('\u{1F550}', '\u{1F567}'),
-    ('\u{1F56F}', '\u{1F570}'),
-    ('\u{1F573}', '\u{1F57A}'),
-    ('\u{1F587}', '\u{1F587}'),
-    ('\u{1F58A}', '\u{1F58D}'),
-    ('\u{1F590}', '\u{1F590}'),
-    ('\u{1F595}', '\u{1F596}'),
-    ('\u{1F5A4}', '\u{1F5A5}'),
-    ('\u{1F5A8}', '\u{1F5A8}'),
-    ('\u{1F5B1}', '\u{1F5B2}'),
-    ('\u{1F5BC}', '\u{1F5BC}'),
-    ('\u{1F5C2}', '\u{1F5C4}'),
-    ('\u{1F5D1}', '\u{1F5D3}'),
-    ('\u{1F5DC}', '\u{1F5DE}'),
-    ('\u{1F5E1}', '\u{1F5E1}'),
-    ('\u{1F5E3}', '\u{1F5E3}'),
-    ('\u{1F5E8}', '\u{1F5E8}'),
-    ('\u{1F5EF}', '\u{1F5EF}'),
-    ('\u{1F5F3}', '\u{1F5F3}'),
-    ('\u{1F5FA}', '\u{1F64F}'),
-    ('\u{1F680}', '\u{1F6C5}'),
-    ('\u{1F6CB}', '\u{1F6D2}'),
-    ('\u{1F6D5}', '\u{1F6E5}'),
-    ('\u{1F6E9}', '\u{1F6E9}'),
-    ('\u{1F6EB}', '\u{1F6F0}'),
-    ('\u{1F6F3}', '\u{1F6FF}'),
-    ('\u{1F7DA}', '\u{1F7FF}'),
-    ('\u{1F80C}', '\u{1F80F}'),
-    ('\u{1F848}', '\u{1F84F}'),
-    ('\u{1F85A}', '\u{1F85F}'),
-    ('\u{1F888}', '\u{1F88F}'),
-    ('\u{1F8AE}', '\u{1F8AF}'),
-    ('\u{1F8BC}', '\u{1F8BF}'),
-    ('\u{1F8C2}', '\u{1F8CF}'),
-    ('\u{1F8D9}', '\u{1F8FF}'),
-    ('\u{1F90C}', '\u{1F93A}'),
-    ('\u{1F93C}', '\u{1F945}'),
-    ('\u{1F947}', '\u{1F9FF}'),
-    ('\u{1FA58}', '\u{1FA5F}'),
-    ('\u{1FA6E}', '\u{1FAFF}'),
-];
+// The table `build.rs` generates from `props_bits`: TABLE_LIMIT, BLOCK_SHIFT,
+// BLOCK_INDEX and BLOCKS.
+include!(concat!(env!("OUT_DIR"), "/char_props.rs"));
 
-/// Whether `c` is in one of `ranges` (sorted and disjoint).
-fn in_ranges(ranges: &[(char, char)], c: char) -> bool {
-    // The first range starting after `c`; `c` is in one if the one before
-    // it reaches `c`.
-    let next = ranges.partition_point(|&(lo, _)| lo <= c);
-    next > 0 && c <= ranges[next - 1].1
-}
+/// What printing a codepoint needs to know about it: the columns it takes
+/// when it starts a cluster and its [`JoinClass`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CharProps(u8);
 
-/// Whether `c` is in the plain class.
-fn is_plain(c: char) -> bool {
-    in_ranges(PLAIN, c)
-}
+impl CharProps {
+    /// `c`'s properties: a table lookup for all but the rarest codepoints.
+    #[inline]
+    pub(super) fn of(c: char) -> Self {
+        let cp = c as u32;
+        if cp < TABLE_LIMIT {
+            let block = BLOCK_INDEX[(cp >> BLOCK_SHIFT) as usize];
+            let offset = cp & ((1 << BLOCK_SHIFT) - 1);
+            Self(BLOCKS[usize::from(block)][offset as usize])
+        } else {
+            Self(props_bits(c))
+        }
+    }
 
-/// Whether `c` is in the extend class (see the module docs).
-fn is_extend(c: char) -> bool {
-    matches!(c,
-        '\u{300}'..='\u{36F}'
-        | '\u{483}'..='\u{489}'
-        | '\u{1DC0}'..='\u{1DFF}'
-        | '\u{20D0}'..='\u{20F0}'
-        | '\u{FE00}'..='\u{FE0F}'
-        | '\u{FE20}'..='\u{FE2F}'
-        | '\u{1F3FB}'..='\u{1F3FF}'
-        | '\u{E0020}'..='\u{E007F}'
-        | '\u{E0100}'..='\u{E01EF}'
-    )
-}
+    /// Columns taken when the codepoint starts a cluster: 0 to 3, as
+    /// `unicode-width` has it (control characters take none).
+    #[inline]
+    pub(super) fn width(self) -> u16 {
+        u16::from(self.0 & ((1 << CLASS_SHIFT) - 1))
+    }
 
-const ZWJ: char = '\u{200D}';
-
-/// Whether `c` always joins a cluster of a plain codepoint and more such.
-fn is_joiner(c: char) -> bool {
-    c == ZWJ || is_extend(c)
-}
-
-fn is_regional_indicator(c: char) -> bool {
-    matches!(c, '\u{1F1E6}'..='\u{1F1FF}')
+    #[inline]
+    pub(super) fn class(self) -> JoinClass {
+        match self.0 >> CLASS_SHIFT {
+            1 => JoinClass::Plain,
+            2 => JoinClass::Joiner,
+            3 => JoinClass::Linker,
+            4 => JoinClass::SpacingMark,
+            5 => JoinClass::Consonant,
+            6 => JoinClass::RegionalIndicator,
+            7 => JoinClass::Pictograph,
+            _ => JoinClass::Other,
+        }
+    }
 }
 
 /// The classes [`joins_by_rules`] knows the rules for.
@@ -277,33 +111,130 @@ enum Class {
 
 impl Class {
     fn of(c: char) -> Option<Self> {
-        if c == ZWJ {
-            Some(Self::Zwj)
-        } else if is_regional_indicator(c) {
-            Some(Self::RegionalIndicator)
-        } else if is_extend(c) {
-            Some(Self::Extend)
-        } else if is_plain(c) {
-            Some(Self::Plain {
-                pictographic: in_ranges(PICTOGRAPHIC, c),
-            })
-        } else {
-            None
+        match CharProps::of(c).class() {
+            JoinClass::Joiner if c == ZWJ => Some(Self::Zwj),
+            JoinClass::Joiner => Some(Self::Extend),
+            JoinClass::RegionalIndicator => Some(Self::RegionalIndicator),
+            JoinClass::Plain => Some(Self::Plain {
+                pictographic: false,
+            }),
+            JoinClass::Pictograph => Some(Self::Plain { pictographic: true }),
+            _ => None,
         }
+    }
+}
+
+/// How a printed cluster ends, as far as [`joins_tail`] needs to know:
+/// its last codepoint, and whether it ends in an emoji sequence waiting
+/// for a pictograph, an Indic conjunct or half a flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Tail {
+    /// A plain, extend, linker or spacing-mark codepoint, not in any of
+    /// the sequences below: extend, ZWJ, linkers and spacing marks join,
+    /// nothing else.
+    Settled,
+    /// A pictograph, then perhaps extends: as `Settled`.
+    Pictograph,
+    /// A pictograph, extends and a ZWJ: as `Settled`, and a pictograph
+    /// joins too (GB11).
+    PictographZwj,
+    /// Another ZWJ: as `Settled`, except that a consonant may join (GB9c,
+    /// if the ZWJ is in a conjunct).
+    Zwj,
+    /// A consonant, then perhaps extends: as `Settled`.
+    Consonant,
+    /// A consonant, then extends and linkers with at least one linker:
+    /// as `Settled`, and a consonant joins too (GB9c).
+    Conjunct,
+    /// An unpaired regional indicator: as `Settled`, and a regional
+    /// indicator joins too (GB12, GB13).
+    RegionalIndicator,
+    /// Anything else.
+    Other,
+}
+
+impl Tail {
+    /// The end of a cluster that starts with `c`.
+    #[inline]
+    pub(super) fn start(c: char) -> Self {
+        match CharProps::of(c).class() {
+            JoinClass::Joiner if c == ZWJ => Self::Zwj,
+            JoinClass::Plain | JoinClass::Joiner | JoinClass::Linker | JoinClass::SpacingMark => {
+                Self::Settled
+            }
+            JoinClass::Pictograph => Self::Pictograph,
+            JoinClass::Consonant => Self::Consonant,
+            JoinClass::RegionalIndicator => Self::RegionalIndicator,
+            JoinClass::Other => Self::Other,
+        }
+    }
+
+    /// The end of this cluster with `c` appended.
+    pub(super) fn then(self, c: char) -> Self {
+        use JoinClass as J;
+        match (CharProps::of(c).class(), self) {
+            (J::Joiner, Self::Pictograph) if c == ZWJ => Self::PictographZwj,
+            (J::Joiner, Self::Other) if c == ZWJ => Self::Other,
+            (J::Joiner, _) if c == ZWJ => Self::Zwj,
+            (J::Plain | J::SpacingMark, _) => Self::Settled,
+            (J::Pictograph, _) => Self::Pictograph,
+            (J::Consonant, _) => Self::Consonant,
+            (J::RegionalIndicator, Self::RegionalIndicator) => Self::Settled,
+            // Extends and linkers (which are extends too) keep a
+            // pictograph or a conjunct going; linkers start a conjunct
+            // after a consonant (GB9c). Both end a flag.
+            (J::Joiner | J::Linker, Self::Pictograph) => Self::Pictograph,
+            (J::Joiner, Self::Consonant | Self::Conjunct) => self,
+            (J::Linker, Self::Consonant | Self::Conjunct) => Self::Conjunct,
+            (
+                J::Joiner | J::Linker,
+                Self::Settled | Self::PictographZwj | Self::RegionalIndicator,
+            ) => Self::Settled,
+            // After another ZWJ a conjunct may still be open.
+            _ => Self::Other,
+        }
+    }
+}
+
+/// Whether a codepoint of `class` joins a cluster that ends as `tail`,
+/// when that follows from the two alone; `None` when it takes the whole
+/// cluster.
+///
+/// Extend, ZWJ, linkers and spacing marks join whatever is not a control
+/// (GB9, GB9a). A plain codepoint joins none of these ends, a pictograph
+/// only one waiting for it after a ZWJ (GB11), a consonant only a
+/// conjunct (GB9c) and a regional indicator only another (GB12, GB13).
+#[inline]
+pub(super) fn joins_tail(tail: Tail, class: JoinClass) -> Option<bool> {
+    use JoinClass as J;
+    match (class, tail) {
+        (_, Tail::Other) | (J::Other, _) | (J::Consonant, Tail::Zwj) => None,
+        (J::Joiner | J::Linker | J::SpacingMark, _) | (J::Plain, _) => Some(class != J::Plain),
+        (J::Pictograph, _) => Some(tail == Tail::PictographZwj),
+        (J::Consonant, _) => Some(tail == Tail::Conjunct),
+        (J::RegionalIndicator, _) => Some(tail == Tail::RegionalIndicator),
     }
 }
 
 /// Whether `c` joins the cluster `base` + `extra`, when that follows from
 /// the classes above; `None` when only the segmenter can tell.
 pub(super) fn joins(base: char, extra: &[char], c: char) -> Option<bool> {
+    let class = |c| CharProps::of(c).class();
     // The common cases first: plain text, and marks on a plain character.
-    if is_plain(c) {
-        let last = extra.last().copied().unwrap_or(base);
-        if is_plain(last) || is_extend(last) {
-            return Some(false);
+    match class(c) {
+        JoinClass::Plain | JoinClass::Pictograph => {
+            let last = extra.last().copied().unwrap_or(base);
+            if last != ZWJ && class(last) != JoinClass::Other {
+                return Some(false);
+            }
         }
-    } else if is_joiner(c) && is_plain(base) && extra.iter().copied().all(is_joiner) {
-        return Some(true);
+        JoinClass::Joiner
+            if matches!(class(base), JoinClass::Plain | JoinClass::Pictograph)
+                && extra.iter().all(|&e| class(e) == JoinClass::Joiner) =>
+        {
+            return Some(true);
+        }
+        _ => {}
     }
     // Rule out the codepoints the rules do not cover before walking the
     // cluster.
@@ -367,9 +298,189 @@ mod tests {
         clusters(&format!("{cluster}{c}")) == 1
     }
 
+    /// The generated table holds what [`props_bits`] computes for every
+    /// codepoint, and that is `unicode-width`'s width and the classes
+    /// above.
+    #[test]
+    fn char_props_match_unicode_width_and_the_classes_for_every_codepoint() {
+        use unicode_width::UnicodeWidthChar;
+        for c in (0..=0x10FFFF).filter_map(char::from_u32) {
+            let props = CharProps::of(c);
+            assert_eq!(props, CharProps(props_bits(c)), "{c:?}");
+            assert_eq!(props.width(), c.width().unwrap_or(0) as u16, "{c:?}");
+            let class = if is_plain(c) && in_ranges(PICTOGRAPHIC, c) {
+                JoinClass::Pictograph
+            } else if is_plain(c) {
+                JoinClass::Plain
+            } else if is_joiner(c) {
+                JoinClass::Joiner
+            } else if in_ranges(LINKER, c) {
+                JoinClass::Linker
+            } else if in_ranges(SPACING_MARK, c) {
+                JoinClass::SpacingMark
+            } else if in_ranges(CONSONANT, c) {
+                JoinClass::Consonant
+            } else if is_regional_indicator(c) {
+                JoinClass::RegionalIndicator
+            } else {
+                JoinClass::Other
+            };
+            assert_eq!(props.class(), class, "{c:?}");
+        }
+    }
+
+    /// The end of the cluster `codepoints`, as the grid tracks it.
+    fn tail_of(codepoints: &[char]) -> Tail {
+        let (&first, rest) = codepoints.split_first().unwrap();
+        rest.iter()
+            .fold(Tail::start(first), |tail, &c| tail.then(c))
+    }
+
+    /// Samples of every class, and of what the classes leave out.
+    const SAMPLES: &[char] = &[
+        'b',
+        '\u{4E2D}',
+        '\u{AC00}',  // LV
+        '\u{AC01}',  // LVT
+        '\u{1F600}', // Extended_Pictographic
+        '\u{A9}',
+        '\u{301}',
+        '\u{FE0F}',
+        '\u{1F3FD}',
+        '\u{E0067}',
+        '\u{941}', // Devanagari vowel sign u: extend
+        ZWJ,
+        '\u{94D}',   // Devanagari virama: linker
+        '\u{9CD}',   // Bengali virama: linker
+        '\u{93F}',   // Devanagari vowel sign i: spacing mark
+        '\u{915}',   // Devanagari ka: consonant
+        '\u{995}',   // Bengali ka: consonant
+        '\u{1F1EF}', // Regional indicators
+        '\u{1100}',  // L
+        '\u{600}',   // Prepend
+        '\u{AD}',    // Control
+        '\u{200C}',  // ZWNJ
+        '\u{BCD}',   // Tamil virama: extend, not a linker
+    ];
+
+    /// Every codepoint of a class `joins_tail` knows, ending clusters of
+    /// each kind it can end: `joins_tail` agrees with the segmenter on
+    /// every sample after it whenever it answers.
+    #[test]
+    fn joins_tail_agrees_with_the_segmenter_for_every_last_codepoint() {
+        for t in (0..=0x10FFFF).filter_map(char::from_u32) {
+            let befores: &[&str] = match CharProps::of(t).class() {
+                JoinClass::Other => continue,
+                JoinClass::Plain => &[""],
+                JoinClass::Pictograph => &["", "\u{1F600}\u{200D}"],
+                JoinClass::RegionalIndicator => &["", "\u{1F1EF}"],
+                JoinClass::Consonant => &["", "\u{915}\u{94D}"],
+                JoinClass::Joiner | JoinClass::Linker | JoinClass::SpacingMark => &[
+                    "a",
+                    "\u{1F600}",
+                    "\u{915}",
+                    "\u{915}\u{94D}",
+                    "a\u{301}",
+                    "\u{1F1EF}",
+                    "\u{1F600}\u{200D}",
+                ],
+            };
+            for before in befores {
+                let cluster: Vec<char> = before.chars().chain([t]).collect();
+                let text: String = cluster.iter().collect();
+                if clusters(&text) != 1 {
+                    continue;
+                }
+                let tail = tail_of(&cluster);
+                for &c in SAMPLES {
+                    if let Some(joins) = joins_tail(tail, CharProps::of(c).class()) {
+                        assert_eq!(joins, segmenter_joins(&text, c), "{text:?} + {c:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every cluster of up to four samples: `joins_tail` agrees with the
+    /// segmenter on every sample after it whenever it answers, and knows
+    /// how clusters of plain codepoints, consonants, extends, linkers and
+    /// spacing marks end.
+    #[test]
+    fn joins_tail_agrees_with_the_segmenter_on_every_short_cluster() {
+        let mut sequences: Vec<Vec<char>> = SAMPLES.iter().map(|&c| vec![c]).collect();
+        let mut start = 0;
+        for _ in 1..4 {
+            let end = sequences.len();
+            for index in start..end {
+                for &c in SAMPLES {
+                    let mut longer = sequences[index].clone();
+                    longer.push(c);
+                    if clusters(&longer.iter().collect::<String>()) == 1 {
+                        sequences.push(longer);
+                    }
+                }
+            }
+            start = end;
+        }
+        for cluster in &sequences {
+            let text: String = cluster.iter().collect();
+            let tail = tail_of(cluster);
+            for &c in SAMPLES {
+                if let Some(joins) = joins_tail(tail, CharProps::of(c).class()) {
+                    assert_eq!(joins, segmenter_joins(&text, c), "{text:?} + {c:?}");
+                }
+            }
+            let known = cluster
+                .iter()
+                .all(|&c| c != ZWJ && CharProps::of(c).class() != JoinClass::Other);
+            if known {
+                assert_ne!(tail, Tail::Other, "{text:?}");
+            }
+        }
+    }
+
+    /// The consonants and linkers are exactly the codepoints that behave
+    /// as such: a consonant joins a consonant and virama but not plain
+    /// text, and a linker after a consonant makes the next one join it.
+    #[test]
+    fn consonants_and_linkers_are_exactly_those_of_the_segmenter() {
+        for c in (0..=0x10FFFF).filter_map(char::from_u32) {
+            let consonant = !segmenter_joins("a", c) && segmenter_joins("\u{915}\u{94D}", c);
+            assert_eq!(in_ranges(CONSONANT, c), consonant, "{c:?}");
+            let linker =
+                segmenter_joins("a", c) && segmenter_joins(&format!("\u{915}{c}"), '\u{915}');
+            assert_eq!(in_ranges(LINKER, c), linker, "{c:?}");
+        }
+    }
+
+    /// Spacing marks join plain text and consonants, are not extends (they
+    /// end an emoji sequence and a conjunct) and join nothing plain after
+    /// them.
+    #[test]
+    fn spacing_marks_are_spacing_marks() {
+        for ranges in SPACING_MARK {
+            for m in (ranges.0..=ranges.1).filter(|&m| char::from_u32(m as u32).is_some()) {
+                for cluster in ["a", "\u{915}", "\u{1F600}", "a\u{301}"] {
+                    assert!(segmenter_joins(cluster, m), "{m:?} after {cluster:?}");
+                }
+                assert!(!segmenter_joins(
+                    &format!("\u{1F600}{m}\u{200D}"),
+                    '\u{1F600}'
+                ));
+                assert!(!segmenter_joins(&format!("\u{915}\u{94D}{m}"), '\u{915}'));
+                for after in ['b', '\u{915}', '\u{1F600}'] {
+                    assert!(
+                        !segmenter_joins(&format!("a{m}"), after),
+                        "{after:?} after {m:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn ranges_are_sorted_and_disjoint() {
-        for ranges in [PLAIN, PICTOGRAPHIC] {
+        for ranges in [PLAIN, PICTOGRAPHIC, EXTEND, LINKER, SPACING_MARK, CONSONANT] {
             for pair in ranges.windows(2) {
                 assert!(pair[0].0 <= pair[0].1 && pair[0].1 < pair[1].0, "{pair:?}");
             }
@@ -538,6 +649,11 @@ mod tests {
             }
             assert!(segmenter_joins(&format!("a{m}"), '\u{301}'), "after {m:?}");
             assert!(segmenter_joins(&format!("a{m}"), ZWJ), "ZWJ after {m:?}");
+            // Indic_Conjunct_Break=Extend: it keeps a conjunct going.
+            assert!(
+                segmenter_joins(&format!("\u{915}\u{94D}{m}"), '\u{915}'),
+                "{m:?} ends a conjunct"
+            );
         }
         for cluster in ["a", "a\u{301}", "a\u{200D}"] {
             assert!(
