@@ -196,7 +196,9 @@ only help slow scrolling), and bigger reads (the kernel hands out 4 KiB).
 
 ## What is left
 
-The gap to Ghostty is the I/O thread's per-byte cost. In order of size:
+The gap to Ghostty is the I/O thread's per-byte cost. In order of size
+(items 1 to 3 are addressed in
+[2026-11-08-vt-core-throughput.md](2026-11-08-vt-core-throughput.md)):
 
 1. **Scrollback encoding.** Plain one-style rows now take the copy path,
    but every other row (prompts, colored output, any non-ASCII) still goes
