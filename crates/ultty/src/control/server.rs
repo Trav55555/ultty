@@ -802,6 +802,7 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
                     pattern,
                     regex: false,
                     timeout_ms,
+                    until: Default::default(),
                     target: None,
                 })
             }
@@ -976,6 +977,19 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
             }
             ControlData::WaitTimeout => "TIMEOUT\n".to_string(),
             ControlData::Subscribed => "SUBSCRIBED\n".to_string(),
+            ControlData::WaitEvent { event } => match event {
+                ControlEvent::CommandFinished {
+                    exit_code: Some(code),
+                    ..
+                } => format!("COMMAND FINISHED exit {code}\n"),
+                ControlEvent::CommandFinished { .. } => "COMMAND FINISHED\n".to_string(),
+                ControlEvent::Bell { .. } => "BELL\n".to_string(),
+                other => format!(
+                    "{}\n",
+                    serde_json::to_string(other).unwrap_or_else(|_| "EVENT".to_string())
+                ),
+            },
+            ControlData::WaitQuiet => "QUIET\n".to_string(),
         },
         ControlResponse::Error { code, message } => {
             format!("ERROR {}: {}\n", code, message)
@@ -1191,6 +1205,7 @@ mod tests {
                 pattern: "$".to_string(),
                 regex: false,
                 timeout_ms: 5000,
+                until: Default::default(),
                 target: None,
             })
         );

@@ -7,7 +7,8 @@ use std::path::Path;
 use ultty::control::format_response;
 use ultty::control::paths::{control_dir, ControlEndpoint};
 use ultty_protocol::control::{
-    ControlData, ControlEnvelope, ControlRequest, ControlResponse, OutputFormat,
+    ControlData, ControlEnvelope, ControlEvent, ControlRequest, ControlResponse, OutputFormat,
+    WaitCondition,
 };
 use ultty_protocol::{Key, Modifiers};
 
@@ -90,9 +91,7 @@ fn main() {
         OutputFormat::Text
     };
     print!("{}", format_response(&response, format));
-    if response_is_failure(&response) {
-        std::process::exit(1);
-    }
+    std::process::exit(exit_status(&response));
 }
 
 /// Socket read timeout for `request`: long enough to outlast a `wait-for`,
@@ -118,6 +117,30 @@ fn parse_response(raw: &str) -> Result<ControlResponse, String> {
 
 /// Whether `response` should make ulttyctl exit non-zero: an error, or a
 /// `wait-for` that timed out.
+/// ulttyctl's exit status for `response`: 1 for an error or a timed-out
+/// wait, the command's own status for `wait-for --command-done`, else 0.
+fn exit_status(response: &ControlResponse) -> i32 {
+    if response_is_failure(response) {
+        return 1;
+    }
+    match response {
+        ControlResponse::Data(ControlData::WaitEvent {
+            event:
+                ControlEvent::CommandFinished {
+                    exit_code: Some(code),
+                    ..
+                },
+        }) => {
+            if (0..=255).contains(code) {
+                *code
+            } else {
+                1
+            }
+        }
+        _ => 0,
+    }
+}
+
 fn response_is_failure(response: &ControlResponse) -> bool {
     matches!(
         response,
@@ -329,11 +352,32 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
 
 fn parse_wait_for(args: &[String]) -> Result<ControlRequest, String> {
     let mut timeout_ms = 30000;
+    let mut until = WaitCondition::Text;
     let mut pattern_parts = Vec::new();
     let mut index = 0;
 
     while index < args.len() {
-        if args[index] == "--timeout" {
+        let event = match args[index].as_str() {
+            "--command-done" => Some(WaitCondition::CommandFinished),
+            "--bell" => Some(WaitCondition::Bell),
+            "--quiet" => {
+                let ms = args
+                    .get(index + 1)
+                    .ok_or_else(|| "wait-for --quiet requires milliseconds".to_string())?
+                    .parse()
+                    .map_err(|_| "wait-for --quiet must be a number".to_string())?;
+                index += 1;
+                Some(WaitCondition::Quiet { ms })
+            }
+            _ => None,
+        };
+        if let Some(event) = event {
+            if !until.is_text() {
+                return Err("wait-for takes one of --command-done, --bell, --quiet".to_string());
+            }
+            until = event;
+            index += 1;
+        } else if args[index] == "--timeout" {
             let timeout = args
                 .get(index + 1)
                 .ok_or_else(|| "wait-for --timeout requires milliseconds".to_string())?;
@@ -348,15 +392,16 @@ fn parse_wait_for(args: &[String]) -> Result<ControlRequest, String> {
     }
 
     let pattern = pattern_parts.join(" ");
-    if pattern.is_empty() {
-        Err("wait-for requires a pattern".to_string())
-    } else {
-        Ok(ControlRequest::WaitFor {
+    match (until.is_text(), pattern.is_empty()) {
+        (true, true) => Err("wait-for requires a pattern or an event to wait for".to_string()),
+        (false, false) => Err("wait-for takes a pattern or an event, not both".to_string()),
+        _ => Ok(ControlRequest::WaitFor {
             pattern,
             regex: false,
             timeout_ms,
+            until,
             target: None,
-        })
+        }),
     }
 }
 
@@ -570,6 +615,10 @@ QUERY COMMANDS:
 WAIT COMMANDS:
     wait-for <pattern> [--timeout <ms>]
                             Wait for pattern to appear (default 30s timeout)
+    wait-for --command-done | --bell | --quiet <ms> [--timeout <ms>]
+                            Wait for the next command to finish (exits with
+                            its status; needs shell integration), the next
+                            bell, or <ms> without output
     subscribe               Print events as JSON lines until ultty exits:
                             pane_opened, pane_closed, command_started,
                             command_finished (needs shell integration),
@@ -630,8 +679,8 @@ EXIT STATUS:
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_cli_request, parse_response, read_response, read_timeout_for, response_is_failure,
-        should_print_version, version_output, with_auth_token,
+        exit_status, parse_cli_request, parse_response, read_response, read_timeout_for,
+        response_is_failure, should_print_version, version_output, with_auth_token,
     };
 
     use std::io::Write;
@@ -639,7 +688,9 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use ultty_protocol::control::{ControlData, ControlRequest, ControlResponse};
+    use ultty_protocol::control::{
+        ControlData, ControlEvent, ControlRequest, ControlResponse, WaitCondition,
+    };
 
     #[test]
     fn read_response_retries_until_delayed_writer_closes() {
@@ -788,6 +839,49 @@ mod tests {
     }
 
     #[test]
+    fn wait_for_takes_a_pattern_or_one_event() {
+        let until = |line: &str| match parse_cli_request(&args(line)).unwrap() {
+            ControlRequest::WaitFor { until, .. } => until,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(until("wait-for ready"), WaitCondition::Text);
+        assert_eq!(
+            until("wait-for --command-done"),
+            WaitCondition::CommandFinished
+        );
+        assert_eq!(until("wait-for --bell --timeout 5"), WaitCondition::Bell);
+        assert_eq!(
+            until("wait-for --quiet 300"),
+            WaitCondition::Quiet { ms: 300 }
+        );
+        for bad in [
+            "wait-for",
+            "wait-for ready --bell",
+            "wait-for --bell --command-done",
+            "wait-for --quiet",
+        ] {
+            assert!(parse_cli_request(&args(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn command_done_exits_with_the_commands_status() {
+        let finished = |exit_code| {
+            ControlResponse::Data(ControlData::WaitEvent {
+                event: ControlEvent::CommandFinished { pane: 0, exit_code },
+            })
+        };
+        assert_eq!(exit_status(&finished(Some(0))), 0);
+        assert_eq!(exit_status(&finished(Some(3))), 3);
+        assert_eq!(exit_status(&finished(Some(-1))), 1);
+        assert_eq!(exit_status(&finished(None)), 0);
+        assert_eq!(
+            exit_status(&ControlResponse::Data(ControlData::WaitTimeout)),
+            1
+        );
+    }
+
+    #[test]
     fn pane_flag_after_the_command_is_just_text() {
         assert_eq!(
             parse_cli_request(&args("send-text --pane 3")).unwrap(),
@@ -843,6 +937,7 @@ mod tests {
             pattern: "DONE".to_string(),
             regex: false,
             timeout_ms: 10_000,
+            until: Default::default(),
             target: None,
         };
         assert_eq!(read_timeout_for(&wait, 5), 15);

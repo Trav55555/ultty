@@ -70,9 +70,10 @@ const INPUT_ECHO_WINDOW: Duration = Duration::from_millis(50);
 /// Maximum time to suppress drawing during synchronized update mode.
 const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(200);
 
-/// Maintenance tick while native sessions (keepalives, animations) or
-/// `ulttyctl wait-for` timeouts need checking. Nothing else polls: with
-/// neither, an idle window sleeps until input, output or a socket wakes it.
+/// Maintenance tick while native sessions (keepalives, animations) need
+/// checking. Nothing else polls: without one, an idle window sleeps until
+/// input, output, a socket or a timer it set (such as a `wait-for`
+/// deadline) wakes it.
 const MAINTENANCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Faster PTY polling while a frame is dirty but not ready to render.

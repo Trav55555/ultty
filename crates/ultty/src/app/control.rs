@@ -2,11 +2,11 @@
 //!
 //! Processes CLI automation requests from ulttyctl and other tools.
 
-use super::control_wait::{find_ignore_case, PendingControlWait, WaitMatcher};
+use super::control_wait::{find_ignore_case, Condition, PendingControlWait, WaitMatcher};
 use super::App;
 use std::io;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use ultty::terminal_manager::TerminalId;
 use winit::dpi::PhysicalSize;
 
@@ -89,6 +89,47 @@ impl App {
         Ok(target)
     }
 
+    /// The earliest instant a pending wait needs the UI awake for.
+    pub(super) fn next_control_wait_deadline(&self) -> Option<Instant> {
+        self.pending_control_waits
+            .iter()
+            .map(PendingControlWait::deadline)
+            .min()
+    }
+
+    /// Answer the waits on `pane` that were waiting for `event`, and restart
+    /// quiet periods on output.
+    pub(super) fn observe_control_wait_event(
+        &mut self,
+        pane: TerminalId,
+        event: &ultty::event_loop::TerminalEvent,
+    ) {
+        use ultty_protocol::control::{ControlData, ControlResponse};
+
+        if self.pending_control_waits.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut answered = Vec::new();
+        self.pending_control_waits.retain_mut(|wait| {
+            if wait.pane() != pane || !wait.observe(event, now) {
+                return true;
+            }
+            if let Some(event) = super::control_events::control_event(pane, event) {
+                answered.push((
+                    wait.client_key(),
+                    ControlResponse::Data(ControlData::WaitEvent { event }),
+                ));
+            }
+            false
+        });
+        if let Some(ref mut server) = self.control_server {
+            for (client_key, response) in answered {
+                server.send_response(client_key, &response);
+            }
+        }
+    }
+
     pub(super) fn complete_pending_control_waits(&mut self) {
         let mut still_pending = Vec::new();
         let mut responses = Vec::new();
@@ -123,12 +164,15 @@ impl App {
         client_key: usize,
         request: &ultty_protocol::control::ControlRequest,
     ) -> Option<ultty_protocol::control::ControlResponse> {
-        use ultty_protocol::control::{ControlData, ControlRequest, ControlResponse};
+        use ultty_protocol::control::{
+            ControlData, ControlRequest, ControlResponse, WaitCondition,
+        };
 
         let ControlRequest::WaitFor {
             pattern,
             regex: use_regex,
             timeout_ms,
+            until,
             target,
         } = request
         else {
@@ -144,23 +188,38 @@ impl App {
             Err(response) => return Some(response),
         };
 
-        let matcher = match WaitMatcher::new(pattern, *use_regex) {
-            Ok(matcher) => matcher,
-            Err(message) => return Some(ControlResponse::Error { code: 4, message }),
+        let now = Instant::now();
+        let condition = match until {
+            WaitCondition::Text => {
+                if pattern.is_empty() {
+                    return Some(ControlResponse::Error {
+                        code: 4,
+                        message: "wait-for needs a pattern or an event to wait for".to_string(),
+                    });
+                }
+                let matcher = match WaitMatcher::new(pattern, *use_regex) {
+                    Ok(matcher) => matcher,
+                    Err(message) => return Some(ControlResponse::Error { code: 4, message }),
+                };
+                if let Some((line, col)) = self.find_wait_match(pane, &matcher) {
+                    return Some(ControlResponse::Data(ControlData::WaitMatched {
+                        line,
+                        col,
+                    }));
+                }
+                Condition::Text(matcher)
+            }
+            WaitCondition::CommandFinished => Condition::CommandFinished,
+            WaitCondition::Bell => Condition::Bell,
+            WaitCondition::Quiet { ms } => Condition::quiet(Duration::from_millis(*ms), now),
         };
-
-        if let Some((line, col)) = self.find_wait_match(pane, &matcher) {
-            return Some(ControlResponse::Data(ControlData::WaitMatched {
-                line,
-                col,
-            }));
-        }
 
         self.pending_control_waits.push(PendingControlWait::new(
             client_key,
             pane,
-            matcher,
+            condition,
             Duration::from_millis(*timeout_ms),
+            now,
         ));
         None
     }
@@ -178,14 +237,22 @@ impl App {
             });
         }
 
-        if let Some((line, col)) = self.find_wait_match(wait.pane(), wait.matcher()) {
+        if let Some((line, col)) = wait
+            .matcher()
+            .and_then(|matcher| self.find_wait_match(wait.pane(), matcher))
+        {
             return Some(ControlResponse::Data(ControlData::WaitMatched {
                 line,
                 col,
             }));
         }
 
-        if wait.is_expired() {
+        let now = Instant::now();
+        if wait.is_quiet(now) {
+            return Some(ControlResponse::Data(ControlData::WaitQuiet));
+        }
+
+        if wait.is_expired(now) {
             return Some(ControlResponse::Data(ControlData::WaitTimeout));
         }
 
@@ -1291,6 +1358,7 @@ mod tests {
             pattern: "ready".to_string(),
             regex: false,
             timeout_ms: 100,
+            until: Default::default(),
             target: None,
         }));
         assert!(control_request_requires_auth(&ControlRequest::GetInfo));

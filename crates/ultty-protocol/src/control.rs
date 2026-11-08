@@ -112,12 +112,18 @@ pub enum ControlRequest {
     },
 
     // === Wait Operations ===
-    /// Wait until `pattern` appears in a pane. The pane is fixed when the
+    /// Wait until something happens in a pane: `pattern` appears (the
+    /// default), or the event `until` names. The pane is fixed when the
     /// request arrives: `target`, or the pane focused at that moment.
     WaitFor {
+        /// Text to wait for; ignored unless `until` is `Text`.
+        #[serde(default)]
         pattern: String,
+        #[serde(default)]
         regex: bool,
         timeout_ms: u64,
+        #[serde(default, skip_serializing_if = "WaitCondition::is_text")]
+        until: WaitCondition,
         /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<u64>,
@@ -183,6 +189,27 @@ pub enum ControlRequest {
     Ping,
 
     Version,
+}
+
+/// What a `WaitFor` request waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitCondition {
+    /// The pattern appears on screen or in scrollback.
+    #[default]
+    Text,
+    /// The next command finishes (OSC 133;D; needs shell integration).
+    CommandFinished,
+    /// The bell rings.
+    Bell,
+    /// No output for `ms` milliseconds.
+    Quiet { ms: u64 },
+}
+
+impl WaitCondition {
+    pub fn is_text(&self) -> bool {
+        *self == WaitCondition::Text
+    }
 }
 
 /// Agent status update for terminal status bar display.
@@ -268,6 +295,12 @@ pub enum ControlData {
         line: usize,
         col: usize,
     },
+    /// A `WaitFor` for an event saw it.
+    WaitEvent {
+        event: ControlEvent,
+    },
+    /// A `WaitFor` for quiet saw no output for the whole period.
+    WaitQuiet,
     WaitTimeout,
     /// The connection is now an event stream.
     Subscribed,
@@ -482,6 +515,13 @@ mod tests {
             ControlData::WaitMatched { line: 1, col: 2 },
             ControlData::WaitTimeout,
             ControlData::Subscribed,
+            ControlData::WaitEvent {
+                event: ControlEvent::CommandFinished {
+                    pane: 1,
+                    exit_code: Some(2),
+                },
+            },
+            ControlData::WaitQuiet,
         ];
         let mut responses = vec![
             ControlResponse::Ok,
@@ -510,6 +550,39 @@ mod tests {
         );
         assert_eq!(serde_json::from_str::<ControlEvent>(&json).unwrap(), event);
         assert_eq!(event.pane(), 3);
+    }
+
+    #[test]
+    fn wait_condition_defaults_to_text_and_round_trips() {
+        let old: ControlRequest = serde_json::from_str(
+            r#"{"type":"wait_for","pattern":"ok","regex":false,"timeout_ms":5}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            old,
+            ControlRequest::WaitFor {
+                until: WaitCondition::Text,
+                ..
+            }
+        ));
+        for until in [
+            WaitCondition::CommandFinished,
+            WaitCondition::Bell,
+            WaitCondition::Quiet { ms: 500 },
+        ] {
+            let request = ControlRequest::WaitFor {
+                pattern: String::new(),
+                regex: false,
+                timeout_ms: 1000,
+                until,
+                target: None,
+            };
+            let json = serde_json::to_string(&request).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ControlRequest>(&json).unwrap(),
+                request
+            );
+        }
     }
 
     /// Clients written before pane targets keep working: an omitted `target`

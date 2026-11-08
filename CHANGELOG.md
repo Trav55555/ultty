@@ -51,6 +51,10 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   `title_changed` and `process_exited`. An idle subscriber costs no
   wakeups. A subscriber more than 1 MiB behind is disconnected, and at most
   64 can be open.
+- `ulttyctl wait-for --command-done` (exits with the command's status),
+  `--bell` and `--quiet <ms>` wait for the next command to finish, the next
+  bell, or a period without output, instead of for text. Control request:
+  `wait_for` with `until`.
 - `behavior.cursor_blink` (default `true`); `false` keeps the cursor steady.
 - `dist/terminfo/ultty.terminfo`, the `xterm-ultty` entry, installed by
   `install.sh`, `make install`, the packages and the Homebrew formula.
@@ -79,7 +83,8 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   fails with error 6 if that pane closes first.
 - An idle window no longer wakes up. The cursor blinks only while the
   window has focus and the cursor is in a blinking style; nothing else
-  polls unless a native app is connected or `ulttyctl wait-for` is waiting.
+  polls unless a native app is connected. A pending `ulttyctl wait-for`
+  wakes the window only at its timeout.
   Config edits are reloaded 100 ms after the file stops changing.
 - The GPU is opened with the primary API (Vulkan on Linux) alone, and GL
   only if that finds no adapter. Probing GL as well cost startup time and

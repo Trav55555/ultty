@@ -28,7 +28,7 @@ impl App {
                 .protocol_server
                 .as_ref()
                 .map_or(0, |server| server.session_count()),
-            control_waits: self.pending_control_waits.len(),
+            control_wait: self.next_control_wait_deadline(),
         }
         .next_wake(now)
     }
@@ -215,6 +215,7 @@ impl App {
                     .is_some_and(|server| server.has_subscribers());
                 for (terminal_id, events) in all_events {
                     for event in events {
+                        self.observe_control_wait_event(terminal_id, &event);
                         if subscribed {
                             if let (Some(server), Some(control_event)) = (
                                 self.control_server.as_mut(),
@@ -486,9 +487,9 @@ struct WakeState {
     /// Connected native sessions: their keepalives and animations are
     /// checked on the maintenance tick.
     native_sessions: usize,
-    /// `ulttyctl wait-for` requests, whose timeouts are checked on the
-    /// maintenance tick.
-    control_waits: usize,
+    /// The earliest `ulttyctl wait-for` timeout or quiet-period end. Text
+    /// and events wake the UI on their own, so waits need no tick.
+    control_wait: Option<Instant>,
 }
 
 impl WakeState {
@@ -499,8 +500,8 @@ impl WakeState {
         let frame = self
             .needs_redraw
             .then(|| self.last_render + render_delay_for_sync_state(self.sync_active));
-        let maintenance = (self.native_sessions > 0 || self.control_waits > 0)
-            .then(|| now + super::MAINTENANCE_POLL_INTERVAL);
+        let maintenance =
+            (self.native_sessions > 0).then(|| now + super::MAINTENANCE_POLL_INTERVAL);
         let title_animation =
             ultty::tabs::title_next_change(now.saturating_duration_since(self.launched_at))
                 .map(|next| self.launched_at + next);
@@ -517,6 +518,7 @@ impl WakeState {
             tab_titles,
             self.config_reload,
             maintenance,
+            self.control_wait,
         ]
         .into_iter()
         .flatten()
@@ -763,7 +765,7 @@ mod tests {
             last_tab_title_refresh: now - Duration::from_secs(5),
             config_reload: None,
             native_sessions: 0,
-            control_waits: 0,
+            control_wait: None,
         }
     }
 
@@ -807,19 +809,27 @@ mod tests {
     }
 
     #[test]
-    fn native_sessions_and_control_waits_keep_the_maintenance_tick() {
+    fn native_sessions_keep_the_maintenance_tick() {
         let now = Instant::now();
-        let tick = Some(now + super::super::MAINTENANCE_POLL_INTERVAL);
         let session = WakeState {
             native_sessions: 1,
             ..idle(now)
         };
-        assert_eq!(session.next_wake(now), tick);
+        assert_eq!(
+            session.next_wake(now),
+            Some(now + super::super::MAINTENANCE_POLL_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn a_pending_wait_wakes_at_its_deadline_not_on_a_tick() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(30);
         let wait = WakeState {
-            control_waits: 1,
+            control_wait: Some(deadline),
             ..idle(now)
         };
-        assert_eq!(wait.next_wake(now), tick);
+        assert_eq!(wait.next_wake(now), Some(deadline));
     }
 
     #[test]
