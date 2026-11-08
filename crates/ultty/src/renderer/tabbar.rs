@@ -7,8 +7,10 @@ use std::borrow::Cow;
 
 use super::{Renderer, Rgba, Vertex};
 use crate::tabs::{
-    MenuItem, TabBarState, TabState, TitleButton, TAB_CLOSE_BUTTON_SIZE, TAB_PADDING,
+    MenuItem, TabBarState, TabState, TitleButton, STATUS_MARKER_SIZE, TAB_CLOSE_BUTTON_SIZE,
+    TAB_PADDING,
 };
+use ultty_protocol::control::{PaneState, PaneStatus};
 
 // Drawing sizes in logical pixels; scaled by `TabBarState::scaled`.
 const CHROME_BUTTON_RADIUS: f32 = 6.0;
@@ -50,6 +52,85 @@ fn fit_title_location(path: &str, branch: Option<&str>, max_chars: usize) -> (St
     }
     let tail: String = path.chars().skip(path_len - (room - 1)).collect();
     (format!("…{tail}"), suffix)
+}
+
+/// Columns the path keeps in the title band before the status label gives
+/// way (the marker stays).
+const MIN_PATH_COLUMNS_WITH_STATUS: usize = 16;
+
+/// The status label as the title band shows it: the label, then progress
+/// as a percentage.
+fn status_label(status: &PaneStatus) -> String {
+    let percent = status
+        .progress
+        .map(|progress| format!("{:.0}%", progress * 100.0));
+    match (status.label.is_empty(), percent) {
+        (_, None) => status.label.clone(),
+        (true, Some(percent)) => percent,
+        (false, Some(percent)) => format!("{} {}", status.label, percent),
+    }
+}
+
+/// Where the title band's location and the focused pane's status go.
+#[derive(Debug, PartialEq)]
+struct TitleBand {
+    path: String,
+    suffix: String,
+    path_x: f32,
+    /// The x of the status marker's cell, and the label after it (empty
+    /// when there is no room for it).
+    status: Option<(f32, String)>,
+}
+
+/// Lay out the title band: the location centered between the logo and the
+/// buttons, followed by the status. The status gives up its label, then its
+/// marker, before the path drops below [`MIN_PATH_COLUMNS_WITH_STATUS`].
+fn title_band_layout(tab_bar: &TabBarState, cw: f32) -> TitleBand {
+    let x0 = title_logo_x(tab_bar);
+    let region_start = x0 + (TITLE_LOGO_COLUMNS + 2.0) * cw;
+    let region_end = tab_bar.title_buttons_start() - 2.0 * cw;
+    let max_chars = if cw > 0.0 {
+        ((region_end - region_start) / cw).floor().max(0.0) as usize
+    } else {
+        0
+    };
+    // Two columns of gap, the marker's column, a space, then the label.
+    const MARKER_COLUMNS: usize = 3;
+    let (status_columns, label) = match &tab_bar.title_status {
+        None => (0, None),
+        Some(status) => {
+            let label = status_label(status);
+            let full = MARKER_COLUMNS + 1 + label.chars().count();
+            if !label.is_empty() && max_chars >= full + MIN_PATH_COLUMNS_WITH_STATUS {
+                (full, Some(label))
+            } else if max_chars >= MARKER_COLUMNS + MIN_PATH_COLUMNS_WITH_STATUS {
+                (MARKER_COLUMNS, Some(String::new()))
+            } else {
+                (0, None)
+            }
+        }
+    };
+    let (path, suffix) = fit_title_location(
+        &tab_bar.title_path,
+        tab_bar.title_branch.as_deref(),
+        max_chars - status_columns,
+    );
+    let text_chars = path.chars().count() + suffix.chars().count();
+    let total = (text_chars + status_columns) as f32 * cw;
+    let centered = (tab_bar.total_width - total) / 2.0;
+    let path_x = centered
+        .max(region_start)
+        .min((region_end - total).max(region_start));
+    let status = label.map(|label| {
+        let gap = if text_chars == 0 { 0 } else { 2 };
+        (path_x + (text_chars + gap) as f32 * cw, label)
+    });
+    TitleBand {
+        path,
+        suffix,
+        path_x,
+        status,
+    }
 }
 
 fn lighten(color: Rgba, amount: f32) -> Rgba {
@@ -183,7 +264,7 @@ fn truncate_tab_title(title: &str, max_width: f32, cell_width: f32) -> Cow<'_, s
 }
 
 fn centered_tab_title_x(tab: &TabState, title: &str, cell_width: f32) -> f32 {
-    let label_x = tab.x + TAB_PADDING * tab.scale;
+    let label_x = tab.label_x();
     let label_width = tab.max_text_width().max(0.0);
     if title.is_empty() || label_width <= 0.0 || cell_width <= 0.0 {
         return label_x;
@@ -194,6 +275,44 @@ fn centered_tab_title_x(tab: &TabState, title: &str, cell_width: f32) -> f32 {
 }
 
 impl Renderer {
+    /// The color of a status marker, one palette color per state: blue for
+    /// work, yellow when the user is wanted, green when done, red on error,
+    /// and a dim foreground when idle. (The cursor accent is not used: many
+    /// themes make it green, which would read as done.)
+    fn status_color(&self, status: &PaneStatus) -> Rgba {
+        let named = &self.color_scheme.named;
+        match (status.state, status.attention) {
+            (PaneState::Error, _) => named[1],
+            (PaneState::Waiting, _) | (_, true) => named[3],
+            (PaneState::Working, _) => named[4],
+            (PaneState::Done, _) => named[2],
+            (PaneState::Idle, _) => dim(self.color_scheme.foreground, 0.45),
+        }
+    }
+
+    /// A square status marker in the text cell box at `x`, `y`: centered
+    /// across, and on the middle of lowercase letters down (a little below
+    /// the cell's center), so it lines up with the label beside it.
+    fn emit_status_marker(
+        &self,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        tab_bar: &TabBarState,
+        (x, y, width, height): (f32, f32, f32, f32),
+        status: &PaneStatus,
+    ) {
+        let size = tab_bar.scaled(STATUS_MARKER_SIZE).round();
+        self.emit_rect(
+            vertices,
+            indices,
+            (x + (width - size) / 2.0).round(),
+            (y + height * 0.56 - size / 2.0).round(),
+            size,
+            size,
+            self.status_color(status),
+        );
+    }
+
     /// Three bars: the main menu button's icon.
     fn emit_menu_icon(
         &self,
@@ -496,6 +615,28 @@ impl Renderer {
                 );
             }
 
+            if let Some(status) = &tab.status {
+                let marker_box = (
+                    tab.x + px(TAB_PADDING),
+                    title_bar_height + (tab_row_height - self.cell_height) / 2.0,
+                    tab_bar.scaled(STATUS_MARKER_SIZE),
+                    self.cell_height,
+                );
+                self.emit_status_marker(&mut vertices, &mut indices, tab_bar, marker_box, status);
+                if let Some(progress) = status.progress.filter(|progress| *progress > 0.0) {
+                    let track = tab.width - margin_x * 2.0;
+                    self.emit_rect(
+                        &mut vertices,
+                        &mut indices,
+                        tab.x + margin_x,
+                        height - line - px(2.0),
+                        (track * progress).round(),
+                        px(2.0),
+                        self.status_color(status),
+                    );
+                }
+            }
+
             // Close button hover background
             if tab_bar.hovered_close_button == Some(tab_idx) {
                 let (cx, cy, target_size, _) = tab.close_hover_bounds();
@@ -549,6 +690,19 @@ impl Renderer {
                 );
             }
         }
+        if let (Some(status), Some((marker_x, _))) = (
+            &tab_bar.title_status,
+            title_band_layout(tab_bar, self.cell_width).status,
+        ) {
+            let marker_box = (
+                marker_x,
+                (title_bar_height - self.cell_height) / 2.0,
+                self.cell_width,
+                self.cell_height,
+            );
+            self.emit_status_marker(&mut vertices, &mut indices, tab_bar, marker_box, status);
+        }
+
         // Separator between the split buttons and the window controls.
         let separator_height = tab_bar.chrome_button_size() - px(6.0);
         self.emit_rect(
@@ -671,31 +825,18 @@ impl Renderer {
             let cursor_column = if letters == 0 { 4 } else { 5 + letters };
             parts.push(("_", x0 + cursor_column as f32 * cw, green));
 
-            let region_start = x0 + (TITLE_LOGO_COLUMNS + 2.0) * cw;
-            let region_end = tab_bar.title_buttons_start() - 2.0 * cw;
-            let max_chars = if cw > 0.0 {
-                ((region_end - region_start) / cw).floor().max(0.0) as usize
-            } else {
-                0
-            };
-            let (path, suffix) = fit_title_location(
-                &tab_bar.title_path,
-                tab_bar.title_branch.as_deref(),
-                max_chars,
-            );
-            let text_chars = (path.chars().count() + suffix.chars().count()) as f32;
-            let centered = (tab_bar.total_width - text_chars * cw) / 2.0;
-            let path_x = centered
-                .max(region_start)
-                .min((region_end - text_chars * cw).max(region_start));
-            let path_owned = path;
-            let suffix_owned = suffix;
-            if !path_owned.is_empty() {
-                parts.push((path_owned.as_str(), path_x, fg));
+            let band = title_band_layout(tab_bar, cw);
+            if !band.path.is_empty() {
+                parts.push((band.path.as_str(), band.path_x, fg));
             }
-            if !suffix_owned.is_empty() {
-                let suffix_x = path_x + path_owned.chars().count() as f32 * cw;
-                parts.push((suffix_owned.as_str(), suffix_x, aqua));
+            if !band.suffix.is_empty() {
+                let suffix_x = band.path_x + band.path.chars().count() as f32 * cw;
+                parts.push((band.suffix.as_str(), suffix_x, aqua));
+            }
+            if let Some((marker_x, label)) = &band.status {
+                if !label.is_empty() {
+                    parts.push((label.as_str(), marker_x + 2.0 * cw, dim(fg, 0.75)));
+                }
             }
             for (text, x, color) in parts {
                 let width = text.chars().count() as f32 * cw + cw;
@@ -767,13 +908,15 @@ mod tests {
     use super::{
         center_vertices_in_rect, centered_tab_title_x, chrome_button_inner_rect,
         chrome_button_rect, chrome_symbol_color, close_symbol_color, dim, fit_title_location, mix,
-        truncate_tab_title, vertex_bounds, CHROME_BUTTON_BORDER,
+        status_label, title_band_layout, truncate_tab_title, vertex_bounds, CHROME_BUTTON_BORDER,
+        MIN_PATH_COLUMNS_WITH_STATUS,
     };
     use crate::renderer::{Rgba, Vertex};
     use crate::tabs::{
         TabBarState, TabState, CHROME_BUTTON_SIZE, TITLE_BAR_HEIGHT, WINDOW_BUTTON_WIDTH,
     };
     use crate::terminal_manager::TabId;
+    use ultty_protocol::control::{PaneState, PaneStatus};
 
     #[test]
     fn title_location_fits_whole_when_there_is_room() {
@@ -868,6 +1011,87 @@ mod tests {
         assert!((color.a - 1.0).abs() < f32::EPSILON);
     }
 
+    fn working(label: &str, progress: Option<f32>) -> PaneStatus {
+        PaneStatus {
+            state: PaneState::Working,
+            label: label.to_string(),
+            progress,
+            attention: false,
+        }
+    }
+
+    fn band(width: f32, status: Option<PaneStatus>) -> TabBarState {
+        let mut tab_bar = TabBarState::new();
+        tab_bar.total_width = width;
+        tab_bar.title_path = "~/projects/ultty".to_string();
+        tab_bar.title_branch = Some("main".to_string());
+        tab_bar.title_status = status;
+        tab_bar
+    }
+
+    #[test]
+    fn status_label_adds_progress_as_a_percentage() {
+        assert_eq!(status_label(&working("tests", None)), "tests");
+        assert_eq!(status_label(&working("tests", Some(0.425))), "tests 42%");
+        assert_eq!(status_label(&working("", Some(1.0))), "100%");
+    }
+
+    #[test]
+    fn a_wide_title_band_shows_the_location_then_the_status() {
+        let cw = 10.0;
+        let layout = title_band_layout(&band(1600.0, Some(working("running tests", None))), cw);
+        assert_eq!(layout.path, "~/projects/ultty");
+        assert_eq!(layout.suffix, " git:(main)");
+        let (marker_x, label) = layout.status.expect("status shown");
+        assert_eq!(label, "running tests");
+        let location_end = layout.path_x + 27.0 * cw;
+        assert_eq!(marker_x, location_end + 2.0 * cw);
+    }
+
+    #[test]
+    fn without_a_status_the_layout_is_unchanged() {
+        let layout = title_band_layout(&band(1600.0, None), 10.0);
+        assert_eq!(layout.status, None);
+        assert_eq!(layout.suffix, " git:(main)");
+    }
+
+    #[test]
+    fn a_narrow_title_band_drops_the_label_then_the_marker() {
+        let cw = 10.0;
+        let status = Some(working("a long label that will not fit here", None));
+        // Find widths where the full status fits, only the marker fits, and
+        // nothing fits, keeping MIN_PATH_COLUMNS_WITH_STATUS for the path.
+        let shown = |width: f32| title_band_layout(&band(width, status.clone()), cw).status;
+        let widths: Vec<f32> = (40..200).map(|columns| columns as f32 * cw).collect();
+        let marker_only = widths
+            .iter()
+            .find(|width| shown(**width).is_some_and(|(_, label)| label.is_empty()))
+            .expect("some width shows only the marker");
+        let full = widths
+            .iter()
+            .find(|width| shown(**width).is_some_and(|(_, label)| !label.is_empty()))
+            .expect("some width shows the label");
+        assert!(marker_only < full);
+        assert_eq!(shown(widths[0]), None);
+        let layout = title_band_layout(&band(*marker_only, status.clone()), cw);
+        assert!(
+            layout.path.chars().count() + layout.suffix.chars().count()
+                >= MIN_PATH_COLUMNS_WITH_STATUS
+        );
+    }
+
+    #[test]
+    fn a_tab_with_a_status_moves_its_title_past_the_marker() {
+        let plain = test_tab_state(0.0, 200.0);
+        let marked = TabState {
+            status: Some(working("", None)),
+            ..test_tab_state(0.0, 200.0)
+        };
+        assert!(marked.label_x() > plain.label_x());
+        assert!(marked.max_text_width() < plain.max_text_width());
+        assert!(centered_tab_title_x(&marked, "ab", 8.0) >= marked.label_x());
+    }
+
     #[test]
     fn chrome_symbol_hover_moves_toward_accent() {
         let fg = Rgba::new(0.8, 0.8, 0.8, 1.0);
@@ -942,6 +1166,7 @@ mod tests {
             is_active: false,
             is_hovered: false,
             scale: 1.0,
+            status: None,
         }
     }
 

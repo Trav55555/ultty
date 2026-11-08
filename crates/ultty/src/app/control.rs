@@ -569,7 +569,23 @@ impl App {
                 ControlResponse::Ok
             }
 
-            ControlRequest::SetAgentStatus { status: _ } => {
+            ControlRequest::SetPaneStatus { status, target } => {
+                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                let status = status.map(|status| status.sanitized());
+                let wants_user = status.as_ref().is_some_and(|status| status.attention);
+                if let Some(terminal) = self.terminal_manager.terminal_mut(pane) {
+                    terminal.status = status;
+                }
+                if wants_user && !self.window.has_focus() {
+                    // Cleared when the window gains focus, as for the bell.
+                    self.window.request_user_attention(Some(
+                        winit::window::UserAttentionType::Informational,
+                    ));
+                }
+                self.update_tab_bar();
                 self.needs_redraw = true;
                 ControlResponse::Ok
             }
@@ -979,6 +995,7 @@ fn pane_infos(
                 cwd: terminal_working_directory(terminal),
                 cols: dims.cols,
                 rows: dims.rows,
+                status: terminal.status.clone(),
             });
         }
     }
@@ -1094,7 +1111,7 @@ fn control_request_requires_auth(request: &ultty_protocol::control::ControlReque
         | ControlRequest::ToggleFullscreen
         | ControlRequest::Resize { .. }
         | ControlRequest::SetOpacity { .. }
-        | ControlRequest::SetAgentStatus { .. }
+        | ControlRequest::SetPaneStatus { .. }
         | ControlRequest::Screenshot { .. } => true,
     }
 }

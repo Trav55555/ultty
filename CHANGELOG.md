@@ -51,6 +51,15 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   `title_changed` and `process_exited`. An idle subscriber costs no
   wakeups. A subscriber more than 1 MiB behind is disconnected, and at most
   64 can be open.
+- `ulttyctl [--pane <id>] status <state> [label] [--progress <0-1|N%>]
+  [--attention]` (control request `set_pane_status`, MCP tool
+  `ultty_set_status`) shows what a pane is doing: a colored marker before
+  its tab title (blue working, yellow waiting, green done, red error), a
+  progress line along the tab, and the focused pane's marker and label after
+  the location in the title band. A tab shows its most urgent pane.
+  `--attention` marks an unfocused window urgent. `status clear` removes
+  it; `ulttyctl panes` lists it. It replaces `set_agent_status`, which was
+  accepted but never shown.
 - `ulttyctl mcp` serves Ultty's control plane to AI agents over MCP
   (stdio): list panes, read text, type text, send keys, run a command, wait
   (for text, a finished command with its exit code, the bell, or quiet),

@@ -8,7 +8,7 @@ use ultty::control::format_response;
 use ultty::control::paths::{control_dir, ControlEndpoint};
 use ultty_protocol::control::{
     ControlData, ControlEnvelope, ControlEvent, ControlRequest, ControlResponse, OutputFormat,
-    WaitCondition,
+    PaneState, PaneStatus, WaitCondition,
 };
 use ultty_protocol::{Key, Modifiers};
 
@@ -350,6 +350,7 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
         }
         "wait-for" => parse_wait_for(rest),
         "subscribe" => Ok(ControlRequest::Subscribe { target: None }),
+        "status" => parse_status(rest),
         "auth" => Ok(ControlRequest::Authenticate {
             token: rest
                 .first()
@@ -415,6 +416,66 @@ fn parse_wait_for(args: &[String]) -> Result<ControlRequest, String> {
     }
 }
 
+/// `status clear`, or `status <state> [label...] [--progress <0-1|N%>]
+/// [--attention]`.
+fn parse_status(args: &[String]) -> Result<ControlRequest, String> {
+    let state = match args.first().map(String::as_str) {
+        Some("clear") if args.len() == 1 => {
+            return Ok(ControlRequest::SetPaneStatus {
+                status: None,
+                target: None,
+            })
+        }
+        Some("idle") => PaneState::Idle,
+        Some("working") => PaneState::Working,
+        Some("waiting") => PaneState::Waiting,
+        Some("done") => PaneState::Done,
+        Some("error") => PaneState::Error,
+        _ => return Err("status takes idle, working, waiting, done, error or clear".to_string()),
+    };
+    let mut status = PaneStatus {
+        state,
+        label: String::new(),
+        progress: None,
+        attention: false,
+    };
+    let mut label = Vec::new();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--attention" => status.attention = true,
+            "--progress" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "--progress requires a value".to_string())?;
+                status.progress = Some(parse_progress(value)?);
+                index += 1;
+            }
+            word => label.push(word),
+        }
+        index += 1;
+    }
+    status.label = label.join(" ");
+    Ok(ControlRequest::SetPaneStatus {
+        status: Some(status),
+        target: None,
+    })
+}
+
+/// A fraction from 0 to 1, or a percentage such as `40%`.
+fn parse_progress(value: &str) -> Result<f32, String> {
+    let (number, scale) = match value.strip_suffix('%') {
+        Some(percent) => (percent, 100.0),
+        None => (value, 1.0),
+    };
+    number
+        .parse::<f32>()
+        .ok()
+        .filter(|n| n.is_finite())
+        .map(|n| (n / scale).clamp(0.0, 1.0))
+        .ok_or_else(|| format!("--progress must be 0-1 or a percentage, not {value}"))
+}
+
 /// Point a pane-scoped request at pane `id`; other requests refuse `--pane`.
 fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
     match request {
@@ -426,11 +487,12 @@ fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
         | ControlRequest::RunCommand { target, .. }
         | ControlRequest::Search { target, .. }
         | ControlRequest::WaitFor { target, .. }
-        | ControlRequest::Subscribe { target } => {
+        | ControlRequest::Subscribe { target }
+        | ControlRequest::SetPaneStatus { target, .. } => {
             *target = Some(id);
             Ok(())
         }
-        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for and subscribe".to_string()),
+        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for, subscribe and status".to_string()),
     }
 }
 
@@ -626,7 +688,7 @@ GLOBAL FLAGS:
     --pane <id>             Act on pane <id> (from `panes`) instead of the
                             focused one. Goes before the command; applies to
                             text, selection, send-*, run, search, wait-for,
-                            subscribe
+                            subscribe, status
     -V, --version           Show ulttyctl version without connecting to Ultty
     -h, --help              Show this help
 
@@ -668,6 +730,13 @@ WINDOW COMMANDS:
 
 EXECUTION:
     run <command> [args]    Run a command in current tab
+
+STATUS:
+    status <state> [label] [--progress <0-1|N%>] [--attention]
+                            Show what this pane is doing in the tab bar:
+                            idle, working, waiting, done or error.
+                            --attention marks an unfocused window urgent
+    status clear            Remove the pane's status
 
 MCP:
     mcp                     Serve the tools above to an AI agent over MCP
@@ -730,7 +799,8 @@ mod tests {
     use std::time::Duration;
 
     use ultty_protocol::control::{
-        ControlData, ControlEvent, ControlRequest, ControlResponse, WaitCondition,
+        ControlData, ControlEvent, ControlRequest, ControlResponse, PaneState, PaneStatus,
+        WaitCondition,
     };
 
     #[test]
@@ -920,6 +990,40 @@ mod tests {
             exit_status(&ControlResponse::Data(ControlData::WaitTimeout)),
             1
         );
+    }
+
+    #[test]
+    fn status_takes_a_state_label_progress_and_attention() {
+        assert_eq!(
+            parse_cli_request(&args(
+                "--pane 2 status waiting need a review --attention --progress 40%"
+            ))
+            .unwrap(),
+            ControlRequest::SetPaneStatus {
+                status: Some(PaneStatus {
+                    state: PaneState::Waiting,
+                    label: "need a review".to_string(),
+                    progress: Some(0.4),
+                    attention: true,
+                }),
+                target: Some(2),
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("status clear")).unwrap(),
+            ControlRequest::SetPaneStatus {
+                status: None,
+                target: None
+            }
+        );
+        for bad in [
+            "status",
+            "status busy",
+            "status working --progress",
+            "status working --progress x",
+        ] {
+            assert!(parse_cli_request(&args(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

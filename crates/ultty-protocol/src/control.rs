@@ -156,8 +156,13 @@ pub enum ControlRequest {
         opacity: f32,
     },
 
-    SetAgentStatus {
-        status: AgentStatusUpdate,
+    /// Show what a pane is doing in the tab bar; `None` clears it.
+    SetPaneStatus {
+        #[serde(default)]
+        status: Option<PaneStatus>,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     // === Screenshot ===
@@ -212,40 +217,65 @@ impl WaitCondition {
     }
 }
 
-/// Agent status update for terminal status bar display.
+/// What a program says it is doing in its pane, shown in the tab bar.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentStatusUpdate {
-    /// Current cumulative spend in USD.
-    pub cost_usd: f64,
-    /// Configured budget ceiling in USD.
-    pub budget_usd: f64,
-    /// Pressure indicator (for example: low/normal/high).
-    pub pressure: String,
-    /// Active model name.
-    pub model: String,
-    /// Context quality summary shown in the status bar.
-    pub context_quality: String,
-    /// Current workflow step.
-    pub step: String,
-    /// Agent display name.
-    pub agent_name: String,
+pub struct PaneStatus {
+    pub state: PaneState,
+    /// A few words, such as "running tests". Shown in the title band.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    /// How far along, from 0 to 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<f32>,
+    /// Ask for the user: marks the window urgent while it is unfocused.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attention: bool,
 }
 
-impl AgentStatusUpdate {
-    /// Validate that numeric fields are finite (not NaN or Inf).
-    pub fn is_valid(&self) -> bool {
-        self.cost_usd.is_finite() && self.budget_usd.is_finite()
+/// The kind of thing a pane is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneState {
+    Idle,
+    Working,
+    /// Waiting on the user.
+    Waiting,
+    Done,
+    Error,
+}
+
+impl PaneStatus {
+    /// Longest label kept, in characters.
+    pub const MAX_LABEL_CHARS: usize = 64;
+
+    /// The status with its label cut to [`Self::MAX_LABEL_CHARS`] and free
+    /// of control characters, and its progress finite and within 0..=1.
+    pub fn sanitized(mut self) -> Self {
+        self.label = self
+            .label
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(Self::MAX_LABEL_CHARS)
+            .collect::<String>()
+            .trim()
+            .to_string();
+        self.progress = self
+            .progress
+            .filter(|progress| progress.is_finite())
+            .map(|progress| progress.clamp(0.0, 1.0));
+        self
     }
 
-    /// Clamp cost and budget to finite values, replacing NaN/Inf with 0.0.
-    pub fn sanitized(mut self) -> Self {
-        if !self.cost_usd.is_finite() {
-            self.cost_usd = 0.0;
+    /// How much the status asks for the user's eye: an error first, then a
+    /// pane waiting on the user, then work in progress.
+    pub fn urgency(&self) -> u8 {
+        match (self.state, self.attention) {
+            (PaneState::Error, _) => 4,
+            (PaneState::Waiting, _) | (_, true) => 3,
+            (PaneState::Working, _) => 2,
+            (PaneState::Done, _) => 1,
+            (PaneState::Idle, _) => 0,
         }
-        if !self.budget_usd.is_finite() {
-            self.budget_usd = 0.0;
-        }
-        self
     }
 }
 
@@ -425,6 +455,9 @@ pub struct PaneInfo {
     pub cols: u16,
     /// Pane height in cells.
     pub rows: u16,
+    /// What the pane's program said it is doing, if it set a status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<PaneStatus>,
 }
 
 /// Build and protocol version information.
@@ -481,6 +514,12 @@ mod tests {
                     cwd: None,
                     cols: 40,
                     rows: 24,
+                    status: Some(PaneStatus {
+                        state: PaneState::Working,
+                        label: "tests".to_string(),
+                        progress: Some(0.5),
+                        attention: false,
+                    }),
                 }],
             },
             ControlData::Selection {
@@ -535,6 +574,57 @@ mod tests {
         ];
         responses.extend(data.into_iter().map(ControlResponse::Data));
         responses
+    }
+
+    #[test]
+    fn pane_status_is_cleaned_before_it_is_shown() {
+        let status = PaneStatus {
+            state: PaneState::Working,
+            label: format!("  run\x1b[31m{}", "x".repeat(100)),
+            progress: Some(7.0),
+            attention: false,
+        }
+        .sanitized();
+        assert!(!status.label.contains('\x1b'));
+        assert!(status.label.starts_with("run ["));
+        assert_eq!(
+            status.label.chars().count(),
+            PaneStatus::MAX_LABEL_CHARS - 2
+        );
+        assert_eq!(status.progress, Some(1.0));
+        let nan = PaneStatus {
+            progress: Some(f32::NAN),
+            ..status
+        };
+        assert_eq!(nan.sanitized().progress, None);
+    }
+
+    #[test]
+    fn errors_outrank_waiting_outranks_work() {
+        let status = |state, attention| PaneStatus {
+            state,
+            label: String::new(),
+            progress: None,
+            attention,
+        };
+        let error = status(PaneState::Error, false).urgency();
+        let waiting = status(PaneState::Waiting, false).urgency();
+        let attention = status(PaneState::Working, true).urgency();
+        let working = status(PaneState::Working, false).urgency();
+        let done = status(PaneState::Done, false).urgency();
+        assert!(error > waiting && waiting == attention && attention > working && working > done);
+    }
+
+    #[test]
+    fn pane_status_json_is_small() {
+        let json = serde_json::to_string(&PaneStatus {
+            state: PaneState::Done,
+            label: String::new(),
+            progress: None,
+            attention: false,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"state":"done"}"#);
     }
 
     #[test]

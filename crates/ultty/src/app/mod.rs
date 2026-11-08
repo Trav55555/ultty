@@ -773,6 +773,7 @@ impl App {
             tab_width_override,
         );
         self.update_title_location();
+        self.update_tab_statuses();
 
         // Update renderer's tab bar height for dimension calculations
         let new_height = self.tab_bar.content_top();
@@ -786,6 +787,23 @@ impl App {
         }
 
         self.refresh_runtime_wakeup_fds();
+    }
+
+    /// Show each tab's most urgent pane status, and the focused pane's in
+    /// the title band.
+    fn update_tab_statuses(&mut self) {
+        let manager = &self.terminal_manager;
+        for (state, tab) in self.tab_bar.tabs.iter_mut().zip(manager.tabs()) {
+            state.status = tab
+                .terminals
+                .iter()
+                .filter_map(|&pane| manager.terminal(pane)?.status.as_ref())
+                .max_by_key(|status| status.urgency())
+                .cloned();
+        }
+        self.tab_bar.title_status = manager
+            .focused_terminal()
+            .and_then(|terminal| terminal.status.clone());
     }
 
     fn freeze_tab_width_after_close(&mut self) {

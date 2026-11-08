@@ -69,6 +69,8 @@ pub struct ManagedTerminal {
     pub tab_id: TabId,
     /// Display title
     pub title: String,
+    /// What the pane's program said it is doing (`ulttyctl status`).
+    pub status: Option<ultty_protocol::control::PaneStatus>,
 }
 
 impl ManagedTerminal {
@@ -88,6 +90,7 @@ impl ManagedTerminal {
             event_loop,
             tab_id,
             title: format!("Terminal {}", id.0),
+            status: None,
         })
     }
 
@@ -943,6 +946,7 @@ impl TerminalManager {
             event_loop,
             tab_id,
             title: format!("Terminal {}", terminal_id.0),
+            status: None,
         };
 
         self.push_terminal(terminal);
@@ -1330,6 +1334,7 @@ impl ManagedTerminal {
             event_loop,
             tab_id,
             title: format!("Terminal {}", id.0),
+            status: None,
         })
     }
 }

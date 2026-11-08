@@ -930,7 +930,7 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                         .find(|label| !label.is_empty())
                         .unwrap_or("");
                     out.push_str(&format!(
-                        "{}{} tab:{} {}x{} {}\n",
+                        "{}{} tab:{} {}x{} {}",
                         marker,
                         pane.id,
                         pane.tab_index + 1,
@@ -938,6 +938,18 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                         pane.rows,
                         label
                     ));
+                    if let Some(status) = &pane.status {
+                        let state = serde_json::to_value(status.state)
+                            .ok()
+                            .and_then(|state| state.as_str().map(str::to_string))
+                            .unwrap_or_default();
+                        let mut detail = status.label.clone();
+                        if let Some(progress) = status.progress {
+                            detail = format!("{detail} {:.0}%", progress * 100.0);
+                        }
+                        out.push_str(&format!(" [{}: {}]", state, detail.trim()));
+                    }
+                    out.push('\n');
                 }
                 out
             }
@@ -1285,11 +1297,20 @@ mod tests {
             cwd: None,
             cols: 40,
             rows: 24,
+            status: None,
         };
         let response = ControlResponse::Data(ControlData::Panes {
             panes: vec![
                 pane(3, true, "~/src", Some("vim")),
-                pane(5, false, "build log", None),
+                PaneInfo {
+                    status: Some(ultty_protocol::control::PaneStatus {
+                        state: ultty_protocol::control::PaneState::Working,
+                        label: "make".to_string(),
+                        progress: Some(0.25),
+                        attention: false,
+                    }),
+                    ..pane(5, false, "build log", None)
+                },
                 PaneInfo {
                     cwd: Some("/srv".to_string()),
                     ..pane(8, false, "", None)
@@ -1298,7 +1319,7 @@ mod tests {
         });
         assert_eq!(
             format_response(&response, OutputFormat::Text),
-            "*3 tab:1 40x24 vim\n 5 tab:1 40x24 build log\n 8 tab:1 40x24 /srv\n"
+            "*3 tab:1 40x24 vim\n 5 tab:1 40x24 build log [working: make 25%]\n 8 tab:1 40x24 /srv\n"
         );
     }
 

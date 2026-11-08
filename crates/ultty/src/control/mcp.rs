@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use ultty_protocol::control::{
-    ControlData, ControlRequest, ControlResponse, PaneInfo, WaitCondition,
+    ControlData, ControlRequest, ControlResponse, PaneInfo, PaneState, PaneStatus, WaitCondition,
 };
 
 use super::server::{parse_key, parse_modifiers};
@@ -167,6 +167,10 @@ impl McpServer<'_, '_> {
                 target: pane,
             })?,
             "ultty_new_tab" => return self.new_tab(args),
+            "ultty_set_status" => self.request(ControlRequest::SetPaneStatus {
+                status: pane_status(args)?,
+                target: pane,
+            })?,
             "ultty_screenshot" => return self.screenshot(),
             _ => return Err(format!("unknown tool: {name}")),
         };
@@ -259,6 +263,38 @@ impl McpServer<'_, '_> {
             "data": base64::engine::general_purpose::STANDARD.encode(bytes?),
         })])
     }
+}
+
+/// The status `ultty_set_status` asks for; `state: "clear"` removes it.
+fn pane_status(args: &Map<String, Value>) -> Result<Option<PaneStatus>, String> {
+    let state = match required_str(args, "state")? {
+        "clear" => return Ok(None),
+        "idle" => PaneState::Idle,
+        "working" => PaneState::Working,
+        "waiting" => PaneState::Waiting,
+        "done" => PaneState::Done,
+        "error" => PaneState::Error,
+        other => {
+            return Err(format!(
+                "state must be idle, working, waiting, done, error or clear, not {other}"
+            ))
+        }
+    };
+    let progress = match args.get("progress") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_f64()
+                .filter(|n| (0.0..=1.0).contains(n))
+                .ok_or("progress must be a number from 0 to 1")? as f32,
+        ),
+    };
+    Ok(Some(PaneStatus {
+        state,
+        label: optional_str(args, "label")?.unwrap_or("").to_string(),
+        progress,
+        attention: optional_bool(args, "attention")?,
+    }))
 }
 
 fn initialize(params: &Value) -> Value {
@@ -437,6 +473,20 @@ fn tools() -> Vec<Value> {
             &[],
         ),
         tool(
+            "ultty_set_status",
+            "Show what you are doing in a pane's tab: a colored marker, a short label \
+             and optional progress. Set waiting with attention=true when you need the \
+             user. state=clear removes it.",
+            json!({
+                "pane": pane_property(),
+                "state": { "type": "string", "enum": ["idle", "working", "waiting", "done", "error", "clear"] },
+                "label": { "type": "string", "description": "A few words, e.g. \"running tests\"." },
+                "progress": { "type": "number", "minimum": 0, "maximum": 1 },
+                "attention": { "type": "boolean", "description": "Mark the window urgent while it is unfocused." },
+            }),
+            &["state"],
+        ),
+        tool(
             "ultty_screenshot",
             "Capture the Ultty window as a PNG image.",
             json!({}),
@@ -496,6 +546,7 @@ mod tests {
             cwd: None,
             cols: 80,
             rows: 24,
+            status: None,
         }
     }
 
@@ -656,6 +707,42 @@ mod tests {
             serde_json::from_str(lines[0]["result"]["content"][0]["text"].as_str().unwrap())
                 .unwrap();
         assert_eq!(opened, vec![pane(5)]);
+    }
+
+    #[test]
+    fn set_status_sets_and_clears_a_panes_status() {
+        let (lines, sent) = exchange(
+            &[
+                call(
+                    1,
+                    "ultty_set_status",
+                    json!({ "pane": 3, "state": "working",
+                                                   "label": "tests", "progress": 0.5 }),
+                ),
+                call(2, "ultty_set_status", json!({ "state": "clear" })),
+                call(3, "ultty_set_status", json!({ "state": "busy" })),
+            ],
+            |_| ControlResponse::Ok,
+        );
+        assert_eq!(
+            sent,
+            vec![
+                ControlRequest::SetPaneStatus {
+                    status: Some(PaneStatus {
+                        state: PaneState::Working,
+                        label: "tests".to_string(),
+                        progress: Some(0.5),
+                        attention: false,
+                    }),
+                    target: Some(3),
+                },
+                ControlRequest::SetPaneStatus {
+                    status: None,
+                    target: None,
+                },
+            ]
+        );
+        assert_eq!(lines[2]["result"]["isError"], true);
     }
 
     #[test]
