@@ -116,6 +116,9 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Changed
 
+- Output in a background tab no longer redraws the window. A hidden tab
+  streaming 100 lines a second cost 272 frames and 0.24 s of CPU per 5 s;
+  now none beyond the cursor blink, and 0.05 s.
 - A command given by name runs the first executable file of that name on
   `PATH`. A file without execute permission, such as the `~/.local/bin/env`
   that uv installs to be sourced, no longer hides `/usr/bin/env` (it made

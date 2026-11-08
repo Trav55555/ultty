@@ -904,6 +904,12 @@ impl TerminalManager {
             .collect()
     }
 
+    /// Whether the pane is in the active tab, so its output shows.
+    pub fn is_on_screen(&self, id: TerminalId) -> bool {
+        self.active_tab()
+            .is_some_and(|tab| tab.terminals.contains(&id))
+    }
+
     /// Get the focused terminal ID in the active tab.
     pub fn focused_terminal_id(&self) -> Option<TerminalId> {
         self.active_tab().map(|t| t.focused_terminal)
@@ -1587,6 +1593,20 @@ mod tests {
             ..ThemeColors::default()
         });
         assert!(wait_for_screen(&mut manager, "got:E[?997;2n"));
+    }
+
+    #[test]
+    fn only_the_active_tabs_panes_are_on_screen() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let first = manager.focused_terminal_id().unwrap();
+        let split = manager.split_horizontal().unwrap().unwrap();
+        assert!(manager.is_on_screen(first) && manager.is_on_screen(split));
+        manager.create_tab().unwrap();
+        let other = manager.focused_terminal_id().unwrap();
+        assert!(manager.is_on_screen(other));
+        assert!(!manager.is_on_screen(first) && !manager.is_on_screen(split));
+        manager.switch_to_tab(0);
+        assert!(manager.is_on_screen(first) && !manager.is_on_screen(other));
     }
 
     #[test]

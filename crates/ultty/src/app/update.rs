@@ -227,7 +227,11 @@ impl App {
                         }
                         match event {
                             TerminalEvent::Redraw => {
-                                self.needs_redraw = true;
+                                // A background tab's output is drawn when
+                                // the tab is shown.
+                                if self.terminal_manager.is_on_screen(terminal_id) {
+                                    self.needs_redraw = true;
+                                }
                                 // Output may come with a new foreground
                                 // program or directory; see the tab titles.
                                 self.tab_title_activity = Some(now);
