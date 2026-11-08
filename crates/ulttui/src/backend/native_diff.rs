@@ -60,6 +60,21 @@ impl RetainedTree {
         }
     }
 
+    /// The native key of retained region `id`, if it has one.
+    pub(super) fn key_of(&self, id: RegionId) -> Option<&str> {
+        self.regions.get(&id)?.key.as_deref()
+    }
+
+    /// The retained region with native key `key`; the oldest one if
+    /// several share it.
+    pub(super) fn region_with_key(&self, key: &str) -> Option<RegionId> {
+        self.regions
+            .iter()
+            .filter(|(_, region)| region.key.as_deref() == Some(key))
+            .map(|(id, _)| *id)
+            .min_by_key(|id| id.0)
+    }
+
     pub(super) fn children_of(&self, parent: RegionId) -> &[RegionId] {
         self.children.get(&parent).map(Vec::as_slice).unwrap_or(&[])
     }

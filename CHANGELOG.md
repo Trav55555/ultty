@@ -61,6 +61,15 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   `title_changed` and `process_exited`. An idle subscriber costs no
   wakeups. A subscriber more than 1 MiB behind is disconnected, and at most
   64 can be open.
+- `ulttyctl [--pane <id>] regions` (control request `regions`, MCP tool
+  `ultty_regions`) shows the native apps in a pane's tab: each app's
+  region tree in drawing order with every region's position and size in
+  cells, scroll, content kind and text, metadata, and the focused region.
+  `--json` has the full text, so a test can assert on a native program
+  ([testing TUIs](docs/testing-tuis.md)). Read-only.
+- `ulttui` names each region it creates for a widget with an id
+  (`SetRegionMetadata`, key `id`) and tells the terminal which region has
+  focus, so `regions` can find widgets by id.
 - `ulttyctl [--pane <id>] last-command [--tail <lines>]` (control request
   `last_command`, MCP tool `ultty_last_command`) prints the last command the
   pane's shell ran, its output and how it ended, or what it has printed so

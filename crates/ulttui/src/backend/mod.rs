@@ -95,6 +95,16 @@ impl Backend {
         }
     }
 
+    /// Tell the terminal which widget has focus (native mode only).
+    pub fn report_focus(&mut self, widget_id: Option<&str>) -> crate::Result<()> {
+        match self {
+            Backend::Native(b) => b.report_focus(widget_id),
+            Backend::Ansi(_) => Ok(()),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(_) => Ok(()),
+        }
+    }
+
     /// Poll for events.
     pub fn poll_event(&mut self) -> crate::Result<Option<Event>> {
         match self {

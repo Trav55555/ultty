@@ -472,6 +472,8 @@ The terminal sends empty `Ping` after 30 seconds idle. It closes after 10 second
 | `StreamEnd` | id u32, stream_id u32 | `CAP_STREAM_LIFECYCLE` |
 | `SetRegionMetadata` | id u32, pair count u32, key/value strings | `CAP_REGION_METADATA` |
 
+Metadata is opaque to the terminal; tools read it back (`ulttyctl regions`). By convention the key `id` holds the widget id of the region's widget, which `ulttui` sets for every region it creates for a widget with an id. `Focus` and `Blur` name the region with keyboard focus for those tools too; they do not change where key events go unless the focused region subscribed to `EVENT_KEY`.
+
 `Scroll` is `id: u32`, `x: f32`, `y: f32`, `animate: u8`; `Focus` is `id: u32`; `Blur` is empty. None of these is capability-gated: `CAP_WIDGET_SCROLL` only advertises that the terminal handles scroll offsets and animation, and `CAP_LAYOUT_FLEXBOX` that it runs the flexbox layout described in section 5.
 
 ---
