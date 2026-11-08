@@ -5,6 +5,7 @@
 
 use crate::{Key, Modifiers};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Output format used by `ulttyctl` responses.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -97,6 +98,14 @@ pub enum ControlRequest {
 
     /// Every pane in every tab, tabs in order and panes in layout order.
     ListPanes,
+
+    /// The native apps drawing in a pane's tab: each one's region tree
+    /// with computed layout, content and focus. Read-only.
+    Regions {
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
 
     GetInfo,
 
@@ -350,6 +359,10 @@ pub enum ControlData {
         tab_index: usize,
         pane: u64,
     },
+    /// The native apps in a pane's tab; see `ControlRequest::Regions`.
+    Regions {
+        scenes: Vec<NativeScene>,
+    },
     /// A pane's last command; see `ControlRequest::LastCommand`.
     LastCommand {
         command: String,
@@ -457,6 +470,48 @@ pub struct TabInfo {
     pub pid: Option<u32>,
     /// Working directory for the tab, if known.
     pub cwd: Option<String>,
+}
+
+/// One native app's scene, as `ControlRequest::Regions` reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NativeScene {
+    /// The app's session, unique for the terminal's lifetime.
+    pub session: u64,
+    /// Connected in-band over the PTY rather than over the tab's socket.
+    pub in_band: bool,
+    /// The region with keyboard focus, if any.
+    pub focused: Option<u32>,
+    /// Every region, root first, in depth-first (drawing) order.
+    pub regions: Vec<RegionInfo>,
+}
+
+/// One region of a native scene. Positions and sizes are in cells, from
+/// the top left of the app's area, before any scrolled ancestor moves it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegionInfo {
+    pub id: u32,
+    /// None for the root.
+    pub parent: Option<u32>,
+    /// The root is 0.
+    pub depth: usize,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// How far the region's content is scrolled, in cells.
+    pub scroll_x: f32,
+    pub scroll_y: f32,
+    /// `none`, `text`, `rich_text`, or a widget: `input`, `markdown`,
+    /// `code`, `progress`, `spinner`, `image`, `button`.
+    pub content: String,
+    /// The text the region shows, for content that has text (an input's
+    /// value, a button's label).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Key-value pairs the app set with `SetRegionMetadata` (a later
+    /// duplicate key wins).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 /// Metadata describing a single pane (one terminal in a tab's layout).
@@ -600,6 +655,27 @@ mod tests {
                 exit_code: Some(0),
                 running: false,
                 output_available: true,
+            },
+            ControlData::Regions {
+                scenes: vec![NativeScene {
+                    session: 3,
+                    in_band: false,
+                    focused: Some(2),
+                    regions: vec![RegionInfo {
+                        id: 2,
+                        parent: Some(0),
+                        depth: 1,
+                        x: 0.0,
+                        y: 1.0,
+                        width: 80.0,
+                        height: 22.0,
+                        scroll_x: 0.0,
+                        scroll_y: 4.0,
+                        content: "text".to_string(),
+                        text: Some("log line".to_string()),
+                        metadata: BTreeMap::from([("id".to_string(), "log".to_string())]),
+                    }],
+                }],
             },
         ];
         let mut responses = vec![

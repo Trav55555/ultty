@@ -370,6 +370,8 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
                 target: None,
             })
         }
+        "regions" if rest.is_empty() => Ok(ControlRequest::Regions { target: None }),
+        "regions" => Err("usage: regions".to_string()),
         "status" => parse_status(rest),
         "auth" => Ok(ControlRequest::Authenticate {
             token: rest
@@ -509,11 +511,12 @@ fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
         | ControlRequest::WaitFor { target, .. }
         | ControlRequest::Subscribe { target }
         | ControlRequest::SetPaneStatus { target, .. }
-        | ControlRequest::LastCommand { target, .. } => {
+        | ControlRequest::LastCommand { target, .. }
+        | ControlRequest::Regions { target } => {
             *target = Some(id);
             Ok(())
         }
-        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for, subscribe, status and last-command".to_string()),
+        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for, subscribe, status, last-command and regions".to_string()),
     }
 }
 
@@ -709,7 +712,7 @@ GLOBAL FLAGS:
     --pane <id>             Act on pane <id> (from `panes`) instead of the
                             focused one. Goes before the command; applies to
                             text, selection, send-*, run, search, wait-for,
-                            subscribe, status, last-command
+                            subscribe, status, last-command, regions
     -V, --version           Show ulttyctl version without connecting to Ultty
     -h, --help              Show this help
 
@@ -734,6 +737,10 @@ QUERY COMMANDS:
                             The last command the shell ran and its output
                             (needs OSC 133 shell integration); exits with
                             the command's status
+    regions                 The native apps in the pane's tab: each region
+                            by depth with its content kind, position and
+                            size in cells, metadata and text (all of it
+                            with --json)
 
 WAIT COMMANDS:
     wait-for <pattern> [--timeout <ms>]
@@ -1049,6 +1056,15 @@ mod tests {
         ] {
             assert!(parse_cli_request(&args(bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn regions_takes_a_pane_and_no_arguments() {
+        assert_eq!(
+            parse_cli_request(&args("--pane 3 regions")).unwrap(),
+            ControlRequest::Regions { target: Some(3) }
+        );
+        assert!(parse_cli_request(&args("regions extra")).is_err());
     }
 
     #[test]

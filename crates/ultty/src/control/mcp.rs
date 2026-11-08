@@ -175,6 +175,7 @@ impl McpServer<'_, '_> {
                 tail_lines: Some(optional_u64(args, "tail_lines")?.unwrap_or(DEFAULT_TAIL_LINES)),
                 target: pane,
             })?,
+            "ultty_regions" => self.request(ControlRequest::Regions { target: pane })?,
             "ultty_set_status" => self.request(ControlRequest::SetPaneStatus {
                 status: pane_status(args)?,
                 target: pane,
@@ -461,6 +462,16 @@ fn tools() -> Vec<Value> {
                 "pane": pane_property(),
                 "tail_lines": { "type": "integer", "minimum": 1, "description": "Lines of output from the end. Default 200." },
             }),
+            &[],
+        ),
+        tool(
+            "ultty_regions",
+            "The native (ulttui) apps in a pane's tab: each app's region tree in \
+             drawing order, with every region's position and size in cells, scroll, \
+             content kind and text, the metadata the app set, and which region has \
+             focus. Empty when the tab runs only plain terminal programs; read those \
+             with ultty_read_text.",
+            json!({ "pane": pane_property() }),
             &[],
         ),
         tool(

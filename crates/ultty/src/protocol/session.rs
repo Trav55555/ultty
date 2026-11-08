@@ -24,11 +24,36 @@ use ultty_protocol::{
 #[cfg(test)]
 use ultty_protocol::{Content, Style};
 
+use ultty_protocol::control::{NativeScene, RegionInfo};
+
 use crate::scene::layout::LayoutEngine;
 #[cfg(test)]
 use crate::scene::region::Region;
 use crate::scene::tree::SceneTree;
 use crate::terminal_manager::TabId;
+
+/// A region's content kind as `ulttyctl regions` names it, and its text
+/// when it has some.
+fn describe_content(content: &ultty_protocol::Content) -> (&'static str, Option<String>) {
+    use ultty_protocol::{Content, WidgetContent};
+    match content {
+        Content::None => ("none", None),
+        Content::Text(text) => ("text", Some(text.text.clone())),
+        Content::RichText(rich) => (
+            "rich_text",
+            Some(rich.spans.iter().map(|span| span.text.as_str()).collect()),
+        ),
+        Content::Widget(widget) => match widget {
+            WidgetContent::Input(input) => ("input", Some(input.value.clone())),
+            WidgetContent::Markdown(markdown) => ("markdown", Some(markdown.source.clone())),
+            WidgetContent::Code(code) => ("code", Some(code.source.clone())),
+            WidgetContent::Progress(_) => ("progress", None),
+            WidgetContent::Spinner(_) => ("spinner", None),
+            WidgetContent::Image(_) => ("image", None),
+            WidgetContent::Button(button) => ("button", Some(button.label.clone())),
+        },
+    }
+}
 
 /// Capabilities supported by this terminal.
 const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
@@ -544,6 +569,40 @@ impl NativeSession {
 
     pub fn scene(&self) -> &SceneTree {
         &self.scene
+    }
+
+    /// This app's scene for `ulttyctl regions`: every region, root first,
+    /// in drawing order, with its layout, scroll and content.
+    pub fn describe(&self) -> NativeScene {
+        let regions = self
+            .scene
+            .iter_depth_first()
+            .map(|region| {
+                let (content, text) = describe_content(&region.content);
+                let (scroll_x, scroll_y) = self.scroll_offset(region.id);
+                let layout = region.computed;
+                RegionInfo {
+                    id: region.id.0,
+                    parent: region.parent.map(|parent| parent.0),
+                    depth: self.scene.depth_of(region.id).unwrap_or(0),
+                    x: layout.x,
+                    y: layout.y,
+                    width: layout.width,
+                    height: layout.height,
+                    scroll_x,
+                    scroll_y,
+                    content: content.to_string(),
+                    text,
+                    metadata: region.metadata.iter().cloned().collect(),
+                }
+            })
+            .collect();
+        NativeScene {
+            session: self.session_id,
+            in_band: self.is_in_band(),
+            focused: self.focused_region.map(|id| id.0),
+            regions,
+        }
     }
 
     /// Get the currently focused region.
@@ -1619,6 +1678,52 @@ mod tests {
                 frame_id: FrameId(frame),
             })
             .unwrap();
+    }
+
+    /// `ulttyctl regions --json` for a small app: a title, a log the app
+    /// named with metadata, and a focused input.
+    #[test]
+    fn describe_reports_the_tree_layout_content_and_focus() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        session.set_viewport(80.0, 24.0);
+        let text = |id, text: &str| AppMessage::SetContent {
+            id: RegionId::new(id),
+            content: Content::Text(ultty_protocol::TextContent::new(text)),
+        };
+        run_frame(
+            &mut session,
+            1,
+            vec![
+                create_region(1, 0),
+                text(1, "Build"),
+                create_region(2, 0),
+                text(2, "compiling ultty\nfinished"),
+                create_region(3, 0),
+                AppMessage::SetContent {
+                    id: RegionId::new(3),
+                    content: Content::Widget(ultty_protocol::WidgetContent::Input(
+                        ultty_protocol::InputWidget {
+                            value: "cargo test".to_string(),
+                            ..Default::default()
+                        },
+                    )),
+                },
+            ],
+        );
+        session
+            .handle_message(AppMessage::SetRegionMetadata {
+                id: RegionId::new(2),
+                metadata: vec![("id".to_string(), "log".to_string())],
+            })
+            .unwrap();
+        session
+            .handle_message(AppMessage::Focus {
+                id: RegionId::new(3),
+            })
+            .unwrap();
+
+        insta::assert_json_snapshot!(session.describe());
     }
 
     #[test]

@@ -1027,11 +1027,63 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                 }
                 out
             }
+            ControlData::Regions { scenes } => format_regions(scenes),
         },
         ControlResponse::Error { code, message } => {
             format!("ERROR {}: {}\n", code, message)
         }
     }
+}
+
+/// Characters of a region's text the text format shows; `--json` has it all.
+const REGION_TEXT_PREVIEW: usize = 60;
+
+/// One line per region, indented by depth: id, content kind, position and
+/// size in cells, scroll when scrolled, metadata, and the start of its text.
+fn format_regions(scenes: &[ultty_protocol::control::NativeScene]) -> String {
+    use std::fmt::Write as _;
+    if scenes.is_empty() {
+        return "(no native app in this tab)\n".to_string();
+    }
+    let mut out = String::new();
+    for scene in scenes {
+        let transport = if scene.in_band { "in-band" } else { "socket" };
+        let _ = write!(out, "session {} ({transport})", scene.session);
+        if let Some(focused) = scene.focused {
+            let _ = write!(out, ", focus #{focused}");
+        }
+        out.push('\n');
+        for region in &scene.regions {
+            let _ = write!(
+                out,
+                "{:indent$}#{} {} {},{} {}x{}",
+                "",
+                region.id,
+                region.content,
+                region.x,
+                region.y,
+                region.width,
+                region.height,
+                indent = region.depth * 2
+            );
+            if region.scroll_x != 0.0 || region.scroll_y != 0.0 {
+                let _ = write!(out, " scroll {},{}", region.scroll_x, region.scroll_y);
+            }
+            for (key, value) in &region.metadata {
+                let _ = write!(out, " {key}={value}");
+            }
+            if let Some(text) = region.text.as_deref().filter(|text| !text.is_empty()) {
+                let first_line = text.lines().next().unwrap_or("");
+                let mut preview: String = first_line.chars().take(REGION_TEXT_PREVIEW).collect();
+                if preview.len() < text.len() {
+                    preview.push_str("...");
+                }
+                let _ = write!(out, " {preview:?}");
+            }
+            out.push('\n');
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1345,6 +1397,58 @@ mod tests {
         assert_eq!(
             format_response(&response, OutputFormat::Text),
             "*3 tab:1 40x24 vim\n 5 tab:1 40x24 build log [working: make 25%]\n 8 tab:1 40x24 /srv\n"
+        );
+    }
+
+    #[test]
+    fn format_regions_text_indents_by_depth_and_previews_text() {
+        use ultty_protocol::control::{NativeScene, RegionInfo};
+        let region = |id, parent, depth, content: &str, text: Option<&str>| RegionInfo {
+            id,
+            parent,
+            depth,
+            x: 0.0,
+            y: id as f32,
+            width: 80.0,
+            height: 1.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            content: content.to_string(),
+            text: text.map(str::to_string),
+            metadata: Default::default(),
+        };
+        let mut log = region(2, Some(0), 1, "text", Some(&"x".repeat(70)));
+        log.scroll_y = 3.0;
+        log.metadata.insert("id".to_string(), "log".to_string());
+        let scenes = vec![NativeScene {
+            session: 4,
+            in_band: true,
+            focused: Some(3),
+            regions: vec![
+                region(0, None, 0, "none", None),
+                log,
+                region(3, Some(0), 1, "input", Some("ls\nmore")),
+            ],
+        }];
+        assert_eq!(
+            format_response(
+                &ControlResponse::Data(ControlData::Regions { scenes }),
+                OutputFormat::Text
+            ),
+            format!(
+                "session 4 (in-band), focus #3\n\
+                 #0 none 0,0 80x1\n\
+                 \x20 #2 text 0,2 80x1 scroll 0,3 id=log \"{}...\"\n\
+                 \x20 #3 input 0,3 80x1 \"ls...\"\n",
+                "x".repeat(60)
+            )
+        );
+        assert_eq!(
+            format_response(
+                &ControlResponse::Data(ControlData::Regions { scenes: vec![] }),
+                OutputFormat::Text
+            ),
+            "(no native app in this tab)\n"
         );
     }
 

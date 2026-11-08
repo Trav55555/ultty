@@ -59,6 +59,7 @@ agent started in an Ultty pane drives that window.
 | `ultty_wait` | Wait for text to appear, the next command to finish (with its exit code), the bell, or a quiet period |
 | `ultty_last_command` | The last command in a pane: command line, output (last 200 lines unless asked), exit code, still running or not |
 | `ultty_read_text` | A pane's screen, optionally with scrollback |
+| `ultty_regions` | A native (ulttui) app's regions: layout, text, widget ids, focus |
 | `ultty_type_text`, `ultty_send_key` | Type text, or press a key: `enter`, `up`, or `c` with `modifiers: "ctrl"` |
 | `ultty_search` | Find text in a pane's screen and scrollback |
 | `ultty_new_tab` | Open a tab, optionally running a program, and return its pane id |

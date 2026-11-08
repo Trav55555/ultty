@@ -391,6 +391,26 @@ impl App {
                 }
             }
 
+            ControlRequest::Regions { target } => {
+                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                let tab = self.terminal_manager.terminal(pane).map(|t| t.tab_id);
+                let scenes = self
+                    .protocol_server
+                    .as_ref()
+                    .map(|server| {
+                        server
+                            .sessions()
+                            .filter(|session| Some(session.tab_id()) == tab)
+                            .map(|session| session.describe())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                ControlResponse::Data(ControlData::Regions { scenes })
+            }
+
             ControlRequest::GetSelection { target } => {
                 let pane = match resolve_control_target(&self.terminal_manager, target) {
                     Ok(pane) => pane,
@@ -1140,6 +1160,7 @@ fn control_request_requires_auth(request: &ultty_protocol::control::ControlReque
         | ControlRequest::GetText { .. }
         | ControlRequest::GetSelection { .. }
         | ControlRequest::LastCommand { .. }
+        | ControlRequest::Regions { .. }
         | ControlRequest::Search { .. }
         | ControlRequest::WaitFor { .. }
         | ControlRequest::Subscribe { .. }
