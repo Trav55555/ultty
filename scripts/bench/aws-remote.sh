@@ -118,6 +118,12 @@ setup_ghostty() {
   [[ "${have%%-dev+*}" == "$EXPECT_GHOSTTY" ]] || die "built Ghostty reports $have, expected $EXPECT_GHOSTTY"
 }
 
+# wants TERM: whether this run compares TERM. UBENCH_TERMINALS is the
+# comma list from compare.sh --terminals; unset means every terminal.
+wants() {
+  [[ ",${UBENCH_TERMINALS:-ultty,ghostty,gnome-terminal,alacritty}," == *",$1,"* ]]
+}
+
 setup_terminals() {
   apt_install xvfb xserver-xorg-core x11-utils x11-xserver-utils xdotool dbus-x11 dbus-user-session \
     gnome-terminal dconf-cli sway grim wtype mesa-vulkan-drivers mesa-utils openbox
@@ -125,8 +131,11 @@ setup_terminals() {
     have=$(dpkg-query -W -f='${Version}' gnome-terminal)
     [[ "$have" == "$EXPECT_GNOME_TERMINAL" ]] || die "gnome-terminal is $have, expected $EXPECT_GNOME_TERMINAL"
   fi
-  setup_ghostty
-  if [[ "$("$WORK/alacritty/bin/alacritty" --version 2>/dev/null)" != "alacritty $ALACRITTY_VERSION"* ]]; then
+  # The two source builds take most of the setup time; skip the ones this
+  # run does not compare.
+  if wants ghostty; then setup_ghostty; fi
+  if wants alacritty &&
+    [[ "$("$WORK/alacritty/bin/alacritty" --version 2>/dev/null)" != "alacritty $ALACRITTY_VERSION"* ]]; then
     log "building Alacritty $ALACRITTY_VERSION"
     rustup toolchain install stable --profile minimal
     cargo +stable install alacritty --version "$ALACRITTY_VERSION" --locked --root "$WORK/alacritty"
