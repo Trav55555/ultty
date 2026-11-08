@@ -68,24 +68,31 @@ ESC _ U <base64url of the chunk, no padding> ESC \
   protocol data. Apps ignore them on stdin. Terminals process them as
   ordinary output.
 
-**Probe.** An app writes `ClientHello` as an in-band string and then DA1
-(`ESC [ c`). A terminal that supports in-band answers with a frame, normally
-`ServerHello`, before its DA1 reply; any other terminal ignores the APC
-string and answers only DA1. A terminal must send its reply to a query
-that follows an in-band string only after its answer to that string. Ultty
-applies this per read from the PTY, so it may also delay replies to queries
-made just before the string; apps must send the hello first. An app that
-sees the DA1
-reply first, or nothing within a timeout (`ulttui`: 1 s), uses ANSI.
+**Probe.** An app first asks the terminal's name: XTVERSION, then DA1
+(`ESC [ > q ESC [ c`). It goes on only if the reply before DA1 is Ultty's,
+`DCS > | ultty <version> ST`. The reply comes from whatever draws the
+screen, so a multiplexer answers for itself and its pane never sees the APC
+string, even when it cannot be recognised from the environment (a tmux pane
+reached over ssh).
+
+The app then writes `ClientHello` as an in-band string and then DA1. A
+terminal that supports in-band answers with a frame, normally
+`ServerHello`, before its DA1 reply. A terminal must send its reply to a
+query that follows an in-band string only after its answer to that string.
+Ultty applies this per read from the PTY, so it may also delay replies to
+queries made just before the string; apps must wait for the name reply
+before sending the hello. An app that sees the DA1 reply first, or nothing
+within a timeout (`ulttui`: 1 s for both steps), uses ANSI.
 
 - Apps keep their tty in raw mode, without echo, for the whole session.
   Otherwise the line discipline holds the terminal's strings and echoes
   them back.
 - Apps must not wrap the probe for multiplexer passthrough. A terminal
   outside a multiplexer cannot know where a pane is.
-- `ulttui` does not probe under tmux or screen: when `TMUX` or `STY` is set,
-  or `TERM` starts with `tmux` or `screen`. Both take APC strings as title or
-  status text. It also skips the probe on `TERM=dumb` and on the Linux
+- `ulttui` does not probe at all under tmux or screen when it can tell:
+  when `TMUX` or `STY` is set, or `TERM` starts with `tmux` or `screen`. Both
+  take APC strings as title or status text, which the name check above
+  guards against when they cannot be told apart. It also skips the probe on `TERM=dumb` and on the Linux
   console, which prints unknown APC strings, and when `ULTTY_IN_BAND=0`.
 
 **Sessions.** A terminal opens an in-band session only when a well-formed

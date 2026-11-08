@@ -166,6 +166,9 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Fixed
 
+- An `ulttui` app run over ssh from a tmux pane no longer renames that pane.
+  The in-band probe now asks the terminal's name first and sends its hello
+  only to Ultty, at the cost of one more round trip at start.
 - Widening the window gives the new columns tab stops.
 - A window larger than the GPU's texture limit no longer aborts the process.
 - Sixel images are sized with the real cell size.

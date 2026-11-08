@@ -117,11 +117,11 @@ impl NativeBackend {
     /// Probe for in-band support and, if the terminal has it, run the
     /// handshake over the app's own terminal.
     ///
-    /// The probe is `ClientHello` followed by DA1. A terminal that speaks
-    /// the protocol answers `ServerHello` before its DA1 reply; any other
-    /// terminal ignores the APC string and answers only DA1. Inside tmux or
-    /// screen the bare string is dropped, so apps there fall back to ANSI,
-    /// which is right: the outer terminal cannot know where the pane is.
+    /// The probe asks the terminal's name and, only if it is Ultty, sends
+    /// `ClientHello` followed by DA1 ([`in_band::probe`]). Inside tmux or
+    /// screen the multiplexer answers for itself, so apps there fall back
+    /// to ANSI, which is right: the outer terminal cannot know where the
+    /// pane is.
     fn init_in_band(&mut self) -> crate::Result<()> {
         let mut tty = in_band::InBandTty::open()?;
         let mut received = Vec::new();
