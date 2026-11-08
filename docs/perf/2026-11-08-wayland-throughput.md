@@ -140,6 +140,11 @@ in-band pumping. Options, if that matters:
 3. **Skip rendering while occluded** (winit `WindowEvent::Occluded`), which
    addresses the indefinite case without changing the present mode.
 
+Followed up in [frame pacing](2026-11-08-frame-pacing.md): frames are now
+drawn from `RedrawRequested` with `pre_present_notify`, so on Wayland they
+wait for the frame callback instead of blocking in present, and an occluded
+window draws nothing.
+
 ## Rerunning on AWS
 
 `scripts/bench/compare.sh --session wayland --terminals ultty,ghostty` on
