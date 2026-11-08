@@ -401,21 +401,30 @@ fn env_entry(key: &std::ffi::OsStr, value: &std::ffi::OsStr) -> Result<CString> 
 }
 
 fn resolve_program_path(program: &str) -> std::borrow::Cow<'_, str> {
+    match std::env::var_os("PATH") {
+        Some(paths) => resolve_in_path(program, &paths),
+        None => std::borrow::Cow::Borrowed(program),
+    }
+}
+
+/// The first executable file named `program` in the directories of
+/// `paths`, as a shell finds it. A file without execute permission is
+/// skipped: `~/.local/bin/env`, which uv installs to be sourced, must not
+/// hide `/usr/bin/env`.
+fn resolve_in_path<'a>(program: &'a str, paths: &std::ffi::OsStr) -> std::borrow::Cow<'a, str> {
+    use std::os::unix::fs::PermissionsExt;
+
     if program.contains('/') {
         return std::borrow::Cow::Borrowed(program);
     }
-
-    let Some(paths) = std::env::var_os("PATH") else {
-        return std::borrow::Cow::Borrowed(program);
-    };
-
-    for dir in std::env::split_paths(&paths) {
+    for dir in std::env::split_paths(paths) {
         let candidate = dir.join(program);
-        if candidate.is_file() {
+        let executable = std::fs::metadata(&candidate)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0);
+        if executable {
             return std::borrow::Cow::Owned(candidate.to_string_lossy().into_owned());
         }
     }
-
     std::borrow::Cow::Borrowed(program)
 }
 
@@ -511,6 +520,23 @@ fn exit_child(code: i32) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_lookup_skips_files_that_are_not_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let sourced = tempfile::tempdir().unwrap();
+        let real = tempfile::tempdir().unwrap();
+        // Like uv's ~/.local/bin/env: a script to source, not to run.
+        std::fs::write(sourced.path().join("tool"), "export X=1\n").unwrap();
+        let program = real.path().join("tool");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let paths = std::env::join_paths([sourced.path(), real.path()]).unwrap();
+        assert_eq!(resolve_in_path("tool", &paths), program.to_string_lossy());
+        assert_eq!(resolve_in_path("missing", &paths), "missing");
+        assert_eq!(resolve_in_path("/bin/sh", &paths), "/bin/sh");
+    }
 
     #[test]
     fn spawn_echo() {

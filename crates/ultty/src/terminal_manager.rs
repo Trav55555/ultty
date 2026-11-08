@@ -924,22 +924,21 @@ impl TerminalManager {
             full_args.push(arg);
         }
 
+        // A failed chdir in the child is tolerated: the command then starts
+        // in the directory Ultty runs in.
+        let dir = working_dir
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(crate::pty::current_dir);
         let child = Child::spawn(
             command,
             &full_args,
-            &crate::pty::current_dir(),
+            &dir,
             PtySize::new(self.default_cols, self.default_rows),
             env,
         )
         .map_err(io::Error::other)?;
         let event_loop =
             TerminalEventLoop::from_child(child, self.default_cols, self.default_rows)?;
-
-        // Change working directory if specified
-        if let Some(dir) = working_dir {
-            // Working dir is handled in spawn, but we can set it for display
-            let _ = dir; // Already passed to spawn
-        }
 
         let terminal = ManagedTerminal {
             id: terminal_id,
@@ -1472,6 +1471,28 @@ mod tests {
             .unwrap();
         manager.close_tab(first);
         manager
+    }
+
+    #[test]
+    fn a_tab_command_starts_in_the_working_directory_it_was_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        manager
+            .create_tab_with_command(
+                "sleep",
+                &["5".to_string()],
+                Some(dir.to_str().unwrap()),
+                None,
+                &mut no_tab_env,
+            )
+            .unwrap();
+        let cwd = manager
+            .focused_terminal()
+            .unwrap()
+            .event_loop
+            .child_working_directory();
+        assert_eq!(cwd.as_deref(), dir.to_str());
     }
 
     #[test]
