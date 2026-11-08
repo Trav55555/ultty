@@ -541,9 +541,8 @@ impl Grid {
     }
 
     /// [`Grid::continues_cluster`] for `c` with properties `props`.
+    #[inline]
     fn continues_cluster_with(&self, c: char, props: cluster::CharProps) -> bool {
-        use unicode_segmentation::UnicodeSegmentation;
-
         // Nothing below U+0300 extends a cluster (except CR LF, which is
         // never printed), so the common case never segments.
         if !self.grapheme_clustering || c < '\u{300}' {
@@ -552,9 +551,18 @@ impl Grid {
         let Some(last) = self.last_print() else {
             return false;
         };
-        if let Some(joins) = cluster::joins_tail(last.tail, props.class()) {
-            return joins;
+        match cluster::joins_tail(last.tail, props.class()) {
+            Some(joins) => joins,
+            None => self.continues_cluster_slow(last, c),
         }
+    }
+
+    /// Whether `c` joins the cluster `last` started, from the whole
+    /// cluster rather than how it ends.
+    #[inline(never)]
+    fn continues_cluster_slow(&self, last: LastPrint, c: char) -> bool {
+        use unicode_segmentation::UnicodeSegmentation;
+
         let (row, col) = (last.base_row, last.base_col);
         let Some(r) = self.rows.get(row as usize) else {
             return false;
