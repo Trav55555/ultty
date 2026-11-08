@@ -1189,24 +1189,65 @@ where
     F: FnMut(AnsiOutput<'a>),
 {
     let mut index = 0;
-    while let Some(&lead) = bytes.get(index) {
-        let len = match lead {
-            0xC2..=0xDF => 2,
-            0xE0..=0xEF => 3,
-            0xF0..=0xF4 => 4,
-            _ => break,
-        };
-        let Some(c) = bytes
-            .get(index..index + len)
-            .and_then(|seq| std::str::from_utf8(seq).ok())
-            .and_then(|s| s.chars().next())
-        else {
-            break;
-        };
+    while let Some((c, len)) = decode_utf8(&bytes[index..]) {
         callback(AnsiOutput::Action(Action::Print(c)));
         index += len;
     }
     index
+}
+
+/// The well-formed multi-byte UTF-8 character at the start of `bytes` and
+/// its length, validated and decoded in one pass; `None` for ASCII, a
+/// truncated sequence or ill-formed bytes (the second-byte ranges are
+/// those of the Unicode standard's table 3-7).
+#[inline]
+fn decode_utf8(bytes: &[u8]) -> Option<(char, usize)> {
+    let cont = |b: u8| b & 0xC0 == 0x80;
+    let (&lead, rest) = bytes.split_first()?;
+    let (cp, len) = match lead {
+        0xC2..=0xDF => {
+            let &[b1, ..] = rest else { return None };
+            if !cont(b1) {
+                return None;
+            }
+            ((u32::from(lead) & 0x1F) << 6 | (u32::from(b1) & 0x3F), 2)
+        }
+        0xE0..=0xEF => {
+            let &[b1, b2, ..] = rest else { return None };
+            let b1_ok = match lead {
+                0xE0 => (0xA0..=0xBF).contains(&b1),
+                0xED => (0x80..=0x9F).contains(&b1),
+                _ => cont(b1),
+            };
+            if !b1_ok || !cont(b2) {
+                return None;
+            }
+            let cp = (u32::from(lead) & 0x0F) << 12
+                | (u32::from(b1) & 0x3F) << 6
+                | (u32::from(b2) & 0x3F);
+            (cp, 3)
+        }
+        0xF0..=0xF4 => {
+            let &[b1, b2, b3, ..] = rest else { return None };
+            let b1_ok = match lead {
+                0xF0 => (0x90..=0xBF).contains(&b1),
+                0xF4 => (0x80..=0x8F).contains(&b1),
+                _ => cont(b1),
+            };
+            if !b1_ok || !cont(b2) || !cont(b3) {
+                return None;
+            }
+            let cp = (u32::from(lead) & 0x07) << 18
+                | (u32::from(b1) & 0x3F) << 12
+                | (u32::from(b2) & 0x3F) << 6
+                | (u32::from(b3) & 0x3F);
+            (cp, 4)
+        }
+        _ => return None,
+    };
+    // The ranges above rule out surrogates and anything past U+10FFFF, so
+    // this never fails.
+    char::from_u32(cp).map(|c| (c, len))
 }
 
 #[cfg(test)]
