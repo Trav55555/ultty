@@ -247,14 +247,16 @@ Current dated reports:
 | Idle CPU/GPU work | near-zero when terminal and native app state are unchanged |
 | Layout recompute | < 1ms |
 | Frame render | < 5ms |
-| Input latency | < 10ms (target; not measured) |
+| Input latency | < 10ms (3.6 ms keypress to pixel on a Tesla T4 under X11, idle) |
 | Memory (terminal) | < 50MB |
 
-The input latency row is a target. A keystroke's echo is drawn without waiting
-for the 16 ms frame interval, so Ultty adds no pacing delay to it, but the time
-from key press to pixels on screen (including GPU and compositor) has not been
-measured on real hardware. The `input_latency` bench measures only parsing and
-grid updates, in nanoseconds to microseconds.
+A keystroke's echo is drawn without waiting for the 16 ms frame interval. Key
+press to pixels on screen was measured on a Tesla T4 under X11 (XTest
+injection, then polling the window's pixels): 3.6 ms median idle, level with
+Alacritty, 5.5 ms under 10 MiB/s of output and 22 ms under maximum output
+([T4 comparison](docs/perf/2026-11-08-t4-comparison.md)). Wayland and the
+development workstation are not measured yet. The `input_latency` bench
+measures only parsing and grid updates, in nanoseconds to microseconds.
 
 Run the published benchmark set:
 
