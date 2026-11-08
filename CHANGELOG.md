@@ -176,6 +176,11 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Fixed
 
+- Resizing the window no longer leaves the process up to 100 MB larger.
+  Reflow decoded the whole scrollback and built every row at full size
+  before compacting it again, peaking at 149 MB of heap for 10,000 lines,
+  which the allocator kept; it now rewraps line by line and peaks at
+  4.7 MB. It is also about three times faster.
 - A progress report (`OSC 9;4`) is shown as progress on the tab, not as a
   desktop notification reading "4;1;50". Control-socket statuses take
   precedence; the report is cleared by `OSC 9;4;0` or, with shell
