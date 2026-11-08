@@ -384,50 +384,6 @@ fn font_metrics(font_config: &FontConfig) -> Metrics {
     Metrics::new(font_size, line_height)
 }
 
-/// The system font database, which takes tens of milliseconds to build:
-/// either still being built on another thread, or built when asked for.
-pub enum Fonts {
-    Loading(std::thread::JoinHandle<FontSystem>),
-    OnDemand,
-}
-
-impl Fonts {
-    /// Start building the font database on its own thread, so it overlaps
-    /// opening the window and bringing up the GPU.
-    pub fn load_in_background() -> Self {
-        match std::thread::Builder::new()
-            .name("ultty-fonts".to_string())
-            .spawn(FontSystem::new)
-        {
-            Ok(handle) => Fonts::Loading(handle),
-            Err(error) => {
-                tracing::warn!("Cannot start the font thread ({error}); loading fonts later");
-                Fonts::OnDemand
-            }
-        }
-    }
-
-    /// The database, waiting for the thread if it is still building it.
-    fn into_font_system(self) -> FontSystem {
-        match self {
-            Fonts::Loading(handle) => {
-                let waiting = std::time::Instant::now();
-                let fonts = handle.join().unwrap_or_else(|_| {
-                    tracing::warn!("The font thread failed; loading fonts again");
-                    FontSystem::new()
-                });
-                tracing::debug!(
-                    target: "ultty::startup",
-                    "fonts ready (waited {:.1} ms)",
-                    waiting.elapsed().as_secs_f64() * 1000.0
-                );
-                fonts
-            }
-            Fonts::OnDemand => FontSystem::new(),
-        }
-    }
-}
-
 impl TextRenderer {
     /// Create a new text renderer with configuration.
     pub fn with_config(
@@ -437,27 +393,8 @@ impl TextRenderer {
         uniform_bind_group_layout: &wgpu::BindGroupLayout,
         font_config: &FontConfig,
     ) -> anyhow::Result<Self> {
-        Self::with_fonts(
-            device,
-            queue,
-            format,
-            uniform_bind_group_layout,
-            font_config,
-            Fonts::OnDemand,
-        )
-    }
-
-    /// [`Self::with_config`] with a font database that may already be
-    /// loading.
-    pub fn with_fonts(
-        device: Arc<wgpu::Device>,
-        queue: Arc<wgpu::Queue>,
-        format: wgpu::TextureFormat,
-        uniform_bind_group_layout: &wgpu::BindGroupLayout,
-        font_config: &FontConfig,
-        fonts: Fonts,
-    ) -> anyhow::Result<Self> {
-        let mut font_system = fonts.into_font_system();
+        // Create font system with system fonts
+        let mut font_system = FontSystem::new();
 
         let metrics = font_metrics(font_config);
 

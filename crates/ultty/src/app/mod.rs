@@ -18,7 +18,7 @@ use ultty::config::Config;
 use ultty::config_watcher::ConfigWatcher;
 use ultty::control::ControlServer;
 use ultty::protocol::ProtocolServer;
-use ultty::renderer::{Fonts, Renderer};
+use ultty::renderer::Renderer;
 use ultty::tabs::TabBarState;
 use ultty::terminal_manager::{TabId, TerminalManager};
 use ultty::url::UrlDetector;
@@ -216,11 +216,7 @@ pub struct App {
 
 impl App {
     /// Create a new application with window.
-    fn new(
-        event_loop: &ActiveEventLoop,
-        event_proxy: EventLoopProxy<AppEvent>,
-        fonts: Fonts,
-    ) -> Result<Self> {
+    fn new(event_loop: &ActiveEventLoop, event_proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
         // Load configuration
         let config = Config::load();
         tracing::info!("Loaded configuration");
@@ -284,7 +280,6 @@ impl App {
             size.height,
             &config.colors,
             &scaled_font,
-            fonts,
         ))?;
 
         tracing::debug!(target: "ultty::startup", "renderer ready");
@@ -668,13 +663,9 @@ impl App {
 
     /// Run the application.
     pub fn run() -> Result<()> {
-        // First, so it overlaps connecting to the display server and
-        // bringing up the GPU.
-        let fonts = Fonts::load_in_background();
         let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
         let mut handler = AppHandler {
             proxy: event_loop.create_proxy(),
-            fonts: Some(fonts),
             app: None,
             init_error: None,
         };
@@ -1493,8 +1484,6 @@ fn control_flow(deadline: Option<Instant>) -> ControlFlow {
 /// first `resumed`, as winit 0.30 requires.
 struct AppHandler {
     proxy: EventLoopProxy<AppEvent>,
-    /// The font database loading since [`App::run`], until the app takes it.
-    fonts: Option<Fonts>,
     app: Option<App>,
     /// A startup failure, returned from [`App::run`] after the loop exits.
     init_error: Option<anyhow::Error>,
@@ -1505,8 +1494,7 @@ impl ApplicationHandler<AppEvent> for AppHandler {
         if self.app.is_some() {
             return;
         }
-        let fonts = self.fonts.take().unwrap_or(Fonts::OnDemand);
-        match App::new(event_loop, self.proxy.clone(), fonts) {
+        match App::new(event_loop, self.proxy.clone()) {
             Ok(mut app) => {
                 app.update_tab_bar();
                 app.relayout_terminals();

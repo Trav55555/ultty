@@ -25,7 +25,7 @@ mod text_cache;
 pub use atlas::{AtlasStats, GlyphAtlas};
 pub use color::{ColorScheme, Rgba};
 pub use pipeline::RenderPipeline;
-pub use text::{Fonts, TextRenderer};
+pub use text::TextRenderer;
 
 use crate::config::{ColorConfig, FontConfig};
 #[cfg(test)]
@@ -387,9 +387,8 @@ impl Renderer {
         height: u32,
         color_config: &ColorConfig,
         font_config: &FontConfig,
-        fonts: Fonts,
     ) -> anyhow::Result<Self> {
-        let mut renderer = Self::new(surface, adapter, width, height, font_config, fonts).await?;
+        let mut renderer = Self::new(surface, adapter, width, height, font_config).await?;
         renderer.color_scheme = ColorScheme::from_config(color_config);
         Ok(renderer)
     }
@@ -401,7 +400,6 @@ impl Renderer {
         width: u32,
         height: u32,
         font_config: &FontConfig,
-        fonts: Fonts,
     ) -> anyhow::Result<Self> {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -490,13 +488,12 @@ impl Renderer {
         let bg_pipeline = RenderPipeline::new(&device, surface_format, &uniform_bind_group_layout)?;
 
         // Create text renderer
-        let text_renderer = TextRenderer::with_fonts(
+        let text_renderer = TextRenderer::with_config(
             device.clone(),
             queue.clone(),
             surface_format,
             &uniform_bind_group_layout,
             font_config,
-            fonts,
         )?;
 
         // Get cell dimensions from text renderer
