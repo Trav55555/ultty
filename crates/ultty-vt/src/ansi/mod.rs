@@ -334,6 +334,16 @@ pub enum Action {
     /// [`MAX_IN_BAND_APC`] are dropped.
     InBand(Vec<u8>),
 
+    /// Inline surface anchor (ADR 0020):
+    /// `ESC _ u <session_id> ; <surface_id> ; <rows> ESC \`, in decimal.
+    /// Malformed strings, `rows` outside 1 to [`MAX_ANCHOR_ROWS`], and
+    /// strings longer than [`MAX_ANCHOR_APC`] are dropped.
+    InlineAnchor {
+        session_id: u64,
+        surface_id: u32,
+        rows: u16,
+    },
+
     /// Application keypad mode (DECKPAM — ESC =)
     ApplicationKeypadMode,
 
@@ -605,6 +615,12 @@ pub(super) enum State {
 /// room for senders that pick a slightly larger chunk.
 pub const MAX_IN_BAND_APC: usize = 128 * 1024;
 
+/// Longest inline anchor string kept, in bytes after the `u`.
+pub const MAX_ANCHOR_APC: usize = 64;
+
+/// Most rows an inline anchor may reserve.
+pub const MAX_ANCHOR_ROWS: u16 = 128;
+
 /// Classification of the APC string being parsed, from its first byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ApcKind {
@@ -612,7 +628,9 @@ pub(super) enum ApcKind {
     Unknown,
     /// `U`: Ultty in-band protocol data, collected.
     InBand,
-    /// An in-band string that exceeded [`MAX_IN_BAND_APC`]; dropped.
+    /// `u`: an inline surface anchor, collected.
+    Anchor,
+    /// A collected string that exceeded its limit; dropped.
     Oversized,
     /// Any other APC (kitty graphics and so on); consumed and ignored.
     Other,

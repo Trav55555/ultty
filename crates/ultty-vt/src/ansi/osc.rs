@@ -1,7 +1,10 @@
 //! OSC (Operating System Command), DCS, APC, and other string sequence handling.
 
 use super::AnsiParser;
-use super::{Action, ApcKind, DynamicColor, Progress, State, StringTerminator, MAX_IN_BAND_APC};
+use super::{
+    Action, ApcKind, DynamicColor, Progress, State, StringTerminator, MAX_ANCHOR_APC,
+    MAX_ANCHOR_ROWS, MAX_IN_BAND_APC,
+};
 
 /// Maximum size for OSC/DCS string buffers to prevent unbounded memory growth.
 const MAX_STRING_BUFFER: usize = 65536;
@@ -299,8 +302,9 @@ impl AnsiParser {
         }
     }
 
-    /// APC string state. Ultty in-band strings (`U`) are collected; others,
-    /// such as kitty graphics, are consumed and ignored.
+    /// APC string state. Ultty in-band strings (`U`) and inline anchors
+    /// (`u`) are collected; others, such as kitty graphics, are consumed and
+    /// ignored.
     pub(super) fn apc_string(&mut self, byte: u8) {
         if byte == 0x1B {
             // ESC - might be start of ST (String Terminator = ESC \)
@@ -309,23 +313,25 @@ impl AnsiParser {
         }
         match self.apc_kind {
             ApcKind::Unknown => {
-                self.apc_kind = if byte == b'U' {
-                    ApcKind::InBand
-                } else {
-                    ApcKind::Other
+                self.apc_kind = match byte {
+                    b'U' => ApcKind::InBand,
+                    b'u' => ApcKind::Anchor,
+                    _ => ApcKind::Other,
                 };
             }
             _ => self.apc_extend(&[byte]),
         }
     }
 
-    /// Add payload bytes to an in-band string, dropping it if it grows past
-    /// [`MAX_IN_BAND_APC`].
+    /// Add payload bytes to a collected string, dropping it if it grows past
+    /// its limit ([`MAX_IN_BAND_APC`] or [`MAX_ANCHOR_APC`]).
     pub(super) fn apc_extend(&mut self, bytes: &[u8]) {
-        if self.apc_kind != ApcKind::InBand {
-            return;
-        }
-        if self.apc_buffer.len() + bytes.len() > MAX_IN_BAND_APC {
+        let limit = match self.apc_kind {
+            ApcKind::InBand => MAX_IN_BAND_APC,
+            ApcKind::Anchor => MAX_ANCHOR_APC,
+            _ => return,
+        };
+        if self.apc_buffer.len() + bytes.len() > limit {
             self.apc_kind = ApcKind::Oversized;
             self.apc_buffer = Vec::new();
             return;
@@ -341,14 +347,28 @@ impl AnsiParser {
         match byte {
             // Backslash completes ST (String Terminator)
             b'\\' => {
-                if self.apc_kind == ApcKind::InBand {
-                    callback(Action::InBand(std::mem::take(&mut self.apc_buffer)));
+                match self.apc_kind {
+                    ApcKind::InBand => {
+                        callback(Action::InBand(std::mem::take(&mut self.apc_buffer)));
+                    }
+                    ApcKind::Anchor => {
+                        if let Some(action) = parse_anchor(&self.apc_buffer) {
+                            callback(action);
+                        }
+                        self.apc_buffer.clear();
+                    }
+                    _ => {}
                 }
                 self.apc_kind = ApcKind::Unknown;
                 self.reset();
             }
-            // Any other byte - not a valid ST, continue in APC mode
+            // Any other byte - not a valid ST, continue in APC mode. An
+            // anchor has no ESC in it, so it is malformed.
             _ => {
+                if self.apc_kind == ApcKind::Anchor {
+                    self.apc_kind = ApcKind::Other;
+                    self.apc_buffer.clear();
+                }
                 self.state = State::ApcString;
             }
         }
@@ -525,6 +545,30 @@ fn parse_progress(rest: &str) -> Option<Progress> {
         3 => Progress::Indeterminate,
         4 => Progress::Paused(percent),
         _ => return None,
+    })
+}
+
+/// Parse an inline anchor's text after the `u`: `session;surface;rows`,
+/// three decimal numbers with nothing else, `rows` from 1 to
+/// [`MAX_ANCHOR_ROWS`].
+fn parse_anchor(text: &[u8]) -> Option<Action> {
+    fn number<T: std::str::FromStr>(field: &[u8]) -> Option<T> {
+        if field.is_empty() || !field.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        std::str::from_utf8(field).ok()?.parse().ok()
+    }
+    let mut fields = text.split(|&b| b == b';');
+    let session_id = number(fields.next()?)?;
+    let surface_id = number(fields.next()?)?;
+    let rows: u16 = number(fields.next()?)?;
+    if fields.next().is_some() || !(1..=MAX_ANCHOR_ROWS).contains(&rows) {
+        return None;
+    }
+    Some(Action::InlineAnchor {
+        session_id,
+        surface_id,
+        rows,
     })
 }
 
@@ -1120,6 +1164,102 @@ mod tests {
         assert!(
             matches!(&actions[..], [Action::InBand(p)] if p.len() == crate::ansi::MAX_IN_BAND_APC)
         );
+    }
+
+    fn anchor(session_id: u64, surface_id: u32, rows: u16) -> Action {
+        Action::InlineAnchor {
+            session_id,
+            surface_id,
+            rows,
+        }
+    }
+
+    #[test]
+    fn inline_anchor_is_parsed_where_it_sits() {
+        assert_eq!(
+            parse(b"a\x1b_u18446744073709551615;4294967295;128\x1b\\b"),
+            vec![
+                Action::Print('a'),
+                anchor(u64::MAX, u32::MAX, 128),
+                Action::Print('b')
+            ]
+        );
+        assert_eq!(parse(b"\x1b_u7;0;1\x1b\\"), vec![anchor(7, 0, 1)]);
+        assert_eq!(parse(b"\x1b_u007;02;003\x1b\\"), vec![anchor(7, 2, 3)]);
+    }
+
+    #[test]
+    fn malformed_inline_anchors_are_ignored() {
+        for wire in [
+            &b"\x1b_u\x1b\\"[..],
+            b"\x1b_u1;2\x1b\\",
+            b"\x1b_u1;2;3;4\x1b\\",
+            b"\x1b_u1;2;0\x1b\\",
+            b"\x1b_u1;2;129\x1b\\",
+            b"\x1b_u1;2;65536\x1b\\",
+            b"\x1b_u18446744073709551616;2;3\x1b\\",
+            b"\x1b_u1;4294967296;3\x1b\\",
+            b"\x1b_u-1;2;3\x1b\\",
+            b"\x1b_u+1;2;3\x1b\\",
+            b"\x1b_u1;;3\x1b\\",
+            b"\x1b_u1;2;3 \x1b\\",
+            b"\x1b_u 1;2;3\x1b\\",
+            b"\x1b_u1;2;\xff\x1b\\",
+            b"\x1b_u1;2\x1bx;3\x1b\\",
+        ] {
+            assert_eq!(parse(wire), vec![], "{:?}", String::from_utf8_lossy(wire));
+        }
+    }
+
+    #[test]
+    fn oversized_inline_anchor_is_dropped_and_parsing_recovers() {
+        let mut wire = b"\x1b_u1;2;3".to_vec();
+        wire.extend(std::iter::repeat_n(b'0', crate::ansi::MAX_ANCHOR_APC));
+        wire.extend_from_slice(b"\x1b\\x\x1b_u1;2;3\x1b\\");
+        assert_eq!(parse(&wire), vec![Action::Print('x'), anchor(1, 2, 3)]);
+
+        // Exactly the limit is kept: leading zeros pad it out.
+        let mut wire = b"\x1b_u".to_vec();
+        let tail = b"1;2;3";
+        wire.extend(std::iter::repeat_n(
+            b'0',
+            crate::ansi::MAX_ANCHOR_APC - tail.len(),
+        ));
+        wire.extend_from_slice(tail);
+        wire.extend_from_slice(b"\x1b\\");
+        assert_eq!(parse(&wire), vec![anchor(1, 2, 3)]);
+    }
+
+    #[test]
+    fn inline_anchor_and_in_band_survive_any_split_through_both_feed_paths() {
+        let wire = b"x\x1b_u12;34;5\x1b\\y\x1b_Uabc\x1b\\\x1b_u1;2\x1b\\z";
+        let expected = vec![
+            Action::Print('x'),
+            anchor(12, 34, 5),
+            Action::Print('y'),
+            Action::InBand(b"abc".to_vec()),
+            Action::Print('z'),
+        ];
+        for split in 1..wire.len() {
+            let mut parser = AnsiParser::new();
+            let mut got = Vec::new();
+            for chunk in wire.chunks(split) {
+                parser.feed(chunk, |a| got.push(a));
+            }
+            assert_eq!(got, expected, "feed, split {split}");
+
+            let mut parser = AnsiParser::new();
+            let mut got = Vec::new();
+            for chunk in wire.chunks(split) {
+                parser.feed_with_ascii_spans(chunk, |out| match out {
+                    crate::ansi::AnsiOutput::Action(a) => got.push(a),
+                    crate::ansi::AnsiOutput::PrintAscii(s) => {
+                        got.extend(s.iter().map(|&b| Action::Print(b as char)))
+                    }
+                });
+            }
+            assert_eq!(got, expected, "spans, split {split}");
+        }
     }
 
     #[test]
