@@ -1,7 +1,7 @@
 //! OSC (Operating System Command), DCS, APC, and other string sequence handling.
 
 use super::AnsiParser;
-use super::{Action, ApcKind, DynamicColor, State, StringTerminator, MAX_IN_BAND_APC};
+use super::{Action, ApcKind, DynamicColor, Progress, State, StringTerminator, MAX_IN_BAND_APC};
 
 /// Maximum size for OSC/DCS string buffers to prevent unbounded memory growth.
 const MAX_STRING_BUFFER: usize = 65536;
@@ -117,6 +117,13 @@ impl AnsiParser {
                             // Start hyperlink
                             callback(Action::StartHyperlink(uri.to_string()));
                         }
+                    }
+                }
+                // ConEmu's progress report (OSC 9;4;state;percent) shares
+                // OSC 9 with iTerm2's notifications (OSC 9;body).
+                "9" if data == "4" || data.starts_with("4;") => {
+                    if let Some(progress) = parse_progress(&data[1..]) {
+                        callback(Action::Progress(progress));
                     }
                 }
                 // Desktop notification - iTerm2 style (OSC 9)
@@ -499,6 +506,28 @@ pub(super) fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
     Ok(output)
 }
 
+/// Parse what follows `OSC 9;4`: `;state;percent`, both optional. An
+/// unknown state is ignored; percentages above 100 count as 100.
+fn parse_progress(rest: &str) -> Option<Progress> {
+    let mut fields = rest.strip_prefix(';').unwrap_or(rest).split(';');
+    let state = match fields.next() {
+        None | Some("") => 0,
+        Some(state) => state.parse::<u8>().ok()?,
+    };
+    let percent = fields
+        .next()
+        .and_then(|p| p.parse::<u32>().ok())
+        .map(|p| p.min(100) as u8);
+    Some(match state {
+        0 => Progress::Clear,
+        1 => Progress::Normal(percent.unwrap_or(0)),
+        2 => Progress::Error(percent),
+        3 => Progress::Indeterminate,
+        4 => Progress::Paused(percent),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{Action, AnsiParser, DynamicColor, StringTerminator};
@@ -848,6 +877,41 @@ mod tests {
             vec![Action::Notification {
                 title: String::new(),
                 body: "Build complete!".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn osc_9_4_is_progress_not_a_notification() {
+        use super::Progress::*;
+        let cases: [(&[u8], Vec<Action>); 10] = [
+            (b"\x1b]9;4;1;50\x07", vec![Action::Progress(Normal(50))]),
+            (b"\x1b]9;4;1\x07", vec![Action::Progress(Normal(0))]),
+            (b"\x1b]9;4;1;250\x1b\\", vec![Action::Progress(Normal(100))]),
+            (
+                b"\x1b]9;4;2;30\x07",
+                vec![Action::Progress(Error(Some(30)))],
+            ),
+            (b"\x1b]9;4;2\x07", vec![Action::Progress(Error(None))]),
+            (b"\x1b]9;4;3\x07", vec![Action::Progress(Indeterminate)]),
+            (
+                b"\x1b]9;4;4;80\x07",
+                vec![Action::Progress(Paused(Some(80)))],
+            ),
+            (b"\x1b]9;4;0;0\x07", vec![Action::Progress(Clear)]),
+            (b"\x1b]9;4\x07", vec![Action::Progress(Clear)]),
+            // An unknown state is dropped, not shown as a notification.
+            (b"\x1b]9;4;7;10\x07", vec![]),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse(input), expected, "{input:?}");
+        }
+        // A notification that merely starts with 4 is still one.
+        assert_eq!(
+            parse(b"\x1b]9;42 tests passed\x07"),
+            vec![Action::Notification {
+                title: String::new(),
+                body: "42 tests passed".to_string(),
             }]
         );
     }

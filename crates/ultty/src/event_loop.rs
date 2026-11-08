@@ -120,6 +120,8 @@ pub enum TerminalEvent {
         /// Notification body/message
         body: String,
     },
+    /// The program reported its progress (OSC 9;4).
+    Progress(crate::protocol::ansi::Progress),
     /// The shell started running a command (OSC 133;C).
     CommandStarted,
     /// The command finished (OSC 133;D), with the exit code the shell
@@ -1009,6 +1011,7 @@ fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
                     title: title.clone(),
                     body: body.clone(),
                 }),
+                Action::Progress(progress) => Some(TerminalEvent::Progress(*progress)),
                 Action::CommandExecuted => Some(TerminalEvent::CommandStarted),
                 Action::CommandFinished(exit_code) => Some(TerminalEvent::CommandFinished {
                     exit_code: *exit_code,
@@ -1033,6 +1036,12 @@ fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
             if let Some(event) = event {
                 let repeat_bell = matches!(event, TerminalEvent::Bell)
                     && matches!(events.last(), Some(TerminalEvent::Bell));
+                // Only the latest of a run of progress reports matters.
+                if matches!(event, TerminalEvent::Progress(_))
+                    && matches!(events.last(), Some(TerminalEvent::Progress(_)))
+                {
+                    events.pop();
+                }
                 if !repeat_bell && events.len() < MAX_PENDING_EVENTS {
                     events.push(event);
                 }

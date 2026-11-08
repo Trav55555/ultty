@@ -1037,7 +1037,7 @@ fn pane_infos(
                 cwd: terminal_working_directory(terminal),
                 cols: dims.cols,
                 rows: dims.rows,
-                status: terminal.status.clone(),
+                status: terminal.shown_status().cloned(),
             });
         }
     }

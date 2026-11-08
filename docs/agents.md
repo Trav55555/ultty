@@ -84,6 +84,10 @@ An MCP client that sends one call at a time can run the command first and
 then wait with `until: "quiet"`, or call `ultty_last_command` and check
 `running`.
 
+A program that prints ConEmu's progress report (`OSC 9;4;1;<percent>`, as
+Windows Terminal and Ghostty read it) gets the same progress marker without
+the socket. A status set through the socket takes precedence.
+
 ### Asking for the user
 
 `ultty_set_status` with `state: "waiting"` and `attention: true` puts a

@@ -59,6 +59,27 @@ impl TerminalId {
     }
 }
 
+/// The pane status a progress report (OSC 9;4) stands for.
+pub fn progress_status(
+    progress: crate::protocol::ansi::Progress,
+) -> Option<ultty_protocol::control::PaneStatus> {
+    use crate::protocol::ansi::Progress;
+    use ultty_protocol::control::{PaneState, PaneStatus};
+    let (state, percent) = match progress {
+        Progress::Clear => return None,
+        Progress::Normal(percent) => (PaneState::Working, Some(percent)),
+        Progress::Indeterminate => (PaneState::Working, None),
+        Progress::Error(percent) => (PaneState::Error, percent),
+        Progress::Paused(percent) => (PaneState::Waiting, percent),
+    };
+    Some(PaneStatus {
+        state,
+        label: String::new(),
+        progress: percent.map(|p| f32::from(p) / 100.0),
+        attention: false,
+    })
+}
+
 /// A single terminal instance.
 pub struct ManagedTerminal {
     /// Unique ID
@@ -71,9 +92,17 @@ pub struct ManagedTerminal {
     pub title: String,
     /// What the pane's program said it is doing (`ulttyctl status`).
     pub status: Option<ultty_protocol::control::PaneStatus>,
+    /// The status its last progress report (OSC 9;4) implies.
+    pub progress: Option<ultty_protocol::control::PaneStatus>,
 }
 
 impl ManagedTerminal {
+    /// The status to show for the pane: what was set through the control
+    /// socket, else what the program's progress reports imply.
+    pub fn shown_status(&self) -> Option<&ultty_protocol::control::PaneStatus> {
+        self.status.as_ref().or(self.progress.as_ref())
+    }
+
     /// Create a new managed terminal whose shell gets `env` on top of the
     /// inherited environment.
     pub fn new(
@@ -91,6 +120,7 @@ impl ManagedTerminal {
             tab_id,
             title: format!("Terminal {}", id.0),
             status: None,
+            progress: None,
         })
     }
 
@@ -946,6 +976,7 @@ impl TerminalManager {
             tab_id,
             title: format!("Terminal {}", terminal_id.0),
             status: None,
+            progress: None,
         };
 
         self.push_terminal(terminal);
@@ -1334,6 +1365,7 @@ impl ManagedTerminal {
             tab_id,
             title: format!("Terminal {}", id.0),
             status: None,
+            progress: None,
         })
     }
 }
@@ -1341,6 +1373,30 @@ impl ManagedTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_reports_map_to_pane_statuses() {
+        use crate::protocol::ansi::Progress;
+        use ultty_protocol::control::PaneState;
+        let shown = |progress| progress_status(progress).map(|s| (s.state, s.progress));
+        assert_eq!(shown(Progress::Clear), None);
+        assert_eq!(
+            shown(Progress::Normal(40)),
+            Some((PaneState::Working, Some(0.4)))
+        );
+        assert_eq!(
+            shown(Progress::Indeterminate),
+            Some((PaneState::Working, None))
+        );
+        assert_eq!(
+            shown(Progress::Error(Some(70))),
+            Some((PaneState::Error, Some(0.7)))
+        );
+        assert_eq!(
+            shown(Progress::Paused(None)),
+            Some((PaneState::Waiting, None))
+        );
+    }
 
     #[test]
     fn terminals_report_the_cell_size_and_theme_they_are_drawn_with() {

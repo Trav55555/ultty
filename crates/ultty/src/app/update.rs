@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use super::App;
 use ultty::config::{BehaviorConfig, ClipboardWrite};
 use ultty::event_loop::TerminalEvent;
+use ultty::terminal_manager::progress_status;
 
 impl App {
     /// When the loop next has timed work to do, or `None` to sleep until
@@ -300,9 +301,25 @@ impl App {
                                     Self::show_notification(&title, &body);
                                 }
                             }
-                            // Only subscribers hear of these (above).
-                            TerminalEvent::CommandStarted
-                            | TerminalEvent::CommandFinished { .. } => {}
+                            TerminalEvent::Progress(progress) => {
+                                if let Some(terminal) =
+                                    self.terminal_manager.terminal_mut(terminal_id)
+                                {
+                                    terminal.progress = progress_status(progress);
+                                    tab_titles_changed = true;
+                                }
+                            }
+                            TerminalEvent::CommandFinished { .. } => {
+                                // A program that died mid-way leaves its
+                                // progress behind; the prompt clears it.
+                                if let Some(terminal) =
+                                    self.terminal_manager.terminal_mut(terminal_id)
+                                {
+                                    tab_titles_changed |= terminal.progress.take().is_some();
+                                }
+                            }
+                            // Only subscribers hear of this (above).
+                            TerminalEvent::CommandStarted => {}
                         }
                     }
                 }

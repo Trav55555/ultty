@@ -35,7 +35,10 @@ pub(super) fn control_event(pane: TerminalId, event: &TerminalEvent) -> Option<C
         },
         // Redraws are too frequent to be useful; clipboard contents stay
         // private to the terminal.
-        TerminalEvent::Redraw | TerminalEvent::SetClipboard { .. } => return None,
+        // Progress shows in `list_panes` statuses.
+        TerminalEvent::Redraw | TerminalEvent::SetClipboard { .. } | TerminalEvent::Progress(_) => {
+            return None
+        }
     })
 }
 

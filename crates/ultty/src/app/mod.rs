@@ -797,13 +797,13 @@ impl App {
             state.status = tab
                 .terminals
                 .iter()
-                .filter_map(|&pane| manager.terminal(pane)?.status.as_ref())
+                .filter_map(|&pane| manager.terminal(pane)?.shown_status())
                 .max_by_key(|status| status.urgency())
                 .cloned();
         }
         self.tab_bar.title_status = manager
             .focused_terminal()
-            .and_then(|terminal| terminal.status.clone());
+            .and_then(|terminal| terminal.shown_status().cloned());
     }
 
     fn freeze_tab_width_after_close(&mut self) {

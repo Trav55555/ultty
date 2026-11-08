@@ -387,9 +387,8 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.end_hyperlink();
                 self.terminal.grid_mut().set_hyperlink_id(0);
             }
-            Action::Notification { title: _, body: _ } => {
-                // Notification is handled at the app level, not terminal level
-                // The terminal handler ignores this and the app will handle it
+            Action::Notification { title: _, body: _ } | Action::Progress(_) => {
+                // Handled by the app, which shows them; no terminal state.
             }
             Action::KittyKeyboardPush(flags) => {
                 self.terminal.push_kitty_keyboard_mode(flags);

@@ -151,7 +151,7 @@ Implemented:
   clustering (2027), DECSCNM reverse video
 - Sixel graphics, OSC 8 hyperlinks, OSC 52 clipboard writes (reads are
   refused), OSC 7 working directory, OSC 133 prompt marks, OSC 9 and 777
-  notifications
+  notifications, OSC 9;4 progress on the tab
 - Queries: DA1, DA2, DSR, DECXCPR, DECRQM, DECRQSS, XTVERSION, XTGETTCAP,
   XTWINOPS 14/16/18, the title stack (XTWINOPS 22/23)
 - Tabs, splits, scrollback, vim-style copy mode

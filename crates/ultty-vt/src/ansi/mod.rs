@@ -22,6 +22,22 @@ mod sgr;
 
 use serde::{Deserialize, Serialize};
 
+/// A program's progress report (OSC 9;4), as Windows Terminal and Ghostty
+/// read it. Percentages are 0 to 100.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Progress {
+    /// State 0: no progress to show.
+    Clear,
+    /// State 1: this far along.
+    Normal(u8),
+    /// State 2: failed, optionally at a percentage.
+    Error(Option<u8>),
+    /// State 3: busy, with no idea how far along.
+    Indeterminate,
+    /// State 4: paused or waiting, optionally at a percentage.
+    Paused(Option<u8>),
+}
+
 /// Actions the ANSI parser can emit.
 ///
 /// This enum represents all terminal control operations that
@@ -217,6 +233,9 @@ pub enum Action {
 
     /// Desktop notification (OSC 9 or OSC 777)
     Notification { title: String, body: String },
+
+    /// Progress report (OSC 9;4, ConEmu's sequence)
+    Progress(Progress),
 
     /// Kitty keyboard protocol: push mode with flags (CSI > flags u)
     KittyKeyboardPush(u8),

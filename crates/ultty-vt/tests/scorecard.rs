@@ -150,6 +150,19 @@ fn scorecard_notifications() {
 }
 
 #[test]
+fn scorecard_progress() {
+    use ultty_vt::ansi::Progress;
+    assert_eq!(
+        actions(b"\x1b]9;4;1;40\x07"),
+        vec![Action::Progress(Progress::Normal(40))]
+    );
+    assert_eq!(
+        actions(b"\x1b]9;4;0\x07"),
+        vec![Action::Progress(Progress::Clear)]
+    );
+}
+
+#[test]
 fn scorecard_colour_queries() {
     let mut term = run(b"");
     let fg = replies(&mut term, b"\x1b]10;?\x07");

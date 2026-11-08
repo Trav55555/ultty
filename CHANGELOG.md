@@ -166,6 +166,10 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Fixed
 
+- A progress report (`OSC 9;4`) is shown as progress on the tab, not as a
+  desktop notification reading "4;1;50". Control-socket statuses take
+  precedence; the report is cleared by `OSC 9;4;0` or, with shell
+  integration, when the command finishes.
 - An `ulttui` app run over ssh from a tmux pane no longer renames that pane.
   The in-band probe now asks the terminal's name first and sends its hello
   only to Ultty, at the cost of one more round trip at start.
