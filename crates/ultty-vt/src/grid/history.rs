@@ -82,13 +82,16 @@ struct Run {
 pub(super) struct CompactRow {
     width: u16,
     wrapped: bool,
-    /// One character per stored cell, as UTF-8. Bytes rather than `String`
-    /// so ASCII is a plain push; [`CompactRow::decode`] checks it.
+    /// One character per stored cell, as UTF-8, each followed by its extra
+    /// grapheme codepoints if it has any. Bytes rather than `String` so
+    /// ASCII is a plain push; [`CompactRow::decode`] checks it.
     text: Vec<u8>,
     /// Style runs covering the stored cells in order.
     runs: Vec<Run>,
-    /// Extra grapheme codepoints by column, for cells that have them.
-    graphemes: Vec<(u16, Box<[char]>)>,
+    /// The columns whose cells have extra grapheme codepoints, in order,
+    /// with how many follow the cell's character in `text`. Keeping them in
+    /// `text` saves an allocation per cluster.
+    graphemes: Vec<(u16, u16)>,
 }
 
 impl CompactRow {
@@ -102,6 +105,27 @@ impl CompactRow {
         self.text.clear();
         self.runs.clear();
         self.graphemes.clear();
+
+        // Plain output in the default style, which the row has kept track
+        // of: its text is the whole row, and a cell is default exactly when
+        // it holds a space, so trimming the text trims the blank tail.
+        if row.is_plain() {
+            let cells = row.used_cells();
+            self.text.extend(cells.iter().map(|cell| cell.char() as u8));
+            let len = self
+                .text
+                .iter()
+                .rposition(|&b| b != b' ')
+                .map_or(0, |last| last + 1);
+            self.text.truncate(len);
+            if len > 0 {
+                self.runs.push(Run {
+                    len: len as u16,
+                    style: Style::of(&Cell::default()),
+                });
+            }
+            return;
+        }
 
         let cells = row.used_cells();
         let cells = &cells[..used_len(cells)];
@@ -132,17 +156,13 @@ impl CompactRow {
             let start = col;
             while col < cells.len() && Style::of(&cells[col]) == style {
                 let cell = &cells[col];
-                let c = cell.char();
-                if c.is_ascii() {
-                    self.text.push(c as u8);
-                } else {
-                    let mut utf8 = [0u8; 4];
-                    self.text
-                        .extend_from_slice(c.encode_utf8(&mut utf8).as_bytes());
-                }
+                self.push_char(cell.char());
                 if cell.has_flag(CellFlags::HAS_COMBINING) {
                     if let Some(extra) = row.grapheme_extra(col as u16) {
-                        self.graphemes.push((col as u16, extra.into()));
+                        self.graphemes.push((col as u16, extra.len() as u16));
+                        for &c in extra {
+                            self.push_char(c);
+                        }
                     }
                 }
                 col += 1;
@@ -154,13 +174,23 @@ impl CompactRow {
         }
     }
 
+    fn push_char(&mut self, c: char) {
+        if c.is_ascii() {
+            self.text.push(c as u8);
+        } else {
+            let mut utf8 = [0u8; 4];
+            self.text
+                .extend_from_slice(c.encode_utf8(&mut utf8).as_bytes());
+        }
+    }
+
     /// Bytes this row occupies, including its heap allocations.
     #[cfg(test)]
     pub(super) fn footprint(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.text.capacity()
             + self.runs.capacity() * std::mem::size_of::<Run>()
-            + self.graphemes.capacity() * std::mem::size_of::<(u16, Box<[char]>)>()
+            + self.graphemes.capacity() * std::mem::size_of::<(u16, u16)>()
     }
 
     /// `row` in compact form.
@@ -175,6 +205,8 @@ impl CompactRow {
         let mut row = Row::new(self.width);
         let text = std::str::from_utf8(&self.text).unwrap_or_default();
         let mut chars = text.chars();
+        let mut graphemes = self.graphemes.iter().peekable();
+        let mut extra = Vec::new();
         let mut col = 0u16;
         for run in &self.runs {
             for _ in 0..run.len {
@@ -182,11 +214,13 @@ impl CompactRow {
                 if col < self.width {
                     row[col] = run.style.cell(c);
                 }
+                if let Some(&(_, len)) = graphemes.next_if(|&&(at, _)| at == col) {
+                    extra.clear();
+                    extra.extend(chars.by_ref().take(len as usize));
+                    row.set_grapheme_extra(col, &extra);
+                }
                 col += 1;
             }
-        }
-        for (col, extra) in &self.graphemes {
-            row.set_grapheme_extra(*col, extra);
         }
         row.set_wrapped(self.wrapped);
         row.clear_dirty();
@@ -286,6 +320,32 @@ mod tests {
         fn encode_then_decode_returns_the_same_row(row in row()) {
             let decoded = CompactRow::encode(&row).decode();
             prop_assert!(same(&row, &decoded), "{row:?}\n!=\n{decoded:?}");
+        }
+
+        /// Rows that keep track of being plain take a shortcut; it must
+        /// give exactly what encoding them cell by cell gives.
+        #[test]
+        fn a_plain_row_encodes_like_any_other(
+            width in 1u16..40,
+            writes in prop::collection::vec((0u16..40, "[ a-z]{0,40}", any::<bool>()), 0..6),
+        ) {
+            let mut row = Row::new(width);
+            for (col, text, erase) in writes {
+                let col = col.min(width - 1);
+                if erase {
+                    row.erase_range(col, col + text.len() as u16, Color::Default);
+                } else {
+                    let len = text.len().min((width - col) as usize);
+                    row.write_ascii(col, &text.as_bytes()[..len], Cell::default());
+                }
+            }
+            prop_assert!(row.is_plain());
+            let mut copy = row.clone();
+            copy[0] = row[0];
+            prop_assert!(!copy.is_plain());
+            let compact = CompactRow::encode(&row);
+            prop_assert_eq!(&compact, &CompactRow::encode(&copy));
+            prop_assert!(same(&row, &compact.decode()));
         }
 
         #[test]

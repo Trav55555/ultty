@@ -685,66 +685,66 @@ impl Grid {
         let col = self.cursor.position.col;
         let row = self.cursor.position.row;
 
-        // Copy attrs first to avoid borrow conflict
         let attrs = self.attrs;
+        let cols = self.dims.cols;
+        let insert_mode = self.insert_mode;
+        // Everything below touches only this row, so it is marked dirty once.
+        self.mark_dirty(row);
+        let Some(r) = self.rows.get_mut(row as usize) else {
+            return;
+        };
 
         // Clear any combining characters from previous content
-        self.clear_combining_range(row, col, col.saturating_add(1));
+        r.clear_graphemes(col, col.saturating_add(1));
 
         // Insert mode (IRM): shift existing cells right before writing
-        if self.insert_mode {
-            let bg = attrs.bg();
-            if let Some(r) = self.row_mut(row) {
-                r.insert_cells(col, width, bg);
-            }
+        if insert_mode {
+            r.insert_cells(col, width, attrs.bg());
         }
 
         // Clean up orphaned wide-char parts before overwriting
-        let is_wide = self.cell(col, row).is_some_and(|c| c.is_wide());
-        let is_spacer = self.cell(col, row).is_some_and(|c| c.is_wide_spacer());
-        if is_wide && col + 1 < self.dims.cols {
-            if let Some(spacer) = self.cell_mut(col + 1, row) {
+        let is_wide = r.get(col).is_some_and(|c| c.is_wide());
+        let is_spacer = r.get(col).is_some_and(|c| c.is_wide_spacer());
+        if is_wide && col + 1 < cols {
+            if let Some(spacer) = r.get_mut(col + 1) {
                 spacer.clear();
             }
         }
         if is_spacer && col > 0 {
-            if let Some(primary) = self.cell_mut(col - 1, row) {
+            if let Some(primary) = r.get_mut(col - 1) {
                 primary.clear();
             }
         }
         // A wide char's spacer overwrites the next cell; if that cell starts
         // another wide char, that char's own spacer would be orphaned.
-        if width > 1
-            && col + 2 < self.dims.cols
-            && self.cell(col + 1, row).is_some_and(|c| c.is_wide())
-        {
-            if let Some(orphan) = self.cell_mut(col + 2, row) {
+        if width > 1 && col + 2 < cols && r.get(col + 1).is_some_and(|c| c.is_wide()) {
+            if let Some(orphan) = r.get_mut(col + 2) {
                 orphan.clear();
             }
         }
 
         // Write the character
-        if let Some(cell) = self.cell_mut(col, row) {
-            cell.set_char(c);
-            cell.copy_attrs_from(&attrs);
-            cell.unset_flag(CellFlags::HAS_COMBINING);
-
-            // Handle wide characters
+        if let Some(cell) = r.get_mut(col) {
+            let mut written = attrs;
+            written.set_char(c);
+            written.unset_flag(CellFlags::HAS_COMBINING);
             if width > 1 {
-                cell.set_flag(CellFlags::WIDE_CHAR);
+                written.set_flag(CellFlags::WIDE_CHAR);
             } else {
-                cell.unset_flag(CellFlags::WIDE_CHAR);
+                written.unset_flag(CellFlags::WIDE_CHAR);
             }
-            cell.unset_flag(CellFlags::WIDE_CHAR_SPACER);
+            written.unset_flag(CellFlags::WIDE_CHAR_SPACER);
+            *cell = written;
         }
 
         // If wide character, put spacer in next cell
-        if width > 1 && col + 1 < self.dims.cols {
-            if let Some(spacer) = self.cell_mut(col + 1, row) {
-                spacer.set_char(' ');
-                spacer.copy_attrs_from(&attrs);
-                spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
-                spacer.unset_flag(CellFlags::WIDE_CHAR);
+        if width > 1 && col + 1 < cols {
+            if let Some(spacer) = r.get_mut(col + 1) {
+                let mut written = attrs;
+                written.set_char(' ');
+                written.set_flag(CellFlags::WIDE_CHAR_SPACER);
+                written.unset_flag(CellFlags::WIDE_CHAR);
+                *spacer = written;
             }
         }
 

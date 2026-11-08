@@ -261,6 +261,12 @@ impl Cell {
         self.c
     }
 
+    /// This cell with its character replaced by `c`.
+    #[inline]
+    pub(crate) fn with_char(self, c: char) -> Self {
+        Self { c, ..self }
+    }
+
     /// Set the character.
     #[inline]
     pub fn set_char(&mut self, c: char) {

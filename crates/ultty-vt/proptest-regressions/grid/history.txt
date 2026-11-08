@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc f463d00ea7f456aee087994eb0ff26701482cfa05f9de9e7503d1af93360a79b # shrinks to row = Row { cells: [Cell(' ', fg=Default, bg=Default, flags=CellFlags(2048))], dirty: true, wrapped: false, used: 1, graphemes: GraphemeMap { entries: [(0, ['\u{301}'])] } }
+cc ebd8a311359a1e74ba5e987b225966d40f63da346bc27614a84ef3e24b90cb36 # shrinks to width = 1, writes = [(0, " ", false)]

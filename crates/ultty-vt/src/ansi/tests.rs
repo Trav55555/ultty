@@ -1318,6 +1318,37 @@ fn utf8_heavy_bytes() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
     prop::collection::vec(piece, 0..32).prop_map(|v| v.concat())
 }
 
+/// The one-pass decoder agrees with `str::from_utf8` on every character
+/// and on every lead byte with every second byte, whole or cut short.
+#[test]
+fn decode_utf8_agrees_with_from_utf8() {
+    let reference = |bytes: &[u8]| {
+        (2..=bytes.len().min(4)).find_map(|len| {
+            std::str::from_utf8(&bytes[..len])
+                .ok()
+                .map(|s| (s.chars().next().unwrap(), len))
+        })
+    };
+    for c in (0x80..=0x10FFFF).filter_map(char::from_u32) {
+        let mut buf = [0u8; 4];
+        let bytes = c.encode_utf8(&mut buf).as_bytes();
+        assert_eq!(decode_utf8(bytes), Some((c, bytes.len())), "{c:?}");
+        assert_eq!(decode_utf8(&bytes[..bytes.len() - 1]), None, "{c:?} cut");
+    }
+    for lead in 0x80..=0xFFu8 {
+        for b1 in 0..=0xFFu8 {
+            for tail in [[0x80, 0x80], [0xBF, 0xBF], [0x80, 0x41], [0x41, 0x80]] {
+                let bytes = [lead, b1, tail[0], tail[1]];
+                assert_eq!(
+                    decode_utf8(&bytes),
+                    reference(&bytes).filter(|_| lead >= 0xC2),
+                    "{bytes:02X?}"
+                );
+            }
+        }
+    }
+}
+
 proptest::proptest! {
     /// Span feeding is an optimisation only: split anywhere, it yields
     /// exactly the characters and actions that byte-wise feeding does.
