@@ -140,6 +140,9 @@ pub struct App {
     mouse_pos: PhysicalPosition<f64>,
     /// Whether left mouse button is pressed (for selection drag)
     mouse_pressed: bool,
+    /// The button held down while the program reports the mouse: drags are
+    /// reported with it and its release names it.
+    reported_button: Option<ultty::grid::MouseButton>,
     /// Last click time for double/triple click detection
     last_click_time: Instant,
     /// Click count (1=single, 2=double, 3=triple)
@@ -369,6 +372,7 @@ impl App {
             clipboard,
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             mouse_pressed: false,
+            reported_button: None,
             last_click_time: Instant::now() - CLICK_THRESHOLD * 2,
             click_count: 0,
             last_click_pos: (0, 0),

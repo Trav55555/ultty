@@ -1120,11 +1120,14 @@ impl Terminal {
             return None;
         }
 
-        // Check if we should report motion
+        // Motion is reported in button-event mode only while a button is
+        // held (a drag), and in any-event mode always. `Release` with motion
+        // means no button is held.
         if motion {
+            let button_held = pressed && button != MouseButton::Release;
             match self.modes.mouse_mode {
                 MouseMode::AnyEvent => {}
-                MouseMode::ButtonEvent if pressed => {}
+                MouseMode::ButtonEvent if button_held => {}
                 _ => return None,
             }
         }

@@ -46,7 +46,9 @@ impl App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_pos = position;
-                if self.mouse_pressed {
+                if self.reported_button.is_some() {
+                    self.report_mouse_drag();
+                } else if self.mouse_pressed {
                     self.handle_mouse_drag();
                 } else if self.terminal().is_some_and(|t| t.track_mouse_motion()) {
                     // AnyEvent mode reports motion even without button pressed
@@ -203,10 +205,13 @@ impl App {
                     _ => return,
                 };
                 let pressed = state == ElementState::Pressed;
-                let term_button = if !pressed {
-                    TerminalMouseButton::Release
-                } else {
+                // A release names the button that was down (SGR reports
+                // it; the legacy encodings turn any release into 3).
+                let term_button = if pressed {
+                    self.reported_button = Some(term_button);
                     term_button
+                } else {
+                    self.reported_button.take().unwrap_or(term_button)
                 };
                 let mods = self.mouse_modifiers();
                 if let Some(bytes) = self
@@ -454,6 +459,7 @@ impl App {
             }
             ElementState::Released => {
                 self.mouse_pressed = false;
+                self.reported_button = None;
                 self.divider_dragging = None;
 
                 // Forward MouseUp to native protocol sessions
@@ -551,6 +557,23 @@ impl App {
             t.update_selection(point);
         }
         self.needs_redraw = true;
+    }
+
+    /// Report motion with a button held to a program that tracks the mouse
+    /// (modes 1002 and 1003), as a drag of that button.
+    fn report_mouse_drag(&mut self) {
+        let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
+        let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y.max(0.0));
+        let Some(button) = self.reported_button else {
+            return;
+        };
+        let mods = self.mouse_modifiers();
+        if let Some(bytes) = self
+            .terminal()
+            .and_then(|t| t.encode_mouse_event(button, col, row, true, true, mods))
+        {
+            let _ = self.send_report(&bytes);
+        }
     }
 
     /// Handle mouse motion without button pressed (for AnyEvent mode).

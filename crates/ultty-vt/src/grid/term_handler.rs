@@ -1370,6 +1370,32 @@ mod tests {
         assert_eq!(term.modes().mouse_encoding, MouseEncoding::X10);
     }
 
+    /// What Claude Code's full mouse mode (1000, 1002, 1003, 1006) needs: a
+    /// drag is the held button plus 32, motion with no button is 35, and
+    /// button-event mode (1002 alone) reports only drags.
+    #[test]
+    fn mouse_motion_reports_drags_and_buttonless_motion_by_mode() {
+        use crate::grid::{MouseButton, MouseModifiers};
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+        let none = MouseModifiers::default();
+
+        process(&mut term, b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h");
+        let drag = term.encode_mouse_event(MouseButton::Left, 3, 4, true, true, none);
+        assert_eq!(drag.as_deref(), Some(&b"\x1b[<32;4;5M"[..]));
+        let hover = term.encode_mouse_event(MouseButton::Release, 3, 4, true, true, none);
+        assert_eq!(hover.as_deref(), Some(&b"\x1b[<35;4;5M"[..]));
+
+        process(&mut term, b"\x1b[?1003l\x1b[?1002h");
+        let drag = term.encode_mouse_event(MouseButton::Right, 3, 4, true, true, none);
+        assert_eq!(drag.as_deref(), Some(&b"\x1b[<34;4;5M"[..]));
+        let hover = term.encode_mouse_event(MouseButton::Release, 3, 4, true, true, none);
+        assert_eq!(hover, None, "1002 reports motion only with a button held");
+
+        process(&mut term, b"\x1b[?1002l\x1b[?1000h");
+        let drag = term.encode_mouse_event(MouseButton::Left, 3, 4, true, true, none);
+        assert_eq!(drag, None, "1000 reports no motion");
+    }
+
     #[test]
     fn mouse_event_encoding_sgr() {
         use crate::grid::MouseModifiers;
