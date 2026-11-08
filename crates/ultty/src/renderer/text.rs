@@ -343,9 +343,9 @@ pub struct TextRenderer {
     /// order; see [`GridTextCache`].
     grid_caches: Vec<GridTextCache>,
     grid_draws: usize,
-    /// This draw's vertices, gathered from the cached rows, and the quad
-    /// index list shared by every draw (all grid geometry is quads).
-    frame_vertices: Vec<Vertex>,
+    /// Quads in this draw's cached rows, and the quad index list shared by
+    /// every draw (all grid geometry is quads).
+    frame_quads: usize,
     quad_indices: Vec<u32>,
 }
 
@@ -353,6 +353,9 @@ pub struct TextRenderer {
 struct GridBuffers {
     vertex: wgpu::Buffer,
     index: wgpu::Buffer,
+    /// Quads whose indices `index` already holds. The shared index list
+    /// only ever grows, so they stay valid for any draw up to that size.
+    indexed_quads: usize,
 }
 
 /// Smallest buffer the pool allocates, so ordinary frames never regrow.
@@ -443,7 +446,7 @@ impl TextRenderer {
             grid_buffers_used: 0,
             grid_caches: Vec::new(),
             grid_draws: 0,
-            frame_vertices: Vec::new(),
+            frame_quads: 0,
             quad_indices: Vec::new(),
         };
         renderer.decoration = renderer.measure_decoration_metrics(baseline);
@@ -676,11 +679,17 @@ impl TextRenderer {
         self.grid_draws = 0;
     }
 
-    /// Upload this draw's vertices and indices into the next pooled slot,
-    /// growing it if needed, and return the slot.
-    fn upload_grid(&mut self, vertices: &[Vertex], indices: &[u32]) -> usize {
-        let vertex_bytes: &[u8] = bytemuck::cast_slice(vertices);
-        let index_bytes: &[u8] = bytemuck::cast_slice(indices);
+    /// Upload the vertices of grid draw `draw` (`self.frame_quads` quads)
+    /// into the next pooled slot, growing it if needed, and return the slot.
+    ///
+    /// The rows are copied from the row cache straight into the queue's
+    /// staging memory: gathering them into one vector first copied every
+    /// vertex of the frame one more time. Indices are uploaded only when the
+    /// slot holds fewer than this draw needs.
+    fn upload_grid(&mut self, draw: usize) -> usize {
+        let quads = self.frame_quads;
+        let vertex_len = (quads * 4 * std::mem::size_of::<Vertex>()) as u64;
+        let index_len = (quads * 6 * std::mem::size_of::<u32>()) as u64;
         let slot = self.grid_buffers_used;
         self.grid_buffers_used += 1;
         if slot == self.grid_buffers.len() {
@@ -689,35 +698,55 @@ impl TextRenderer {
                     &self.device,
                     "text_vertex_buffer",
                     wgpu::BufferUsages::VERTEX,
-                    vertex_bytes.len() as u64,
+                    vertex_len,
                 ),
                 index: grid_buffer(
                     &self.device,
                     "text_index_buffer",
                     wgpu::BufferUsages::INDEX,
-                    index_bytes.len() as u64,
+                    index_len,
                 ),
+                indexed_quads: 0,
             });
         }
         let buffers = &mut self.grid_buffers[slot];
-        if buffers.vertex.size() < vertex_bytes.len() as u64 {
+        if buffers.vertex.size() < vertex_len {
             buffers.vertex = grid_buffer(
                 &self.device,
                 "text_vertex_buffer",
                 wgpu::BufferUsages::VERTEX,
-                vertex_bytes.len() as u64,
+                vertex_len,
             );
         }
-        if buffers.index.size() < index_bytes.len() as u64 {
+        if buffers.index.size() < index_len {
             buffers.index = grid_buffer(
                 &self.device,
                 "text_index_buffer",
                 wgpu::BufferUsages::INDEX,
-                index_bytes.len() as u64,
+                index_len,
             );
+            buffers.indexed_quads = 0;
         }
-        self.queue.write_buffer(&buffers.vertex, 0, vertex_bytes);
-        self.queue.write_buffer(&buffers.index, 0, index_bytes);
+        if let Some(size) = wgpu::BufferSize::new(vertex_len) {
+            if let Some(mut view) = self.queue.write_buffer_with(&buffers.vertex, 0, size) {
+                let mut offset = 0;
+                for row in self.grid_caches[draw].vertices() {
+                    let bytes: &[u8] = bytemuck::cast_slice(row);
+                    view.slice(offset..offset + bytes.len())
+                        .copy_from_slice(bytes);
+                    offset += bytes.len();
+                }
+            }
+        }
+        if buffers.indexed_quads < quads {
+            extend_quad_indices(&mut self.quad_indices, quads);
+            self.queue.write_buffer(
+                &buffers.index,
+                0,
+                bytemuck::cast_slice(&self.quad_indices[..quads * 6]),
+            );
+            buffers.indexed_quads = quads;
+        }
         slot
     }
 
@@ -963,7 +992,7 @@ impl TextRenderer {
         cursor_blink_visible: bool,
         uniform_bind_group: &wgpu::BindGroup,
     ) {
-        self.build_text_vertices_with_offset(
+        let draw = self.build_text_vertices_with_offset(
             terminal,
             color_scheme,
             cell_width,
@@ -973,18 +1002,14 @@ impl TextRenderer {
             cursor_blink_visible,
         );
 
-        if self.frame_vertices.is_empty() {
+        if self.frame_quads == 0 {
             return;
         }
 
-        let vertices = std::mem::take(&mut self.frame_vertices);
-        let indices = std::mem::take(&mut self.quad_indices);
-        let index_count = vertices.len() / 4 * 6;
-        let slot = self.upload_grid(&vertices, &indices[..index_count]);
-        let vertex_bytes = std::mem::size_of_val(vertices.as_slice()) as u64;
+        let slot = self.upload_grid(draw);
+        let index_count = self.frame_quads * 6;
+        let vertex_bytes = (self.frame_quads * 4 * std::mem::size_of::<Vertex>()) as u64;
         let index_bytes = (index_count * std::mem::size_of::<u32>()) as u64;
-        self.frame_vertices = vertices;
-        self.quad_indices = indices;
         let buffers = &self.grid_buffers[slot];
 
         // Render pass for text
@@ -1018,10 +1043,10 @@ impl TextRenderer {
         }
     }
 
-    /// Gather this draw's grid vertices into `frame_vertices` (and make
-    /// `quad_indices` long enough for them), rebuilding only the rows whose
-    /// content, cursor, or drawing parameters changed since the same draw
-    /// in the previous frame.
+    /// Bring this draw's cached grid rows up to date, rebuilding only the
+    /// rows whose content, cursor, or drawing parameters changed since the
+    /// same draw in the previous frame. Returns the draw's index into
+    /// `grid_caches` and sets `frame_quads` to its number of quads.
     #[allow(clippy::too_many_arguments)]
     fn build_text_vertices_with_offset(
         &mut self,
@@ -1032,7 +1057,7 @@ impl TextRenderer {
         x_offset: f32,
         y_offset: f32,
         cursor_blink_visible: bool,
-    ) {
+    ) -> usize {
         let draw = self.grid_draws;
         self.grid_draws += 1;
         if self.grid_caches.len() <= draw {
@@ -1086,12 +1111,9 @@ impl TextRenderer {
             cache.store(row_idx, &row, cursor_col, vertices);
         }
 
-        self.frame_vertices.clear();
-        for row in cache.vertices() {
-            self.frame_vertices.extend_from_slice(row);
-        }
-        extend_quad_indices(&mut self.quad_indices, self.frame_vertices.len() / 4);
+        self.frame_quads = cache.vertices().map(<[Vertex]>::len).sum::<usize>() / 4;
         self.grid_caches[draw] = cache;
+        draw
     }
 
     /// Scratch buffers for shaping single cells and ligature runs (which
