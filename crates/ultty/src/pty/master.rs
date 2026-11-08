@@ -108,6 +108,18 @@ impl Pty {
         self.master.as_raw_fd()
     }
 
+    /// Bytes the child has written that nobody has read yet (`FIONREAD`).
+    pub fn unread_bytes(&self) -> std::io::Result<usize> {
+        let mut count: libc::c_int = 0;
+        // SAFETY: FIONREAD writes one c_int through the pointer, which points
+        // at a live local; the fd is owned by `self` and open.
+        let rc = unsafe { libc::ioctl(self.master.as_raw_fd(), libc::FIONREAD, &mut count) };
+        if rc < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
     /// A second handle to the same PTY master, for a thread that reads the
     /// child's output while this one keeps writing input and resizing.
     ///
@@ -389,6 +401,24 @@ mod tests {
             n = clone.read(&mut buf).expect("read clone");
         }
         assert_eq!(&buf[..n], b"hi");
+    }
+
+    #[test]
+    fn unread_bytes_counts_output_waiting_on_the_master() {
+        let (pty, slave) = Pty::open().expect("open pty");
+        assert_eq!(pty.unread_bytes().expect("fionread"), 0);
+        nix::unistd::write(&slave.fd, b"waiting").expect("write slave");
+        // The line discipline hands the bytes to the master asynchronously.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut unread = 0;
+        while unread == 0 && Instant::now() < deadline {
+            unread = pty.unread_bytes().expect("fionread");
+        }
+        assert_eq!(unread, b"waiting".len());
+        let mut buf = [0u8; 16];
+        let n = pty.read(&mut buf).expect("read master");
+        assert_eq!(&buf[..n], b"waiting");
+        assert_eq!(pty.unread_bytes().expect("fionread"), 0);
     }
 
     #[test]

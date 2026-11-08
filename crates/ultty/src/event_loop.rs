@@ -74,6 +74,19 @@ const EXIT_POKES: usize = 250;
 /// process the child left behind still holds it.
 const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(200);
 
+/// The longest the exit report waits for unread output to be drained when
+/// the PTY stays open. Past the grace the exit is held back only while the
+/// kernel still has bytes for the I/O thread to read, which a loaded machine
+/// can delay; this bounds that wait.
+const EXIT_DRAIN_CAP: Duration = Duration::from_secs(2);
+
+/// Whether to report the child's exit now: once the I/O thread has closed
+/// the PTY; after [`EXIT_DRAIN_GRACE`] if the kernel holds no unread output
+/// (`unread` is only asked then); and after [`EXIT_DRAIN_CAP`] regardless.
+fn exit_report_due(closed: bool, waited: Duration, unread: impl FnOnce() -> usize) -> bool {
+    closed || waited >= EXIT_DRAIN_CAP || (waited >= EXIT_DRAIN_GRACE && unread() == 0)
+}
+
 /// Where the child's exit cannot be watched (no pidfd), how often the I/O
 /// thread pokes the UI to check for it.
 const EXIT_CHECK_FALLBACK_INTERVAL: Duration = Duration::from_millis(250);
@@ -570,11 +583,14 @@ impl EventLoop {
 
         // Report the exit only after the child's last output: once the I/O
         // thread has drained and closed the PTY, or, if something else keeps
-        // the PTY open, after a short grace. waitpid alone sees the exit
-        // while the final chunk can still be unread.
+        // the PTY open, after a short grace once nothing is left unread (a
+        // starved I/O thread may not have read the last chunk yet), and in
+        // any case after EXIT_DRAIN_CAP. waitpid alone sees the exit while
+        // the final chunk can still be unread.
         if self.child.try_wait().map_err(io::Error::other)? {
             let seen_at = *self.exit_seen_at.get_or_insert_with(Instant::now);
-            let report = !self.exit_reported && (closed || seen_at.elapsed() >= EXIT_DRAIN_GRACE);
+            let unread = || self.child.pty().unread_bytes().unwrap_or(0);
+            let report = !self.exit_reported && exit_report_due(closed, seen_at.elapsed(), unread);
             if report {
                 self.exit_reported = true;
                 if let Some(status) = self.child.exit_status() {
@@ -1263,6 +1279,22 @@ mod tests {
         .expect("spawn");
         let event_loop = EventLoop::from_child(child, 80, 24).expect("create event loop");
         assert_eq!(event_loop.terminal().terminal_name(), "xterm-ultty");
+    }
+
+    #[test]
+    fn exit_waits_for_unread_output_past_the_grace_but_not_past_the_cap() {
+        let ms = Duration::from_millis;
+        // A closed PTY means everything was read.
+        assert!(exit_report_due(true, ms(0), || 4096));
+        // Within the grace: wait for the I/O thread to close the PTY.
+        assert!(!exit_report_due(false, ms(100), || 0));
+        // Past the grace with nothing unread: something else holds the PTY.
+        assert!(exit_report_due(false, ms(250), || 0));
+        // Past the grace with output still unread: a starved I/O thread has
+        // not caught up yet, so hold the exit back.
+        assert!(!exit_report_due(false, ms(250), || 512));
+        // But never past the cap.
+        assert!(exit_report_due(false, EXIT_DRAIN_CAP, || 512));
     }
 
     /// A child that prints and exits at once must not have its last output
