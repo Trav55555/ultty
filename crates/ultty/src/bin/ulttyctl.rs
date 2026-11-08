@@ -140,6 +140,11 @@ fn exit_status(response: &ControlResponse) -> i32 {
                     exit_code: Some(code),
                     ..
                 },
+        })
+        | ControlResponse::Data(ControlData::LastCommand {
+            exit_code: Some(code),
+            running: false,
+            ..
         }) => {
             if (0..=255).contains(code) {
                 *code
@@ -350,6 +355,21 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
         }
         "wait-for" => parse_wait_for(rest),
         "subscribe" => Ok(ControlRequest::Subscribe { target: None }),
+        "last-command" => {
+            let tail_lines = match rest {
+                [] => None,
+                [flag, lines] if flag == "--tail" => Some(
+                    lines
+                        .parse()
+                        .map_err(|_| "--tail requires a number of lines".to_string())?,
+                ),
+                _ => return Err("usage: last-command [--tail <lines>]".to_string()),
+            };
+            Ok(ControlRequest::LastCommand {
+                tail_lines,
+                target: None,
+            })
+        }
         "status" => parse_status(rest),
         "auth" => Ok(ControlRequest::Authenticate {
             token: rest
@@ -488,11 +508,12 @@ fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
         | ControlRequest::Search { target, .. }
         | ControlRequest::WaitFor { target, .. }
         | ControlRequest::Subscribe { target }
-        | ControlRequest::SetPaneStatus { target, .. } => {
+        | ControlRequest::SetPaneStatus { target, .. }
+        | ControlRequest::LastCommand { target, .. } => {
             *target = Some(id);
             Ok(())
         }
-        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for, subscribe and status".to_string()),
+        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for, subscribe, status and last-command".to_string()),
     }
 }
 
@@ -688,7 +709,7 @@ GLOBAL FLAGS:
     --pane <id>             Act on pane <id> (from `panes`) instead of the
                             focused one. Goes before the command; applies to
                             text, selection, send-*, run, search, wait-for,
-                            subscribe, status
+                            subscribe, status, last-command
     -V, --version           Show ulttyctl version without connecting to Ultty
     -h, --help              Show this help
 
@@ -709,6 +730,10 @@ QUERY COMMANDS:
     text [--scrollback]     Get visible text (optionally with scrollback)
     selection               Get current selection
     search <pattern>        Search for pattern in scrollback
+    last-command [--tail <lines>]
+                            The last command the shell ran and its output
+                            (needs OSC 133 shell integration); exits with
+                            the command's status
 
 WAIT COMMANDS:
     wait-for <pattern> [--timeout <ms>]
@@ -1024,6 +1049,31 @@ mod tests {
         ] {
             assert!(parse_cli_request(&args(bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn last_command_takes_a_tail_and_exits_with_the_commands_status() {
+        assert_eq!(
+            parse_cli_request(&args("--pane 1 last-command --tail 20")).unwrap(),
+            ControlRequest::LastCommand {
+                tail_lines: Some(20),
+                target: Some(1),
+            }
+        );
+        assert!(parse_cli_request(&args("last-command --tail")).is_err());
+        assert!(parse_cli_request(&args("last-command extra")).is_err());
+
+        let last = |exit_code, running| {
+            ControlResponse::Data(ControlData::LastCommand {
+                command: "make".to_string(),
+                output: String::new(),
+                exit_code,
+                running,
+                output_available: true,
+            })
+        };
+        assert_eq!(exit_status(&last(Some(2), false)), 2);
+        assert_eq!(exit_status(&last(None, true)), 0);
     }
 
     #[test]

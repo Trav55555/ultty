@@ -1002,6 +1002,29 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                 ),
             },
             ControlData::WaitQuiet => "QUIET\n".to_string(),
+            ControlData::LastCommand {
+                command,
+                output,
+                exit_code,
+                running,
+                output_available,
+            } => {
+                let mut out = format!("$ {command}\n");
+                if *output_available {
+                    if !output.is_empty() {
+                        out.push_str(output);
+                        out.push('\n');
+                    }
+                } else {
+                    out.push_str("(output no longer on screen or in scrollback)\n");
+                }
+                match (running, exit_code) {
+                    (true, _) => out.push_str("[running]\n"),
+                    (false, Some(code)) => out.push_str(&format!("[exit {code}]\n")),
+                    (false, None) => out.push_str("[finished]\n"),
+                }
+                out
+            }
         },
         ControlResponse::Error { code, message } => {
             format!("ERROR {}: {}\n", code, message)
@@ -1320,6 +1343,31 @@ mod tests {
         assert_eq!(
             format_response(&response, OutputFormat::Text),
             "*3 tab:1 40x24 vim\n 5 tab:1 40x24 build log [working: make 25%]\n 8 tab:1 40x24 /srv\n"
+        );
+    }
+
+    #[test]
+    fn format_last_command_text_shows_how_it_ended() {
+        let last = |output: &str, exit_code, running, output_available| {
+            format_response(
+                &ControlResponse::Data(ControlData::LastCommand {
+                    command: "make test".to_string(),
+                    output: output.to_string(),
+                    exit_code,
+                    running,
+                    output_available,
+                }),
+                OutputFormat::Text,
+            )
+        };
+        assert_eq!(
+            last("1 failed", Some(2), false, true),
+            "$ make test\n1 failed\n[exit 2]\n"
+        );
+        assert_eq!(last("", None, true, true), "$ make test\n[running]\n");
+        assert_eq!(
+            last("", Some(0), false, false),
+            "$ make test\n(output no longer on screen or in scrollback)\n[exit 0]\n"
         );
     }
 

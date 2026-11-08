@@ -51,6 +51,14 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   `title_changed` and `process_exited`. An idle subscriber costs no
   wakeups. A subscriber more than 1 MiB behind is disconnected, and at most
   64 can be open.
+- `ulttyctl [--pane <id>] last-command [--tail <lines>]` (control request
+  `last_command`, MCP tool `ultty_last_command`) prints the last command the
+  pane's shell ran, its output and how it ended, or what it has printed so
+  far while it runs, and exits with the command's status. It needs OSC 133
+  shell integration. Output survives scrolling into the scrollback and
+  window resizes; when its lines are gone (cleared, reset, or out of the
+  scrollback) it says so instead of showing another command's output. OSC
+  133 marks now live on rows (ADR 0019) at no memory cost.
 - `ulttyctl [--pane <id>] status <state> [label] [--progress <0-1|N%>]
   [--attention]` (control request `set_pane_status`, MCP tool
   `ultty_set_status`) shows what a pane is doing: a colored marker before

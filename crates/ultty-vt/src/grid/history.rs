@@ -12,7 +12,7 @@
 //! something reads them, which is at most a screenful while scrolled back.
 
 use super::cell::{Cell, CellFlags, PackedColor};
-use super::row::Row;
+use super::row::{Row, RowMarks};
 
 /// Everything about a cell except its character. Colors stay packed so
 /// comparing styles, done for every cell, is integer comparison.
@@ -82,6 +82,8 @@ struct Run {
 pub(super) struct CompactRow {
     width: u16,
     wrapped: bool,
+    /// Shell integration marks (ADR 0019); three bytes in padding.
+    marks: RowMarks,
     /// One character per stored cell, as UTF-8. Bytes rather than `String`
     /// so ASCII is a plain push; [`CompactRow::decode`] checks it.
     text: Vec<u8>,
@@ -99,6 +101,7 @@ impl CompactRow {
     pub(super) fn encode_from(&mut self, row: &Row) {
         self.width = row.width();
         self.wrapped = row.is_wrapped();
+        self.marks = row.marks();
         self.text.clear();
         self.runs.clear();
         self.graphemes.clear();
@@ -152,6 +155,11 @@ impl CompactRow {
     }
 
     /// The full row this was encoded from.
+    /// The row's shell marks, without decoding it.
+    pub(super) fn marks(&self) -> RowMarks {
+        self.marks
+    }
+
     pub(super) fn decode(&self) -> Row {
         let mut row = Row::new(self.width);
         let text = std::str::from_utf8(&self.text).unwrap_or_default();
@@ -170,6 +178,7 @@ impl CompactRow {
             row.set_grapheme_extra(*col, extra);
         }
         row.set_wrapped(self.wrapped);
+        row.set_marks(self.marks);
         row.clear_dirty();
         row
     }
@@ -185,6 +194,7 @@ mod tests {
     fn same(a: &Row, b: &Row) -> bool {
         a.width() == b.width()
             && a.is_wrapped() == b.is_wrapped()
+            && a.marks() == b.marks()
             && a.cells().eq(b.cells())
             && (0..a.width()).all(|col| a.grapheme_extra(col) == b.grapheme_extra(col))
     }
@@ -230,36 +240,47 @@ mod tests {
                 1..3,
             )),
         );
-        (1u16..60, any::<bool>(), prop::collection::vec(cell, 0..60)).prop_map(
-            |(width, wrapped, cells)| {
-                let mut row = Row::new(width);
-                for (col, (c, fg, bg, flag_bits, link, (ul_style, ul_color), extra)) in
-                    cells.into_iter().take(width as usize).enumerate()
-                {
-                    let col = col as u16;
-                    let mut flags = CellFlags::NONE;
-                    if flag_bits & 1 != 0 {
-                        flags.set(CellFlags::BOLD);
-                    }
-                    if flag_bits & (1 << 2) != 0 {
-                        flags.set(CellFlags::ITALIC);
-                    }
-                    if flag_bits & (1 << 3) != 0 {
-                        flags.set(CellFlags::UNDERLINE);
-                    }
-                    let mut cell = Cell::with_attrs(c, fg, bg, flags);
-                    cell.set_hyperlink_id(link);
-                    cell.set_underline_style(ul_style);
-                    cell.set_underline_color(ul_color);
-                    row[col] = cell;
-                    if let Some(extra) = extra {
-                        row.set_grapheme_extra(col, &extra);
-                    }
-                }
-                row.set_wrapped(wrapped);
-                row
-            },
+        (
+            1u16..60,
+            any::<bool>(),
+            any::<[u8; 3]>(),
+            prop::collection::vec(cell, 0..60),
         )
+            .prop_map(
+                |(width, wrapped, [input_start, output_start, command_end], cells)| {
+                    let mut row = Row::new(width);
+                    for (col, (c, fg, bg, flag_bits, link, (ul_style, ul_color), extra)) in
+                        cells.into_iter().take(width as usize).enumerate()
+                    {
+                        let col = col as u16;
+                        let mut flags = CellFlags::NONE;
+                        if flag_bits & 1 != 0 {
+                            flags.set(CellFlags::BOLD);
+                        }
+                        if flag_bits & (1 << 2) != 0 {
+                            flags.set(CellFlags::ITALIC);
+                        }
+                        if flag_bits & (1 << 3) != 0 {
+                            flags.set(CellFlags::UNDERLINE);
+                        }
+                        let mut cell = Cell::with_attrs(c, fg, bg, flags);
+                        cell.set_hyperlink_id(link);
+                        cell.set_underline_style(ul_style);
+                        cell.set_underline_color(ul_color);
+                        row[col] = cell;
+                        if let Some(extra) = extra {
+                            row.set_grapheme_extra(col, &extra);
+                        }
+                    }
+                    row.set_wrapped(wrapped);
+                    row.set_marks(RowMarks {
+                        input_start,
+                        output_start,
+                        command_end,
+                    });
+                    row
+                },
+            )
     }
 
     proptest! {
@@ -290,5 +311,16 @@ mod tests {
         assert_eq!(compact.runs.len(), 1);
         assert_eq!(compact.text.len(), 43);
         assert!(compact.graphemes.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod size {
+    /// Scrollback keeps up to tens of thousands of these. The shell marks
+    /// (ADR 0019) fit in padding; keep it that way.
+    #[test]
+    fn rows_do_not_grow() {
+        assert!(std::mem::size_of::<super::CompactRow>() <= 80);
+        assert!(std::mem::size_of::<super::Row>() <= 56);
     }
 }

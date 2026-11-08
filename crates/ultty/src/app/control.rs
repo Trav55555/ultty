@@ -363,6 +363,34 @@ impl App {
                 }
             }
 
+            ControlRequest::LastCommand { tail_lines, target } => {
+                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                let last = self.terminal_manager.terminal(pane).and_then(|terminal| {
+                    let tail = tail_lines.map(|lines| lines.min(usize::MAX as u64) as usize);
+                    terminal.event_loop.terminal().last_command(tail)
+                });
+                match last {
+                    Some(last) => ControlResponse::Data(ControlData::LastCommand {
+                        command: last.command,
+                        output: last.output,
+                        exit_code: last.exit_code,
+                        running: last.running,
+                        output_available: last.output_available,
+                    }),
+                    None => ControlResponse::Error {
+                        code: NO_COMMAND_RECORDED,
+                        message: format!(
+                            "No command recorded in pane {}; it needs a shell with OSC 133 \
+                             integration",
+                            pane.raw()
+                        ),
+                    },
+                }
+            }
+
             ControlRequest::GetSelection { target } => {
                 let pane = match resolve_control_target(&self.terminal_manager, target) {
                     Ok(pane) => pane,
@@ -940,6 +968,9 @@ fn terminal_info(
 /// Error code for a `target` that names no open pane.
 const PANE_NOT_FOUND: u16 = 6;
 
+/// Error code for `last_command` in a pane whose shell marked no command.
+const NO_COMMAND_RECORDED: u16 = 7;
+
 /// The pane a request acts on: `target` (an id from `ListPanes`), or the
 /// focused pane when it is omitted.
 fn resolve_control_target(
@@ -1097,6 +1128,7 @@ fn control_request_requires_auth(request: &ultty_protocol::control::ControlReque
         | ControlRequest::ListPanes
         | ControlRequest::GetText { .. }
         | ControlRequest::GetSelection { .. }
+        | ControlRequest::LastCommand { .. }
         | ControlRequest::Search { .. }
         | ControlRequest::WaitFor { .. }
         | ControlRequest::Subscribe { .. }

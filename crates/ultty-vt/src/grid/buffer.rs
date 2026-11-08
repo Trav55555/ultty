@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use super::history::CompactRow;
-use super::{Cell, CellFlags, Dimensions, Grid, Row};
+use super::{Cell, CellFlags, Dimensions, Grid, Row, RowMarks};
 
 /// Default scrollback buffer size (lines).
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
@@ -217,6 +217,40 @@ impl Buffer {
         }
     }
 
+    /// The shell marks of the row at `absolute_index` (as for
+    /// [`Buffer::row_at`]), without decoding a scrollback row.
+    pub fn marks_at(&self, absolute_index: usize) -> Option<RowMarks> {
+        let history_len = self.history.len();
+        if absolute_index < history_len {
+            self.history.get(absolute_index).map(CompactRow::marks)
+        } else {
+            let grid_index = u16::try_from(absolute_index - history_len).ok()?;
+            self.grid.row(grid_index).map(Row::marks)
+        }
+    }
+
+    /// The text of rows `start..end` (absolute indices), from column
+    /// `first_col` of the first row. A soft-wrapped row runs on into the
+    /// next; other rows end in a newline. Trailing blanks and blank lines
+    /// at the end are dropped.
+    pub fn text_of_rows(&self, start: usize, end: usize, first_col: u16) -> String {
+        let mut text = String::new();
+        for index in start..end.min(self.total_lines()) {
+            let Some(row) = self.row_at(index) else {
+                break;
+            };
+            let from = if index == start { first_col } else { 0 };
+            if row.is_wrapped() {
+                text.push_str(&row.copy_text(from, row.width()));
+            } else {
+                text.push_str(row.copy_text(from, row.width()).trim_end());
+                text.push('\n');
+            }
+        }
+        text.truncate(text.trim_end().len());
+        text
+    }
+
     /// Clear scrollback history.
     pub fn clear_history(&mut self) {
         self.history.clear();
@@ -324,16 +358,22 @@ impl Buffer {
         let mut logical_lines: Vec<Vec<ReflowCell>> = Vec::new();
         let mut current_line: Vec<ReflowCell> = Vec::new();
         let mut current_logical_idx: usize = 0;
+        // Shell marks of each logical line, gathered from its rows; they go
+        // on the first row of its new layout (ADR 0019).
+        let mut line_marks: Vec<RowMarks> = Vec::new();
+        let mut current_marks = RowMarks::default();
 
         // Process history rows
         for compact in self.history.drain(..) {
             let row = compact.decode();
             push_reflow_cells(&mut current_line, &row);
+            current_marks = current_marks.or(row.marks());
             if !row.is_wrapped() {
                 while current_line.last().is_some_and(|(c, _)| c.is_blank()) {
                     current_line.pop();
                 }
                 logical_lines.push(std::mem::take(&mut current_line));
+                line_marks.push(std::mem::take(&mut current_marks));
                 current_logical_idx += 1;
             }
         }
@@ -341,13 +381,13 @@ impl Buffer {
         // Process grid rows, but skip trailing blank rows
         let grid_rows: Vec<_> = self.grid.rows().cloned().collect();
 
-        let last_content_row = grid_rows
-            .iter()
-            .rposition(|row| !row.is_blank())
-            .unwrap_or(0);
+        // A blank row with shell marks (output that has not started yet)
+        // counts as content.
+        let has_content = |row: &Row| !row.is_blank() || !row.marks().is_empty();
+        let last_content_row = grid_rows.iter().rposition(has_content).unwrap_or(0);
 
         for (idx, row) in grid_rows.iter().enumerate() {
-            if idx > last_content_row && row.is_blank() {
+            if idx > last_content_row && !has_content(row) {
                 // Track cursor on blank trailing rows before skipping
                 if idx == old_cursor_row && !found_cursor {
                     cursor_logical_line = current_logical_idx;
@@ -359,6 +399,7 @@ impl Buffer {
 
             let cells_before = current_line.len();
             push_reflow_cells(&mut current_line, row);
+            current_marks = current_marks.or(row.marks());
 
             // Track cursor: it's on this grid row
             if idx == old_cursor_row && !found_cursor {
@@ -377,6 +418,7 @@ impl Buffer {
                     cursor_logical_col = cursor_logical_col.min(current_line.len());
                 }
                 logical_lines.push(std::mem::take(&mut current_line));
+                line_marks.push(std::mem::take(&mut current_marks));
                 current_logical_idx += 1;
             }
         }
@@ -389,10 +431,15 @@ impl Buffer {
                 cursor_logical_col = cursor_logical_col.min(current_line.len());
             }
             logical_lines.push(current_line);
+            line_marks.push(current_marks);
         }
 
-        while logical_lines.last().is_some_and(|line| line.is_empty()) {
+        // Trailing empty lines go, unless they carry shell marks.
+        while logical_lines.last().is_some_and(|line| line.is_empty())
+            && line_marks.last().is_none_or(RowMarks::is_empty)
+        {
             logical_lines.pop();
+            line_marks.pop();
         }
 
         // Re-wrap all logical lines to new width, tracking cursor
@@ -401,12 +448,15 @@ impl Buffer {
         let mut new_cursor_col: usize = 0;
 
         for (line_idx, line) in logical_lines.iter().enumerate() {
+            let first_row_of_line = all_rows.len();
             if line.is_empty() {
                 if found_cursor && line_idx == cursor_logical_line {
                     new_cursor_abs_row = Some(all_rows.len());
                     new_cursor_col = 0;
                 }
-                all_rows.push(Row::new(new_cols));
+                let mut row = Row::new(new_cols);
+                row.set_marks(line_marks[line_idx]);
+                all_rows.push(row);
                 continue;
             }
 
@@ -417,7 +467,9 @@ impl Buffer {
                     new_cursor_abs_row = Some(all_rows.len());
                     new_cursor_col = 0;
                 }
-                all_rows.push(Row::new(0));
+                let mut row = Row::new(0);
+                row.set_marks(line_marks[line_idx]);
+                all_rows.push(row);
                 continue;
             }
 
@@ -489,6 +541,10 @@ impl Buffer {
                 }
 
                 all_rows.push(new_row);
+            }
+
+            if let Some(first) = all_rows.get_mut(first_row_of_line) {
+                first.set_marks(line_marks[line_idx]);
             }
 
             // Cursor at exact end of logical line

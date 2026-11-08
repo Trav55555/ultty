@@ -23,11 +23,15 @@ const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// Default `ultty_wait` timeout.
 const DEFAULT_WAIT_MS: u64 = 30_000;
 
+/// Lines of output `ultty_last_command` returns unless asked for more, so
+/// one long build log does not fill the agent's context.
+const DEFAULT_TAIL_LINES: u64 = 200;
+
 const INSTRUCTIONS: &str = "Drive the Ultty terminal. Every pane has a stable id \
 from ultty_list_panes; tools that act on a pane take `pane` and use the focused \
 pane without it. Run a command with ultty_run_command, then ultty_wait with \
 until=command_finished (needs shell integration) or until=quiet, then \
-ultty_read_text.";
+ultty_last_command (or ultty_read_text without shell integration).";
 
 /// Sends one control request to Ultty and returns its reply.
 pub type Send<'a> = dyn FnMut(ControlRequest) -> Result<ControlResponse, String> + 'a;
@@ -167,6 +171,10 @@ impl McpServer<'_, '_> {
                 target: pane,
             })?,
             "ultty_new_tab" => return self.new_tab(args),
+            "ultty_last_command" => self.request(ControlRequest::LastCommand {
+                tail_lines: Some(optional_u64(args, "tail_lines")?.unwrap_or(DEFAULT_TAIL_LINES)),
+                target: pane,
+            })?,
             "ultty_set_status" => self.request(ControlRequest::SetPaneStatus {
                 status: pane_status(args)?,
                 target: pane,
@@ -447,6 +455,17 @@ fn tools() -> Vec<Value> {
                 "regex": { "type": "boolean" },
                 "quiet_ms": { "type": "integer", "minimum": 1, "description": "Default 500." },
                 "timeout_ms": { "type": "integer", "minimum": 1, "description": "Default 30000." },
+            }),
+            &[],
+        ),
+        tool(
+            "ultty_last_command",
+            "The last command run in a pane's shell: the command line, its output, its \
+             exit code, and whether it is still running. Needs shell integration (OSC \
+             133). Pair with ultty_wait until=command_finished.",
+            json!({
+                "pane": pane_property(),
+                "tail_lines": { "type": "integer", "minimum": 1, "description": "Lines of output from the end. Default 200." },
             }),
             &[],
         ),
@@ -743,6 +762,30 @@ mod tests {
             ]
         );
         assert_eq!(lines[2]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn last_command_returns_a_bounded_tail_by_default() {
+        let (_, sent) = exchange(
+            &[
+                call(1, "ultty_last_command", json!({ "pane": 2 })),
+                call(2, "ultty_last_command", json!({ "tail_lines": 5 })),
+            ],
+            |_| ControlResponse::Ok,
+        );
+        assert_eq!(
+            sent,
+            vec![
+                ControlRequest::LastCommand {
+                    tail_lines: Some(DEFAULT_TAIL_LINES),
+                    target: Some(2),
+                },
+                ControlRequest::LastCommand {
+                    tail_lines: Some(5),
+                    target: None,
+                },
+            ]
+        );
     }
 
     #[test]

@@ -100,6 +100,17 @@ pub enum ControlRequest {
 
     GetInfo,
 
+    /// The last command the pane's shell ran (or is running) and what it
+    /// printed, from OSC 133 shell integration marks.
+    LastCommand {
+        /// Keep only the last this many lines of output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tail_lines: Option<u64>,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
+
     // === Search ===
     Search {
         pattern: String,
@@ -334,6 +345,19 @@ pub enum ControlData {
     WaitTimeout,
     /// The connection is now an event stream.
     Subscribed,
+    /// A pane's last command; see `ControlRequest::LastCommand`.
+    LastCommand {
+        command: String,
+        /// What it printed; empty when `output_available` is false.
+        output: String,
+        /// Its exit status once finished, if the shell reported one.
+        exit_code: Option<i32>,
+        /// Still running: `output` is what it printed so far.
+        running: bool,
+        /// False when the output's rows are gone (cleared, reset, or out
+        /// of the scrollback).
+        output_available: bool,
+    },
 }
 
 /// Something that happened in a pane, sent to subscribers one per line.
@@ -561,6 +585,13 @@ mod tests {
                 },
             },
             ControlData::WaitQuiet,
+            ControlData::LastCommand {
+                command: "make".to_string(),
+                output: "ok".to_string(),
+                exit_code: Some(0),
+                running: false,
+                output_available: true,
+            },
         ];
         let mut responses = vec![
             ControlResponse::Ok,

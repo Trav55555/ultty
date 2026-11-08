@@ -3,6 +3,42 @@
 use super::cell::{Cell, CellFlags};
 use std::ops::{Index, IndexMut};
 
+/// Shell integration marks on a row (OSC 133; ADR 0019).
+///
+/// Each mark is 0 when unset, otherwise the tag of the command it belongs
+/// to: the low bits of a per-terminal command number, from 1 to 255. Three
+/// bytes, so they fit in padding rows already have.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RowMarks {
+    /// Command input starts on this row (OSC 133;B).
+    pub input_start: u8,
+    /// Command output starts at the beginning of this row (OSC 133;C).
+    pub output_start: u8,
+    /// The command finished at the beginning of this row (OSC 133;D).
+    pub command_end: u8,
+}
+
+impl RowMarks {
+    /// The tag a command number is stored as: never 0, which means unset.
+    pub fn tag(command: u32) -> u8 {
+        (command % 255) as u8 + 1
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == RowMarks::default()
+    }
+
+    /// These marks, with any unset one taken from `other`.
+    pub fn or(self, other: RowMarks) -> RowMarks {
+        let pick = |a: u8, b: u8| if a != 0 { a } else { b };
+        RowMarks {
+            input_start: pick(self.input_start, other.input_start),
+            output_start: pick(self.output_start, other.output_start),
+            command_end: pick(self.command_end, other.command_end),
+        }
+    }
+}
+
 /// A row of terminal cells.
 ///
 /// Provides efficient storage and manipulation of a single line
@@ -14,6 +50,8 @@ pub struct Row {
     dirty: bool,
     /// Whether this row is wrapped (continues on next line due to soft wrap)
     wrapped: bool,
+    /// Shell integration marks; see [`RowMarks`].
+    marks: RowMarks,
     /// Every cell at or after this column is [`Cell::default`]. It may
     /// overstate the used part of the row, never understate it, so code
     /// that only cares about non-default cells (history encoding, erasing a
@@ -175,6 +213,7 @@ impl Row {
             cells: vec![Cell::default(); width as usize],
             dirty: true,
             wrapped: false,
+            marks: RowMarks::default(),
             used: 0,
             graphemes: GraphemeMap::default(),
         }
@@ -201,6 +240,7 @@ impl Row {
         self.cells.clone_from(&other.cells);
         self.graphemes.clone_from(&other.graphemes);
         self.wrapped = other.wrapped;
+        self.marks = other.marks;
         self.used = other.used;
         self.dirty = true;
     }
@@ -337,6 +377,19 @@ impl Row {
         self.dirty = true;
     }
 
+    /// The row's shell integration marks.
+    #[inline]
+    pub fn marks(&self) -> RowMarks {
+        self.marks
+    }
+
+    /// Replace the row's shell integration marks. They do not change what
+    /// is drawn, so the row stays clean.
+    #[inline]
+    pub fn set_marks(&mut self, marks: RowMarks) {
+        self.marks = marks;
+    }
+
     /// Get the width of the row.
     #[inline]
     pub fn width(&self) -> u16 {
@@ -388,6 +441,7 @@ impl Row {
         }
         self.graphemes.clear();
         self.wrapped = false;
+        self.marks = RowMarks::default();
         self.dirty = true;
     }
 

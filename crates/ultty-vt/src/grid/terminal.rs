@@ -1,7 +1,8 @@
 //! Terminal state management with alternate screen support.
 
 use super::{
-    Buffer, CursorPosition, Dimensions, Grid, ImageStore, Palette, TerminalImage, ThemeColors,
+    Buffer, CursorPosition, Dimensions, Grid, ImageStore, Palette, RowMarks, TerminalImage,
+    ThemeColors,
 };
 
 /// Maximum number of distinct OSC 8 hyperlink URIs remembered per terminal.
@@ -148,7 +149,33 @@ pub struct ShellIntegration {
     pub command_executing: bool,
     /// Last command exit code
     pub last_exit_code: Option<i32>,
+    /// Commands started (OSC 133;C) so far; tags the row marks of the
+    /// current one (ADR 0019).
+    pub command_number: u32,
+    /// Column command input started at (OSC 133;B), until output starts.
+    pub input_col: Option<u16>,
+    /// The current or last command line, read when its output started.
+    pub command: Option<String>,
 }
+
+/// The last command a shell ran, as `last_command` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastCommand {
+    /// The command line, as typed after the prompt.
+    pub command: String,
+    /// What it printed; empty when `output_available` is false.
+    pub output: String,
+    /// Its exit status, once finished, if the shell reported one.
+    pub exit_code: Option<i32>,
+    /// Still running: `output` is what it has printed so far.
+    pub running: bool,
+    /// False when the rows holding the output are gone: the screen was
+    /// cleared or reset, or they left the scrollback.
+    pub output_available: bool,
+}
+
+/// How far above the output to look for the command line's row.
+const MAX_COMMAND_LINE_ROWS: usize = 256;
 
 /// Terminal state with main and alternate screen buffers.
 ///
@@ -649,24 +676,105 @@ impl Terminal {
         tracing::trace!("Prompt started at line {}", row);
     }
 
-    /// Mark command start (OSC 133;B).
+    /// Mark command start (OSC 133;B): input begins at the cursor.
     pub fn mark_command_start(&mut self) {
-        let row = self.grid().cursor().position.row;
-        self.shell_integration.command_line = Some(row);
-        tracing::trace!("Command started at line {}", row);
+        let position = self.grid().cursor().position;
+        self.shell_integration.command_line = Some(position.row);
+        self.shell_integration.input_col = Some(position.col);
+        let tag = RowMarks::tag(self.shell_integration.command_number.wrapping_add(1));
+        self.update_cursor_row_marks(|marks| marks.input_start = tag);
+        tracing::trace!("Command started at line {}", position.row);
     }
 
-    /// Mark command executed (OSC 133;C).
+    /// Mark command executed (OSC 133;C): output begins at the cursor's
+    /// row. Reads the command line typed since OSC 133;B.
     pub fn mark_command_executed(&mut self) {
-        self.shell_integration.command_executing = true;
+        let shell = &mut self.shell_integration;
+        shell.command_number = shell.command_number.wrapping_add(1);
+        shell.command_executing = true;
+        shell.last_exit_code = None;
+        let tag = RowMarks::tag(shell.command_number);
+        let input_col = shell.input_col.take();
+        self.shell_integration.command = Some(self.command_line_before_cursor(tag, input_col));
+        self.update_cursor_row_marks(|marks| marks.output_start = tag);
         tracing::trace!("Command executing");
     }
 
-    /// Mark command finished (OSC 133;D).
+    /// Mark command finished (OSC 133;D). A D with no command running (the
+    /// one shells send before their first prompt) marks nothing.
     pub fn mark_command_finished(&mut self, exit_code: Option<i32>) {
+        if self.shell_integration.command_executing {
+            let tag = RowMarks::tag(self.shell_integration.command_number);
+            self.update_cursor_row_marks(|marks| marks.command_end = tag);
+        }
         self.shell_integration.command_executing = false;
         self.shell_integration.last_exit_code = exit_code;
         tracing::trace!("Command finished with exit code: {:?}", exit_code);
+    }
+
+    fn update_cursor_row_marks(&mut self, update: impl FnOnce(&mut RowMarks)) {
+        let row = self.grid().cursor().position.row;
+        if let Some(row) = self.grid_mut().row_mut(row) {
+            let mut marks = row.marks();
+            update(&mut marks);
+            row.set_marks(marks);
+        }
+    }
+
+    /// The command line typed after the prompt: from the row marked as
+    /// input start for `tag` (at `input_col`) up to the cursor's row.
+    fn command_line_before_cursor(&self, tag: u8, input_col: Option<u16>) -> String {
+        let buffer = self.buffer();
+        let cursor = buffer.history_len() + self.grid().cursor().position.row as usize;
+        let input_row = (cursor.saturating_sub(MAX_COMMAND_LINE_ROWS)..=cursor)
+            .rev()
+            .find(|&index| buffer.marks_at(index).is_some_and(|m| m.input_start == tag));
+        match (input_row, input_col) {
+            (Some(row), Some(col)) => buffer.text_of_rows(row, cursor.max(row + 1), col),
+            _ => String::new(),
+        }
+    }
+
+    /// The last command the shell ran (or is running), found through the
+    /// OSC 133 marks on the main screen's rows (ADR 0019). `None` before
+    /// the first command. `tail_lines` keeps only the end of long output.
+    pub fn last_command(&self, tail_lines: Option<usize>) -> Option<LastCommand> {
+        let shell = &self.shell_integration;
+        if shell.command_number == 0 {
+            return None;
+        }
+        let tag = RowMarks::tag(shell.command_number);
+        let buffer = &self.main;
+        let total = buffer.total_lines();
+        let start = (0..total).rev().find(|&index| {
+            buffer
+                .marks_at(index)
+                .is_some_and(|m| m.output_start == tag)
+        });
+        let end = start.and_then(|start| {
+            (start..total)
+                .find(|&index| buffer.marks_at(index).is_some_and(|m| m.command_end == tag))
+        });
+        let running = shell.command_executing;
+        let rows = match (start, end) {
+            (Some(start), Some(end)) => Some((start, end)),
+            (Some(start), None) if running => Some((start, total)),
+            _ => None,
+        };
+        let mut output = rows
+            .map(|(start, end)| buffer.text_of_rows(start, end, 0))
+            .unwrap_or_default();
+        if let Some(tail) = tail_lines {
+            let lines: Vec<&str> = output.lines().collect();
+            output = lines[lines.len().saturating_sub(tail)..].join("\n");
+        }
+        Some(LastCommand {
+            command: shell.command.clone().unwrap_or_default(),
+            output,
+            exit_code: if running { None } else { shell.last_exit_code },
+            running,
+            output_available: rows.is_some(),
+        })
     }
 
     /// Get the image store.
