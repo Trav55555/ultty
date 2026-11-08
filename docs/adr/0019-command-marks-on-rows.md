@@ -49,10 +49,10 @@ end: the command number rules that out for the last 255 commands.
 
 - `last-command` survives scrolling, scrollback eviction of older lines,
   and window resizes.
-- Output written after D on the same row as D (no trailing newline before
-  the next prompt) is not part of the output; shells that send D after
-  making sure the cursor is at column 0 (zsh, fish, bash with the usual
-  integration) are not affected.
+- Output that does not end in a newline leaves the cursor mid-row when D
+  arrives, and the next prompt usually continues on that row. The text
+  before the cursor is saved when D arrives and appended to the output, so
+  the prompt never is.
 - The marks are also the basis for later features: jump to the previous
   prompt, select a command's output.
 - The alternate screen's rows can carry marks too, but `last-command` reads

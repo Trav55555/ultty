@@ -161,6 +161,23 @@ fn a_long_command_line_is_read_across_its_wrapped_rows() {
 }
 
 #[test]
+fn output_without_a_final_newline_is_kept_and_the_prompt_is_not() {
+    let mut term = Terminal::new(Dimensions::new(40, 10));
+    run(&mut term, "printf done", "done", 0);
+    prompt(&mut term);
+    assert_eq!(last(&term).output, "done");
+
+    run(&mut term, "cat notes", "line one\r\nno newline at end", 0);
+    prompt(&mut term);
+    assert_eq!(last(&term).output, "line one\nno newline at end");
+
+    // A later command with a newline does not inherit the old tail.
+    run(&mut term, "echo ok", "ok\r\n", 0);
+    prompt(&mut term);
+    assert_eq!(last(&term).output, "ok");
+}
+
+#[test]
 fn tail_lines_keeps_the_end_of_long_output() {
     let mut term = Terminal::new(Dimensions::new(40, 10));
     let (sent, _) = lines(0..30);

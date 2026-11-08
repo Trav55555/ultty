@@ -156,6 +156,10 @@ pub struct ShellIntegration {
     pub input_col: Option<u16>,
     /// The current or last command line, read when its output started.
     pub command: Option<String>,
+    /// Output the last command left on the row it finished on, before the
+    /// cursor, when it did not end in a newline. The prompt that follows
+    /// usually shares that row, so it is saved when the command finishes.
+    pub output_tail: Option<String>,
 }
 
 /// The last command a shell ran, as `last_command` reports it.
@@ -693,6 +697,7 @@ impl Terminal {
         shell.command_number = shell.command_number.wrapping_add(1);
         shell.command_executing = true;
         shell.last_exit_code = None;
+        shell.output_tail = None;
         let tag = RowMarks::tag(shell.command_number);
         let input_col = shell.input_col.take();
         self.shell_integration.command = Some(self.command_line_before_cursor(tag, input_col));
@@ -706,6 +711,12 @@ impl Terminal {
         if self.shell_integration.command_executing {
             let tag = RowMarks::tag(self.shell_integration.command_number);
             self.update_cursor_row_marks(|marks| marks.command_end = tag);
+            let cursor = self.grid().cursor().position;
+            self.shell_integration.output_tail = (cursor.col > 0)
+                .then(|| self.grid().row(cursor.row))
+                .flatten()
+                .map(|row| row.copy_text(0, cursor.col - 1).trim_end().to_string())
+                .filter(|tail| !tail.is_empty());
         }
         self.shell_integration.command_executing = false;
         self.shell_integration.last_exit_code = exit_code;
@@ -764,6 +775,12 @@ impl Terminal {
         let mut output = rows
             .map(|(start, end)| buffer.text_of_rows(start, end, 0))
             .unwrap_or_default();
+        if let (Some(_), false, Some(tail)) = (rows, running, &shell.output_tail) {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(tail);
+        }
         if let Some(tail) = tail_lines {
             let lines: Vec<&str> = output.lines().collect();
             output = lines[lines.len().saturating_sub(tail)..].join("\n");
