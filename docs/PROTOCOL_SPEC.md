@@ -544,7 +544,7 @@ Roles form a closed set. Each maps to an AccessKit role when the terminal expose
 
 Adding a role is additive; removing one is not.
 
-**Defaults.** A region that never received `SetSemantics`, or whose role is `Auto`, gets a role and state derived from its content:
+**Defaults.** A region that never received `SetSemantics`, or whose role is `Auto`, takes the role its content implies. Whatever the role, the state in the third column fills the fields the app left empty:
 
 | Content | Role | Derived state |
 |---------|------|---------------|
@@ -556,7 +556,7 @@ Adding a role is additive; removing one is not.
 | `Spinner` | `Status` | `busy`; `label` is the spinner's label |
 | `Image` | `Image` | unlabelled |
 
-Fields the app did set are kept; derivation only fills what it left empty. A region with no label takes its text as its name when the text is one line (a trailing newline is ignored), whatever its role, except an `Input`, whose text is its value. `live` defaults to `Off` and is never inferred: a wrongly live region floods speech.
+Fields the app did set always win, except that `busy` has no unset value: a spinner or an indeterminate progress bar is busy whatever the app sent. A region with no label takes its text as its name when the text is one line (a trailing newline is ignored), whatever its role; an `Input`'s text is its value, never its name. `live` defaults to `Off` and is never inferred: a wrongly live region floods speech.
 
 `ulttyctl regions` reports each region's effective `role`, `label` and `live`; the JSON form leaves out `label` when there is none and `live` when it is `off`.
 

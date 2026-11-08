@@ -7,84 +7,117 @@ use super::Region;
 
 /// The semantics a screen reader should see for `region`.
 ///
-/// With role `Auto` (the default before any `SetSemantics`) the role and
-/// its state come from the content. Fields the app set are kept; this only
-/// fills what it left empty. A region with no label is named by its text
-/// when that is one line, except an input, whose text is its value. `live`
-/// is never inferred.
+/// With role `Auto` (the default before any `SetSemantics`) the role comes
+/// from the content. Whatever the role, fields the app left empty are
+/// filled from the content where it has them; fields the app set win. A
+/// region with no label is named by its text when that is one line; an
+/// input's text is its value, never its name. `live` is never inferred.
 pub fn effective_semantics(region: &Region) -> Semantics {
     let mut semantics = region.semantics.clone();
     if semantics.role == Role::Auto {
-        derive_from_content(&mut semantics, &region.content, region.appended);
+        semantics.role = content_role(&region.content, region.appended);
     }
-    if semantics.label.is_none() && semantics.role != Role::Input {
-        semantics.label = one_line(&region.content);
-    }
+    fill_from_content(&mut semantics, &region.content);
     semantics
 }
 
-fn derive_from_content(semantics: &mut Semantics, content: &Content, appended: bool) {
+/// The role a region's content implies.
+fn content_role(content: &Content, appended: bool) -> Role {
     let text_role = if appended { Role::Log } else { Role::Text };
-    semantics.role = match content {
+    match content {
         Content::None => Role::Group,
         Content::Text(_) | Content::RichText(_) => text_role,
         Content::Widget(widget) => match widget {
             WidgetContent::Markdown(_) | WidgetContent::Code(_) => text_role,
-            WidgetContent::Input(input) => {
-                if semantics.value_text.is_none() && !input.password {
-                    semantics.value_text = Some(input.value.clone());
-                }
-                if semantics.description.is_none() && !input.placeholder.is_empty() {
-                    semantics.description = Some(input.placeholder.clone());
-                }
-                Role::Input
-            }
-            WidgetContent::Button(button) => {
-                if semantics.label.is_none() {
-                    semantics.label = Some(button.label.clone());
-                }
-                Role::Button
-            }
-            WidgetContent::Progress(progress) => {
-                if progress.indeterminate {
-                    semantics.busy = true;
-                } else if semantics.value.is_none() {
-                    semantics.value = Some(SemanticValue {
-                        now: progress.value,
-                        min: 0.0,
-                        max: 1.0,
-                    });
-                }
-                if semantics.label.is_none() {
-                    semantics.label = progress.label.clone();
-                }
-                Role::Progress
-            }
-            WidgetContent::Spinner(spinner) => {
-                semantics.busy = true;
-                if semantics.label.is_none() {
-                    semantics.label = spinner.label.clone();
-                }
-                Role::Status
-            }
+            WidgetContent::Input(_) => Role::Input,
+            WidgetContent::Button(_) => Role::Button,
+            WidgetContent::Progress(_) => Role::Progress,
+            WidgetContent::Spinner(_) => Role::Status,
             WidgetContent::Image(_) => Role::Image,
         },
-    };
+    }
+}
+
+/// Fill the fields the app left empty from what the content says.
+fn fill_from_content(semantics: &mut Semantics, content: &Content) {
+    match content {
+        Content::Widget(WidgetContent::Input(input)) => {
+            if semantics.value_text.is_none() && !input.password {
+                semantics.value_text = Some(input.value.clone());
+            }
+            if semantics.description.is_none() && !input.placeholder.is_empty() {
+                semantics.description = Some(input.placeholder.clone());
+            }
+        }
+        Content::Widget(WidgetContent::Button(button)) => {
+            if semantics.label.is_none() {
+                semantics.label = Some(button.label.clone());
+            }
+        }
+        Content::Widget(WidgetContent::Progress(progress)) => {
+            if progress.indeterminate {
+                semantics.busy = true;
+            } else if semantics.value.is_none() {
+                semantics.value = Some(SemanticValue {
+                    now: progress.value,
+                    min: 0.0,
+                    max: 1.0,
+                });
+            }
+            if semantics.label.is_none() {
+                semantics.label = progress.label.clone();
+            }
+        }
+        Content::Widget(WidgetContent::Spinner(spinner)) => {
+            semantics.busy = true;
+            if semantics.label.is_none() {
+                semantics.label = spinner.label.clone();
+            }
+        }
+        _ => {
+            if semantics.label.is_none() {
+                semantics.label = one_line(content);
+            }
+        }
+    }
 }
 
 /// The content's text when it is a single non-empty line. A trailing
-/// newline does not count as a second line.
+/// newline does not count as a second line. Allocates only in that case.
 fn one_line(content: &Content) -> Option<String> {
     let text = match content {
-        Content::Text(text) => text.text.clone(),
-        Content::RichText(rich) => rich.spans.iter().map(|span| span.text.as_str()).collect(),
-        Content::Widget(WidgetContent::Markdown(markdown)) => markdown.source.clone(),
-        Content::Widget(WidgetContent::Code(code)) => code.source.clone(),
+        Content::Text(text) => &text.text,
+        Content::Widget(WidgetContent::Markdown(markdown)) => &markdown.source,
+        Content::Widget(WidgetContent::Code(code)) => &code.source,
+        Content::RichText(rich) => {
+            let last = rich.spans.len().checked_sub(1)?;
+            let several_lines = rich.spans.iter().enumerate().any(|(index, span)| {
+                let text = if index == last {
+                    trim_line_end(&span.text)
+                } else {
+                    &span.text
+                };
+                text.contains('\n')
+            });
+            if several_lines {
+                return None;
+            }
+            let text: String = rich.spans.iter().map(|span| span.text.as_str()).collect();
+            return single_line(&text).map(str::to_string);
+        }
         _ => return None,
     };
-    let line = text.strip_suffix('\n').unwrap_or(&text);
-    let line = line.strip_suffix('\r').unwrap_or(line);
-    (!line.is_empty() && !line.contains('\n')).then(|| line.to_string())
+    single_line(text).map(str::to_string)
+}
+
+fn trim_line_end(text: &str) -> &str {
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    text.strip_suffix('\r').unwrap_or(text)
+}
+
+fn single_line(text: &str) -> Option<&str> {
+    let line = trim_line_end(text);
+    (!line.is_empty() && !line.contains('\n')).then_some(line)
 }
 
 #[cfg(test)]
@@ -265,5 +298,72 @@ mod tests {
         assert_eq!(semantics.role, Role::Button);
         assert_eq!(semantics.label.as_deref(), Some("Run all tests"));
         assert!(semantics.disabled);
+    }
+
+    #[test]
+    fn explicit_role_still_gets_state_from_content() {
+        let mut button = region(widget(WidgetContent::Button(ButtonWidget::new("Run"))));
+        button.semantics.role = Role::Button;
+        assert_eq!(effective_semantics(&button).label.as_deref(), Some("Run"));
+
+        let mut bar = region(widget(WidgetContent::Progress(ProgressWidget {
+            value: 0.5,
+            label: Some("Upload".to_string()),
+            animated: false,
+            indeterminate: false,
+        })));
+        bar.semantics.role = Role::Progress;
+        let semantics = effective_semantics(&bar);
+        assert_eq!(semantics.value.map(|value| value.now), Some(0.5));
+        assert_eq!(semantics.label.as_deref(), Some("Upload"));
+
+        let mut spinner = region(widget(WidgetContent::Spinner(SpinnerWidget::default())));
+        spinner.semantics.role = Role::Alert;
+        let semantics = effective_semantics(&spinner);
+        assert_eq!(semantics.role, Role::Alert);
+        assert!(semantics.busy);
+
+        let mut field = region(widget(WidgetContent::Input(InputWidget {
+            value: "secret".to_string(),
+            placeholder: "Token".to_string(),
+            password: true,
+            ..Default::default()
+        })));
+        field.semantics.role = Role::Input;
+        field.semantics.description = Some("API token".to_string());
+        let semantics = effective_semantics(&field);
+        assert_eq!(semantics.value_text, None, "never a password");
+        assert_eq!(semantics.description.as_deref(), Some("API token"));
+        assert_eq!(semantics.label, None, "an input is not named by its value");
+
+        let mut status = region(text("Saved"));
+        status.semantics.role = Role::Status;
+        status.semantics.value = Some(SemanticValue {
+            now: 3.0,
+            min: 0.0,
+            max: 9.0,
+        });
+        let semantics = effective_semantics(&status);
+        assert_eq!(semantics.label.as_deref(), Some("Saved"));
+        assert_eq!(semantics.value.map(|value| value.now), Some(3.0));
+    }
+
+    #[test]
+    fn rich_text_is_one_line_only_without_inner_newlines() {
+        let rich = |parts: &[&str]| {
+            Content::RichText(RichText {
+                spans: parts
+                    .iter()
+                    .map(|text| Span {
+                        text: text.to_string(),
+                        style: Style::new(),
+                    })
+                    .collect(),
+            })
+        };
+        let label = |parts: &[&str]| effective_semantics(&region(rich(parts))).label;
+        assert_eq!(label(&["Build ", "ok\n"]).as_deref(), Some("Build ok"));
+        assert_eq!(label(&["Build\n", "ok"]), None);
+        assert_eq!(label(&[]), None);
     }
 }
