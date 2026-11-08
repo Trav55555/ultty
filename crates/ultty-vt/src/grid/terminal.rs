@@ -272,6 +272,9 @@ pub struct Terminal {
     pending_alternate_resize: Option<Dimensions>,
     /// Anchor events not yet taken by the embedder, oldest first.
     anchor_events: std::collections::VecDeque<AnchorEvent>,
+    /// Anchors in the output reserve rows; see
+    /// [`Terminal::set_inline_anchors`].
+    inline_anchors: bool,
 }
 
 impl Terminal {
@@ -333,6 +336,7 @@ impl Terminal {
             terminal_name: DEFAULT_TERMINAL_NAME.to_string(),
             pending_alternate_resize: None,
             anchor_events: std::collections::VecDeque::new(),
+            inline_anchors: false,
         }
     }
 
@@ -363,10 +367,28 @@ impl Terminal {
         !self.pending_responses.is_empty()
     }
 
+    /// Whether inline surface anchors in the output reserve rows (ADR
+    /// 0020). Off by default: until the embedder pairs anchors with
+    /// sessions and releases them, anchors in output (a `cat`ed recording,
+    /// say) are parsed and ignored.
+    pub fn set_inline_anchors(&mut self, enabled: bool) {
+        self.inline_anchors = enabled;
+    }
+
+    /// Whether inline surface anchors reserve rows; see
+    /// [`Terminal::set_inline_anchors`].
+    pub fn inline_anchors(&self) -> bool {
+        self.inline_anchors
+    }
+
     /// Apply an inline surface anchor at the cursor (ADR 0020). On the main
     /// screen its rows are reserved and tagged; on the alternate screen
-    /// nothing is. Either way an [`AnchorEvent`] says what happened.
+    /// nothing is. Either way an [`AnchorEvent`] says what happened. With
+    /// inline anchors off this does nothing.
     pub fn place_anchor(&mut self, anchor: Anchor) {
+        if !self.inline_anchors {
+            return;
+        }
         // Free the tags of anchors already gone, so they can be reused.
         self.sweep_anchors();
         let event = if self.using_alternate {

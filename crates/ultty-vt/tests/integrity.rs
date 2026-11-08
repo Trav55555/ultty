@@ -97,6 +97,7 @@ fn step() -> impl Strategy<Value = Step> {
 /// rather than one action per character.
 fn run(cols: u16, rows: u16, steps: &[Step], spans: bool) -> Result<(), String> {
     let mut terminal = Terminal::new(Dimensions::new(cols, rows));
+    terminal.set_inline_anchors(true);
     let mut parser = AnsiParser::new();
     for (index, step) in steps.iter().enumerate() {
         match step {

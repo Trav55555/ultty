@@ -16,6 +16,14 @@ fn feed(term: &mut Terminal, bytes: &[u8]) {
         .expect("terminal state stays consistent");
 }
 
+/// A terminal with inline anchors turned on, as the embedder does once it
+/// pairs them with sessions.
+fn term(cols: u16, rows: u16) -> Terminal {
+    let mut term = Terminal::new(Dimensions::new(cols, rows));
+    term.set_inline_anchors(true);
+    term
+}
+
 fn anchor_bytes(session_id: u64, surface_id: u32, rows: u16) -> Vec<u8> {
     format!("\x1b_u{session_id};{surface_id};{rows}\x1b\\").into_bytes()
 }
@@ -70,7 +78,7 @@ fn lost(tag: u16, surface_id: u32, rows: u16) -> AnchorEvent {
 
 #[test]
 fn malformed_anchors_reserve_nothing() {
-    let mut term = Terminal::new(Dimensions::new(20, 5));
+    let mut term = term(20, 5);
     feed(
         &mut term,
         b"x\x1b_u1;2;0\x1b\\\x1b_u1;2;129\x1b\\\x1b_u1;2\x1b\\y",
@@ -87,7 +95,7 @@ fn malformed_anchors_reserve_nothing() {
 
 #[test]
 fn reservation_at_the_bottom_scrolls_in_and_returns_to_its_first_row() {
-    let mut term = Terminal::new(Dimensions::new(20, 5));
+    let mut term = term(20, 5);
     feed(&mut term, b"one\r\ntwo\r\nthree\r\nfour\r\nprompt$ ");
     feed(&mut term, b"\r\n");
     // The cursor is on the bottom row, column 0, with one line in
@@ -114,7 +122,7 @@ fn reservation_at_the_bottom_scrolls_in_and_returns_to_its_first_row() {
 
 #[test]
 fn reservation_mid_screen_tags_rows_below_without_scrolling() {
-    let mut term = Terminal::new(Dimensions::new(20, 6));
+    let mut term = term(20, 6);
     feed(&mut term, b"top\r\n");
     let tag = place(&mut term, 9, 3);
     assert_eq!(term.buffer().history_len(), 0);
@@ -131,7 +139,7 @@ fn reservation_mid_screen_tags_rows_below_without_scrolling() {
 
 #[test]
 fn tags_survive_scrolling_into_scrollback_and_back() {
-    let mut term = Terminal::new(Dimensions::new(20, 4));
+    let mut term = term(20, 4);
     let tag = place(&mut term, 1, 2);
     feed(&mut term, b"card 1\r\ncard 2\r\n");
     for n in 0..10 {
@@ -161,7 +169,7 @@ fn tags_survive_scrolling_into_scrollback_and_back() {
 
 #[test]
 fn a_blank_reservation_is_content_when_the_window_shrinks() {
-    let mut term = Terminal::new(Dimensions::new(20, 6));
+    let mut term = term(20, 6);
     feed(&mut term, b"$ ");
     // Cursor above its own reservation's blank rows: they are not dropped
     // as blank space below the cursor.
@@ -173,7 +181,7 @@ fn a_blank_reservation_is_content_when_the_window_shrinks() {
 
 #[test]
 fn insert_and_delete_line_move_tags_with_their_rows() {
-    let mut term = Terminal::new(Dimensions::new(20, 8));
+    let mut term = term(20, 8);
     feed(&mut term, b"a\r\nb\r\n");
     let tag = place(&mut term, 1, 2);
     feed(&mut term, b"card\r\ncard\r\n");
@@ -199,7 +207,7 @@ fn insert_and_delete_line_move_tags_with_their_rows() {
 
 #[test]
 fn rows_pushed_out_of_the_screen_by_insert_line_lose_their_anchor() {
-    let mut term = Terminal::new(Dimensions::new(20, 4));
+    let mut term = term(20, 4);
     feed(&mut term, b"\x1b[3H");
     let tag = place(&mut term, 1, 2);
     feed(&mut term, b"\x1b[1H\x1b[2L");
@@ -208,7 +216,7 @@ fn rows_pushed_out_of_the_screen_by_insert_line_lose_their_anchor() {
 
 #[test]
 fn scroll_regions_move_tags_and_discard_them_off_the_top() {
-    let mut term = Terminal::new(Dimensions::new(20, 8));
+    let mut term = term(20, 8);
     // Region rows 3 to 6 (1-based); cursor at its bottom.
     feed(&mut term, b"\x1b[3;6r\x1b[6H");
     let tag = place(&mut term, 1, 2);
@@ -230,7 +238,7 @@ fn scroll_regions_move_tags_and_discard_them_off_the_top() {
 
 #[test]
 fn reservations_that_cannot_stay_on_screen_are_refused() {
-    let mut term = Terminal::new(Dimensions::new(20, 8));
+    let mut term = term(20, 8);
     let refused = |rows, reason| AnchorEvent::Refused {
         anchor: anchor(1, rows),
         reason,
@@ -261,7 +269,7 @@ fn reservations_that_cannot_stay_on_screen_are_refused() {
 
 #[test]
 fn erase_display_drops_tags_and_reports_the_loss() {
-    let mut term = Terminal::new(Dimensions::new(20, 5));
+    let mut term = term(20, 5);
     let tag = place(&mut term, 1, 2);
     feed(&mut term, b"\x1b[2J");
     assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 2)]);
@@ -270,7 +278,7 @@ fn erase_display_drops_tags_and_reports_the_loss() {
 
 #[test]
 fn erase_saved_lines_drops_tags_in_scrollback() {
-    let mut term = Terminal::new(Dimensions::new(20, 3));
+    let mut term = term(20, 3);
     let in_history = place(&mut term, 1, 1);
     feed(&mut term, b"\r\n\r\n\r\n\r\n");
     let on_screen = place(&mut term, 2, 1);
@@ -285,7 +293,7 @@ fn erase_saved_lines_drops_tags_in_scrollback() {
 
 #[test]
 fn full_reset_drops_every_anchor() {
-    let mut term = Terminal::new(Dimensions::new(20, 4));
+    let mut term = term(20, 4);
     let in_history = place(&mut term, 1, 2);
     feed(&mut term, b"\r\n\r\n\r\n\r\n");
     let on_screen = place(&mut term, 2, 1);
@@ -299,7 +307,7 @@ fn full_reset_drops_every_anchor() {
 
 #[test]
 fn full_reset_from_the_alternate_screen_drops_main_screen_anchors() {
-    let mut term = Terminal::new(Dimensions::new(20, 4));
+    let mut term = term(20, 4);
     let tag = place(&mut term, 1, 2);
     feed(&mut term, b"\x1b[?1049h\x1bc");
     assert!(!term.is_alternate_screen());
@@ -309,7 +317,7 @@ fn full_reset_from_the_alternate_screen_drops_main_screen_anchors() {
 
 #[test]
 fn erasing_a_line_drops_its_tag_and_its_first_line_loses_the_anchor() {
-    let mut term = Terminal::new(Dimensions::new(20, 6));
+    let mut term = term(20, 6);
     let tag = place(&mut term, 1, 3);
     feed(&mut term, b"card 1\r\ncard 2\r\ncard 3");
 
@@ -319,10 +327,6 @@ fn erasing_a_line_drops_its_tag_and_its_first_line_loses_the_anchor() {
         b"\x1b[1;3H\x1b[K\x1b[3;1H\x1b[1K\x1b[2;1H\x1b[5X",
     );
     assert_eq!(tags(&term)[..3], [tag, tag, tag]);
-
-    // Erasing a whole line that is not the first drops only that tag.
-    feed(&mut term, b"\x1b[2;1H\x1b[2K");
-    assert_eq!(tags(&term)[..3], [tag, 0, tag]);
     assert_eq!(term.take_anchor_events(), vec![]);
 
     // Erasing the first line loses the anchor and frees every row.
@@ -332,8 +336,18 @@ fn erasing_a_line_drops_its_tag_and_its_first_line_loses_the_anchor() {
 }
 
 #[test]
+fn erasing_any_reserved_line_loses_the_anchor() {
+    let mut term = term(20, 6);
+    let tag = place(&mut term, 1, 3);
+    feed(&mut term, b"card 1\r\ncard 2\r\ncard 3");
+    feed(&mut term, b"\x1b[3;1H\x1b[2K");
+    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 3)]);
+    assert!(tags(&term).iter().all(|&t| t == 0));
+}
+
+#[test]
 fn eviction_from_scrollback_loses_the_anchor() {
-    let mut term = Terminal::new(Dimensions::new(20, 3));
+    let mut term = term(20, 3);
     term.set_scrollback_limit(4);
     let tag = place(&mut term, 1, 2);
     feed(&mut term, b"card\r\ncard\r\n");
@@ -353,7 +367,7 @@ fn eviction_from_scrollback_loses_the_anchor() {
 
 #[test]
 fn lowering_the_scrollback_limit_loses_evicted_anchors() {
-    let mut term = Terminal::new(Dimensions::new(20, 3));
+    let mut term = term(20, 3);
     let tag = place(&mut term, 1, 1);
     feed(&mut term, b"\r\n\r\n\r\n\r\n\r\n");
     term.set_scrollback_limit(1);
@@ -362,7 +376,7 @@ fn lowering_the_scrollback_limit_loses_evicted_anchors() {
 
 #[test]
 fn the_alternate_screen_tags_nothing_and_main_anchors_wait_for_it() {
-    let mut term = Terminal::new(Dimensions::new(20, 5));
+    let mut term = term(20, 5);
     let tag = place(&mut term, 1, 2);
 
     feed(&mut term, b"\x1b[?1049h\x1b[3H");
@@ -387,7 +401,7 @@ fn the_alternate_screen_tags_nothing_and_main_anchors_wait_for_it() {
 
 #[test]
 fn reflow_clips_or_pads_tagged_rows_and_rewraps_their_neighbours() {
-    let mut term = Terminal::new(Dimensions::new(20, 8));
+    let mut term = term(20, 8);
     feed(&mut term, b"0123456789abcdefghijKL\r\n");
     let tag = place(&mut term, 1, 2);
     feed(
@@ -449,7 +463,7 @@ fn reflow_clips_or_pads_tagged_rows_and_rewraps_their_neighbours() {
 
 #[test]
 fn a_tagged_row_ends_the_line_that_wrapped_into_it() {
-    let mut term = Terminal::new(Dimensions::new(10, 4));
+    let mut term = term(10, 4);
     let tag = place(&mut term, 1, 2);
     // Fallback text one character too long wraps into the second row.
     feed(&mut term, b"0123456789X\r\n");
@@ -462,7 +476,7 @@ fn a_tagged_row_ends_the_line_that_wrapped_into_it() {
 
 #[test]
 fn an_untagged_line_that_wrapped_into_a_reservation_ends_before_it() {
-    let mut term = Terminal::new(Dimensions::new(10, 5));
+    let mut term = term(10, 5);
     // A prompt wraps onto the row the anchor then reserves.
     feed(&mut term, b"0123456789X\r");
     let tag = place(&mut term, 1, 1);
@@ -478,7 +492,7 @@ fn an_untagged_line_that_wrapped_into_a_reservation_ends_before_it() {
 
 #[test]
 fn reflow_keeps_the_cursor_on_its_tagged_row() {
-    let mut term = Terminal::new(Dimensions::new(20, 4));
+    let mut term = term(20, 4);
     let tag = place(&mut term, 1, 2);
     feed(&mut term, b"abcdefghijklmno");
     term.resize(Dimensions::new(8, 4));
@@ -490,7 +504,7 @@ fn reflow_keeps_the_cursor_on_its_tagged_row() {
 
 #[test]
 fn reflow_blanks_a_wide_character_cut_by_the_clip() {
-    let mut term = Terminal::new(Dimensions::new(10, 4));
+    let mut term = term(10, 4);
     let tag = place(&mut term, 1, 1);
     feed(&mut term, "abc中de".as_bytes());
     term.resize(Dimensions::new(4, 4));
@@ -501,7 +515,7 @@ fn reflow_blanks_a_wide_character_cut_by_the_clip() {
 
 #[test]
 fn reflow_drops_anchors_pushed_past_the_scrollback_limit() {
-    let mut term = Terminal::new(Dimensions::new(20, 3));
+    let mut term = term(20, 3);
     term.set_scrollback_limit(3);
     let tag = place(&mut term, 1, 1);
     feed(&mut term, b"card\r\n");
@@ -517,7 +531,7 @@ fn reflow_drops_anchors_pushed_past_the_scrollback_limit() {
 
 #[test]
 fn a_full_table_refuses_anchors_until_tags_are_freed() {
-    let mut term = Terminal::new(Dimensions::new(20, 3));
+    let mut term = term(20, 3);
     let mut wire = Vec::new();
     for surface in 0..MAX_ANCHORS as u32 {
         wire.extend(anchor_bytes(7, surface, 1));
@@ -551,7 +565,7 @@ fn a_full_table_refuses_anchors_until_tags_are_freed() {
 
 #[test]
 fn releasing_an_anchor_frees_its_tag_and_rows() {
-    let mut term = Terminal::new(Dimensions::new(20, 5));
+    let mut term = term(20, 5);
     let tag = place(&mut term, 1, 3);
     assert_eq!(term.buffer_mut().release_anchor(tag), Some(anchor(1, 3)));
     assert!(tags(&term).iter().all(|&t| t == 0));
@@ -562,7 +576,7 @@ fn releasing_an_anchor_frees_its_tag_and_rows() {
 
 #[test]
 fn a_new_anchor_over_an_old_first_row_replaces_it() {
-    let mut term = Terminal::new(Dimensions::new(20, 5));
+    let mut term = term(20, 5);
     let old = place(&mut term, 1, 2);
     feed(&mut term, b"\x1b[1H");
     feed(&mut term, &anchor_bytes(7, 2, 1));
@@ -577,4 +591,109 @@ fn a_new_anchor_over_an_old_first_row_replaces_it() {
         ]
     );
     assert_eq!(tags(&term), vec![2, 0, 0, 0, 0]);
+}
+
+#[test]
+fn anchors_are_ignored_until_turned_on() {
+    let mut term = Terminal::new(Dimensions::new(20, 5));
+    assert!(!term.inline_anchors());
+    feed(&mut term, b"$ ");
+    feed(&mut term, &anchor_bytes(7, 1, 3));
+    feed(&mut term, b"card");
+    assert_eq!(term.take_anchor_events(), vec![]);
+    assert!(tags(&term).iter().all(|&t| t == 0));
+    assert_eq!(term.grid().row(0).unwrap().text_trimmed(), "$ card");
+    assert_eq!(cursor(&term), (0, 6));
+
+    term.set_inline_anchors(true);
+    feed(&mut term, b"\r\n");
+    let tag = place(&mut term, 1, 3);
+    assert_eq!(tags(&term), vec![0, tag, tag, tag, 0]);
+}
+
+#[test]
+fn erasing_below_the_first_row_loses_the_anchor() {
+    let mut term = term(20, 6);
+    let tag = place(&mut term, 1, 3);
+    feed(&mut term, b"card 1\r\ncard 2\r\ncard 3\r\n");
+    // ED 0 on the first row keeps that row's tag (it erases only part of
+    // it) but erases the rest of the reservation.
+    feed(&mut term, b"\x1b[1;1H\x1b[J");
+    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 3)]);
+    assert!(tags(&term).iter().all(|&t| t == 0));
+}
+
+#[test]
+fn inserting_or_deleting_a_line_inside_a_reservation_loses_it() {
+    for split in [&b"\x1b[2;1H\x1b[L"[..], b"\x1b[2;1H\x1b[M"] {
+        let mut term = term(20, 6);
+        let tag = place(&mut term, 1, 3);
+        feed(&mut term, split);
+        assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 3)]);
+        assert!(tags(&term).iter().all(|&t| t == 0));
+    }
+}
+
+#[test]
+fn a_first_row_moved_on_the_grid_then_scrolled_off_is_still_found() {
+    let mut term = term(20, 6);
+    feed(&mut term, b"\x1b[2H");
+    let tag = place(&mut term, 1, 2);
+    // Insert line moves the card down; then, with no sweep in between,
+    // output scrolls it into scrollback.
+    feed(&mut term, b"\x1b[1H\x1b[2L\x1b[6H");
+    for n in 0..20 {
+        feed(&mut term, format!("{n}\r\n").as_bytes());
+    }
+    assert_eq!(term.take_anchor_events(), vec![]);
+    let first = tags(&term).iter().position(|&t| t == tag).unwrap();
+    assert!(first < term.buffer().history_len());
+    assert_eq!(term.buffer().anchor_line(tag), Some(first));
+}
+
+#[test]
+fn stale_tags_left_in_scrollback_are_dropped_by_reflow() {
+    let mut term = term(20, 4);
+    let tag = place(&mut term, 1, 2);
+    feed(&mut term, b"card 1\r\ncard 2");
+    // Insert line on the second row pulls the reservation apart; output
+    // then scrolls all of it into scrollback before anything sweeps.
+    feed(&mut term, b"\x1b[2;1H\x1b[L\x1b[4H");
+    for n in 0..6 {
+        feed(&mut term, format!("{n}\r\n").as_bytes());
+    }
+    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 2)]);
+    // The second row was two lines down, outside what the anchor reserved,
+    // and keeps a stale tag that marks no first row.
+    assert_eq!(tags(&term)[..3], [0, 0, tag]);
+    term.resize(Dimensions::new(10, 4));
+    assert!(tags(&term).iter().all(|&t| t == 0));
+    assert!(lines(&term).contains(&"card 2".to_string()));
+}
+
+#[test]
+fn a_reservation_pulled_back_from_scrollback_can_be_erased_again() {
+    let mut term = term(20, 4);
+    let tag = place(&mut term, 1, 2);
+    feed(&mut term, b"card 1\r\ncard 2\r\n");
+    for n in 0..6 {
+        feed(&mut term, format!("{n}\r\n").as_bytes());
+    }
+    // Checked while all in scrollback...
+    assert_eq!(term.take_anchor_events(), vec![]);
+    // ...then back on the grid, where its second row is erased.
+    term.resize(Dimensions::new(20, 12));
+    assert_eq!(term.buffer().history_len(), 0);
+    feed(&mut term, b"\x1b[2;1H\x1b[2K");
+    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 2)]);
+}
+
+#[test]
+fn an_anchor_at_the_last_column_keeps_its_text_on_its_row() {
+    let mut term = term(10, 4);
+    feed(&mut term, b"0123456789");
+    let tag = place(&mut term, 1, 1);
+    feed(&mut term, b"X");
+    assert_eq!(term.grid().row(0).unwrap().text_trimmed(), "012345678X");
+    assert_eq!(tags(&term), vec![tag, 0, 0, 0]);
 }
