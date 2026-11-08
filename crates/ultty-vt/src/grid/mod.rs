@@ -575,8 +575,6 @@ impl Grid {
     /// columns when the sequence now has emoji presentation (VS16, flag
     /// pairs, ZWJ sequences) and there is room on the row.
     fn extend_cluster(&mut self, row: u16, col: u16, c: char) {
-        use unicode_width::UnicodeWidthStr;
-
         // A codepoint past the cap is dropped, leaving the cluster's end as
         // it was.
         let old_tail = self
@@ -596,7 +594,11 @@ impl Grid {
         let widens = !was_wide
             && room
             && at_cursor
-            && r.with_grapheme_str(col, None, |g| g.width()).unwrap_or(1) >= 2;
+            && r.get(col).is_some_and(|cell| {
+                let extra = r.grapheme_extra(col).unwrap_or_default();
+                let cluster = std::iter::once(cell.char()).chain(extra.iter().copied());
+                unicode_width::char_iter_width(cluster) >= 2
+            });
 
         if widens {
             let next = col + 1;
