@@ -29,6 +29,7 @@
 
 mod buffer;
 mod cell;
+mod char_class;
 mod cluster;
 mod history;
 mod image;
@@ -231,6 +232,8 @@ struct LastPrint {
     cursor: CursorPosition,
     wrap_pending: bool,
     content_version: u64,
+    /// How the cluster ends, as far as joining it goes.
+    tail: cluster::Tail,
 }
 
 impl Grid {
@@ -501,24 +504,32 @@ impl Grid {
         self.last_print = None;
     }
 
-    /// The cell holding the last printed grapheme, if nothing has moved the
-    /// cursor or changed the grid since it was printed.
-    fn cluster_base(&self) -> Option<(u16, u16)> {
+    /// The last printed grapheme, if nothing has moved the cursor or
+    /// changed the grid since it was printed.
+    fn last_print(&self) -> Option<LastPrint> {
         let last = self.last_print?;
         let unchanged = last.cursor == self.cursor.position
             && last.wrap_pending == self.cursor.wrap_pending
             && last.content_version == self.content_version;
-        unchanged.then_some((last.base_row, last.base_col))
+        unchanged.then_some(last)
     }
 
-    /// Record that a grapheme starting at `(row, col)` was just printed.
-    fn record_print(&mut self, row: u16, col: u16) {
+    /// The cell holding the last printed grapheme, if nothing has moved the
+    /// cursor or changed the grid since it was printed.
+    fn cluster_base(&self) -> Option<(u16, u16)> {
+        self.last_print().map(|last| (last.base_row, last.base_col))
+    }
+
+    /// Record that a grapheme starting at `(row, col)` and ending in a
+    /// codepoint of `tail` was just printed.
+    fn record_print(&mut self, row: u16, col: u16, tail: cluster::Tail) {
         self.last_print = Some(LastPrint {
             base_row: row,
             base_col: col,
             cursor: self.cursor.position,
             wrap_pending: self.cursor.wrap_pending,
             content_version: self.content_version,
+            tail,
         });
     }
 
@@ -526,16 +537,33 @@ impl Grid {
     /// starting a new one. Such a codepoint never advances to a new cell,
     /// so callers must treat it as zero-width when deciding to wrap.
     pub fn continues_cluster(&self, c: char) -> bool {
-        use unicode_segmentation::UnicodeSegmentation;
+        self.continues_cluster_with(c, cluster::CharProps::of(c))
+    }
 
+    /// [`Grid::continues_cluster`] for `c` with properties `props`.
+    #[inline]
+    fn continues_cluster_with(&self, c: char, props: cluster::CharProps) -> bool {
         // Nothing below U+0300 extends a cluster (except CR LF, which is
         // never printed), so the common case never segments.
         if !self.grapheme_clustering || c < '\u{300}' {
             return false;
         }
-        let Some((row, col)) = self.cluster_base() else {
+        let Some(last) = self.last_print() else {
             return false;
         };
+        match cluster::joins_tail(last.tail, props.class()) {
+            Some(joins) => joins,
+            None => self.continues_cluster_slow(last, c),
+        }
+    }
+
+    /// Whether `c` joins the cluster `last` started, from the whole
+    /// cluster rather than how it ends.
+    #[inline(never)]
+    fn continues_cluster_slow(&self, last: LastPrint, c: char) -> bool {
+        use unicode_segmentation::UnicodeSegmentation;
+
+        let (row, col) = (last.base_row, last.base_col);
         let Some(r) = self.rows.get(row as usize) else {
             return false;
         };
@@ -555,19 +583,30 @@ impl Grid {
     /// columns when the sequence now has emoji presentation (VS16, flag
     /// pairs, ZWJ sequences) and there is room on the row.
     fn extend_cluster(&mut self, row: u16, col: u16, c: char) {
-        use unicode_width::UnicodeWidthStr;
-
+        // A codepoint past the cap is dropped, leaving the cluster's end as
+        // it was.
+        let old_tail = self
+            .last_print
+            .map_or(cluster::Tail::Other, |last| last.tail);
         let Some(r) = self.rows.get_mut(row as usize) else {
             return;
         };
-        r.push_grapheme_char(col, c, MAX_COMBINING_PER_CELL);
+        let tail = if r.push_grapheme_char(col, c, MAX_COMBINING_PER_CELL) {
+            old_tail.then(c)
+        } else {
+            old_tail
+        };
         let was_wide = r.get(col).is_some_and(|cell| cell.is_wide());
         let room = col.saturating_add(1) < self.dims.cols;
         let at_cursor = !self.cursor.wrap_pending && self.cursor.position.col == col + 1;
         let widens = !was_wide
             && room
             && at_cursor
-            && r.with_grapheme_str(col, None, |g| g.width()).unwrap_or(1) >= 2;
+            && r.get(col).is_some_and(|cell| {
+                let extra = r.grapheme_extra(col).unwrap_or_default();
+                let cluster = std::iter::once(cell.char()).chain(extra.iter().copied());
+                unicode_width::char_iter_width(cluster) >= 2
+            });
 
         if widens {
             let next = col + 1;
@@ -596,7 +635,7 @@ impl Grid {
             self.advance_cursor(1);
         }
         self.mark_dirty(row);
-        self.record_print(row, col);
+        self.record_print(row, col, tail);
     }
 
     /// Write a character at the cursor position and advance.
@@ -609,18 +648,54 @@ impl Grid {
     /// grapheme cluster, else its width (0 for control characters and
     /// combining marks that start no cluster, 1 normally, 2 for wide).
     pub(super) fn print_width(&self, c: char) -> Option<u16> {
-        use unicode_width::UnicodeWidthChar;
-
-        if self.continues_cluster(c) {
+        let props = cluster::CharProps::of(c);
+        if self.continues_cluster_with(c, props) {
             None
         } else {
-            Some(c.width().unwrap_or(0) as u16)
+            Some(props.width())
         }
     }
 
     /// [`Grid::write_char`] with `width` from [`Grid::print_width`] for the
     /// current state, so a caller that needed it first does not pay twice.
     pub(super) fn write_measured_char(&mut self, c: char, width: Option<u16>) {
+        if !self.write_in_row(c, width) {
+            self.write_measured_char_slow(c, width);
+        }
+    }
+
+    /// Print `c`, `width` columns from [`Grid::print_width`], when that is
+    /// only writing its cells at the cursor: it starts a cluster of one or
+    /// two columns that fit on the row, no wrap is pending, insert mode is
+    /// off and it overwrites no part of a wide character. Returns `false`,
+    /// having changed nothing, otherwise.
+    ///
+    /// Most printed characters are this case; the result is what
+    /// [`Grid::write_measured_char_slow`] would do.
+    #[inline]
+    pub(super) fn write_in_row(&mut self, c: char, width: Option<u16>) -> bool {
+        let Some(width @ 1..=2) = width else {
+            return false;
+        };
+        let CursorPosition { col, row } = self.cursor.position;
+        if self.cursor.wrap_pending || self.insert_mode || col + width > self.dims.cols {
+            return false;
+        }
+        let Some(r) = self.rows.get_mut(row as usize) else {
+            return false;
+        };
+        if !r.write_char_in_place(col, c, width, self.attrs) {
+            return false;
+        }
+        self.mark_dirty(row);
+        self.last_char = c;
+        self.advance_cursor(width);
+        self.record_print(row, col, cluster::Tail::start(c));
+        true
+    }
+
+    /// [`Grid::write_measured_char`] for any character in any state.
+    pub(super) fn write_measured_char_slow(&mut self, c: char, width: Option<u16>) {
         let Some(width) = width else {
             if let Some((row, col)) = self.cluster_base() {
                 self.extend_cluster(row, col, c);
@@ -685,66 +760,66 @@ impl Grid {
         let col = self.cursor.position.col;
         let row = self.cursor.position.row;
 
-        // Copy attrs first to avoid borrow conflict
         let attrs = self.attrs;
+        let cols = self.dims.cols;
+        let insert_mode = self.insert_mode;
+        // Everything below touches only this row, so it is marked dirty once.
+        self.mark_dirty(row);
+        let Some(r) = self.rows.get_mut(row as usize) else {
+            return;
+        };
 
         // Clear any combining characters from previous content
-        self.clear_combining_range(row, col, col.saturating_add(1));
+        r.clear_graphemes(col, col.saturating_add(1));
 
         // Insert mode (IRM): shift existing cells right before writing
-        if self.insert_mode {
-            let bg = attrs.bg();
-            if let Some(r) = self.row_mut(row) {
-                r.insert_cells(col, width, bg);
-            }
+        if insert_mode {
+            r.insert_cells(col, width, attrs.bg());
         }
 
         // Clean up orphaned wide-char parts before overwriting
-        let is_wide = self.cell(col, row).is_some_and(|c| c.is_wide());
-        let is_spacer = self.cell(col, row).is_some_and(|c| c.is_wide_spacer());
-        if is_wide && col + 1 < self.dims.cols {
-            if let Some(spacer) = self.cell_mut(col + 1, row) {
+        let is_wide = r.get(col).is_some_and(|c| c.is_wide());
+        let is_spacer = r.get(col).is_some_and(|c| c.is_wide_spacer());
+        if is_wide && col + 1 < cols {
+            if let Some(spacer) = r.get_mut(col + 1) {
                 spacer.clear();
             }
         }
         if is_spacer && col > 0 {
-            if let Some(primary) = self.cell_mut(col - 1, row) {
+            if let Some(primary) = r.get_mut(col - 1) {
                 primary.clear();
             }
         }
         // A wide char's spacer overwrites the next cell; if that cell starts
         // another wide char, that char's own spacer would be orphaned.
-        if width > 1
-            && col + 2 < self.dims.cols
-            && self.cell(col + 1, row).is_some_and(|c| c.is_wide())
-        {
-            if let Some(orphan) = self.cell_mut(col + 2, row) {
+        if width > 1 && col + 2 < cols && r.get(col + 1).is_some_and(|c| c.is_wide()) {
+            if let Some(orphan) = r.get_mut(col + 2) {
                 orphan.clear();
             }
         }
 
         // Write the character
-        if let Some(cell) = self.cell_mut(col, row) {
-            cell.set_char(c);
-            cell.copy_attrs_from(&attrs);
-            cell.unset_flag(CellFlags::HAS_COMBINING);
-
-            // Handle wide characters
+        if let Some(cell) = r.get_mut(col) {
+            let mut written = attrs;
+            written.set_char(c);
+            written.unset_flag(CellFlags::HAS_COMBINING);
             if width > 1 {
-                cell.set_flag(CellFlags::WIDE_CHAR);
+                written.set_flag(CellFlags::WIDE_CHAR);
             } else {
-                cell.unset_flag(CellFlags::WIDE_CHAR);
+                written.unset_flag(CellFlags::WIDE_CHAR);
             }
-            cell.unset_flag(CellFlags::WIDE_CHAR_SPACER);
+            written.unset_flag(CellFlags::WIDE_CHAR_SPACER);
+            *cell = written;
         }
 
         // If wide character, put spacer in next cell
-        if width > 1 && col + 1 < self.dims.cols {
-            if let Some(spacer) = self.cell_mut(col + 1, row) {
-                spacer.set_char(' ');
-                spacer.copy_attrs_from(&attrs);
-                spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
-                spacer.unset_flag(CellFlags::WIDE_CHAR);
+        if width > 1 && col + 1 < cols {
+            if let Some(spacer) = r.get_mut(col + 1) {
+                let mut written = attrs;
+                written.set_char(' ');
+                written.set_flag(CellFlags::WIDE_CHAR_SPACER);
+                written.unset_flag(CellFlags::WIDE_CHAR);
+                *spacer = written;
             }
         }
 
@@ -752,7 +827,7 @@ impl Grid {
         self.last_char = c;
 
         self.advance_cursor(width);
-        self.record_print(row, col);
+        self.record_print(row, col, cluster::Tail::start(c));
     }
 
     /// Advance the cursor after printing `width` columns, parking it on the
@@ -820,7 +895,8 @@ impl Grid {
             } else {
                 self.cursor.position.col = end_col;
             }
-            self.record_print(row, end_col - 1);
+            // Printable ASCII is plain.
+            self.record_print(row, end_col - 1, cluster::Tail::Settled);
         }
     }
 
@@ -2311,6 +2387,26 @@ mod tests {
         assert_eq!(marks.len(), MAX_COMBINING_PER_CELL);
     }
 
+    /// A codepoint dropped at the cap does not end the cluster: what joins
+    /// next depends on the last one stored.
+    #[test]
+    fn a_codepoint_dropped_at_the_cap_leaves_the_cluster_end_alone() {
+        let mut grid = Grid::new(Dimensions::new(10, 2));
+        grid.write_char('\u{1F600}');
+        for _ in 1..MAX_COMBINING_PER_CELL {
+            grid.write_char('\u{0301}');
+        }
+        grid.write_char('\u{200D}');
+        // Joins, but there is no room left for it.
+        grid.write_char('\u{0302}');
+        assert_eq!(
+            grid.combining_chars(0, 0).unwrap().len(),
+            MAX_COMBINING_PER_CELL
+        );
+        // The stored cluster ends in ZWJ, so a pictograph joins it (GB11).
+        assert!(grid.continues_cluster('\u{1F603}'));
+    }
+
     #[test]
     fn content_version_changes_on_writes_but_not_cursor_moves() {
         let mut grid = Grid::new(Dimensions::new(10, 5));
@@ -2409,5 +2505,80 @@ mod tests {
         assert_eq!(grid.cell(1, 0).unwrap().char(), 'X');
         assert_eq!(grid.cell(2, 0).unwrap().char(), 'B');
         assert_eq!(grid.cell(3, 0).unwrap().char(), 'C');
+    }
+
+    #[derive(Debug, Clone)]
+    enum PrintOp {
+        Print(char),
+        MoveTo(u16, u16),
+        InsertMode(bool),
+        AutoWrap(bool),
+        Bold(bool),
+    }
+
+    fn print_op() -> impl proptest::strategy::Strategy<Value = PrintOp> {
+        use proptest::prelude::*;
+        prop_oneof![
+            8 => prop::sample::select(vec![
+                'a', ' ', '\u{E9}', '\u{4E2D}', '\u{65E5}', '\u{1F600}', '\u{2764}', '\u{FE0F}',
+                '\u{301}', '\u{200D}', '\u{1F1EF}', '\u{1F1F5}', '\u{915}', '\u{94D}',
+                '\u{93F}', '\u{1100}', '\u{1161}', '\u{AD}', '\u{17D8}',
+            ])
+            .prop_map(PrintOp::Print),
+            1 => (0u16..8, 0u16..3).prop_map(|(col, row)| PrintOp::MoveTo(col, row)),
+            1 => any::<bool>().prop_map(PrintOp::InsertMode),
+            1 => any::<bool>().prop_map(PrintOp::AutoWrap),
+            1 => any::<bool>().prop_map(PrintOp::Bold),
+        ]
+    }
+
+    proptest::proptest! {
+        /// Printing through the in-place shortcut leaves the grid exactly as
+        /// the general path does.
+        #[test]
+        fn printing_in_place_matches_the_general_path(
+            cols in 1u16..8,
+            ops in proptest::collection::vec(print_op(), 0..60),
+        ) {
+            let dims = Dimensions::new(cols, 3);
+            let mut fast = Grid::new(dims);
+            let mut general = Grid::new(dims);
+            for op in ops {
+                for (grid, shortcut) in [(&mut fast, true), (&mut general, false)] {
+                    match op {
+                        PrintOp::Print(c) => {
+                            let width = grid.print_width(c);
+                            if shortcut {
+                                grid.write_measured_char(c, width);
+                            } else {
+                                grid.write_measured_char_slow(c, width);
+                            }
+                        }
+                        PrintOp::MoveTo(col, row) => grid.set_cursor_position(row + 1, col + 1),
+                        PrintOp::InsertMode(on) => grid.set_insert_mode(on),
+                        PrintOp::AutoWrap(on) => grid.set_auto_wrap(on),
+                        PrintOp::Bold(on) => {
+                            if on {
+                                grid.attrs_mut().set_flag(CellFlags::BOLD);
+                            } else {
+                                grid.attrs_mut().unset_flag(CellFlags::BOLD);
+                            }
+                        }
+                    }
+                }
+                proptest::prop_assert_eq!(fast.cursor.position, general.cursor.position);
+                proptest::prop_assert_eq!(fast.cursor.wrap_pending, general.cursor.wrap_pending);
+                proptest::prop_assert_eq!(fast.last_char, general.last_char);
+                proptest::prop_assert_eq!(fast.last_print, general.last_print);
+                for (a, b) in fast.rows.iter().zip(&general.rows) {
+                    proptest::prop_assert!(a.cells().eq(b.cells()), "{a:?}\n!=\n{b:?}");
+                    for col in 0..cols {
+                        proptest::prop_assert_eq!(a.grapheme_extra(col), b.grapheme_extra(col));
+                    }
+                    proptest::prop_assert_eq!(a.used_cells().len(), b.used_cells().len());
+                }
+                fast.check_integrity().map_err(proptest::test_runner::TestCaseError::fail)?;
+            }
+        }
     }
 }

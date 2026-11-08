@@ -88,10 +88,8 @@ impl App {
                     tracing::warn!("Failed to send IME input: {}", e);
                 }
             }
-            WindowEvent::RedrawRequested => {
-                // Redraw requests are delivery events, not state changes. Dirty state is
-                // set by input, PTY output, native protocol updates, timers, and resize.
-            }
+            WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::Occluded(occluded) => self.set_occluded(occluded),
             WindowEvent::Focused(focused) => {
                 if focused {
                     // Clear a bell's urgency hint; X11 keeps it until cleared.

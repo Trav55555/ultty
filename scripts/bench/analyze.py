@@ -69,7 +69,9 @@ def median(values):
 
 def bootstrap_ratio(a_by_block, b_by_block, resamples, rng):
     """CI of median(B)/median(A). Inputs map block -> value."""
-    common = sorted(set(a_by_block) & set(b_by_block))
+    # Block ids are ints from the headless runner and strings from the
+    # comparison runner; sort by text so a mixed set still orders.
+    common = sorted(set(a_by_block) & set(b_by_block), key=str)
     estimates = []
     if len(common) >= 2:
         pairs = [(a_by_block[k], b_by_block[k]) for k in common]

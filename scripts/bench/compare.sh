@@ -341,7 +341,11 @@ launch() {
       TERM_PID=$!
       ;;
     ghostty)
-      "$GHOSTTY_BIN" --config-default-files=false --config-file="$OUT/cfg/ghostty/config" \
+      # Private bus: Ghostty resets GDK_DEBUG, dropping no-portals, and GTK
+      # then waits on the session bus's desktop portal and never maps a
+      # window. On an empty bus the portal lookup fails at once.
+      UBENCH_TOKEN="$title" dbus-run-session -- \
+        "$GHOSTTY_BIN" --config-default-files=false --config-file="$OUT/cfg/ghostty/config" \
         -e "$OUT/run/$title.sh" >"$OUT/logs/$title.ghostty.log" 2>&1 &
       TERM_PID=$!
       ;;
@@ -376,9 +380,14 @@ wrapper() {
 
 # The PID whose memory and CPU belong to the terminal.
 owner_pid() {
-  local term="$1" title="$2" pid
-  if [[ "$term" != gnome-terminal ]]; then echo "$TERM_PID"; return; fi
-  for pid in $(pgrep -x gnome-terminal- 2>/dev/null; pgrep -x gnome-terminal-server 2>/dev/null); do
+  local term="$1" title="$2" pid names
+  case "$term" in
+    gnome-terminal) names="gnome-terminal- gnome-terminal-server" ;;
+    # Launched under dbus-run-session, so TERM_PID is the bus wrapper.
+    ghostty) names="ghostty" ;;
+    *) echo "$TERM_PID"; return ;;
+  esac
+  for pid in $(for n in $names; do pgrep -x "$n" 2>/dev/null; done); do
     if tr '\0' '\n' 2>/dev/null <"/proc/$pid/environ" | grep -qx "UBENCH_TOKEN=$title"; then
       echo "$pid"; return
     fi
@@ -413,12 +422,12 @@ stop() {
 # gnome-terminal-server, which is stopped first; then its bus goes.
 stop_term() {
   local term="$1" title="$2" server
-  if [[ "$term" == gnome-terminal ]]; then
+  if [[ "$term" == gnome-terminal || "$term" == ghostty ]]; then
     server=$(owner_pid "$term" "$title")
     [[ -n "$server" ]] && stop "$server"
   fi
   stop "$TERM_PID"
-  if [[ "$term" == gnome-terminal ]]; then
+  if [[ "$term" == gnome-terminal || "$term" == ghostty ]]; then
     # dbus-run-session can leave its bus and activated services running.
     local pid
     for pid in $(pgrep -u "$(id -u)" 2>/dev/null); do

@@ -61,6 +61,13 @@ The current dated evidence set is:
 - [`2026-11-07-idle-footprint.md`](./2026-11-07-idle-footprint.md) for idle
   wakeups (now none with the cursor steady), the memory breakdown, and the
   startup stage split.
+- [`2026-11-08-nvidia-idle-wakeups.md`](./2026-11-08-nvidia-idle-wakeups.md)
+  for the ~113 idle wakeups/s on NVIDIA, which come from a driver thread, not
+  from Ultty.
+- [`2026-11-08-live-throughput.md`](./2026-11-08-live-throughput.md) for the
+  live flood profile (the PTY I/O thread is CPU-bound on parse, grid and
+  scrollback encoding), the parser, scrollback and frame-cost cuts, and the
+  `pty_flood` bench.
 - [`2026-05-29-current-readiness.md`](./2026-05-29-current-readiness.md) for
   current benchmark refresh, fixed live-pipeline evidence, soft-wrap evidence,
   and process-level idle sample.
@@ -166,7 +173,9 @@ in the Gitea test job).
 payloads now use CRLF), `layout` (`relayout_dirty_leaf`, `relayout_resize`, and
 `cached_same_size`, the old clean-tree number kept as a floor), `render` (one
 reused offscreen target; the adapter is printed and is part of every group
-name, e.g. `render_filled@gpu-vulkan` or `@swrast-gl`), `grid`, and
+name, e.g. `render_filled@gpu-vulkan` or `@swrast-gl`), `pty_flood` (32 MiB
+corpora written by `dd` into a raw-mode PTY and read by the real I/O thread,
+no GPU), `grid`, and
 `ultty-protocol`'s `codec` (every case now sets its own throughput). Use
 `--save-baseline` / `--baseline` for local before/after comparisons, and treat
 them as diagnosis rather than gates.

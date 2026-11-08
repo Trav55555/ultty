@@ -965,15 +965,27 @@ impl Renderer {
         self.set_font_size(current - step)
     }
 
-    /// Render the terminal to a surface.
-    pub fn render(&mut self, output: wgpu::SurfaceTexture, terminal: &Terminal) {
-        self.render_with_overlay(output, terminal, &OverlayState::default())
+    /// Draw the terminal into `view`, a view of a surface frame. The frame
+    /// is not presented; see [`Renderer::present`].
+    pub fn render(&mut self, view: &wgpu::TextureView, terminal: &Terminal) {
+        self.render_with_overlay(view, terminal, &OverlayState::default())
     }
 
-    /// Render the terminal with overlay state (vim mode, URL highlights).
+    /// Show a frame drawn by one of the `render*` methods.
+    ///
+    /// This can block until the compositor takes the frame (FIFO presents on
+    /// Wayland wait for the previous frame's callback, which a compositor
+    /// may withhold indefinitely), so call it with no terminal locked: the
+    /// terminals' I/O threads parse output under that lock.
+    pub fn present(&self, output: wgpu::SurfaceTexture) {
+        self.queue.present(output);
+    }
+
+    /// Draw the terminal with overlay state (vim mode, URL highlights) into
+    /// `view`, without presenting the frame.
     pub fn render_with_overlay(
         &mut self,
-        output: wgpu::SurfaceTexture,
+        view: &wgpu::TextureView,
         terminal: &Terminal,
         overlay: &OverlayState,
     ) {
@@ -982,10 +994,6 @@ impl Renderer {
             .tab_bar
             .map_or(crate::tabs::TERMINAL_TOP_PADDING, |tb| tb.content_top());
         self.text_renderer.begin_frame();
-
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self
             .device
@@ -1026,7 +1034,7 @@ impl Renderer {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminal_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -1050,7 +1058,7 @@ impl Renderer {
         }
 
         // Render images (Sixel, etc.) after backgrounds, before text
-        self.render_images(&mut encoder, &view, terminal);
+        self.render_images(&mut encoder, view, terminal);
 
         // Render tab bar if visible
         if !tab_bar_vertices.is_empty() {
@@ -1073,7 +1081,7 @@ impl Renderer {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("tab_bar_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -1119,7 +1127,7 @@ impl Renderer {
                     let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("tab_title_render_pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
+                            view,
                             resolve_target: None,
                             depth_slice: None,
                             ops: wgpu::Operations {
@@ -1147,7 +1155,7 @@ impl Renderer {
         // Render text (offset by tab bar height)
         self.text_renderer.render(
             &mut encoder,
-            &view,
+            view,
             terminal,
             &self
                 .color_scheme
@@ -1183,7 +1191,7 @@ impl Renderer {
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("overlay_render_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
+                        view,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
@@ -1238,7 +1246,7 @@ impl Renderer {
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("indicator_bg_pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
+                            view,
                             resolve_target: None,
                             depth_slice: None,
                             ops: wgpu::Operations {
@@ -1287,7 +1295,7 @@ impl Renderer {
                         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: Some("indicator_text_pass"),
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &view,
+                                view,
                                 resolve_target: None,
                                 depth_slice: None,
                                 ops: wgpu::Operations {
@@ -1313,29 +1321,30 @@ impl Renderer {
         }
 
         if let Some(preedit) = overlay.ime_preedit {
-            self.render_ime_preedit(&mut encoder, &view, preedit);
+            self.render_ime_preedit(&mut encoder, view, preedit);
         }
 
         // Render keyboard shortcuts overlay if visible
         if overlay.shortcuts_visible {
             if let Some(keybindings) = overlay.keybindings {
-                self.render_shortcuts_overlay(&mut encoder, &view, keybindings);
+                self.render_shortcuts_overlay(&mut encoder, view, keybindings);
             }
         }
         if let Some(rows) = overlay.protocol_status {
-            self.render_protocol_status_overlay(&mut encoder, &view, rows);
+            self.render_protocol_status_overlay(&mut encoder, view, rows);
         }
         if let Some(tab_bar) = overlay.tab_bar {
-            self.render_main_menu(&mut encoder, &view, tab_bar);
+            self.render_main_menu(&mut encoder, view, tab_bar);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        self.queue.present(output);
     }
 
+    /// Draw the terminal and the visible native sessions into `view`,
+    /// without presenting the frame.
     pub fn render_with_native_sessions<'a>(
         &mut self,
-        output: wgpu::SurfaceTexture,
+        view: &wgpu::TextureView,
         terminal: &Terminal,
         overlay: &OverlayState,
         sessions: impl Iterator<Item = &'a crate::protocol::NativeSession>,
@@ -1346,10 +1355,6 @@ impl Renderer {
             .tab_bar
             .map_or(crate::tabs::TERMINAL_TOP_PADDING, |tb| tb.content_top());
         self.text_renderer.begin_frame();
-
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self
             .device
@@ -1385,7 +1390,7 @@ impl Renderer {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminal_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -1410,7 +1415,7 @@ impl Renderer {
         let has_native_sessions = !sessions.is_empty();
 
         if !has_native_sessions {
-            self.render_images(&mut encoder, &view, terminal);
+            self.render_images(&mut encoder, view, terminal);
         }
 
         if !tab_bar_vertices.is_empty() {
@@ -1432,7 +1437,7 @@ impl Renderer {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("tab_bar_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -1456,7 +1461,7 @@ impl Renderer {
         if !has_native_sessions {
             self.text_renderer.render(
                 &mut encoder,
-                &view,
+                view,
                 terminal,
                 &self
                     .color_scheme
@@ -1475,13 +1480,13 @@ impl Renderer {
         // their UVs point at the wrong glyphs.
         let atlas_unchanged = self.cached_native_atlas_epoch == self.text_renderer.atlas_epoch();
         if !any_dirty && atlas_unchanged && self.has_cached_native_buffers() {
-            self.draw_cached_native_buffers(&mut encoder, &view);
+            self.draw_cached_native_buffers(&mut encoder, view);
         } else {
             self.clear_cached_native_buffers();
             for session in &sessions {
                 self.render_native_session(
                     &mut encoder,
-                    &view,
+                    view,
                     session,
                     native_search_matches,
                     native_search_index,
@@ -1490,22 +1495,21 @@ impl Renderer {
         }
 
         if let Some(preedit) = overlay.ime_preedit {
-            self.render_ime_preedit(&mut encoder, &view, preedit);
+            self.render_ime_preedit(&mut encoder, view, preedit);
         }
         if overlay.shortcuts_visible {
             if let Some(keybindings) = overlay.keybindings {
-                self.render_shortcuts_overlay(&mut encoder, &view, keybindings);
+                self.render_shortcuts_overlay(&mut encoder, view, keybindings);
             }
         }
         if let Some(rows) = overlay.protocol_status {
-            self.render_protocol_status_overlay(&mut encoder, &view, rows);
+            self.render_protocol_status_overlay(&mut encoder, view, rows);
         }
         if let Some(tab_bar) = overlay.tab_bar {
-            self.render_main_menu(&mut encoder, &view, tab_bar);
+            self.render_main_menu(&mut encoder, view, tab_bar);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        self.queue.present(output);
     }
 
     /// Emit a rectangle (helper for tab bar).

@@ -6,6 +6,7 @@ mod control;
 mod control_events;
 mod control_wait;
 mod input;
+mod pacing;
 mod render;
 mod update;
 mod wakeup;
@@ -127,6 +128,8 @@ pub struct App {
     tab_title_activity: Option<Instant>,
     /// Whether we need to redraw
     needs_redraw: bool,
+    /// Redraw requests in flight and the window's occlusion.
+    frame_pacing: pacing::FramePacing,
     /// Pending close request (from window control button).
     pending_close: bool,
     /// Current modifier state
@@ -358,6 +361,7 @@ impl App {
             last_tab_title_refresh: Instant::now() - TAB_TITLE_REFRESH_INTERVAL,
             tab_title_activity: None,
             needs_redraw: true,
+            frame_pacing: pacing::FramePacing::default(),
             pending_close: false,
             modifiers: ModifiersState::empty(),
             clipboard,

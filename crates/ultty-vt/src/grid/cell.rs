@@ -54,6 +54,17 @@ impl CellFlags {
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
+
+    /// The flags set in both.
+    #[inline]
+    pub(crate) fn intersection(self, other: CellFlags) -> CellFlags {
+        CellFlags(self.0 & other.0)
+    }
+
+    /// The flags set in either; `|` for constants.
+    pub(crate) const fn union(self, other: CellFlags) -> CellFlags {
+        CellFlags(self.0 | other.0)
+    }
 }
 
 impl std::ops::BitOr for CellFlags {
@@ -259,6 +270,12 @@ impl Cell {
     #[inline]
     pub fn char(&self) -> char {
         self.c
+    }
+
+    /// This cell with its character replaced by `c`.
+    #[inline]
+    pub(crate) fn with_char(self, c: char) -> Self {
+        Self { c, ..self }
     }
 
     /// Set the character.

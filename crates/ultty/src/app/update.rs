@@ -13,6 +13,7 @@ impl App {
     pub(super) fn next_update_deadline(&self, now: Instant) -> Option<Instant> {
         WakeState {
             needs_redraw: self.needs_redraw,
+            frame_timer: self.frame_pacing.frame_timer_applies(),
             last_render: self.last_render,
             sync_active: self.needs_redraw && self.sync_update_active(),
             cursor_blink: self.cursor_blink.next_toggle(),
@@ -378,39 +379,64 @@ impl App {
             }
         }
 
-        // Render if needed (limit to ~60fps)
-        // Suppress rendering during synchronized update (mode 2026) to prevent
-        // partial frames, but enforce a 200ms safety timeout to avoid indefinite
-        // suppression if the app never sends ESU.
+        // Ask for a frame when one is due; it is drawn in `redraw` when the
+        // window system delivers `RedrawRequested` (see `pacing`).
+        let due = self.frame_due(Instant::now()).is_some();
+        if self.frame_pacing.should_request(due) {
+            self.window.request_redraw();
+        }
+
+        false
+    }
+
+    /// Draw a frame for `WindowEvent::RedrawRequested`, if one is due.
+    pub(super) fn redraw(&mut self) {
         let now = Instant::now();
+        let due = self.frame_due(now);
+        if !self.frame_pacing.should_draw(due.is_some()) {
+            return;
+        }
+        if let (true, Some((frame_elapsed, sync_active))) = (pipeline_trace_enabled(), due) {
+            tracing::info!(
+                target: "ultty::perf",
+                frame_elapsed_us = frame_elapsed.as_micros(),
+                sync_active,
+                "pipeline_render_scheduled"
+            );
+        }
+        self.render();
+        self.last_render = now;
+        if self.output_since_input {
+            self.input_sent_at = None;
+            self.output_since_input = false;
+        }
+        // A frame that skipped glyphs (atlas overflow) must draw again
+        // once the deferred eviction has run.
+        self.needs_redraw = self.renderer.frame_incomplete();
+    }
+
+    /// The window was hidden or shown again (`WindowEvent::Occluded`).
+    pub(super) fn set_occluded(&mut self, occluded: bool) {
+        if self.frame_pacing.set_occluded(occluded) {
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Whether a frame is due at `now`, with the time since the last frame
+    /// and whether a synchronized update is active, for the pipeline trace.
+    ///
+    /// Frames are limited to about 60 per second. A synchronized update
+    /// (mode 2026) holds them to prevent partial frames, but only up to a
+    /// 200 ms safety timeout in case the app never ends it.
+    fn frame_due(&self, now: Instant) -> Option<(Duration, bool)> {
         let sync_active = self.sync_update_active();
         let frame_elapsed = now.duration_since(self.last_render);
         let echo_after = self
             .input_sent_at
             .filter(|_| self.output_since_input)
             .map(|sent| now.saturating_duration_since(sent));
-
-        if should_render(self.needs_redraw, frame_elapsed, sync_active, echo_after) {
-            if pipeline_trace_enabled() {
-                tracing::info!(
-                    target: "ultty::perf",
-                    frame_elapsed_us = frame_elapsed.as_micros(),
-                    sync_active,
-                    "pipeline_render_scheduled"
-                );
-            }
-            self.render();
-            self.last_render = now;
-            if self.output_since_input {
-                self.input_sent_at = None;
-                self.output_since_input = false;
-            }
-            // A frame that skipped glyphs (atlas overflow) must draw again
-            // once the deferred eviction has run.
-            self.needs_redraw = self.renderer.frame_incomplete();
-        }
-
-        false
+        should_render(self.needs_redraw, frame_elapsed, sync_active, echo_after)
+            .then_some((frame_elapsed, sync_active))
     }
 }
 
@@ -490,6 +516,9 @@ pub(super) fn title_activity_after_refresh(
 struct WakeState {
     /// A frame is waiting to be drawn.
     needs_redraw: bool,
+    /// The frame is up to the loop's timer, not to a redraw request in
+    /// flight or an occluded window; see `FramePacing::frame_timer_applies`.
+    frame_timer: bool,
     last_render: Instant,
     /// The focused pane holds frames for a synchronized update.
     sync_active: bool,
@@ -518,8 +547,7 @@ impl WakeState {
     /// window with a steady cursor and no native or control clients has no
     /// timer at all.
     fn next_wake(&self, now: Instant) -> Option<Instant> {
-        let frame = self
-            .needs_redraw
+        let frame = (self.needs_redraw && self.frame_timer)
             .then(|| self.last_render + render_delay_for_sync_state(self.sync_active));
         let maintenance =
             (self.native_sessions > 0).then(|| now + super::MAINTENANCE_POLL_INTERVAL);
@@ -776,6 +804,7 @@ mod tests {
     fn idle(now: Instant) -> WakeState {
         WakeState {
             needs_redraw: false,
+            frame_timer: true,
             last_render: now - Duration::from_secs(5),
             sync_active: false,
             cursor_blink: None,
@@ -865,6 +894,20 @@ mod tests {
             state.next_wake(now),
             Some(now + super::super::PTY_CATCHUP_POLL_INTERVAL)
         );
+    }
+
+    #[test]
+    fn a_frame_left_to_the_window_system_sets_no_timer() {
+        // A redraw request the compositor holds back (hidden window), or an
+        // occluded window: the loop sleeps until something else happens.
+        let now = Instant::now();
+        let state = WakeState {
+            needs_redraw: true,
+            frame_timer: false,
+            last_render: now - Duration::from_secs(5),
+            ..idle(now)
+        };
+        assert_eq!(state.next_wake(now), None);
     }
 
     #[test]

@@ -44,12 +44,29 @@ impl App {
                 return;
             }
         };
+        let acquired_at = trace_start.map(|_| Instant::now());
 
-        if pane_count > 1 {
-            self.render_multi_pane(output, cursor_cell);
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let drawn = if pane_count > 1 {
+            self.render_multi_pane(&view, cursor_cell)
         } else {
-            self.render_single_pane(output, cursor_cell);
+            self.render_single_pane(&view, cursor_cell)
+        };
+        let drawn_at = trace_start.map(|_| Instant::now());
+        // Present only now that the drawing above has released every
+        // terminal lock: presenting can block for a whole refresh, or for as
+        // long as the compositor withholds frame callbacks, and the I/O
+        // threads must keep parsing output meanwhile.
+        if drawn {
+            // On Wayland this asks for a frame callback with this commit;
+            // winit holds the next `RedrawRequested` until it arrives. Only
+            // call it when a present follows, or no callback ever comes.
+            self.window.pre_present_notify();
+            self.renderer.present(output);
         }
+        let presented_at = trace_start.map(|_| Instant::now());
 
         // Clear dirty flags after successful render
         self.terminal_manager.clear_dirty();
@@ -66,10 +83,15 @@ impl App {
             self.reconfigure_surface();
         }
 
-        if let Some(start) = trace_start {
+        if let (Some(start), Some(acquired), Some(drawn), Some(presented)) =
+            (trace_start, acquired_at, drawn_at, presented_at)
+        {
             tracing::info!(
                 target: "ultty::perf",
                 pane_count,
+                acquire_us = acquired.duration_since(start).as_micros(),
+                draw_us = drawn.duration_since(acquired).as_micros(),
+                present_us = presented.duration_since(drawn).as_micros(),
                 elapsed_us = start.elapsed().as_micros(),
                 "pipeline_render_frame"
             );
@@ -140,14 +162,20 @@ impl App {
         self.renderer.resize(&self.surface, size.width, size.height);
     }
 
-    /// Render a single terminal pane.
-    fn render_single_pane(&mut self, output: wgpu::SurfaceTexture, cursor_cell: Option<CellRect>) {
+    /// Draw a single terminal pane into `view`, returning whether there
+    /// was one to draw. The terminal is locked only for the drawing; the
+    /// caller presents.
+    fn render_single_pane(
+        &mut self,
+        view: &wgpu::TextureView,
+        cursor_cell: Option<CellRect>,
+    ) -> bool {
         let Some(terminal) = self
             .terminal_manager
             .focused_terminal()
             .map(|t| t.event_loop.terminal())
         else {
-            return;
+            return false;
         };
 
         // Check if bell is still active
@@ -212,23 +240,30 @@ impl App {
                     .collect();
                 self.renderer.retain_native_images(&live_regions);
 
-                return self.renderer.render_with_native_sessions(
-                    output,
+                self.renderer.render_with_native_sessions(
+                    view,
                     &terminal,
                     &overlay,
                     server.active_tab_sessions(),
                     search_matches,
                     self.native_search_index,
                 );
+                return true;
             }
         }
 
-        self.renderer
-            .render_with_overlay(output, &terminal, &overlay)
+        self.renderer.render_with_overlay(view, &terminal, &overlay);
+        true
     }
 
-    /// Render multiple panes.
-    fn render_multi_pane(&mut self, output: wgpu::SurfaceTexture, cursor_cell: Option<CellRect>) {
+    /// Draw multiple panes into `view`, returning whether there were any
+    /// to draw. The panes are locked only for the drawing; the caller
+    /// presents.
+    fn render_multi_pane(
+        &mut self,
+        view: &wgpu::TextureView,
+        cursor_cell: Option<CellRect>,
+    ) -> bool {
         // One lock per pane, held for this frame. Everything below reads the
         // panes through these guards; locking a pane's terminal again here
         // would deadlock.
@@ -238,7 +273,7 @@ impl App {
             self.tab_bar.content_top(),
         );
         if locked.is_empty() {
-            return;
+            return false;
         }
 
         let panes: Vec<(&ultty::grid::Terminal, PaneInfo)> = locked
@@ -289,7 +324,8 @@ impl App {
                 }),
         };
 
-        self.renderer.render_panes(output, &panes, &overlay)
+        self.renderer.render_panes(view, &panes, &overlay);
+        true
     }
 }
 
