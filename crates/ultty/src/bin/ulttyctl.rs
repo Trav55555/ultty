@@ -191,6 +191,7 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
         "version" => Ok(ControlRequest::Version),
         "info" => Ok(ControlRequest::GetInfo),
         "tabs" => Ok(ControlRequest::ListTabs),
+        "panes" => Ok(ControlRequest::ListPanes),
         "text" => Ok(ControlRequest::GetText {
             include_scrollback: rest.iter().any(|arg| arg == "--scrollback"),
             scrollback_lines: None,
@@ -473,6 +474,7 @@ TAB COMMANDS:
     switch-tab <n>          Switch to tab number n (1-indexed)
     close-tab [n]           Close tab n (or current if omitted)
     tabs                    List all tabs
+    panes                   List every pane with its id (* marks the focused one)
 
 QUERY COMMANDS:
     info                    Get terminal info (size, cursor, etc.)
@@ -669,6 +671,10 @@ mod tests {
         assert_eq!(
             parse_cli_request(&["info".to_string()]).unwrap(),
             ControlRequest::GetInfo
+        );
+        assert_eq!(
+            parse_cli_request(&["panes".to_string()]).unwrap(),
+            ControlRequest::ListPanes
         );
     }
 

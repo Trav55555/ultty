@@ -527,6 +527,7 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
         "version" => Some(ControlRequest::Version),
         "info" => Some(ControlRequest::GetInfo),
         "tabs" => Some(ControlRequest::ListTabs),
+        "panes" => Some(ControlRequest::ListPanes),
         "text" => {
             let include_scrollback = parts.next() == Some("--scrollback");
             Some(ControlRequest::GetText {
@@ -743,6 +744,28 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                 }
                 out
             }
+            ControlData::Panes { panes } => {
+                let mut out = String::new();
+                for pane in panes {
+                    let marker = if pane.focused { "*" } else { " " };
+                    let label = [pane.foreground.as_deref(), Some(pane.title.as_str())]
+                        .into_iter()
+                        .chain([pane.cwd.as_deref()])
+                        .flatten()
+                        .find(|label| !label.is_empty())
+                        .unwrap_or("");
+                    out.push_str(&format!(
+                        "{}{} tab:{} {}x{} {}\n",
+                        marker,
+                        pane.id,
+                        pane.tab_index + 1,
+                        pane.cols,
+                        pane.rows,
+                        label
+                    ));
+                }
+                out
+            }
             ControlData::Selection { text } => match text {
                 Some(text) => format!("{}\n", text),
                 None => "(no selection)\n".to_string(),
@@ -888,6 +911,10 @@ mod tests {
     #[test]
     fn parse_ping() {
         assert_eq!(parse_request_only(b"ping"), Some(ControlRequest::Ping));
+        assert_eq!(
+            parse_request_only(b"panes"),
+            Some(ControlRequest::ListPanes)
+        );
     }
 
     #[test]
@@ -1046,6 +1073,37 @@ mod tests {
     fn format_pong_text() {
         let response = ControlResponse::Data(ControlData::Pong);
         assert_eq!(format_response(&response, OutputFormat::Text), "PONG\n");
+    }
+
+    #[test]
+    fn format_panes_text_marks_focus_and_prefers_the_foreground_process() {
+        use ultty_protocol::control::PaneInfo;
+        let pane = |id, focused, title: &str, foreground: Option<&str>| PaneInfo {
+            id,
+            tab_index: 0,
+            active: focused,
+            focused,
+            title: title.to_string(),
+            foreground: foreground.map(str::to_string),
+            pid: None,
+            cwd: None,
+            cols: 40,
+            rows: 24,
+        };
+        let response = ControlResponse::Data(ControlData::Panes {
+            panes: vec![
+                pane(3, true, "~/src", Some("vim")),
+                pane(5, false, "build log", None),
+                PaneInfo {
+                    cwd: Some("/srv".to_string()),
+                    ..pane(8, false, "", None)
+                },
+            ],
+        });
+        assert_eq!(
+            format_response(&response, OutputFormat::Text),
+            "*3 tab:1 40x24 vim\n 5 tab:1 40x24 build log\n 8 tab:1 40x24 /srv\n"
+        );
     }
 
     #[test]

@@ -76,6 +76,9 @@ pub enum ControlRequest {
 
     ListTabs,
 
+    /// Every pane in every tab, tabs in order and panes in layout order.
+    ListPanes,
+
     GetInfo,
 
     // === Search ===
@@ -202,6 +205,7 @@ pub enum ControlResponse {
 pub enum ControlData {
     Info(TerminalInfo),
     Tabs { tabs: Vec<TabInfo> },
+    Panes { panes: Vec<PaneInfo> },
     Selection { text: Option<String> },
     Version(VersionInfo),
     Pong,
@@ -265,6 +269,33 @@ pub struct TabInfo {
     pub cwd: Option<String>,
 }
 
+/// Metadata describing a single pane (one terminal in a tab's layout).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneInfo {
+    /// Pane id. Unique within one Ultty process and never reused, so it
+    /// stays valid across splits, focus changes and tab switches until the
+    /// pane closes. Treat it as opaque.
+    pub id: u64,
+    /// Index of the tab holding the pane.
+    pub tab_index: usize,
+    /// Whether this is the focused pane of its tab.
+    pub active: bool,
+    /// Whether this pane has keyboard focus: the active pane of the active tab.
+    pub focused: bool,
+    /// Title the program set (OSC 0/2); empty when none was set.
+    pub title: String,
+    /// Name of the foreground process, when it can be read.
+    pub foreground: Option<String>,
+    /// Shell process ID.
+    pub pid: Option<u32>,
+    /// Working directory, if known.
+    pub cwd: Option<String>,
+    /// Pane width in cells.
+    pub cols: u16,
+    /// Pane height in cells.
+    pub rows: u16,
+}
+
 /// Build and protocol version information.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VersionInfo {
@@ -305,6 +336,20 @@ mod tests {
                     active: true,
                     pid: Some(42),
                     cwd: None,
+                }],
+            },
+            ControlData::Panes {
+                panes: vec![PaneInfo {
+                    id: 7,
+                    tab_index: 0,
+                    active: true,
+                    focused: false,
+                    title: "vim".to_string(),
+                    foreground: Some("vim".to_string()),
+                    pid: Some(42),
+                    cwd: None,
+                    cols: 40,
+                    rows: 24,
                 }],
             },
             ControlData::Selection {

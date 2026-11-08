@@ -34,6 +34,11 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Added
 
+- `ulttyctl panes` (control request `list_panes`) lists every pane in every
+  tab with a pane id, tab index, focus, title, foreground process, shell
+  PID, working directory and size. Pane ids are unique within an Ultty
+  process and never reused, so they stay valid across splits, focus changes
+  and tab moves until the pane closes.
 - `behavior.cursor_blink` (default `true`); `false` keeps the cursor steady.
 - `dist/terminfo/ultty.terminfo`, the `xterm-ultty` entry, installed by
   `install.sh`, `make install`, the packages and the Homebrew formula.

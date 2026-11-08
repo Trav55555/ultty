@@ -221,6 +221,10 @@ impl App {
                 ControlResponse::Data(ControlData::Tabs { tabs })
             }
 
+            ControlRequest::ListPanes => ControlResponse::Data(ControlData::Panes {
+                panes: pane_infos(&self.terminal_manager),
+            }),
+
             ControlRequest::GetText {
                 include_scrollback,
                 scrollback_lines,
@@ -759,6 +763,41 @@ fn terminal_info(
     }
 }
 
+/// Every pane in every tab: tabs in order, each tab's panes in layout order.
+fn pane_infos(
+    manager: &ultty::terminal_manager::TerminalManager,
+) -> Vec<ultty_protocol::control::PaneInfo> {
+    let active_tab_id = manager.active_tab().map(|tab| tab.id);
+    let mut panes = Vec::new();
+    for (tab_index, tab) in manager.tabs().iter().enumerate() {
+        for &pane_id in &tab.terminals {
+            let Some(terminal) = manager.terminal(pane_id) else {
+                continue;
+            };
+            let active = pane_id == tab.focused_terminal;
+            // Hold the terminal lock only for these reads: the working
+            // directory lookup below takes it again.
+            let (title, dims) = {
+                let term = terminal.event_loop.terminal();
+                (term.title().to_string(), term.grid().dimensions())
+            };
+            panes.push(ultty_protocol::control::PaneInfo {
+                id: pane_id.raw() as u64,
+                tab_index,
+                active,
+                focused: active && Some(tab.id) == active_tab_id,
+                title,
+                foreground: terminal.event_loop.foreground_process_name(),
+                pid: Some(terminal.event_loop.child_pid()),
+                cwd: terminal_working_directory(terminal),
+                cols: dims.cols,
+                rows: dims.rows,
+            });
+        }
+    }
+    panes
+}
+
 pub(super) fn terminal_working_directory(
     terminal: &ultty::terminal_manager::ManagedTerminal,
 ) -> Option<String> {
@@ -851,6 +890,7 @@ fn control_request_requires_auth(request: &ultty_protocol::control::ControlReque
         // Everything that reads screen content or drives the terminal.
         ControlRequest::GetInfo
         | ControlRequest::ListTabs
+        | ControlRequest::ListPanes
         | ControlRequest::GetText { .. }
         | ControlRequest::GetSelection
         | ControlRequest::Search { .. }
@@ -1126,6 +1166,7 @@ mod tests {
             timeout_ms: 100,
         }));
         assert!(control_request_requires_auth(&ControlRequest::GetInfo));
+        assert!(control_request_requires_auth(&ControlRequest::ListPanes));
     }
 
     #[test]
@@ -1218,6 +1259,62 @@ mod tests {
         let info = terminal_info(manager.focused_terminal().unwrap(), 0, 1);
         assert_eq!((info.cols, info.rows), (80, 24));
         assert_eq!(info.cwd.as_deref(), Some("/tmp/ultty-info-cwd"));
+    }
+
+    fn pane_ids(panes: &[ultty_protocol::control::PaneInfo]) -> Vec<(u64, usize)> {
+        panes.iter().map(|pane| (pane.id, pane.tab_index)).collect()
+    }
+
+    fn focused_pane(panes: &[ultty_protocol::control::PaneInfo]) -> Vec<u64> {
+        panes
+            .iter()
+            .filter(|pane| pane.focused)
+            .map(|pane| pane.id)
+            .collect()
+    }
+
+    #[test]
+    fn panes_list_every_pane_in_layout_order_with_stable_ids() {
+        let mut manager = ultty::terminal_manager::TerminalManager::new(80, 24).unwrap();
+        let left = manager.focused_terminal_id().unwrap().raw() as u64;
+        let right = manager.split_horizontal().unwrap().unwrap().raw() as u64;
+        manager.create_tab().unwrap();
+        let other = manager.focused_terminal_id().unwrap().raw() as u64;
+
+        let panes = pane_infos(&manager);
+        assert_eq!(pane_ids(&panes), vec![(left, 0), (right, 0), (other, 1)]);
+        // Only the active pane of the active tab has keyboard focus; each tab
+        // still reports its own active pane (a split keeps focus where it was).
+        assert_eq!(focused_pane(&panes), vec![other]);
+        let active: Vec<u64> = panes.iter().filter(|p| p.active).map(|p| p.id).collect();
+        assert_eq!(active, vec![left, other]);
+        assert!(panes
+            .iter()
+            .all(|p| p.pid.is_some() && p.cols > 0 && p.rows > 0));
+
+        // Switching tabs, moving focus and reordering tabs move the focus
+        // and the tab index, never the ids.
+        manager.switch_to_tab(0);
+        manager.focus_next_pane();
+        assert_eq!(focused_pane(&pane_infos(&manager)), vec![right]);
+        assert!(manager.reorder_tabs(0, 1));
+        assert_eq!(
+            pane_ids(&pane_infos(&manager)),
+            vec![(other, 0), (left, 1), (right, 1)]
+        );
+    }
+
+    #[test]
+    fn closed_pane_ids_are_not_reused() {
+        let mut manager = ultty::terminal_manager::TerminalManager::new(80, 24).unwrap();
+        let split = manager.split_horizontal().unwrap().unwrap();
+        let closed = split.raw() as u64;
+        manager.focus_terminal(split);
+        assert!(manager.close_focused_pane());
+        let next = manager.split_horizontal().unwrap().unwrap().raw() as u64;
+        let ids: Vec<u64> = pane_infos(&manager).iter().map(|p| p.id).collect();
+        assert!(!ids.contains(&closed));
+        assert!(ids.contains(&next));
     }
 
     #[test]
