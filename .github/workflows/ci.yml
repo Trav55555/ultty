@@ -1,0 +1,164 @@
+# CI for pull requests and pushes on GitHub. It mirrors .gitea/workflows/ci.yml,
+# which runs on the primary remote; keep the two in step.
+#
+# Third-party actions are pinned to commit SHAs. Every job only reads the
+# repository.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+  # Pinned to match rust-toolchain.toml. Bump all workflows together.
+  RUST_TOOLCHAIN: 1.98.1
+  # Minimum supported Rust version declared in the root Cargo.toml.
+  RUST_MSRV: 1.89
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.1 --locked
+        env:
+          RUSTFLAGS: ""
+      - run: scripts/security-audit.sh
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
+      - run: cargo test --locked --workspace
+      - name: Protocol roundtrip property tests
+        run: cargo test --locked -p ultty-protocol --test roundtrip -- --ignored
+        env:
+          RUST_MIN_STACK: 8388608
+      - name: Snapshot tests
+        run: cargo test --locked -p ulttui --test snapshots
+      - name: install.sh against a fake release
+        run: scripts/install-sh-test.sh
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
+        with:
+          toolchain: ${{ env.RUST_MSRV }}
+      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
+      - run: cargo check --locked --workspace --all-targets
+
+  porygon-tui:
+    name: porygon-tui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - run: cargo check --locked --manifest-path examples/porygon-tui/Cargo.toml
+
+  vt-integrity:
+    name: VT integrity (deep property run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - run: cargo test --locked -p ultty-vt --test integrity
+        env:
+          PROPTEST_CASES: "20000"
+
+  fuzz:
+    name: Fuzz (smoke)
+    runs-on: ubuntu-latest
+    env:
+      # cargo-fuzz supplies its own sanitizer and coverage flags.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
+        with:
+          toolchain: nightly
+      - run: cargo install cargo-fuzz --version 0.12.0 --locked
+      - name: VT parser and grid
+        working-directory: fuzz
+        run: cargo +nightly fuzz run vt_terminal -- -max_total_time=120 -max_len=4096
+      - name: Protocol decoders
+        working-directory: fuzz
+        run: |
+          cargo +nightly fuzz run decode_app -- -max_total_time=30
+          cargo +nightly fuzz run decode_terminal -- -max_total_time=30
+      - name: In-band stream splitter
+        working-directory: fuzz
+        run: cargo +nightly fuzz run in_band_split -- -max_total_time=60 -max_len=4096
+
+  gui-smoke:
+    name: GUI smoke (Xvfb, software Vulkan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - run: >
+          sudo apt-get update && sudo apt-get install -y
+          libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libvulkan1
+          libx11-xcb1 libxcursor1 libxrandr2 libxi6
+          xvfb mesa-vulkan-drivers fonts-dejavu-core
+      - run: cargo build --locked -p ultty -p hello-native -p counter-app --bins
+      - run: scripts/ci-gui-smoke.sh "$RUNNER_TEMP/gui-smoke"
+      - name: Upload smoke artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gui-smoke
+          path: ${{ runner.temp }}/gui-smoke
