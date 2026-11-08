@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
@@ -54,6 +54,7 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let subscribe = matches!(request, ControlRequest::Subscribe { .. });
     let request = with_auth_token(request, read_auth_token(&endpoint.token));
     // Always ask for JSON so the reply can be parsed and the exit status set
     // from it; text output is rendered here with the server's formatter.
@@ -63,6 +64,16 @@ fn main() {
     };
     let command =
         serde_json::to_string(&envelope).expect("control request envelope should serialize");
+
+    if subscribe {
+        match stream_events(&endpoint.socket, &command, &mut std::io::stdout()) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
 
     let response = match send_command(&endpoint.socket, &command, read_timeout)
         .and_then(|raw| parse_response(&raw))
@@ -305,6 +316,7 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             }
         }
         "wait-for" => parse_wait_for(rest),
+        "subscribe" => Ok(ControlRequest::Subscribe { target: None }),
         "auth" => Ok(ControlRequest::Authenticate {
             token: rest
                 .first()
@@ -358,11 +370,12 @@ fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
         | ControlRequest::SendRaw { target, .. }
         | ControlRequest::RunCommand { target, .. }
         | ControlRequest::Search { target, .. }
-        | ControlRequest::WaitFor { target, .. } => {
+        | ControlRequest::WaitFor { target, .. }
+        | ControlRequest::Subscribe { target } => {
             *target = Some(id);
             Ok(())
         }
-        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search and wait-for".to_string()),
+        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for and subscribe".to_string()),
     }
 }
 
@@ -456,6 +469,36 @@ fn send_command(socket_path: &Path, command: &str, timeout_secs: u64) -> Result<
     read_response(&mut stream, timeout_secs)
 }
 
+/// Subscribe and copy each event line to `out` until Ultty closes the
+/// stream. The write side stays open: shutting it down ends a subscription.
+fn stream_events(socket_path: &Path, command: &str, out: &mut impl Write) -> Result<(), String> {
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|e| format!("failed to connect to ultty (is it running?): {}", e))?;
+    stream
+        .write_all(format!("{command}\n").as_bytes())
+        .map_err(|e| format!("failed to send command: {}", e))?;
+    let mut lines = BufReader::new(stream).lines();
+    let first = lines
+        .next()
+        .ok_or_else(|| "ultty closed the connection without answering".to_string())?
+        .map_err(|e| format!("failed to read reply: {}", e))?;
+    match parse_response(&first)? {
+        ControlResponse::Data(ControlData::Subscribed) => {}
+        other => {
+            return Err(format_response(&other, OutputFormat::Text)
+                .trim()
+                .to_string())
+        }
+    }
+    for line in lines {
+        let line = line.map_err(|e| format!("failed to read event: {}", e))?;
+        writeln!(out, "{line}")
+            .and_then(|()| out.flush())
+            .map_err(|e| format!("failed to write event: {}", e))?;
+    }
+    Ok(())
+}
+
 fn read_response(stream: &mut UnixStream, timeout_secs: u64) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut response = Vec::new();
@@ -501,7 +544,8 @@ GLOBAL FLAGS:
                             wait-for always waits out its own timeout)
     --pane <id>             Act on pane <id> (from `panes`) instead of the
                             focused one. Goes before the command; applies to
-                            text, selection, send-*, run, search, wait-for
+                            text, selection, send-*, run, search, wait-for,
+                            subscribe
     -V, --version           Show ulttyctl version without connecting to Ultty
     -h, --help              Show this help
 
@@ -526,6 +570,10 @@ QUERY COMMANDS:
 WAIT COMMANDS:
     wait-for <pattern> [--timeout <ms>]
                             Wait for pattern to appear (default 30s timeout)
+    subscribe               Print events as JSON lines until ultty exits:
+                            pane_opened, pane_closed, command_started,
+                            command_finished (needs shell integration),
+                            bell, notification, title_changed, process_exited
 
 WINDOW COMMANDS:
     focus                   Focus the ultty window

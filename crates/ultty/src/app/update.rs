@@ -209,8 +209,20 @@ impl App {
             Ok(all_events) => {
                 let mut content_changed = false;
                 let mut tab_titles_changed = false;
+                let subscribed = self
+                    .control_server
+                    .as_ref()
+                    .is_some_and(|server| server.has_subscribers());
                 for (terminal_id, events) in all_events {
                     for event in events {
+                        if subscribed {
+                            if let (Some(server), Some(control_event)) = (
+                                self.control_server.as_mut(),
+                                super::control_events::control_event(terminal_id, &event),
+                            ) {
+                                server.publish(&control_event);
+                            }
+                        }
                         match event {
                             TerminalEvent::Redraw => {
                                 self.needs_redraw = true;
@@ -287,6 +299,9 @@ impl App {
                                     Self::show_notification(&title, &body);
                                 }
                             }
+                            // Only subscribers hear of these (above).
+                            TerminalEvent::CommandStarted
+                            | TerminalEvent::CommandFinished { .. } => {}
                         }
                     }
                 }
@@ -327,6 +342,7 @@ impl App {
             }
         }
 
+        self.publish_pane_changes();
         self.complete_pending_control_waits();
 
         // Check if bell animation needs to continue

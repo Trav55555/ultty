@@ -11,7 +11,7 @@ use polling::{Event, Events, Poller};
 use tracing::{debug, error, info, warn};
 
 use ultty_protocol::control::{
-    ControlData, ControlEnvelope, ControlRequest, ControlResponse, OutputFormat,
+    ControlData, ControlEnvelope, ControlEvent, ControlRequest, ControlResponse, OutputFormat,
 };
 
 use super::paths::{control_dir, ControlEndpoint};
@@ -27,6 +27,13 @@ const CLIENT_KEY_BASE: usize = 100;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
 const READ_CHUNK: usize = 64 * 1024;
+
+/// Most event bytes kept for one subscriber that is not reading. A
+/// subscriber further behind than this is disconnected.
+pub const MAX_SUBSCRIBER_BACKLOG: usize = 1024 * 1024;
+
+/// Most event subscriptions open at once.
+pub const MAX_SUBSCRIBERS: usize = 64;
 
 pub struct ControlServer {
     listener: UnixListener,
@@ -55,8 +62,12 @@ struct ClientState {
     /// the socket unanswered.
     awaiting_response: bool,
     /// Reply bytes the socket has not taken yet. While non-empty the client
-    /// is polled for writability; it is closed once the reply is out.
+    /// is polled for writability; it is closed once the reply is out,
+    /// unless it is a subscriber.
     reply: Vec<u8>,
+    /// Set once the client subscribed: the connection stays open and gets
+    /// events, for this pane only when `Some(Some(pane))`.
+    subscription: Option<Option<u64>>,
 }
 
 impl ClientState {
@@ -180,6 +191,19 @@ impl ControlServer {
             .collect()
     }
 
+    fn is_subscriber(&self, key: usize) -> bool {
+        self.clients
+            .get(&key)
+            .is_some_and(|client| client.subscription.is_some())
+    }
+
+    /// Whether any client is subscribed to events.
+    pub fn has_subscribers(&self) -> bool {
+        self.clients
+            .values()
+            .any(|client| client.subscription.is_some())
+    }
+
     /// Whether the client `key` has reply bytes still waiting to be written.
     fn is_sending_reply(&self, key: usize) -> bool {
         self.clients
@@ -194,6 +218,8 @@ impl ControlServer {
         for event in events.iter() {
             if event.key == LISTENER_KEY {
                 self.accept_connections()?;
+            } else if self.is_subscriber(event.key) {
+                self.service_subscriber(event.key)?;
             } else if self.is_sending_reply(event.key) {
                 self.continue_reply(event.key)?;
             } else {
@@ -231,6 +257,7 @@ impl ControlServer {
                             oversized: false,
                             awaiting_response: false,
                             reply: Vec::new(),
+                            subscription: None,
                         },
                     );
                     debug!("Control client connected: {}", key);
@@ -330,6 +357,142 @@ impl ControlServer {
             // already out of the poller; that delete fails harmlessly.
             let _ = self.poller.delete(&client.stream);
         }
+    }
+
+    /// Turn client `key`'s connection into an event stream for `target`
+    /// (every pane when `None`), after replying `Subscribed`. Refused with an
+    /// error reply when [`MAX_SUBSCRIBERS`] are already open.
+    pub fn start_subscription(&mut self, key: usize, target: Option<u64>) {
+        let open = self
+            .clients
+            .values()
+            .filter(|client| client.subscription.is_some())
+            .count();
+        if open >= MAX_SUBSCRIBERS {
+            self.send_response(
+                key,
+                &ControlResponse::Error {
+                    code: 429,
+                    message: format!("at most {MAX_SUBSCRIBERS} subscriptions can be open"),
+                },
+            );
+            return;
+        }
+        let Some(client) = self.clients.get_mut(&key) else {
+            return;
+        };
+        client.subscription = Some(target);
+        client.awaiting_response = false;
+        client.reply.extend_from_slice(
+            format_response(
+                &ControlResponse::Data(ControlData::Subscribed),
+                client.output_format,
+            )
+            .as_bytes(),
+        );
+        // The client left the poller when its request was complete; it comes
+        // back so a disconnect (EOF) ends the subscription.
+        // SAFETY: the stream fd stays valid while the client is in
+        // self.clients, and remove_client deletes it from the poller.
+        let added = unsafe { self.poller.add(&client.stream, Event::readable(key)) };
+        if let Err(e) = added {
+            warn!("Failed to poll control subscriber {}: {}", key, e);
+            self.remove_client(key);
+            return;
+        }
+        debug!("Control client {} subscribed (pane {:?})", key, target);
+        self.flush_subscriber(key);
+    }
+
+    /// Send `event` to every subscriber that wants it.
+    pub fn publish(&mut self, event: &ControlEvent) {
+        let pane = event.pane();
+        let mut line = match serde_json::to_vec(event) {
+            Ok(line) => line,
+            Err(e) => {
+                warn!("Failed to serialize control event: {}", e);
+                return;
+            }
+        };
+        line.push(b'\n');
+        let keys: Vec<usize> = self
+            .clients
+            .iter()
+            .filter(|(_, client)| {
+                client
+                    .subscription
+                    .is_some_and(|target| target.is_none_or(|t| t == pane))
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for key in keys {
+            let Some(client) = self.clients.get_mut(&key) else {
+                continue;
+            };
+            if client.reply.len() + line.len() > MAX_SUBSCRIBER_BACKLOG {
+                warn!(
+                    "Control subscriber {} fell too far behind; disconnecting",
+                    key
+                );
+                self.remove_client(key);
+                continue;
+            }
+            client.reply.extend_from_slice(&line);
+            self.flush_subscriber(key);
+        }
+    }
+
+    /// Write what a subscriber's socket takes now and poll for writability
+    /// while some is left. A failed write ends the subscription.
+    fn flush_subscriber(&mut self, key: usize) {
+        let Some(client) = self.clients.get_mut(&key) else {
+            return;
+        };
+        match client.flush_reply() {
+            Ok(done) => {
+                let interest = if done {
+                    Event::readable(key)
+                } else {
+                    Event::all(key)
+                };
+                if let Err(e) = self.poller.modify(&client.stream, interest) {
+                    warn!("Failed to poll control subscriber {}: {}", key, e);
+                    self.remove_client(key);
+                }
+            }
+            Err(e) => {
+                debug!("Control subscriber {} went away: {}", key, e);
+                self.remove_client(key);
+            }
+        }
+    }
+
+    /// A subscriber's socket is ready: it closed (the subscription ends),
+    /// sent something (ignored), or can take more of its backlog.
+    fn service_subscriber(&mut self, key: usize) -> io::Result<()> {
+        let Some(client) = self.clients.get_mut(&key) else {
+            return Ok(());
+        };
+        let mut chunk = [0u8; 4096];
+        loop {
+            match client.stream.read(&mut chunk) {
+                Ok(0) => {
+                    debug!("Control subscriber {} disconnected", key);
+                    self.remove_client(key);
+                    return Ok(());
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    debug!("Control subscriber {} failed: {}", key, e);
+                    self.remove_client(key);
+                    return Ok(());
+                }
+            }
+        }
+        self.flush_subscriber(key);
+        Ok(())
     }
 
     pub fn take_pending_requests(&mut self) -> Vec<(usize, ControlRequest)> {
@@ -812,6 +975,7 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                 format!("MATCHED at {}:{}\n", line + 1, col + 1)
             }
             ControlData::WaitTimeout => "TIMEOUT\n".to_string(),
+            ControlData::Subscribed => "SUBSCRIBED\n".to_string(),
         },
         ControlResponse::Error { code, message } => {
             format!("ERROR {}: {}\n", code, message)
@@ -822,6 +986,7 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
 
@@ -1258,6 +1423,103 @@ mod tests {
             request,
         })
         .unwrap()
+    }
+
+    /// Connect, send `subscribe` for `target` without closing the write
+    /// side, and start the subscription the way the app does.
+    fn subscribe(server: &mut ControlServer, target: Option<u64>) -> BufReader<UnixStream> {
+        let mut client = UnixStream::connect(server.socket_path()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = json_request(ControlRequest::Subscribe { target });
+        request.push(b'\n');
+        client.write_all(&request).unwrap();
+        let pending = poll_until_pending(server);
+        assert_eq!(pending[0].1, ControlRequest::Subscribe { target });
+        server.start_subscription(pending[0].0, target);
+        BufReader::new(client)
+    }
+
+    fn next_line(reader: &mut BufReader<UnixStream>) -> String {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        line
+    }
+
+    #[test]
+    fn subscriber_gets_an_ack_then_one_event_per_line() {
+        let mut server = test_server("subscribe-events");
+        let mut events = subscribe(&mut server, None);
+        assert!(server.has_subscribers());
+        assert_eq!(
+            next_line(&mut events),
+            format_response(
+                &ControlResponse::Data(ControlData::Subscribed),
+                OutputFormat::Json
+            )
+        );
+
+        server.publish(&ControlEvent::Bell { pane: 2 });
+        server.publish(&ControlEvent::CommandFinished {
+            pane: 5,
+            exit_code: Some(0),
+        });
+        assert_eq!(next_line(&mut events), "{\"event\":\"bell\",\"pane\":2}\n");
+        assert_eq!(
+            next_line(&mut events),
+            "{\"event\":\"command_finished\",\"pane\":5,\"exit_code\":0}\n"
+        );
+    }
+
+    #[test]
+    fn pane_subscriber_hears_only_its_pane() {
+        let mut server = test_server("subscribe-pane");
+        let mut events = subscribe(&mut server, Some(7));
+        next_line(&mut events);
+
+        server.publish(&ControlEvent::Bell { pane: 1 });
+        server.publish(&ControlEvent::Bell { pane: 7 });
+        assert_eq!(next_line(&mut events), "{\"event\":\"bell\",\"pane\":7}\n");
+    }
+
+    #[test]
+    fn closing_the_connection_ends_the_subscription() {
+        let mut server = test_server("subscribe-close");
+        let events = subscribe(&mut server, None);
+        drop(events);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.has_subscribers() {
+            assert!(Instant::now() < deadline, "subscriber was never dropped");
+            server.poll(Some(Duration::from_millis(10))).unwrap();
+        }
+    }
+
+    #[test]
+    fn subscriber_that_stops_reading_is_disconnected_not_buffered_forever() {
+        let mut server = test_server("subscribe-backlog");
+        let _events = subscribe(&mut server, None);
+        let event = ControlEvent::Notification {
+            pane: 1,
+            title: String::new(),
+            body: "x".repeat(64 * 1024),
+        };
+        // The socket buffer takes some; the backlog limit takes the rest.
+        for _ in 0..(4 * MAX_SUBSCRIBER_BACKLOG / (64 * 1024)) {
+            server.publish(&event);
+        }
+        assert!(!server.has_subscribers());
+    }
+
+    #[test]
+    fn subscriptions_beyond_the_limit_are_refused() {
+        let mut server = test_server("subscribe-limit");
+        let _open: Vec<_> = (0..MAX_SUBSCRIBERS)
+            .map(|_| subscribe(&mut server, None))
+            .collect();
+        let mut refused = subscribe(&mut server, None);
+        assert!(next_line(&mut refused).contains("\"code\":429"));
     }
 
     #[test]

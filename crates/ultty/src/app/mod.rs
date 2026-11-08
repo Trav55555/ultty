@@ -3,6 +3,7 @@
 mod actions;
 mod blink;
 mod control;
+mod control_events;
 mod control_wait;
 mod input;
 mod render;
@@ -173,6 +174,8 @@ pub struct App {
     control_server: Option<ControlServer>,
     /// Control wait requests that are checked after terminal output is drained.
     pending_control_waits: Vec<control_wait::PendingControlWait>,
+    /// Panes subscribers were last told about, for pane opened/closed events.
+    published_panes: Vec<ultty::terminal_manager::TerminalId>,
     /// Cross-thread wakeups from PTY readiness into winit.
     socket_wakeup: wakeup::SocketWakeup,
     /// Search matches for native protocol regions
@@ -299,6 +302,10 @@ impl App {
         // Each terminal's I/O thread parses on its own and pokes the UI
         // through this proxy when there is something new to draw.
         let pty_proxy = std::sync::Mutex::new(event_proxy.clone());
+        let published_panes = control_events::open_panes(&terminal_manager)
+            .into_iter()
+            .map(|(pane, _)| pane)
+            .collect();
         terminal_manager.set_waker(std::sync::Arc::new(move || {
             if let Ok(proxy) = pty_proxy.lock() {
                 let _ = proxy.send_event(AppEvent::RuntimeReadable);
@@ -370,6 +377,7 @@ impl App {
             protocol_server,
             control_server,
             pending_control_waits: Vec::new(),
+            published_panes,
             socket_wakeup,
             native_search_matches: Vec::new(),
             native_search_active: false,

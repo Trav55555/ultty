@@ -25,6 +25,7 @@ impl App {
         };
 
         let mut responses: Vec<(usize, ControlResponse)> = Vec::new();
+        let mut subscriptions: Vec<(usize, Option<u64>)> = Vec::new();
 
         for (client_key, request) in requests {
             // `WithToken` authenticates the connection and then behaves
@@ -39,6 +40,14 @@ impl App {
                 }
                 other => other,
             };
+
+            if let ControlRequest::Subscribe { target } = request {
+                match self.subscription_target(client_key, &request, target) {
+                    Ok(target) => subscriptions.push((client_key, target)),
+                    Err(response) => responses.push((client_key, response)),
+                }
+                continue;
+            }
 
             if let Some(response) = self.defer_wait_for_request(client_key, &request) {
                 responses.push((client_key, response));
@@ -57,7 +66,27 @@ impl App {
             for (client_key, response) in responses {
                 server.send_response(client_key, &response);
             }
+            for (client_key, target) in subscriptions {
+                server.start_subscription(client_key, target);
+            }
         }
+    }
+
+    /// Check a `subscribe` request: it needs the token, and a `target` must
+    /// name an open pane. Returns the pane filter to subscribe with.
+    fn subscription_target(
+        &self,
+        client_key: usize,
+        request: &ultty_protocol::control::ControlRequest,
+        target: Option<u64>,
+    ) -> Result<Option<u64>, ultty_protocol::control::ControlResponse> {
+        if let Some(response) = self.auth_error_for_request(client_key, request) {
+            return Err(response);
+        }
+        if target.is_some() {
+            resolve_control_target(&self.terminal_manager, target)?;
+        }
+        Ok(target)
     }
 
     pub(super) fn complete_pending_control_waits(&mut self) {
@@ -645,6 +674,11 @@ impl App {
                 }
             }
 
+            ControlRequest::Subscribe { .. } => ControlResponse::Error {
+                code: 5,
+                message: "subscribe cannot be used inside batch requests".to_string(),
+            },
+
             ControlRequest::WaitFor { .. } => ControlResponse::Error {
                 code: 5,
                 message: "wait-for cannot be used inside batch requests".to_string(),
@@ -981,6 +1015,7 @@ fn control_request_requires_auth(request: &ultty_protocol::control::ControlReque
         | ControlRequest::GetSelection { .. }
         | ControlRequest::Search { .. }
         | ControlRequest::WaitFor { .. }
+        | ControlRequest::Subscribe { .. }
         | ControlRequest::SendText { .. }
         | ControlRequest::SendKey { .. }
         | ControlRequest::SendRaw { .. }

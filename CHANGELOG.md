@@ -44,6 +44,13 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   optional pane `target`; `ulttyctl --pane <id> <command>` sets it. Without
   one they act on the focused pane, as before. An id naming no open pane is
   error 6.
+- `ulttyctl subscribe [--pane <id>]` (control request `subscribe`) keeps
+  the connection open and prints one JSON event per line: `pane_opened`,
+  `pane_closed`, `command_started` and `command_finished` with the exit code
+  (OSC 133, needs shell integration), `bell`, `notification`,
+  `title_changed` and `process_exited`. An idle subscriber costs no
+  wakeups. A subscriber more than 1 MiB behind is disconnected, and at most
+  64 can be open.
 - `behavior.cursor_blink` (default `true`); `false` keeps the cursor steady.
 - `dist/terminfo/ultty.terminfo`, the `xterm-ultty` entry, installed by
   `install.sh`, `make install`, the packages and the Homebrew formula.

@@ -123,6 +123,15 @@ pub enum ControlRequest {
         target: Option<u64>,
     },
 
+    // === Events ===
+    /// Turn this connection into an event stream: after the `Subscribed`
+    /// reply, one [`ControlEvent`] per line until the client disconnects.
+    Subscribe {
+        /// Only events about this pane; every pane's events when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
+
     // === Window Control ===
     FocusWindow,
 
@@ -231,18 +240,80 @@ pub enum ControlResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlData {
     Info(TerminalInfo),
-    Tabs { tabs: Vec<TabInfo> },
-    Panes { panes: Vec<PaneInfo> },
-    Selection { text: Option<String> },
+    Tabs {
+        tabs: Vec<TabInfo>,
+    },
+    Panes {
+        panes: Vec<PaneInfo>,
+    },
+    Selection {
+        text: Option<String>,
+    },
     Version(VersionInfo),
     Pong,
-    ScreenshotSaved { path: String },
-    ScreenshotData { data: Vec<u8> },
-    SearchResults { matches: Vec<SearchMatch> },
-    BatchResults { results: Vec<ControlResponse> },
+    ScreenshotSaved {
+        path: String,
+    },
+    ScreenshotData {
+        data: Vec<u8>,
+    },
+    SearchResults {
+        matches: Vec<SearchMatch>,
+    },
+    BatchResults {
+        results: Vec<ControlResponse>,
+    },
     Authenticated,
-    WaitMatched { line: usize, col: usize },
+    WaitMatched {
+        line: usize,
+        col: usize,
+    },
     WaitTimeout,
+    /// The connection is now an event stream.
+    Subscribed,
+}
+
+/// Something that happened in a pane, sent to subscribers one per line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum ControlEvent {
+    /// A pane was opened (a new tab or a split).
+    PaneOpened { pane: u64, tab_index: usize },
+    /// A pane was closed.
+    PaneClosed { pane: u64 },
+    /// The shell started running a command (OSC 133;C).
+    CommandStarted { pane: u64 },
+    /// The command finished (OSC 133;D), with its exit code when the shell
+    /// reported one.
+    CommandFinished { pane: u64, exit_code: Option<i32> },
+    /// The bell rang.
+    Bell { pane: u64 },
+    /// A program asked for a desktop notification (OSC 9/777).
+    Notification {
+        pane: u64,
+        title: String,
+        body: String,
+    },
+    /// A program set the pane title (OSC 0/2).
+    TitleChanged { pane: u64, title: String },
+    /// The pane's shell process exited.
+    ProcessExited { pane: u64, status: i32 },
+}
+
+impl ControlEvent {
+    /// The pane the event is about.
+    pub fn pane(&self) -> u64 {
+        match self {
+            ControlEvent::PaneOpened { pane, .. }
+            | ControlEvent::PaneClosed { pane }
+            | ControlEvent::CommandStarted { pane }
+            | ControlEvent::CommandFinished { pane, .. }
+            | ControlEvent::Bell { pane }
+            | ControlEvent::Notification { pane, .. }
+            | ControlEvent::TitleChanged { pane, .. }
+            | ControlEvent::ProcessExited { pane, .. } => *pane,
+        }
+    }
 }
 
 /// A single text search match.
@@ -410,6 +481,7 @@ mod tests {
             ControlData::Authenticated,
             ControlData::WaitMatched { line: 1, col: 2 },
             ControlData::WaitTimeout,
+            ControlData::Subscribed,
         ];
         let mut responses = vec![
             ControlResponse::Ok,
@@ -423,6 +495,21 @@ mod tests {
         ];
         responses.extend(data.into_iter().map(ControlResponse::Data));
         responses
+    }
+
+    #[test]
+    fn events_are_flat_json_objects_named_by_event() {
+        let event = ControlEvent::CommandFinished {
+            pane: 3,
+            exit_code: Some(1),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            json,
+            r#"{"event":"command_finished","pane":3,"exit_code":1}"#
+        );
+        assert_eq!(serde_json::from_str::<ControlEvent>(&json).unwrap(), event);
+        assert_eq!(event.pane(), 3);
     }
 
     /// Clients written before pane targets keep working: an omitted `target`

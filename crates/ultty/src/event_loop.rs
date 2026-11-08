@@ -120,6 +120,11 @@ pub enum TerminalEvent {
         /// Notification body/message
         body: String,
     },
+    /// The shell started running a command (OSC 133;C).
+    CommandStarted,
+    /// The command finished (OSC 133;D), with the exit code the shell
+    /// reported, if any.
+    CommandFinished { exit_code: Option<i32> },
 }
 
 /// State shared between the UI thread and a terminal's I/O thread.
@@ -1003,6 +1008,10 @@ fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
                 Action::Notification { title, body } => Some(TerminalEvent::Notification {
                     title: title.clone(),
                     body: body.clone(),
+                }),
+                Action::CommandExecuted => Some(TerminalEvent::CommandStarted),
+                Action::CommandFinished(exit_code) => Some(TerminalEvent::CommandFinished {
+                    exit_code: *exit_code,
                 }),
                 Action::InBand(text) => {
                     if in_band.len() + text.len() > MAX_IN_BAND_PENDING
