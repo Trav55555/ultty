@@ -52,7 +52,12 @@ use ultty_protocol::{
     RegionId,
     ResizeEvent,
     RichText,
+    // Semantics types
+    Role,
     ScrollEvent,
+    SemanticValue,
+    Semantics,
+    SetPosition,
     Size,
     Span,
     SpinnerWidget,
@@ -62,9 +67,11 @@ use ultty_protocol::{
     TextContent,
     TextOverflow,
     TextWrap,
+    Toggled,
     TrackSizingFunction,
     WidgetContent,
 };
+use ultty_protocol::{Expanded, Live};
 
 // ============================================================================
 // Arbitrary Implementations for Basic Types
@@ -712,6 +719,72 @@ fn arb_computed_region_layout() -> impl Strategy<Value = ComputedRegionLayout> {
 }
 
 // ============================================================================
+// Semantics
+// ============================================================================
+
+fn arb_semantics() -> impl Strategy<Value = Semantics> {
+    let enums = (
+        proptest::sample::select(Role::ALL.to_vec()),
+        prop_oneof![Just(Live::Off), Just(Live::Polite), Just(Live::Assertive)],
+        prop_oneof![
+            Just(Toggled::Unset),
+            Just(Toggled::False),
+            Just(Toggled::True),
+            Just(Toggled::Mixed)
+        ],
+        prop_oneof![
+            Just(Expanded::Unset),
+            Just(Expanded::Collapsed),
+            Just(Expanded::Expanded)
+        ],
+        proptest::array::uniform6(any::<bool>()),
+        any::<u8>(),
+    );
+    let texts = (
+        proptest::option::of(".*"),
+        proptest::option::of(".*"),
+        proptest::option::of(".*"),
+    );
+    let numbers = (
+        proptest::option::of((arb_finite_f32(), arb_finite_f32(), arb_finite_f32())),
+        proptest::option::of((any::<u32>(), any::<u32>())),
+        proptest::option::of(arb_region_id()),
+        proptest::option::of(arb_region_id()),
+        proptest::option::of(arb_region_id()),
+    );
+    (enums, texts, numbers).prop_map(
+        |(
+            (role, live, toggled, expanded, flags, level),
+            (label, description, value_text),
+            (value, position, labelled_by, described_by, controls),
+        )| {
+            let [busy, hidden, read_only, disabled, atomic, modal] = flags;
+            Semantics {
+                role,
+                label,
+                description,
+                live,
+                busy,
+                hidden,
+                read_only,
+                disabled,
+                atomic,
+                modal,
+                toggled,
+                expanded,
+                value: value.map(|(now, min, max)| SemanticValue { now, min, max }),
+                value_text,
+                position: position.map(|(index, size)| SetPosition { index, size }),
+                level,
+                labelled_by,
+                described_by,
+                controls,
+            }
+        },
+    )
+}
+
+// ============================================================================
 // Message Types
 // ============================================================================
 
@@ -749,6 +822,9 @@ fn arb_app_message() -> impl Strategy<Value = AppMessage> {
         // SetContent
         (arb_region_id(), arb_content())
             .prop_map(|(id, content)| AppMessage::SetContent { id, content }),
+        // SetSemantics
+        (arb_region_id(), arb_semantics())
+            .prop_map(|(id, semantics)| AppMessage::SetSemantics { id, semantics }),
         // DeleteRegion
         arb_region_id().prop_map(|id| AppMessage::DeleteRegion { id }),
         // ReparentRegion
@@ -845,6 +921,18 @@ proptest! {
         let encoded = msg.encode_to_bytes();
         let mut cursor = encoded.as_ref();
         let decoded = AppMessage::decode(&mut cursor).expect("decode should succeed");
+        prop_assert_eq!(msg, decoded, "roundtrip should preserve message");
+    }
+
+    /// `SetSemantics` on its own: the full `app_message_roundtrip` needs a
+    /// larger stack and is ignored by default.
+    #[test]
+    fn set_semantics_roundtrip(id in arb_region_id(), semantics in arb_semantics()) {
+        let msg = AppMessage::SetSemantics { id, semantics };
+        let encoded = msg.encode_to_bytes();
+        let mut cursor = encoded.as_ref();
+        let decoded = AppMessage::decode(&mut cursor).expect("decode should succeed");
+        prop_assert!(cursor.is_empty(), "decode should consume the whole frame");
         prop_assert_eq!(msg, decoded, "roundtrip should preserve message");
     }
 

@@ -57,6 +57,11 @@ impl NativeSession {
                 }
             }
 
+            AppMessage::SetSemantics { .. } => {
+                // Not advertised yet, so never negotiated.
+                self.queue_protocol_error(NativeProtocolError::missing_capability("set_semantics"));
+            }
+
             AppMessage::AppendContent { id, text } => {
                 if self.has_capability(CAP_APPEND_CONTENT) {
                     self.handle_append_content(id, text);
