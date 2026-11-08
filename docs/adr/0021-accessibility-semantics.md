@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed 2026-11-08. Plan item B4 of `docs/agent-tui-plan.md`; gated on
+Accepted 2026-11-08. Plan item B4 of `docs/agent-tui-plan.md`; gated on
 protocol and ADR sign-off. Written alongside ADR 0020 (inline surfaces in
 scrollback), which takes app code `0x0015`/`0x0016` and capability bit
 `0x0100`; this ADR uses the next free ones. §6 covers where the two meet.

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed 2026-11-08. Plan item B3 of `docs/agent-tui-plan.md` (gate:
+Accepted 2026-11-08. Plan item B3 of `docs/agent-tui-plan.md` (gate:
 protocol change). Amends spec §1.3, §2.1, §3.2, §4 and §10.
 
 ## Context
