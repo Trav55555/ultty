@@ -56,6 +56,8 @@ The current dated evidence set is:
 - [`2026-11-08-control-latency.md`](./2026-11-08-control-latency.md) for
   control request and event delivery latency, and background tabs no longer
   redrawing the window.
+- [`2026-11-08-agent-soak.md`](./2026-11-08-agent-soak.md) for the ten-hour
+  agent-session soak: frame time met, memory inconclusive (host swapped).
 - [`2026-11-07-idle-footprint.md`](./2026-11-07-idle-footprint.md) for idle
   wakeups (now none with the cursor steady), the memory breakdown, and the
   startup stage split.
