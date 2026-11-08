@@ -586,7 +586,7 @@ impl Grid {
             return;
         };
         let tail = if r.push_grapheme_char(col, c, MAX_COMBINING_PER_CELL) {
-            cluster::Tail::of(c)
+            old_tail.then(c)
         } else {
             old_tail
         };
@@ -780,7 +780,7 @@ impl Grid {
         self.last_char = c;
 
         self.advance_cursor(width);
-        self.record_print(row, col, cluster::Tail::of(c));
+        self.record_print(row, col, cluster::Tail::start(c));
     }
 
     /// Advance the cursor after printing `width` columns, parking it on the
