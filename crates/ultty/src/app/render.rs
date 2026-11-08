@@ -60,6 +60,10 @@ impl App {
         // long as the compositor withholds frame callbacks, and the I/O
         // threads must keep parsing output meanwhile.
         if drawn {
+            // On Wayland this asks for a frame callback with this commit;
+            // winit holds the next `RedrawRequested` until it arrives. Only
+            // call it when a present follows, or no callback ever comes.
+            self.window.pre_present_notify();
             self.renderer.present(output);
         }
         let presented_at = trace_start.map(|_| Instant::now());
