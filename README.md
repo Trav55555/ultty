@@ -115,6 +115,15 @@ cargo run --manifest-path examples/porygon-tui/Cargo.toml
 
 Native apps auto-detect whether they're talking to Ultty. On an Ultty tab's own terminal they use the tab's socket. Anywhere else they probe the terminal, and if it is Ultty they carry the native protocol in-band in the terminal byte stream. That covers ssh, `sudo`, containers, and `script` recordings. In both cases the terminal does layout and rendering. Everywhere else they use ANSI mode via ratatui on supported Unix terminals. That includes tmux, screen, and zellij, where Ultty cannot know where a pane sits, so the probe is skipped or dropped. Set `ULTTY_IN_BAND=0` to skip the probe. See [spec §1.3](docs/PROTOCOL_SPEC.md) and [ADR 0018](docs/adr/0018-in-band-native-transport.md).
 
+## Privacy
+
+No account, no telemetry, no network calls. Ultty does not phone home,
+check for updates, or report crashes; it contains no networking code. The
+network is reached only by programs you run in it, and by a link you
+Ctrl+click, which Ultty hands to your browser. Its sockets (the control
+socket that `ulttyctl` uses and each tab's native socket) are local Unix
+sockets that only your user can open.
+
 ## ANSI Compatibility
 
 Ultty emulates an xterm-style terminal; ordinary terminal programs are the
