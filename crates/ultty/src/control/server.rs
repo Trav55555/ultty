@@ -1002,6 +1002,8 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                 ),
             },
             ControlData::WaitQuiet => "QUIET\n".to_string(),
+            // Just the id, so a script can write P=$(ulttyctl new-tab ...).
+            ControlData::TabOpened { pane, .. } => format!("{pane}\n"),
             ControlData::LastCommand {
                 command,
                 output,

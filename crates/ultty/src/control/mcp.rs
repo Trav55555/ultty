@@ -224,7 +224,6 @@ impl McpServer<'_, '_> {
 
     /// Open a tab and report the id of the pane it made.
     fn new_tab(&mut self, args: &Map<String, Value>) -> Result<Vec<Value>, String> {
-        let before: Vec<u64> = self.panes()?.iter().map(|pane| pane.id).collect();
         let command_args = match args.get("args") {
             None | Some(Value::Null) => Vec::new(),
             Some(Value::Array(items)) => items
@@ -234,18 +233,13 @@ impl McpServer<'_, '_> {
                 .ok_or("args must be a list of strings")?,
             Some(_) => return Err("args must be a list of strings".to_string()),
         };
-        self.request(ControlRequest::NewTab {
+        let response = self.request(ControlRequest::NewTab {
             title: optional_str(args, "title")?.map(str::to_string),
             command: optional_str(args, "command")?.map(str::to_string),
             args: command_args,
             working_dir: optional_str(args, "cwd")?.map(str::to_string),
         })?;
-        let opened: Vec<PaneInfo> = self
-            .panes()?
-            .into_iter()
-            .filter(|pane| !before.contains(&pane.id))
-            .collect();
-        Ok(vec![json_text(&opened)])
+        Ok(vec![reply_content(response)?])
     }
 
     fn screenshot(&mut self) -> Result<Vec<Value>, String> {
@@ -553,22 +547,6 @@ mod tests {
                 "params": { "name": name, "arguments": arguments } })
     }
 
-    fn pane(id: u64) -> PaneInfo {
-        PaneInfo {
-            id,
-            tab_index: 0,
-            active: true,
-            focused: true,
-            title: String::new(),
-            foreground: None,
-            pid: None,
-            cwd: None,
-            cols: 80,
-            rows: 24,
-            status: None,
-        }
-    }
-
     #[test]
     fn initialize_answers_one_line_per_message_and_ignores_notifications() {
         let (lines, sent) = exchange(
@@ -706,26 +684,32 @@ mod tests {
 
     #[test]
     fn new_tab_returns_the_pane_it_opened() {
-        let mut listed = 0;
-        let (lines, _) = exchange(
-            &[call(1, "ultty_new_tab", json!({ "command": "htop" }))],
-            |request| match request {
-                ControlRequest::ListPanes => {
-                    listed += 1;
-                    let panes = if listed == 1 {
-                        vec![pane(0)]
-                    } else {
-                        vec![pane(0), pane(5)]
-                    };
-                    ControlResponse::Data(ControlData::Panes { panes })
-                }
-                _ => ControlResponse::Ok,
+        let (lines, sent) = exchange(
+            &[call(
+                1,
+                "ultty_new_tab",
+                json!({ "command": "htop", "args": ["-d", "5"] }),
+            )],
+            |_| {
+                ControlResponse::Data(ControlData::TabOpened {
+                    tab_index: 1,
+                    pane: 5,
+                })
             },
         );
-        let opened: Vec<PaneInfo> =
+        assert_eq!(
+            sent,
+            vec![ControlRequest::NewTab {
+                title: None,
+                command: Some("htop".to_string()),
+                args: vec!["-d".to_string(), "5".to_string()],
+                working_dir: None,
+            }]
+        );
+        let reply: Value =
             serde_json::from_str(lines[0]["result"]["content"][0]["text"].as_str().unwrap())
                 .unwrap();
-        assert_eq!(opened, vec![pane(5)]);
+        assert_eq!(reply["pane"], 5);
     }
 
     #[test]

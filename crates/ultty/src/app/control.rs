@@ -486,11 +486,22 @@ impl App {
                 };
 
                 match result {
-                    Ok(_) => {
+                    Ok(tab_id) => {
                         self.clear_tab_width_freeze();
                         self.update_tab_bar();
                         self.needs_redraw = true;
-                        ControlResponse::Ok
+                        let tabs = self.terminal_manager.tabs();
+                        match tabs.iter().position(|tab| tab.id == tab_id) {
+                            Some(tab_index) => ControlResponse::Data(ControlData::TabOpened {
+                                tab_index,
+                                pane: tabs[tab_index].focused_terminal.raw() as u64,
+                            }),
+                            // The command exited at once and the tab closed.
+                            None => ControlResponse::Error {
+                                code: 2,
+                                message: "The tab closed as soon as it opened".to_string(),
+                            },
+                        }
                     }
                     Err(e) => ControlResponse::Error {
                         code: 2,

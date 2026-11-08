@@ -345,6 +345,11 @@ pub enum ControlData {
     WaitTimeout,
     /// The connection is now an event stream.
     Subscribed,
+    /// `NewTab` opened a tab; `pane` is its pane's id.
+    TabOpened {
+        tab_index: usize,
+        pane: u64,
+    },
     /// A pane's last command; see `ControlRequest::LastCommand`.
     LastCommand {
         command: String,
@@ -585,6 +590,10 @@ mod tests {
                 },
             },
             ControlData::WaitQuiet,
+            ControlData::TabOpened {
+                tab_index: 2,
+                pane: 9,
+            },
             ControlData::LastCommand {
                 command: "make".to_string(),
                 output: "ok".to_string(),
