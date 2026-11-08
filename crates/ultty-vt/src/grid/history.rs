@@ -103,6 +103,27 @@ impl CompactRow {
         self.runs.clear();
         self.graphemes.clear();
 
+        // Plain output in the default style, which the row has kept track
+        // of: its text is the whole row, and a cell is default exactly when
+        // it holds a space, so trimming the text trims the blank tail.
+        if row.is_plain() {
+            let cells = row.used_cells();
+            self.text.extend(cells.iter().map(|cell| cell.char() as u8));
+            let len = self
+                .text
+                .iter()
+                .rposition(|&b| b != b' ')
+                .map_or(0, |last| last + 1);
+            self.text.truncate(len);
+            if len > 0 {
+                self.runs.push(Run {
+                    len: len as u16,
+                    style: Style::of(&Cell::default()),
+                });
+            }
+            return;
+        }
+
         let cells = row.used_cells();
         let cells = &cells[..used_len(cells)];
         self.text.reserve(cells.len());
@@ -286,6 +307,32 @@ mod tests {
         fn encode_then_decode_returns_the_same_row(row in row()) {
             let decoded = CompactRow::encode(&row).decode();
             prop_assert!(same(&row, &decoded), "{row:?}\n!=\n{decoded:?}");
+        }
+
+        /// Rows that keep track of being plain take a shortcut; it must
+        /// give exactly what encoding them cell by cell gives.
+        #[test]
+        fn a_plain_row_encodes_like_any_other(
+            width in 1u16..40,
+            writes in prop::collection::vec((0u16..40, "[ a-z]{0,40}", any::<bool>()), 0..6),
+        ) {
+            let mut row = Row::new(width);
+            for (col, text, erase) in writes {
+                let col = col.min(width - 1);
+                if erase {
+                    row.erase_range(col, col + text.len() as u16, Color::Default);
+                } else {
+                    let len = text.len().min((width - col) as usize);
+                    row.write_ascii(col, &text.as_bytes()[..len], Cell::default());
+                }
+            }
+            prop_assert!(row.is_plain());
+            let mut copy = row.clone();
+            copy[0] = row[0];
+            prop_assert!(!copy.is_plain());
+            let compact = CompactRow::encode(&row);
+            prop_assert_eq!(&compact, &CompactRow::encode(&copy));
+            prop_assert!(same(&row, &compact.decode()));
         }
 
         #[test]

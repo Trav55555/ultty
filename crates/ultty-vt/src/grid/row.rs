@@ -19,6 +19,12 @@ pub struct Row {
     /// that only cares about non-default cells (history encoding, erasing a
     /// row that is already blank) can skip the tail without looking at it.
     used: u16,
+    /// Every cell is ASCII in the default style, with no grapheme data, so
+    /// the row's content is its characters alone. Like `used`, it may
+    /// understate (anything handing out a mutable cell clears it) but never
+    /// overstates, so history can copy such a row's text without checking
+    /// each cell's style.
+    plain: bool,
     /// Codepoints after the base character of a multi-codepoint grapheme
     /// cluster (combining marks, ZWJ sequences, variation selectors), keyed by
     /// column. An entry is only meaningful while the cell at that column has
@@ -137,6 +143,15 @@ impl Row {
     /// grapheme codepoints than `max_extra`.
     pub fn check_integrity(&self, max_extra: usize) -> Result<(), String> {
         let cells = &self.cells;
+        if self.plain {
+            if let Some(col) = cells.iter().position(|cell| {
+                let mut style = *cell;
+                style.set_char(' ');
+                !cell.char().is_ascii() || !style.is_default()
+            }) {
+                return Err(format!("row is marked plain but cell at col {col} is not"));
+            }
+        }
         if let Some(col) = cells[(self.used as usize).min(cells.len())..]
             .iter()
             .position(|cell| !cell.is_default())
@@ -176,6 +191,7 @@ impl Row {
             dirty: true,
             wrapped: false,
             used: 0,
+            plain: true,
             graphemes: GraphemeMap::default(),
         }
     }
@@ -188,6 +204,11 @@ impl Row {
         let start = col as usize;
         let end = start + bytes.len();
         self.drop_grapheme_entries(col, end as u16);
+        if self.plain {
+            let mut style = template;
+            style.set_char(' ');
+            self.plain = style.is_default();
+        }
         for (cell, &byte) in self.cells[start..end].iter_mut().zip(bytes) {
             *cell = template;
             cell.set_char(byte as char);
@@ -202,6 +223,7 @@ impl Row {
         self.graphemes.clone_from(&other.graphemes);
         self.wrapped = other.wrapped;
         self.used = other.used;
+        self.plain = other.plain;
         self.dirty = true;
     }
 
@@ -263,6 +285,7 @@ impl Row {
         let Some(cell) = self.cells.get_mut(col as usize) else {
             return;
         };
+        self.plain = false;
         let extra = self.graphemes.entry(col);
         if !cell.has_flag(CellFlags::HAS_COMBINING) {
             // Whatever is stored for this column belonged to earlier content.
@@ -285,6 +308,7 @@ impl Row {
             cell.unset_flag(CellFlags::HAS_COMBINING);
             self.graphemes.remove(col);
         } else {
+            self.plain = false;
             cell.set_flag(CellFlags::HAS_COMBINING);
             self.graphemes.insert(col, extra.to_vec());
             self.mark_used(col as usize + 1);
@@ -353,6 +377,7 @@ impl Row {
     #[inline]
     pub fn get_mut(&mut self, index: u16) -> Option<&mut Cell> {
         self.dirty = true;
+        self.plain = false;
         self.mark_used(index as usize + 1);
         self.cells.get_mut(index as usize)
     }
@@ -362,6 +387,12 @@ impl Row {
     fn mark_used(&mut self, end: usize) {
         let end = end.min(self.cells.len()) as u16;
         self.used = self.used.max(end);
+    }
+
+    /// Whether every cell is ASCII in the default style with no grapheme
+    /// data. `false` does not mean some cell is not.
+    pub(crate) fn is_plain(&self) -> bool {
+        self.plain
     }
 
     /// The cells up to the used mark: every cell after them is default.
@@ -382,9 +413,11 @@ impl Row {
             // Cells past the used mark are already default.
             self.cells[..self.used as usize].fill(blank);
             self.used = 0;
+            self.plain = true;
         } else {
             self.cells.fill(blank);
             self.used = self.width();
+            self.plain = false;
         }
         self.graphemes.clear();
         self.wrapped = false;
@@ -413,6 +446,7 @@ impl Row {
         } else {
             self.cells[start as usize..end as usize].fill(blank);
             self.mark_used(end as usize);
+            self.plain = false;
         }
         self.dirty = true;
     }
@@ -456,6 +490,7 @@ impl Row {
     /// Iterate over cells mutably.
     pub fn cells_mut(&mut self) -> impl Iterator<Item = &mut Cell> {
         self.dirty = true;
+        self.plain = false;
         self.used = self.width();
         self.cells.iter_mut()
     }
@@ -533,6 +568,7 @@ impl Row {
         }
         self.shift_graphemes(at as u16, count as i32);
         self.used = self.width();
+        self.plain = false;
 
         // Fill inserted cells with background color
         for i in at..(at + count).min(len) {
@@ -571,6 +607,7 @@ impl Row {
         }
         self.drop_grapheme_entries(at as u16, src_start as u16);
         self.used = self.width();
+        self.plain = false;
         self.shift_graphemes(src_start as u16, -(count as i32));
 
         // Fill vacated cells at end with background color. A count running
@@ -615,6 +652,7 @@ impl Index<u16> for Row {
 impl IndexMut<u16> for Row {
     fn index_mut(&mut self, index: u16) -> &mut Self::Output {
         self.dirty = true;
+        self.plain = false;
         self.mark_used(index as usize + 1);
         &mut self.cells[index as usize]
     }
@@ -623,6 +661,7 @@ impl IndexMut<u16> for Row {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grid::cell::Color;
 
     #[test]
     fn new_row_is_blank() {
@@ -875,6 +914,34 @@ mod tests {
         assert!((6..8).all(|col| row[col].bg() == Color::Indexed(4)));
         assert_eq!(row[8].bg(), Color::Default);
         assert_eq!(row.check_integrity(16), Ok(()));
+    }
+
+    #[test]
+    fn a_row_is_plain_until_something_other_than_default_ascii_lands() {
+        let mut row = Row::new(10);
+        assert!(row.is_plain());
+        row.write_ascii(0, b"abc", Cell::default());
+        assert!(row.is_plain());
+        row.write_ascii(
+            3,
+            b"d",
+            Cell::with_attrs(' ', Color::Default, Color::Named(1), CellFlags::NONE),
+        );
+        assert!(!row.is_plain());
+        row.erase(Color::Default);
+        assert!(row.is_plain());
+        row.erase(Color::Named(4));
+        assert!(!row.is_plain(), "a colored blank is not plain");
+        row.clear();
+        let _ = row.get_mut(2);
+        assert!(!row.is_plain());
+        row.clear();
+        row.push_grapheme_char(0, '\u{301}', 4);
+        assert!(!row.is_plain());
+        row.clear();
+        row.erase_range(2, 4, Color::Named(2));
+        assert!(!row.is_plain());
+        row.check_integrity(4).unwrap();
     }
 
     #[test]
