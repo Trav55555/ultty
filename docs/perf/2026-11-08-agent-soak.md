@@ -9,6 +9,12 @@ a status box redrawn every 80 ms in synchronized output, tool output dumps
 of 200 to 3000 lines, and `/clear` now and then. The window is resized
 every 5 minutes. Release build, Ryzen 5 7600, RX 7900 XT through RADV.
 
+The script started Xvfb, but the shell carried the desktop's
+`WAYLAND_DISPLAY`, which winit prefers, so every run here drew to a real
+window on the GNOME Wayland desktop (found 2026-11-08 by the soak
+process's socket peers; `soak.sh` now unsets it). The frame times are
+therefore on the real GPU and compositor, not Xvfb.
+
 ## Results
 
 600 minutes, run 02:19 to 12:19.

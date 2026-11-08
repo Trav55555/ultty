@@ -7,12 +7,13 @@ against a running Ultty. Measuring them found that a background tab's
 output redrew the window; that is fixed here.
 
 All numbers are from the development workstation (Ryzen 5 7600, Radeon RX
-7900 XT through RADV), with the window on Xvfb, a release build, two runs
-each. Presenting into Xvfb copies every frame through the X server, so a
-frame costs about 14 ms here (median of 336 frames,
-`ULTTY_TRACE_PIPELINE=1`), far more than on a real display, which matters
-below. (A first draft of this note said lavapipe; Ultty now logs the
-adapter it picks at start, and it is RADV.)
+7900 XT through RADV), a release build, two runs each. The launch script
+meant to put the window on Xvfb, but the shell carried the desktop's
+`WAYLAND_DISPLAY`, which winit prefers, so the window was on the GNOME
+Wayland desktop (found 2026-11-08; the e2e and soak scripts now unset
+it). A frame there cost about 14 ms in `ULTTY_TRACE_PIPELINE=1`'s
+`pipeline_render_frame` (median of 336), which includes waiting for the
+compositor to take the frame, and that matters below.
 
 ## Results
 
@@ -40,7 +41,7 @@ background tab. Two causes, neither in the event path:
 - A bell starts a 100 ms visual flash. Ringing every few milliseconds kept
   the window redrawing at 60 fps, and the UI thread, which also answers
   control requests and publishes events, spent most of each 16 ms in a
-  14 ms Xvfb frame. The probe now uses events that do not animate.
+  14 ms frame. The probe now uses events that do not animate.
 - Output in a background tab set `needs_redraw`, so the hidden pane's echo
   drew a frame too. That is a real cost, below.
 
