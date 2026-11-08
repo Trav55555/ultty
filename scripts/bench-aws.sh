@@ -95,15 +95,24 @@ git -C "$ROOT" bundle verify "$BUNDLE" >/dev/null || die "bundle verification fa
 scp "${SCP_OPTS[@]}" "$BUNDLE" "$ROOT/scripts/bench/aws-remote.sh" "$TARGET:ubench/"
 remote 'chmod +x ubench/aws-remote.sh'
 
+# Terminals the comparison will run, so setup builds only those.
+TERMINALS=""
+read -r -a compare_words <<<"$COMPARE_ARGS"
+for ((i = 0; i < ${#compare_words[@]}; i++)); do
+  if [[ "${compare_words[i]}" == --terminals ]]; then TERMINALS="${compare_words[i + 1]:-}"; fi
+done
+SETUP_ENV=""
+[[ -n "$TERMINALS" ]] && SETUP_ENV="UBENCH_TERMINALS=$(printf '%q' "$TERMINALS") "
+
 if [[ "$SETUP" == 1 ]]; then
   log "setup ($ROLE)"
-  remote "ubench/aws-remote.sh setup $ROLE"
+  remote "${SETUP_ENV}ubench/aws-remote.sh setup $ROLE"
   if remote 'ubench/aws-remote.sh needs-reboot'; then
     log "rebooting $HOST to load the driver"
     remote 'sudo systemctl reboot' || true
     sleep 30
     wait_for_ssh 900
-    remote "ubench/aws-remote.sh setup $ROLE"
+    remote "${SETUP_ENV}ubench/aws-remote.sh setup $ROLE"
     if remote 'ubench/aws-remote.sh needs-reboot'; then
       die "still needs a reboot after rebooting; check the driver install on $HOST"
     fi

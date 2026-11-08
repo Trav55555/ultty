@@ -227,26 +227,52 @@ is running; that fix is untested here because openbox is not installed).
 reachable over SSH. It never launches or terminates instances.
 
 ```bash
-# GPU instance (g4dn.xlarge or g5.xlarge, Ubuntu 24.04): X11 + Wayland comparative suite
-scripts/bench-aws.sh --host 203.0.113.10 --user ubuntu --key ~/.ssh/bench.pem --role gpu --ref HEAD
+# GPU instance (g4dn.xlarge, Ubuntu 26.04 when Ghostty is compared): X11 + Wayland
+scripts/bench-aws.sh --host 203.0.113.10 --user ubuntu --key ~/.ssh/bench.pem --role gpu --ref main \
+  --known-hosts /tmp/bench-known-hosts --compare-args "--terminals ultty,ghostty"
 
 # Dedicated-core CPU instance (c7a.2xlarge or larger): headless A/A + instruction counts
 scripts/bench-aws.sh --host 203.0.113.11 --user ubuntu --key ~/.ssh/bench.pem --role cpu --ref main
 ```
 
-It sends the ref as a git bundle (the instance needs no repository access),
-runs `scripts/bench/aws-remote.sh` there to install build dependencies, Rust
-(from `rust-toolchain.toml`), and for the GPU role `nvidia-driver-550`
-(rebooting once and waiting for SSH), Ghostty from the snap `latest/stable`
-channel (must report 1.4.0, then held; override with `EXPECT_GHOSTTY`), GNOME
-Terminal from Ubuntu 24.04's apt (version recorded; set
-`EXPECT_GNOME_TERMINAL` to a dpkg version to fail on drift) and Alacritty
-0.16.1 built with `cargo install --locked` (matching the development box,
-which has the 0.16.1 Ubuntu package). It builds in release, runs the suite,
-and copies results back to `target/bench-results/aws-<role>-<date>/` with a
-combined `REPORT.md`. Every step is idempotent and any failure stops it with
-a non-zero exit. Pass `--compare-args "--rounds 5 --k2p-samples 300"` to
-lengthen the campaign and `--skip-setup` on reruns.
+It sends the ref as a git bundle (the instance needs no repository access) and
+runs `scripts/bench/aws-remote.sh` there. Setup installs build dependencies and
+Rust (from `rust-toolchain.toml`), and for the GPU role `nvidia-driver-580`
+(rebooting once and waiting for SSH), a headless Xorg configuration on the GPU,
+sway, and the comparison terminals the run asks for (`--terminals` in
+`--compare-args`; all four when absent):
+
+- **Ghostty 1.4.0** built from the signed source release with Zig 0.17.0, each
+  download checked against a pinned SHA-256 and the project's minisign key.
+  Ghostty 1.4 needs GTK 4.18 and libadwaita 1.7, so use Ubuntu 26.04; the
+  snap cannot drive the NVIDIA driver. `compare.sh` runs it on a private D-Bus
+  session (it resets `GDK_DEBUG`, and GTK then waits on the desktop portal).
+- **GNOME Terminal** from apt (version recorded; set `EXPECT_GNOME_TERMINAL` to
+  a dpkg version to fail on drift).
+- **Alacritty 0.16.1** built with `cargo install --locked`.
+
+It then builds Ultty in release, runs the suite, and copies results back to
+`target/bench-results/aws-<role>-<date>/` with a combined `REPORT.md`. Every
+step is idempotent and any failure stops it with a non-zero exit. Pass
+`--compare-args "--rounds 5 --k2p-samples 300"` to lengthen the campaign,
+`--skip-setup` on reruns, and `--known-hosts FILE` to keep throwaway host
+keys out of `~/.ssh/known_hosts`.
+
+**Reusing a set-up instance.** Setup from a clean image takes about 25
+minutes, most of it the Ghostty build and the driver install. After one
+complete run, snapshot the instance (`aws ec2 create-image --instance-id ID
+--name ultty-bench-gpu-<date> --no-reboot`) and launch later runs from that
+image: setup then finds everything installed and only builds Ultty. The image
+records driver and terminal versions as of its creation; make a new one when
+the pins in `aws-remote.sh` change, and deregister old ones (with their EBS
+snapshots) to stop storage charges.
+
+**Safety stop.** Give every instance a time limit that survives the driver
+reboot: a cloud-init `runcmd` with `systemd-run --on-active=5h systemctl
+poweroff` covers the first boot only, so re-arm it (`sudo shutdown -h +240`)
+after the reboot, and launch with `--instance-initiated-shutdown-behavior
+terminate`. Do not put `shutdown` or `systemd-run` in `bootcmd`: on Ubuntu
+26.04 the former powered the instance off at once and the latter hung boot.
 
 ## Required Sections
 
