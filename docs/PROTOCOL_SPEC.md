@@ -156,6 +156,9 @@ App                                          Terminal
 | `CAP_APPEND_CONTENT` | `0x0020` |
 | `CAP_STREAM_LIFECYCLE` | `0x0040` |
 | `CAP_REGION_METADATA` | `0x0080` |
+| `CAP_SEMANTICS` | `0x0200` |
+
+Bit `0x0100` is reserved for inline surfaces ([ADR 0020](adr/0020-inline-surfaces.md)).
 
 `CAP_ALL_KNOWN` is the OR of those bits. Capabilities are negotiated as `requested & supported`; the version is `min(client, server)`. A version below `MIN_PROTOCOL_VERSION` is rejected with `Error` 426.
 
@@ -179,6 +182,8 @@ Integers are little-endian. Floats are IEEE-754 little-endian `f32`; NaN and inf
 | `MAX_SPAN_COUNT` | 10,000 |
 | `MAX_METADATA_PAIRS` | 1,024 |
 | `MAX_METADATA_TOTAL_BYTES` | 1 MiB |
+| `MAX_SEMANTICS_STRING_LEN` | 4 KiB per `Semantics` string |
+| `MAX_SEMANTICS_TOTAL_BYTES` | 8 KiB across one `Semantics`' strings |
 | `MAX_IMAGE_DATA_LEN` | 16 MiB, equal to the payload cap |
 | Image dimensions | width and height each at most 16,384; `width * height * 4 <= data_len` |
 
@@ -208,12 +213,15 @@ App and terminal codes are separate namespaces.
 | `SetRegionMetadata` | `0x0014` | `SetContent` | `0x0020` |
 | `SetStyle` | `0x0021` | `SetConstraints` | `0x0022` |
 | `AppendContent` | `0x0023` | `StreamStart` | `0x0024` |
-| `StreamEnd` | `0x0025` | `BeginFrame` | `0x0030` |
-| `EndFrame` | `0x0031` | `Scroll` | `0x0040` |
-| `Focus` | `0x0041` | `Blur` | `0x0042` |
-| `Subscribe` | `0x0050` | `Unsubscribe` | `0x0051` |
-| `ClipboardGet` | `0x0060` | `ClipboardSet` | `0x0061` |
-| `Pong` | `0x0070` | `Disconnect` | `0x00FF` |
+| `StreamEnd` | `0x0025` | `SetSemantics` | `0x0026` |
+| `BeginFrame` | `0x0030` | `EndFrame` | `0x0031` |
+| `Scroll` | `0x0040` | `Focus` | `0x0041` |
+| `Blur` | `0x0042` | `Subscribe` | `0x0050` |
+| `Unsubscribe` | `0x0051` | `ClipboardGet` | `0x0060` |
+| `ClipboardSet` | `0x0061` | `Pong` | `0x0070` |
+| `Disconnect` | `0x00FF` | | |
+
+App codes `0x0015` and `0x0016` are reserved for inline surfaces ([ADR 0020](adr/0020-inline-surfaces.md)).
 
 #### Terminal → App
 
@@ -224,6 +232,8 @@ App and terminal codes are separate namespaces.
 | `Resize` | `0x0022` | `FocusEvent` | `0x0023` |
 | `ScrollEvent` | `0x0024` | `ClipboardContent` | `0x0025` |
 | `Ping` | `0x0070` | `Error` | `0x00FF` |
+
+Terminal code `0x0026` is reserved for inline surfaces ([ADR 0020](adr/0020-inline-surfaces.md)); the app code `0x0026` is `SetSemantics`.
 
 ---
 
@@ -471,10 +481,84 @@ The terminal sends empty `Ping` after 30 seconds idle. It closes after 10 second
 | `StreamStart` | id u32, stream_id u32 | `CAP_STREAM_LIFECYCLE` |
 | `StreamEnd` | id u32, stream_id u32 | `CAP_STREAM_LIFECYCLE` |
 | `SetRegionMetadata` | id u32, pair count u32, key/value strings | `CAP_REGION_METADATA` |
+| `SetSemantics` | id u32, `Semantics` (section 10.5) | `CAP_SEMANTICS` |
 
 Metadata is opaque to the terminal; tools read it back (`ulttyctl regions`). By convention the key `id` holds the widget id of the region's widget, which `ulttui` sets for every region it creates for a widget with an id. `Focus` and `Blur` name the region with keyboard focus for those tools too; they do not change where key events go unless the focused region subscribed to `EVENT_KEY`.
 
 `Scroll` is `id: u32`, `x: f32`, `y: f32`, `animate: u8`; `Focus` is `id: u32`; `Blur` is empty. None of these is capability-gated: `CAP_WIDGET_SCROLL` only advertises that the terminal handles scroll offsets and animation, and `CAP_LAYOUT_FLEXBOX` that it runs the flexbox layout described in section 5.
+
+### 10.5 Semantics
+
+`SetSemantics` says what a region is, for screen readers and other assistive technology ([ADR 0021](adr/0021-accessibility-semantics.md)). It replaces the region's earlier semantics as a whole, like `SetStyle`, and is batched by frames like any other region message. Without `CAP_SEMANTICS` it is `Error` 400; for an unknown region it is `Error` 404. `DeleteRegion` drops a region's semantics with it.
+
+The payload after `id: u32`, in encoding order:
+
+| Field | Encoding | Meaning |
+|-------|----------|---------|
+| `role` | `u8` | Role table below; `0` (`Auto`) derives the role from content |
+| `label` | `Option<string>` | Accessible name |
+| `description` | `Option<string>` | Longer help text |
+| `live` | `u8` | `Off=0`, `Polite=1`, `Assertive=2` |
+| `flags` | `u8` | `busy=1`, `hidden=2`, `read_only=4`, `disabled=8`, `atomic=16`, `modal=32` |
+| `toggled` | `u8` | `Unset=0`, `False=1`, `True=2`, `Mixed=3` |
+| `expanded` | `u8` | `Unset=0`, `Collapsed=1`, `Expanded=2` |
+| `value` | `Option<(f32 now, f32 min, f32 max)>` | Numeric value and range |
+| `value_text` | `Option<string>` | Spoken instead of the number when present |
+| `position` | `Option<(u32 index, u32 size)>` | 1-based position in a set, and the set's size |
+| `level` | `u8` | Heading or tree level; `0` for none |
+| `labelled_by` | `Option<u32>` | Region whose text names this one |
+| `described_by` | `Option<u32>` | Region whose text describes this one |
+| `controls` | `Option<u32>` | Region this one controls |
+
+An unknown `role`, `live`, `toggled` or `expanded` value, a flag bit outside `0x3F`, a NaN or infinite `value` float, a `label`, `description` or `value_text` longer than 4 KiB (`MAX_SEMANTICS_STRING_LEN`), and more than 8 KiB across those three (`MAX_SEMANTICS_TOTAL_BYTES`) are decode errors (`Error` 400). Accessible names are short, and the limits bound what semantics can add to a session's memory.
+
+Out-of-range numbers are accepted and clamped when the tree is exposed: a `position` index is clamped to `1..=size`, a `value` with `min > max` is treated as having no known range, and otherwise `now` is clamped into `[min, max]`. Relationship targets are not checked: apps create regions in any order inside a frame, and a target that does not exist is ignored when the tree is exposed.
+
+`busy` marks work in progress; `hidden` leaves the region and its subtree out of the accessibility tree (decorative dividers, spacers); `atomic` asks for the whole region to be announced when part of it changes; `modal` marks a `Dialog` that blocks the rest of the app.
+
+Roles form a closed set. Each maps to an AccessKit role when the terminal exposes the tree:
+
+| Value | Role | AccessKit role |
+|-------|------|----------------|
+| 0 | `Auto` | derived, see below |
+| 1 | `Group` | `Group` |
+| 2 | `Text` | `Label` (one line) or `Paragraph` |
+| 3 | `Heading` | `Heading`, with `level` |
+| 4 | `Log` | `Log` |
+| 5 | `Status` | `Status` |
+| 6 | `Alert` | `Alert` |
+| 7 | `Dialog` | `Dialog`, with `modal` |
+| 8 | `Input` | `TextInput`, `MultilineTextInput` or `PasswordInput` by the `Input` widget's flags |
+| 9 | `Button` | `Button` |
+| 10 | `Checkbox` | `CheckBox`, with `toggled` |
+| 11 | `Switch` | `Switch`, with `toggled` |
+| 12 | `Progress` | `ProgressIndicator`, with `value` |
+| 13 | `List` | `List` |
+| 14 | `ListItem` | `ListItem`, with `position` |
+| 15 | `TabList` | `TabList` |
+| 16 | `Tab` | `Tab`, with `position` |
+| 17 | `Tree` | `Tree` |
+| 18 | `TreeItem` | `TreeItem`, with `expanded` and `level` |
+| 19 | `Image` | `Image`; the label is the alt text |
+| 20 | `Link` | `Link` |
+
+Adding a role is additive; removing one is not.
+
+**Defaults.** A region that never received `SetSemantics`, or whose role is `Auto`, takes the role its content implies. Whatever the role, the state in the third column fills the fields the app left empty:
+
+| Content | Role | Derived state |
+|---------|------|---------------|
+| `None` | `Group` | |
+| `Text`, `RichText`, `Markdown`, `Code` | `Text`, or `Log` once the region has received `AppendContent` | |
+| `Input` | `Input` | `value_text` is the value (not for password inputs), `description` the placeholder |
+| `Button` | `Button` | `label` is the button's label |
+| `Progress` | `Progress` | `value` is the progress in `0..1`, or `busy` when indeterminate; `label` is the bar's label |
+| `Spinner` | `Status` | `busy`; `label` is the spinner's label |
+| `Image` | `Image` | unlabelled |
+
+Fields the app did set always win, except that `busy` has no unset value: a spinner or an indeterminate progress bar is busy whatever the app sent. A region with no label takes its text as its name when the text is one line (a trailing newline is ignored), whatever its role; an `Input`'s text is its value, never its name. `live` defaults to `Off` and is never inferred: a wrongly live region floods speech.
+
+`ulttyctl regions` reports each region's effective `role`, `label` and `live`; the JSON form leaves out `label` when there is none and `live` when it is `off`.
 
 ---
 
@@ -528,6 +612,7 @@ Supply row and column track vectors and place children with start/end `GridLine`
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.1.0-draft | 2026-11-08 | `SetSemantics` (`0x0026`) and `CAP_SEMANTICS` (`0x0200`), section 10.5 (ADR 0021) |
 | 0.1.0-draft | 2026-09-22 | Regenerated wire-format sections from `codec.rs`; removed shared-memory/zero-copy claims |
 | 0.1.0-draft | 2026-01-30 | Initial draft |
 
@@ -536,6 +621,5 @@ Supply row and column track vectors and place children with start/end `GridLine`
 ## 15. Open Questions
 
 1. Which additional properties should transitions support?
-2. How should accessibility semantics be exposed?
-3. Should app-defined widgets be added in a future version?
-4. Should terminal tabs or splits be represented?
+2. Should app-defined widgets be added in a future version?
+3. Should terminal tabs or splits be represented?

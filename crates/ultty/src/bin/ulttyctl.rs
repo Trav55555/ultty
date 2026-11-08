@@ -738,9 +738,9 @@ QUERY COMMANDS:
                             (needs OSC 133 shell integration); exits with
                             the command's status
     regions                 The native apps in the pane's tab: each region
-                            by depth with its content kind, position and
-                            size in cells, metadata and text (all of it
-                            with --json)
+                            by depth with its content kind, accessibility
+                            role, position and size in cells, metadata and
+                            text (all of it with --json)
 
 WAIT COMMANDS:
     wait-for <pattern> [--timeout <ms>]

@@ -67,6 +67,13 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   cells, scroll, content kind and text, metadata, and the focused region.
   `--json` has the full text, so a test can assert on a native program
   ([testing TUIs](docs/testing-tuis.md)). Read-only.
+- Native protocol: `SetSemantics` (`0x0026`, capability
+  `CAP_SEMANTICS = 0x0200`) gives a region an accessibility role, label,
+  liveness and state ([ADR 0021](docs/adr/0021-accessibility-semantics.md),
+  spec §10.5). Regions without it get a role derived from their content;
+  text a region received by `AppendContent` makes it a `Log`. `regions`
+  reports each region's effective `role`, `label` and `live`. Nothing is
+  exposed to screen readers yet.
 - `ulttui` names each region it creates for a widget with an id
   (`SetRegionMetadata`, key `id`) and tells the terminal which region has
   focus, so `regions` can find widgets by id.

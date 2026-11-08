@@ -4,6 +4,7 @@ use crate::{
     content::Content,
     events::{FocusEvent, InputEvent, ResizeEvent, ScrollEvent},
     layout::Constraints,
+    semantics::Semantics,
     style::Style,
     RegionId,
 };
@@ -62,6 +63,9 @@ pub enum AppMessage {
         id: RegionId,
         metadata: Vec<(String, String)>,
     },
+
+    /// Set a region's accessibility semantics, replacing earlier ones.
+    SetSemantics { id: RegionId, semantics: Semantics },
 
     /// Delete a region.
     DeleteRegion { id: RegionId },

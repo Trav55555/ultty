@@ -5,8 +5,8 @@ use std::io;
 use tracing::{debug, info, warn};
 use ultty_protocol::{
     negotiate_capabilities, negotiate_protocol_version, AppMessage, Constraints, Content, RegionId,
-    Style, TerminalMessage, CAP_APPEND_CONTENT, CAP_REGION_METADATA, CAP_STREAM_LIFECYCLE,
-    PROTOCOL_VERSION,
+    Semantics, Style, TerminalMessage, CAP_APPEND_CONTENT, CAP_REGION_METADATA, CAP_SEMANTICS,
+    CAP_STREAM_LIFECYCLE, PROTOCOL_VERSION,
 };
 
 use super::content_limits::{text_bytes, trim_region_text, MAX_SESSION_TEXT_BYTES};
@@ -53,6 +53,16 @@ impl NativeSession {
                 } else {
                     self.queue_protocol_error(NativeProtocolError::missing_capability(
                         "set_region_metadata",
+                    ));
+                }
+            }
+
+            AppMessage::SetSemantics { id, semantics } => {
+                if self.has_capability(CAP_SEMANTICS) {
+                    self.handle_set_semantics(id, semantics);
+                } else {
+                    self.queue_protocol_error(NativeProtocolError::missing_capability(
+                        "set_semantics",
                     ));
                 }
             }
@@ -404,6 +414,7 @@ impl NativeSession {
                 }
             }
             trim_region_text(&mut region.content);
+            region.appended = true;
             region.mark_dirty();
             self.mark_region_visual_changed(id);
         } else {
@@ -429,6 +440,17 @@ impl NativeSession {
             region.metadata = metadata;
         } else {
             warn!("SetRegionMetadata for unknown region {:?}", id);
+            self.queue_protocol_error(NativeProtocolError::region_not_found(id));
+        }
+    }
+
+    /// Handle SetSemantics. Semantics do not change what is drawn, so the
+    /// scene stays clean.
+    fn handle_set_semantics(&mut self, id: RegionId, semantics: Semantics) {
+        if let Some(region) = self.scene.get_mut(id) {
+            region.semantics = semantics;
+        } else {
+            warn!("SetSemantics for unknown region {:?}", id);
             self.queue_protocol_error(NativeProtocolError::region_not_found(id));
         }
     }

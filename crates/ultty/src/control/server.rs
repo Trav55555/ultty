@@ -1038,8 +1038,10 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
 /// Characters of a region's text the text format shows; `--json` has it all.
 const REGION_TEXT_PREVIEW: usize = 60;
 
-/// One line per region, indented by depth: id, content kind, position and
-/// size in cells, scroll when scrolled, metadata, and the start of its text.
+/// One line per region, indented by depth: id, content kind, accessibility
+/// role (and liveness when live), position and size in cells, scroll when
+/// scrolled, metadata, the accessible label when it is not just the text,
+/// and the start of its text.
 fn format_regions(scenes: &[ultty_protocol::control::NativeScene]) -> String {
     use std::fmt::Write as _;
     if scenes.is_empty() {
@@ -1056,21 +1058,38 @@ fn format_regions(scenes: &[ultty_protocol::control::NativeScene]) -> String {
         for region in &scene.regions {
             let _ = write!(
                 out,
-                "{:indent$}#{} {} {},{} {}x{}",
+                "{:indent$}#{} {}",
                 "",
                 region.id,
                 region.content,
-                region.x,
-                region.y,
-                region.width,
-                region.height,
                 indent = region.depth * 2
+            );
+            match (region.role.as_str(), region.live.as_str()) {
+                ("", _) => {}
+                (role, "off") => {
+                    let _ = write!(out, " ({role})");
+                }
+                (role, live) => {
+                    let _ = write!(out, " ({role}, {live})");
+                }
+            }
+            let _ = write!(
+                out,
+                " {},{} {}x{}",
+                region.x, region.y, region.width, region.height,
             );
             if region.scroll_x != 0.0 || region.scroll_y != 0.0 {
                 let _ = write!(out, " scroll {},{}", region.scroll_x, region.scroll_y);
             }
             for (key, value) in &region.metadata {
                 let _ = write!(out, " {key}={value}");
+            }
+            if let Some(label) = region
+                .label
+                .as_deref()
+                .filter(|label| region.text.as_deref() != Some(*label))
+            {
+                let _ = write!(out, " label={label:?}");
             }
             if let Some(text) = region.text.as_deref().filter(|text| !text.is_empty()) {
                 let first_line = text.lines().next().unwrap_or("");
@@ -1404,6 +1423,9 @@ mod tests {
     fn format_regions_text_indents_by_depth_and_previews_text() {
         use ultty_protocol::control::{NativeScene, RegionInfo};
         let region = |id, parent, depth, content: &str, text: Option<&str>| RegionInfo {
+            role: content.to_string(),
+            label: None,
+            live: "off".to_string(),
             id,
             parent,
             depth,
@@ -1420,12 +1442,20 @@ mod tests {
         let mut log = region(2, Some(0), 1, "text", Some(&"x".repeat(70)));
         log.scroll_y = 3.0;
         log.metadata.insert("id".to_string(), "log".to_string());
+        log.role = "log".to_string();
+        log.live = "polite".to_string();
+        log.label = Some("Build log".to_string());
+        let mut root = region(0, None, 0, "none", None);
+        root.role = "group".to_string();
+        let mut title = region(1, Some(0), 1, "text", Some("Build"));
+        title.label = Some("Build".to_string());
         let scenes = vec![NativeScene {
             session: 4,
             in_band: true,
             focused: Some(3),
             regions: vec![
-                region(0, None, 0, "none", None),
+                root,
+                title,
                 log,
                 region(3, Some(0), 1, "input", Some("ls\nmore")),
             ],
@@ -1437,9 +1467,10 @@ mod tests {
             ),
             format!(
                 "session 4 (in-band), focus #3\n\
-                 #0 none 0,0 80x1\n\
-                 \x20 #2 text 0,2 80x1 scroll 0,3 id=log \"{}...\"\n\
-                 \x20 #3 input 0,3 80x1 \"ls...\"\n",
+                 #0 none (group) 0,0 80x1\n\
+                 \x20 #1 text (text) 0,1 80x1 \"Build\"\n\
+                 \x20 #2 text (log, polite) 0,2 80x1 scroll 0,3 id=log label=\"Build log\" \"{}...\"\n\
+                 \x20 #3 input (input) 0,3 80x1 \"ls...\"\n",
                 "x".repeat(60)
             )
         );

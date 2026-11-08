@@ -18,7 +18,7 @@ use bytes::BytesMut;
 use tracing::{debug, error, info, warn};
 use ultty_protocol::{
     AppMessage, Dimension, Display, FlexDirection, FrameId, LayoutTrigger, RegionId,
-    TerminalMessage, CAP_APPEND_CONTENT, CAP_LAYOUT_FLEXBOX, CAP_REGION_METADATA,
+    TerminalMessage, CAP_APPEND_CONTENT, CAP_LAYOUT_FLEXBOX, CAP_REGION_METADATA, CAP_SEMANTICS,
     CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, PROTOCOL_VERSION,
 };
 #[cfg(test)]
@@ -29,11 +29,12 @@ use ultty_protocol::control::{NativeScene, RegionInfo};
 use crate::scene::layout::LayoutEngine;
 #[cfg(test)]
 use crate::scene::region::Region;
+use crate::scene::semantics::effective_semantics;
 use crate::scene::tree::SceneTree;
 use crate::terminal_manager::TabId;
 
 /// A region's content kind as `ulttyctl regions` names it, and its text
-/// when it has some.
+/// when it has some. A password input's value is never reported.
 fn describe_content(content: &ultty_protocol::Content) -> (&'static str, Option<String>) {
     use ultty_protocol::{Content, WidgetContent};
     match content {
@@ -44,7 +45,9 @@ fn describe_content(content: &ultty_protocol::Content) -> (&'static str, Option<
             Some(rich.spans.iter().map(|span| span.text.as_str()).collect()),
         ),
         Content::Widget(widget) => match widget {
-            WidgetContent::Input(input) => ("input", Some(input.value.clone())),
+            WidgetContent::Input(input) => {
+                ("input", (!input.password).then(|| input.value.clone()))
+            }
             WidgetContent::Markdown(markdown) => ("markdown", Some(markdown.source.clone())),
             WidgetContent::Code(code) => ("code", Some(code.source.clone())),
             WidgetContent::Progress(_) => ("progress", None),
@@ -60,7 +63,8 @@ const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_WIDGET_SCROLL
     | CAP_APPEND_CONTENT
     | CAP_STREAM_LIFECYCLE
-    | CAP_REGION_METADATA;
+    | CAP_REGION_METADATA
+    | CAP_SEMANTICS;
 
 /// An in-band session with no traffic from its app for this long has ended.
 /// Clients send a heartbeat (an unsolicited `Pong`) at least every few
@@ -572,7 +576,8 @@ impl NativeSession {
     }
 
     /// This app's scene for `ulttyctl regions`: every region, root first,
-    /// in drawing order, with its layout, scroll and content.
+    /// in drawing order, with its layout, scroll, content and effective
+    /// accessibility semantics.
     pub fn describe(&self) -> NativeScene {
         let regions = self
             .scene
@@ -581,6 +586,7 @@ impl NativeSession {
                 let (content, text) = describe_content(&region.content);
                 let (scroll_x, scroll_y) = self.scroll_offset(region.id);
                 let layout = region.computed;
+                let semantics = effective_semantics(region);
                 RegionInfo {
                     id: region.id.0,
                     parent: region.parent.map(|parent| parent.0),
@@ -594,6 +600,9 @@ impl NativeSession {
                     content: content.to_string(),
                     text,
                     metadata: region.metadata.iter().cloned().collect(),
+                    role: semantics.role.as_str().to_string(),
+                    label: semantics.label,
+                    live: semantics.live.as_str().to_string(),
                 }
             })
             .collect();
@@ -1058,7 +1067,8 @@ mod tests {
                     | CAP_WIDGET_SCROLL
                     | CAP_APPEND_CONTENT
                     | CAP_STREAM_LIFECYCLE
-                    | CAP_REGION_METADATA,
+                    | CAP_REGION_METADATA
+                    | CAP_SEMANTICS,
             })
             .unwrap();
     }
@@ -1720,6 +1730,262 @@ mod tests {
         session
             .handle_message(AppMessage::Focus {
                 id: RegionId::new(3),
+            })
+            .unwrap();
+
+        insta::assert_json_snapshot!(session.describe());
+    }
+
+    fn set_semantics(id: u32, semantics: ultty_protocol::Semantics) -> AppMessage {
+        AppMessage::SetSemantics {
+            id: RegionId::new(id),
+            semantics,
+        }
+    }
+
+    fn polite_log() -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            role: ultty_protocol::Role::Log,
+            label: Some("Build log".to_string()),
+            live: ultty_protocol::Live::Polite,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn regions_never_report_a_password_input_value() {
+        use crate::control::format_response;
+        use ultty_protocol::control::{ControlData, ControlResponse, OutputFormat};
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        run_frame(
+            &mut session,
+            1,
+            vec![
+                create_region(1, 0),
+                AppMessage::SetContent {
+                    id: RegionId::new(1),
+                    content: Content::Widget(ultty_protocol::WidgetContent::Input(
+                        ultty_protocol::InputWidget {
+                            value: "hunter2".to_string(),
+                            password: true,
+                            ..Default::default()
+                        },
+                    )),
+                },
+            ],
+        );
+
+        let scene = session.describe();
+        assert_eq!(scene.regions[1].content, "input");
+        assert_eq!(scene.regions[1].text, None);
+        let response = ControlResponse::Data(ControlData::Regions {
+            scenes: vec![scene],
+        });
+        for format in [OutputFormat::Json, OutputFormat::Text] {
+            let shown = format_response(&response, format);
+            assert!(shown.contains("input"), "{shown}");
+            assert!(!shown.contains("hunter2"), "{format:?} leaks: {shown}");
+        }
+    }
+
+    #[test]
+    fn set_semantics_requires_negotiated_capability() {
+        let mut session = make_session();
+        session
+            .handle_message(AppMessage::ClientHello {
+                version: PROTOCOL_VERSION,
+                requested_capabilities: CAP_LAYOUT_FLEXBOX | CAP_REGION_METADATA,
+            })
+            .unwrap();
+        run_frame(&mut session, 1, vec![create_region(1, 0)]);
+        drain_messages(&mut session);
+
+        session
+            .handle_message(set_semantics(1, polite_log()))
+            .unwrap();
+
+        assert_eq!(error_codes(&drain_messages(&mut session)), vec![400]);
+        assert_eq!(
+            session.scene.get(RegionId::new(1)).unwrap().semantics,
+            ultty_protocol::Semantics::default()
+        );
+    }
+
+    #[test]
+    fn terminal_advertises_semantics() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        assert_ne!(session.capabilities & CAP_SEMANTICS, 0);
+    }
+
+    #[test]
+    fn set_semantics_for_unknown_region_is_not_found() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        drain_messages(&mut session);
+
+        session
+            .handle_message(set_semantics(9, polite_log()))
+            .unwrap();
+
+        assert_eq!(error_codes(&drain_messages(&mut session)), vec![404]);
+    }
+
+    #[test]
+    fn set_semantics_applies_at_end_frame_without_dirtying_the_scene() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        run_frame(&mut session, 1, vec![create_region(1, 0)]);
+        drain_messages(&mut session);
+        session.scene_dirty = false;
+        session.constraints_dirty = false;
+        session.render_dirty = false;
+
+        session
+            .handle_message(AppMessage::BeginFrame {
+                frame_id: FrameId(2),
+            })
+            .unwrap();
+        session
+            .handle_message(set_semantics(1, polite_log()))
+            .unwrap();
+        assert_eq!(
+            session.scene.get(RegionId::new(1)).unwrap().semantics,
+            ultty_protocol::Semantics::default(),
+            "queued until EndFrame"
+        );
+        session
+            .handle_message(AppMessage::EndFrame {
+                frame_id: FrameId(2),
+            })
+            .unwrap();
+
+        assert_eq!(
+            session.scene.get(RegionId::new(1)).unwrap().semantics,
+            polite_log()
+        );
+        assert!(error_codes(&drain_messages(&mut session)).is_empty());
+        assert!(!session.scene_dirty);
+        assert!(!session.constraints_dirty);
+        assert!(!session.render_dirty);
+    }
+
+    #[test]
+    fn delete_region_drops_its_semantics() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        run_frame(
+            &mut session,
+            1,
+            vec![create_region(1, 0), set_semantics(1, polite_log())],
+        );
+        assert_eq!(
+            session.scene.get(RegionId::new(1)).unwrap().semantics,
+            polite_log()
+        );
+
+        run_frame(
+            &mut session,
+            2,
+            vec![
+                AppMessage::DeleteRegion {
+                    id: RegionId::new(1),
+                },
+                create_region(1, 0),
+            ],
+        );
+
+        assert!(error_codes(&drain_messages(&mut session)).is_empty());
+        assert_eq!(
+            session.scene.get(RegionId::new(1)).unwrap().semantics,
+            ultty_protocol::Semantics::default()
+        );
+    }
+
+    #[test]
+    fn text_region_is_reported_as_log_after_append_content() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        run_frame(
+            &mut session,
+            1,
+            vec![
+                create_region(1, 0),
+                AppMessage::SetContent {
+                    id: RegionId::new(1),
+                    content: Content::Text(ultty_protocol::TextContent::new("compiling")),
+                },
+            ],
+        );
+        let role = |session: &NativeSession| session.describe().regions[1].role.clone();
+        assert_eq!(role(&session), "text");
+
+        session
+            .handle_message(AppMessage::AppendContent {
+                id: RegionId::new(1),
+                text: "\nfinished".to_string(),
+            })
+            .unwrap();
+        assert_eq!(role(&session), "log");
+
+        session
+            .handle_message(AppMessage::SetContent {
+                id: RegionId::new(1),
+                content: Content::Text(ultty_protocol::TextContent::new("again")),
+            })
+            .unwrap();
+        assert_eq!(role(&session), "log", "a log stays a log when replaced");
+    }
+
+    /// `ulttyctl regions --json` for an app that declares semantics: an
+    /// explicit heading, a polite log that is streaming, a button whose
+    /// accessible name is longer than its label.
+    #[test]
+    fn describe_reports_explicit_semantics() {
+        use ultty_protocol::{Role, Semantics};
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        session.set_viewport(80.0, 24.0);
+        run_frame(
+            &mut session,
+            1,
+            vec![
+                create_region(1, 0),
+                AppMessage::SetContent {
+                    id: RegionId::new(1),
+                    content: Content::Text(ultty_protocol::TextContent::new("Build")),
+                },
+                set_semantics(
+                    1,
+                    Semantics {
+                        role: Role::Heading,
+                        level: 1,
+                        ..Default::default()
+                    },
+                ),
+                create_region(2, 0),
+                set_semantics(2, polite_log()),
+                create_region(3, 0),
+                AppMessage::SetContent {
+                    id: RegionId::new(3),
+                    content: Content::Widget(ultty_protocol::WidgetContent::Button(
+                        ultty_protocol::ButtonWidget::new("Run"),
+                    )),
+                },
+                set_semantics(
+                    3,
+                    Semantics {
+                        label: Some("Run all tests".to_string()),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        );
+        session
+            .handle_message(AppMessage::AppendContent {
+                id: RegionId::new(2),
+                text: "compiling ultty".to_string(),
             })
             .unwrap();
 

@@ -1,6 +1,6 @@
 //! Region node in the scene graph.
 
-use ultty_protocol::{Constraints, Content, RegionId, Style};
+use ultty_protocol::{Constraints, Content, RegionId, Semantics, Style};
 
 /// A region in the scene graph.
 pub struct Region {
@@ -20,6 +20,12 @@ pub struct Region {
     pub style: Style,
     /// Arbitrary metadata as key-value pairs.
     pub metadata: Vec<(String, String)>,
+    /// Accessibility semantics as the app last set them (`SetSemantics`);
+    /// see [`super::semantics::effective_semantics`] for what is exposed.
+    pub semantics: Semantics,
+    /// Whether the region has received `AppendContent`. Text regions that
+    /// have are derived as `Log` rather than `Text`.
+    pub appended: bool,
     /// Dirty flag for rendering.
     pub dirty: bool,
 }
@@ -49,6 +55,8 @@ impl Region {
             content: Content::None,
             style: Style::default(),
             metadata: Vec::new(),
+            semantics: Semantics::default(),
+            appended: false,
             dirty: true,
         }
     }

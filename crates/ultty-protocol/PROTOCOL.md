@@ -22,7 +22,7 @@ Offset  Size  Field
 
 Integers and finite IEEE-754 `f32` values are little-endian. Strings are `u32` length plus UTF-8, options have a `u8` 0/1 tag, and booleans/enums use `u8`.
 
-Limits: payload 16 MiB; string 1 MiB; regions 10,000; tracks 1,000; spans 10,000; metadata pairs 1,024 and metadata bytes 1 MiB; image data 16 MiB; image width/height 16,384 each, with sufficient RGBA data.
+Limits: payload 16 MiB; string 1 MiB; regions 10,000; tracks 1,000; spans 10,000; metadata pairs 1,024 and metadata bytes 1 MiB; semantics strings 4 KiB each and 8 KiB together; image data 16 MiB; image width/height 16,384 each, with sufficient RGBA data.
 
 ## Message Types
 
@@ -37,12 +37,13 @@ Codes are separate namespaces by direction.
 | `0x0014` | `SetRegionMetadata` | `0x0020` | `SetContent` |
 | `0x0021` | `SetStyle` | `0x0022` | `SetConstraints` |
 | `0x0023` | `AppendContent` | `0x0024` | `StreamStart` |
-| `0x0025` | `StreamEnd` | `0x0030` | `BeginFrame` |
-| `0x0031` | `EndFrame` | `0x0040` | `Scroll` |
-| `0x0041` | `Focus` | `0x0042` | `Blur` |
-| `0x0050` | `Subscribe` | `0x0051` | `Unsubscribe` |
-| `0x0060` | `ClipboardGet` | `0x0061` | `ClipboardSet` |
-| `0x0070` | `Pong` | `0x00FF` | `Disconnect` |
+| `0x0025` | `StreamEnd` | `0x0026` | `SetSemantics` |
+| `0x0030` | `BeginFrame` | `0x0031` | `EndFrame` |
+| `0x0040` | `Scroll` | `0x0041` | `Focus` |
+| `0x0042` | `Blur` | `0x0050` | `Subscribe` |
+| `0x0051` | `Unsubscribe` | `0x0060` | `ClipboardGet` |
+| `0x0061` | `ClipboardSet` | `0x0070` | `Pong` |
+| `0x00FF` | `Disconnect` | | |
 
 ### Terminal -> App
 
@@ -65,6 +66,10 @@ Region zero is the root viewport. Regions carry complete constraints, style, and
 ## Content Types
 
 Content is None, Text, RichText, or Widget. Widgets are Input, Markdown, Code, Progress, Spinner, Image, and Button.
+
+## Accessibility Semantics
+
+`SetSemantics` (gated by `CAP_SEMANTICS = 0x0200`) gives a region a role, label, liveness and state for screen readers; regions without it get roles derived from their content. See spec §10.5 and ADR 0021.
 
 ## Layout System
 
