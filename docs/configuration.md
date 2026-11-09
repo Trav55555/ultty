@@ -88,6 +88,19 @@ Values outside 0.5 to 3.0 are clamped. At 1.0, block and box-drawing
 characters in adjacent rows touch; larger values add space between lines.
 Font settings are read at start; restart Ultty after changing them.
 
+## Emoji and accents
+
+Characters the configured font lacks come from other installed fonts. Color
+emoji need a color emoji font such as Noto Color Emoji
+(`fonts-noto-color-emoji` on Debian and Ubuntu). An emoji sequence (a ZWJ
+family, a flag, a skin tone) is drawn as one glyph in whatever design that
+font gives it. Noto Color Emoji 2.051, for example, draws the family
+sequences as grey silhouettes on a light tile. That is the font's design,
+not a missing-glyph box.
+
+When the font has no positioning rule for a second accent on an accented
+letter (as in `é̃`), Ultty stacks the accent above the first one itself.
+
 ## Clipboard
 
 ```toml

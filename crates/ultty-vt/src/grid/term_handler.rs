@@ -1173,6 +1173,28 @@ mod tests {
     }
 
     #[test]
+    fn two_combining_marks_stack_on_one_base_cell() {
+        let mut term = Terminal::new(Dimensions::new(10, 2));
+        process(&mut term, "e\u{301}\u{303}x".as_bytes());
+        assert_eq!(
+            term.grid().grapheme(0, 0).as_deref(),
+            Some("e\u{301}\u{303}")
+        );
+        assert_eq!(term.grid().cell(1, 0).unwrap().char(), 'x');
+        assert_eq!(cursor_col(&term), 2);
+    }
+
+    #[test]
+    fn four_person_family_occupies_one_wide_cell() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(&mut term, family.as_bytes());
+        assert_eq!(cursor_col(&term), 2);
+        assert_eq!(term.grid().grapheme(0, 0).as_deref(), Some(family));
+        assert!(term.grid().cell(1, 0).unwrap().is_wide_spacer());
+    }
+
+    #[test]
     fn zwj_sequence_occupies_one_wide_cell() {
         let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
         let mut term = Terminal::new(Dimensions::new(20, 2));
