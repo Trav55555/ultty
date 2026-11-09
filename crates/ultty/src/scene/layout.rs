@@ -70,11 +70,14 @@ pub struct LayoutEngine {
     surfaces: Vec<(NodeId, f32)>,
 }
 
-/// A surface root's style: its constraints, but always exactly the size it
-/// is laid out at (the viewport's width by its rows), whatever its width
-/// and height constraints say.
+/// A surface root's style: its constraints, but always exactly the space
+/// it is laid out in (the viewport's width by its rows) at that space's
+/// top left, whatever its size and margin constraints say.
 fn surface_root_style(region: &super::region::Region) -> Style {
     Style {
+        position: Position::Relative,
+        inset: Rect::auto(),
+        margin: Rect::zero(),
         size: Size::from_percent(1.0, 1.0),
         min_size: Size::auto(),
         max_size: Size::auto(),
@@ -680,6 +683,8 @@ mod tests {
             width: ProtoDimension::Cells(7.0),
             height: ProtoDimension::Cells(50.0),
             min_height: ProtoDimension::Cells(40.0),
+            // A margin would move a root inside its space.
+            margin: ultty_protocol::Edges::all(ProtoDimension::Cells(1.0)),
             padding: ultty_protocol::Edges::all(ProtoDimension::Cells(1.0)),
             ..Default::default()
         };

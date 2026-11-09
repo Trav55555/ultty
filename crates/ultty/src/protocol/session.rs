@@ -973,9 +973,13 @@ impl NativeSession {
 
     /// Target region for key events: the focused region if it has an EVENT_KEY subscription,
     /// otherwise ROOT.
+    /// A region in an inline surface never gets keys (ADR 0020), however it
+    /// came to be focused and subscribed.
     fn key_target(&self) -> RegionId {
         if let Some(focused) = self.focused_region {
-            if self.is_subscribed(focused, ultty_protocol::EVENT_KEY) {
+            if self.is_subscribed(focused, ultty_protocol::EVENT_KEY)
+                && !self.scene.is_in_surface(focused)
+            {
                 return focused;
             }
         }
@@ -3010,5 +3014,124 @@ mod tests {
         let scene = build(true);
         assert_eq!(scene.regions, build(false).regions);
         insta::assert_json_snapshot!(scene);
+    }
+
+    /// The region a key typed now would be sent to.
+    fn key_goes_to(session: &mut NativeSession) -> u32 {
+        drain_messages(session);
+        session
+            .send_key(ultty_protocol::Key::Enter, ultty_protocol::Modifiers::NONE)
+            .unwrap();
+        drain_messages(session)
+            .into_iter()
+            .find_map(|m| match m {
+                TerminalMessage::Input(event) => Some(event.region_id.0),
+                _ => None,
+            })
+            .expect("a key event")
+    }
+
+    fn focus(id: u32) -> AppMessage {
+        AppMessage::Focus {
+            id: RegionId::new(id),
+        }
+    }
+
+    fn subscribe_keys(id: u32) -> AppMessage {
+        AppMessage::Subscribe {
+            id: RegionId::new(id),
+            events: ultty_protocol::EVENT_KEY,
+        }
+    }
+
+    /// ROOT subscribed to keys, so they are sent somewhere, and surface 5.
+    fn session_with_surface_and_root_keys() -> NativeSession {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        session.handle_message(subscribe_keys(0)).unwrap();
+        run_frame(&mut session, 1, vec![create_surface(5, 2)]);
+        session
+    }
+
+    #[test]
+    fn a_region_subscribed_before_it_joins_a_surface_gets_no_keys() {
+        let mut session = session_with_surface_and_root_keys();
+        session.handle_message(subscribe_keys(6)).unwrap();
+        run_frame(&mut session, 2, vec![create_region(6, 5)]);
+        session.handle_message(focus(6)).unwrap();
+        assert_eq!(key_goes_to(&mut session), 0);
+    }
+
+    #[test]
+    fn a_region_moved_into_a_surface_stops_getting_keys() {
+        let mut session = session_with_surface_and_root_keys();
+        run_frame(&mut session, 2, vec![create_region(1, 0)]);
+        session.handle_message(subscribe_keys(1)).unwrap();
+        session.handle_message(focus(1)).unwrap();
+        assert_eq!(key_goes_to(&mut session), 1);
+
+        session
+            .handle_message(AppMessage::ReparentRegion {
+                id: RegionId::new(1),
+                new_parent: RegionId::new(5),
+                insert_index: -1,
+            })
+            .unwrap();
+        assert_eq!(key_goes_to(&mut session), 0);
+    }
+
+    #[test]
+    fn deleting_a_region_forgets_its_subtree_state() {
+        let mut session = session_with_surface_and_root_keys();
+        run_frame(
+            &mut session,
+            2,
+            vec![create_region(1, 0), create_region(2, 1)],
+        );
+        session.handle_message(subscribe_keys(2)).unwrap();
+        session
+            .handle_message(AppMessage::Scroll {
+                id: RegionId::new(2),
+                x: 0.0,
+                y: 3.0,
+                animate: false,
+            })
+            .unwrap();
+        session.handle_message(focus(2)).unwrap();
+
+        session
+            .handle_message(AppMessage::DeleteRegion {
+                id: RegionId::new(1),
+            })
+            .unwrap();
+        assert!(!session.is_subscribed(RegionId::new(2), ultty_protocol::EVENT_KEY));
+        assert_eq!(session.scroll_offset(RegionId::new(2)), (0.0, 0.0));
+        assert_eq!(session.focused_region(), None);
+
+        // The id made again, under a surface, inherits nothing.
+        run_frame(&mut session, 3, vec![create_region(2, 5)]);
+        session.handle_message(focus(2)).unwrap();
+        assert!(!session.is_subscribed(RegionId::new(2), ultty_protocol::EVENT_KEY));
+        assert_eq!(key_goes_to(&mut session), 0);
+    }
+
+    #[test]
+    fn closing_a_surface_forgets_the_state_of_its_regions() {
+        let mut session = session_with_surface_and_root_keys();
+        run_frame(&mut session, 2, vec![create_region(6, 5)]);
+        session
+            .handle_message(AppMessage::Subscribe {
+                id: RegionId::new(6),
+                events: ultty_protocol::EVENT_MOUSE,
+            })
+            .unwrap();
+        session.handle_message(focus(6)).unwrap();
+        session
+            .handle_message(AppMessage::CloseSurface {
+                id: RegionId::new(5),
+            })
+            .unwrap();
+        assert!(!session.is_subscribed(RegionId::new(6), ultty_protocol::EVENT_MOUSE));
+        assert_eq!(session.focused_region(), None);
     }
 }

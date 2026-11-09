@@ -492,9 +492,10 @@ impl NativeSession {
     /// Handle DeleteRegion. On a surface root it closes the surface.
     fn handle_delete_region(&mut self, id: RegionId) -> io::Result<()> {
         let closes_surface = self.scene.surface(id).is_some();
+        let removed: Vec<RegionId> = self.scene.iter_tree(id).map(|region| region.id).collect();
         if self.scene.remove(id).is_some() {
             self.mark_full_scene_rebuild();
-            self.subscriptions.remove(&id);
+            self.forget_regions(&removed);
             debug!("Deleted region {:?}", id);
             if closes_surface {
                 self.send_surface_event(id, SurfaceEventKind::Closed)?;
@@ -549,6 +550,24 @@ impl NativeSession {
             self.queue_protocol_error(NativeProtocolError::region_not_found(id));
         }
         Ok(())
+    }
+
+    /// Drop the per-region state of deleted regions, so an id created again
+    /// later starts with none of it.
+    fn forget_regions(&mut self, removed: &[RegionId]) {
+        for id in removed {
+            self.subscriptions.remove(id);
+            self.scroll_offsets.remove(id);
+            self.scroll_targets.remove(id);
+            self.style_animations.remove(id);
+            self.active_streams.remove(id);
+        }
+        if self
+            .focused_region
+            .is_some_and(|focused| removed.contains(&focused))
+        {
+            self.focused_region = None;
+        }
     }
 
     fn send_surface_event(&mut self, id: RegionId, kind: SurfaceEventKind) -> io::Result<()> {
