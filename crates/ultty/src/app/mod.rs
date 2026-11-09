@@ -1,5 +1,6 @@
 //! Terminal application state and main loop.
 
+mod accessibility;
 mod actions;
 mod blink;
 mod control;

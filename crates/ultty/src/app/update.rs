@@ -31,6 +31,10 @@ impl App {
                 .as_ref()
                 .map_or(0, |server| server.session_count()),
             control_wait: self.next_control_wait_deadline(),
+            accessibility: self
+                .accessibility
+                .as_ref()
+                .and_then(|adapter| adapter.next_deadline()),
         }
         .next_wake(now)
     }
@@ -211,6 +215,8 @@ impl App {
             Ok(all_events) => {
                 let mut content_changed = false;
                 let mut tab_titles_changed = false;
+                // What a screen reader is shown changed (ADR 0021 §3).
+                let mut shown_changed = false;
                 let subscribed = self
                     .control_server
                     .as_ref()
@@ -239,6 +245,7 @@ impl App {
                                 // Only update URL detection for focused terminal
                                 if Some(terminal_id) == focused_id {
                                     content_changed = true;
+                                    shown_changed = true;
                                     self.output_since_input = self.input_sent_at.is_some();
                                 }
                             }
@@ -271,6 +278,7 @@ impl App {
                             }
                             TerminalEvent::TitleChanged(title) => {
                                 tab_titles_changed = true;
+                                shown_changed = true;
                                 // Only set window title from focused terminal
                                 if Some(terminal_id) == focused_id {
                                     self.window.set_title(&title);
@@ -361,6 +369,8 @@ impl App {
 
                 // Check for column mode resize requests (DECCOLM - 132/80 column mode)
                 self.handle_column_resize_requests();
+
+                self.update_accessibility(shown_changed, Instant::now());
             }
             Err(e) => {
                 tracing::error!("Terminal error: {}", e);
@@ -543,6 +553,9 @@ struct WakeState {
     /// The earliest `ulttyctl wait-for` timeout or quiet-period end. Text
     /// and events wake the UI on their own, so waits need no tick.
     control_wait: Option<Instant>,
+    /// When a coalesced accessibility tree is due; `None` unless a screen
+    /// reader is listening and the screen changed.
+    accessibility: Option<Instant>,
 }
 
 impl WakeState {
@@ -571,6 +584,7 @@ impl WakeState {
             self.config_reload,
             maintenance,
             self.control_wait,
+            self.accessibility,
         ]
         .into_iter()
         .flatten()
@@ -819,6 +833,7 @@ mod tests {
             config_reload: None,
             native_sessions: 0,
             control_wait: None,
+            accessibility: None,
         }
     }
 
@@ -883,6 +898,17 @@ mod tests {
             ..idle(now)
         };
         assert_eq!(wait.next_wake(now), Some(deadline));
+    }
+
+    #[test]
+    fn a_coalesced_accessibility_tree_wakes_at_its_deadline() {
+        let now = Instant::now();
+        let due = now + Duration::from_millis(30);
+        let state = WakeState {
+            accessibility: Some(due),
+            ..idle(now)
+        };
+        assert_eq!(state.next_wake(now), Some(due));
     }
 
     #[test]
