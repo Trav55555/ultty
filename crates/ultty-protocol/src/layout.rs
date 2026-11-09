@@ -226,7 +226,11 @@ pub struct Size<T> {
 }
 
 /// Complete layout constraints for a region.
-#[derive(Debug, Clone, PartialEq, Default)]
+///
+/// The default has no margins (`Cells(0)` on every edge), as in CSS. An
+/// `Auto` margin takes free space in its container, so it has to be asked
+/// for (to centre a region, say).
+#[derive(Debug, Clone, PartialEq)]
 pub struct Constraints {
     /// Display mode (block, flex, grid, or none).
     pub display: Display,
@@ -283,6 +287,38 @@ pub struct Constraints {
     pub grid_column: GridPlacement,
     /// Grid row placement for this item.
     pub grid_row: GridPlacement,
+}
+
+impl Default for Constraints {
+    fn default() -> Self {
+        Self {
+            display: Display::default(),
+            flex_direction: FlexDirection::default(),
+            flex_wrap: FlexWrap::default(),
+            justify_content: JustifyContent::default(),
+            align_items: AlignItems::default(),
+            align_self: AlignSelf::default(),
+            align_content: AlignContent::default(),
+            flex_grow: 0.0,
+            flex_shrink: 0.0,
+            flex_basis: Dimension::default(),
+            width: Dimension::default(),
+            height: Dimension::default(),
+            min_width: Dimension::default(),
+            min_height: Dimension::default(),
+            max_width: Dimension::default(),
+            max_height: Dimension::default(),
+            aspect_ratio: None,
+            margin: Edges::all(Dimension::Cells(0.0)),
+            padding: Edges::default(),
+            gap: Size::default(),
+            overflow: Overflow::default(),
+            grid_template_columns: Vec::new(),
+            grid_template_rows: Vec::new(),
+            grid_column: GridPlacement::default(),
+            grid_row: GridPlacement::default(),
+        }
+    }
 }
 
 impl Constraints {
