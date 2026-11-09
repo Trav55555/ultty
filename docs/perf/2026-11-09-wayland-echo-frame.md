@@ -191,3 +191,72 @@ each build in turn), cursor blink off as `compare.sh` configures it:
    (5.8 ms towards 1.6 ms at 240 Hz), flood rows and throughput no worse, and
    X11 idle still about 3.4 ms. If the idle number does not move, step 1 says
    where the frame goes.
+
+## On the T4: Mailbox is chosen and changes nothing
+
+Run 2026-11-09 on AWS g4dn.xlarge (Tesla T4, NVIDIA 580.178.04, 4 vCPUs),
+Ubuntu 26.04.1, kernel 7.0.0-1016-aws, headless sway 1.11
+(`WLR_RENDERER=gles2`, `--unsupported-gpu`), Ghostty 1.4.0; the instance ran
+nothing else. Ultty release builds: **base** is `main` before PR #68
+(`92185b0`), **fix** is this branch's head (`44f9705`) and, as a repeat,
+`main` after the merge (`10a9185`, no other renderer change). Commands as in
+"Confirming on the T4" above. The trace's log is
+`logs/ub-ultty-k2p-idle-0.ultty.log` (rounds count from 0), not `-1`.
+
+**Present mode.** Both fix builds log `Present mode: Mailbox` under sway:
+the NVIDIA Vulkan surface offers Mailbox, so the change takes effect. Under
+X11 they log `Present mode: AutoVsync`, as intended.
+
+**Trace** (`wl-echo-trace.py`, 22 keys per build, idle, `cat`-style echo):
+
+| build | commits per key | key to commit | key to frame callback done | callbacks outstanding at the key |
+|---|---:|---:|---:|---|
+| base (FIFO) | 1 | 0.9–1.7 ms | 17.8–20.2 ms (one at 28.3) | none on 20 keys, one on 2 |
+| fix (Mailbox) | 1 | 1.0–2.1 ms | 15.9–21.1 ms (one at 1456) | none |
+
+Every key gives one content commit with the echo about 1.5 ms after the key,
+so the client neither draws an echo-less frame first nor holds the echo. The
+frame callback for that commit then completes about 16.7 ms later with
+either present mode. Per the reading guide above, that is sway holding the
+commit for one output period: the frame on the T4 is spent in the
+compositor, not in Ultty or the NVIDIA swapchain. (No
+`wp_presentation_feedback` events were logged here, so the presented column
+is empty. The 1456 ms callback on one fix key was not looked into; that
+run's 20 probe samples had a p50 of 17.8 ms and no timeouts.)
+
+**Latency**, keypress to pixel in ms, n = 600 per row at 60 Hz (3 launches)
+and 200 at 240 Hz:
+
+| session | case | Ultty base p50 / p99 | Ultty fix p50 / p99 | Ultty fix (main) p50 / p99 | Ghostty p50 / p99 |
+|---|---|---:|---:|---:|---:|
+| Wayland 60 Hz | idle | 17.79 / 17.95 | 17.74 / 17.90 | 17.81 / 18.00 | 36.02 / 37.57 |
+| Wayland 60 Hz | flood 10 MiB/s | 29.10 / 37.26 | 29.09 / 35.93 | 29.15 / 37.29 | 27.30 / 38.18 |
+| Wayland 60 Hz | flood max | 31.37 / 81.95 | 33.32 / 91.69 | 31.34 / 88.29 | 41.96 / 64.86 |
+| Wayland 240 Hz | idle | 5.77 / 5.92 | 5.74 / 6.11 | 5.74 / 5.93 | 13.55 / 23.27 |
+| Wayland 240 Hz | flood 10 MiB/s | 5.80 / 21.65 | 5.54 / 21.54 | 5.71 / 21.76 | 10.77 / 15.95 |
+| Wayland 240 Hz | flood max | 22.05 / 46.52 | 21.48 / 69.69 | 21.73 / 69.96 | 24.75 / 44.69 |
+| X11 | idle | 3.46 / 3.66 | 3.38 / 3.56 | 3.46 / 3.62 | 22.12 / 30.66 |
+| X11 | flood 10 MiB/s | 4.86 / 20.29 | 4.77 / 8.16 | 5.32 / 8.02 | 13.30 / 24.17 |
+| X11 | flood max | 21.54 / 24.37 | 21.57 / 24.22 | 21.70 / 24.20 | 32.65 / 59.83 |
+
+Ghostty is from the campaign with this branch's build (it was not rerun
+with base).
+Live ascii throughput (4 MiB, 3 launches at 60 Hz) was 84.0 MiB/s for base
+and 83.6 and 82.5 for the two fix builds, against Ghostty's 88–100.
+
+**Result.** The idle Wayland p50 does not move: 17.8 ms at 60 Hz and 5.8 ms
+at 240 Hz, and every 60 Hz idle sample on every build lies between 16.8 and
+20.9 ms, one frame plus work. Flood rows, throughput and X11 are unchanged
+within run-to-run noise. Two tails differ between campaigns, not between
+builds: the Wayland max-flood p99 varies as much between the two fix
+campaigns as against base, and X11's 10 MiB/s p99 was 20.3 ms for base
+(FIFO on X11 in every build, so no code difference) against 8.0 and 8.2.
+So Mailbox is harmless here but does not
+remove the frame; FIFO was not what cost it on sway. The trace puts the
+frame inside sway: it composites the echo commit one output period after
+the commit, not at once. The suspects are now wlroots' headless output
+scheduling (whether an idle headless output really composites a new commit
+immediately, as the first-numbers note assumed) and how the probe's
+screencopy request interacts with it. Ghostty, at two frames, may pay the
+same period. The next step is a compositor-side trace (sway
+with `-d`, or `WAYLAND_DEBUG=server`) of one key.
