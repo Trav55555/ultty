@@ -201,9 +201,18 @@ Terminal-neutral drivers in `tools/ultty-bench` run *inside* each terminal:
   cell until it changes. Measures injection to pixels in the X server's
   framebuffer, not photons; the median poll time is recorded as
   `resolution_us` (about 25 us locally). Under Xvfb there is no vsync.
-- `scripts/bench/k2p-wayland.py` (sway): `wtype` plus `grim` polling. Each
-  poll is a process spawn and a screencopy, so resolution is tens of
-  milliseconds (`resolution_ms` is recorded); treat it as coarse.
+- `scripts/bench/k2p-wayland.py` (sway): a stdlib Wayland client that keeps
+  one virtual keyboard (`zwp_virtual_keyboard_v1`) for the whole run and
+  reads the echo cell with wlr-screencopy (`copy_with_damage`). The end of a
+  sample is the compositor's timestamp for the first output frame showing
+  the change (CLOCK_MONOTONIC, like the start), so the read-back cost is not
+  in the number; the probe's receipt time is kept as `received_ms`. Pixels
+  only exist on output frames, so the resolution is one frame (`frame_ms`,
+  16.7 ms at the default 60 Hz). Measured on headless sway 1.11 in
+  [2026-11-09-wayland-latency.md](2026-11-09-wayland-latency.md). The first
+  version (one `wtype` process per key, `grim` polling) never worked on
+  headless sway: a seat with no keyboard drops a one-shot virtual keyboard's
+  key before the client binds `wl_keyboard`.
 
 `scripts/bench/compare.sh --session xvfb|x11|wayland` runs Ultty, Ghostty,
 GNOME Terminal and Alacritty with matched settings: the same font family
@@ -228,8 +237,11 @@ a private headless sway (`WLR_BACKENDS=headless`, GPU rendering through the
 render node with `WLR_RENDERER=gles2`, `--unsupported-gpu` on NVIDIA;
 `WLR_RENDERER=pixman` on a machine without a GPU). sway rather than weston
 because the Wayland probe needs the virtual-keyboard and screencopy protocols,
-which weston does not offer. sway is not installed on the development box,
-so the Wayland path is untested locally. The `xvfb` session has been run end to
+which weston does not offer. The headless output has no vblank: it
+composites on demand, at most once per frame (`--wayland-refresh HZ`, default
+60), so Wayland latency is counted in compositor frames rather than against a
+free-running display clock. sway is not installed on the development box, so
+the Wayland path runs on the AWS instance only. The `xvfb` session has been run end to
 end locally with all four terminals; on a bare Xvfb GNOME Terminal showed no
 echo for XTest keys (the launcher now starts openbox when no window manager
 is running; that fix is untested here because openbox is not installed).
