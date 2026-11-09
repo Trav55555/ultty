@@ -119,6 +119,8 @@ checks that every constructor and prop in it is named on this page.
 
 ## Other globals
 
+- `print(...)` writes to the log (see `--log`) with the file and line it was
+  called from; the terminal is the UI, so nothing is printed to it.
 - `json.decode(string)` turns JSON into Lua values: objects and arrays become
   tables (arrays 1-based), `null` becomes `nil`. Bad JSON is an error.
 - The Luau standard library minus anything that reaches outside: `string`,

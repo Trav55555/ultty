@@ -517,3 +517,37 @@ fn the_first_load_can_fail_and_a_later_one_succeed() {
     assert!(matches!(script.reload(), Reload::Loaded(_)));
     assert_eq!(view_texts(&script), ["Count: 0"]);
 }
+
+#[test]
+fn print_goes_to_the_log_not_the_terminal() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        load(
+            "print",
+            "print(\"hello\", 42, nil, true)\nreturn app { view = function() return text(\"x\") end }",
+            ScriptOptions::default(),
+        );
+    });
+    let logged = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    assert!(logged.contains("hello\t42\tnil\ttrue"), "{logged}");
+    assert!(logged.contains("print.luau:1"), "{logged}");
+}

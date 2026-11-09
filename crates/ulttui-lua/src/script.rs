@@ -547,6 +547,29 @@ pub fn describe_error(error: &mlua::Error) -> String {
 fn install_api(lua: &Lua, globals: &Table, allow_exec: bool) -> mlua::Result<()> {
     node::register(lua, globals)?;
 
+    // The terminal is the UI: `print` goes to the log, with where it was called.
+    globals.set(
+        "print",
+        lua.create_function(|lua, args: mlua::MultiValue| {
+            let parts = args
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<mlua::Result<Vec<_>>>()?;
+            let place = lua
+                .inspect_stack(1, |debug| {
+                    let source = debug.source().short_src.map(|s| s.into_owned());
+                    format!(
+                        "{}:{}",
+                        source.unwrap_or_default(),
+                        debug.current_line().unwrap_or(0)
+                    )
+                })
+                .unwrap_or_default();
+            tracing::info!(target: "ulttui_lua::print", at = %place, "{}", parts.join("\t"));
+            Ok(())
+        })?,
+    )?;
+
     globals.set(
         "app",
         lua.create_function(|lua, table: Value| match &table {
