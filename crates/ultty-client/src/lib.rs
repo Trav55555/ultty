@@ -42,7 +42,8 @@ use ultty_protocol::{
     RegionId, Style, TerminalMessage, CAP_INLINE_SURFACES, CLIENT_DEFAULT_CAPABILITIES,
     FRAME_MAGIC, MAX_SURFACE_ROWS, MIN_PROTOCOL_VERSION, MIN_SURFACE_ROWS, PROTOCOL_VERSION,
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// How long [`UlttyClient::end_frame`] and the handshake wait for the
 /// terminal's reply before giving up.
@@ -105,6 +106,8 @@ pub struct UlttyClient {
     /// their fallback text go on the socket transport. In-band, the tty
     /// carries both, so this is unused.
     text_out: Box<dyn Write + Send>,
+    /// The terminal hung up: a read found the end of the stream.
+    closed: bool,
 }
 
 /// How the client reaches the terminal.
@@ -181,6 +184,7 @@ impl UlttyClient {
             next_region_id: 1,
             frame_id: 0,
             text_out: Box::new(std::io::stdout()),
+            closed: false,
         }
     }
 
@@ -218,6 +222,13 @@ impl UlttyClient {
     /// (`min(client, server)`).
     pub fn protocol_version(&self) -> u16 {
         self.negotiated_version
+    }
+
+    /// Whether the terminal has hung up: a read (in [`UlttyClient::poll_events`]
+    /// or while waiting for a reply) found the end of the stream. Nothing
+    /// sent from now on arrives.
+    pub fn is_closed(&self) -> bool {
+        self.closed
     }
 
     /// Send a raw [`AppMessage`] to the terminal.
@@ -436,6 +447,25 @@ impl UlttyClient {
         }
         self.write_output(text.as_bytes())?;
 
+        let sent = self.send_surface_frame(id, rows, constraints, style, &contents);
+        if sent.is_err() {
+            // The anchor is out; do not leave the surface, if it got as far
+            // as the terminal, to wait for a frame that will not come.
+            if let Err(err) = self.send(&AppMessage::CloseSurface { id }) {
+                tracing::debug!("closing surface {} after a failed open: {err}", id.0);
+            }
+        }
+        sent
+    }
+
+    fn send_surface_frame(
+        &mut self,
+        id: RegionId,
+        rows: u16,
+        constraints: Constraints,
+        style: Style,
+        contents: &[AppMessage],
+    ) -> Result<(), Error> {
         let frame = self.begin_frame()?;
         self.send(&AppMessage::CreateSurface {
             id,
@@ -443,7 +473,7 @@ impl UlttyClient {
             constraints,
             style,
         })?;
-        for message in &contents {
+        for message in contents {
             self.send(message)?;
         }
         self.end_frame(frame)
@@ -611,7 +641,10 @@ impl UlttyClient {
                 )?;
                 return match status {
                     in_band::ReadStatus::Open => Ok(()),
-                    in_band::ReadStatus::Closed => Err(Error::ConnectionClosed),
+                    in_band::ReadStatus::Closed => {
+                        self.closed = true;
+                        Err(Error::ConnectionClosed)
+                    }
                 };
             }
             Link::Socket(stream) => stream,
@@ -621,7 +654,10 @@ impl UlttyClient {
         }
         let mut buf = [0u8; 4096];
         match stream.read(&mut buf) {
-            Ok(0) => Err(Error::ConnectionClosed),
+            Ok(0) => {
+                self.closed = true;
+                Err(Error::ConnectionClosed)
+            }
             Ok(n) => {
                 self.read_buf.extend_from_slice(&buf[..n]);
                 Ok(())
@@ -710,13 +746,14 @@ pub fn fallback_lines(fallback: &[impl AsRef<str>], rows: u16, width: u16) -> Ve
             let mut line = String::new();
             let mut used = 0;
             let text = fallback.get(index).map(AsRef::as_ref).unwrap_or("");
-            for ch in text.chars().filter(|ch| !ch.is_control()) {
-                let w = ch.width().unwrap_or(0);
+            let plain: String = text.chars().filter(|ch| !ch.is_control()).collect();
+            for cluster in plain.graphemes(true) {
+                let w = cluster.width();
                 if used + w > width {
                     break;
                 }
                 used += w;
-                line.push(ch);
+                line.push_str(cluster);
             }
             line
         })
@@ -1122,6 +1159,29 @@ mod tests {
             fallback_lines(&["a\x1b_u1;2;3\x1b\\b\tc\r"], 1, 20),
             vec!["a_u1;2;3\\bc".to_string()]
         );
+    }
+
+    #[test]
+    fn fallback_lines_measure_grapheme_clusters() {
+        // A heart with the emoji presentation selector is two columns wide,
+        // though its characters add up to one.
+        assert_eq!(
+            fallback_lines(&["\u{2764}\u{fe0f}x"], 1, 2),
+            vec!["\u{2764}\u{fe0f}".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_hang_up_is_noticed() {
+        let (mut client, handle) = connect_with(PROTOCOL_VERSION, |_| {});
+        handle.join().unwrap(); // the fake terminal's socket closes
+        assert!(!client.is_closed());
+        let deadline = Instant::now() + REPLY_TIMEOUT;
+        while !client.is_closed() && Instant::now() < deadline {
+            client.poll_events().unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(client.is_closed());
     }
 
     #[test]
