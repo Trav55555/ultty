@@ -34,9 +34,16 @@
 //! **Keepalive.** Natively a background thread answers the terminal's
 //! keepalive every second, so an app may sit in a long call (waiting for a
 //! model, say) without its session timing out. If the session is lost
-//! anyway (the terminal closed it, or a reply never came), the console
-//! carries on in [`Mode::Fallback`]: open cards become final where they
-//! stand, and new ones are printed as text.
+//! anyway (the terminal closed it, or a reply did not come within 5 s), the
+//! console carries on in [`Mode::Fallback`] for good: open cards become
+//! final where they stand, and new ones are printed as text. One slow reply
+//! is enough.
+//!
+//! **Keys, in-band.** Over ssh the session runs in-band on the app's own
+//! tty, and the console reads it for the terminal's replies whenever it is
+//! called. Keys typed meanwhile are kept for [`Console::take_input`]; read
+//! them there, not from stdin, while the console is native. Over the socket
+//! the console never reads stdin.
 //!
 //! **Fallback redraws** move the cursor up over the card's lines, so they
 //! assume the console saw everything on the screen since: output it did not
@@ -45,7 +52,9 @@
 //! or expect a redraw to land on the wrong lines. When stdout is not a
 //! terminal (a pipe, a log file) cards are never redrawn: each is written
 //! once, as plain text, in its last state, when something is printed after
-//! it or it is closed.
+//! it, it is closed or the console is dropped, and lines end with `\n`. A
+//! card still waiting is lost if the app ends with `std::process::exit`,
+//! which skips `Drop`: close it, or drop the console, first.
 //!
 //! **Width changes.** Natively the terminal lays a live card out again at
 //! the new width and clips or pads its rows; frozen cards are text and
@@ -133,6 +142,8 @@ pub struct Console {
     last: Last,
     /// Card events from a session since lost, still to be reported.
     events: Vec<CardEvent>,
+    /// Keys a lost in-band session had read, still to be taken.
+    input: Vec<u8>,
 }
 
 enum Link {
@@ -146,8 +157,8 @@ struct NativeLink {
     /// Dropping it wakes the keepalive thread to end.
     stop: Option<mpsc::Sender<()>>,
     keepalive: Option<JoinHandle<()>>,
-    /// Where the console prints if the session is lost.
-    fallback_out: Option<Box<dyn Write + Send>>,
+    /// What the console becomes if the session is lost.
+    fallback: Option<FallbackLink>,
 }
 
 struct Session {
@@ -257,7 +268,7 @@ impl FallbackLink {
         let mut text = String::new();
         for line in pending.lines {
             text.push_str(&line);
-            text.push_str("\r\n");
+            text.push('\n');
         }
         self.write(text.as_bytes())
     }
@@ -286,7 +297,8 @@ impl Console {
         if std::io::stdout().is_terminal() {
             match UlttyClient::connect() {
                 Ok(client) if client.supports_capability(CAP_INLINE_SURFACES) => {
-                    return Self::native(client, Box::new(std::io::stdout()), KEEPALIVE_INTERVAL);
+                    let fallback = FallbackLink::stdout(Box::new(std::io::stdout()));
+                    return Self::native(client, fallback, KEEPALIVE_INTERVAL);
                 }
                 Ok(_) => tracing::debug!("the terminal does not offer inline surfaces"),
                 Err(err) => tracing::debug!("no Ultty session: {err}"),
@@ -309,12 +321,8 @@ impl Console {
     }
 
     /// A native console on `client`, read every `keepalive` by a thread of
-    /// its own, printing to `fallback_out` if the session is lost.
-    fn native(
-        client: UlttyClient,
-        fallback_out: Box<dyn Write + Send>,
-        keepalive: Duration,
-    ) -> Self {
+    /// its own, carrying on as `fallback` if the session is lost.
+    fn native(client: UlttyClient, fallback: FallbackLink, keepalive: Duration) -> Self {
         let session = Arc::new(Mutex::new(Session {
             client,
             cards: HashMap::new(),
@@ -329,7 +337,15 @@ impl Console {
                     // Ends when the console drops `stop`.
                     while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(keepalive) {
                         let mut session = session.lock().unwrap_or_else(PoisonError::into_inner);
-                        if !session.pump() {
+                        if session.client.is_in_band() {
+                            // In-band the terminal never pings, and reading
+                            // the tty here would take keys from under the
+                            // app; events wait for the console's next call.
+                            if let Err(err) = session.client.heartbeat() {
+                                tracing::debug!("inline cards: heartbeat failed: {err}");
+                                break;
+                            }
+                        } else if !session.pump() {
                             break;
                         }
                     }
@@ -346,7 +362,7 @@ impl Console {
             session,
             stop: Some(stop),
             keepalive,
-            fallback_out: Some(fallback_out),
+            fallback: Some(fallback),
         }))
     }
 
@@ -356,6 +372,7 @@ impl Console {
             next_id: 1,
             last: Last::LineStart,
             events: Vec::new(),
+            input: Vec::new(),
         }
     }
 
@@ -381,8 +398,8 @@ impl Console {
             return Ok(());
         }
         self.check_session();
-        let crlf = text.replace("\r\n", "\n").replace('\n', "\r\n");
-        self.write(crlf.as_bytes())?;
+        let lines = text.replace("\r\n", "\n").replace('\n', self.newline());
+        self.write(lines.as_bytes())?;
         self.last = if text.ends_with('\n') {
             Last::LineStart
         } else {
@@ -413,7 +430,7 @@ impl Console {
         // the terminal has now.
         self.check_session();
         if self.last == Last::MidLine {
-            self.write(b"\r\n")?;
+            self.write(self.newline().as_bytes())?;
         }
         let width = self.width().max(1);
         let buffer = render_buffer(view, width, rows);
@@ -560,6 +577,21 @@ impl Console {
         Ok(())
     }
 
+    /// Bytes typed on the terminal since the last call, in order.
+    ///
+    /// Natively in-band (over ssh, say) the console reads the app's own tty
+    /// for the terminal's replies, so keys typed meanwhile arrive here and
+    /// not on stdin; this also reads what is waiting now. Over the socket
+    /// and in fallback the console never reads stdin, and this returns only
+    /// what an in-band session held when it was lost.
+    pub fn take_input(&mut self) -> Vec<u8> {
+        let mut input = std::mem::take(&mut self.input);
+        if let Link::Native(native) = &self.link {
+            input.extend(native.session().client.take_input());
+        }
+        input
+    }
+
     /// What the terminal reported about cards since the last call (always
     /// empty in fallback, apart from what a lost session reported first).
     pub fn poll_events(&mut self) -> crate::Result<Vec<CardEvent>> {
@@ -589,16 +621,28 @@ impl Console {
             return;
         };
         tracing::warn!("inline cards: lost the Ultty session ({why}); printing cards as text");
-        let out = native
-            .fallback_out
+        let fallback = native
+            .fallback
             .take()
-            .unwrap_or_else(|| Box::new(std::io::stdout()));
-        self.events.extend(native.session().events.drain(..));
-        self.link = Link::Fallback(FallbackLink::stdout(out));
+            .unwrap_or_else(|| FallbackLink::stdout(Box::new(std::io::stdout())));
+        let mut session = native.session();
+        self.events.extend(session.events.drain(..));
+        self.input.extend(session.client.take_input());
+        drop(session);
+        self.link = Link::Fallback(fallback);
         // A live card can no longer be redrawn; the cursor is where the
         // session left it, at the start of a line.
         if matches!(self.last, Last::Card { .. }) {
             self.last = Last::LineStart;
+        }
+    }
+
+    /// How a line ends: `\r\n` on a terminal (in-band it is in raw mode),
+    /// `\n` in a file or pipe.
+    fn newline(&self) -> &'static str {
+        match &self.link {
+            Link::Fallback(fallback) if !fallback.redraw => "\n",
+            _ => "\r\n",
         }
     }
 
@@ -852,12 +896,16 @@ mod tests {
         let card = console.open(2, &Text::new("queued")).unwrap();
         console.update(&card, &Text::new("running")).unwrap();
         console.update(&card, &Text::new("done\nok")).unwrap();
-        assert_eq!(output.take(), "before\r\n", "the card waits");
+        assert_eq!(output.take(), "before\n", "the card waits");
         console.println("after").unwrap();
         // Once something follows it, the card is final.
         console.update(&card, &Text::new("too late")).unwrap();
         console.close(card).unwrap();
-        assert_eq!(output.take(), "done\r\nok\r\nafter\r\n");
+        assert_eq!(
+            output.take(),
+            "done\nok\nafter\n",
+            "LF, not CRLF, in a file"
+        );
     }
 
     #[test]
@@ -866,10 +914,10 @@ mod tests {
         let first = console.open(1, &Text::new("first")).unwrap();
         console.update(&first, &Text::new("first, done")).unwrap();
         console.close(first).unwrap();
-        assert_eq!(output.take(), "first, done\r\n");
+        assert_eq!(output.take(), "first, done\n");
         console.open(1, &Text::new("second")).unwrap();
         drop(console);
-        assert_eq!(output.take(), "second\r\n", "never left unwritten");
+        assert_eq!(output.take(), "second\n", "never left unwritten");
     }
 
     #[test]
@@ -1131,7 +1179,15 @@ mod tests {
             let output = Output::default();
             let mut client = UlttyClient::connect_to(&path).unwrap();
             client.set_output(Box::new(output.clone()));
-            let console = Console::native(client, Box::new(output.clone()), keepalive);
+            // As if stdout were a log, so lines end with LF however the
+            // tests are run.
+            let fallback = FallbackLink {
+                out: Box::new(output.clone()),
+                size: SizeSource::Fixed(40, 10),
+                redraw: false,
+                pending: None,
+            };
+            let console = Console::native(client, fallback, keepalive);
             Self {
                 console,
                 output,
@@ -1309,7 +1365,7 @@ mod tests {
         let (_, output) = rig.finish();
         assert_eq!(
             output.take(),
-            "after\r\n",
+            "after\n",
             "the card stays as the terminal froze it; printing carries on"
         );
     }
@@ -1322,5 +1378,110 @@ mod tests {
         rig.console.open(1, &Text::new("abcdefghij")).unwrap();
         let (_, output) = rig.finish();
         assert_eq!(output.take(), "\x1b_u5;1;1\x1b\\abcdef\r\n");
+    }
+
+    /// Keys typed while an in-band console sits idle reach the app intact
+    /// and in order, with the terminal's in-band strings taken out.
+    #[test]
+    fn keys_typed_during_an_idle_in_band_console_reach_the_app() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use ultty_protocol::in_band::encode_to_vec;
+
+        let (mut master, slave) = {
+            let (mut m, mut s) = (0, 0);
+            // SAFETY: openpty writes two fds; the other arguments may be null.
+            let rc = unsafe {
+                libc::openpty(
+                    &mut m,
+                    &mut s,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(rc, 0, "openpty");
+            // SAFETY: both fds were just opened and are owned here.
+            unsafe {
+                (
+                    std::fs::File::from(OwnedFd::from_raw_fd(m)),
+                    OwnedFd::from_raw_fd(s),
+                )
+            }
+        };
+        let (typed_tx, typed_rx) = mpsc::channel::<()>();
+        let (connected_tx, connected_rx) = mpsc::channel::<()>();
+        let fake = std::thread::spawn(move || {
+            // Answer the probe as Ultty does: its name, then the hello reply
+            // before DA1.
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 4096];
+            let da1 = |seen: &[u8]| seen.windows(3).filter(|w| w == b"\x1b[c").count();
+            while da1(&seen) < 1 {
+                let n = master.read(&mut buf).unwrap();
+                seen.extend_from_slice(&buf[..n]);
+            }
+            master
+                .write_all(b"\x1bP>|ultty 0.1.0\x1b\\\x1b[?62;22c")
+                .unwrap();
+            while da1(&seen) < 2 {
+                let n = master.read(&mut buf).unwrap();
+                seen.extend_from_slice(&buf[..n]);
+            }
+            let mut hello = Vec::new();
+            for msg in [
+                TerminalMessage::ServerHello {
+                    version: PROTOCOL_VERSION,
+                    capabilities: CLIENT_DEFAULT_CAPABILITIES,
+                },
+                TerminalMessage::SessionReady {
+                    session_id: 9,
+                    root_region: RegionId::ROOT,
+                    width: 40,
+                    height: 10,
+                },
+            ] {
+                hello.extend_from_slice(&msg.encode_to_bytes());
+            }
+            let mut wire = encode_to_vec(&hello);
+            wire.extend_from_slice(b"\x1b[?62;22c");
+            master.write_all(&wire).unwrap();
+
+            // Type once the session is up (keys typed during the probe are
+            // the probe's), with one of the terminal's strings in the middle.
+            connected_rx.recv().unwrap();
+            let event = TerminalMessage::SurfaceEvent {
+                id: RegionId::new(3),
+                kind: SurfaceEventKind::Shown,
+            };
+            let mut typed = b"y\r".to_vec();
+            typed.extend(encode_to_vec(&event.encode_to_bytes()));
+            typed.extend_from_slice(b"abc\x1b[A");
+            master.write_all(&typed).unwrap();
+            typed_tx.send(()).unwrap();
+            // Drain what the app writes (heartbeats) until it hangs up.
+            while matches!(master.read(&mut buf), Ok(n) if n > 0) {}
+        });
+
+        let tty = ultty_client::in_band::InBandTty::open_on(slave.as_raw_fd(), slave.as_raw_fd())
+            .unwrap();
+        let client = UlttyClient::connect_in_band_on(tty).unwrap();
+        connected_tx.send(()).unwrap();
+        let fallback = FallbackLink::stdout(Box::new(Output::default()));
+        let mut console = Console::native(client, fallback, Duration::from_millis(10));
+        typed_rx.recv().unwrap();
+        // Idle while the keepalive thread runs many times.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(console.mode(), Mode::Native);
+        assert_eq!(console.take_input(), b"y\rabc\x1b[A");
+        assert_eq!(
+            console.poll_events().unwrap(),
+            vec![CardEvent {
+                card: RegionId::new(3),
+                kind: SurfaceEventKind::Shown
+            }]
+        );
+        drop(console);
+        drop(slave);
+        fake.join().unwrap();
     }
 }
