@@ -295,9 +295,9 @@ output, prose, a diff card, while a loop prints shell output under it.
    scrolls, animations and resizes that touch its tree). Measured with
    `cargo bench -p ultty --bench layout -- surface_raster` (release, LTO;
    a bordered 8 × 120 card, title plus five streamed lines of output, a new
-   line each frame): rasterising 10.1 µs, rasterising and writing the eight
-   rows on the screen 10.7 µs, in scrollback (re-encoding compact rows)
-   12.9 µs. Under 0.1 % of a 16 ms frame, so a ≤ 100 ms cadence would buy
+   line each frame): rasterising 9.5 µs, rasterising and writing the eight
+   rows on the screen 11.0 µs, in scrollback (decoding each row to skip an
+   unchanged one, re-encoding the rest) 14.9 µs. Under 0.1 % of a 16 ms frame, so a ≤ 100 ms cadence would buy
    nothing and would make copy lag what is drawn. Closing, or the session
    ending, writes the last frame if a pass has not, so the frozen text is
    never stale; an eviction does not (its rows are gone or erased).
