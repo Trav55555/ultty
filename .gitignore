@@ -49,3 +49,7 @@ rust-analyzer.toml
 
 # Vim swap files (.foo.swp, .foo.swo, ... .foo.sua)
 .*.s[a-w][a-z]
+
+# Python bytecode from the scripts
+__pycache__/
+*.pyc
