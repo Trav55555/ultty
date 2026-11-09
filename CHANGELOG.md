@@ -45,6 +45,12 @@ longer collapses, and an idle window no longer wakes up.
 
 ### Added
 
+- Ultty exposes its window to screen readers through AccessKit (AT-SPI on
+  Linux), on by default (`[behavior] accessibility = false` turns it off).
+  It joins the accessibility bus only while assistive technology runs, and
+  an idle window still does not wake up: `blocking` is pinned to 1.6.2,
+  because 1.7.0 keeps a pool thread waking twice a second forever.
+
 - Shift+click and Shift+drag select text even while a program tracks the
   mouse, as in xterm and other terminals; the program sees none of it.
 

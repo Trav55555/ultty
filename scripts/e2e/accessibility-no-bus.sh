@@ -77,4 +77,18 @@ sleep 1
 kill -0 "$ultty_pid" 2>/dev/null || fail "Ultty exited after its first frame"
 ! grep -q "panicked at" "$out/ultty.log" || fail "Ultty logged a panic"
 
+# An idle window must not wake up. blocking 1.7.0 (under zbus) kept a pool
+# thread waking twice a second forever; Cargo.lock pins 1.6.2, whose idle
+# threads exit. This catches a `cargo update` that brings it back.
+switches() {
+    cat /proc/"$ultty_pid"/task/*/status 2>/dev/null |
+        awk '/_ctxt_switches/ { s += $2 } END { print s + 0 }'
+}
+sleep 3
+before=$(switches)
+sleep 5
+woke=$(( $(switches) - before ))
+echo "idle context switches in 5 s: $woke" >"$out/idle.txt"
+[ "$woke" -le 2 ] || fail "Ultty woke $woke times in 5 s of idle (expected none)"
+
 echo "accessibility-no-bus: ok"
