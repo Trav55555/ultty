@@ -916,4 +916,14 @@ fn replacing_a_row_drops_only_a_selection_over_it() {
     term.main_buffer_mut()
         .replace_row(1, &card_row(10, "card 9"));
     assert_eq!(term.selected_text(), None);
+
+    // Back at the bottom, a selection dragged up past the top of the
+    // screen covers the card's row in scrollback, out of view: it is
+    // dropped too.
+    term.buffer_mut().scroll_to_bottom();
+    term.start_selection(SelectionPoint::new(0, -1), SelectionMode::Normal);
+    term.update_selection(SelectionPoint::new(3, 0));
+    term.main_buffer_mut()
+        .replace_row(1, &card_row(10, "card 10"));
+    assert!(term.selection().is_none());
 }

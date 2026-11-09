@@ -647,6 +647,11 @@ impl Buffer {
 
     /// Record that line `line` (as numbered in `rewritten_lines`) was
     /// rewritten in place, forgetting lines evicted since.
+    ///
+    /// With no history (`max_history` 0) rows scrolled off are not counted
+    /// in `evicted`, so a line's number can come to name another row. That
+    /// costs at most a selection over that row being dropped, and the map
+    /// holds at most a screenful of such lines.
     fn note_rewrite(&mut self, line: usize) {
         self.rewrites += 1;
         self.rewritten_lines.insert(line, self.rewrites);

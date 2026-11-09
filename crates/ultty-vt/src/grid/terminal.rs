@@ -613,7 +613,7 @@ impl Terminal {
         let on_screen = end.row >= 0 && start.row <= max_row;
         let first = start.row.clamp(0, max_row.max(0)) as u16;
         let last = end.row.clamp(0, max_row.max(0)) as u16;
-        if on_screen && self.rows_rewritten_since_selection(first, last) {
+        if self.rows_rewritten_since_selection(start.row, end.row) {
             return None;
         }
         if self.selection_content_version == grid.content_version() {
@@ -632,15 +632,17 @@ impl Terminal {
         }
     }
 
-    /// Whether the rows shown on visual rows `first..=last` were rewritten
-    /// in place since the selection was made.
-    fn rows_rewritten_since_selection(&self, first: u16, last: u16) -> bool {
+    /// Whether any row the selection covers, visual rows `first..=last`
+    /// counted from the top of the view (negative above it, past the
+    /// screen below it), was rewritten in place since it was made.
+    fn rows_rewritten_since_selection(&self, first: i32, last: i32) -> bool {
         let buffer = self.buffer();
-        let top = buffer.history_len().saturating_sub(buffer.scroll_offset());
-        buffer.rows_rewritten_since(
-            self.selection_rewrite_count,
-            top + usize::from(first)..=top + usize::from(last),
-        )
+        let top = buffer.history_len().saturating_sub(buffer.scroll_offset()) as i64;
+        let line = |row: i32| (top + i64::from(row)).max(0) as usize;
+        let (first, last) = (line(first), line(last));
+        let end = buffer.total_lines().saturating_sub(1);
+        first <= end
+            && buffer.rows_rewritten_since(self.selection_rewrite_count, first..=last.min(end))
     }
 
     /// Start a new selection.
