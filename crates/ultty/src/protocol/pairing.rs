@@ -36,6 +36,8 @@ pub fn rows_on_screen(first: i64, rows: u16, screen_rows: u16) -> bool {
 #[derive(Debug, Clone, Copy)]
 struct PendingAnchor {
     tag: u16,
+    /// Which placement on that tag it is (see `Buffer::anchor_serial`).
+    serial: u64,
     anchor: Anchor,
     seen_at: Instant,
 }
@@ -44,20 +46,11 @@ struct PendingAnchor {
 #[derive(Debug, Clone, Copy)]
 struct Claimed {
     tag: u16,
+    /// Which placement on that tag the surface is drawn over.
+    serial: u64,
     rows: u16,
     session_id: u64,
     surface: RegionId,
-}
-
-impl Claimed {
-    /// The anchor the surface was placed on.
-    fn anchor(&self) -> Anchor {
-        Anchor {
-            session_id: self.session_id,
-            surface_id: self.surface.0,
-            rows: self.rows,
-        }
-    }
 }
 
 /// The pairing state of one terminal's anchors.
@@ -106,8 +99,8 @@ impl AnchorPairing {
     /// Events were lost (the terminal's queue overflowed), so make the
     /// pairing agree with the anchors the terminal holds: drop waiting
     /// anchors that are gone, evict surfaces whose tag is gone or now holds
-    /// another anchor, and treat live anchors nobody knows of as newly
-    /// seen.
+    /// a later placement (even of an identical anchor), and treat live
+    /// anchors nobody knows of as newly seen.
     fn reconcile(
         &mut self,
         terminal: &mut Terminal,
@@ -115,17 +108,21 @@ impl AnchorPairing {
         claimable: bool,
         now: Instant,
     ) {
-        let live: Vec<(u16, Anchor)> = terminal.main_buffer().anchors().collect();
-        let anchor_of = |tag: u16| {
+        let buffer = terminal.main_buffer();
+        let live: Vec<(u16, u64, Anchor)> = buffer
+            .anchors()
+            .filter_map(|(tag, anchor)| Some((tag, buffer.anchor_serial(tag)?, anchor)))
+            .collect();
+        let serial_of = |tag: u16| {
             live.iter()
-                .find(|(live_tag, _)| *live_tag == tag)
-                .map(|&(_, anchor)| anchor)
+                .find(|(live_tag, _, _)| *live_tag == tag)
+                .map(|&(_, serial, _)| serial)
         };
         self.pending
-            .retain(|pending| anchor_of(pending.tag) == Some(pending.anchor));
+            .retain(|pending| serial_of(pending.tag) == Some(pending.serial));
         let mut gone = Vec::new();
         self.claimed.retain(|claimed| {
-            let intact = anchor_of(claimed.tag) == Some(claimed.anchor());
+            let intact = serial_of(claimed.tag) == Some(claimed.serial);
             if !intact {
                 gone.push(*claimed);
             }
@@ -134,7 +131,7 @@ impl AnchorPairing {
         for claimed in gone {
             self.evict(sessions, claimed);
         }
-        for &(tag, anchor) in &live {
+        for &(tag, serial, anchor) in &live {
             let known = self.pending.iter().any(|pending| pending.tag == tag)
                 || self.claimed.iter().any(|claimed| claimed.tag == tag);
             if known {
@@ -143,6 +140,7 @@ impl AnchorPairing {
             if claimable {
                 self.pending.push(PendingAnchor {
                     tag,
+                    serial,
                     anchor,
                     seen_at: now,
                 });
@@ -181,9 +179,14 @@ impl AnchorPairing {
         }
         for event in terminal.take_anchor_events() {
             match event {
-                AnchorEvent::Placed { tag, anchor } if claimable => {
+                AnchorEvent::Placed {
+                    tag,
+                    serial,
+                    anchor,
+                } if claimable => {
                     self.pending.push(PendingAnchor {
                         tag,
+                        serial,
                         anchor,
                         seen_at: now,
                     });
@@ -203,15 +206,15 @@ impl AnchorPairing {
                         session.refuse_surface(id, &format!("anchor refused: {reason:?}"));
                     }
                 }
-                AnchorEvent::Lost { tag, anchor } => {
-                    // Match the anchor too: after lost events, a tag may
-                    // name a later anchor.
+                AnchorEvent::Lost { tag, serial, .. } => {
+                    // Match the serial too: after lost events, a tag may
+                    // name a later placement, even of an identical anchor.
                     self.pending
-                        .retain(|pending| (pending.tag, pending.anchor) != (tag, anchor));
+                        .retain(|pending| (pending.tag, pending.serial) != (tag, serial));
                     if let Some(index) = self
                         .claimed
                         .iter()
-                        .position(|c| (c.tag, c.anchor()) == (tag, anchor))
+                        .position(|c| (c.tag, c.serial) == (tag, serial))
                     {
                         let claimed = self.claimed.remove(index);
                         self.evict(sessions, claimed);
@@ -269,6 +272,7 @@ impl AnchorPairing {
                     report(pending.anchor.session_id, placed);
                     self.claimed.push(Claimed {
                         tag: pending.tag,
+                        serial: pending.serial,
                         rows,
                         session_id: pending.anchor.session_id,
                         surface: id,
@@ -825,6 +829,44 @@ mod tests {
         rig.update();
         assert_eq!(rig.term.main_buffer().anchors().count(), 0);
         assert!(rig.pairing.is_idle());
+    }
+
+    /// Another program in the tab clears the card's rows, overflows the
+    /// event queue and prints the identical anchor again, which reuses the
+    /// card's tag: the card is evicted, not moved onto the new rows.
+    #[test]
+    fn an_identical_anchor_on_a_reused_tag_does_not_move_a_placed_surface() {
+        let mut rig = Rig::new();
+        create_surface(&mut rig.session, 5, 1);
+        anchor(&mut rig.term, SESSION, 5, 1);
+        feed(&mut rig.term, b"card\r\n");
+        rig.update();
+        assert_eq!(rig.sent(), placed(5));
+
+        let mut wire = b"\x1b[3J\x1b[2J\x1b[H".to_vec();
+        for round in 0..5u32 {
+            for surface in 0..MAX_ANCHORS as u32 {
+                let id = 10_000 + round * 2_000 + surface;
+                wire.extend(format!("\x1b_u99;{id};1\x1b\\\r\n").into_bytes());
+            }
+            wire.extend_from_slice(b"\x1b[3J\x1b[2J\x1b[H");
+        }
+        // The forged anchor lands on tag 1, the card's old tag.
+        wire.extend(format!("\x1b_u{SESSION};5;1\x1b\\").into_bytes());
+        feed(&mut rig.term, &wire);
+        assert_eq!(
+            rig.term.main_buffer().anchor(1),
+            Some(Anchor {
+                session_id: SESSION,
+                surface_id: 5,
+                rows: 1
+            })
+        );
+
+        rig.update();
+        assert_eq!(rig.sent(), (vec![(5, SurfaceEventKind::Evicted)], vec![]));
+        assert_eq!(rig.placement(5), None);
+        assert_eq!(rig.session.placed_surfaces().count(), 0);
     }
 
     #[test]

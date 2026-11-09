@@ -38,6 +38,9 @@ pub enum AnchorRefusal {
 #[derive(Debug, Clone, Copy)]
 struct AnchorEntry {
     anchor: Anchor,
+    /// Which placement this is: anchors placed later have larger serials,
+    /// so a tag reused for an identical anchor is still told apart.
+    serial: u64,
     /// The first row's line number: lines evicted from history before it
     /// plus its absolute index. Scrolling and eviction leave it right;
     /// anything else that moves rows makes it a stale hint, which lookups
@@ -71,7 +74,9 @@ pub struct Buffer {
     evicted: usize,
     /// Anchors a reflow pushed out of scrollback, for the next sweep to
     /// report.
-    lost_in_reflow: Vec<(u16, Anchor)>,
+    lost_in_reflow: Vec<(u16, u64, Anchor)>,
+    /// The serial the next placed anchor gets.
+    next_anchor_serial: u64,
     /// Rows looked at for anchor bookkeeping, so tests can bound its cost.
     #[cfg(test)]
     anchor_visits: std::cell::Cell<usize>,
@@ -424,6 +429,7 @@ impl Buffer {
             anchors: Vec::new(),
             evicted: 0,
             lost_in_reflow: Vec::new(),
+            next_anchor_serial: 1,
             #[cfg(test)]
             anchor_visits: std::cell::Cell::new(0),
         }
@@ -601,11 +607,12 @@ impl Buffer {
 
     /// Reserve `anchor.rows` rows at the cursor for an inline surface
     /// (ADR 0020): scroll them in as `rows - 1` line feeds would, tag each,
-    /// and put the cursor back on the first. Returns the tag.
+    /// and put the cursor back on the first. Returns the tag and the
+    /// placement's serial (see [`Buffer::anchor_serial`]).
     ///
     /// Anchors whose first row is gone are not freed here; call
     /// [`Buffer::sweep_anchors`] first so their tags can be reused.
-    pub fn place_anchor(&mut self, anchor: Anchor) -> Result<u16, AnchorRefusal> {
+    pub fn place_anchor(&mut self, anchor: Anchor) -> Result<(u16, u64), AnchorRefusal> {
         let region = self.grid.effective_scroll_region();
         let cursor_row = self.grid.cursor().position.row;
         let height = region.bottom - region.top + 1;
@@ -637,12 +644,23 @@ impl Buffer {
         let cursor = self.grid.cursor_mut();
         cursor.position.row = first;
         cursor.wrap_pending = false;
+        let serial = self.next_anchor_serial;
+        self.next_anchor_serial += 1;
         self.anchors[index] = Some(AnchorEntry {
             anchor,
+            serial,
             first_line: self.evicted + self.history.len() + usize::from(first),
             settled: false,
         });
-        Ok(tag)
+        Ok((tag, serial))
+    }
+
+    /// The serial of the live anchor tagged `tag`: placements number up
+    /// from 1 in the order they happened, and a tag freed and reused gets
+    /// a new one.
+    pub fn anchor_serial(&self, tag: u16) -> Option<u64> {
+        let index = usize::from(tag).checked_sub(1)?;
+        Some(self.anchors.get(index)?.as_ref()?.serial)
     }
 
     /// The anchor tagged `tag`, if it is live.
@@ -702,7 +720,7 @@ impl Buffer {
     /// An anchor whose rows are all in scrollback cannot change but by
     /// eviction, so once checked there it costs one row per sweep; the
     /// others cost their rows plus, when they moved, a screenful.
-    pub fn sweep_anchors(&mut self) -> Vec<(u16, Anchor)> {
+    pub fn sweep_anchors(&mut self) -> Vec<(u16, u64, Anchor)> {
         let mut lost = std::mem::take(&mut self.lost_in_reflow);
         for index in 0..self.anchors.len() {
             let Some(entry) = self.anchors[index] else {
@@ -727,7 +745,7 @@ impl Buffer {
                 let from = found.map_or_else(|| self.hinted_line(&entry), |line| line as isize);
                 self.anchors[index] = None;
                 self.strip_anchor_rows(tag, from, rows);
-                lost.push((tag, entry.anchor));
+                lost.push((tag, entry.serial, entry.anchor));
             }
         }
         self.trim_anchor_table();
@@ -751,9 +769,17 @@ impl Buffer {
     /// Drop every anchor and take all tags off rows, as a full reset does.
     /// Returns the anchors that were live. This walks all of scrollback; a
     /// reset clears it first.
-    pub fn drop_all_anchors(&mut self) -> Vec<(u16, Anchor)> {
+    pub fn drop_all_anchors(&mut self) -> Vec<(u16, u64, Anchor)> {
         let mut live = std::mem::take(&mut self.lost_in_reflow);
-        live.extend(self.anchors());
+        live.extend(
+            self.anchors
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    let entry = entry.as_ref()?;
+                    Some((index as u16 + 1, entry.serial, entry.anchor))
+                }),
+        );
         self.anchors.clear();
         for compact in &mut self.history {
             if !compact.anchor().is_none() {
@@ -822,7 +848,7 @@ impl Buffer {
                     let from = made.map_or(isize::MIN / 2, |made| made as isize - dropped as isize);
                     self.anchors[index] = None;
                     self.strip_anchor_rows(tag, from, entry.anchor.rows);
-                    self.lost_in_reflow.push((tag, entry.anchor));
+                    self.lost_in_reflow.push((tag, entry.serial, entry.anchor));
                 }
             }
         }

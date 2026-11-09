@@ -17,7 +17,12 @@ pub const MAX_QUEUED_REFUSALS: usize = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnchorEvent {
     /// Rows were reserved and tagged `tag` on the main screen.
-    Placed { tag: u16, anchor: Anchor },
+    Placed {
+        tag: u16,
+        /// See [`Buffer::anchor_serial`].
+        serial: u64,
+        anchor: Anchor,
+    },
     /// The anchor reserved nothing.
     Refused {
         anchor: Anchor,
@@ -25,7 +30,12 @@ pub enum AnchorEvent {
     },
     /// The anchor's first row is gone: erased, cleared, reset, or evicted
     /// from scrollback. Its tag is free again.
-    Lost { tag: u16, anchor: Anchor },
+    Lost {
+        tag: u16,
+        /// The serial it was placed with.
+        serial: u64,
+        anchor: Anchor,
+    },
 }
 
 /// Maximum number of distinct OSC 8 hyperlink URIs remembered per terminal.
@@ -408,7 +418,11 @@ impl Terminal {
             }
         } else {
             match self.main.place_anchor(anchor) {
-                Ok(tag) => AnchorEvent::Placed { tag, anchor },
+                Ok((tag, serial)) => AnchorEvent::Placed {
+                    tag,
+                    serial,
+                    anchor,
+                },
                 Err(reason) => AnchorEvent::Refused { anchor, reason },
             }
         };
@@ -432,8 +446,12 @@ impl Terminal {
     }
 
     fn sweep_anchors(&mut self) {
-        for (tag, anchor) in self.main.sweep_anchors() {
-            self.push_anchor_event(AnchorEvent::Lost { tag, anchor });
+        for (tag, serial, anchor) in self.main.sweep_anchors() {
+            self.push_anchor_event(AnchorEvent::Lost {
+                tag,
+                serial,
+                anchor,
+            });
         }
     }
 
@@ -1163,8 +1181,12 @@ impl Terminal {
         self.main.clear_history();
         // The main grid keeps its text when the reset came on the
         // alternate screen, but no anchor survives a reset.
-        for (tag, anchor) in self.main.drop_all_anchors() {
-            self.push_anchor_event(AnchorEvent::Lost { tag, anchor });
+        for (tag, serial, anchor) in self.main.drop_all_anchors() {
+            self.push_anchor_event(AnchorEvent::Lost {
+                tag,
+                serial,
+                anchor,
+            });
         }
         self.images.clear();
         self.hyperlinks.clear();

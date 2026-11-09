@@ -41,7 +41,7 @@ fn anchor(surface_id: u32, rows: u16) -> Anchor {
 fn place(term: &mut Terminal, surface_id: u32, rows: u16) -> u16 {
     feed(term, &anchor_bytes(7, surface_id, rows));
     match term.take_anchor_events().as_slice() {
-        [AnchorEvent::Placed { tag, anchor: a }] => {
+        [AnchorEvent::Placed { tag, anchor: a, .. }] => {
             assert_eq!(*a, anchor(surface_id, rows));
             *tag
         }
@@ -73,8 +73,31 @@ fn cursor(term: &Terminal) -> (u16, u16) {
 fn lost(tag: u16, surface_id: u32, rows: u16) -> AnchorEvent {
     AnchorEvent::Lost {
         tag,
+        serial: 0,
         anchor: anchor(surface_id, rows),
     }
+}
+
+/// The anchor events since the last call, with serials zeroed: tests that
+/// are not about serials compare the rest. See
+/// `serials_number_placements_and_follow_them_into_lost_events`.
+fn take_events(term: &mut Terminal) -> Vec<AnchorEvent> {
+    term.take_anchor_events()
+        .into_iter()
+        .map(|event| match event {
+            AnchorEvent::Placed { tag, anchor, .. } => AnchorEvent::Placed {
+                tag,
+                serial: 0,
+                anchor,
+            },
+            AnchorEvent::Lost { tag, anchor, .. } => AnchorEvent::Lost {
+                tag,
+                serial: 0,
+                anchor,
+            },
+            refused => refused,
+        })
+        .collect()
 }
 
 #[test]
@@ -88,7 +111,7 @@ fn malformed_anchors_reserve_nothing() {
     oversized.extend(std::iter::repeat_n(b'0', 100));
     oversized.extend_from_slice(b"\x1b\\");
     feed(&mut term, &oversized);
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
     assert_eq!(cursor(&term), (0, 2));
     assert!(tags(&term).iter().all(|&t| t == 0));
     assert_eq!(term.grid().row(0).unwrap().text_trimmed(), "xy");
@@ -150,7 +173,7 @@ fn tags_survive_scrolling_into_scrollback_and_back() {
     assert_eq!(buffer.history_len(), 9);
     assert_eq!(buffer.anchor_line(tag), Some(0));
     assert_eq!(tags(&term)[..3], [tag, tag, 0]);
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
 
     // A taller window pulls the card back from scrollback onto the grid.
     term.resize(Dimensions::new(20, 13));
@@ -164,7 +187,7 @@ fn tags_survive_scrolling_into_scrollback_and_back() {
     // And a shorter one pushes it back without losing it.
     term.resize(Dimensions::new(20, 3));
     assert_eq!(term.buffer().anchor_line(tag), Some(0));
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
     term.check_integrity().unwrap();
 }
 
@@ -176,7 +199,7 @@ fn a_blank_reservation_is_content_when_the_window_shrinks() {
     // as blank space below the cursor.
     let tag = place(&mut term, 1, 3);
     term.resize(Dimensions::new(20, 2));
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
     assert_eq!(tags(&term).iter().filter(|&&t| t == tag).count(), 3);
 }
 
@@ -196,12 +219,12 @@ fn insert_and_delete_line_move_tags_with_their_rows() {
     feed(&mut term, b"\x1b[1H\x1b[3M");
     assert_eq!(tags(&term), vec![0, tag, tag, 0, 0, 0, 0, 0]);
     assert_eq!(term.buffer().anchor_line(tag), Some(1));
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
 
     // DL on the card's first row deletes it: the surface is lost and its
     // other row no longer carries the tag.
     feed(&mut term, b"\x1b[2H\x1b[1M");
-    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 2)]);
+    assert_eq!(take_events(&mut term), vec![lost(tag, 1, 2)]);
     assert!(tags(&term).iter().all(|&t| t == 0));
     assert_eq!(term.buffer().anchor(tag), None);
 }
@@ -212,7 +235,7 @@ fn rows_pushed_out_of_the_screen_by_insert_line_lose_their_anchor() {
     feed(&mut term, b"\x1b[3H");
     let tag = place(&mut term, 1, 2);
     feed(&mut term, b"\x1b[1H\x1b[2L");
-    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 2)]);
+    assert_eq!(take_events(&mut term), vec![lost(tag, 1, 2)]);
 }
 
 #[test]
@@ -229,11 +252,11 @@ fn scroll_regions_move_tags_and_discard_them_off_the_top() {
     // Scrolling the region moves the card up within it...
     feed(&mut term, b"\x1b[6H\n");
     assert_eq!(term.buffer().anchor_line(tag), Some(3));
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
     // ...and lines leaving a region below the top of the screen are
     // discarded, taking the anchor with them.
     feed(&mut term, b"\n\n");
-    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 2)]);
+    assert_eq!(take_events(&mut term), vec![lost(tag, 1, 2)]);
     assert!(tags(&term).iter().all(|&t| t == 0));
 }
 
@@ -248,7 +271,7 @@ fn reservations_that_cannot_stay_on_screen_are_refused() {
     // Taller than the screen.
     feed(&mut term, &anchor_bytes(7, 1, 9));
     assert_eq!(
-        term.take_anchor_events(),
+        take_events(&mut term),
         vec![refused(9, AnchorRefusal::NoRoom)]
     );
     // Taller than the scroll region.
@@ -258,7 +281,7 @@ fn reservations_that_cannot_stay_on_screen_are_refused() {
     feed(&mut term, b"\x1b[8H");
     feed(&mut term, &anchor_bytes(7, 1, 1));
     assert_eq!(
-        term.take_anchor_events(),
+        take_events(&mut term),
         vec![
             refused(5, AnchorRefusal::NoRoom),
             refused(1, AnchorRefusal::NoRoom)
@@ -273,7 +296,7 @@ fn erase_display_drops_tags_and_reports_the_loss() {
     let mut term = term(20, 5);
     let tag = place(&mut term, 1, 2);
     feed(&mut term, b"\x1b[2J");
-    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 2)]);
+    assert_eq!(take_events(&mut term), vec![lost(tag, 1, 2)]);
     assert!(tags(&term).iter().all(|&t| t == 0));
 }
 
@@ -286,7 +309,7 @@ fn erase_saved_lines_drops_tags_in_scrollback() {
     assert!(term.buffer().history_len() > 0);
 
     feed(&mut term, b"\x1b[3J");
-    assert_eq!(term.take_anchor_events(), vec![lost(in_history, 1, 1)]);
+    assert_eq!(take_events(&mut term), vec![lost(in_history, 1, 1)]);
     // The anchor on the screen is untouched, and found where it is.
     assert_eq!(term.buffer().anchor_line(on_screen), Some(2));
     assert_eq!(tags(&term), vec![0, 0, on_screen]);
@@ -300,7 +323,7 @@ fn full_reset_drops_every_anchor() {
     let on_screen = place(&mut term, 2, 1);
     feed(&mut term, b"\x1bc");
     assert_eq!(
-        term.take_anchor_events(),
+        take_events(&mut term),
         vec![lost(in_history, 1, 2), lost(on_screen, 2, 1)]
     );
     assert!(tags(&term).iter().all(|&t| t == 0));
@@ -312,7 +335,7 @@ fn full_reset_from_the_alternate_screen_drops_main_screen_anchors() {
     let tag = place(&mut term, 1, 2);
     feed(&mut term, b"\x1b[?1049h\x1bc");
     assert!(!term.is_alternate_screen());
-    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 2)]);
+    assert_eq!(take_events(&mut term), vec![lost(tag, 1, 2)]);
     assert!(tags(&term).iter().all(|&t| t == 0));
 }
 
@@ -328,11 +351,11 @@ fn erasing_a_line_drops_its_tag_and_its_first_line_loses_the_anchor() {
         b"\x1b[1;3H\x1b[K\x1b[3;1H\x1b[1K\x1b[2;1H\x1b[5X",
     );
     assert_eq!(tags(&term)[..3], [tag, tag, tag]);
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
 
     // Erasing the first line loses the anchor and frees every row.
     feed(&mut term, b"\x1b[1;1H\x1b[2K");
-    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 3)]);
+    assert_eq!(take_events(&mut term), vec![lost(tag, 1, 3)]);
     assert!(tags(&term).iter().all(|&t| t == 0));
 }
 
@@ -342,7 +365,7 @@ fn erasing_any_reserved_line_loses_the_anchor() {
     let tag = place(&mut term, 1, 3);
     feed(&mut term, b"card 1\r\ncard 2\r\ncard 3");
     feed(&mut term, b"\x1b[3;1H\x1b[2K");
-    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 3)]);
+    assert_eq!(take_events(&mut term), vec![lost(tag, 1, 3)]);
     assert!(tags(&term).iter().all(|&t| t == 0));
 }
 
@@ -357,10 +380,10 @@ fn eviction_from_scrollback_loses_the_anchor() {
     }
     // Scrollback is full and the card's first row is its oldest line.
     assert_eq!(term.buffer().anchor_line(tag), Some(0));
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
 
     feed(&mut term, b"one more\r\n");
-    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 2)]);
+    assert_eq!(take_events(&mut term), vec![lost(tag, 1, 2)]);
     // The card's second row is still in scrollback, without the tag.
     assert_eq!(lines(&term)[0], "card");
     assert!(tags(&term).iter().all(|&t| t == 0));
@@ -372,7 +395,7 @@ fn lowering_the_scrollback_limit_loses_evicted_anchors() {
     let tag = place(&mut term, 1, 1);
     feed(&mut term, b"\r\n\r\n\r\n\r\n\r\n");
     term.set_scrollback_limit(1);
-    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 1)]);
+    assert_eq!(take_events(&mut term), vec![lost(tag, 1, 1)]);
 }
 
 #[test]
@@ -383,7 +406,7 @@ fn the_alternate_screen_tags_nothing_and_main_anchors_wait_for_it() {
     feed(&mut term, b"\x1b[?1049h\x1b[3H");
     feed(&mut term, &anchor_bytes(7, 2, 2));
     assert_eq!(
-        term.take_anchor_events(),
+        take_events(&mut term),
         vec![AnchorEvent::Refused {
             anchor: anchor(2, 2),
             reason: AnchorRefusal::AlternateScreen,
@@ -395,7 +418,7 @@ fn the_alternate_screen_tags_nothing_and_main_anchors_wait_for_it() {
     feed(&mut term, b"\x1b[2J");
 
     feed(&mut term, b"\x1b[?1049l");
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
     assert_eq!(term.buffer().anchor_line(tag), Some(0));
     assert_eq!(tags(&term)[..2], [tag, tag]);
 }
@@ -441,7 +464,7 @@ fn reflow_clips_or_pads_tagged_rows_and_rewraps_their_neighbours() {
         want.map(|(text, tag)| (text.to_string(), tag))
     );
     assert!(term.grid().rows().any(|row| row.anchor().is_first()));
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
 
     // Wider: the neighbours join up again; the clipped rows are padded and
     // keep their tag.
@@ -459,7 +482,7 @@ fn reflow_clips_or_pads_tagged_rows_and_rewraps_their_neighbours() {
     );
     let first = term.buffer().anchor_line(tag).unwrap();
     assert_eq!(term.buffer().row_at(first).unwrap().width(), 30);
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
 }
 
 #[test]
@@ -527,7 +550,7 @@ fn reflow_drops_anchors_pushed_past_the_scrollback_limit() {
     // Halving the width doubles the rows after the card, which pushes it
     // out of scrollback.
     term.resize(Dimensions::new(10, 3));
-    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 1)]);
+    assert_eq!(take_events(&mut term), vec![lost(tag, 1, 1)]);
 }
 
 /// A full table and a flood of refused anchors in one batch: the refusals
@@ -541,7 +564,7 @@ fn refusals_never_push_placements_out_of_the_queue() {
         wire.extend_from_slice(b"\r\n");
     }
     feed(&mut term, &wire);
-    let events = term.take_anchor_events();
+    let events = take_events(&mut term);
     let placed = events
         .iter()
         .filter(|e| matches!(e, AnchorEvent::Placed { .. }))
@@ -552,7 +575,7 @@ fn refusals_never_push_placements_out_of_the_queue() {
 
     // The cap is per batch: the next refusal is reported.
     feed(&mut term, &anchor_bytes(7, 9999, 1));
-    assert_eq!(term.take_anchor_events().len(), 1);
+    assert_eq!(take_events(&mut term).len(), 1);
 }
 
 /// More placements and losses than the queue holds: the oldest go and the
@@ -569,9 +592,42 @@ fn an_overflowing_queue_is_reported() {
         wire.extend_from_slice(b"\x1b[3J\x1b[2J\x1b[H");
     }
     feed(&mut term, &wire);
-    assert_eq!(term.take_anchor_events().len(), MAX_ANCHOR_EVENTS);
+    assert_eq!(take_events(&mut term).len(), MAX_ANCHOR_EVENTS);
     assert!(term.take_anchor_overflow());
     assert!(!term.take_anchor_overflow());
+}
+
+/// Every placement gets the next serial, and its Lost event carries it:
+/// an identical anchor printed again on a reused tag is a new placement.
+#[test]
+fn serials_number_placements_and_follow_them_into_lost_events() {
+    let mut term = term(20, 5);
+    feed(&mut term, &anchor_bytes(7, 1, 1));
+    let first = match term.take_anchor_events().as_slice() {
+        [AnchorEvent::Placed { tag: 1, serial, .. }] => *serial,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(term.main_buffer().anchor_serial(1), Some(first));
+
+    feed(&mut term, b"\x1b[2J\x1b[H");
+    feed(&mut term, &anchor_bytes(7, 1, 1));
+    assert_eq!(
+        term.take_anchor_events(),
+        vec![
+            AnchorEvent::Lost {
+                tag: 1,
+                serial: first,
+                anchor: anchor(1, 1),
+            },
+            AnchorEvent::Placed {
+                tag: 1,
+                serial: first + 1,
+                anchor: anchor(1, 1),
+            },
+        ]
+    );
+    assert_eq!(term.main_buffer().anchor_serial(1), Some(first + 1));
+    assert_eq!(term.main_buffer().anchor_serial(2), None);
 }
 
 #[test]
@@ -583,7 +639,7 @@ fn a_full_table_refuses_anchors_until_tags_are_freed() {
         wire.extend_from_slice(b"\r\n");
     }
     feed(&mut term, &wire);
-    let events = term.take_anchor_events();
+    let events = take_events(&mut term);
     assert_eq!(events.len(), MAX_ANCHORS);
     assert!(events.iter().enumerate().all(|(i, e)| matches!(
         e,
@@ -593,7 +649,7 @@ fn a_full_table_refuses_anchors_until_tags_are_freed() {
 
     feed(&mut term, &anchor_bytes(7, 5000, 1));
     assert_eq!(
-        term.take_anchor_events(),
+        take_events(&mut term),
         vec![AnchorEvent::Refused {
             anchor: anchor(5000, 1),
             reason: AnchorRefusal::TableFull,
@@ -603,7 +659,7 @@ fn a_full_table_refuses_anchors_until_tags_are_freed() {
     // Clearing scrollback loses all but the last two (still on screen), and
     // their tags are reused.
     feed(&mut term, b"\x1b[3J");
-    let gone = term.take_anchor_events();
+    let gone = take_events(&mut term);
     assert_eq!(gone.len(), MAX_ANCHORS - 2);
     assert_eq!(place(&mut term, 5000, 1), 1);
 }
@@ -615,7 +671,7 @@ fn releasing_an_anchor_frees_its_tag_and_rows() {
     assert_eq!(term.buffer_mut().release_anchor(tag), Some(anchor(1, 3)));
     assert!(tags(&term).iter().all(|&t| t == 0));
     assert_eq!(term.buffer_mut().release_anchor(tag), None);
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
     term.check_integrity().unwrap();
 }
 
@@ -633,7 +689,7 @@ fn anchors_are_read_and_released_on_the_main_screen_under_the_alternate() {
     assert_eq!(term.main_buffer().anchor_line(tag), None);
     feed(&mut term, b"\x1b[?1049l");
     assert!(tags(&term).iter().all(|&t| t == 0));
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
 }
 
 #[test]
@@ -643,10 +699,11 @@ fn a_new_anchor_over_an_old_first_row_replaces_it() {
     feed(&mut term, b"\x1b[1H");
     feed(&mut term, &anchor_bytes(7, 2, 1));
     assert_eq!(
-        term.take_anchor_events(),
+        take_events(&mut term),
         vec![
             AnchorEvent::Placed {
                 tag: 2,
+                serial: 0,
                 anchor: anchor(2, 1)
             },
             lost(old, 1, 2)
@@ -662,7 +719,7 @@ fn anchors_are_ignored_until_turned_on() {
     feed(&mut term, b"$ ");
     feed(&mut term, &anchor_bytes(7, 1, 3));
     feed(&mut term, b"card");
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
     assert!(tags(&term).iter().all(|&t| t == 0));
     assert_eq!(term.grid().row(0).unwrap().text_trimmed(), "$ card");
     assert_eq!(cursor(&term), (0, 6));
@@ -681,7 +738,7 @@ fn erasing_below_the_first_row_loses_the_anchor() {
     // ED 0 on the first row keeps that row's tag (it erases only part of
     // it) but erases the rest of the reservation.
     feed(&mut term, b"\x1b[1;1H\x1b[J");
-    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 3)]);
+    assert_eq!(take_events(&mut term), vec![lost(tag, 1, 3)]);
     assert!(tags(&term).iter().all(|&t| t == 0));
 }
 
@@ -691,7 +748,7 @@ fn inserting_or_deleting_a_line_inside_a_reservation_loses_it() {
         let mut term = term(20, 6);
         let tag = place(&mut term, 1, 3);
         feed(&mut term, split);
-        assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 3)]);
+        assert_eq!(take_events(&mut term), vec![lost(tag, 1, 3)]);
         assert!(tags(&term).iter().all(|&t| t == 0));
     }
 }
@@ -707,7 +764,7 @@ fn a_first_row_moved_on_the_grid_then_scrolled_off_is_still_found() {
     for n in 0..20 {
         feed(&mut term, format!("{n}\r\n").as_bytes());
     }
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
     let first = tags(&term).iter().position(|&t| t == tag).unwrap();
     assert!(first < term.buffer().history_len());
     assert_eq!(term.buffer().anchor_line(tag), Some(first));
@@ -724,7 +781,7 @@ fn stale_tags_left_in_scrollback_are_dropped_by_reflow() {
     for n in 0..6 {
         feed(&mut term, format!("{n}\r\n").as_bytes());
     }
-    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 2)]);
+    assert_eq!(take_events(&mut term), vec![lost(tag, 1, 2)]);
     // The second row was two lines down, outside what the anchor reserved,
     // and keeps a stale tag that marks no first row.
     assert_eq!(tags(&term)[..3], [0, 0, tag]);
@@ -742,12 +799,12 @@ fn a_reservation_pulled_back_from_scrollback_can_be_erased_again() {
         feed(&mut term, format!("{n}\r\n").as_bytes());
     }
     // Checked while all in scrollback...
-    assert_eq!(term.take_anchor_events(), vec![]);
+    assert_eq!(take_events(&mut term), vec![]);
     // ...then back on the grid, where its second row is erased.
     term.resize(Dimensions::new(20, 12));
     assert_eq!(term.buffer().history_len(), 0);
     feed(&mut term, b"\x1b[2;1H\x1b[2K");
-    assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 2)]);
+    assert_eq!(take_events(&mut term), vec![lost(tag, 1, 2)]);
 }
 
 #[test]
