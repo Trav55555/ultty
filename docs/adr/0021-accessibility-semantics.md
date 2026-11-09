@@ -356,7 +356,14 @@ Each slice is independently testable and mergeable.
    is opt-in (`accessibility = false` by default) per Consequences;
    `docs/perf/2026-11-08-accessibility-adapter.md`.
 4. **Grid as Terminal**: tabs, panes, focused grid rows and caret, coalesced
-   rebuilds. Check: builder tests; manual steps 1 to 3 recorded.
+   rebuilds. Check: builder tests; manual steps 1 to 3 recorded. Done
+   2026-11-08 except the Orca run: the steps are written in
+   `docs/accessibility-test.md`, not yet run with Orca;
+   `scripts/e2e/accessibility-atspi.sh` checks the same text and caret
+   over AT-SPI without a screen reader. The panes sit in a `TabPanel`
+   that the selected `Tab` `controls`, not under the `Tab` node (the ARIA
+   tab pattern). The rows are the live screen even while the view is
+   scrolled back (scrollback is deferred, §2).
 5. **Native scenes**: regions to nodes, derived and explicit roles, focus.
    Check: builder tests; manual step 6.
 6. **Live regions**: queue, flush rules, cap, pruning, `busy`. Check: builder
@@ -379,7 +386,11 @@ Each slice is independently testable and mergeable.
   `Action::Click` works, and should it come with keyboard activation of
   `Button` regions in general?
 - Does `accesskit_winit`'s "full tree" requirement apply to every update
-  or only the first after activation? Slice 4 reads the adapter source and
-  measures; incremental updates wait on the answer.
+  or only the first after activation? Answered by the source
+  (`accesskit_consumer` 0.39.2 `Tree::update`): only the first. Later
+  updates may carry just the changed nodes; nodes no longer reachable
+  are dropped, and unchanged nodes in a full update raise no events.
+  Slice 4 sends full trees (44 nodes for an 88x39 screen, built in under
+  0.1 ms); incremental updates stay a later optimisation.
 - Whether the unused `tokio` dependency of `crates/ultty` should go, now
   that a second executor arrives.
