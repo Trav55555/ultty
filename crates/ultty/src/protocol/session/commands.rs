@@ -354,6 +354,8 @@ impl NativeSession {
         region.parent = Some(parent);
         region.constraints = constraints;
         region.style = style;
+        // A stream may be opened before its region is created.
+        region.streaming = self.active_streams.contains_key(&id);
 
         let index = usize::try_from(insert_index).unwrap_or(usize::MAX);
         match self.scene.try_insert_at(region, index) {
@@ -608,6 +610,7 @@ impl NativeSession {
         let mut region = Region::new(id);
         region.constraints = constraints;
         region.style = style;
+        region.streaming = self.active_streams.contains_key(&id);
         match self.scene.try_insert_surface(region, rows) {
             Ok(()) => {
                 self.mark_full_scene_rebuild();

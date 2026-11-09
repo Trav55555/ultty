@@ -232,7 +232,7 @@ impl SceneSnapshot {
             .enumerate()
             .map(|(index, region)| (region.id, index))
             .collect();
-        let root = self.emit_region(0, &by_id, out, budget)?;
+        let root = self.emit_region(0, &by_id, out, budget, false)?;
         if let Some(target) = described_by {
             // The root is pushed after its subtree, so it is the last node.
             if let Some((_, node)) = out.nodes.last_mut() {
@@ -242,12 +242,18 @@ impl SceneSnapshot {
         Some(root)
     }
 
+    /// Add region `index` and its subtree. `in_live` says whether a region
+    /// above it is live: AccessKit's liveness is inherited, so every node
+    /// under a live region that is not live itself is marked `Off`, else
+    /// each new or renamed one (a line, a growing child) would be spoken
+    /// besides, and faster than, the region's announcements.
     fn emit_region(
         &self,
         index: usize,
         by_id: &HashMap<u32, usize>,
         out: &mut Emitter,
         budget: &mut usize,
+        in_live: bool,
     ) -> Option<NodeId> {
         let region = self.regions.get(index)?;
         if *budget == 0 {
@@ -260,6 +266,15 @@ impl SceneSnapshot {
         }
         *budget -= 1;
         let mut node = region_node(region);
+        let live = region.semantics.live != Live::Off;
+        if in_live && !live {
+            node.set_live(AkLive::Off);
+        }
+        // The announcements are added last but counted first, so the text
+        // and children cannot take all the budget and hold them back to
+        // burst out in a later tree.
+        let reserved = region.announcements.len().min(*budget);
+        *budget -= reserved;
         // The text comes before any child regions, as it is drawn.
         let mut children = Vec::with_capacity(region.lines.len() + region.children.len());
         for (line, text) in &region.lines {
@@ -272,9 +287,7 @@ impl SceneSnapshot {
                 *budget -= 1;
                 let mut label = Node::new(AkRole::Label);
                 label.set_value(text.as_str());
-                if region.semantics.live != Live::Off {
-                    // Liveness is inherited: a new or changed line would be
-                    // announced besides the region's own announcements.
+                if live || in_live {
                     label.set_live(AkLive::Off);
                 }
                 out.nodes.push((line_id, label));
@@ -283,13 +296,14 @@ impl SceneSnapshot {
         }
         for child in &region.children {
             if let Some(&child) = by_id.get(child) {
-                if let Some(child) = self.emit_region(child, by_id, out, budget) {
+                if let Some(child) = self.emit_region(child, by_id, out, budget, live || in_live) {
                     children.push(child);
                 }
             }
         }
         // Then its announcements, newest last; adding one is what makes
         // the platform speak it.
+        *budget += reserved;
         for announcement in &region.announcements {
             if *budget == 0 {
                 out.truncated = true;
@@ -1505,24 +1519,32 @@ mod tests {
     /// Records how many nodes AccessKit reports as added, and the live ones.
     #[derive(Default)]
     struct Added {
+        /// What the platform adapters would announce: live nodes added,
+        /// and live nodes whose name changed.
         live: Vec<(String, AkLive)>,
         added: usize,
+    }
+
+    /// What AT-SPI names a node: a label's name is its value.
+    fn name(node: &accesskit_consumer::NodeRef) -> String {
+        node.label().or_else(|| node.value()).unwrap_or_default()
     }
 
     impl accesskit_consumer::TreeChangeHandler for Added {
         fn node_added(&mut self, node: &accesskit_consumer::NodeRef) {
             self.added += 1;
             if node.live() != AkLive::Off {
-                // What AT-SPI names it: a label's name is its value.
-                let name = node.label().or_else(|| node.value()).unwrap_or_default();
-                self.live.push((name, node.live()));
+                self.live.push((name(node), node.live()));
             }
         }
         fn node_updated(
             &mut self,
-            _: &accesskit_consumer::NodeRef,
-            _: &accesskit_consumer::NodeRef,
+            old: &accesskit_consumer::NodeRef,
+            new: &accesskit_consumer::NodeRef,
         ) {
+            if new.live() != AkLive::Off && name(old) != name(new) {
+                self.live.push((name(new), new.live()));
+            }
         }
         fn focus_moved(
             &mut self,
@@ -1646,5 +1668,63 @@ mod tests {
             .expect("region 1")
             .1;
         assert!(log.children().is_empty(), "{:?}", log.children());
+    }
+
+    #[test]
+    fn nothing_under_a_live_region_is_live_but_its_announcements() {
+        let scene_with = |child_text: &str| {
+            let mut scene = Scene::new();
+            let log = scene.add(1, 0, Content::None);
+            log.set_semantics(Semantics {
+                label: Some("Transcript".to_owned()),
+                live: Live::Polite,
+                ..Semantics::default()
+            });
+            // A child the app streams into without marking it live.
+            scene.add(2, 1, text(child_text)).appended = true;
+            scene.add(3, 2, text(child_text)).appended = true;
+            let mut snapshot = pane(vec![scene.capture(7, 0)], None);
+            snapshot.set_announcements(&LiveRegions::default());
+            build("Ultty", &snapshot)
+        };
+        let update = scene_with("Thinking");
+        for id in [2, 3] {
+            assert_eq!(region(&update, id).live(), Some(AkLive::Off), "region {id}");
+        }
+        let mut tree = consume(update);
+        for text in ["Thinking about", "Thinking about it\nand more", "x\ny\nz"] {
+            let update = scene_with(text);
+            let mut added = Added::default();
+            tree.update_and_process_changes(update, &mut added);
+            assert!(added.live.is_empty(), "{text:?} announced {:?}", added.live);
+        }
+        let state = tree.state();
+        let line = state
+            .node_by_tree_local_id(region_line_node_id(7, 3, 2), accesskit::TreeId::ROOT)
+            .expect("a line of region 3");
+        assert_eq!(line.live(), AkLive::Off);
+    }
+
+    #[test]
+    fn announcements_are_not_crowded_out_by_the_node_budget() {
+        let t0 = std::time::Instant::now();
+        let mut live = LiveRegions::default();
+        live.push(7, 1, Live::Polite, "kept\n", t0);
+        assert!(live.flush(t0));
+        let mut scene = Scene::new();
+        scene.add(1, 0, Content::None).set_semantics(Semantics {
+            live: Live::Polite,
+            ..Semantics::default()
+        });
+        for id in 2..(MAX_PANE_NODES as u32 + 100) {
+            scene.add(id, 1, Content::None);
+        }
+        let mut snapshot = pane(vec![scene.capture(7, 0)], None);
+        snapshot.set_announcements(&live);
+        let update = build("Ultty", &snapshot);
+        let announcement = crate::a11y::tree::region_announcement_node_id(7, 1, 0);
+        assert_eq!(region(&update, 1).children().last(), Some(&announcement));
+        assert_eq!(node(&update, announcement).value(), Some("kept"));
+        consume(update);
     }
 }

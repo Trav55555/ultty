@@ -10,7 +10,7 @@ mod errors;
 mod frame;
 mod live_appends;
 
-pub use live_appends::LiveAppend;
+pub use live_appends::LiveChange;
 mod surfaces;
 mod transport;
 
@@ -1635,6 +1635,21 @@ mod tests {
         assert!(busy(&session));
         assert_ne!(session.shown_generation(), before, "StreamStart is shown");
 
+        // A stream opened before its region exists is busy once it does.
+        session
+            .handle_message(AppMessage::StreamStart {
+                id: RegionId::new(2),
+                stream_id: 9,
+            })
+            .unwrap();
+        run_frame(&mut session, 2, vec![create_region(2, 0)]);
+        assert!(
+            crate::scene::semantics::effective_semantics(
+                session.scene.get(RegionId::new(2)).unwrap()
+            )
+            .busy
+        );
+
         // Another stream's end leaves it open.
         session
             .handle_message(AppMessage::StreamEnd { id, stream_id: 7 })
@@ -2140,31 +2155,58 @@ mod tests {
         append(&mut session, 1, "Compiling ");
         append(&mut session, 1, "ultty\n");
         append(&mut session, 2, "not live\n");
-        assert_eq!(
-            session.take_live_appends(),
-            [LiveAppend {
-                region: RegionId::new(1),
-                live: ultty_protocol::Live::Polite,
-                text: "Compiling ultty\n".to_string(),
-            }]
-        );
+        let appended = |text: &str| LiveChange::Appended {
+            region: RegionId::new(1),
+            live: ultty_protocol::Live::Polite,
+            text: text.to_string(),
+        };
+        assert_eq!(session.take_live_appends(), [appended("Compiling ultty\n")]);
         assert!(session.take_live_appends().is_empty(), "taken once");
 
-        // A deleted region's text is dropped with it.
+        // Deleted and created again between two passes: the deletion comes
+        // between the old text and the new, so the old is not announced
+        // under the new region.
         append(&mut session, 1, "gone\n");
         run_frame(
             &mut session,
             2,
+            vec![
+                AppMessage::DeleteRegion {
+                    id: RegionId::new(1),
+                },
+                AppMessage::DeleteRegion {
+                    id: RegionId::new(2),
+                },
+                create_region(1, 0),
+                set_semantics(1, polite_log()),
+            ],
+        );
+        append(&mut session, 1, "new\n");
+        assert_eq!(
+            session.take_live_appends(),
+            [
+                appended("gone\n"),
+                LiveChange::Removed(RegionId::new(1)),
+                appended("new\n"),
+            ],
+            "region 2 never had live text, so its deletion is not reported"
+        );
+        run_frame(
+            &mut session,
+            3,
             vec![AppMessage::DeleteRegion {
                 id: RegionId::new(1),
             }],
         );
-        assert!(session.take_live_appends().is_empty());
+        assert_eq!(
+            session.take_live_appends(),
+            [LiveChange::Removed(RegionId::new(1))]
+        );
 
         session.set_live_announcements(false);
         run_frame(
             &mut session,
-            3,
+            4,
             vec![create_region(1, 0), set_semantics(1, polite_log())],
         );
         append(&mut session, 1, "unheard again\n");

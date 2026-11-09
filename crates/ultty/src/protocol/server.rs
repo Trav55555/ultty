@@ -37,7 +37,7 @@ use polling::{Event, Events, Poller};
 use tracing::{error, info, warn};
 
 use super::pairing::AnchorPairing;
-use super::session::{LiveAppend, NativeSession};
+use super::session::{LiveChange, NativeSession};
 use crate::grid::Terminal;
 use crate::platform::socket::{peer_uid, set_cloexec, tab_socket_file_name};
 use crate::terminal_manager::{TabId, TerminalId};
@@ -666,20 +666,20 @@ impl ProtocolServer {
         }
     }
 
-    /// Hand `appended` the text appended to the live regions of the active
-    /// tab's shown sessions since the last call, as (session id, append).
-    /// Other sessions' text is dropped: they are not on screen, and must
-    /// not be announced when their tab is shown later.
-    pub fn take_live_appends(&mut self, mut appended: impl FnMut(u64, LiveAppend)) {
+    /// Hand `changed` what happened to the live regions of the active
+    /// tab's shown sessions since the last call, as (session id, change).
+    /// Other sessions' changes are dropped: they are not on screen, and
+    /// must not be announced when their tab is shown later.
+    pub fn take_live_appends(&mut self, mut changed: impl FnMut(u64, LiveChange)) {
         if !self.live_announcements {
             return;
         }
         let active = self.active_tab;
         for session in self.sessions.values_mut() {
             let shown = Some(session.tab_id()) == active && session.is_confirmed();
-            for append in session.take_live_appends() {
+            for change in session.take_live_appends() {
                 if shown {
-                    appended(session.session_id(), append);
+                    changed(session.session_id(), change);
                 }
             }
         }

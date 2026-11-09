@@ -9,13 +9,17 @@
 //! flush with a line break in it takes the complete lines only; the line
 //! begun after them waits for its own break, or the delay from its own
 //! first byte, so lines held back by the cap below do not drag a fragment
-//! of the next one with them. A session
-//! flushes at most once per [`FLUSH_SPACING`] (four a second), oldest
-//! queue first; text that arrives meanwhile joins the next flush. A flush
-//! is at most [`MAX_FLUSH_BYTES`], cut at the last line break inside that
-//! (else the last blank, else a character boundary), and the rest waits.
-//! A region keeps its last [`MAX_ANNOUNCEMENTS`]; the region's own text
-//! nodes carry the whole transcript for review.
+//! of the next one with them. A session flushes at most once per
+//! [`FLUSH_SPACING`] (four a second), oldest queue first; text that
+//! arrives meanwhile joins the next flush. A flush is at most
+//! [`MAX_FLUSH_BYTES`], cut at the last line break inside that (else the
+//! last blank, else a character boundary), and the rest waits. A region
+//! keeps its last [`MAX_ANNOUNCEMENTS`]; the region's own text nodes carry
+//! the whole transcript for review.
+//!
+//! Memory is bounded twice: a region queues at most [`MAX_QUEUED_BYTES`],
+//! and a session's regions hold at most [`MAX_SESSION_BYTES`], queued and
+//! announced together, the oldest going first.
 //!
 //! Nothing here runs unless a screen reader is listening, and the clock is
 //! the caller's, so tests script it.
@@ -40,16 +44,30 @@ pub const MAX_ANNOUNCEMENTS: usize = 8;
 
 /// The most unannounced bytes a region queues. Text arriving faster than
 /// four flushes a second can carry is dropped oldest first, from a line
-/// start where there is one: nobody can listen that fast, and the region's
+/// start where one is near: nobody can listen that fast, and the region's
 /// text keeps all of it.
 pub const MAX_QUEUED_BYTES: usize = 16 * 1024;
+
+/// What a queue over [`MAX_QUEUED_BYTES`] is cut to, so that a flood
+/// trims once per few KiB appended rather than on every append.
+const TRIMMED_QUEUE_BYTES: usize = MAX_QUEUED_BYTES / 4 * 3;
+
+/// How far past a queue's cut a trim looks for a line break to cut after.
+const LINE_SEARCH_BYTES: usize = 1024;
+
+/// The most bytes one session's live regions hold, queued and announced.
+pub const MAX_SESSION_BYTES: usize = 64 * 1024;
+
+/// What a session over [`MAX_SESSION_BYTES`] is cut to.
+const TRIMMED_SESSION_BYTES: usize = MAX_SESSION_BYTES / 4 * 3;
 
 /// One flush of a region's queue: the node the platform announces.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Announcement {
-    /// The region's count of announcements before this one, which names
-    /// its node, so a kept announcement keeps its node and a new one never
-    /// reuses an old node's id.
+    /// Counts every flush since assistive technology arrived and names
+    /// the node, so a kept announcement keeps its node and a new one never
+    /// takes an id that was in the tree, not even after its region was
+    /// deleted and created again.
     pub serial: u64,
     /// The text, without leading or trailing blanks.
     pub text: String,
@@ -64,6 +82,10 @@ pub struct LiveRegions {
     regions: BTreeMap<(u64, u32), LiveRegion>,
     /// Each session's last flush, while it still holds the next one back.
     last_flush: HashMap<u64, Instant>,
+    /// The bytes each session's regions hold ([`LiveRegion::size`]).
+    bytes: HashMap<u64, usize>,
+    /// The next announcement's serial.
+    next_serial: u64,
 }
 
 #[derive(Debug, Default)]
@@ -71,13 +93,16 @@ struct LiveRegion {
     live: Live,
     /// Text appended and not yet announced.
     queue: String,
+    /// Where the queue's last line break is.
+    last_break: Option<usize>,
     /// When the queue's first byte arrived; `None` while it is empty.
     since: Option<Instant>,
     /// When the first byte after the queue's last line break arrived;
     /// `None` when the queue is empty or ends with a line break.
     line_since: Option<Instant>,
     announced: VecDeque<Announcement>,
-    next_serial: u64,
+    /// Bytes of text in `announced`.
+    announced_bytes: usize,
 }
 
 impl LiveRegions {
@@ -99,29 +124,18 @@ impl LiveRegions {
             return;
         }
         let entry = self.regions.entry((session, region)).or_default();
+        let before = entry.size();
         entry.live = live;
-        if entry.queue.is_empty() {
-            entry.since = Some(now);
-        }
-        match text.rfind('\n') {
-            Some(last) if last + 1 == text.len() => entry.line_since = None,
-            Some(_) => entry.line_since = Some(now),
-            None => {
-                entry.line_since.get_or_insert(now);
-            }
-        }
-        entry.queue.push_str(text);
-        if entry.queue.len() > MAX_QUEUED_BYTES {
-            let excess = entry.queue.len() - MAX_QUEUED_BYTES;
-            let cut = entry.queue[excess..].find('\n').map_or_else(
-                || ceil_char_boundary(&entry.queue, excess),
-                |at| excess + at + 1,
-            );
-            entry.queue.drain(..cut);
-            if entry.queue.is_empty() {
-                entry.since = None;
-                entry.line_since = None;
-            }
+        entry.append(text, now);
+        account(&mut self.bytes, session, before, entry.size());
+        self.keep_session_within_budget(session);
+    }
+
+    /// `region` of `session` was deleted: drop its queue and announcements,
+    /// so a region created again with its id starts with none.
+    pub fn forget(&mut self, session: u64, region: u32) {
+        if let Some(gone) = self.regions.remove(&(session, region)) {
+            account(&mut self.bytes, session, gone.size(), 0);
         }
     }
 
@@ -150,7 +164,11 @@ impl LiveRegions {
             let Some(region) = self.regions.get_mut(&key) else {
                 continue;
             };
-            if region.flush(now) {
+            let before = region.size();
+            let flushed = region.flush(now, self.next_serial);
+            account(&mut self.bytes, session, before, region.size());
+            if flushed {
+                self.next_serial += 1;
                 self.last_flush.insert(session, now);
                 announced = true;
             }
@@ -185,33 +203,130 @@ impl LiveRegions {
     /// leaves the tree loses its queue and announcements, so that coming
     /// back does not add, and announce, old nodes again.
     pub fn retain(&mut self, mut shown: impl FnMut(u64, u32) -> bool) {
-        self.regions
-            .retain(|&(session, region), _| shown(session, region));
+        let bytes = &mut self.bytes;
+        self.regions.retain(|&(session, region), live| {
+            let keep = shown(session, region);
+            if !keep {
+                account(bytes, session, live.size(), 0);
+            }
+            keep
+        });
+    }
+
+    /// Bring `session` back under [`MAX_SESSION_BYTES`] once it passes it,
+    /// to [`TRIMMED_SESSION_BYTES`]: the oldest announcements leave first,
+    /// then the queues that have waited longest.
+    fn keep_session_within_budget(&mut self, session: u64) {
+        if self.bytes.get(&session).copied().unwrap_or(0) <= MAX_SESSION_BYTES {
+            return;
+        }
+        while self.bytes.get(&session).copied().unwrap_or(0) > TRIMMED_SESSION_BYTES {
+            let range = (session, 0)..=(session, u32::MAX);
+            let oldest_announced = self
+                .regions
+                .range(range.clone())
+                .filter_map(|(&key, region)| Some((region.announced.front()?.serial, key)))
+                .min();
+            let victim = match oldest_announced {
+                Some((_, key)) => key,
+                None => match self
+                    .regions
+                    .range(range)
+                    .filter_map(|(&key, region)| Some((region.since?, key)))
+                    .min()
+                {
+                    Some((_, key)) => key,
+                    None => break,
+                },
+            };
+            let Some(region) = self.regions.get_mut(&victim) else {
+                break;
+            };
+            let before = region.size();
+            if let Some(dropped) = region.announced.pop_front() {
+                region.announced_bytes -= dropped.text.len();
+            } else {
+                region.drop_front(region.queue.len());
+            }
+            account(&mut self.bytes, session, before, region.size());
+        }
+    }
+}
+
+/// Move `session`'s count in `bytes` from a region's `before` to `after`.
+fn account(bytes: &mut HashMap<u64, usize>, session: u64, before: usize, after: usize) {
+    let total = bytes.entry(session).or_default();
+    *total = (*total + after).saturating_sub(before);
+    if *total == 0 {
+        bytes.remove(&session);
     }
 }
 
 impl LiveRegion {
+    /// Bytes the region holds, queued and announced.
+    fn size(&self) -> usize {
+        self.queue.len() + self.announced_bytes
+    }
+
+    /// Queue `text`, arrived at `now`, keeping the queue within
+    /// [`MAX_QUEUED_BYTES`].
+    fn append(&mut self, text: &str, now: Instant) {
+        if self.queue.is_empty() {
+            self.since = Some(now);
+        }
+        match text.rfind('\n') {
+            Some(last) => {
+                self.last_break = Some(self.queue.len() + last);
+                self.line_since = (last + 1 < text.len()).then_some(now);
+            }
+            None => {
+                self.line_since.get_or_insert(now);
+            }
+        }
+        self.queue.push_str(text);
+        if self.queue.len() > MAX_QUEUED_BYTES {
+            // Keep the newest, from a line start if one is near the cut.
+            let from = ceil_char_boundary(&self.queue, self.queue.len() - TRIMMED_QUEUE_BYTES);
+            let window =
+                &self.queue[from..ceil_char_boundary(&self.queue, from + LINE_SEARCH_BYTES)];
+            let cut = window.find('\n').map_or(from, |at| from + at + 1);
+            self.drop_front(cut);
+        }
+    }
+
+    /// Drop the queue's first `len` bytes, which end on a character
+    /// boundary.
+    fn drop_front(&mut self, len: usize) {
+        self.queue.drain(..len);
+        self.last_break = self.last_break.and_then(|at| at.checked_sub(len));
+        if self.queue.is_empty() {
+            self.since = None;
+            self.line_since = None;
+        }
+    }
+
     /// When the queue is due: at once with a complete line in it, else
     /// [`FLUSH_DELAY`] after its first byte. `None` when it is empty.
     fn ready_at(&self) -> Option<Instant> {
         let since = self.since?;
-        Some(if self.queue.contains('\n') {
+        Some(if self.last_break.is_some() {
             since
         } else {
             since + FLUSH_DELAY
         })
     }
 
-    /// Move the due part of the queue into a new announcement. Returns
-    /// false, with that part dropped, when it is only blanks.
-    fn flush(&mut self, now: Instant) -> bool {
+    /// Move the due part of the queue into a new announcement numbered
+    /// `serial`. Returns false, with that part dropped, when it is only
+    /// blanks.
+    fn flush(&mut self, now: Instant, serial: u64) -> bool {
         let Some(since) = self.since else {
             return false;
         };
         // Complete lines go out alone: a line begun after them waits for
         // its own break or delay, so it is not cut mid-word just because
         // the lines before it were held back.
-        let mut end = match self.queue.rfind('\n') {
+        let mut end = match self.last_break {
             Some(last) => last + 1,
             None if now.saturating_duration_since(since) >= FLUSH_DELAY => self.queue.len(),
             None => return false,
@@ -219,27 +334,26 @@ impl LiveRegion {
         if end > MAX_FLUSH_BYTES {
             end = cut_point(&self.queue, MAX_FLUSH_BYTES);
         }
-        let text: String = self.queue.drain(..end).collect();
-        if self.queue.is_empty() {
-            self.since = None;
-            self.line_since = None;
-        } else if !self.queue.contains('\n') {
+        let text = self.queue[..end].trim().to_owned();
+        self.drop_front(end);
+        if !self.queue.is_empty() && self.last_break.is_none() {
             // What is left is the start of a line; it waits from when that
             // line began.
             self.since = Some(self.line_since.unwrap_or(now));
         }
-        let text = text.trim();
         if text.is_empty() {
             return false;
         }
+        self.announced_bytes += text.len();
         self.announced.push_back(Announcement {
-            serial: self.next_serial,
-            text: text.to_owned(),
+            serial,
+            text,
             live: self.live,
         });
-        self.next_serial += 1;
         while self.announced.len() > MAX_ANNOUNCEMENTS {
-            self.announced.pop_front();
+            if let Some(dropped) = self.announced.pop_front() {
+                self.announced_bytes -= dropped.text.len();
+            }
         }
         true
     }
@@ -503,5 +617,83 @@ mod tests {
         assert_eq!(live.announcements(7, 1).count(), 0);
         assert!(live.flush(t0));
         assert_eq!(live.announcements(7, 2).count(), 1);
+    }
+
+    #[test]
+    fn a_flood_of_multi_byte_text_is_trimmed_on_character_boundaries() {
+        // 2-, 3- and 4-byte characters, after an odd number of ASCII bytes,
+        // so a cut by byte count would land inside one.
+        for wide in ["é", "中", "🦀"] {
+            for lead in ["a", "ab", "abc"] {
+                let t0 = Instant::now();
+                let mut live = LiveRegions::default();
+                live.push(7, 1, Live::Polite, lead, t0);
+                live.push(7, 1, Live::Polite, &wide.repeat(8192), t0);
+                live.push(7, 1, Live::Polite, "a", t0);
+                live.push(
+                    7,
+                    1,
+                    Live::Polite,
+                    &format!("{lead}\n{}", wide.repeat(5000)),
+                    t0,
+                );
+                let queue = &live.regions[&(7, 1)].queue;
+                assert!(queue.len() <= MAX_QUEUED_BYTES, "{wide} after {lead}");
+                // And it still flushes on boundaries.
+                let mut at = t0 + FLUSH_DELAY;
+                for _ in 0..40 {
+                    live.flush(at);
+                    at += FLUSH_SPACING;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_session_holds_at_most_its_budget_across_regions_oldest_first() {
+        let t0 = Instant::now();
+        let mut live = LiveRegions::default();
+        // Many regions, each announcing and queueing.
+        let line = "x".repeat(1000) + "\n";
+        let mut now = t0;
+        for region in 0..200u32 {
+            live.push(7, region, Live::Polite, &line, now);
+            live.flush(now);
+            live.push(7, region, Live::Polite, &line.repeat(3), now);
+            now += FLUSH_SPACING;
+            let held: usize = live.regions.values().map(LiveRegion::size).sum();
+            assert!(
+                held <= MAX_SESSION_BYTES,
+                "{held} bytes after region {region}"
+            );
+            assert_eq!(live.bytes.get(&7).copied().unwrap_or(0), held);
+        }
+        // The newest region kept its text; the oldest lost theirs.
+        assert!(live.regions[&(7, 199)].size() > 0);
+        assert_eq!(live.regions[&(7, 0)].size(), 0);
+        // Other sessions are not charged for it.
+        live.push(8, 1, Live::Polite, "ok\n", now);
+        assert!(live.flush(now));
+        assert_eq!(live.announcements(8, 1).count(), 1);
+    }
+
+    #[test]
+    fn a_forgotten_region_starts_again_with_nothing() {
+        let t0 = Instant::now();
+        let mut live = LiveRegions::default();
+        live.push(7, 1, Live::Polite, "old\n", t0);
+        assert!(live.flush(t0));
+        live.push(7, 1, Live::Polite, "old, unflushed", t0);
+        live.forget(7, 1);
+        assert_eq!(live.announcements(7, 1).count(), 0);
+        assert_eq!(live.next_deadline(), None);
+        assert!(live.bytes.is_empty());
+        live.push(7, 1, Live::Polite, "new\n", t0 + FLUSH_SPACING);
+        assert!(live.flush(t0 + FLUSH_SPACING));
+        let new: Vec<(u64, String)> = live
+            .announcements(7, 1)
+            .map(|a| (a.serial, a.text.clone()))
+            .collect();
+        assert_eq!(new, [(1, "new".to_owned())], "a serial never reused");
     }
 }

@@ -12,6 +12,7 @@ use std::time::Instant;
 use accesskit::Rect;
 use ultty::a11y::scene::{Placement, SceneSnapshot};
 use ultty::a11y::tree::{GridSnapshot, PaneSnapshot, Snapshot, SurfaceSnapshot, TabSnapshot};
+use ultty::protocol::session::LiveChange;
 use ultty::protocol::{NativeSession, ProtocolServer};
 use ultty::terminal_manager::ManagedTerminal;
 use ultty_protocol::RegionId;
@@ -38,9 +39,17 @@ impl App {
         let Some(adapter) = self.accessibility.as_mut() else {
             return;
         };
+        // Native scenes are shown only in a tab of one pane (see
+        // `accessibility_snapshot`); text for scenes that are not shown is
+        // dropped rather than flushed into a tree that leaves it out.
+        let scenes_shown = self.terminal_manager.active_pane_rects(1.0, 1.0).len() == 1;
         if let Some(server) = self.protocol_server.as_mut() {
-            server.take_live_appends(|session, append| {
-                adapter.appended(session, append.region.0, append.live, &append.text, now);
+            server.take_live_appends(|session, change| match change {
+                LiveChange::Appended { region, live, text } if scenes_shown => {
+                    adapter.appended(session, region.0, live, &text, now);
+                }
+                LiveChange::Appended { .. } => {}
+                LiveChange::Removed(region) => adapter.removed(session, region.0),
             });
         }
         if screen_changed {

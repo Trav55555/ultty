@@ -138,6 +138,12 @@ impl Adapter {
         }
     }
 
+    /// `region` of native `session` was deleted; whatever it queued or
+    /// announced goes with it.
+    pub fn removed(&mut self, session: u64, region: u32) {
+        self.live.forget(session, region);
+    }
+
     /// When the loop must wake to send a coalesced tree or flush a live
     /// region, if either is waiting. `None` while inactive or with nothing
     /// changed or queued.
