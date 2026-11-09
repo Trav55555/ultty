@@ -108,6 +108,8 @@ pub struct UlttyClient {
     text_out: Box<dyn Write + Send>,
     /// The terminal hung up: a read found the end of the stream.
     closed: bool,
+    /// In-band, what the terminal sent that is not protocol data: keys.
+    input: Vec<u8>,
 }
 
 /// How the client reaches the terminal.
@@ -140,10 +142,12 @@ impl UlttyClient {
     /// Connect in-band through this process's own terminal (stdin and
     /// stdout), which stays in raw mode until the client is dropped.
     pub fn connect_in_band() -> Result<Self, Error> {
-        Self::in_band_over(in_band::InBandTty::open()?)
+        Self::connect_in_band_on(in_band::InBandTty::open()?)
     }
 
-    fn in_band_over(mut tty: in_band::InBandTty) -> Result<Self, Error> {
+    /// Connect in-band through `tty`, a terminal already opened with
+    /// [`in_band::InBandTty::open_on`].
+    pub fn connect_in_band_on(mut tty: in_band::InBandTty) -> Result<Self, Error> {
         let mut received = Vec::new();
         if !in_band::probe(&mut tty, &mut received, in_band::PROBE_TIMEOUT)? {
             return Err(Error::NotUltty);
@@ -185,6 +189,7 @@ impl UlttyClient {
             frame_id: 0,
             text_out: Box::new(std::io::stdout()),
             closed: false,
+            input: Vec::new(),
         }
     }
 
@@ -229,6 +234,33 @@ impl UlttyClient {
     /// sent from now on arrives.
     pub fn is_closed(&self) -> bool {
         self.closed
+    }
+
+    /// Bytes typed on the terminal that the client read while looking for
+    /// protocol data (in-band only), in the order they came, after reading
+    /// whatever is available now. In-band the client reads the app's own
+    /// tty, so while it is connected the app reads its keys here rather than
+    /// from stdin. Over the socket this is always empty.
+    pub fn take_input(&mut self) -> Vec<u8> {
+        if self.is_in_band() {
+            if let Err(err) = self.read_available(None) {
+                tracing::debug!("reading the terminal for input: {err}");
+            }
+        }
+        std::mem::take(&mut self.input)
+    }
+
+    /// In-band, tell the terminal the app is alive if it has been quiet for
+    /// [`in_band::HEARTBEAT_INTERVAL`], without reading the tty (so no
+    /// typed input is consumed). Over the socket it does nothing: the
+    /// terminal pings, and [`UlttyClient::poll_events`] answers.
+    pub fn heartbeat(&mut self) -> Result<(), Error> {
+        if let Link::InBand(tty) = &self.link {
+            if tty.heartbeat_due() {
+                self.send(&AppMessage::Pong)?;
+            }
+        }
+        Ok(())
     }
 
     /// Send a raw [`AppMessage`] to the terminal.
@@ -629,15 +661,17 @@ impl UlttyClient {
     }
 
     /// Read what is available: wait up to `timeout`, or not at all for
-    /// `None`. In-band input that is not protocol data is ignored.
+    /// `None`. In-band input that is not protocol data is kept for
+    /// [`UlttyClient::take_input`].
     fn read_available(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
         let stream = match &mut self.link {
             Link::InBand(tty) => {
                 let read_buf = &mut self.read_buf;
+                let input = &mut self.input;
                 let status = tty.read(
                     timeout.unwrap_or(Duration::ZERO),
                     |frames| read_buf.extend_from_slice(frames),
-                    |_other| {},
+                    |other| input.extend_from_slice(other),
                 )?;
                 return match status {
                     in_band::ReadStatus::Open => Ok(()),
@@ -1302,7 +1336,7 @@ mod tests {
         });
 
         let tty = in_band::InBandTty::open_on(slave.as_raw_fd(), slave.as_raw_fd()).unwrap();
-        let mut client = UlttyClient::in_band_over(tty).unwrap();
+        let mut client = UlttyClient::connect_in_band_on(tty).unwrap();
         use_client(&mut client);
         drop(client); // sends Disconnect
         fake.join().unwrap()
