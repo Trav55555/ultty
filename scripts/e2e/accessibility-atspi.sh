@@ -8,30 +8,45 @@
 #
 # Needs Xvfb, dbus-run-session, at-spi-bus-launcher, the system Python with
 # python3-gi and gir1.2-atspi-2.0, and a Vulkan or GL driver (Mesa's
-# lavapipe works without a GPU). Uses $ULTTY and $ULTTYCTL, default
-# target/debug/ultty and ulttyctl, built first if unset. A local script,
-# not a CI job: it says nothing about what Orca speaks
-# (docs/accessibility-test.md).
+# lavapipe works without a GPU); xdotool, if present, focuses the window.
+# Uses $ULTTY and $ULTTYCTL, default target/debug/ultty and ulttyctl, built
+# first if unset. Artifacts go to artifact-dir if given, else to a
+# temporary directory removed on success. A local script, not a CI job:
+# it says nothing about what Orca speaks (docs/accessibility-test.md).
 set -euo pipefail
-cd "$(dirname "$0")/../.."
 
 if [ "${1:-}" != "--inner" ]; then
+    # Paths the caller gave are relative to where it ran us.
+    absolute() { case "$1" in /*) echo "$1" ;; *) echo "$PWD/$1" ;; esac; }
+    self=$(absolute "$0")
+    if [ -n "${ULTTY:-}" ]; then ULTTY=$(absolute "$ULTTY"); fi
+    if [ -n "${ULTTYCTL:-}" ]; then ULTTYCTL=$(absolute "$ULTTYCTL"); fi
+    if [ -n "${1:-}" ]; then
+        out=$(absolute "$1")
+        keep=true
+    else
+        out=$(mktemp -d)
+        keep=false
+    fi
+    cd "$(dirname "$self")/../.."
     for tool in Xvfb dbus-run-session gdbus; do
         command -v "$tool" >/dev/null || { echo "$tool is required" >&2; exit 2; }
     done
     if [ -z "${ULTTY:-}" ]; then
         cargo build -q -p ultty --bins
-        export ULTTY=target/debug/ultty ULTTYCTL=target/debug/ulttyctl
+        ULTTY=$PWD/target/debug/ultty
+        ULTTYCTL=$PWD/target/debug/ulttyctl
     fi
-    out="${1:-$(mktemp -d)}"
+    export ULTTY ULTTYCTL
     mkdir -p "$out"
-    out=$(cd "$out" && pwd)
     # A session bus of our own: the desktop's AT-SPI state is left alone.
-    exec dbus-run-session -- "$0" --inner "$out"
+    exec dbus-run-session -- "$self" --inner "$out" "$keep"
 fi
 
+cd "$(dirname "$0")/../.."
 out="$2"
-ULTTYCTL="${ULTTYCTL:-target/debug/ulttyctl}"
+keep="$3"
+ULTTYCTL="${ULTTYCTL:-$PWD/target/debug/ulttyctl}"
 launcher=$(ls /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher 2>/dev/null | head -1 || true)
 [ -n "$launcher" ] || { echo "at-spi-bus-launcher is required" >&2; exit 2; }
 mkdir -p "$out/config/ultty"
@@ -39,13 +54,28 @@ mkdir -p "$out/config/ultty"
 runtime=$(mktemp -d /tmp/ultty-atspi.XXXXXX)
 chmod 700 "$runtime"
 cleanup() {
-    kill "${ultty_pid-}" "${xvfb_pid-}" "${launcher_pid-}" 2>/dev/null || true
+    kill "${ultty_pid-}" "${launcher_pid-}" "${xvfb_pid-}" 2>/dev/null || true
     wait 2>/dev/null || true
     rm -rf "$runtime"
 }
 trap cleanup EXIT
 
 printf '[behavior]\naccessibility = true\ncursor_blink = false\n' >"$out/config/ultty/config.toml"
+
+# Xvfb first: on X11 the launcher publishes the AT-SPI bus address on the
+# display's root window, which must be Xvfb's, not the caller's desktop.
+rm -f "$out/display"
+Xvfb -displayfd 3 -screen 0 1280x800x24 -nolisten tcp 3>"$out/display" 2>"$out/xvfb.log" &
+xvfb_pid=$!
+for _ in $(seq 50); do [ -s "$out/display" ] && break; sleep 0.1; done
+[ -s "$out/display" ] || { echo "Xvfb did not start" >&2; cat "$out/xvfb.log" >&2; exit 1; }
+
+# Everything from here (the launcher, the client, Ultty) is on Xvfb.
+# Without unsetting WAYLAND_DISPLAY, a Wayland session in the environment
+# wins over DISPLAY and the window opens on the desktop instead.
+DISPLAY=":$(cat "$out/display")"
+export DISPLAY
+unset WAYLAND_DISPLAY
 
 "$launcher" --launch-immediately >"$out/at-spi.log" 2>&1 &
 launcher_pid=$!
@@ -57,21 +87,12 @@ done
 gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
     --method org.freedesktop.DBus.Properties.Set org.a11y.Status IsEnabled '<true>' >/dev/null
 
-Xvfb -displayfd 3 -screen 0 1280x800x24 -nolisten tcp 3>"$out/display" 2>"$out/xvfb.log" &
-xvfb_pid=$!
-for _ in $(seq 50); do [ -s "$out/display" ] && break; sleep 0.1; done
-[ -s "$out/display" ] || { echo "Xvfb did not start" >&2; cat "$out/xvfb.log" >&2; exit 1; }
-
 lvp_icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1 || true)
 if [ -z "${VK_ICD_FILENAMES:-}" ] && [ -n "$lvp_icd" ]; then
     export VK_ICD_FILENAMES="$lvp_icd"
 fi
 
-# Without unsetting WAYLAND_DISPLAY, a Wayland session in the environment
-# wins over DISPLAY and the window opens on the desktop instead of Xvfb.
-env -u WAYLAND_DISPLAY \
-    DISPLAY=":$(cat "$out/display")" \
-    XDG_RUNTIME_DIR="$runtime" \
+env XDG_RUNTIME_DIR="$runtime" \
     XDG_CONFIG_HOME="$out/config" \
     SHELL=/bin/sh \
     PS1='$ ' \
@@ -82,6 +103,7 @@ ultty_pid=$!
 fail() {
     echo "FAIL: $*" >&2
     tail -40 "$out/ultty.log" >&2
+    echo "artifacts in $out" >&2
     exit 1
 }
 
@@ -107,8 +129,8 @@ echo "$before" | grep -q '"role": "terminal"' || fail "the object is not a termi
 # focus AT-SPI reports no focused object. Focus it when xdotool is there.
 focus_checked=false
 if command -v xdotool >/dev/null; then
-    window=$(DISPLAY=":$(cat "$out/display")" xdotool search --pid "$ultty_pid" | head -1)
-    [ -n "$window" ] && DISPLAY=":$(cat "$out/display")" xdotool windowfocus --sync "$window" \
+    window=$(xdotool search --pid "$ultty_pid" | head -1)
+    [ -n "$window" ] && xdotool windowfocus --sync "$window" \
         >"$out/xdotool.log" 2>&1 && focus_checked=true
 fi
 
@@ -130,3 +152,5 @@ fi
 grep "accessibility tree built" "$out/ultty.log" | tail -3 || true
 
 echo "accessibility-atspi: ok (caret $caret_before -> $caret_after)"
+# Artifacts are kept when the caller named a directory; on failure, always.
+$keep || rm -rf "$out"
