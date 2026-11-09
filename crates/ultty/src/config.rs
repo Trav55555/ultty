@@ -843,9 +843,8 @@ pub struct BehaviorConfig {
     /// Restore previous session on startup
     pub restore_session: bool,
     /// Expose the window to assistive technology (screen readers) through
-    /// AccessKit. When false (the default) Ultty never connects to the
-    /// accessibility bus. Opt-in because the Linux adapter's D-Bus client
-    /// wakes an idle window twice a second. Read at start only.
+    /// AccessKit (the default). When false Ultty never connects to the
+    /// accessibility bus. Read at start only.
     pub accessibility: bool,
 }
 
@@ -862,7 +861,7 @@ impl Default for BehaviorConfig {
             close_on_exit: true,
             opacity: 1.0,
             restore_session: false, // Disabled by default
-            accessibility: false,
+            accessibility: true,
         }
     }
 }
@@ -1328,20 +1327,24 @@ copy = "ctrl+c"
     }
 
     #[test]
-    fn accessibility_is_opt_in() {
-        // Off by default until the adapter stops waking an idle window
+    fn accessibility_is_on_unless_turned_off() {
+        // On by default since the adapter's idle wakeups were traced to
+        // blocking 1.7.0 and pinned away
         // (docs/perf/2026-11-08-accessibility-adapter.md).
-        assert!(!Config::default().behavior.accessibility);
+        assert!(Config::default().behavior.accessibility);
         let config: Config = toml::from_str("[behavior]\ncursor_blink = false\n").unwrap();
-        assert!(!config.behavior.accessibility);
-
-        let config: Config = toml::from_str("[behavior]\naccessibility = true\n").unwrap();
         assert!(config.behavior.accessibility);
+
+        let config: Config = toml::from_str("[behavior]\naccessibility = false\n").unwrap();
+        assert!(!config.behavior.accessibility);
     }
 
     #[test]
     fn reload_keeps_the_running_accessibility_setting() {
-        let running = BehaviorConfig::default();
+        let running = BehaviorConfig {
+            accessibility: false,
+            ..BehaviorConfig::default()
+        };
         let mut reloaded = BehaviorConfig {
             accessibility: true,
             cursor_blink: false,
