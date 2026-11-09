@@ -112,6 +112,49 @@ impl App {
         }
     }
 
+    /// Pair native sessions' inline surfaces with the anchors in their
+    /// tabs' output (ADR 0020). A terminal gets a pass when it had output
+    /// (`with_output`) or still has surfaces to place or follow; the pass
+    /// also tells apps when a surface scrolls off or back onto the screen.
+    fn pair_inline_surfaces(
+        &mut self,
+        with_output: &[ultty::terminal_manager::TerminalId],
+        now: Instant,
+    ) {
+        let Some(server) = self.protocol_server.as_mut() else {
+            return;
+        };
+        let active = self.terminal_manager.active_tab().map(|tab| tab.id);
+        for tab in self.terminal_manager.tabs() {
+            let single_pane = tab.terminals.len() == 1;
+            for &terminal_id in &tab.terminals {
+                if !with_output.contains(&terminal_id) && !server.needs_pairing(tab.id, terminal_id)
+                {
+                    continue;
+                }
+                let Some(managed) = self.terminal_manager.terminal(terminal_id) else {
+                    continue;
+                };
+                let mut terminal = managed.event_loop.terminal();
+                server.pair_inline_surfaces(
+                    tab.id,
+                    terminal_id,
+                    &mut terminal,
+                    single_pane,
+                    single_pane && Some(tab.id) == active,
+                    now,
+                );
+            }
+        }
+        server.expire_unplaced_surfaces(now);
+        let terminal_manager = &self.terminal_manager;
+        server.retain_pairings(|terminal_id| terminal_manager.terminal(terminal_id).is_some());
+        // A surface placed or dropped just now is drawn in this frame.
+        if server.active_tab_sessions().any(|s| s.is_render_dirty()) {
+            self.needs_redraw = true;
+        }
+    }
+
     /// Whether the focused pane's cursor should blink: the config allows
     /// it, the window has focus, and the cursor is shown in a blinking
     /// style. Anything else draws a steady cursor and runs no blink timer.
@@ -211,6 +254,7 @@ impl App {
             Ok(all_events) => {
                 let mut content_changed = false;
                 let mut tab_titles_changed = false;
+                let mut with_output = Vec::new();
                 let subscribed = self
                     .control_server
                     .as_ref()
@@ -228,6 +272,7 @@ impl App {
                         }
                         match event {
                             TerminalEvent::Redraw => {
+                                with_output.push(terminal_id);
                                 // A background tab's output is drawn when
                                 // the tab is shown.
                                 if self.terminal_manager.is_on_screen(terminal_id) {
@@ -334,6 +379,7 @@ impl App {
 
                 // Clean up exited terminals
                 self.terminal_manager.cleanup_exited();
+                self.pair_inline_surfaces(&with_output, now);
                 let tab_state_after_cleanup = (
                     self.terminal_manager.tab_count(),
                     self.terminal_manager.active_tab().map(|tab| tab.id),

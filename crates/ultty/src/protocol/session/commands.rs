@@ -1,6 +1,7 @@
 //! Native protocol command application.
 
 use std::io;
+use std::time::Instant;
 
 use tracing::{debug, info, warn};
 use ultty_protocol::{
@@ -492,11 +493,7 @@ impl NativeSession {
     /// Handle DeleteRegion. On a surface root it closes the surface.
     fn handle_delete_region(&mut self, id: RegionId) -> io::Result<()> {
         let closes_surface = self.scene.surface(id).is_some();
-        let removed: Vec<RegionId> = self.scene.iter_tree(id).map(|region| region.id).collect();
-        if self.scene.remove(id).is_some() {
-            self.mark_full_scene_rebuild();
-            self.forget_regions(&removed);
-            debug!("Deleted region {:?}", id);
+        if self.remove_tree(id) {
             if closes_surface {
                 self.send_surface_event(id, SurfaceEventKind::Closed)?;
             }
@@ -505,6 +502,21 @@ impl NativeSession {
             self.queue_protocol_error(NativeProtocolError::region_not_found(id));
         }
         Ok(())
+    }
+
+    /// Delete region `id` and its subtree, a surface's placement with its
+    /// root, and the state of every region removed. False if there was no
+    /// such region.
+    pub(super) fn remove_tree(&mut self, id: RegionId) -> bool {
+        let removed: Vec<RegionId> = self.scene.iter_tree(id).map(|region| region.id).collect();
+        if self.scene.remove(id).is_none() {
+            return false;
+        }
+        self.mark_full_scene_rebuild();
+        self.forget_regions(&removed);
+        self.surface_states.remove(&id);
+        debug!("Deleted region {:?}", id);
+        true
     }
 
     /// Handle CreateSurface: a new root, laid out at the viewport's width by
@@ -522,6 +534,8 @@ impl NativeSession {
         match self.scene.try_insert_surface(region, rows) {
             Ok(()) => {
                 self.mark_full_scene_rebuild();
+                self.surface_states
+                    .insert(id, super::surfaces::SurfaceState::new(Instant::now()));
                 debug!("Created surface {:?} ({} rows)", id, rows);
             }
             Err(error) => {
@@ -570,7 +584,11 @@ impl NativeSession {
         }
     }
 
-    fn send_surface_event(&mut self, id: RegionId, kind: SurfaceEventKind) -> io::Result<()> {
+    pub(super) fn send_surface_event(
+        &mut self,
+        id: RegionId,
+        kind: SurfaceEventKind,
+    ) -> io::Result<()> {
         self.send_message(&TerminalMessage::SurfaceEvent { id, kind })
     }
 

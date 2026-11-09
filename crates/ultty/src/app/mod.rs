@@ -331,6 +331,12 @@ impl App {
         // gets its own listening socket, and the tab's shell is told about it
         // through ULTTY_SOCKET at spawn time.
         let mut protocol_server = Self::start_protocol_server();
+        // Sessions start at the grid's size, not 80x24, even when the window
+        // system sends no resize (no window manager, say): inline surfaces
+        // are as wide as the pane.
+        if let Some(server) = protocol_server.as_mut() {
+            server.set_viewport(f32::from(cols), f32::from(rows));
+        }
         let control_server = Self::start_control_server();
 
         // Create terminal manager - with launch profile if configured

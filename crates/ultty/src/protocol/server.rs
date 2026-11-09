@@ -31,14 +31,16 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use polling::{Event, Events, Poller};
 use tracing::{error, info, warn};
 
+use super::pairing::AnchorPairing;
 use super::session::NativeSession;
+use crate::grid::Terminal;
 use crate::platform::socket::{peer_uid, set_cloexec, tab_socket_file_name};
-use crate::terminal_manager::TabId;
+use crate::terminal_manager::{TabId, TerminalId};
 use ultty_protocol::FRAME_MAGIC;
 
 /// Session identifier assigned by the server on accept.
@@ -81,6 +83,8 @@ pub struct ProtocolServer {
     active_tab: Option<TabId>,
     /// In-band bytes per tab that may be the start of a `ClientHello`.
     in_band_openers: HashMap<TabId, Vec<u8>>,
+    /// Inline surface anchors of each terminal that has had any (ADR 0020).
+    pairings: HashMap<TerminalId, AnchorPairing>,
 }
 
 /// Whether `bytes` are, or may become, a complete `ClientHello` frame.
@@ -141,6 +145,7 @@ impl ProtocolServer {
             viewport_height: 24.0,
             active_tab: None,
             in_band_openers: HashMap::new(),
+            pairings: HashMap::new(),
         })
     }
 
@@ -346,7 +351,9 @@ impl ProtocolServer {
                             tab.tab_id.raw(),
                             session_id
                         );
-                        accepted.push(NativeSession::new(stream, session_id, tab.tab_id)?);
+                        let mut session = NativeSession::new(stream, session_id, tab.tab_id)?;
+                        session.set_inline_surfaces(true);
+                        accepted.push(session);
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                     Err(e) => return Err(e),
@@ -464,6 +471,7 @@ impl ProtocolServer {
                     tab_id.raw()
                 );
                 let mut session = NativeSession::new_in_band(session_id, tab_id, pgrp, pids());
+                session.set_inline_surfaces(true);
                 session.set_viewport(self.viewport_width, self.viewport_height);
                 let key = self.allocate_key();
                 self.sessions.insert(key, session);
@@ -559,6 +567,57 @@ impl ProtocolServer {
             .iter()
             .find(|(_, session)| session.is_in_band() && session.tab_id() == tab_id)
             .map(|(&key, _)| key)
+    }
+
+    /// Whether terminal `terminal_id` needs a pairing pass even without new
+    /// output: it has anchors waiting for a surface or under one, or a
+    /// session of its tab holds surfaces.
+    pub fn needs_pairing(&self, tab_id: TabId, terminal_id: TerminalId) -> bool {
+        self.pairings
+            .get(&terminal_id)
+            .is_some_and(|pairing| !pairing.is_idle())
+            || self
+                .sessions
+                .values()
+                .any(|session| session.tab_id() == tab_id && session.has_surfaces())
+    }
+
+    /// Pair the inline surfaces of `tab_id`'s sessions with the anchors in
+    /// `terminal`'s output, as of `now`; see [`AnchorPairing::update`].
+    /// `single_pane` says the terminal is the tab's only pane, and
+    /// `on_screen` that it is drawn now.
+    pub fn pair_inline_surfaces(
+        &mut self,
+        tab_id: TabId,
+        terminal_id: TerminalId,
+        terminal: &mut Terminal,
+        single_pane: bool,
+        on_screen: bool,
+        now: Instant,
+    ) {
+        let mut sessions: Vec<&mut NativeSession> = self
+            .sessions
+            .values_mut()
+            .filter(|session| session.tab_id() == tab_id)
+            .collect();
+        let pairing = self.pairings.entry(terminal_id).or_default();
+        pairing.update(terminal, &mut sessions, single_pane, on_screen, now);
+        if pairing.is_idle() {
+            self.pairings.remove(&terminal_id);
+        }
+    }
+
+    /// Drop, with `Error` 400, every surface whose anchor has not come in
+    /// time. Call it after the pairing passes of the same `now`.
+    pub fn expire_unplaced_surfaces(&mut self, now: Instant) {
+        for session in self.sessions.values_mut() {
+            session.expire_unplaced_surfaces(now);
+        }
+    }
+
+    /// Forget the anchors of terminals that are gone.
+    pub fn retain_pairings(&mut self, mut live: impl FnMut(TerminalId) -> bool) {
+        self.pairings.retain(|&terminal_id, _| live(terminal_id));
     }
 
     /// Returns the number of currently connected native sessions.
