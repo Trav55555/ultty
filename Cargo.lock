@@ -4851,6 +4851,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "ultty-protocol",
+ "unicode-width",
 ]
 
 [[package]]

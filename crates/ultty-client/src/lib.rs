@@ -39,9 +39,10 @@ use std::time::{Duration, Instant};
 use bytes::{Buf, BytesMut};
 use ultty_protocol::{
     negotiate_protocol_version, AppMessage, Constraints, Content, Decode, Encode, FrameId,
-    RegionId, Style, TerminalMessage, CLIENT_DEFAULT_CAPABILITIES, FRAME_MAGIC,
-    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    RegionId, Style, TerminalMessage, CAP_INLINE_SURFACES, CLIENT_DEFAULT_CAPABILITIES,
+    FRAME_MAGIC, MAX_SURFACE_ROWS, MIN_PROTOCOL_VERSION, MIN_SURFACE_ROWS, PROTOCOL_VERSION,
 };
+use unicode_width::UnicodeWidthChar;
 
 /// How long [`UlttyClient::end_frame`] and the handshake wait for the
 /// terminal's reply before giving up.
@@ -74,6 +75,12 @@ pub enum Error {
     /// The terminal did not answer within [`REPLY_TIMEOUT`].
     #[error("timed out waiting for {0} from the terminal")]
     Timeout(&'static str),
+
+    /// The request is not one the terminal or the protocol accepts, such as
+    /// an inline surface on a terminal that did not offer
+    /// `CAP_INLINE_SURFACES`. Nothing was written.
+    #[error("invalid request: {0}")]
+    Invalid(String),
 }
 
 /// A client for the ultty native protocol.
@@ -94,6 +101,10 @@ pub struct UlttyClient {
     negotiated_version: u16,
     next_region_id: u32,
     frame_id: u32,
+    /// The app's own output (its stdout), where inline-surface anchors and
+    /// their fallback text go on the socket transport. In-band, the tty
+    /// carries both, so this is unused.
+    text_out: Box<dyn Write + Send>,
 }
 
 /// How the client reaches the terminal.
@@ -169,6 +180,7 @@ impl UlttyClient {
             negotiated_version: PROTOCOL_VERSION,
             next_region_id: 1,
             frame_id: 0,
+            text_out: Box::new(std::io::stdout()),
         }
     }
 
@@ -347,6 +359,95 @@ impl UlttyClient {
     /// Set clipboard contents in the terminal.
     pub fn clipboard_set(&mut self, text: String) -> Result<(), Error> {
         self.send(&AppMessage::ClipboardSet { text })
+    }
+
+    /// Write `bytes` to the app's terminal output, in order with inline
+    /// surface anchors and, in-band, with protocol frames.
+    ///
+    /// Anything the app printed through `std::io::stdout` is flushed first.
+    /// In-band, the tty is in raw mode, so a line ends with `\r\n`.
+    pub fn write_output(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        match &mut self.link {
+            Link::InBand(tty) => {
+                std::io::stdout().flush()?;
+                tty.write_raw(bytes)?;
+            }
+            Link::Socket(_) => {
+                self.text_out.write_all(bytes)?;
+                self.text_out.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Open an inline surface (spec §10.6, ADR 0020) at the cursor, which
+    /// must be at column 0 of the app's terminal.
+    ///
+    /// Writes the anchor `ESC _ u <session>;<id>;<rows> ESC \` and then
+    /// exactly `rows` lines of `fallback` text to the app's output (see
+    /// [`fallback_lines`]: missing lines are blank, extra ones dropped, each
+    /// clipped to the viewport width), and then sends one frame holding
+    /// `CreateSurface` followed by `contents`, the messages that build the
+    /// surface's children (`CreateRegion { parent: id, .. }` and so on).
+    /// Waits for the frame's `LayoutComputed` like [`UlttyClient::end_frame`].
+    ///
+    /// The text goes out before the frame on both transports. Over the
+    /// socket the two travel separately and the terminal pairs them in either
+    /// order; in-band they share the tty, so the anchor precedes the frame.
+    /// The terminal answers `SurfaceEvent { kind: Placed }` (or an `Error`),
+    /// which [`UlttyClient::poll_events`] returns.
+    ///
+    /// Fails with [`Error::Invalid`], having written nothing, when the
+    /// terminal did not offer `CAP_INLINE_SURFACES`, `id` is the root, or
+    /// `rows` is outside `MIN_SURFACE_ROWS..=MAX_SURFACE_ROWS`.
+    pub fn open_surface(
+        &mut self,
+        id: RegionId,
+        rows: u16,
+        fallback: &[impl AsRef<str>],
+        constraints: Constraints,
+        style: Style,
+        contents: Vec<AppMessage>,
+    ) -> Result<(), Error> {
+        if !self.supports_capability(CAP_INLINE_SURFACES) {
+            return Err(Error::Invalid(
+                "the terminal does not offer inline surfaces".into(),
+            ));
+        }
+        if id == RegionId::ROOT {
+            return Err(Error::Invalid("a surface cannot use the root id".into()));
+        }
+        if !(MIN_SURFACE_ROWS..=MAX_SURFACE_ROWS).contains(&rows) {
+            return Err(Error::Invalid(format!(
+                "surface rows {rows} outside {MIN_SURFACE_ROWS}..={MAX_SURFACE_ROWS}"
+            )));
+        }
+        let mut text = format!("\x1b_u{};{};{}\x1b\\", self.session_id, id.0, rows);
+        for line in fallback_lines(fallback, rows, self.viewport_width) {
+            text.push_str(&line);
+            text.push_str("\r\n");
+        }
+        self.write_output(text.as_bytes())?;
+
+        let frame = self.begin_frame()?;
+        self.send(&AppMessage::CreateSurface {
+            id,
+            rows,
+            constraints,
+            style,
+        })?;
+        for message in &contents {
+            self.send(message)?;
+        }
+        self.end_frame(frame)
+    }
+
+    /// Close inline surface `id` in a frame of its own: the terminal freezes
+    /// it into its rows as text and answers `SurfaceEvent { kind: Closed }`.
+    pub fn close_surface(&mut self, id: RegionId) -> Result<(), Error> {
+        let frame = self.begin_frame()?;
+        self.send(&AppMessage::CloseSurface { id })?;
+        self.end_frame(frame)
     }
 
     /// Disconnect cleanly from the terminal.
@@ -572,6 +673,12 @@ impl UlttyClient {
         let msg = TerminalMessage::decode(&mut self.read_buf.as_ref())
             .map_err(|e| Error::Protocol(e.to_string()))?;
         self.read_buf.advance(total);
+        if let TerminalMessage::Resize(resize) = &msg {
+            // Keep the width fallback text is clipped to current; the
+            // message still reaches the caller.
+            self.viewport_width = resize.width;
+            self.viewport_height = resize.height;
+        }
         Ok(Some(msg))
     }
 
@@ -580,6 +687,33 @@ impl UlttyClient {
         self.next_region_id += 1;
         id
     }
+}
+
+/// The fallback text of an inline surface: exactly `rows` lines, each at
+/// most `width` columns wide.
+///
+/// Lines past `rows` are dropped and missing ones are blank. Text is plain:
+/// control characters (escape sequences included, which could otherwise
+/// carry a second anchor or move the cursor) are dropped, and a wide
+/// character that would cross `width` is left out.
+pub fn fallback_lines(fallback: &[impl AsRef<str>], rows: u16, width: u16) -> Vec<String> {
+    let width = usize::from(width);
+    (0..usize::from(rows))
+        .map(|index| {
+            let mut line = String::new();
+            let mut used = 0;
+            let text = fallback.get(index).map(AsRef::as_ref).unwrap_or("");
+            for ch in text.chars().filter(|ch| !ch.is_control()) {
+                let w = ch.width().unwrap_or(0);
+                if used + w > width {
+                    break;
+                }
+                used += w;
+                line.push(ch);
+            }
+            line
+        })
+        .collect()
 }
 
 impl Drop for UlttyClient {
@@ -825,8 +959,193 @@ mod tests {
         handle.join().unwrap();
     }
 
+    /// A `Write` the test can read back: the app's stdout on the socket path.
+    #[derive(Clone, Default)]
+    struct SharedOutput(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl SharedOutput {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl Write for SharedOutput {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn surface_child(surface: RegionId) -> AppMessage {
+        AppMessage::CreateRegion {
+            id: RegionId::new(901),
+            parent: surface,
+            insert_index: -1,
+            constraints: Constraints::default(),
+            style: Style::default(),
+        }
+    }
+
     #[test]
-    fn in_band_client_handshakes_and_sends_frames_on_its_terminal() {
+    fn open_surface_writes_anchor_and_fallback_before_its_frame() {
+        let surface = RegionId::new(900);
+        let output = SharedOutput::default();
+        let seen_by_terminal = output.clone();
+        let (mut client, handle) = connect_with(PROTOCOL_VERSION, move |terminal| {
+            assert!(matches!(terminal.read_one(), AppMessage::BeginFrame { .. }));
+            // The text was written before any of the frame was sent.
+            assert_eq!(
+                seen_by_terminal.text(),
+                "\x1b_u7;900;3\x1b\\card\r\nline two\r\n\r\n"
+            );
+            assert!(matches!(
+                terminal.read_one(),
+                AppMessage::CreateSurface { id, rows: 3, .. } if id == RegionId::new(900)
+            ));
+            assert_eq!(terminal.read_one(), surface_child(RegionId::new(900)));
+            assert_eq!(
+                terminal.read_one(),
+                AppMessage::EndFrame {
+                    frame_id: FrameId(1)
+                }
+            );
+            terminal.send(&TerminalMessage::SurfaceEvent {
+                id: RegionId::new(900),
+                kind: ultty_protocol::SurfaceEventKind::Placed,
+            });
+            terminal.send(&layout_reply(FrameId(1)));
+
+            assert!(matches!(terminal.read_one(), AppMessage::BeginFrame { .. }));
+            assert_eq!(
+                terminal.read_one(),
+                AppMessage::CloseSurface {
+                    id: RegionId::new(900)
+                }
+            );
+            assert!(matches!(terminal.read_one(), AppMessage::EndFrame { .. }));
+            terminal.send(&layout_reply(FrameId(2)));
+        });
+        client.text_out = Box::new(output.clone());
+
+        client
+            .open_surface(
+                surface,
+                3,
+                &["card", "line two"],
+                Constraints::default(),
+                Style::default(),
+                vec![surface_child(surface)],
+            )
+            .unwrap();
+        client.close_surface(surface).unwrap();
+        handle.join().unwrap();
+        assert_eq!(
+            client.poll_events().unwrap(),
+            vec![TerminalMessage::SurfaceEvent {
+                id: surface,
+                kind: ultty_protocol::SurfaceEventKind::Placed,
+            }],
+            "surface events reach the caller"
+        );
+    }
+
+    #[test]
+    fn open_surface_refuses_without_the_capability_and_writes_nothing() {
+        let output = SharedOutput::default();
+        let (mut client, handle) = connect_with(PROTOCOL_VERSION, |_| {});
+        client.text_out = Box::new(output.clone());
+        client.negotiated_capabilities &= !CAP_INLINE_SURFACES;
+        let err = client
+            .open_surface(
+                RegionId::new(5),
+                2,
+                &["x"],
+                Constraints::default(),
+                Style::default(),
+                Vec::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "got {err:?}");
+        client.negotiated_capabilities |= CAP_INLINE_SURFACES;
+        for (id, rows) in [
+            (RegionId::ROOT, 2),
+            (RegionId::new(5), 0),
+            (RegionId::new(5), 129),
+        ] {
+            let err = client
+                .open_surface(
+                    id,
+                    rows,
+                    &["x"],
+                    Constraints::default(),
+                    Style::default(),
+                    Vec::new(),
+                )
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::Invalid(_)),
+                "{id:?} {rows}: got {err:?}"
+            );
+        }
+        assert_eq!(output.text(), "");
+        drop(client);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn fallback_lines_are_exactly_rows_lines_clipped_to_width() {
+        assert_eq!(
+            fallback_lines(&["abcdef", "xy", "dropped"], 2, 4),
+            vec!["abcd".to_string(), "xy".to_string()]
+        );
+        assert_eq!(
+            fallback_lines(&["one"], 3, 10),
+            vec!["one".to_string(), String::new(), String::new()]
+        );
+        // A wide character that would cross the edge is left out, and escape
+        // sequences cannot ride along to move the cursor or anchor again.
+        assert_eq!(
+            fallback_lines(&["ab\u{4e16}"], 1, 3),
+            vec!["ab".to_string()]
+        );
+        assert_eq!(
+            fallback_lines(&["a\x1b_u1;2;3\x1b\\b\tc\r"], 1, 20),
+            vec!["a_u1;2;3\\bc".to_string()]
+        );
+    }
+
+    #[test]
+    fn resize_updates_the_width_fallback_text_is_clipped_to() {
+        let (mut client, handle) = connect_with(PROTOCOL_VERSION, |terminal| {
+            terminal.send(&TerminalMessage::Resize(ultty_protocol::ResizeEvent {
+                width: 42,
+                height: 10,
+            }));
+        });
+        handle.join().unwrap();
+        let deadline = Instant::now() + REPLY_TIMEOUT;
+        while client.viewport_width() != 42 && Instant::now() < deadline {
+            client.poll_events().unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            (client.viewport_width(), client.viewport_height()),
+            (42, 10)
+        );
+    }
+
+    /// What a fake in-band terminal saw after the handshake: the messages
+    /// the client sent, everything it wrote to the tty, and the pty master
+    /// (kept open so the slave does not hang up).
+    type InBandSeen = (Vec<AppMessage>, Vec<u8>, std::fs::File);
+
+    /// Run a client in-band on a pty against a fake Ultty that answers the
+    /// probe and handshake (session 9, 120 x 40), then answers every
+    /// `EndFrame` with `LayoutComputed`, until the client sends `Disconnect`.
+    fn in_band_client_on_fake_terminal(use_client: impl FnOnce(&mut UlttyClient)) -> InBandSeen {
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
         use ultty_protocol::in_band::{decode_payload, encode_to_vec, Piece, Splitter};
 
@@ -886,42 +1205,95 @@ mod tests {
             wire.extend_from_slice(b"\x1b[?62;22c");
             master.write_all(&wire).unwrap();
 
-            // Collect what the client sends in-band until Disconnect.
+            // Collect what the client sends until Disconnect.
             let mut splitter = Splitter::default();
             let mut frames = Vec::new();
+            let mut raw = Vec::new();
             let mut got = Vec::new();
             while !got.iter().any(|m| matches!(m, AppMessage::Disconnect)) {
                 let n = master.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
                 splitter.feed(&buf[..n], |piece| {
                     if let Piece::Payload(text) = piece {
                         decode_payload(text, &mut frames).unwrap();
                     }
                 });
                 let mut cursor = &frames[..];
-                got.clear();
+                let mut now = Vec::new();
                 while let Ok(msg) = AppMessage::decode(&mut cursor) {
-                    got.push(msg);
+                    now.push(msg);
                 }
+                for msg in &now[got.len()..] {
+                    if let AppMessage::EndFrame { frame_id } = msg {
+                        let reply = layout_reply(*frame_id).encode_to_bytes();
+                        master.write_all(&encode_to_vec(&reply)).unwrap();
+                    }
+                }
+                got = now;
             }
-            (got, master)
+            (got, raw, master)
         });
 
         let tty = in_band::InBandTty::open_on(slave.as_raw_fd(), slave.as_raw_fd()).unwrap();
         let mut client = UlttyClient::in_band_over(tty).unwrap();
-        assert!(client.is_in_band());
-        assert_eq!(client.session_id(), 9);
-        assert_eq!(
-            (client.viewport_width(), client.viewport_height()),
-            (120, 40)
-        );
-        client.subscribe(RegionId::ROOT, 1).unwrap();
+        use_client(&mut client);
         drop(client); // sends Disconnect
+        fake.join().unwrap()
+    }
 
-        let (got, _master) = fake.join().unwrap();
+    #[test]
+    fn in_band_client_handshakes_and_sends_frames_on_its_terminal() {
+        let (got, _raw, _master) = in_band_client_on_fake_terminal(|client| {
+            assert!(client.is_in_band());
+            assert_eq!(client.session_id(), 9);
+            assert_eq!(
+                (client.viewport_width(), client.viewport_height()),
+                (120, 40)
+            );
+            client.subscribe(RegionId::ROOT, 1).unwrap();
+        });
         assert!(
             matches!(got.first(), Some(AppMessage::Subscribe { .. })),
             "got {got:?}"
         );
         assert!(matches!(got.last(), Some(AppMessage::Disconnect)));
+    }
+
+    #[test]
+    fn in_band_open_surface_puts_anchor_and_fallback_before_the_frame() {
+        let surface = RegionId::new(900);
+        let (got, raw, _master) = in_band_client_on_fake_terminal(|client| {
+            client
+                .open_surface(
+                    surface,
+                    2,
+                    &["card"],
+                    Constraints::default(),
+                    Style::default(),
+                    vec![surface_child(surface)],
+                )
+                .unwrap();
+        });
+        // One tty stream: the anchor, its two lines (raw mode, so CR LF),
+        // and only then the frame's in-band string.
+        let text = b"\x1b_u9;900;2\x1b\\card\r\n\r\n\x1b_U";
+        let at = raw
+            .windows(text.len())
+            .position(|w| w == text)
+            .unwrap_or_else(|| panic!("no anchor then frame in {raw:?}"));
+        assert!(
+            !raw[..at].windows(3).any(|w| w == b"\x1b_U"),
+            "a frame went out before the anchor"
+        );
+        assert!(matches!(
+            got.as_slice(),
+            [
+                AppMessage::BeginFrame { .. },
+                AppMessage::CreateSurface { rows: 2, .. },
+                AppMessage::CreateRegion { .. },
+                AppMessage::EndFrame { .. },
+                AppMessage::Disconnect,
+            ]
+        ));
     }
 }
