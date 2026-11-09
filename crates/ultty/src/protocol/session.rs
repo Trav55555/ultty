@@ -175,6 +175,9 @@ pub struct NativeSession {
     /// Counts changes to what the session shows; see
     /// [`NativeSession::shown_generation`].
     shown_generation: u64,
+    /// Protocol errors queued so far, to tell a refused message from an
+    /// applied one.
+    protocol_errors: u64,
 }
 
 /// How a session's app is connected.
@@ -311,6 +314,7 @@ impl NativeSession {
             recent_protocol_errors: VecDeque::with_capacity(MAX_RECENT_PROTOCOL_ERRORS),
             last_layout_duration: None,
             shown_generation: 0,
+            protocol_errors: 0,
         }
     }
 
@@ -336,8 +340,8 @@ impl NativeSession {
 
     /// A number that changes whenever what the session shows may have
     /// changed: a scene message applied (regions, content, semantics,
-    /// scroll), focus or blur, a relayout, a surface placed, dropped, or
-    /// moved onto or off the screen. Reading it is free; the accessibility
+    /// scroll), a scroll animation step, focus or blur, a relayout, a
+    /// surface placed, dropped, or moved onto or off the screen. Reading it is free; the accessibility
     /// tree compares it between passes to know when to rebuild, so nothing
     /// is done per frame while no screen reader listens.
     pub fn shown_generation(&self) -> u64 {
@@ -695,6 +699,7 @@ impl NativeSession {
     /// Advance animated scroll positions toward their targets.
     /// Returns `true` if any animations are still active (needs another frame).
     pub fn update_scroll_animations(&mut self) -> bool {
+        let stepped = !self.scroll_targets.is_empty();
         const LERP_FACTOR: f32 = 0.15;
         const EPSILON: f32 = 0.5;
 
@@ -732,6 +737,10 @@ impl NativeSession {
         }
         if !self.scroll_targets.is_empty() {
             self.mark_scroll_animation_changed();
+        }
+        if stepped {
+            // Offsets moved, and with them the regions' bounds.
+            self.mark_shown_changed();
         }
         !self.scroll_targets.is_empty()
     }
@@ -3201,7 +3210,35 @@ mod tests {
         session.handle_message(AppMessage::Pong).unwrap();
         session.handle_message(subscribe_keys(1)).unwrap();
         session.handle_message(AppMessage::ClipboardGet).unwrap();
-        assert!(!moved(&session), "keepalives, subscriptions, clipboard");
+        session
+            .handle_message(AppMessage::SetStyle {
+                id: RegionId::new(1),
+                style: Style::default(),
+            })
+            .unwrap();
+        assert!(
+            !moved(&session),
+            "keepalives, subscriptions, clipboard, style"
+        );
+        session
+            .handle_message(AppMessage::SetContent {
+                id: RegionId::new(99),
+                content: Content::None,
+            })
+            .unwrap();
+        assert!(!moved(&session), "a refused message");
+
+        session
+            .handle_message(AppMessage::Scroll {
+                id: RegionId::new(1),
+                x: 0.0,
+                y: 4.0,
+                animate: true,
+            })
+            .unwrap();
+        assert!(moved(&session), "a scroll");
+        session.update_scroll_animations();
+        assert!(moved(&session), "a scroll animation step");
 
         run_frame(&mut session, 2, vec![create_surface(5, 2)]);
         assert!(moved(&session));

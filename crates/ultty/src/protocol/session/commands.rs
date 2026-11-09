@@ -15,14 +15,19 @@ use super::errors::NativeProtocolError;
 use super::{NativeSession, StyleAnimation};
 use crate::scene::region::Region;
 
-/// Whether applying `msg` may change what the session shows, its focus
-/// included. Keepalives, the clipboard and subscriptions do not.
+/// Whether applying `msg` may change what the accessibility tree shows of
+/// the session, its focus included. Keepalives, the clipboard,
+/// subscriptions and styles do not; nor, until live regions (ADR 0021
+/// slice 6), do streams.
 fn changes_what_is_shown(msg: &AppMessage) -> bool {
     !matches!(
         msg,
         AppMessage::ClientHello { .. }
             | AppMessage::Subscribe { .. }
             | AppMessage::Unsubscribe { .. }
+            | AppMessage::SetStyle { .. }
+            | AppMessage::StreamStart { .. }
+            | AppMessage::StreamEnd { .. }
             | AppMessage::ClipboardGet
             | AppMessage::ClipboardSet { .. }
             | AppMessage::Pong
@@ -31,11 +36,20 @@ fn changes_what_is_shown(msg: &AppMessage) -> bool {
 }
 
 impl NativeSession {
-    /// Apply one decoded app message outside frame batching.
+    /// Apply one decoded app message outside frame batching. A message
+    /// that may change what is shown, and was not refused, counts as a
+    /// change in [`NativeSession::shown_generation`].
     pub(super) fn apply_message(&mut self, msg: AppMessage) -> io::Result<bool> {
-        if changes_what_is_shown(&msg) {
+        let shown = changes_what_is_shown(&msg);
+        let errors = self.protocol_errors;
+        let result = self.apply_message_inner(msg);
+        if shown && self.protocol_errors == errors {
             self.mark_shown_changed();
         }
+        result
+    }
+
+    fn apply_message_inner(&mut self, msg: AppMessage) -> io::Result<bool> {
         match msg {
             AppMessage::ClientHello {
                 version,
