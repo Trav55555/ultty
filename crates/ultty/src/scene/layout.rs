@@ -66,6 +66,36 @@ pub struct LayoutEngine {
     taffy: TaffyTree<()>,
     region_to_node: HashMap<RegionId, NodeId>,
     node_to_region: HashMap<NodeId, RegionId>,
+    /// Surface root nodes and their heights in rows, as of the last sync.
+    surfaces: Vec<(NodeId, f32)>,
+}
+
+/// A surface root's style: its constraints, but always exactly the size it
+/// is laid out at (the viewport's width by its rows), whatever its width
+/// and height constraints say.
+fn surface_root_style(region: &super::region::Region) -> Style {
+    Style {
+        size: Size::from_percent(1.0, 1.0),
+        min_size: Size::auto(),
+        max_size: Size::auto(),
+        ..constraints_to_style(&region.constraints)
+    }
+}
+
+/// Lay out the tree under `node` in `width x height` cells of space.
+fn compute_root(
+    taffy: &mut TaffyTree<()>,
+    node: NodeId,
+    width: f32,
+    height: f32,
+) -> Result<(), LayoutEngineError> {
+    let size = Size {
+        width: AvailableSpace::Definite(width),
+        height: AvailableSpace::Definite(height),
+    };
+    taffy
+        .compute_layout(node, size)
+        .map_err(|source| LayoutEngineError::Compute { source })
 }
 
 impl LayoutEngine {
@@ -74,17 +104,22 @@ impl LayoutEngine {
             taffy: TaffyTree::new(),
             region_to_node: HashMap::new(),
             node_to_region: HashMap::new(),
+            surfaces: Vec::new(),
         }
     }
 
     pub fn sync(&mut self, scene: &SceneTree) -> Result<(), LayoutEngineError> {
         let mut seen = std::collections::HashSet::new();
 
-        for region in scene.iter_depth_first() {
+        for region in scene.iter_all() {
             seen.insert(region.id);
+            let style = if scene.surface(region.id).is_some() {
+                surface_root_style(region)
+            } else {
+                constraints_to_style(&region.constraints)
+            };
 
             if let Some(&node_id) = self.region_to_node.get(&region.id) {
-                let style = constraints_to_style(&region.constraints);
                 self.taffy.set_style(node_id, style).map_err(|source| {
                     LayoutEngineError::SetStyle {
                         region_id: region.id,
@@ -92,7 +127,6 @@ impl LayoutEngine {
                     }
                 })?;
             } else {
-                let style = constraints_to_style(&region.constraints);
                 let node_id =
                     self.taffy
                         .new_leaf(style)
@@ -122,7 +156,7 @@ impl LayoutEngine {
 
         // Collect every node whose child list differs from the scene.
         let mut changed = Vec::new();
-        for region in scene.iter_depth_first() {
+        for region in scene.iter_all() {
             let Some(&parent_node) = self.region_to_node.get(&region.id) else {
                 continue;
             };
@@ -163,6 +197,15 @@ impl LayoutEngine {
                 .map_err(|source| LayoutEngineError::SetChildren { region_id, source })?;
         }
 
+        self.surfaces = scene
+            .surfaces()
+            .iter()
+            .filter_map(|surface| {
+                let node = self.region_to_node.get(&surface.id)?;
+                Some((*node, f32::from(surface.rows)))
+            })
+            .collect();
+
         Ok(())
     }
 
@@ -172,15 +215,14 @@ impl LayoutEngine {
         self.region_to_node.len()
     }
 
+    /// Lay out the full-scene tree at `width x height` and each surface,
+    /// independently, at `width` by its rows.
     pub fn compute(&mut self, width: f32, height: f32) -> Result<(), LayoutEngineError> {
         if let Some(&root_node) = self.region_to_node.get(&RegionId::ROOT) {
-            let size = Size {
-                width: AvailableSpace::Definite(width),
-                height: AvailableSpace::Definite(height),
-            };
-            self.taffy
-                .compute_layout(root_node, size)
-                .map_err(|source| LayoutEngineError::Compute { source })?;
+            compute_root(&mut self.taffy, root_node, width, height)?;
+        }
+        for &(node, rows) in &self.surfaces {
+            compute_root(&mut self.taffy, node, width, rows)?;
         }
 
         Ok(())
@@ -192,6 +234,10 @@ impl LayoutEngine {
     }
 
     /// Sync, compute, and write computed layouts back to the scene tree.
+    ///
+    /// Offsets are absolute from the top left of each region's root, the
+    /// viewport or a surface. The full-scene tree comes first, then each
+    /// surface's tree in creation order.
     pub fn compute_scene_layout(
         &mut self,
         scene: &mut SceneTree,
@@ -202,10 +248,9 @@ impl LayoutEngine {
         self.compute(width, height)?;
 
         let mut absolute_offsets: HashMap<RegionId, (f32, f32)> = HashMap::new();
-        absolute_offsets.insert(RegionId::ROOT, (0.0, 0.0));
 
         let mut regions = Vec::new();
-        for region in scene.iter_depth_first() {
+        for region in scene.iter_all() {
             if let Some(taffy_layout) = self.get_layout(region.id) {
                 let (parent_abs_x, parent_abs_y) = region
                     .parent
@@ -622,6 +667,98 @@ mod tests {
 
         assert!(layouts.iter().all(|layout| layout.id != RegionId::new(1)));
         assert!(engine.get_layout(RegionId::new(1)).is_none());
+    }
+
+    /// `build_scene` plus surface 10, three rows high, whose own size
+    /// constraints ask for something else, holding a growing child.
+    fn build_scene_with_surface() -> SceneTree {
+        let mut tree = build_scene();
+        let mut surface = Region::new(RegionId::new(10));
+        surface.constraints = Constraints {
+            display: ProtoDisplay::Flex,
+            flex_direction: ProtoFlexDirection::Column,
+            width: ProtoDimension::Cells(7.0),
+            height: ProtoDimension::Cells(50.0),
+            min_height: ProtoDimension::Cells(40.0),
+            padding: ultty_protocol::Edges::all(ProtoDimension::Cells(1.0)),
+            ..Default::default()
+        };
+        tree.try_insert_surface(surface, 3).unwrap();
+        let mut body = Region::new(RegionId::new(11));
+        body.parent = Some(RegionId::new(10));
+        body.constraints = Constraints {
+            flex_grow: 1.0,
+            width: ProtoDimension::Percent(100.0),
+            // Default margins are Auto, which would absorb free space.
+            margin: ultty_protocol::Edges::all(ProtoDimension::Cells(0.0)),
+            ..Default::default()
+        };
+        tree.insert(body);
+        tree
+    }
+
+    fn layout_of(layouts: &[ComputedRegionLayout], id: u32) -> ComputedRegionLayout {
+        *layouts
+            .iter()
+            .find(|layout| layout.id == RegionId::new(id))
+            .unwrap()
+    }
+
+    #[test]
+    fn surfaces_are_laid_out_at_cols_by_rows_apart_from_root() {
+        let mut tree = build_scene_with_surface();
+        let mut engine = LayoutEngine::new();
+        let layouts = engine.compute_scene_layout(&mut tree, 80.0, 24.0).unwrap();
+
+        let ids: Vec<u32> = layouts.iter().map(|layout| layout.id.0).collect();
+        assert_eq!(ids, [0, 1, 2, 10, 11], "ROOT tree first, then the surface");
+
+        let surface = layout_of(&layouts, 10);
+        assert_eq!(
+            (surface.x, surface.y, surface.width, surface.height),
+            (0.0, 0.0, 80.0, 3.0),
+            "the surface ignores its width and height constraints"
+        );
+        let body = layout_of(&layouts, 11);
+        assert_eq!(
+            (body.x, body.y, body.width, body.height),
+            (1.0, 1.0, 78.0, 1.0),
+            "children are placed from the surface's own origin"
+        );
+
+        // The full-scene tree is exactly what it is without the surface.
+        let mut plain = build_scene();
+        let plain_layouts = LayoutEngine::new()
+            .compute_scene_layout(&mut plain, 80.0, 24.0)
+            .unwrap();
+        assert_eq!(&layouts[..3], &plain_layouts[..]);
+    }
+
+    #[test]
+    fn surfaces_follow_the_width_and_keep_their_rows_on_resize() {
+        let mut tree = build_scene_with_surface();
+        let mut engine = LayoutEngine::new();
+        engine.compute_scene_layout(&mut tree, 80.0, 24.0).unwrap();
+        let layouts = engine.compute_scene_layout(&mut tree, 120.0, 40.0).unwrap();
+
+        let surface = layout_of(&layouts, 10);
+        assert_eq!((surface.width, surface.height), (120.0, 3.0));
+        assert_eq!(layout_of(&layouts, 11).width, 118.0);
+        assert_eq!(tree.get(RegionId::new(11)).unwrap().computed.width, 118.0);
+    }
+
+    #[test]
+    fn closing_a_surface_drops_its_nodes() {
+        let mut tree = build_scene_with_surface();
+        let mut engine = LayoutEngine::new();
+        engine.compute_scene_layout(&mut tree, 80.0, 24.0).unwrap();
+        assert_eq!(engine.node_count(), 5);
+
+        tree.remove(RegionId::new(10));
+        let layouts = engine.compute_scene_layout(&mut tree, 80.0, 24.0).unwrap();
+        assert_eq!(layouts.len(), 3);
+        assert_eq!(engine.node_count(), 3);
+        assert!(engine.get_layout(RegionId::new(11)).is_none());
     }
 
     // ── constraints_to_style tests ──────────────────────────────────

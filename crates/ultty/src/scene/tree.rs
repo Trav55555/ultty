@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use ultty_protocol::{Content, RegionId, WidgetContent, MAX_REGION_COUNT};
+use ultty_protocol::{Content, RegionId, WidgetContent, MAX_REGION_COUNT, MAX_SURFACES};
 
 use super::region::Region;
 
@@ -12,7 +12,7 @@ use super::region::Region;
 /// full layout reply always stays decodable by the client.
 pub const MAX_REGIONS: usize = MAX_REGION_COUNT;
 
-/// Maximum depth of a region below the root (root is depth 0).
+/// Maximum depth of a region below its root (a root is depth 0).
 pub const MAX_TREE_DEPTH: usize = 256;
 
 /// Reasons a structural edit to the scene tree is rejected.
@@ -32,6 +32,16 @@ pub enum SceneTreeError {
     TooManyRegions { max: usize },
     #[error("region would exceed the maximum tree depth of {max}")]
     TooDeep { max: usize },
+    #[error("scene already holds the maximum of {max} surfaces")]
+    TooManySurfaces { max: usize },
+}
+
+/// The root of an inline surface (ADR 0020): a region with no parent,
+/// laid out on its own at the viewport's width and `rows` cells high.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurfaceRoot {
+    pub id: RegionId,
+    pub rows: u16,
 }
 
 /// A search match within the scene tree.
@@ -48,11 +58,18 @@ pub struct SearchMatch {
 }
 
 /// The scene graph tree.
+///
+/// It has one full-scene root, [`RegionId::ROOT`], and up to
+/// [`MAX_SURFACES`] surface roots. Each root heads a tree of its own;
+/// [`SceneTree::iter_depth_first`] walks only the full-scene tree, which is
+/// what is drawn over the whole pane.
 pub struct SceneTree {
-    /// All regions by ID.
+    /// All regions by ID, in every tree.
     regions: HashMap<RegionId, Region>,
     /// Root region ID.
     root: RegionId,
+    /// Surface roots, in creation order.
+    surfaces: Vec<SurfaceRoot>,
 }
 
 impl SceneTree {
@@ -66,6 +83,7 @@ impl SceneTree {
         Self {
             regions,
             root: root_id,
+            surfaces: Vec::new(),
         }
     }
 
@@ -132,13 +150,60 @@ impl SceneTree {
         Ok(())
     }
 
-    /// Remove a region and its entire subtree.
+    /// Add `region` as the root of a new surface `rows` cells high.
+    ///
+    /// Rejects duplicate ids, more than [`MAX_REGIONS`] regions and more
+    /// than [`MAX_SURFACES`] surfaces. Any parent the region names is
+    /// dropped: a surface root has none. On error the tree is left
+    /// untouched.
+    pub fn try_insert_surface(
+        &mut self,
+        mut region: Region,
+        rows: u16,
+    ) -> Result<(), SceneTreeError> {
+        let id = region.id;
+        if self.regions.contains_key(&id) {
+            return Err(SceneTreeError::DuplicateRegion(id));
+        }
+        if self.surfaces.len() >= MAX_SURFACES {
+            return Err(SceneTreeError::TooManySurfaces { max: MAX_SURFACES });
+        }
+        if self.regions.len() >= MAX_REGIONS {
+            return Err(SceneTreeError::TooManyRegions { max: MAX_REGIONS });
+        }
+        region.parent = None;
+        self.regions.insert(id, region);
+        self.surfaces.push(SurfaceRoot { id, rows });
+        Ok(())
+    }
+
+    /// Surface roots, in creation order.
+    pub fn surfaces(&self) -> &[SurfaceRoot] {
+        &self.surfaces
+    }
+
+    /// The surface whose root is `id`, if it is one.
+    pub fn surface(&self, id: RegionId) -> Option<SurfaceRoot> {
+        self.surfaces
+            .iter()
+            .copied()
+            .find(|surface| surface.id == id)
+    }
+
+    /// True for the full-scene root and every surface root.
+    fn is_root(&self, id: RegionId) -> bool {
+        id == self.root || self.surface(id).is_some()
+    }
+
+    /// Remove a region and its entire subtree. Removing a surface root
+    /// removes the surface; the full-scene root cannot be removed.
     pub fn remove(&mut self, id: RegionId) -> Option<Region> {
         if id == self.root {
             return None; // Cannot remove root
         }
 
         let region = self.regions.remove(&id)?;
+        self.surfaces.retain(|surface| surface.id != id);
         if let Some(parent_id) = region.parent {
             if let Some(parent) = self.regions.get_mut(&parent_id) {
                 parent.children.retain(|&child| child != id);
@@ -170,7 +235,7 @@ impl SceneTree {
         new_parent: RegionId,
         index: usize,
     ) -> Result<(), SceneTreeError> {
-        if id == self.root {
+        if self.is_root(id) {
             return Err(SceneTreeError::CannotMoveRoot);
         }
         if !self.regions.contains_key(&id) {
@@ -213,13 +278,13 @@ impl SceneTree {
         self.regions.len() <= 1
     }
 
-    /// Depth of a region below the root (root is 0), or `None` if the region
-    /// does not exist or is not attached to the root.
+    /// Depth of a region below its root (a root is 0), or `None` if the
+    /// region does not exist or is not attached to a root.
     pub fn depth_of(&self, id: RegionId) -> Option<usize> {
         let mut depth = 0;
         let mut current = id;
         loop {
-            if current == self.root {
+            if self.is_root(current) {
                 return Some(depth);
             }
             current = self.regions.get(&current)?.parent?;
@@ -278,9 +343,26 @@ impl SceneTree {
         }
     }
 
-    /// Iterate all regions in depth-first order.
+    /// Iterate the full-scene tree under [`RegionId::ROOT`] in depth-first
+    /// (drawing) order. Surfaces are not part of it.
     pub fn iter_depth_first(&self) -> impl Iterator<Item = &Region> {
         DepthFirstIterator::new(self, self.root)
+    }
+
+    /// Iterate the tree under `root` (the full-scene root or a surface
+    /// root) in depth-first order.
+    pub fn iter_tree(&self, root: RegionId) -> impl Iterator<Item = &Region> {
+        DepthFirstIterator::new(self, root)
+    }
+
+    /// Iterate every attached region: the full-scene tree, then each
+    /// surface's tree in creation order.
+    pub fn iter_all(&self) -> impl Iterator<Item = &Region> {
+        self.iter_depth_first().chain(
+            self.surfaces
+                .iter()
+                .flat_map(|surface| self.iter_tree(surface.id)),
+        )
     }
 
     /// Search all text content in the scene tree for a query string (case-insensitive).
@@ -1472,5 +1554,153 @@ mod tests {
         // Placeholder IS displayed when value is empty, so it should be searchable
         let matches = tree.search("enter");
         assert_eq!(matches.len(), 1);
+    }
+
+    fn child_of(id: u32, parent: u32) -> Region {
+        let mut region = Region::new(RegionId::new(id));
+        region.parent = Some(RegionId::new(parent));
+        region
+    }
+
+    fn ids<'a>(regions: impl Iterator<Item = &'a Region>) -> Vec<u32> {
+        regions.map(|region| region.id.0).collect()
+    }
+
+    /// ROOT with child 1, and surface 10 (3 rows) with children 11 and 12,
+    /// 12 under 11.
+    fn tree_with_surface() -> SceneTree {
+        let mut tree = SceneTree::new();
+        tree.try_insert_at(child_of(1, 0), usize::MAX).unwrap();
+        tree.try_insert_surface(Region::new(RegionId::new(10)), 3)
+            .unwrap();
+        tree.try_insert_at(child_of(11, 10), usize::MAX).unwrap();
+        tree.try_insert_at(child_of(12, 11), usize::MAX).unwrap();
+        tree
+    }
+
+    #[test]
+    fn a_surface_is_a_second_root_outside_the_full_scene_walk() {
+        let tree = tree_with_surface();
+        assert_eq!(
+            tree.surfaces(),
+            &[SurfaceRoot {
+                id: RegionId::new(10),
+                rows: 3
+            }]
+        );
+        assert_eq!(tree.get(RegionId::new(10)).unwrap().parent, None);
+        assert_eq!(tree.depth_of(RegionId::new(10)), Some(0));
+        assert_eq!(tree.depth_of(RegionId::new(12)), Some(2));
+        assert_eq!(ids(tree.iter_depth_first()), [0, 1]);
+        assert_eq!(ids(tree.iter_tree(RegionId::new(10))), [10, 11, 12]);
+        assert_eq!(ids(tree.iter_all()), [0, 1, 10, 11, 12]);
+        assert_eq!(tree.len(), 5);
+    }
+
+    #[test]
+    fn a_surface_root_drops_any_parent_it_names() {
+        let mut tree = SceneTree::new();
+        tree.try_insert_surface(child_of(5, 0), 1).unwrap();
+        assert_eq!(tree.get(RegionId::new(5)).unwrap().parent, None);
+        assert!(tree.get(RegionId::ROOT).unwrap().children.is_empty());
+    }
+
+    #[test]
+    fn removing_a_surface_root_removes_its_tree_and_the_surface() {
+        let mut tree = tree_with_surface();
+        assert!(tree.remove(RegionId::new(10)).is_some());
+        assert!(tree.surfaces().is_empty());
+        for id in [10, 11, 12] {
+            assert!(tree.get(RegionId::new(id)).is_none(), "region {id}");
+        }
+        assert_eq!(ids(tree.iter_all()), [0, 1]);
+    }
+
+    #[test]
+    fn removing_a_region_inside_a_surface_keeps_the_surface() {
+        let mut tree = tree_with_surface();
+        tree.remove(RegionId::new(11));
+        assert_eq!(tree.surfaces().len(), 1);
+        assert_eq!(ids(tree.iter_tree(RegionId::new(10))), [10]);
+    }
+
+    #[test]
+    fn surface_roots_cannot_move_but_regions_can_move_between_trees() {
+        let mut tree = tree_with_surface();
+        assert_eq!(
+            tree.reparent(RegionId::new(10), RegionId::ROOT, 0),
+            Err(SceneTreeError::CannotMoveRoot)
+        );
+        tree.reparent(RegionId::new(1), RegionId::new(10), usize::MAX)
+            .unwrap();
+        assert_eq!(ids(tree.iter_depth_first()), [0]);
+        assert_eq!(ids(tree.iter_tree(RegionId::new(10))), [10, 11, 12, 1]);
+        tree.reparent(RegionId::new(11), RegionId::ROOT, usize::MAX)
+            .unwrap();
+        assert_eq!(ids(tree.iter_depth_first()), [0, 11, 12]);
+    }
+
+    #[test]
+    fn try_insert_surface_rejects_duplicates_and_a_seventeenth_surface() {
+        let mut tree = SceneTree::new();
+        tree.try_insert_at(child_of(1, 0), usize::MAX).unwrap();
+        assert_eq!(
+            tree.try_insert_surface(Region::new(RegionId::new(1)), 2),
+            Err(SceneTreeError::DuplicateRegion(RegionId::new(1)))
+        );
+        assert_eq!(
+            tree.try_insert_surface(Region::new(RegionId::ROOT), 2),
+            Err(SceneTreeError::DuplicateRegion(RegionId::ROOT))
+        );
+        for id in 0..MAX_SURFACES as u32 {
+            tree.try_insert_surface(Region::new(RegionId::new(100 + id)), 1)
+                .unwrap();
+        }
+        assert_eq!(
+            tree.try_insert_surface(Region::new(RegionId::new(999)), 1),
+            Err(SceneTreeError::TooManySurfaces { max: MAX_SURFACES })
+        );
+        assert!(tree.get(RegionId::new(999)).is_none());
+        tree.remove(RegionId::new(100));
+        tree.try_insert_surface(Region::new(RegionId::new(999)), 1)
+            .unwrap();
+    }
+
+    #[test]
+    fn surface_regions_count_toward_the_region_limit() {
+        let mut tree = SceneTree::new();
+        tree.try_insert_surface(Region::new(RegionId::new(1)), 1)
+            .unwrap();
+        for i in 2..MAX_REGIONS as u32 {
+            tree.try_insert_at(child_of(i, 1), usize::MAX).unwrap();
+        }
+        assert_eq!(tree.len(), MAX_REGIONS);
+        assert_eq!(
+            tree.try_insert_surface(Region::new(RegionId::new(MAX_REGIONS as u32)), 1),
+            Err(SceneTreeError::TooManyRegions { max: MAX_REGIONS })
+        );
+        assert_eq!(
+            tree.try_insert_at(child_of(MAX_REGIONS as u32, 0), usize::MAX),
+            Err(SceneTreeError::TooManyRegions { max: MAX_REGIONS })
+        );
+    }
+
+    #[test]
+    fn depth_is_limited_below_a_surface_root() {
+        let mut tree = SceneTree::new();
+        tree.try_insert_surface(Region::new(RegionId::new(1)), 1)
+            .unwrap();
+        for i in 0..MAX_TREE_DEPTH as u32 {
+            tree.try_insert_at(child_of(2 + i, 1 + i), usize::MAX)
+                .unwrap();
+        }
+        let deepest = 1 + MAX_TREE_DEPTH as u32;
+        assert_eq!(tree.depth_of(RegionId::new(deepest)), Some(MAX_TREE_DEPTH));
+        assert_eq!(
+            tree.try_insert_at(child_of(deepest + 1, deepest), usize::MAX),
+            Err(SceneTreeError::TooDeep {
+                max: MAX_TREE_DEPTH
+            })
+        );
     }
 }

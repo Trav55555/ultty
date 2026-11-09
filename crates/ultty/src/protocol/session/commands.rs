@@ -5,8 +5,8 @@ use std::io;
 use tracing::{debug, info, warn};
 use ultty_protocol::{
     negotiate_capabilities, negotiate_protocol_version, AppMessage, Constraints, Content, RegionId,
-    Semantics, Style, TerminalMessage, CAP_APPEND_CONTENT, CAP_REGION_METADATA, CAP_SEMANTICS,
-    CAP_STREAM_LIFECYCLE, PROTOCOL_VERSION,
+    Semantics, Style, SurfaceEventKind, TerminalMessage, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES,
+    CAP_REGION_METADATA, CAP_SEMANTICS, CAP_STREAM_LIFECYCLE, PROTOCOL_VERSION,
 };
 
 use super::content_limits::{text_bytes, trim_region_text, MAX_SESSION_TEXT_BYTES};
@@ -109,14 +109,32 @@ impl NativeSession {
             }
 
             AppMessage::DeleteRegion { id } => {
-                self.handle_delete_region(id);
+                self.handle_delete_region(id)?;
             }
 
-            AppMessage::CreateSurface { .. } | AppMessage::CloseSurface { .. } => {
-                // Not advertised yet, so never negotiated.
-                self.queue_protocol_error(NativeProtocolError::missing_capability(
-                    "inline_surfaces",
-                ));
+            AppMessage::CreateSurface {
+                id,
+                rows,
+                constraints,
+                style,
+            } => {
+                if self.has_capability(CAP_INLINE_SURFACES) {
+                    self.handle_create_surface(id, rows, constraints, style);
+                } else {
+                    self.queue_protocol_error(NativeProtocolError::missing_capability(
+                        "create_surface",
+                    ));
+                }
+            }
+
+            AppMessage::CloseSurface { id } => {
+                if self.has_capability(CAP_INLINE_SURFACES) {
+                    self.handle_close_surface(id)?;
+                } else {
+                    self.queue_protocol_error(NativeProtocolError::missing_capability(
+                        "close_surface",
+                    ));
+                }
             }
 
             AppMessage::ReparentRegion {
@@ -462,16 +480,70 @@ impl NativeSession {
         }
     }
 
-    /// Handle DeleteRegion.
-    fn handle_delete_region(&mut self, id: RegionId) {
+    /// Handle DeleteRegion. On a surface root it closes the surface.
+    fn handle_delete_region(&mut self, id: RegionId) -> io::Result<()> {
+        let closes_surface = self.scene.surface(id).is_some();
         if self.scene.remove(id).is_some() {
             self.mark_full_scene_rebuild();
             self.subscriptions.remove(&id);
             debug!("Deleted region {:?}", id);
+            if closes_surface {
+                self.send_surface_event(id, SurfaceEventKind::Closed)?;
+            }
         } else {
             warn!("DeleteRegion for unknown region {:?}", id);
             self.queue_protocol_error(NativeProtocolError::region_not_found(id));
         }
+        Ok(())
+    }
+
+    /// Handle CreateSurface: a new root, laid out at the viewport's width by
+    /// `rows`. The tree enforces the surface and region limits.
+    fn handle_create_surface(
+        &mut self,
+        id: RegionId,
+        rows: u16,
+        constraints: Constraints,
+        style: Style,
+    ) {
+        let mut region = Region::new(id);
+        region.constraints = constraints;
+        region.style = style;
+        match self.scene.try_insert_surface(region, rows) {
+            Ok(()) => {
+                self.mark_full_scene_rebuild();
+                debug!("Created surface {:?} ({} rows)", id, rows);
+            }
+            Err(error) => {
+                warn!("CreateSurface {:?} rejected: {}", id, error);
+                self.queue_protocol_error(NativeProtocolError::scene_edit_rejected(
+                    "create_surface",
+                    error,
+                ));
+            }
+        }
+    }
+
+    /// Handle CloseSurface: delete the surface's tree and say so.
+    fn handle_close_surface(&mut self, id: RegionId) -> io::Result<()> {
+        if self.scene.surface(id).is_some() {
+            return self.handle_delete_region(id);
+        }
+        if self.scene.get(id).is_some() {
+            warn!("CloseSurface for region {:?}, which is not a surface", id);
+            self.queue_protocol_error(NativeProtocolError::bad_request(format!(
+                "close_surface: region {} is not a surface",
+                id.0
+            )));
+        } else {
+            warn!("CloseSurface for unknown region {:?}", id);
+            self.queue_protocol_error(NativeProtocolError::region_not_found(id));
+        }
+        Ok(())
+    }
+
+    fn send_surface_event(&mut self, id: RegionId, kind: SurfaceEventKind) -> io::Result<()> {
+        self.send_message(&TerminalMessage::SurfaceEvent { id, kind })
     }
 
     /// Handle ReparentRegion.

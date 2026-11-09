@@ -77,6 +77,14 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   text a region received by `AppendContent` makes it a `Log`. `regions`
   reports each region's effective `role`, `label` and `live`. Nothing is
   exposed to screen readers yet.
+- Native protocol: inline surfaces, part one (capability
+  `CAP_INLINE_SURFACES = 0x0100`, [ADR 0020](docs/adr/0020-inline-surfaces.md),
+  spec §10.6). `CreateSurface` (`0x0015`) opens a region tree laid out on its
+  own at the pane's width by 1 to 128 rows, `CloseSurface` (`0x0016`) or
+  `DeleteRegion` closes it, and the terminal answers `SurfaceEvent`
+  (`0x0026`) `Closed`. A session holds at most 16. `regions` lists each
+  surface with its rows, state and region tree. Surfaces are not yet
+  anchored to rows or drawn.
 - `ulttui` names each region it creates for a widget with an id
   (`SetRegionMetadata`, key `id`) and tells the terminal which region has
   focus, so `regions` can find widgets by id.

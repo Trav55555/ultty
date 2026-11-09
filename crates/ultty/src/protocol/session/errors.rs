@@ -77,7 +77,8 @@ impl NativeProtocolError {
             | SceneTreeError::CannotMoveRoot
             | SceneTreeError::CyclicReparent { .. }
             | SceneTreeError::TooManyRegions { .. }
-            | SceneTreeError::TooDeep { .. } => Self::bad_request(message),
+            | SceneTreeError::TooDeep { .. }
+            | SceneTreeError::TooManySurfaces { .. } => Self::bad_request(message),
         }
     }
 

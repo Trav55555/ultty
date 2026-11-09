@@ -481,7 +481,32 @@ pub struct NativeScene {
     pub in_band: bool,
     /// The region with keyboard focus, if any.
     pub focused: Option<u32>,
-    /// Every region, root first, in depth-first (drawing) order.
+    /// Every region of the full-scene tree, root first, in depth-first
+    /// (drawing) order. Surface regions are listed under `surfaces`.
+    pub regions: Vec<RegionInfo>,
+    /// The app's inline surfaces (ADR 0020), in creation order. Left out
+    /// of JSON when there are none, and empty from a terminal that
+    /// predates them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surfaces: Vec<SurfaceInfo>,
+}
+
+/// One inline surface of a native scene.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SurfaceInfo {
+    /// The surface root's region id.
+    pub id: u32,
+    /// Height in rows, fixed for the surface's life.
+    pub rows: u16,
+    /// `unplaced` until its anchor and `CreateSurface` have both arrived,
+    /// then `placed`.
+    pub state: String,
+    /// Line of the surface's first row, counted from the oldest line the
+    /// terminal still holds, once placed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_line: Option<u64>,
+    /// The surface's regions, its root first, in depth-first order.
+    /// Positions are from the surface's top left; depth from its root.
     pub regions: Vec<RegionInfo>,
 }
 
@@ -698,6 +723,13 @@ mod tests {
                         label: Some("Build log".to_string()),
                         live: "polite".to_string(),
                     }],
+                    surfaces: vec![SurfaceInfo {
+                        id: 7,
+                        rows: 3,
+                        state: "unplaced".to_string(),
+                        anchor_line: None,
+                        regions: Vec::new(),
+                    }],
                 }],
             },
         ];
@@ -847,5 +879,19 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{json} does not parse back: {e}"));
             assert_eq!(back, response);
         }
+    }
+
+    /// A scene from a terminal that predates surfaces still parses, and a
+    /// scene without surfaces is written as it was before them.
+    #[test]
+    fn scenes_without_surfaces_keep_their_old_json() {
+        let old = r#"{"session":1,"in_band":false,"focused":null,"regions":[]}"#;
+        let scene: NativeScene = serde_json::from_str(old).unwrap();
+        assert!(scene.surfaces.is_empty());
+        assert_eq!(serde_json::to_string(&scene).unwrap(), old);
+
+        let surface: SurfaceInfo =
+            serde_json::from_str(r#"{"id":7,"rows":3,"state":"unplaced","regions":[]}"#).unwrap();
+        assert_eq!(surface.anchor_line, None);
     }
 }
