@@ -11,7 +11,6 @@
 //! Surface events go to stderr, one per line. Exits 1 outside Ultty or when
 //! the terminal does not offer inline surfaces.
 
-use std::io::Write;
 use std::time::{Duration, Instant};
 
 use ultty_client::UlttyClient;
@@ -42,55 +41,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("inline-surface: the terminal does not offer inline surfaces");
         std::process::exit(1);
     }
-    let rows = FALLBACK.len() as u16;
-
-    // The anchor, then exactly `rows` lines of fallback text.
-    let mut stdout = std::io::stdout().lock();
-    write!(
-        stdout,
-        "\x1b_u{};{};{}\x1b\\",
-        client.session_id(),
-        SURFACE.0,
-        rows
-    )?;
-    for line in FALLBACK {
-        write!(stdout, "{line}\r\n")?;
-    }
-    stdout.flush()?;
-    drop(stdout);
-
-    let frame = client.begin_frame()?;
-    client.send(&AppMessage::CreateSurface {
-        id: SURFACE,
-        rows,
-        constraints: Constraints::default(),
-        style: Style {
+    // The anchor and the three lines of fallback text, then one frame with
+    // `CreateSurface` and the card's label.
+    let label = RegionId::new(SURFACE.0 + 1);
+    client.open_surface(
+        SURFACE,
+        FALLBACK.len() as u16,
+        &FALLBACK,
+        Constraints::default(),
+        Style {
             bg: Some(CARD_BG),
             ..Style::default()
         },
-    })?;
-    let label = client.create_region(
-        SURFACE,
-        Constraints {
-            width: Dimension::Percent(100.0),
-            height: Dimension::Cells(1.0),
-            ..Constraints::default()
-        },
-        Style {
-            fg: Some(Color::Rgb(255, 255, 255)),
-            ..Style::default()
-        },
+        vec![
+            AppMessage::CreateRegion {
+                id: label,
+                parent: SURFACE,
+                insert_index: -1,
+                constraints: Constraints {
+                    width: Dimension::Percent(100.0),
+                    height: Dimension::Cells(1.0),
+                    ..Constraints::default()
+                },
+                style: Style {
+                    fg: Some(Color::Rgb(255, 255, 255)),
+                    ..Style::default()
+                },
+            },
+            AppMessage::SetContent {
+                id: label,
+                content: Content::Text(TextContent::new("INLINE CARD")),
+            },
+        ],
     )?;
-    client.set_content(label, Content::Text(TextContent::new("INLINE CARD")))?;
-    client.end_frame(frame)?;
 
     let until = Instant::now() + hold;
     let mut closing = false;
     while Instant::now() < until {
         if !closing && close_when.as_deref().is_some_and(|path| path.exists()) {
-            let frame = client.begin_frame()?;
-            client.send(&AppMessage::CloseSurface { id: SURFACE })?;
-            client.end_frame(frame)?;
+            client.close_surface(SURFACE)?;
             closing = true;
         }
         for event in client.poll_events()? {

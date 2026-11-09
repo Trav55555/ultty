@@ -51,6 +51,7 @@ impl Default for ScrollView {
                 x: OverflowAxis::Hidden,
                 y: OverflowAxis::Scroll,
             },
+            padding: super::BORDER_PADDING,
             ..Default::default()
         };
         Self {

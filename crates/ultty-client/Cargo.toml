@@ -12,4 +12,6 @@ ultty-protocol = { path = "../ultty-protocol" }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+unicode-segmentation = "1.12"
+unicode-width = { workspace = true }
 libc = "0.2"

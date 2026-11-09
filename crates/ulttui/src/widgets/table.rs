@@ -216,6 +216,7 @@ impl View for Table {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
             width: Dimension::Percent(100.0),
+            padding: super::BORDER_PADDING,
             ..Default::default()
         }
     }

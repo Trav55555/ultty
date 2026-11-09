@@ -860,6 +860,78 @@ mod tests {
         assert_eq!(card.text(), ["abcde ", "fg    ", "h     "]);
     }
 
+    /// The tree `ulttui` sends for the agent-transcript diff card, with its
+    /// constraints as `ulttui` builds them (from `Constraints::default()`),
+    /// in a surface one row taller than its content: the free row stays at
+    /// the bottom, not between the title and the diff.
+    #[test]
+    fn a_short_column_leaves_its_free_rows_at_the_bottom() {
+        use ultty_protocol::{Display, FlexDirection};
+        let mut card = Card::new(20, 7);
+        let mut put = |id: u32, parent: RegionId, constraints: Constraints, content: Content| {
+            let mut region = Region::new(RegionId::new(id));
+            region.parent = Some(parent);
+            region.constraints = constraints;
+            region.content = content;
+            card.scene.insert(region);
+            RegionId::new(id)
+        };
+        let column = Constraints {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            width: Dimension::Percent(100.0),
+            ..Constraints::default()
+        };
+        let line = |height: Dimension| Constraints {
+            display: Display::Flex,
+            width: Dimension::Percent(100.0),
+            height,
+            flex_shrink: 1.0,
+            ..Constraints::default()
+        };
+        let card_root = put(
+            1,
+            SURFACE,
+            Constraints {
+                height: Dimension::Percent(100.0),
+                ..column.clone()
+            },
+            Content::None,
+        );
+        put(
+            2,
+            card_root,
+            line(Dimension::Cells(1.0)),
+            text("[diff] title"),
+        );
+        let diff = put(3, card_root, column, Content::None);
+        for n in 0..5 {
+            put(
+                4 + n,
+                diff,
+                line(Dimension::Cells(1.0)),
+                text(&format!("line {n}")),
+            );
+        }
+        let text: Vec<String> = card
+            .text()
+            .iter()
+            .map(|r| r.trim_end().to_string())
+            .collect();
+        assert_eq!(
+            text,
+            [
+                "[diff] title",
+                "line 0",
+                "line 1",
+                "line 2",
+                "line 3",
+                "line 4",
+                ""
+            ]
+        );
+    }
+
     #[test]
     fn a_surface_root_background_fills_every_cell() {
         let style = Style {

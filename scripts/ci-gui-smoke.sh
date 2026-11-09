@@ -4,7 +4,8 @@
 # same way locally on Linux with xvfb and mesa-vulkan-drivers installed.
 #
 # Usage: scripts/ci-gui-smoke.sh [artifact-dir]
-# Expects debug builds of ultty, ulttyctl, hello-native, and counter-app.
+# Expects debug builds of ultty, ulttyctl, hello-native, counter-app, and
+# agent-transcript.
 set -euo pipefail
 
 OUT="${1:-/tmp/ultty-ci-gui-smoke}"
@@ -70,6 +71,11 @@ if command -v xdotool >/dev/null 2>&1; then
 else
   echo "SKIPPED: scripts/e2e/inline-surface.sh needs xdotool" >&2
 fi
+# A fourth, for the agent transcript example (plan item B3): cards in the
+# scrollback in Ultty, and as ANSI text under tmux. Without tmux the script
+# skips that part, loudly.
+ULTTY="$ROOT/target/debug/ultty" ULTTYCTL="$ULTTYCTL" \
+  scripts/e2e/agent-transcript.sh "$OUT/agent-transcript"
 
 # Catch panics that did not take the process down.
 if grep -q "panicked at" "$OUT/ultty.log"; then

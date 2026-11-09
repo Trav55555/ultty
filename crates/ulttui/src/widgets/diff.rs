@@ -240,6 +240,9 @@ impl View for DiffView {
             insert_index: -1,
             constraints: Constraints {
                 width: Dimension::Cells(GUTTER_WIDTH),
+                // A row does not stretch its children (AlignItems::Start),
+                // and text has no height of its own in the layout.
+                height: Dimension::Cells(1.0),
                 flex_shrink: 0.0,
                 ..Default::default()
             },
@@ -263,6 +266,7 @@ impl View for DiffView {
                 display: Display::Flex,
                 flex_grow: 1.0,
                 width: Dimension::Percent(100.0),
+                height: Dimension::Cells(1.0),
                 ..Default::default()
             },
             style: content_style,
@@ -357,6 +361,25 @@ fn format_gutter(old_line: Option<usize>, new_line: Option<usize>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_line_texts_are_one_cell_high() {
+        // In a row the texts are not stretched, so without a height of their
+        // own they are laid out 0 cells high and an inline card's rows,
+        // rasterised from the layout, would show nothing.
+        let view = DiffView::new(vec![DiffLine::new(DiffKind::Added, "x").new_line(1)]);
+        let messages = crate::widgets::render_view_messages(&view).unwrap();
+        let heights: Vec<Dimension> = messages
+            .iter()
+            .filter_map(|m| match m {
+                AppMessage::CreateRegion { constraints, .. } => Some(constraints.height),
+                _ => None,
+            })
+            .collect();
+        // The view, its row, the row's gutter and text.
+        assert_eq!(heights.len(), 4);
+        assert_eq!(&heights[1..], &[Dimension::Cells(1.0); 3]);
+    }
 
     #[test]
     fn test_diff_line_new() {

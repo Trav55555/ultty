@@ -41,6 +41,7 @@ pub mod backend;
 pub mod cmd;
 pub mod event;
 pub mod focus;
+pub mod inline;
 pub mod layout;
 pub mod screen;
 pub mod theme;

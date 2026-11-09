@@ -30,6 +30,10 @@ pub enum Error {
     /// The terminal closed, refused, or never finished the native handshake.
     #[error("native handshake failed: {0}")]
     Handshake(String),
+    /// An inline card was asked for with a height out of range
+    /// (see [`crate::inline::Console::open`]).
+    #[error("invalid inline card: {0}")]
+    InvalidCard(String),
     /// An error injected into a [`crate::backend::MockBackend`] by a test.
     #[error("{0}")]
     Mock(String),

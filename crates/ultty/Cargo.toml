@@ -100,6 +100,7 @@ insta = { workspace = true }
 tempfile = "3.10"
 ultty-bench = { path = "../../tools/ultty-bench" }
 toml = "0.8"
+ulttui = { path = "../ulttui" }
 
 [package.metadata.generate-rpm]
 assets = [
