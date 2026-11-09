@@ -3254,7 +3254,7 @@ mod tests {
 
         run_frame(&mut session, 2, vec![create_surface(5, 2)]);
         assert!(moved(&session));
-        session.place_surface(RegionId::new(5), 1).unwrap();
+        session.place_surface(RegionId::new(5), 1, 1).unwrap();
         assert!(moved(&session), "a surface placed");
         session
             .set_surface_view(RegionId::new(5), Some(0), true)
