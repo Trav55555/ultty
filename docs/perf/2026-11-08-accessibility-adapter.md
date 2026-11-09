@@ -68,6 +68,11 @@ process. It happens with no bus as well, since the connect is attempted.
   (`accessibility = false` by default) until this is fixed upstream (zbus
   or `blocking`), or Ultty drives zbus another way (its `tokio` feature with
   a runtime Ultty does not run today).
+- zbus is not new to Ultty: notify-rust already pulls it in with async-io,
+  so switching zbus to tokio changes desktop notifications too. Sending a
+  notification probably starts the same `blocking` thread on `main` today,
+  which would then wake twice a second from the first notification on;
+  that is unmeasured.
 
 With `accessibility = true` on a private session bus with
 `at-spi-bus-launcher` and `org.a11y.Status.IsEnabled` set, AT-SPI lists an

@@ -50,10 +50,15 @@ impl Adapter {
     }
 
     /// Answer a request AccessKit sent through the event loop.
-    pub fn handle(&mut self, event: AccessKitEvent) {
+    pub fn handle(&mut self, window: &Window, event: AccessKitEvent) {
         match event {
             AccessKitEvent::InitialTreeRequested => {
                 tracing::debug!("Accessibility activated");
+                // The adapter learns the window's bounds only from Moved and
+                // Resized events; one that was never moved or resized would
+                // be a 0x0 frame to screen readers and magnifiers.
+                self.inner
+                    .process_event(window, &WindowEvent::Resized(window.inner_size()));
                 self.send_tree();
             }
             AccessKitEvent::AccessibilityDeactivated => {

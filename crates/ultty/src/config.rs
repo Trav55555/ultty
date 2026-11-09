@@ -928,6 +928,16 @@ impl BehaviorConfig {
             self.scrollback_lines = MAX_SCROLLBACK_LINES;
         }
     }
+
+    /// Put back the settings a reload cannot apply (`accessibility`) from
+    /// `running`, so the config describes the app as it is. Returns whether
+    /// the reloaded file asked for something different, which takes effect
+    /// after a restart.
+    pub fn keep_start_only(&mut self, running: &BehaviorConfig) -> bool {
+        let changed = self.accessibility != running.accessibility;
+        self.accessibility = running.accessibility;
+        changed
+    }
 }
 
 /// Policy for clipboard writes requested by programs (OSC 52).
@@ -1327,6 +1337,23 @@ copy = "ctrl+c"
 
         let config: Config = toml::from_str("[behavior]\naccessibility = true\n").unwrap();
         assert!(config.behavior.accessibility);
+    }
+
+    #[test]
+    fn reload_keeps_the_running_accessibility_setting() {
+        let running = BehaviorConfig::default();
+        let mut reloaded = BehaviorConfig {
+            accessibility: true,
+            cursor_blink: false,
+            ..BehaviorConfig::default()
+        };
+
+        assert!(reloaded.keep_start_only(&running));
+        assert!(!reloaded.accessibility);
+        // Settings that do apply on reload are left alone.
+        assert!(!reloaded.cursor_blink);
+
+        assert!(!reloaded.keep_start_only(&running));
     }
 
     #[test]

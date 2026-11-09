@@ -1562,7 +1562,7 @@ impl ApplicationHandler<AppEvent> for AppHandler {
             AppEvent::Accessibility(event) => {
                 if let Some(app) = self.app.as_mut() {
                     if let Some(adapter) = app.accessibility.as_mut() {
-                        adapter.handle(event.window_event);
+                        adapter.handle(&app.window, event.window_event);
                     }
                 }
             }
