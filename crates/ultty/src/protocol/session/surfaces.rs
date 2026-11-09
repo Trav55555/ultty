@@ -154,6 +154,7 @@ impl NativeSession {
         state.changed = true;
         debug!("Surface {:?} placed on anchor tag {}", id, tag);
         self.render_dirty = true;
+        self.mark_shown_changed();
         self.send_surface_event(id, SurfaceEventKind::Placed)
     }
 
@@ -216,6 +217,7 @@ impl NativeSession {
             return Ok(());
         }
         placed.shown = shown;
+        self.mark_shown_changed();
         let kind = if shown {
             SurfaceEventKind::Shown
         } else {

@@ -1,9 +1,30 @@
 //! A region's effective accessibility semantics: what the app set with
 //! `SetSemantics`, completed from the region's content (spec §10.5).
 
+use std::borrow::Cow;
+
 use ultty_protocol::{Content, Role, SemanticValue, Semantics, WidgetContent};
 
 use super::Region;
+
+/// The most characters of a name, description or value given to
+/// assistive technology; past it the text is cut and ends in "…". Names
+/// are short, and a region's text can be megabytes on one line.
+pub const MAX_NAME_CHARS: usize = 1024;
+
+/// `text`, or its first [`MAX_NAME_CHARS`] characters and "…". Looks at
+/// no more than that many characters and copies only when it cuts.
+pub fn capped(text: &str) -> Cow<'_, str> {
+    match text.char_indices().nth(MAX_NAME_CHARS) {
+        None => Cow::Borrowed(text),
+        Some((cut, _)) => {
+            let mut short = String::with_capacity(cut + '…'.len_utf8());
+            short.push_str(&text[..cut]);
+            short.push('…');
+            Cow::Owned(short)
+        }
+    }
+}
 
 /// The semantics a screen reader should see for `region`.
 ///
@@ -82,8 +103,9 @@ fn fill_from_content(semantics: &mut Semantics, content: &Content) {
     }
 }
 
-/// The content's text when it is a single non-empty line. A trailing
-/// newline does not count as a second line. Allocates only in that case.
+/// The content's text when it is a single non-empty line, [`capped`]. A
+/// trailing newline does not count as a second line. Allocates only in
+/// that case, and no more than the capped name.
 fn one_line(content: &Content) -> Option<String> {
     let text = match content {
         Content::Text(text) => &text.text,
@@ -102,12 +124,28 @@ fn one_line(content: &Content) -> Option<String> {
             if several_lines {
                 return None;
             }
-            let text: String = rich.spans.iter().map(|span| span.text.as_str()).collect();
-            return single_line(&text).map(str::to_string);
+            let mut name = String::new();
+            let mut chars = 0;
+            for (index, span) in rich.spans.iter().enumerate() {
+                let text = if index == last {
+                    trim_line_end(&span.text)
+                } else {
+                    &span.text
+                };
+                for c in text.chars() {
+                    if chars == MAX_NAME_CHARS {
+                        name.push('…');
+                        return Some(name);
+                    }
+                    name.push(c);
+                    chars += 1;
+                }
+            }
+            return (!name.is_empty()).then_some(name);
         }
         _ => return None,
     };
-    single_line(text).map(str::to_string)
+    single_line(text).map(|line| capped(line).into_owned())
 }
 
 fn trim_line_end(text: &str) -> &str {
@@ -346,6 +384,30 @@ mod tests {
         let semantics = effective_semantics(&status);
         assert_eq!(semantics.label.as_deref(), Some("Saved"));
         assert_eq!(semantics.value.map(|value| value.now), Some(3.0));
+    }
+
+    #[test]
+    fn a_long_line_names_its_region_only_up_to_the_cap() {
+        let line = "é".repeat(2 << 20);
+        let name = |content| effective_semantics(&region(content)).label.expect("a name");
+        let expected = format!("{}…", "é".repeat(MAX_NAME_CHARS));
+        assert_eq!(name(text(&line)), expected);
+        let rich = Content::RichText(RichText {
+            spans: vec![
+                Span {
+                    text: line[..2 << 20].to_string(),
+                    style: Style::new(),
+                },
+                Span {
+                    text: format!("{}\n", &line[2 << 20..]),
+                    style: Style::new(),
+                },
+            ],
+        });
+        assert_eq!(name(rich), expected);
+        // At the cap exactly, nothing is cut.
+        let exact = "x".repeat(MAX_NAME_CHARS);
+        assert_eq!(name(text(&exact)), exact);
     }
 
     #[test]
