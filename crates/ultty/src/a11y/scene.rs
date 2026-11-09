@@ -26,7 +26,7 @@ use accesskit::{Live as AkLive, Node, NodeId, Rect, Role as AkRole, Toggled as A
 use ultty_protocol::{Content, Expanded, Live, RegionId, Role, Semantics, Toggled, WidgetContent};
 
 use super::tree::{region_line_node_id, region_node_id};
-use crate::scene::semantics::effective_semantics;
+use crate::scene::semantics::{capped, effective_semantics};
 use crate::scene::tree::SceneTree;
 
 /// The most lines of a region's text given as `Label` children: the last
@@ -404,13 +404,14 @@ fn input_kind(content: &Content) -> Option<InputKind> {
 }
 
 /// The lines of `text` to give as `Label`s under a region named `label`:
-/// none when the name says the whole text; else the last non-empty lines,
+/// none when the name says the whole text (as far as a [`capped`] name
+/// can); else the last non-empty lines,
 /// at most [`MAX_TEXT_LINES`] and `budget`, with their line numbers, in
 /// order. Copies only those lines.
 fn shown_lines(text: &str, label: Option<&str>, budget: usize) -> Vec<(usize, String)> {
     let line = text.strip_suffix('\n').unwrap_or(text);
     let line = line.strip_suffix('\r').unwrap_or(line);
-    if line.trim().is_empty() || label == Some(line) {
+    if line.trim().is_empty() || label.is_some_and(|label| *label == *capped(line)) {
         return Vec::new();
     }
     // As many as `str::lines` gives: a last line without its newline counts.
@@ -421,7 +422,7 @@ fn shown_lines(text: &str, label: Option<&str>, budget: usize) -> Vec<(usize, St
         .enumerate()
         .filter(|(_, line)| !line.trim().is_empty())
         .take(MAX_TEXT_LINES.min(budget))
-        .map(|(from_end, line)| (count - 1 - from_end, line.to_owned()))
+        .map(|(from_end, line)| (count - 1 - from_end, capped(line).into_owned()))
         .collect();
     lines.reverse();
     lines
@@ -467,18 +468,18 @@ fn region_node(region: &RegionSnapshot) -> Node {
     if role == AkRole::Label {
         // AccessKit names a label by its value.
         if let Some(label) = label {
-            node.set_value(label);
+            node.set_value(capped(label));
         }
     } else {
         if let Some(label) = label {
-            node.set_label(label);
+            node.set_label(capped(label));
         }
         if let Some(value) = &semantics.value_text {
-            node.set_value(value.as_str());
+            node.set_value(capped(value));
         }
     }
     if let Some(description) = &semantics.description {
-        node.set_description(description.as_str());
+        node.set_description(capped(description));
     }
     set_state(&mut node, semantics);
     node
@@ -1310,6 +1311,34 @@ mod tests {
             Some("line 199999")
         );
         assert!(find(&update, region_line_node_id(7, 1, 0)).is_none());
+    }
+
+    #[test]
+    fn names_and_lines_are_capped() {
+        use crate::scene::semantics::MAX_NAME_CHARS;
+
+        let line = "x".repeat(4 << 20);
+        let mut scene = Scene::new();
+        scene.add(1, 0, text(&line));
+        scene.add(2, 0, text(&format!("short\n{line}")));
+        scene.add(3, 0, Content::None).set_semantics(Semantics {
+            description: Some("d".repeat(MAX_NAME_CHARS + 1)),
+            ..semantics(Role::Group)
+        });
+        let update = full_scene(&scene);
+
+        let expected = format!("{}…", "x".repeat(MAX_NAME_CHARS));
+        assert_eq!(region(&update, 1).value(), Some(expected.as_str()));
+        assert_eq!(
+            node(&update, region_line_node_id(7, 2, 1)).value(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            region(&update, 3).description().map(|d| d.chars().count()),
+            Some(MAX_NAME_CHARS + 1),
+            "cut to the cap, then the ellipsis"
+        );
+        consume(update);
     }
 
     #[test]
