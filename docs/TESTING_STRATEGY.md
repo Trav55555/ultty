@@ -251,7 +251,10 @@ criterion_main!(benches);
 ## CI Pipeline
 
 `.gitea/workflows/ci.yml` runs on Gitea Actions (Linux) for every push and
-pull request to `main`:
+pull request to `main`, on the `ultty` runner pool: x86_64 Fargate Spot tasks
+whose image (in the gitea-server repository) carries every toolchain and
+package the jobs use. Compiles are cached in S3 through sccache, and run steps
+go through `scripts/ci-runner-step.sh`, which keeps the pool's heartbeat.
 
 | Job | What it runs |
 |-----|--------------|

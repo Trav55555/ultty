@@ -1,7 +1,13 @@
 # CI on Gitea Actions (git.traversannan.com), the primary remote; GitHub is
-# a push mirror. Jobs run on the shared workstation runner (ubuntu-latest,
-# Docker). There is no macOS runner: macOS builds only run in the GitHub
-# release workflow.
+# a push mirror. Jobs run on the ultty pool: x86_64 Fargate Spot tasks, one
+# job each, defined with their image in the gitea-server repository. The image
+# carries the toolchains (stable, MSRV, RUST_NIGHTLY), cargo-audit, cargo-fuzz,
+# the Wayland/X11 headers and Xvfb with lavapipe, so jobs install nothing.
+# Tasks start empty and run on the host (no docker); compiles are cached in S3
+# through sccache. Run steps go through scripts/ci-runner-step.sh, which also
+# keeps the pool's heartbeat: without it the scaler stops the task mid-job.
+# There is no macOS runner: macOS builds only run in the GitHub release
+# workflow.
 name: CI
 
 on:
@@ -18,193 +24,125 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
-  # Pinned to match rust-toolchain.toml. Bump both together.
-  RUST_TOOLCHAIN: 1.98.1
-  # Minimum supported Rust version declared in the root Cargo.toml.
+  # The stable toolchain comes from rust-toolchain.toml; the runner image's
+  # RUST_TOOLCHAIN matches it, so bump the image with the file.
+  # Minimum supported Rust version declared in the root Cargo.toml; the
+  # runner image's RUST_MSRV matches it.
   RUST_MSRV: 1.89
+  # The nightly the fuzz job runs, baked into the runner image (RUST_NIGHTLY).
+  RUST_NIGHTLY: nightly-2026-11-01
+  CARGO_INCREMENTAL: "0"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_REGION: us-east-1
+  SCCACHE_S3_KEY_PREFIX: ultty/
 
 jobs:
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: ultty
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rustfmt
       - run: cargo fmt --all -- --check
 
   security-audit:
     name: Security Audit
-    runs-on: ubuntu-latest
+    runs-on: ultty
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # PRs restore main's cache but never save their own, so one
-          # main-branch entry per job is all the runner keeps.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --version 0.22.1 --locked
-        env:
-          RUSTFLAGS: ""
-      - run: scripts/security-audit.sh
+      - run: scripts/ci-runner-step.sh scripts/security-audit.sh
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: ultty
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # PRs restore main's cache but never save their own, so one
-          # main-branch entry per job is all the runner keeps.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: scripts/ci-runner-step.sh cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ultty
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # PRs restore main's cache but never save their own, so one
-          # main-branch entry per job is all the runner keeps.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
-      - run: cargo test --workspace
+      - run: scripts/ci-runner-step.sh cargo test --workspace
       - name: Protocol roundtrip property tests
-        run: cargo test -p ultty-protocol --test roundtrip -- --ignored
+        run: scripts/ci-runner-step.sh cargo test -p ultty-protocol --test roundtrip -- --ignored
         env:
           RUST_MIN_STACK: 8388608
       - name: Snapshot tests
-        run: cargo test -p ulttui --test snapshots
+        run: scripts/ci-runner-step.sh cargo test -p ulttui --test snapshots
       # Heap bytes from a counting allocator: deterministic, so it gates
       # without flaking. Fails when a case exceeds its budget (+5%).
       - name: Memory budgets
-        run: cargo test -p ultty --bench memory
+        run: scripts/ci-runner-step.sh cargo test -p ultty --bench memory
 
   msrv:
     name: MSRV
-    runs-on: ubuntu-latest
+    runs-on: ultty
     steps:
       - uses: actions/checkout@v4
-      # dtolnay/rust-toolchain exports RUSTUP_TOOLCHAIN, which overrides the
-      # pinned rust-toolchain.toml so this job really builds with the MSRV.
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_MSRV }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # PRs restore main's cache but never save their own, so one
-          # main-branch entry per job is all the runner keeps.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
-      - run: cargo check --workspace --all-targets
+      # RUSTUP_TOOLCHAIN overrides the pinned rust-toolchain.toml so this job
+      # really builds with the MSRV.
+      - run: scripts/ci-runner-step.sh cargo check --workspace --all-targets
+        env:
+          RUSTUP_TOOLCHAIN: ${{ env.RUST_MSRV }}
 
   # porygon-tui is outside the workspace (its own lockfile and a large
   # dependency tree), so `cargo test --workspace` never builds it. Check it
   # here so ulttui API changes cannot break it unnoticed.
   porygon-tui:
     name: porygon-tui
-    runs-on: ubuntu-latest
+    runs-on: ultty
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: examples/porygon-tui
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo check --locked --manifest-path examples/porygon-tui/Cargo.toml
+      - run: scripts/ci-runner-step.sh cargo check --locked --manifest-path examples/porygon-tui/Cargo.toml
 
   vt-integrity:
     name: VT integrity (deep property run)
-    runs-on: ubuntu-latest
+    runs-on: ultty
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # PRs restore main's cache but never save their own, so one
-          # main-branch entry per job is all the runner keeps.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo test -p ultty-vt --test integrity
+      - run: scripts/ci-runner-step.sh cargo test -p ultty-vt --test integrity
         env:
           PROPTEST_CASES: "20000"
 
   fuzz:
     name: Fuzz (smoke)
-    runs-on: ubuntu-latest
+    runs-on: ultty
     env:
       # cargo-fuzz supplies its own sanitizer and coverage flags.
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: fuzz
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo install cargo-fuzz --version 0.12.0 --locked
       # fuzz/ inherits the repository's pinned stable rust-toolchain.toml, so
-      # each run names nightly; cargo-fuzz needs -Z sanitizer flags.
+      # each run names the nightly; cargo-fuzz needs -Z sanitizer flags.
       - name: VT parser and grid
         working-directory: fuzz
-        run: cargo +nightly fuzz run vt_terminal -- -max_total_time=120 -max_len=4096
+        run: ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run vt_terminal -- -max_total_time=120 -max_len=4096
       - name: Protocol decoders
         working-directory: fuzz
         run: |
-          cargo +nightly fuzz run decode_app -- -max_total_time=30
-          cargo +nightly fuzz run decode_terminal -- -max_total_time=30
+          ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run decode_app -- -max_total_time=30
+          ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run decode_terminal -- -max_total_time=30
       - name: In-band stream splitter
         working-directory: fuzz
-        run: cargo +nightly fuzz run in_band_split -- -max_total_time=60 -max_len=4096
+        run: ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run in_band_split -- -max_total_time=60 -max_len=4096
 
   gui-smoke:
     name: GUI smoke (Xvfb, software Vulkan)
-    runs-on: ubuntu-latest
+    runs-on: ultty
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # PRs restore main's cache but never save their own, so one
-          # main-branch entry per job is all the runner keeps.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
       # lavapipe (mesa-vulkan-drivers) renders without a GPU; Xvfb is the
-      # display. Ultty runs for real and the live smokes drive it. winit
-      # loads the X11 client libraries at runtime, and the runner image
-      # lacks all but libX11.
-      - run: >
-          sudo apt-get update && sudo apt-get install -y
-          libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libvulkan1
-          libx11-xcb1 libxcursor1 libxrandr2 libxi6
-          xvfb mesa-vulkan-drivers fonts-dejavu-core
-      - run: cargo build -p ultty -p hello-native -p counter-app --bins
-      - run: scripts/ci-gui-smoke.sh "$RUNNER_TEMP/gui-smoke"
+      # display. Ultty runs for real and the live smokes drive it. The runner
+      # image carries the X11 client libraries winit loads at runtime.
+      - run: scripts/ci-runner-step.sh cargo build -p ultty -p hello-native -p counter-app --bins
+      - run: scripts/ci-runner-step.sh scripts/ci-gui-smoke.sh "$RUNNER_TEMP/gui-smoke"
+      # Upstream upload-artifact v4.2.0 with its GitHub-only host check
+      # removed: Gitea's artifact API lists and serves only v4 uploads.
       - name: Upload smoke artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: christopherhx/gitea-upload-artifact@81f940d004763f986ba3582c007fd842dd5cb0d7
         with:
           name: gui-smoke
           path: ${{ runner.temp }}/gui-smoke

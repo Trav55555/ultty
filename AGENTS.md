@@ -42,10 +42,13 @@ documentation; run `cargo test --workspace` and read the number from there.
 and CI live; GitHub (`github.com/Trav55555/ultty`) is a push mirror. Open PRs
 on Gitea (`tea pulls create`), not GitHub.
 
-**CI** (`.gitea/workflows/ci.yml`, Gitea Actions on Linux) runs eight jobs:
-`fmt`, `security-audit`, `clippy` (`--all-targets -D warnings`), `test`, `msrv`
-(`cargo check --workspace --all-targets` on 1.89), `vt-integrity`, `fuzz`, and
-`gui-smoke` (Ultty under Xvfb with software Vulkan). There is no coverage or
+**CI** (`.gitea/workflows/ci.yml`, Gitea Actions on Linux, `runs-on: ultty`)
+runs nine jobs: `fmt`, `security-audit`, `clippy` (`--all-targets -D
+warnings`), `test`, `msrv` (`cargo check --workspace --all-targets` on 1.89),
+`porygon-tui`, `vt-integrity`, `fuzz`, and `gui-smoke` (Ultty under Xvfb with
+software Vulkan). The `ultty` pool's image, defined in the gitea-server
+repository, provides every toolchain and package; jobs install nothing, and a
+toolchain bump means a new image. There is no coverage or
 benchmark job, and no macOS runner: macOS is only built by the release
 workflow. Windows requires future named-pipe/ConPTY platform work.
 **RUSTFLAGS=-Dwarnings** — all warnings are errors.
