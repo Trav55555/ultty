@@ -7,7 +7,8 @@
 #   ubench-feed  throughput, fenced by a cursor position report
 #   ubench-echo  echo target for keypress-to-pixels latency (idle and flood)
 #   ubench-k2p   X11 probe: XTest injection + GetImage polling
-#   k2p-wayland.py  Wayland probe: wtype + grim polling (coarse; see below)
+#   k2p-wayland.py  Wayland probe: virtual keyboard + screencopy, timed by
+#                   the compositor's frame timestamps (see the script)
 # and the launcher records startup (exec to titled window), RSS/PSS after the
 # workload (gnome-terminal-server, not the client), idle CPU and context
 # switches from /proc, and memory against tab count.
@@ -22,7 +23,8 @@
 #            --unsupported-gpu, which this script passes). On a box without a
 #            GPU set WLR_RENDERER=pixman (live-swrast). sway rather than weston
 #            because the Wayland probe needs virtual-keyboard and screencopy,
-#            which weston lacks.
+#            which weston lacks. The headless output has no vblank: it
+#            composites on demand, at most once per --wayland-refresh period.
 #
 # Options:
 #   --terminals LIST   default ultty,ghostty,gnome-terminal,alacritty
@@ -39,6 +41,7 @@
 #   --flood LIST       flood rates for latency under load, MiB/s or max (default 10,max)
 #   --idle-secs N      0 skips idle measurement (default 60)
 #   --tabs LIST        tab counts for memory scaling, empty skips (default 1,8,32)
+#   --wayland-refresh HZ  refresh rate of the headless sway output (default 60)
 #   --ultty-dir DIR    directory holding release ultty and ulttyctl (default: build)
 #   --bench-dir DIR    directory holding release ultty-bench, ubench-* (default: build)
 #   --claim CLASS      override the claim class
@@ -58,6 +61,7 @@ log() { echo "[$(date +%T)] $*" >&2; }
 SESSION="" TERMINALS="ultty,ghostty,gnome-terminal,alacritty" GEOMETRY="120x40"
 FONT="DejaVu Sans Mono" FONT_SIZE=11 CORPORA="ascii,sgr-dense,unicode-mixed,cursor-redraw"
 SIZE_MIB=16 ROUNDS=3 REPEAT=3 K2P_SAMPLES=200 FLOOD="10,max" IDLE_SECS=60 TABS="1,8,32"
+WAYLAND_REFRESH=60
 ULTTY_DIR="" BENCH_DIR="" CLAIM="" OUT=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -74,6 +78,7 @@ while [[ $# -gt 0 ]]; do
     --flood) FLOOD="${2?}"; shift 2 ;;
     --idle-secs) IDLE_SECS="${2:?}"; shift 2 ;;
     --tabs) TABS="${2?}"; shift 2 ;;
+    --wayland-refresh) WAYLAND_REFRESH="${2:?}"; shift 2 ;;
     --ultty-dir) ULTTY_DIR="${2:?}"; shift 2 ;;
     --bench-dir) BENCH_DIR="${2:?}"; shift 2 ;;
     --claim) CLAIM="${2:?}"; shift 2 ;;
@@ -187,7 +192,7 @@ case "$SESSION" in
   wayland)
     command -v sway >/dev/null || die "sway is required for the Wayland session"
     cat >"$OUT/cfg/sway.conf" <<EOF
-output HEADLESS-1 resolution 2560x1440 position 0 0
+output HEADLESS-1 mode --custom 2560x1440@${WAYLAND_REFRESH}Hz position 0 0
 for_window [title=".*"] floating enable, border none, move position 0 0
 default_border none
 default_floating_border none
