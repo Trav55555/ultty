@@ -128,6 +128,10 @@ longer collapses, and an idle window no longer wakes up.
   `--bell` and `--quiet <ms>` wait for the next command to finish, the next
   bell, or a period without output, instead of for text. Control request:
   `wait_for` with `until`.
+- `behavior.accessibility` (default `false`) exposes the window to screen
+  readers through AccessKit (AT-SPI on Linux): for now a single window node
+  named after the title. It is off by default because its D-Bus client wakes
+  an idle window twice a second.
 - `behavior.cursor_blink` (default `true`); `false` keeps the cursor steady.
 - `dist/terminfo/ultty.terminfo`, the `xterm-ultty` entry, installed by
   `install.sh`, `make install`, the packages and the Homebrew formula.
