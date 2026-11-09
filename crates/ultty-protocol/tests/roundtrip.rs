@@ -71,7 +71,7 @@ use ultty_protocol::{
     TrackSizingFunction,
     WidgetContent,
 };
-use ultty_protocol::{Expanded, Live};
+use ultty_protocol::{Expanded, Live, SurfaceEventKind, MAX_SURFACE_ROWS, MIN_SURFACE_ROWS};
 
 // ============================================================================
 // Arbitrary Implementations for Basic Types
@@ -828,6 +828,10 @@ fn arb_app_message() -> impl Strategy<Value = AppMessage> {
             .prop_map(|(id, semantics)| AppMessage::SetSemantics { id, semantics }),
         // DeleteRegion
         arb_region_id().prop_map(|id| AppMessage::DeleteRegion { id }),
+        // CreateSurface
+        arb_create_surface(),
+        // CloseSurface
+        arb_surface_id().prop_map(|id| AppMessage::CloseSurface { id }),
         // ReparentRegion
         (arb_region_id(), arb_region_id(), any::<i32>()).prop_map(
             |(id, new_parent, insert_index)| {
@@ -904,9 +908,43 @@ fn arb_terminal_message() -> impl Strategy<Value = TerminalMessage> {
         arb_focus_event().prop_map(TerminalMessage::Focus),
         // Scroll
         arb_scroll_event().prop_map(TerminalMessage::Scroll),
+        // SurfaceEvent
+        arb_surface_event(),
         // Error
         (any::<u16>(), ".*").prop_map(|(code, message)| TerminalMessage::Error { code, message }),
     ]
+}
+
+// ============================================================================
+// Inline surfaces
+// ============================================================================
+
+/// Any region id but the root, which is never a surface.
+fn arb_surface_id() -> impl Strategy<Value = RegionId> {
+    (1..=u32::MAX).prop_map(RegionId)
+}
+
+fn arb_create_surface() -> impl Strategy<Value = AppMessage> {
+    (
+        arb_surface_id(),
+        MIN_SURFACE_ROWS..=MAX_SURFACE_ROWS,
+        arb_constraints(),
+        arb_style(),
+    )
+        .prop_map(|(id, rows, constraints, style)| AppMessage::CreateSurface {
+            id,
+            rows,
+            constraints,
+            style,
+        })
+}
+
+fn arb_surface_event() -> impl Strategy<Value = TerminalMessage> {
+    (
+        arb_surface_id(),
+        proptest::sample::select(SurfaceEventKind::ALL.to_vec()),
+    )
+        .prop_map(|(id, kind)| TerminalMessage::SurfaceEvent { id, kind })
 }
 
 // ============================================================================
@@ -945,6 +983,42 @@ proptest! {
         let decoded = TerminalMessage::decode(&mut cursor).expect("decode should succeed");
         prop_assert_eq!(msg, decoded, "roundtrip should preserve message");
     }
+}
+
+/// Surface messages on their own. `arb_constraints` and `arb_style` need
+/// more stack than a test thread has (see `app_message_roundtrip`), so this
+/// runs its cases on a thread of its own.
+#[test]
+fn surface_messages_roundtrip() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let cases = (arb_create_surface(), arb_surface_id(), arb_surface_event());
+            let mut runner =
+                proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(100));
+            runner
+                .run(&cases, |(create, id, event)| {
+                    for msg in [create, AppMessage::CloseSurface { id }] {
+                        let encoded = msg.encode_to_bytes();
+                        let mut cursor = encoded.as_ref();
+                        let decoded =
+                            AppMessage::decode(&mut cursor).expect("decode should succeed");
+                        prop_assert!(cursor.is_empty(), "decode should consume the whole frame");
+                        prop_assert_eq!(msg, decoded, "roundtrip should preserve message");
+                    }
+                    let encoded = event.encode_to_bytes();
+                    let mut cursor = encoded.as_ref();
+                    let decoded =
+                        TerminalMessage::decode(&mut cursor).expect("decode should succeed");
+                    prop_assert!(cursor.is_empty(), "decode should consume the whole frame");
+                    prop_assert_eq!(event, decoded, "roundtrip should preserve message");
+                    Ok(())
+                })
+                .unwrap();
+        })
+        .expect("spawn test thread")
+        .join()
+        .expect("surface roundtrip cases pass");
 }
 
 // ============================================================================

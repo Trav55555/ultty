@@ -107,7 +107,7 @@ impl NativeSession {
         if self.text_bytes_bound + added > MAX_SESSION_TEXT_BYTES {
             self.text_bytes_bound = self
                 .scene
-                .iter_depth_first()
+                .iter_all()
                 .map(|region| text_bytes(&region.content))
                 .sum();
         }

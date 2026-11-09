@@ -232,11 +232,12 @@ impl App {
                         None
                     };
 
-                // Collect live region IDs (across all tabs, so switching tabs
-                // does not evict images of hidden sessions) for cache eviction.
+                // Collect live region IDs (across all tabs and surfaces, so
+                // switching tabs does not evict images of hidden sessions)
+                // for cache eviction.
                 let live_regions: std::collections::HashSet<ultty_protocol::RegionId> = server
                     .sessions()
-                    .flat_map(|s| s.scene().iter_depth_first().map(|r| r.id))
+                    .flat_map(|s| s.scene().iter_all().map(|r| r.id))
                     .collect();
                 self.renderer.retain_native_images(&live_regions);
 

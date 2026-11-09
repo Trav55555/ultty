@@ -18,13 +18,13 @@ use bytes::BytesMut;
 use tracing::{debug, error, info, warn};
 use ultty_protocol::{
     AppMessage, Dimension, Display, FlexDirection, FrameId, LayoutTrigger, RegionId,
-    TerminalMessage, CAP_APPEND_CONTENT, CAP_LAYOUT_FLEXBOX, CAP_REGION_METADATA, CAP_SEMANTICS,
-    CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, PROTOCOL_VERSION,
+    TerminalMessage, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, CAP_LAYOUT_FLEXBOX,
+    CAP_REGION_METADATA, CAP_SEMANTICS, CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, PROTOCOL_VERSION,
 };
 #[cfg(test)]
 use ultty_protocol::{Content, Style};
 
-use ultty_protocol::control::{NativeScene, RegionInfo};
+use ultty_protocol::control::{NativeScene, RegionInfo, SurfaceInfo};
 
 use crate::scene::layout::LayoutEngine;
 #[cfg(test)]
@@ -58,7 +58,8 @@ fn describe_content(content: &ultty_protocol::Content) -> (&'static str, Option<
     }
 }
 
-/// Capabilities supported by this terminal.
+/// Capabilities supported by this terminal. `CAP_INLINE_SURFACES` is
+/// added per session; see [`NativeSession::set_inline_surfaces`].
 const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_WIDGET_SCROLL
     | CAP_APPEND_CONTENT
@@ -133,6 +134,9 @@ pub struct NativeSession {
     dirty_regions: HashSet<RegionId>,
     /// Whether scroll offsets changed since last render (requires clip/scroll cache rebuild).
     scroll_dirty: bool,
+    /// Whether this session offers `CAP_INLINE_SURFACES` in its
+    /// `ServerHello`.
+    inline_surfaces: bool,
     /// Negotiated capabilities.
     capabilities: u32,
     /// Negotiated protocol version.
@@ -281,6 +285,7 @@ impl NativeSession {
             render_dirty: true,
             dirty_regions: HashSet::new(),
             scroll_dirty: true,
+            inline_surfaces: false,
             capabilities: 0,
             protocol_version: PROTOCOL_VERSION,
             subscriptions: HashMap::new(),
@@ -317,6 +322,23 @@ impl NativeSession {
 
     pub fn session_id(&self) -> u64 {
         self.session_id
+    }
+
+    /// Whether the session offers inline surfaces (ADR 0020) to an app that
+    /// asks for them; it takes effect at the next `ClientHello`. Off by
+    /// default: until the terminal pairs surfaces with anchors and draws
+    /// them, an app that negotiated them would get surfaces nobody sees.
+    pub fn set_inline_surfaces(&mut self, enabled: bool) {
+        self.inline_surfaces = enabled;
+    }
+
+    /// Capabilities this session offers in its `ServerHello`.
+    fn supported_capabilities(&self) -> u32 {
+        if self.inline_surfaces {
+            TERMINAL_CAPABILITIES | CAP_INLINE_SURFACES
+        } else {
+            TERMINAL_CAPABILITIES
+        }
     }
 
     /// Tab that owns this session.
@@ -451,7 +473,7 @@ impl NativeSession {
 
         debug!(
             "Computed layout for {} regions (viewport {}x{})",
-            self.scene.iter_depth_first().count(),
+            self.scene.len(),
             self.viewport_width,
             self.viewport_height,
         );
@@ -575,13 +597,36 @@ impl NativeSession {
         &self.scene
     }
 
-    /// This app's scene for `ulttyctl regions`: every region, root first,
-    /// in drawing order, with its layout, scroll, content and effective
-    /// accessibility semantics.
+    /// This app's scene for `ulttyctl regions`: every region of the
+    /// full-scene tree, root first, in drawing order, with its layout,
+    /// scroll, content and effective accessibility semantics; then each
+    /// surface with its own tree.
     pub fn describe(&self) -> NativeScene {
-        let regions = self
+        let surfaces = self
             .scene
-            .iter_depth_first()
+            .surfaces()
+            .iter()
+            .map(|surface| SurfaceInfo {
+                id: surface.id.0,
+                rows: surface.rows,
+                // Anchors are paired with surfaces in ADR 0020 slice 3.
+                state: "unplaced".to_string(),
+                anchor_line: None,
+                regions: self.describe_tree(surface.id),
+            })
+            .collect();
+        NativeScene {
+            session: self.session_id,
+            in_band: self.is_in_band(),
+            focused: self.focused_region.map(|id| id.0),
+            regions: self.describe_tree(RegionId::ROOT),
+            surfaces,
+        }
+    }
+
+    fn describe_tree(&self, root: RegionId) -> Vec<RegionInfo> {
+        self.scene
+            .iter_tree(root)
             .map(|region| {
                 let (content, text) = describe_content(&region.content);
                 let (scroll_x, scroll_y) = self.scroll_offset(region.id);
@@ -605,13 +650,7 @@ impl NativeSession {
                     live: semantics.live.as_str().to_string(),
                 }
             })
-            .collect();
-        NativeScene {
-            session: self.session_id,
-            in_band: self.is_in_band(),
-            focused: self.focused_region.map(|id| id.0),
-            regions,
-        }
+            .collect()
     }
 
     /// Get the currently focused region.
@@ -934,9 +973,13 @@ impl NativeSession {
 
     /// Target region for key events: the focused region if it has an EVENT_KEY subscription,
     /// otherwise ROOT.
+    /// A region in an inline surface never gets keys (ADR 0020), however it
+    /// came to be focused and subscribed.
     fn key_target(&self) -> RegionId {
         if let Some(focused) = self.focused_region {
-            if self.is_subscribed(focused, ultty_protocol::EVENT_KEY) {
+            if self.is_subscribed(focused, ultty_protocol::EVENT_KEY)
+                && !self.scene.is_in_surface(focused)
+            {
                 return focused;
             }
         }
@@ -1060,6 +1103,7 @@ mod tests {
     }
 
     fn negotiate_all_test_capabilities(session: &mut NativeSession) {
+        session.set_inline_surfaces(true);
         session
             .handle_message(AppMessage::ClientHello {
                 version: PROTOCOL_VERSION,
@@ -1068,7 +1112,8 @@ mod tests {
                     | CAP_APPEND_CONTENT
                     | CAP_STREAM_LIFECYCLE
                     | CAP_REGION_METADATA
-                    | CAP_SEMANTICS,
+                    | CAP_SEMANTICS
+                    | CAP_INLINE_SURFACES,
             })
             .unwrap();
     }
@@ -2528,5 +2573,565 @@ mod tests {
 
         assert_eq!(region_text_len(&session, RegionId::new(count as u32)), 0);
         assert_eq!(session.recent_protocol_errors().count(), 1);
+    }
+
+    // ── Inline surfaces (ADR 0020 slice 2) ──────────────────────────
+
+    fn create_surface(id: u32, rows: u16) -> AppMessage {
+        AppMessage::CreateSurface {
+            id: RegionId::new(id),
+            rows,
+            // Ignored for a surface root: it is always cols x rows.
+            constraints: ultty_protocol::Constraints {
+                width: Dimension::Cells(5.0),
+                height: Dimension::Cells(50.0),
+                ..Default::default()
+            },
+            style: Style::default(),
+        }
+    }
+
+    fn surface_events(
+        messages: &[TerminalMessage],
+    ) -> Vec<(u32, ultty_protocol::SurfaceEventKind)> {
+        messages
+            .iter()
+            .filter_map(|m| match m {
+                TerminalMessage::SurfaceEvent { id, kind } => Some((id.0, *kind)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn last_layout(messages: &[TerminalMessage]) -> Vec<ultty_protocol::ComputedRegionLayout> {
+        messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                TerminalMessage::LayoutComputed { regions, .. } => Some(regions.clone()),
+                _ => None,
+            })
+            .expect("a LayoutComputed reply")
+    }
+
+    fn rect(layouts: &[ultty_protocol::ComputedRegionLayout], id: u32) -> (f32, f32, f32, f32) {
+        let layout = layouts
+            .iter()
+            .find(|layout| layout.id == RegionId::new(id))
+            .unwrap_or_else(|| panic!("region {id} has a layout"));
+        (layout.x, layout.y, layout.width, layout.height)
+    }
+
+    fn surface_ids(session: &NativeSession) -> Vec<u32> {
+        session.scene.surfaces().iter().map(|s| s.id.0).collect()
+    }
+
+    /// Until surfaces are drawn, a session does not offer them, so an app
+    /// asking for everything it knows gets them refused.
+    #[test]
+    fn a_default_session_does_not_offer_inline_surfaces() {
+        assert_eq!(TERMINAL_CAPABILITIES & CAP_INLINE_SURFACES, 0);
+        let mut session = make_session();
+        session
+            .handle_message(AppMessage::ClientHello {
+                version: PROTOCOL_VERSION,
+                requested_capabilities: ultty_protocol::CAP_ALL_KNOWN,
+            })
+            .unwrap();
+        let hello = drain_messages(&mut session)
+            .into_iter()
+            .find_map(|m| match m {
+                TerminalMessage::ServerHello { capabilities, .. } => Some(capabilities),
+                _ => None,
+            })
+            .expect("a ServerHello");
+        assert_eq!(hello & CAP_INLINE_SURFACES, 0);
+        assert_eq!(hello, TERMINAL_CAPABILITIES);
+
+        session.handle_message(create_surface(5, 2)).unwrap();
+        assert_eq!(error_codes(&drain_messages(&mut session)), vec![400]);
+        assert!(session.scene.surfaces().is_empty());
+    }
+
+    #[test]
+    fn a_session_offers_inline_surfaces_when_switched_on() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        assert_ne!(session.capabilities() & CAP_INLINE_SURFACES, 0);
+    }
+
+    #[test]
+    fn key_events_cannot_be_subscribed_on_a_surface_region() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        run_frame(
+            &mut session,
+            1,
+            vec![
+                create_region(1, 0),
+                create_surface(5, 2),
+                create_region(6, 5),
+            ],
+        );
+        drain_messages(&mut session);
+
+        let subscribe = |id, events| AppMessage::Subscribe {
+            id: RegionId::new(id),
+            events,
+        };
+        let key_and_mouse = ultty_protocol::EVENT_KEY | ultty_protocol::EVENT_MOUSE;
+        session.handle_message(subscribe(5, key_and_mouse)).unwrap();
+        session
+            .handle_message(subscribe(6, ultty_protocol::EVENT_KEY))
+            .unwrap();
+        session
+            .handle_message(subscribe(6, ultty_protocol::EVENT_MOUSE))
+            .unwrap();
+        session
+            .handle_message(subscribe(1, ultty_protocol::EVENT_KEY))
+            .unwrap();
+
+        assert_eq!(error_codes(&drain_messages(&mut session)), vec![400, 400]);
+        assert!(!session.is_subscribed(RegionId::new(5), key_and_mouse));
+        assert!(!session.is_subscribed(RegionId::new(6), ultty_protocol::EVENT_KEY));
+        assert!(session.is_subscribed(RegionId::new(6), ultty_protocol::EVENT_MOUSE));
+        assert!(session.is_subscribed(RegionId::new(1), ultty_protocol::EVENT_KEY));
+    }
+
+    #[test]
+    fn surface_messages_require_negotiated_capability() {
+        let mut session = make_session();
+        session
+            .handle_message(AppMessage::ClientHello {
+                version: PROTOCOL_VERSION,
+                requested_capabilities: CAP_LAYOUT_FLEXBOX | CAP_SEMANTICS,
+            })
+            .unwrap();
+        drain_messages(&mut session);
+
+        run_frame(&mut session, 1, vec![create_surface(5, 2)]);
+        session
+            .handle_message(AppMessage::CloseSurface {
+                id: RegionId::new(5),
+            })
+            .unwrap();
+
+        let messages = drain_messages(&mut session);
+        assert_eq!(error_codes(&messages), vec![400, 400]);
+        assert!(surface_events(&messages).is_empty());
+        assert!(session.scene.surfaces().is_empty());
+        assert!(session.scene.get(RegionId::new(5)).is_none());
+    }
+
+    #[test]
+    fn create_surface_applies_at_end_frame_and_gets_a_layout_reply() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        drain_messages(&mut session);
+
+        session
+            .handle_message(AppMessage::BeginFrame {
+                frame_id: FrameId(4),
+            })
+            .unwrap();
+        session.handle_message(create_surface(5, 2)).unwrap();
+        session.handle_message(create_region(6, 5)).unwrap();
+        assert!(session.scene.surfaces().is_empty(), "queued until EndFrame");
+        assert!(drain_messages(&mut session).is_empty());
+
+        session
+            .handle_message(AppMessage::EndFrame {
+                frame_id: FrameId(4),
+            })
+            .unwrap();
+        let messages = drain_messages(&mut session);
+        assert!(error_codes(&messages).is_empty(), "{messages:?}");
+        assert_eq!(
+            layout_replies(&messages),
+            vec![(Some(FrameId(4)), LayoutTrigger::TreeChange)]
+        );
+        assert_eq!(surface_ids(&session), [5]);
+        assert_eq!(
+            session.scene.get(RegionId::new(6)).unwrap().parent,
+            Some(RegionId::new(5))
+        );
+    }
+
+    #[test]
+    fn surfaces_are_laid_out_at_cols_by_rows_apart_from_root() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        session.set_viewport(80.0, 24.0);
+        run_frame(
+            &mut session,
+            1,
+            vec![
+                create_region(1, 0),
+                create_surface(5, 3),
+                create_region(6, 5),
+            ],
+        );
+        let layouts = last_layout(&drain_messages(&mut session));
+        assert_eq!(rect(&layouts, 0), (0.0, 0.0, 80.0, 24.0));
+        assert_eq!(rect(&layouts, 1), (0.0, 0.0, 80.0, 2.0));
+        assert_eq!(rect(&layouts, 5), (0.0, 0.0, 80.0, 3.0));
+        assert_eq!(
+            rect(&layouts, 6),
+            (0.0, 0.0, 80.0, 2.0),
+            "a surface child is placed from the surface's origin"
+        );
+
+        session.set_viewport(120.0, 40.0);
+        session.relayout_for_resize().unwrap();
+        let messages = drain_messages(&mut session);
+        assert_eq!(
+            layout_replies(&messages),
+            vec![(None, LayoutTrigger::Resize)]
+        );
+        let layouts = last_layout(&messages);
+        assert_eq!(rect(&layouts, 0), (0.0, 0.0, 120.0, 40.0));
+        assert_eq!(rect(&layouts, 5), (0.0, 0.0, 120.0, 3.0));
+        assert_eq!(rect(&layouts, 6), (0.0, 0.0, 120.0, 2.0));
+    }
+
+    #[test]
+    fn a_surface_alone_is_laid_out_again_on_resize() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        run_frame(&mut session, 1, vec![create_surface(5, 1)]);
+        drain_messages(&mut session);
+
+        session.set_viewport(100.0, 30.0);
+        session.relayout_for_resize().unwrap();
+        let layouts = last_layout(&drain_messages(&mut session));
+        assert_eq!(rect(&layouts, 5), (0.0, 0.0, 100.0, 1.0));
+    }
+
+    #[test]
+    fn close_surface_deletes_its_tree_and_reports_closed() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        run_frame(
+            &mut session,
+            1,
+            vec![
+                create_surface(5, 2),
+                create_region(6, 5),
+                create_region(7, 6),
+                create_surface(8, 2),
+            ],
+        );
+        drain_messages(&mut session);
+
+        run_frame(
+            &mut session,
+            2,
+            vec![AppMessage::CloseSurface {
+                id: RegionId::new(5),
+            }],
+        );
+        let messages = drain_messages(&mut session);
+        assert!(error_codes(&messages).is_empty(), "{messages:?}");
+        assert_eq!(
+            surface_events(&messages),
+            vec![(5, ultty_protocol::SurfaceEventKind::Closed)]
+        );
+        assert_eq!(
+            layout_replies(&messages),
+            vec![(Some(FrameId(2)), LayoutTrigger::TreeChange)]
+        );
+        for id in [5, 6, 7] {
+            assert!(
+                session.scene.get(RegionId::new(id)).is_none(),
+                "region {id}"
+            );
+        }
+        assert_eq!(surface_ids(&session), [8]);
+        assert!(last_layout(&messages)
+            .iter()
+            .all(|layout| ![5, 6, 7].contains(&layout.id.0)));
+
+        // DeleteRegion on a surface root closes it the same way.
+        session
+            .handle_message(AppMessage::DeleteRegion {
+                id: RegionId::new(8),
+            })
+            .unwrap();
+        let messages = drain_messages(&mut session);
+        assert_eq!(
+            surface_events(&messages),
+            vec![(8, ultty_protocol::SurfaceEventKind::Closed)]
+        );
+        assert!(session.scene.surfaces().is_empty());
+    }
+
+    #[test]
+    fn close_surface_refuses_other_regions_and_surface_roots_do_not_move() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        run_frame(
+            &mut session,
+            1,
+            vec![
+                create_region(1, 0),
+                create_surface(5, 2),
+                create_region(6, 5),
+            ],
+        );
+        drain_messages(&mut session);
+
+        let close = |id| AppMessage::CloseSurface {
+            id: RegionId::new(id),
+        };
+        session.handle_message(close(1)).unwrap();
+        session.handle_message(close(6)).unwrap();
+        session.handle_message(close(99)).unwrap();
+        session
+            .handle_message(AppMessage::ReparentRegion {
+                id: RegionId::new(5),
+                new_parent: RegionId::ROOT,
+                insert_index: -1,
+            })
+            .unwrap();
+        // A region inside a surface is deleted like any region, and the
+        // surface stays.
+        session
+            .handle_message(AppMessage::DeleteRegion {
+                id: RegionId::new(6),
+            })
+            .unwrap();
+
+        let messages = drain_messages(&mut session);
+        assert_eq!(error_codes(&messages), vec![400, 400, 404, 400]);
+        assert!(surface_events(&messages).is_empty());
+        assert_eq!(surface_ids(&session), [5]);
+        assert!(session.scene.get(RegionId::new(1)).is_some());
+        assert!(session.scene.get(RegionId::new(6)).is_none());
+    }
+
+    #[test]
+    fn a_session_holds_at_most_sixteen_surfaces() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        let max = ultty_protocol::MAX_SURFACES as u32;
+        assert_eq!(max, 16);
+        run_frame(
+            &mut session,
+            1,
+            (1..=max).map(|id| create_surface(id, 1)).collect(),
+        );
+        assert!(error_codes(&drain_messages(&mut session)).is_empty());
+
+        run_frame(&mut session, 2, vec![create_surface(max + 1, 1)]);
+        assert_eq!(error_codes(&drain_messages(&mut session)), vec![400]);
+        assert_eq!(session.scene.surfaces().len(), max as usize);
+        assert!(session.scene.get(RegionId::new(max + 1)).is_none());
+
+        // An id already in use is refused too.
+        session.handle_message(create_region(100, 0)).unwrap();
+        session
+            .handle_message(AppMessage::CloseSurface {
+                id: RegionId::new(1),
+            })
+            .unwrap();
+        drain_messages(&mut session);
+        run_frame(&mut session, 3, vec![create_surface(100, 1)]);
+        assert_eq!(error_codes(&drain_messages(&mut session)), vec![400]);
+
+        // Closing one made room.
+        run_frame(&mut session, 4, vec![create_surface(max + 1, 1)]);
+        assert!(error_codes(&drain_messages(&mut session)).is_empty());
+        assert_eq!(session.scene.surfaces().len(), max as usize);
+    }
+
+    #[test]
+    fn surface_text_counts_toward_the_session_limit() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        session.handle_message(create_surface(1000, 4)).unwrap();
+        let chunk = "S".repeat(1024 * 1024);
+        let per_region = content_limits::MAX_REGION_TEXT_BYTES / chunk.len();
+        let regions =
+            content_limits::MAX_SESSION_TEXT_BYTES / content_limits::MAX_REGION_TEXT_BYTES;
+
+        for n in 1..=regions + 4 {
+            let id = RegionId::new(n as u32);
+            session
+                .handle_message(AppMessage::CreateRegion {
+                    id,
+                    parent: RegionId::new(1000),
+                    insert_index: -1,
+                    constraints: ultty_protocol::Constraints::default(),
+                    style: Style::default(),
+                })
+                .unwrap();
+            for _ in 0..per_region {
+                append(&mut session, id, &chunk);
+            }
+        }
+
+        let total: usize = session
+            .scene
+            .iter_all()
+            .map(|region| content_limits::text_bytes(&region.content))
+            .sum();
+        assert!(total <= content_limits::MAX_SESSION_TEXT_BYTES, "{total}");
+        assert!(session.recent_protocol_errors().count() > 0);
+    }
+
+    /// A session with a full-scene tree and a surface reports the
+    /// full-scene tree exactly as it would without the surface; the surface
+    /// and its tree come after it.
+    #[test]
+    fn describe_reports_surfaces_after_the_full_scene_tree() {
+        let build = |with_surface: bool| {
+            let mut session = make_session();
+            negotiate_all_test_capabilities(&mut session);
+            session.set_viewport(80.0, 24.0);
+            let mut ops = vec![
+                create_region(1, 0),
+                AppMessage::SetContent {
+                    id: RegionId::new(1),
+                    content: Content::Text(ultty_protocol::TextContent::new("$ cargo test")),
+                },
+            ];
+            if with_surface {
+                ops.extend([
+                    create_surface(5, 3),
+                    create_region(6, 5),
+                    AppMessage::SetContent {
+                        id: RegionId::new(6),
+                        content: Content::Text(ultty_protocol::TextContent::new(
+                            "running 42 tests",
+                        )),
+                    },
+                ]);
+            }
+            run_frame(&mut session, 1, ops);
+            session.describe()
+        };
+
+        let scene = build(true);
+        assert_eq!(scene.regions, build(false).regions);
+        insta::assert_json_snapshot!(scene);
+    }
+
+    /// The region a key typed now would be sent to.
+    fn key_goes_to(session: &mut NativeSession) -> u32 {
+        drain_messages(session);
+        session
+            .send_key(ultty_protocol::Key::Enter, ultty_protocol::Modifiers::NONE)
+            .unwrap();
+        drain_messages(session)
+            .into_iter()
+            .find_map(|m| match m {
+                TerminalMessage::Input(event) => Some(event.region_id.0),
+                _ => None,
+            })
+            .expect("a key event")
+    }
+
+    fn focus(id: u32) -> AppMessage {
+        AppMessage::Focus {
+            id: RegionId::new(id),
+        }
+    }
+
+    fn subscribe_keys(id: u32) -> AppMessage {
+        AppMessage::Subscribe {
+            id: RegionId::new(id),
+            events: ultty_protocol::EVENT_KEY,
+        }
+    }
+
+    /// ROOT subscribed to keys, so they are sent somewhere, and surface 5.
+    fn session_with_surface_and_root_keys() -> NativeSession {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        session.handle_message(subscribe_keys(0)).unwrap();
+        run_frame(&mut session, 1, vec![create_surface(5, 2)]);
+        session
+    }
+
+    #[test]
+    fn a_region_subscribed_before_it_joins_a_surface_gets_no_keys() {
+        let mut session = session_with_surface_and_root_keys();
+        session.handle_message(subscribe_keys(6)).unwrap();
+        run_frame(&mut session, 2, vec![create_region(6, 5)]);
+        session.handle_message(focus(6)).unwrap();
+        assert_eq!(key_goes_to(&mut session), 0);
+    }
+
+    #[test]
+    fn a_region_moved_into_a_surface_stops_getting_keys() {
+        let mut session = session_with_surface_and_root_keys();
+        run_frame(&mut session, 2, vec![create_region(1, 0)]);
+        session.handle_message(subscribe_keys(1)).unwrap();
+        session.handle_message(focus(1)).unwrap();
+        assert_eq!(key_goes_to(&mut session), 1);
+
+        session
+            .handle_message(AppMessage::ReparentRegion {
+                id: RegionId::new(1),
+                new_parent: RegionId::new(5),
+                insert_index: -1,
+            })
+            .unwrap();
+        assert_eq!(key_goes_to(&mut session), 0);
+    }
+
+    #[test]
+    fn deleting_a_region_forgets_its_subtree_state() {
+        let mut session = session_with_surface_and_root_keys();
+        run_frame(
+            &mut session,
+            2,
+            vec![create_region(1, 0), create_region(2, 1)],
+        );
+        session.handle_message(subscribe_keys(2)).unwrap();
+        session
+            .handle_message(AppMessage::Scroll {
+                id: RegionId::new(2),
+                x: 0.0,
+                y: 3.0,
+                animate: false,
+            })
+            .unwrap();
+        session.handle_message(focus(2)).unwrap();
+
+        session
+            .handle_message(AppMessage::DeleteRegion {
+                id: RegionId::new(1),
+            })
+            .unwrap();
+        assert!(!session.is_subscribed(RegionId::new(2), ultty_protocol::EVENT_KEY));
+        assert_eq!(session.scroll_offset(RegionId::new(2)), (0.0, 0.0));
+        assert_eq!(session.focused_region(), None);
+
+        // The id made again, under a surface, inherits nothing.
+        run_frame(&mut session, 3, vec![create_region(2, 5)]);
+        session.handle_message(focus(2)).unwrap();
+        assert!(!session.is_subscribed(RegionId::new(2), ultty_protocol::EVENT_KEY));
+        assert_eq!(key_goes_to(&mut session), 0);
+    }
+
+    #[test]
+    fn closing_a_surface_forgets_the_state_of_its_regions() {
+        let mut session = session_with_surface_and_root_keys();
+        run_frame(&mut session, 2, vec![create_region(6, 5)]);
+        session
+            .handle_message(AppMessage::Subscribe {
+                id: RegionId::new(6),
+                events: ultty_protocol::EVENT_MOUSE,
+            })
+            .unwrap();
+        session.handle_message(focus(6)).unwrap();
+        session
+            .handle_message(AppMessage::CloseSurface {
+                id: RegionId::new(5),
+            })
+            .unwrap();
+        assert!(!session.is_subscribed(RegionId::new(6), ultty_protocol::EVENT_MOUSE));
+        assert_eq!(session.focused_region(), None);
     }
 }

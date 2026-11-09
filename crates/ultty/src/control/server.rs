@@ -1056,53 +1056,73 @@ fn format_regions(scenes: &[ultty_protocol::control::NativeScene]) -> String {
         }
         out.push('\n');
         for region in &scene.regions {
+            format_region(&mut out, region, 0);
+        }
+        for surface in &scene.surfaces {
             let _ = write!(
                 out,
-                "{:indent$}#{} {}",
-                "",
-                region.id,
-                region.content,
-                indent = region.depth * 2
+                "surface #{} ({} rows, {}",
+                surface.id, surface.rows, surface.state
             );
-            match (region.role.as_str(), region.live.as_str()) {
-                ("", _) => {}
-                (role, "off") => {
-                    let _ = write!(out, " ({role})");
-                }
-                (role, live) => {
-                    let _ = write!(out, " ({role}, {live})");
-                }
+            if let Some(line) = surface.anchor_line {
+                let _ = write!(out, " at line {line}");
             }
-            let _ = write!(
-                out,
-                " {},{} {}x{}",
-                region.x, region.y, region.width, region.height,
-            );
-            if region.scroll_x != 0.0 || region.scroll_y != 0.0 {
-                let _ = write!(out, " scroll {},{}", region.scroll_x, region.scroll_y);
+            out.push_str(")\n");
+            for region in &surface.regions {
+                format_region(&mut out, region, 1);
             }
-            for (key, value) in &region.metadata {
-                let _ = write!(out, " {key}={value}");
-            }
-            if let Some(label) = region
-                .label
-                .as_deref()
-                .filter(|label| region.text.as_deref() != Some(*label))
-            {
-                let _ = write!(out, " label={label:?}");
-            }
-            if let Some(text) = region.text.as_deref().filter(|text| !text.is_empty()) {
-                let first_line = text.lines().next().unwrap_or("");
-                let mut preview: String = first_line.chars().take(REGION_TEXT_PREVIEW).collect();
-                if preview.len() < text.len() {
-                    preview.push_str("...");
-                }
-                let _ = write!(out, " {preview:?}");
-            }
-            out.push('\n');
         }
     }
     out
+}
+
+/// One line of `ulttyctl regions`, indented by depth plus `indent` levels.
+fn format_region(out: &mut String, region: &ultty_protocol::control::RegionInfo, indent: usize) {
+    use std::fmt::Write as _;
+    let _ = write!(
+        out,
+        "{:indent$}#{} {}",
+        "",
+        region.id,
+        region.content,
+        indent = (region.depth + indent) * 2
+    );
+    match (region.role.as_str(), region.live.as_str()) {
+        ("", _) => {}
+        (role, "off") => {
+            let _ = write!(out, " ({role})");
+        }
+        (role, live) => {
+            let _ = write!(out, " ({role}, {live})");
+        }
+    }
+    let _ = write!(
+        out,
+        " {},{} {}x{}",
+        region.x, region.y, region.width, region.height,
+    );
+    if region.scroll_x != 0.0 || region.scroll_y != 0.0 {
+        let _ = write!(out, " scroll {},{}", region.scroll_x, region.scroll_y);
+    }
+    for (key, value) in &region.metadata {
+        let _ = write!(out, " {key}={value}");
+    }
+    if let Some(label) = region
+        .label
+        .as_deref()
+        .filter(|label| region.text.as_deref() != Some(*label))
+    {
+        let _ = write!(out, " label={label:?}");
+    }
+    if let Some(text) = region.text.as_deref().filter(|text| !text.is_empty()) {
+        let first_line = text.lines().next().unwrap_or("");
+        let mut preview: String = first_line.chars().take(REGION_TEXT_PREVIEW).collect();
+        if preview.len() < text.len() {
+            preview.push_str("...");
+        }
+        let _ = write!(out, " {preview:?}");
+    }
+    out.push('\n');
 }
 
 #[cfg(test)]
@@ -1421,7 +1441,7 @@ mod tests {
 
     #[test]
     fn format_regions_text_indents_by_depth_and_previews_text() {
-        use ultty_protocol::control::{NativeScene, RegionInfo};
+        use ultty_protocol::control::{NativeScene, RegionInfo, SurfaceInfo};
         let region = |id, parent, depth, content: &str, text: Option<&str>| RegionInfo {
             role: content.to_string(),
             label: None,
@@ -1449,6 +1469,8 @@ mod tests {
         root.role = "group".to_string();
         let mut title = region(1, Some(0), 1, "text", Some("Build"));
         title.label = Some("Build".to_string());
+        let mut card = region(7, None, 0, "none", None);
+        card.role = "group".to_string();
         let scenes = vec![NativeScene {
             session: 4,
             in_band: true,
@@ -1459,6 +1481,13 @@ mod tests {
                 log,
                 region(3, Some(0), 1, "input", Some("ls\nmore")),
             ],
+            surfaces: vec![SurfaceInfo {
+                id: 7,
+                rows: 2,
+                state: "unplaced".to_string(),
+                anchor_line: None,
+                regions: vec![card, region(8, Some(7), 1, "text", Some("cargo test"))],
+            }],
         }];
         assert_eq!(
             format_response(
@@ -1470,7 +1499,10 @@ mod tests {
                  #0 none (group) 0,0 80x1\n\
                  \x20 #1 text (text) 0,1 80x1 \"Build\"\n\
                  \x20 #2 text (log, polite) 0,2 80x1 scroll 0,3 id=log label=\"Build log\" \"{}...\"\n\
-                 \x20 #3 input (input) 0,3 80x1 \"ls...\"\n",
+                 \x20 #3 input (input) 0,3 80x1 \"ls...\"\n\
+                 surface #7 (2 rows, unplaced)\n\
+                 \x20 #7 none (group) 0,7 80x1\n\
+                 \x20   #8 text (text) 0,8 80x1 \"cargo test\"\n",
                 "x".repeat(60)
             )
         );

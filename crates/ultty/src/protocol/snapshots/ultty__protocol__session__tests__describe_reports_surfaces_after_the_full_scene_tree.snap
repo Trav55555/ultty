@@ -1,0 +1,76 @@
+---
+source: crates/ultty/src/protocol/session.rs
+expression: scene
+---
+{
+  "session": 1,
+  "in_band": false,
+  "focused": null,
+  "regions": [
+    {
+      "id": 0,
+      "parent": null,
+      "depth": 0,
+      "x": 0.0,
+      "y": 0.0,
+      "width": 80.0,
+      "height": 24.0,
+      "scroll_x": 0.0,
+      "scroll_y": 0.0,
+      "content": "none",
+      "role": "group"
+    },
+    {
+      "id": 1,
+      "parent": 0,
+      "depth": 1,
+      "x": 0.0,
+      "y": 0.0,
+      "width": 80.0,
+      "height": 2.0,
+      "scroll_x": 0.0,
+      "scroll_y": 0.0,
+      "content": "text",
+      "text": "$ cargo test",
+      "role": "text",
+      "label": "$ cargo test"
+    }
+  ],
+  "surfaces": [
+    {
+      "id": 5,
+      "rows": 3,
+      "state": "unplaced",
+      "regions": [
+        {
+          "id": 5,
+          "parent": null,
+          "depth": 0,
+          "x": 0.0,
+          "y": 0.0,
+          "width": 80.0,
+          "height": 3.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 6,
+          "parent": 5,
+          "depth": 1,
+          "x": 0.0,
+          "y": 0.0,
+          "width": 80.0,
+          "height": 2.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "text",
+          "text": "running 42 tests",
+          "role": "text",
+          "label": "running 42 tests"
+        }
+      ]
+    }
+  ]
+}

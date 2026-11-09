@@ -232,4 +232,58 @@ mod tests {
         assert_eq!(scroll_adjustments.get(&scroll_id), None);
         assert_eq!(clip_rects.get(&child_id), Some(&(20.0, 125.0, 80.0, 165.0)));
     }
+
+    /// Surfaces are not drawn by the full-scene pass (ADR 0020 slice 3
+    /// draws them at their anchor rows): the geometry the draw loop reads is
+    /// the same with a surface as without, and holds nothing for it.
+    #[test]
+    fn surface_regions_are_left_out_of_full_scene_geometry() {
+        let build = |with_surface: bool| {
+            let mut scene = SceneTree::new();
+            scene.insert(region(
+                RegionId::new(1),
+                RegionId::ROOT,
+                ComputedLayout {
+                    width: 80.0,
+                    height: 24.0,
+                    ..Default::default()
+                },
+                Overflow::default(),
+            ));
+            if with_surface {
+                scene
+                    .try_insert_surface(Region::new(RegionId::new(10)), 3)
+                    .unwrap();
+                scene.insert(region(
+                    RegionId::new(11),
+                    RegionId::new(10),
+                    ComputedLayout {
+                        width: 80.0,
+                        height: 3.0,
+                        ..Default::default()
+                    },
+                    Overflow::default(),
+                ));
+            }
+            let mut scroll_adjustments = ScrollAdjustments::new();
+            let mut clip_rects = ClipRects::new();
+            rebuild_scroll_geometry(
+                &scene,
+                |_| (0.0, 0.0),
+                10.0,
+                20.0,
+                5.0,
+                &mut scroll_adjustments,
+                &mut clip_rects,
+            );
+            let drawn: Vec<RegionId> = scene.iter_depth_first().map(|r| r.id).collect();
+            (drawn, scroll_adjustments, clip_rects)
+        };
+
+        let (drawn, adjustments, clips) = build(true);
+        assert_eq!(drawn, [RegionId::ROOT, RegionId::new(1)]);
+        assert!(!clips.contains_key(&RegionId::new(10)));
+        assert!(!clips.contains_key(&RegionId::new(11)));
+        assert_eq!((drawn, adjustments, clips), build(false));
+    }
 }
