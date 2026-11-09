@@ -23,9 +23,13 @@ read-back cost is not in the number. The compositor only produces pixels on
 output frames, so a change is seen at the first frame after the terminal
 commits: latency includes the wait for the compositor's next frame, as on any
 Wayland desktop, and its resolution is one output frame (`frame_ms`, recorded
-with every sample). Frames are requested with copy_with_damage, so idle
-polling does not force extra frames. `received_ms` is the same sample timed
-at the probe's receipt, as a cross-check; nothing is subtracted from either.
+with every sample). Frames are requested with copy_with_damage, which
+completes on the next frame with damage. Any copy request also makes wlroots
+draw a frame at once, so the first request is sent well before the key (see
+arm_quietly): sent after the key, its frame used up the idle output and
+every echo waited one more frame (`--arm after-key` keeps that order for
+comparison). `received_ms` is the same sample timed at the probe's receipt,
+as a cross-check; nothing is subtracted from either.
 """
 
 import argparse
@@ -340,19 +344,65 @@ def changed_box(frame, before, after, region):
     return region[0] + x0, region[1] + y0, max(1, x1 - x0), max(1, y1 - y0)
 
 
-def measure(probe, cell, symbol, gap, timeout):
+# How long past the gap arm_quietly waits for a quiet output before it
+# accepts a busy one (a flood redraws every frame, so it never goes quiet).
+BUSY_CAP_S = 0.25
+
+
+def arm_quietly(probe, cell, gap):
+    """A copy_with_damage request in flight, sent well before the key.
+
+    Every screencopy copy request, with damage or not, makes wlroots commit
+    an output frame at once (wlr_output_update_needs_frame) when the output
+    is idle, and the headless backend then holds the next frame for a full
+    period. Arming after the key put that forced frame between the key and
+    the terminal's echo commit, so every echo waited one extra period.
+
+    Arming here, `gap` before the key, lets the forced frame and its period
+    pass. A copy that completes first (damage tracking starts full, or
+    something else drew) is replaced, and the key then waits until the
+    latest request is two frame periods old. An output that keeps drawing
+    (a flood) never lets a request get that old; after BUSY_CAP_S the latest
+    one is used, which costs nothing there: a busy output already has its
+    next frame scheduled, so the request forces no extra one.
+    """
+    settle = 2 * (probe.frame_ms() or 1000 / 60) / 1000
+    deadline = now() + gap
+    cap = deadline + BUSY_CAP_S
+    frame, armed_at = None, None
+    while True:
+        if frame is None or frame.done:
+            if frame is not None:
+                probe.destroy(frame)
+            frame = probe.frame(cell)
+            probe.copy(frame, 0, damage=True)
+            armed_at = now()
+        t = now()
+        quiet_from = max(deadline, armed_at + settle)
+        if t >= quiet_from or t >= cap:
+            return frame
+        probe.conn.dispatch(min(quiet_from, cap) - t)
+
+
+def measure(probe, cell, symbol, gap, timeout, arm_after_key=False):
     """One sample: (latency by frame timestamp, latency by receipt) in ms, or None.
 
     The baseline grab forces an output frame, and sway composites at most
     once per frame period, so wait `gap` (longer than a frame) before the key;
-    otherwise every sample would include the rest of that frame.
+    otherwise every sample would include the rest of that frame. The first
+    frame request is armed before that wait (see arm_quietly);
+    `arm_after_key` restores the old order, which adds one frame.
     """
     _, baseline = probe.grab(cell)
-    time.sleep(gap)
-    current = probe.frame(cell)
+    if arm_after_key:
+        time.sleep(gap)
+        current = probe.frame(cell)
+    else:
+        current = arm_quietly(probe, cell, gap)
     armed = probe.frame(cell)
     start = probe.key(symbol)
-    probe.copy(current, 0, damage=True)
+    if arm_after_key:
+        probe.copy(current, 0, damage=True)
     slot = 1
     deadline = start + timeout
     try:
@@ -382,6 +432,9 @@ def main(argv):
     ap.add_argument("--claim", default="live-unknown")
     ap.add_argument("--timeout", type=float, default=2.0)
     ap.add_argument("--start-key", help="press this after calibrating (ubench-echo --flood waits for f)")
+    ap.add_argument("--arm", choices=["before-key", "after-key"], default="before-key",
+                    help="when to request the first frame; after-key is the old, "
+                         "one-frame-late order, kept for comparison")
     args = ap.parse_args(argv)
 
     keys = ["x", "o"] + ([args.start_key] if args.start_key else [])
@@ -432,7 +485,8 @@ def main(argv):
     for _ in range(args.samples):
         # Always the key the cell is not showing, so every sample changes it.
         shown = "o" if shown == "x" else "x"
-        sample = measure(probe, cell, shown, rng.uniform(0.05, 0.3), args.timeout)
+        sample = measure(probe, cell, shown, rng.uniform(0.05, 0.3), args.timeout,
+                         arm_after_key=args.arm == "after-key")
         if sample is None:
             timeouts += 1
             continue
@@ -446,6 +500,7 @@ def main(argv):
                 "suite": "lat.k2p.external", "case": args.case, "arm": args.terminal,
                 "block": block, "value": ms, "unit": "ms",
                 "method": "virtual-keyboard+screencopy", "timestamp": "compositor-frame",
+                "frame_request": args.arm,
                 "received_ms": got, "resolution_ms": frame_ms, "frame_ms": frame_ms,
                 "output": probe.output_name, "claim": args.claim,
                 "env": {"session": "wayland"},

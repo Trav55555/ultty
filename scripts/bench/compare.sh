@@ -38,6 +38,8 @@
 #   --rounds N         interleaved rounds, terminal order shuffled per round (default 3)
 #   --repeat N         feed passes per launch (default 3)
 #   --k2p-samples N    0 skips latency (default 200)
+#   --k2p-arm WHEN     Wayland probe frame request: before-key (default) or
+#                      after-key (the old order, one frame late; comparison only)
 #   --flood LIST       flood rates for latency under load, MiB/s or max (default 10,max)
 #   --idle-secs N      0 skips idle measurement (default 60)
 #   --tabs LIST        tab counts for memory scaling, empty skips (default 1,8,32)
@@ -60,7 +62,7 @@ log() { echo "[$(date +%T)] $*" >&2; }
 
 SESSION="" TERMINALS="ultty,ghostty,gnome-terminal,alacritty" GEOMETRY="120x40"
 FONT="DejaVu Sans Mono" FONT_SIZE=11 CORPORA="ascii,sgr-dense,unicode-mixed,cursor-redraw"
-SIZE_MIB=16 ROUNDS=3 REPEAT=3 K2P_SAMPLES=200 FLOOD="10,max" IDLE_SECS=60 TABS="1,8,32"
+SIZE_MIB=16 ROUNDS=3 REPEAT=3 K2P_SAMPLES=200 K2P_ARM=before-key FLOOD="10,max" IDLE_SECS=60 TABS="1,8,32"
 WAYLAND_REFRESH=60
 ULTTY_DIR="" BENCH_DIR="" CLAIM="" OUT=""
 while [[ $# -gt 0 ]]; do
@@ -75,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     --rounds) ROUNDS="${2:?}"; shift 2 ;;
     --repeat) REPEAT="${2:?}"; shift 2 ;;
     --k2p-samples) K2P_SAMPLES="${2:?}"; shift 2 ;;
+    --k2p-arm) K2P_ARM="${2:?}"; shift 2 ;;
     --flood) FLOOD="${2?}"; shift 2 ;;
     --idle-secs) IDLE_SECS="${2:?}"; shift 2 ;;
     --tabs) TABS="${2?}"; shift 2 ;;
@@ -83,7 +86,7 @@ while [[ $# -gt 0 ]]; do
     --bench-dir) BENCH_DIR="${2:?}"; shift 2 ;;
     --claim) CLAIM="${2:?}"; shift 2 ;;
     --out) OUT="${2:?}"; shift 2 ;;
-    -h|--help) sed -n '2,52p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
     *) die "unknown option $1" ;;
   esac
 done
@@ -571,7 +574,7 @@ run_k2p() {
   sleep 2
   if [[ "$SESSION" == wayland ]]; then
     python3 -I "$HERE/k2p-wayland.py" --title "$title" --terminal "$term" --out "$RESULTS" \
-      --samples "$K2P_SAMPLES" --case "$case_name" --claim "$CLAIM" "${probe_args[@]}" \
+      --samples "$K2P_SAMPLES" --case "$case_name" --claim "$CLAIM" --arm "$K2P_ARM" "${probe_args[@]}" \
       2>>"$OUT/logs/$title.probe.log" || fail "$term k2p $case_name failed (see $OUT/logs/$title.probe.log)"
   else
     "$BIN/ubench-k2p" --window "$win" --terminal "$term" --out "$RESULTS" --samples "$K2P_SAMPLES" \
