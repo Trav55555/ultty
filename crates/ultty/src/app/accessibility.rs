@@ -53,10 +53,11 @@ impl App {
     /// A digest of what the tree shows besides screen text and titles,
     /// which arrive as events: the tabs, their bar titles, the active tab,
     /// its panes and their rectangles (so dragging a divider counts), the
-    /// focused pane, the cell size, and the active tab's native sessions
-    /// with their [`NativeSession::shown_generation`] (frames, focus,
-    /// surfaces). Hashing it each pass is cheaper than finding every place
-    /// these change. The window size is the renderer's, kept from the last
+    /// focused pane, the cell size, whether the focused pane is scrolled
+    /// back, and the active tab's native sessions with their
+    /// [`NativeSession::shown_generation`] (frames, focus, surfaces).
+    /// Hashing it each pass is cheaper than finding every place these
+    /// change. The window size is the renderer's, kept from the last
     /// resize, not asked of the window system.
     fn shown_digest(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -85,6 +86,9 @@ impl App {
         for value in [cell_width, cell_height, top] {
             value.to_bits().hash(&mut hasher);
         }
+        if let Some(terminal) = self.terminal_manager.focused_terminal() {
+            scrolled_back(&terminal.event_loop.terminal()).hash(&mut hasher);
+        }
         if let Some(server) = &self.protocol_server {
             let mut sessions: Vec<(u64, u64)> = server
                 .active_tab_sessions()
@@ -103,7 +107,11 @@ impl App {
 /// renderer draws them only then (spec §10.6).
 ///
 /// Each pane is locked once, briefly: the focused one to copy its rows and
-/// find its surfaces, the others to read their titles.
+/// find its surfaces, the others to read their titles. Native scenes are
+/// copied after the lock is released. While the focused pane is scrolled
+/// back its surfaces are left out: the rows are the live screen
+/// (scrollback is deferred, ADR 0021 §2), so their anchors would be
+/// misplaced.
 fn accessibility_snapshot(
     terminal_manager: &ultty::terminal_manager::TerminalManager,
     bar: &[ultty::tabs::TabState],
@@ -148,42 +156,45 @@ fn accessibility_snapshot(
                 cell_width: cell.0,
                 cell_height: cell.1,
             };
-            let mut scenes = Vec::new();
-            let mut surfaces = Vec::new();
+            let mut on_screen = Vec::new();
             let (title, grid) = {
                 let terminal = managed.event_loop.terminal();
-                let grid = if !is_focused {
-                    None
-                } else if full_scene {
-                    // The scene hides the grid; the renderer draws every
-                    // session's ROOT tree.
-                    scenes = sessions
-                        .iter()
-                        .filter(|session| session.is_full_scene())
-                        .map(|session| capture(session, RegionId::ROOT, at(bounds.y0)))
-                        .collect();
-                    None
-                } else {
-                    surfaces = ultty::protocol::pairing::surfaces_on_screen(
-                        &terminal,
-                        sessions.iter().copied(),
-                    )
-                    .into_iter()
-                    .filter_map(|surface| {
-                        let session = sessions
-                            .iter()
-                            .find(|session| session.session_id() == surface.session_id)?;
-                        let top = bounds.y0 + surface.row as f64 * cell.1;
-                        Some(SurfaceSnapshot {
-                            row: surface.row,
-                            scene: capture(session, surface.id, at(top)),
-                        })
-                    })
-                    .collect();
-                    Some(GridSnapshot::capture(terminal.grid(), cell.0, cell.1))
-                };
+                let grid = (is_focused && !full_scene).then(|| {
+                    if !scrolled_back(&terminal) {
+                        on_screen = ultty::protocol::pairing::surfaces_on_screen(
+                            &terminal,
+                            sessions.iter().copied(),
+                        );
+                    }
+                    GridSnapshot::capture(terminal.grid(), cell.0, cell.1)
+                });
                 (pane_title(managed, terminal.title()), grid)
             };
+            // The terminal is unlocked; now copy the scenes.
+            let scenes = if is_focused && full_scene {
+                // The scene hides the grid; the renderer draws every
+                // session's ROOT tree.
+                sessions
+                    .iter()
+                    .filter(|session| session.is_full_scene())
+                    .map(|session| capture(session, RegionId::ROOT, at(bounds.y0)))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let surfaces = on_screen
+                .into_iter()
+                .filter_map(|surface| {
+                    let session = sessions
+                        .iter()
+                        .find(|session| session.session_id() == surface.session_id)?;
+                    let top = bounds.y0 + surface.row as f64 * cell.1;
+                    Some(SurfaceSnapshot {
+                        row: surface.row,
+                        scene: capture(session, surface.id, at(top)),
+                    })
+                })
+                .collect();
             Some(PaneSnapshot {
                 id: id.raw(),
                 title,
@@ -195,6 +206,11 @@ fn accessibility_snapshot(
         })
         .collect();
     Snapshot { tabs, panes }
+}
+
+/// Whether `terminal`'s view is scrolled back into its history.
+fn scrolled_back(terminal: &ultty::grid::Terminal) -> bool {
+    terminal.main_buffer().scroll_offset() != 0
 }
 
 /// The region tree under `root` of `session`, drawn at `at`.

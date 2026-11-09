@@ -4,7 +4,7 @@
 //!
 //! [`SceneSnapshot::capture`] copies one region tree (a full-scene `ROOT`
 //! or an inline surface) out of a session's scene; [`super::tree::build`]
-//! places it in the window's tree and calls [`SceneSnapshot::push_nodes`].
+//! places it in the window's tree through an [`Emitter`].
 //!
 //! Text is not given as `TextRun`s: AccessKit exposes runs only under a
 //! `Label`, `Document`, `Terminal` or text input, and runs inside the
@@ -12,6 +12,15 @@
 //! its name when it is one line (a `Text` region is then a `Label`, whose
 //! value is its name), else one `Label` child per line, which Orca reads
 //! line by line in browse mode and flat review.
+//!
+//! Apps are not trusted: a pane shows at most [`MAX_PANE_NODES`] nodes of
+//! native scenes, and since node ids are hashes of names the app partly
+//! chooses, a node whose id is already in the tree is left out with its
+//! subtree rather than handed to AccessKit, which panics on a duplicate.
+
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use accesskit::{Live as AkLive, Node, NodeId, Rect, Role as AkRole, Toggled as AkToggled};
 use ultty_protocol::{Content, Expanded, Live, RegionId, Role, Semantics, Toggled, WidgetContent};
@@ -25,6 +34,11 @@ use crate::scene::tree::SceneTree;
 /// long log to a few hundred nodes.
 pub const MAX_TEXT_LINES: usize = 200;
 
+/// The most nodes the native scenes of one pane add to the tree, regions
+/// and text lines together; past it the rest is left out and a last
+/// `Label` says so. Bounds the copy and the rebuild for any app.
+pub const MAX_PANE_NODES: usize = 5000;
+
 /// Where a region tree is drawn: its layout's cell (0, 0) at window pixel
 /// (`x`, `y`), cells `cell_width` by `cell_height` pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,7 +50,8 @@ pub struct Placement {
 }
 
 /// One region tree of a native session, as the accessibility tree shows
-/// it: hidden regions and their subtrees already left out.
+/// it: hidden regions and their subtrees already left out, and at most
+/// [`MAX_PANE_NODES`] nodes' worth of it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneSnapshot {
     session: u64,
@@ -46,18 +61,22 @@ pub struct SceneSnapshot {
     regions: Vec<RegionSnapshot>,
     /// The session's focused region, when it is in this tree.
     focus: Option<u32>,
+    /// Whether regions or lines were left out to stay within the budget.
+    truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct RegionSnapshot {
     id: u32,
-    /// Children shown, in order.
+    /// Children shown, in order. Some may be missing from the snapshot
+    /// when it was truncated.
     children: Vec<u32>,
     semantics: Semantics,
     /// The `Input` widget's flags, for the text input role.
     input: Option<InputKind>,
-    /// The text of a text, rich text, markdown or code region.
-    text: Option<String>,
+    /// The lines of its text that its name does not already say, with
+    /// their line numbers in the text: the last non-empty ones.
+    lines: Vec<(usize, String)>,
     bounds: Rect,
 }
 
@@ -67,28 +86,14 @@ struct InputKind {
     password: bool,
 }
 
-/// A relationship of a region node to another region, kept until every
-/// node is built, so that a target not in the tree can be dropped.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct Relation {
-    /// Index of the node in the update's node list.
-    pub(super) node: usize,
-    pub(super) kind: RelationKind,
-    pub(super) target: NodeId,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum RelationKind {
-    LabelledBy,
-    DescribedBy,
-    Controls,
-}
-
 impl SceneSnapshot {
     /// Copy the tree under `root` of `session`'s `scene`, drawn at `at`.
     /// `focused` is the session's focused region and `scroll` gives a
     /// region's scroll offset in cells; a region's bounds are moved by the
     /// offsets of the regions above it, as it is drawn.
+    ///
+    /// Copies at most [`MAX_PANE_NODES`] regions and lines, and of each
+    /// region's text only the lines it shows.
     pub fn capture(
         scene: &SceneTree,
         root: RegionId,
@@ -99,6 +104,8 @@ impl SceneSnapshot {
     ) -> Self {
         let mut regions = Vec::new();
         let mut focus = None;
+        let mut budget = MAX_PANE_NODES;
+        let mut truncated = false;
         // (region, scroll of the regions above it), children pushed in
         // reverse so they come out in order.
         let mut stack = Vec::new();
@@ -112,6 +119,11 @@ impl SceneSnapshot {
             let Some(region) = scene.get(id) else {
                 continue;
             };
+            if budget == 0 {
+                truncated = true;
+                break;
+            }
+            budget -= 1;
             let children: Vec<u32> = region
                 .children
                 .iter()
@@ -133,16 +145,25 @@ impl SceneSnapshot {
             if Some(id) == focused {
                 focus = Some(id.0);
             }
+            let semantics = effective_semantics(region);
+            let lines = match content_text(&region.content) {
+                Some(text) => {
+                    let lines = shown_lines(&text, semantics.label.as_deref(), budget);
+                    truncated |= lines.len() == budget && budget < MAX_TEXT_LINES;
+                    lines
+                }
+                None => Vec::new(),
+            };
+            budget -= lines.len();
             let layout = region.computed;
             let x0 = at.x + f64::from(layout.x - scroll_x) * at.cell_width;
             let y0 = at.y + f64::from(layout.y - scroll_y) * at.cell_height;
-            let (text, input) = content_parts(&region.content);
             regions.push(RegionSnapshot {
                 id: id.0,
                 children,
-                semantics: effective_semantics(region),
-                input,
-                text,
+                semantics,
+                input: input_kind(&region.content),
+                lines,
                 bounds: Rect {
                     x0,
                     y0,
@@ -156,6 +177,7 @@ impl SceneSnapshot {
             root: root.0,
             regions,
             focus,
+            truncated,
         }
     }
 
@@ -176,94 +198,243 @@ impl SceneSnapshot {
     }
 
     /// Add a node for every region, and the `Label`s of their text lines,
-    /// to `nodes`, root first; relationships go to `relations` to be
-    /// resolved once the whole tree is built.
-    pub(super) fn push_nodes(
+    /// to `out`, spending one of `budget` per node; the root is
+    /// `described_by` that node too, if given. Returns the root's id, or
+    /// `None` when nothing was added: an empty tree, no budget left, or a
+    /// root whose id is taken.
+    pub(super) fn emit(
         &self,
-        nodes: &mut Vec<(NodeId, Node)>,
-        relations: &mut Vec<Relation>,
-    ) {
-        for region in &self.regions {
-            let id = region_node_id(self.session, region.id);
-            let (mut node, lines) = region_node(region);
-            let mut children: Vec<NodeId> = region
-                .children
-                .iter()
-                .map(|&child| region_node_id(self.session, child))
-                .collect();
-            let line_nodes: Vec<(NodeId, Node)> = lines
-                .into_iter()
-                .map(|(index, line)| {
-                    let mut label = Node::new(AkRole::Label);
-                    label.set_value(line);
-                    (region_line_node_id(self.session, region.id, index), label)
-                })
-                .collect();
-            // The text comes before any child regions, as it is drawn.
-            children.splice(0..0, line_nodes.iter().map(|(id, _)| *id));
-            node.set_children(children);
+        out: &mut Emitter,
+        budget: &mut usize,
+        described_by: Option<NodeId>,
+    ) -> Option<NodeId> {
+        if self.truncated {
+            out.truncated = true;
+        }
+        let by_id: HashMap<u32, usize> = self
+            .regions
+            .iter()
+            .enumerate()
+            .map(|(index, region)| (region.id, index))
+            .collect();
+        let root = self.emit_region(0, &by_id, out, budget)?;
+        if let Some(target) = described_by {
+            // The root is pushed after its subtree, so it is the last node.
+            if let Some((_, node)) = out.nodes.last_mut() {
+                node.push_described_by(target);
+            }
+        }
+        Some(root)
+    }
 
-            let index = nodes.len();
-            let semantics = &region.semantics;
-            for (kind, target) in [
-                (RelationKind::LabelledBy, semantics.labelled_by),
-                (RelationKind::DescribedBy, semantics.described_by),
-                (RelationKind::Controls, semantics.controls),
-            ] {
-                if let Some(target) = target {
-                    relations.push(Relation {
-                        node: index,
-                        kind,
-                        target: region_node_id(self.session, target.0),
-                    });
+    fn emit_region(
+        &self,
+        index: usize,
+        by_id: &HashMap<u32, usize>,
+        out: &mut Emitter,
+        budget: &mut usize,
+    ) -> Option<NodeId> {
+        let region = self.regions.get(index)?;
+        if *budget == 0 {
+            out.truncated = true;
+            return None;
+        }
+        let id = region_node_id(self.session, region.id);
+        if !out.claim(id) {
+            return None;
+        }
+        *budget -= 1;
+        let mut node = region_node(region);
+        // The text comes before any child regions, as it is drawn.
+        let mut children = Vec::with_capacity(region.lines.len() + region.children.len());
+        for (line, text) in &region.lines {
+            if *budget == 0 {
+                out.truncated = true;
+                break;
+            }
+            let line_id = region_line_node_id(self.session, region.id, *line);
+            if out.claim(line_id) {
+                *budget -= 1;
+                let mut label = Node::new(AkRole::Label);
+                label.set_value(text.as_str());
+                out.nodes.push((line_id, label));
+                children.push(line_id);
+            }
+        }
+        for child in &region.children {
+            if let Some(&child) = by_id.get(child) {
+                if let Some(child) = self.emit_region(child, by_id, out, budget) {
+                    children.push(child);
                 }
             }
-            nodes.push((id, node));
-            nodes.extend(line_nodes);
         }
+        node.set_children(children);
+
+        let semantics = &region.semantics;
+        for (kind, target) in [
+            (RelationKind::LabelledBy, semantics.labelled_by),
+            (RelationKind::DescribedBy, semantics.described_by),
+            (RelationKind::Controls, semantics.controls),
+        ] {
+            if let Some(target) = target {
+                out.relations.push(Relation {
+                    node: out.nodes.len(),
+                    kind,
+                    target: region_node_id(self.session, target.0),
+                });
+            }
+        }
+        out.nodes.push((id, node));
+        Some(id)
     }
 }
 
-/// A region content's text, and an input's flags.
-fn content_parts(content: &Content) -> (Option<String>, Option<InputKind>) {
+/// The nodes of one tree update as they are built, each id at most once.
+#[derive(Debug, Default)]
+pub(super) struct Emitter {
+    pub(super) nodes: Vec<(NodeId, Node)>,
+    relations: Vec<Relation>,
+    /// Every id pushed or reserved.
+    taken: HashSet<NodeId>,
+    /// Native nodes left out because their id was taken.
+    collisions: usize,
+    /// Whether native nodes were left out for the budget since this was
+    /// last cleared.
+    pub(super) truncated: bool,
+}
+
+/// Whether a collision was logged; once per run is enough.
+static COLLISION_LOGGED: AtomicBool = AtomicBool::new(false);
+
+impl Emitter {
+    /// Push one of Ultty's own nodes (window, tabs, panes, rows), whose
+    /// ids are distinct by construction.
+    pub(super) fn push_fixed(&mut self, id: NodeId, node: Node) {
+        self.taken.insert(id);
+        self.nodes.push((id, node));
+    }
+
+    /// Keep `id` for one of Ultty's own nodes pushed later, so no native
+    /// node takes it first.
+    pub(super) fn reserve(&mut self, id: NodeId) {
+        self.taken.insert(id);
+    }
+
+    /// Whether `id` is in the tree or reserved.
+    pub(super) fn contains(&self, id: NodeId) -> bool {
+        self.taken.contains(&id)
+    }
+
+    /// Take `id` for a native node; false, and the node must be left
+    /// out, when it is already taken.
+    fn claim(&mut self, id: NodeId) -> bool {
+        let fresh = self.taken.insert(id);
+        if !fresh {
+            self.collisions += 1;
+        }
+        fresh
+    }
+
+    /// The nodes, with each relationship whose target was built added to
+    /// its node; a target that does not exist, is hidden or is not shown
+    /// is dropped (spec §10.5).
+    pub(super) fn finish(mut self) -> Vec<(NodeId, Node)> {
+        if self.collisions > 0 && !COLLISION_LOGGED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                target: "ultty::a11y",
+                count = self.collisions,
+                "native accessibility nodes left out: their ids collide"
+            );
+        }
+        for relation in &self.relations {
+            if !self.taken.contains(&relation.target) {
+                continue;
+            }
+            let node = &mut self.nodes[relation.node].1;
+            match relation.kind {
+                RelationKind::LabelledBy => node.push_labelled_by(relation.target),
+                RelationKind::DescribedBy => node.push_described_by(relation.target),
+                RelationKind::Controls => node.push_controlled(relation.target),
+            }
+        }
+        self.nodes
+    }
+}
+
+/// A relationship of a region node to another region, kept until every
+/// node is built, so that a target not in the tree can be dropped.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Relation {
+    /// Index of the node in the emitter's node list.
+    node: usize,
+    kind: RelationKind,
+    target: NodeId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RelationKind {
+    LabelledBy,
+    DescribedBy,
+    Controls,
+}
+
+/// A region content's text: borrowed, except rich text, whose spans are
+/// joined (a region holds at most 4 MiB).
+fn content_text(content: &Content) -> Option<Cow<'_, str>> {
     match content {
-        Content::Text(text) => (Some(text.text.clone()), None),
-        Content::RichText(rich) => (
-            Some(rich.spans.iter().map(|span| span.text.as_str()).collect()),
-            None,
-        ),
-        Content::Widget(WidgetContent::Markdown(markdown)) => (Some(markdown.source.clone()), None),
-        Content::Widget(WidgetContent::Code(code)) => (Some(code.source.clone()), None),
-        Content::Widget(WidgetContent::Input(input)) => (
-            None,
-            Some(InputKind {
-                multiline: input.multiline,
-                password: input.password,
-            }),
-        ),
-        _ => (None, None),
+        Content::Text(text) => Some(Cow::Borrowed(&text.text)),
+        Content::RichText(rich) => Some(Cow::Owned(
+            rich.spans.iter().map(|span| span.text.as_str()).collect(),
+        )),
+        Content::Widget(WidgetContent::Markdown(markdown)) => Some(Cow::Borrowed(&markdown.source)),
+        Content::Widget(WidgetContent::Code(code)) => Some(Cow::Borrowed(&code.source)),
+        _ => None,
     }
 }
 
-/// The node for `region`, and its text lines to add as `Label` children,
-/// each with its line number in the text.
-fn region_node(region: &RegionSnapshot) -> (Node, Vec<(usize, &str)>) {
+/// An `Input` widget's flags.
+fn input_kind(content: &Content) -> Option<InputKind> {
+    match content {
+        Content::Widget(WidgetContent::Input(input)) => Some(InputKind {
+            multiline: input.multiline,
+            password: input.password,
+        }),
+        _ => None,
+    }
+}
+
+/// The lines of `text` to give as `Label`s under a region named `label`:
+/// none when the name says the whole text; else the last non-empty lines,
+/// at most [`MAX_TEXT_LINES`] and `budget`, with their line numbers, in
+/// order. Copies only those lines.
+fn shown_lines(text: &str, label: Option<&str>, budget: usize) -> Vec<(usize, String)> {
+    let line = text.strip_suffix('\n').unwrap_or(text);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    if line.trim().is_empty() || label == Some(line) {
+        return Vec::new();
+    }
+    // As many as `str::lines` gives: a last line without its newline counts.
+    let count = text.bytes().filter(|&b| b == b'\n').count() + usize::from(!text.ends_with('\n'));
+    let mut lines: Vec<(usize, String)> = text
+        .lines()
+        .rev()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .take(MAX_TEXT_LINES.min(budget))
+        .map(|(from_end, line)| (count - 1 - from_end, line.to_owned()))
+        .collect();
+    lines.reverse();
+    lines
+}
+
+/// The node for `region`, its children not yet set.
+fn region_node(region: &RegionSnapshot) -> Node {
     let semantics = &region.semantics;
     let label = semantics.label.as_deref();
-    // Lines of text not already said by the name.
-    let lines: Vec<(usize, &str)> = match region.text.as_deref() {
-        Some(text) if !names_the_text(label, text) => text
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| !line.trim().is_empty())
-            .collect(),
-        _ => Vec::new(),
-    };
-    let lines = lines[lines.len().saturating_sub(MAX_TEXT_LINES)..].to_vec();
-
     let role = match semantics.role {
-        // A one-line text is a label, named by its value.
-        Role::Text if lines.is_empty() => AkRole::Label,
+        // A one-line text is a label, named by its value; one with a value
+        // of its own is a paragraph, which can carry both.
+        Role::Text if region.lines.is_empty() && semantics.value_text.is_none() => AkRole::Label,
         Role::Text => AkRole::Paragraph,
         Role::Auto | Role::Group => AkRole::Group,
         Role::Heading => AkRole::Heading,
@@ -310,14 +481,7 @@ fn region_node(region: &RegionSnapshot) -> (Node, Vec<(usize, &str)>) {
         node.set_description(description.as_str());
     }
     set_state(&mut node, semantics);
-    (node, lines)
-}
-
-/// Whether `label` is the whole of `text`: one line, said by the name.
-fn names_the_text(label: Option<&str>, text: &str) -> bool {
-    let line = text.strip_suffix('\n').unwrap_or(text);
-    let line = line.strip_suffix('\r').unwrap_or(line);
-    line.trim().is_empty() || label == Some(line)
+    node
 }
 
 /// The state fields: value and range, toggled, expanded, level, position
@@ -375,26 +539,6 @@ fn set_state(node: &mut Node, semantics: &Semantics) {
     }
     if semantics.atomic {
         node.set_live_atomic();
-    }
-}
-
-/// Add each relationship whose target was built to its node; a target
-/// that does not exist, is hidden or is not shown is dropped (spec §10.5).
-pub(super) fn resolve_relations(nodes: &mut [(NodeId, Node)], relations: &[Relation]) {
-    if relations.is_empty() {
-        return;
-    }
-    let built: std::collections::HashSet<NodeId> = nodes.iter().map(|(id, _)| *id).collect();
-    for relation in relations {
-        if !built.contains(&relation.target) {
-            continue;
-        }
-        let node = &mut nodes[relation.node].1;
-        match relation.kind {
-            RelationKind::LabelledBy => node.push_labelled_by(relation.target),
-            RelationKind::DescribedBy => node.push_described_by(relation.target),
-            RelationKind::Controls => node.push_controlled(relation.target),
-        }
     }
 }
 
@@ -1052,5 +1196,223 @@ mod tests {
         // With no focus, the app drawn last has it.
         assert_eq!(update.focus, region_node_id(4, 0));
         consume(update);
+    }
+
+    fn assert_ids_distinct(update: &TreeUpdate) {
+        let mut ids: Vec<NodeId> = update.nodes.iter().map(|(id, _)| *id).collect();
+        let count = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "a node id appears twice");
+    }
+
+    #[test]
+    fn colliding_ids_leave_the_later_subtree_out_instead_of_panicking() {
+        // Two snapshots of the same session collide on every id, as two
+        // apps whose names hash alike would.
+        let mut scene = Scene::new();
+        scene.add(1, 0, text("one\ntwo"));
+        scene.add(2, 1, widget(WidgetContent::Button(ButtonWidget::new("Go"))));
+        scene.focused = Some(RegionId::new(2));
+        let update = build(
+            "Ultty",
+            &pane(vec![scene.capture(7, 0), scene.capture(7, 0)], None),
+        );
+        assert_ids_distinct(&update);
+        assert_eq!(
+            node(&update, pane_node_id(1)).children(),
+            &[region_node_id(7, 0)],
+            "the second root collided and was left out"
+        );
+        let tree = consume(update);
+        assert_eq!(
+            tree.state().focus().map(|focus| focus.role()),
+            Some(AkRole::Button)
+        );
+
+        // A surface listed twice, over a grid.
+        let mut surface = Scene::new();
+        surface.surface(5);
+        surface.add(6, 5, text("x"));
+        let mut snapshot = pane(Vec::new(), Some(screen(10, 2, "$ ")));
+        snapshot.panes[0].surfaces = vec![
+            SurfaceSnapshot {
+                row: 0,
+                scene: surface.capture(7, 5),
+            },
+            SurfaceSnapshot {
+                row: 1,
+                scene: surface.capture(7, 5),
+            },
+        ];
+        let update = build("Ultty", &snapshot);
+        assert_ids_distinct(&update);
+        consume(update);
+    }
+
+    #[test]
+    fn a_native_node_cannot_take_an_id_already_in_the_tree() {
+        // As if a region's id hashed to a pane's or a row's.
+        let mut scene = Scene::new();
+        scene.add(1, 0, Content::None);
+        scene.add(2, 1, text("a\nb"));
+        scene.add(3, 1, Content::None);
+        let mut out = Emitter::default();
+        out.reserve(region_node_id(7, 2));
+        let mut budget = MAX_PANE_NODES;
+        let root = scene.capture(7, 0).emit(&mut out, &mut budget, None);
+        assert_eq!(root, Some(region_node_id(7, 0)));
+        let nodes = out.finish();
+        let find = |id| nodes.iter().find(|(node_id, _)| *node_id == id);
+        assert!(find(region_node_id(7, 2)).is_none(), "taken, left out");
+        assert!(
+            find(region_line_node_id(7, 2, 0)).is_none(),
+            "with its subtree"
+        );
+        let parent = &find(region_node_id(7, 1)).expect("region 1").1;
+        assert_eq!(parent.children(), &[region_node_id(7, 3)]);
+    }
+
+    #[test]
+    fn a_huge_scene_is_cut_to_the_budget_quickly() {
+        let mut scene = Scene::new();
+        for id in 1..=10_000 {
+            scene.add(id, 0, Content::None);
+        }
+        let big: String = (0..200_000).map(|n| format!("line {n}\n")).collect();
+        assert!(big.len() > 2 << 20, "a multi-MiB text");
+        scene.add(10_001, 0, text(&big));
+
+        let started = std::time::Instant::now();
+        let update = build("Ultty", &pane(vec![scene.capture(7, 0)], None));
+        let elapsed = started.elapsed();
+
+        // The window, tab list, tab, panel and pane, then the scene.
+        assert!(
+            update.nodes.len() <= MAX_PANE_NODES + 6,
+            "{} nodes",
+            update.nodes.len()
+        );
+        let pane_node = node(&update, pane_node_id(1));
+        let note = *pane_node.children().last().expect("children");
+        assert_eq!(node(&update, note).value(), Some("… truncated"));
+        assert!(elapsed.as_secs_f64() < 2.0, "took {elapsed:?}");
+        consume(update);
+
+        // The text alone: only its last lines are copied, numbered.
+        let mut scene = Scene::new();
+        scene.add(1, 0, text(&big));
+        let update = build("Ultty", &pane(vec![scene.capture(7, 0)], None));
+        let children = region(&update, 1).children();
+        assert_eq!(children.len(), MAX_TEXT_LINES);
+        assert_eq!(
+            node(&update, region_line_node_id(7, 1, 199_999)).value(),
+            Some("line 199999")
+        );
+        assert!(find(&update, region_line_node_id(7, 1, 0)).is_none());
+    }
+
+    #[test]
+    fn an_app_set_value_on_text_is_kept() {
+        let mut scene = Scene::new();
+        scene.add(1, 0, text("Volume")).set_semantics(Semantics {
+            value_text: Some("80%".to_owned()),
+            ..semantics(Role::Text)
+        });
+        let update = full_scene(&scene);
+        let paragraph = region(&update, 1);
+        assert_eq!(paragraph.role(), AkRole::Paragraph);
+        assert_eq!(paragraph.label(), Some("Volume"));
+        assert_eq!(paragraph.value(), Some("80%"));
+    }
+
+    /// Counts what AccessKit reports between two trees.
+    #[derive(Default)]
+    struct Changes {
+        added: usize,
+        updated: usize,
+        removed: usize,
+    }
+
+    impl accesskit_consumer::TreeChangeHandler for Changes {
+        fn node_added(&mut self, _: &accesskit_consumer::NodeRef) {
+            self.added += 1;
+        }
+        fn node_updated(
+            &mut self,
+            _: &accesskit_consumer::NodeRef,
+            _: &accesskit_consumer::NodeRef,
+        ) {
+            self.updated += 1;
+        }
+        fn focus_moved(
+            &mut self,
+            _: Option<&accesskit_consumer::NodeRef>,
+            _: Option<&accesskit_consumer::NodeRef>,
+        ) {
+        }
+        fn node_removed(&mut self, _: &accesskit_consumer::NodeRef) {
+            self.removed += 1;
+        }
+    }
+
+    #[test]
+    fn a_second_tree_after_moves_hides_and_a_closed_surface_updates_cleanly() {
+        let mut scene = Scene::new();
+        scene.surface(5);
+        scene.add(6, 5, text("first"));
+        scene.add(7, 5, text("second"));
+        scene.surface(8);
+        scene.add(9, 8, text("third"));
+        let grid = screen(10, 3, "$ ");
+        let snapshot = |scene: &Scene, surfaces: &[(i64, u32)]| {
+            let mut snapshot = pane(Vec::new(), Some(grid.clone()));
+            snapshot.panes[0].surfaces = surfaces
+                .iter()
+                .map(|&(row, root)| SurfaceSnapshot {
+                    row,
+                    scene: scene.capture(7, root),
+                })
+                .collect();
+            snapshot
+        };
+        let mut tree = consume(build("Ultty", &snapshot(&scene, &[(0, 5), (1, 8)])));
+
+        // Move 7 under surface 8, hide 9, close surface 5.
+        scene
+            .tree
+            .reparent(RegionId::new(7), RegionId::new(8), usize::MAX)
+            .expect("reparent");
+        scene
+            .tree
+            .get_mut(RegionId::new(9))
+            .expect("region 9")
+            .set_semantics(Semantics {
+                hidden: true,
+                ..Semantics::default()
+            });
+        scene.tree.remove(RegionId::new(5));
+        let second = build("Ultty", &snapshot(&scene, &[(1, 8)]));
+        assert_ids_distinct(&second);
+
+        let mut changes = Changes::default();
+        tree.update_and_process_changes(second, &mut changes);
+        assert!(changes.removed >= 2, "surface 5 and region 9 left");
+        let state = tree.state();
+        let moved = state
+            .node_by_tree_local_id(region_node_id(7, 7), accesskit::TreeId::ROOT)
+            .expect("region 7, moved");
+        assert_eq!(
+            moved.parent_id(),
+            Some(
+                state
+                    .node_by_tree_local_id(region_node_id(7, 8), accesskit::TreeId::ROOT)
+                    .expect("surface 8")
+                    .id()
+            )
+        );
+        assert!(state
+            .node_by_tree_local_id(region_node_id(7, 5), accesskit::TreeId::ROOT)
+            .is_none());
     }
 }

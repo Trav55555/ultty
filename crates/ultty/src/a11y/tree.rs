@@ -33,7 +33,7 @@ use accesskit::{
     TreeUpdate,
 };
 
-use super::scene::{resolve_relations, SceneSnapshot};
+use super::scene::{Emitter, SceneSnapshot, MAX_PANE_NODES};
 use crate::grid::{CellFlags, Grid, Row};
 
 /// The window's node, the root of the tree.
@@ -323,14 +323,13 @@ fn push_within(text: &mut String, start: usize, c: char) {
 pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
     let tab_list_id = node_id("tabs");
     let panel_id = node_id("panel");
-    let mut nodes = Vec::new();
-    let mut relations = Vec::new();
+    let mut out = Emitter::default();
     let mut focus = WINDOW_ID;
 
     let mut window = Node::new(Role::Window);
     window.set_label(window_title);
     window.set_children(vec![tab_list_id, panel_id]);
-    nodes.push((WINDOW_ID, window));
+    out.push_fixed(WINDOW_ID, window);
 
     let mut tab_list = Node::new(Role::TabList);
     tab_list.set_children(
@@ -340,7 +339,7 @@ pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
             .map(|tab| tab_node_id(tab.id))
             .collect::<Vec<_>>(),
     );
-    nodes.push((tab_list_id, tab_list));
+    out.push_fixed(tab_list_id, tab_list);
     let mut panel = Node::new(Role::TabPanel);
     for tab in &snapshot.tabs {
         let mut node = Node::new(Role::Tab);
@@ -350,7 +349,7 @@ pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
             node.set_controls(vec![panel_id]);
             panel.set_label(tab.title.as_str());
         }
-        nodes.push((tab_node_id(tab.id), node));
+        out.push_fixed(tab_node_id(tab.id), node);
     }
 
     panel.set_children(
@@ -360,39 +359,45 @@ pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
             .map(|pane| pane_node_id(pane.id))
             .collect::<Vec<_>>(),
     );
-    nodes.push((panel_id, panel));
+    out.push_fixed(panel_id, panel);
+    // Every pane's node, before any app's node can take its id.
+    for pane in &snapshot.panes {
+        out.reserve(pane_node_id(pane.id));
+    }
 
     for pane in &snapshot.panes {
         let id = pane_node_id(pane.id);
+        let mut budget = MAX_PANE_NODES;
+        out.truncated = false;
         let scenes: Vec<&SceneSnapshot> = pane.scenes.iter().filter(|s| !s.is_empty()).collect();
-        if let Some(last) = scenes.last() {
-            let mut group = Node::new(Role::Group);
-            group.set_label(pane.title.as_str());
-            group.set_bounds(pane.bounds);
-            group.set_children(
-                scenes
-                    .iter()
-                    .map(|scene| scene.root_node_id())
-                    .collect::<Vec<_>>(),
-            );
-            nodes.push((id, group));
-            for scene in &scenes {
-                scene.push_nodes(&mut nodes, &mut relations);
-            }
+        if !scenes.is_empty() {
+            let mut children: Vec<NodeId> = scenes
+                .iter()
+                .filter_map(|scene| scene.emit(&mut out, &mut budget, None))
+                .collect();
+            push_truncation_note(&mut out, pane.id, &mut children);
             // The app drawn last is on top; with several, the last one
-            // with a focused region has the keyboard.
+            // with a focused region has the keyboard. Focus must be on a
+            // node that was built.
             focus = scenes
                 .iter()
                 .rev()
                 .find_map(|scene| scene.focus_node_id())
-                .unwrap_or_else(|| last.root_node_id());
+                .or_else(|| scenes.last().map(|scene| scene.root_node_id()))
+                .filter(|&focus| out.contains(focus))
+                .unwrap_or(id);
+            let mut group = Node::new(Role::Group);
+            group.set_label(pane.title.as_str());
+            group.set_bounds(pane.bounds);
+            group.set_children(children);
+            out.push_fixed(id, group);
             continue;
         }
         let Some(grid) = &pane.grid else {
             let mut group = Node::new(Role::Group);
             group.set_label(pane.title.as_str());
             group.set_bounds(pane.bounds);
-            nodes.push((id, group));
+            out.push_fixed(id, group);
             continue;
         };
         let mut terminal = Node::new(Role::Terminal);
@@ -411,24 +416,13 @@ pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
                 focus: caret,
             });
         }
-        let mut children = Vec::with_capacity(grid.rows.len());
-        let mut runs = Vec::with_capacity(grid.rows.len());
-        // Surfaces in reading order: each after its anchor row, one that
-        // starts above the screen first, one below the last row last.
-        let mut surfaces: Vec<&SurfaceSnapshot> = pane
-            .surfaces
-            .iter()
-            .filter(|s| !s.scene.is_empty())
-            .collect();
-        surfaces.sort_by_key(|surface| surface.row);
-        let mut surfaces = surfaces.into_iter().peekable();
-        while let Some(surface) = surfaces.next_if(|surface| surface.row < 0) {
-            children.push(surface.scene.root_node_id());
-        }
+        // The rows first, so no surface's node can take a run's id.
+        let mut row_runs = Vec::with_capacity(grid.rows.len());
         for (index, row) in grid.rows.iter().enumerate() {
             let top = pane.bounds.y0 + index as f64 * grid.cell_height;
             let ranges: Vec<_> = row.runs().collect();
             let last = ranges.len() - 1;
+            let mut runs = Vec::with_capacity(ranges.len());
             for (run, chars) in ranges.into_iter().enumerate() {
                 let first_col = match run {
                     0 => 0,
@@ -452,41 +446,65 @@ pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
                     node.set_next_on_line(run_node_id(pane.id, index, run + 1));
                 }
                 let run_id = run_node_id(pane.id, index, run);
-                children.push(run_id);
-                runs.push((run_id, node));
+                out.push_fixed(run_id, node);
+                runs.push(run_id);
             }
-            while let Some(surface) = surfaces.next_if(|surface| surface.row == index as i64) {
-                children.push(surface.scene.root_node_id());
-            }
+            row_runs.push(runs);
         }
+        // Then the surfaces, in reading order: each after its anchor row
+        // and described by it (the fallback text), one that starts above
+        // the screen first, one below the last row last.
+        let mut surfaces: Vec<&SurfaceSnapshot> = pane
+            .surfaces
+            .iter()
+            .filter(|s| !s.scene.is_empty())
+            .collect();
+        surfaces.sort_by_key(|surface| surface.row);
+        let mut placed: Vec<(i64, NodeId)> = Vec::with_capacity(surfaces.len());
         for surface in surfaces {
-            children.push(surface.scene.root_node_id());
-        }
-        terminal.set_children(children);
-        nodes.push((id, terminal));
-        nodes.extend(runs);
-        for surface in &pane.surfaces {
-            let root = nodes.len();
-            surface.scene.push_nodes(&mut nodes, &mut relations);
-            // A surface is described by its anchor row, the fallback text.
-            if let Some(row) = usize::try_from(surface.row)
+            let anchor = usize::try_from(surface.row)
                 .ok()
                 .filter(|&row| row < grid.rows.len())
-            {
-                if let Some((_, node)) = nodes.get_mut(root) {
-                    node.push_described_by(row_node_id(pane.id, row));
-                }
+                .map(|row| row_node_id(pane.id, row));
+            if let Some(root) = surface.scene.emit(&mut out, &mut budget, anchor) {
+                placed.push((surface.row, root));
             }
         }
+        let mut placed = placed.into_iter().peekable();
+        let mut children = Vec::with_capacity(grid.rows.len() + placed.len());
+        while let Some((_, root)) = placed.next_if(|&(row, _)| row < 0) {
+            children.push(root);
+        }
+        for (index, runs) in row_runs.into_iter().enumerate() {
+            children.extend(runs);
+            while let Some((_, root)) = placed.next_if(|&(row, _)| row == index as i64) {
+                children.push(root);
+            }
+        }
+        children.extend(placed.map(|(_, root)| root));
+        push_truncation_note(&mut out, pane.id, &mut children);
+        terminal.set_children(children);
+        out.push_fixed(id, terminal);
         focus = id;
     }
-    resolve_relations(&mut nodes, &relations);
 
     TreeUpdate {
-        nodes,
+        nodes: out.finish(),
         tree: Some(TreeInfo::new(WINDOW_ID)),
         tree_id: TreeId::ROOT,
         focus,
+    }
+}
+
+/// When the pane's native nodes were cut to the budget, end its children
+/// with a label that says so.
+fn push_truncation_note(out: &mut Emitter, pane: usize, children: &mut Vec<NodeId>) {
+    let id = node_id(&format!("p{pane}truncated"));
+    if out.truncated && !out.contains(id) {
+        let mut note = Node::new(Role::Label);
+        note.set_value("… truncated");
+        out.push_fixed(id, note);
+        children.push(id);
     }
 }
 
