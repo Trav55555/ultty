@@ -102,3 +102,27 @@ closest two were 47 ms apart in the log, which timestamps after the
 build, against the 50 ms coalescing interval. Building a 44-node tree
 for an 88x39 screen (snapshot under the pane's lock plus the build) took
 a median of 93 us and at most 2.8 ms under the flood.
+
+## Update: the wakeups were blocking 1.7.0; on by default
+
+The `blocking` pool thread's 500 ms wake loop is a regression in `blocking`
+1.7.0. In 1.6.2 an idle pool thread exits after one 500 ms timeout with no
+work; 1.7.0 added a condition that it exits only while the pool is over
+its thread limit (500 by default), so a lone thread never exits. zbus 5.19
+asks for `blocking` ^1.6.0 and is its only user here, so `Cargo.lock` now
+pins 1.6.2 (`cargo update -p blocking --precise 1.6.2`).
+
+Same setup as above (release, private Xvfb, `accessibility = true`,
+`cursor_blink = false`, session bus present), 10 s of idle after 5 s, two
+runs each:
+
+| `blocking` | context switches in 10 s | threads |
+|---|---:|---:|
+| 1.7.0 | 20, 20 | 40 |
+| 1.6.2 | 0, 0 | 39 |
+
+With the idle cost gone, `[behavior] accessibility` now defaults to `true`,
+as the ADR intends. `scripts/e2e/accessibility-no-bus.sh` (run in CI's GUI
+smoke job) now fails if an idle window with the adapter on context-switches
+more than twice in 5 s; it fails with 1.7.0 (10 in 5 s) and passes with
+1.6.2 (0), so a `cargo update` that brings 1.7.0 back is caught.

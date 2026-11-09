@@ -145,13 +145,12 @@ it never blinks, and an idle window does not wake up at all.
 
 ```toml
 [behavior]
-accessibility = false   # true exposes the window to screen readers
+accessibility = true   # false keeps Ultty off the accessibility bus
 ```
 
-With `true`, Ultty exposes its window to screen readers through AccessKit: on
-Linux it watches the session D-Bus and joins the AT-SPI bus only while
-assistive technology is running. For now the window is all it exposes; the
-terminal's text follows. With `false` (the default), Ultty never connects to
-the accessibility bus. It is off by default for now because the D-Bus client
-wakes an otherwise idle window twice a second. Read at start; restart Ultty
+With `true` (the default), Ultty exposes its window to screen readers through
+AccessKit: on Linux it watches the session D-Bus and joins the AT-SPI bus only
+while assistive technology is running, and an idle window does not wake up. For now the window is all it exposes; the
+terminal's text follows. With `false`, Ultty never connects to the
+accessibility bus and creates its window visible at once. Read at start; restart Ultty
 after changing it.
