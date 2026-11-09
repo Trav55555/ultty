@@ -114,9 +114,6 @@ impl AnchorPairing {
         self.pending.clear();
         self.frozen.clear();
         for claimed in std::mem::take(&mut self.claimed) {
-            if let Some(session) = find(sessions, claimed.session_id) {
-                session.take_frozen_surface(claimed.surface, claimed.tag);
-            }
             self.evict(sessions, claimed);
         }
     }
@@ -129,7 +126,7 @@ impl AnchorPairing {
             if claimed.session_id != session.session_id() {
                 continue;
             }
-            if let Some(rows) = session.take_frozen_surface(claimed.surface, claimed.tag) {
+            if let Some(rows) = session.take_frozen_surface(claimed.surface, claimed.serial) {
                 self.frozen.push(Frozen {
                     tag: claimed.tag,
                     serial: claimed.serial,
@@ -139,8 +136,11 @@ impl AnchorPairing {
         }
     }
 
+    /// The rows of `claimed` are gone or erased: evict its surface if it is
+    /// still placed, and drop the rows kept for it if it was just closed.
     fn evict(&self, sessions: &mut [&mut NativeSession], claimed: Claimed) {
         if let Some(session) = find(sessions, claimed.session_id) {
+            session.take_frozen_surface(claimed.surface, claimed.serial);
             if is_placed_on(session, claimed.surface, claimed.tag) {
                 let evicted = session.evict_surface(claimed.surface);
                 report(claimed.session_id, evicted);
@@ -290,8 +290,9 @@ impl AnchorPairing {
                 .as_deref()
                 .is_some_and(|session| is_placed_on(session, claimed.surface, claimed.tag));
             if !live {
-                let closed = session
-                    .and_then(|session| session.take_frozen_surface(claimed.surface, claimed.tag));
+                let closed = session.and_then(|session| {
+                    session.take_frozen_surface(claimed.surface, claimed.serial)
+                });
                 let ended = || {
                     let index = frozen
                         .iter()
@@ -338,7 +339,7 @@ impl AnchorPairing {
                     terminal.release_anchor(pending.tag);
                 }
                 Some(SurfacePlacement::Unplaced { rows, .. }) => {
-                    let placed = session.place_surface(id, pending.tag);
+                    let placed = session.place_surface(id, pending.tag, pending.serial);
                     report(pending.anchor.session_id, placed);
                     self.claimed.push(Claimed {
                         tag: pending.tag,
@@ -1178,6 +1179,40 @@ mod tests {
         feed(&mut rig.term, b"\x1b[?1049l");
         rig.update();
         assert_eq!(rig.text(), "prose 1\nwhile away\n\nprose 2");
+    }
+
+    /// A card changed and closed in one frame whose rows are then erased
+    /// in the same pass leaves nothing behind: a later card with the same
+    /// id on the same tag, closed unchanged, keeps its own text.
+    #[test]
+    fn rows_kept_for_an_erased_card_never_reach_a_later_one() {
+        let mut rig = Rig::new();
+        transcript(&mut rig);
+        rig.frame(vec![
+            set_text(5, "old card"),
+            AppMessage::CloseSurface {
+                id: RegionId::new(5),
+            },
+        ]);
+        feed(&mut rig.term, b"\x1b[2J\x1b[H");
+        rig.update();
+        assert_eq!(rig.session.frozen_surface_count(), 0);
+        assert!(rig.pairing.is_idle());
+
+        create_surface(&mut rig.session, 5, 1);
+        anchor(&mut rig.term, SESSION, 5, 1);
+        feed(&mut rig.term, b"fallback\r\n");
+        rig.set_text(5, "new card");
+        rig.update();
+        assert_eq!(
+            rig.placement(5),
+            Some(SurfacePlacement::Placed { rows: 1, tag: 1 }),
+            "the same tag is reused"
+        );
+        close_surface(&mut rig, 5);
+        rig.update();
+        assert_eq!(rig.text(), "new card");
+        assert_eq!(rig.session.frozen_surface_count(), 0);
     }
 
     #[test]

@@ -496,6 +496,9 @@ impl NativeSession {
     /// deletes or moves (from or to a surface). Deleting a surface root
     /// closes it, which is not a change of its scene.
     fn note_surfaces_touched(&mut self, msg: &AppMessage) {
+        if self.surface_states.is_empty() {
+            return;
+        }
         let touched = match msg {
             AppMessage::CreateRegion { parent, .. } => [Some(*parent), None],
             AppMessage::DeleteRegion { id } if self.scene.surface(*id).is_some() => [None, None],
@@ -563,6 +566,7 @@ impl NativeSession {
                 self.mark_full_scene_rebuild();
                 self.surface_states
                     .insert(id, super::surfaces::SurfaceState::new(Instant::now()));
+                self.forget_frozen_surfaces(id);
                 debug!("Created surface {:?} ({} rows)", id, rows);
             }
             Err(error) => {

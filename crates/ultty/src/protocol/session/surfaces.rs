@@ -48,7 +48,9 @@ impl SurfaceState {
 #[derive(Debug)]
 pub(super) struct FrozenSurface {
     id: RegionId,
-    tag: u16,
+    /// The placement it froze on (see `Buffer::anchor_serial`), so a
+    /// surface placed later with the same id and tag never gets its rows.
+    serial: u64,
     rows: Vec<Row>,
 }
 
@@ -56,6 +58,8 @@ pub(super) struct FrozenSurface {
 struct Placed {
     /// The anchor tag on its rows.
     tag: u16,
+    /// Which placement on that tag it is.
+    serial: u64,
     /// Whether any of its rows is on the screen, as last told to the app.
     shown: bool,
     /// Its first row's line, counted from the oldest line the terminal
@@ -136,12 +140,13 @@ impl NativeSession {
     /// Place unplaced surface `id` over the rows tagged `tag` and tell the
     /// app. It counts as shown until [`NativeSession::set_surface_view`]
     /// says otherwise.
-    pub fn place_surface(&mut self, id: RegionId, tag: u16) -> io::Result<()> {
+    pub fn place_surface(&mut self, id: RegionId, tag: u16, serial: u64) -> io::Result<()> {
         let Some(state) = self.surface_states.get_mut(&id) else {
             return Ok(());
         };
         state.placed = Some(Placed {
             tag,
+            serial,
             shown: true,
             line: None,
         });
@@ -290,10 +295,15 @@ impl NativeSession {
         if let Some(rows) = self.rasterise_surface(id, cols) {
             self.frozen_surfaces.push(FrozenSurface {
                 id,
-                tag: placed.tag,
+                serial: placed.serial,
                 rows,
             });
         }
+    }
+
+    /// Drop rows kept for an earlier surface `id`: the id is in use again.
+    pub(super) fn forget_frozen_surfaces(&mut self, id: RegionId) {
+        self.frozen_surfaces.retain(|frozen| frozen.id != id);
     }
 
     /// Freeze every placed surface where it stands: the session is ending.
@@ -304,14 +314,21 @@ impl NativeSession {
         }
     }
 
-    /// The last rows of surface `id`, placed on anchor `tag`, kept when it
-    /// was closed or its session ended; `None` if its rows already hold
-    /// them.
-    pub fn take_frozen_surface(&mut self, id: RegionId, tag: u16) -> Option<Vec<Row>> {
+    /// The last rows of surface `id`, placed as anchor placement
+    /// `serial`, kept when it was closed or its session ended; `None` if
+    /// its rows already hold them. Taking them is also how they are
+    /// dropped when their rows are gone.
+    pub fn take_frozen_surface(&mut self, id: RegionId, serial: u64) -> Option<Vec<Row>> {
         let index = self
             .frozen_surfaces
             .iter()
-            .position(|frozen| frozen.id == id && frozen.tag == tag)?;
+            .position(|frozen| frozen.id == id && frozen.serial == serial)?;
         Some(self.frozen_surfaces.swap_remove(index).rows)
+    }
+
+    /// Rows kept for closed surfaces and not yet taken.
+    #[cfg(test)]
+    pub(crate) fn frozen_surface_count(&self) -> usize {
+        self.frozen_surfaces.len()
     }
 }
