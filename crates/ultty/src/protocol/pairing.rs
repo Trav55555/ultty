@@ -49,6 +49,17 @@ struct Claimed {
     surface: RegionId,
 }
 
+impl Claimed {
+    /// The anchor the surface was placed on.
+    fn anchor(&self) -> Anchor {
+        Anchor {
+            session_id: self.session_id,
+            surface_id: self.surface.0,
+            rows: self.rows,
+        }
+    }
+}
+
 /// The pairing state of one terminal's anchors.
 #[derive(Debug, Default)]
 pub struct AnchorPairing {
@@ -63,6 +74,82 @@ impl AnchorPairing {
     /// pass even without new output.
     pub fn is_idle(&self) -> bool {
         self.pending.is_empty() && self.claimed.is_empty()
+    }
+
+    /// When the oldest waiting anchor is due to be released, so the UI
+    /// wakes for it; `None` when no anchor waits.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.pending
+            .iter()
+            .map(|pending| pending.seen_at + SURFACE_PAIRING_TIMEOUT)
+            .min()
+    }
+
+    /// The terminal is gone: evict every surface placed on its anchors, so
+    /// none stays placed on a tag nothing holds.
+    pub fn abandon(&mut self, sessions: &mut [&mut NativeSession]) {
+        self.pending.clear();
+        for claimed in std::mem::take(&mut self.claimed) {
+            self.evict(sessions, claimed);
+        }
+    }
+
+    fn evict(&self, sessions: &mut [&mut NativeSession], claimed: Claimed) {
+        if let Some(session) = find(sessions, claimed.session_id) {
+            if is_placed_on(session, claimed.surface, claimed.tag) {
+                let evicted = session.evict_surface(claimed.surface);
+                report(claimed.session_id, evicted);
+            }
+        }
+    }
+
+    /// Events were lost (the terminal's queue overflowed), so make the
+    /// pairing agree with the anchors the terminal holds: drop waiting
+    /// anchors that are gone, evict surfaces whose tag is gone or now holds
+    /// another anchor, and treat live anchors nobody knows of as newly
+    /// seen.
+    fn reconcile(
+        &mut self,
+        terminal: &mut Terminal,
+        sessions: &mut [&mut NativeSession],
+        claimable: bool,
+        now: Instant,
+    ) {
+        let live: Vec<(u16, Anchor)> = terminal.main_buffer().anchors().collect();
+        let anchor_of = |tag: u16| {
+            live.iter()
+                .find(|(live_tag, _)| *live_tag == tag)
+                .map(|&(_, anchor)| anchor)
+        };
+        self.pending
+            .retain(|pending| anchor_of(pending.tag) == Some(pending.anchor));
+        let mut gone = Vec::new();
+        self.claimed.retain(|claimed| {
+            let intact = anchor_of(claimed.tag) == Some(claimed.anchor());
+            if !intact {
+                gone.push(*claimed);
+            }
+            intact
+        });
+        for claimed in gone {
+            self.evict(sessions, claimed);
+        }
+        for &(tag, anchor) in &live {
+            let known = self.pending.iter().any(|pending| pending.tag == tag)
+                || self.claimed.iter().any(|claimed| claimed.tag == tag);
+            if known {
+                continue;
+            }
+            if claimable {
+                self.pending.push(PendingAnchor {
+                    tag,
+                    anchor,
+                    seen_at: now,
+                });
+            } else {
+                terminal.release_anchor(tag);
+            }
+        }
     }
 
     /// Bring the terminal's anchors and the tab's `sessions` up to date as
@@ -86,6 +173,12 @@ impl AnchorPairing {
         on_screen: bool,
         now: Instant,
     ) {
+        // A tab split while an anchor waited: it can no longer be claimed.
+        if !claimable {
+            for pending in std::mem::take(&mut self.pending) {
+                terminal.release_anchor(pending.tag);
+            }
+        }
         for event in terminal.take_anchor_events() {
             match event {
                 AnchorEvent::Placed { tag, anchor } if claimable => {
@@ -110,19 +203,24 @@ impl AnchorPairing {
                         session.refuse_surface(id, &format!("anchor refused: {reason:?}"));
                     }
                 }
-                AnchorEvent::Lost { tag, .. } => {
-                    self.pending.retain(|pending| pending.tag != tag);
-                    if let Some(index) = self.claimed.iter().position(|c| c.tag == tag) {
+                AnchorEvent::Lost { tag, anchor } => {
+                    // Match the anchor too: after lost events, a tag may
+                    // name a later anchor.
+                    self.pending
+                        .retain(|pending| (pending.tag, pending.anchor) != (tag, anchor));
+                    if let Some(index) = self
+                        .claimed
+                        .iter()
+                        .position(|c| (c.tag, c.anchor()) == (tag, anchor))
+                    {
                         let claimed = self.claimed.remove(index);
-                        if let Some(session) = find(sessions, claimed.session_id) {
-                            if is_placed_on(session, claimed.surface, tag) {
-                                let evicted = session.evict_surface(claimed.surface);
-                                report(claimed.session_id, evicted);
-                            }
-                        }
+                        self.evict(sessions, claimed);
                     }
                 }
             }
+        }
+        if terminal.take_anchor_overflow() {
+            self.reconcile(terminal, sessions, claimable, now);
         }
 
         // A surface closed by its app, or whose session ended, freezes
@@ -231,7 +329,7 @@ mod tests {
         CAP_INLINE_SURFACES, PROTOCOL_VERSION,
     };
     use ultty_vt::ansi::AnsiParser;
-    use ultty_vt::grid::{Dimensions, TerminalHandler};
+    use ultty_vt::grid::{Dimensions, TerminalHandler, MAX_ANCHORS};
 
     use super::*;
     use crate::terminal_manager::TabId;
@@ -611,6 +709,122 @@ mod tests {
         feed(&mut rig.term, b"\x1b[?1049h");
         rig.update();
         assert_eq!(rig.sent(), (vec![(5, SurfaceEventKind::Hidden)], vec![]));
+    }
+
+    /// A tab split while an anchor waits: the anchor can no longer be
+    /// claimed, so it is released at once rather than paired later.
+    #[test]
+    fn a_split_releases_waiting_anchors() {
+        let mut rig = Rig::new();
+        anchor(&mut rig.term, SESSION, 5, 2);
+        rig.update();
+        assert!(!rig.pairing.is_idle());
+
+        rig.update_with(false, false);
+        assert!(rig.pairing.is_idle());
+        assert!(tags(&rig.term).iter().all(|&tag| tag == 0));
+        create_surface(&mut rig.session, 5, 2);
+        rig.update();
+        assert_eq!(rig.sent(), NOTHING);
+    }
+
+    /// The UI wakes when the oldest waiting anchor is due, and not at all
+    /// when none waits.
+    #[test]
+    fn the_next_deadline_is_the_oldest_waiting_anchors_release() {
+        let mut rig = Rig::new();
+        assert_eq!(rig.pairing.next_deadline(), None);
+        anchor(&mut rig.term, SESSION, 5, 1);
+        rig.update();
+        let first = rig.now;
+        rig.now += Duration::from_millis(500);
+        feed(&mut rig.term, b"\r\n");
+        anchor(&mut rig.term, SESSION, 6, 1);
+        rig.update();
+        assert_eq!(
+            rig.pairing.next_deadline(),
+            Some(first + SURFACE_PAIRING_TIMEOUT)
+        );
+
+        // Placed anchors set no deadline.
+        create_surface(&mut rig.session, 5, 1);
+        create_surface(&mut rig.session, 6, 1);
+        rig.update();
+        assert_eq!(rig.pairing.next_deadline(), None);
+    }
+
+    /// A terminal that goes away takes its anchors with it: the surfaces
+    /// placed on them are evicted, not left placed on dead tags.
+    #[test]
+    fn an_abandoned_terminal_evicts_its_surfaces() {
+        let mut rig = Rig::new();
+        create_surface(&mut rig.session, 5, 1);
+        anchor(&mut rig.term, SESSION, 5, 1);
+        rig.update();
+        assert_eq!(rig.sent(), placed(5));
+
+        rig.pairing.abandon(&mut [&mut rig.session]);
+        assert_eq!(rig.sent(), (vec![(5, SurfaceEventKind::Evicted)], vec![]));
+        assert_eq!(rig.placement(5), None);
+        assert!(rig.pairing.is_idle());
+        assert_eq!(rig.session.placed_surfaces().count(), 0);
+    }
+
+    /// 1024 anchors fill the table, then 4096 more are refused in the same
+    /// batch: every placed anchor is still seen, so none is held forever.
+    #[test]
+    fn a_flood_of_refusals_does_not_leak_tags() {
+        let mut rig = Rig::new();
+        let mut wire = Vec::new();
+        for surface in 0..(MAX_ANCHORS + 4096) as u32 {
+            wire.extend(format!("\x1b_u99;{surface};1\x1b\\\r\n").into_bytes());
+        }
+        feed(&mut rig.term, &wire);
+        rig.update();
+        assert_eq!(rig.term.main_buffer().anchors().count(), MAX_ANCHORS);
+
+        rig.now += SURFACE_PAIRING_TIMEOUT;
+        rig.update();
+        assert_eq!(rig.term.main_buffer().anchors().count(), 0);
+        assert!(rig.pairing.is_idle());
+    }
+
+    /// More placements and losses than the terminal's queue holds, with a
+    /// card placed before them: the pairing reconciles with the anchors the
+    /// terminal holds. The card, whose anchor went with the flood, is
+    /// evicted; every anchor still live waits and then is released.
+    #[test]
+    fn an_overflowing_event_queue_is_reconciled_with_the_live_anchors() {
+        let mut rig = Rig::new();
+        create_surface(&mut rig.session, 5, 1);
+        anchor(&mut rig.term, SESSION, 5, 1);
+        feed(&mut rig.term, b"card\r\n");
+        rig.update();
+        assert_eq!(rig.sent(), placed(5));
+
+        let mut wire = Vec::new();
+        for round in 0..5u32 {
+            wire.extend_from_slice(b"\x1b[3J\x1b[2J\x1b[H");
+            for surface in 0..MAX_ANCHORS as u32 {
+                let id = 10_000 + round * 2_000 + surface;
+                wire.extend(format!("\x1b_u99;{id};1\x1b\\\r\n").into_bytes());
+            }
+        }
+        feed(&mut rig.term, &wire);
+        rig.update();
+        assert_eq!(rig.sent(), (vec![(5, SurfaceEventKind::Evicted)], vec![]));
+        let live = rig.term.main_buffer().anchors().count();
+        assert!(live > 0);
+        assert_eq!(
+            rig.pairing.pending.len(),
+            live,
+            "every live anchor is known"
+        );
+
+        rig.now += SURFACE_PAIRING_TIMEOUT;
+        rig.update();
+        assert_eq!(rig.term.main_buffer().anchors().count(), 0);
+        assert!(rig.pairing.is_idle());
     }
 
     #[test]

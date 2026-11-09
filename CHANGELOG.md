@@ -97,7 +97,7 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   `placed`, `unplaced` or `hidden` and the anchor line. A frozen surface
   keeps the app's fallback text; drawing its last frame into the rows comes
   with rasterisation. A session with no full-scene regions no longer hides
-  the grid. `scripts/e2e/inline-surface.sh` checks it headless.
+  the grid, and gets keys only once it has some. `scripts/e2e/inline-surface.sh` checks it headless.
 - `ulttui` names each region it creates for a widget with an id
   (`SetRegionMetadata`, key `id`) and tells the terminal which region has
   focus, so `regions` can find widgets by id.

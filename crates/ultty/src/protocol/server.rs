@@ -615,9 +615,30 @@ impl ProtocolServer {
         }
     }
 
-    /// Forget the anchors of terminals that are gone.
+    /// Forget the anchors of terminals that are gone, evicting the
+    /// surfaces placed on them.
     pub fn retain_pairings(&mut self, mut live: impl FnMut(TerminalId) -> bool) {
-        self.pairings.retain(|&terminal_id, _| live(terminal_id));
+        let gone: Vec<TerminalId> = self
+            .pairings
+            .keys()
+            .copied()
+            .filter(|&terminal_id| !live(terminal_id))
+            .collect();
+        for terminal_id in gone {
+            if let Some(mut pairing) = self.pairings.remove(&terminal_id) {
+                let mut sessions: Vec<&mut NativeSession> = self.sessions.values_mut().collect();
+                pairing.abandon(&mut sessions);
+            }
+        }
+    }
+
+    /// When the UI must next wake to release an anchor no surface claimed,
+    /// or `None` when no anchor waits.
+    pub fn next_pairing_deadline(&self) -> Option<Instant> {
+        self.pairings
+            .values()
+            .filter_map(AnchorPairing::next_deadline)
+            .min()
     }
 
     /// Returns the number of currently connected native sessions.
@@ -636,15 +657,17 @@ impl ProtocolServer {
     }
 
     /// Sessions that may receive keyboard input typed into the focused pane,
-    /// whose PTY has `foreground_pgrp` in the foreground: sessions of the
-    /// active tab (see `set_active_tab`) whose app is that foreground program
-    /// (see [`NativeSession::is_in_foreground`]).
+    /// whose PTY has `foreground_pgrp` in the foreground: full-scene
+    /// sessions of the active tab (see `set_active_tab`) whose app is that
+    /// foreground program (see [`NativeSession::is_in_foreground`]). An app
+    /// with only inline surfaces reads keys from its tty (ADR 0020).
     fn key_recipients_mut(
         &mut self,
         foreground_pgrp: Option<i32>,
     ) -> impl Iterator<Item = &mut NativeSession> {
-        self.active_tab_sessions_mut()
-            .filter(move |session| session.is_in_foreground(foreground_pgrp))
+        self.active_tab_sessions_mut().filter(move |session| {
+            session.is_full_scene() && session.is_in_foreground(foreground_pgrp)
+        })
     }
 
     /// Send a key event to the sessions that subscribed to keys and may
@@ -674,7 +697,7 @@ impl ProtocolServer {
     /// subscribed to them.
     pub fn has_key_subscribers(&self, foreground_pgrp: Option<i32>) -> bool {
         self.active_tab_sessions()
-            .filter(|session| session.is_in_foreground(foreground_pgrp))
+            .filter(|session| session.is_full_scene() && session.is_in_foreground(foreground_pgrp))
             .any(NativeSession::has_key_subscription)
     }
 
@@ -1568,6 +1591,7 @@ mod tests {
                 version: ultty_protocol::PROTOCOL_VERSION,
                 requested_capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
             },
+            root_child(),
             AppMessage::Subscribe {
                 id: ultty_protocol::RegionId::ROOT,
                 events: ultty_protocol::EVENT_KEY,
@@ -1593,6 +1617,56 @@ mod tests {
             "a background session must receive no input"
         );
 
+        assert!(server.has_key_subscribers(foreground));
+        server.broadcast_key(key, mods, foreground);
+        assert_eq!(key_downs(&socket_replies(&mut client)), 1);
+    }
+
+    /// A region under ROOT, which makes a session full-scene.
+    fn root_child() -> AppMessage {
+        AppMessage::CreateRegion {
+            id: ultty_protocol::RegionId::new(1),
+            parent: ultty_protocol::RegionId::ROOT,
+            insert_index: -1,
+            constraints: ultty_protocol::Constraints::default(),
+            style: ultty_protocol::Style::default(),
+        }
+    }
+
+    /// An app with only inline surfaces reads keys from its tty, even if it
+    /// subscribed ROOT to them; once it draws a full scene it gets them.
+    #[test]
+    fn keys_reach_a_session_only_while_it_is_full_scene() {
+        use std::io::Write;
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
+        let mut client = connect(&mut server, &path);
+        for msg in [
+            AppMessage::ClientHello {
+                version: ultty_protocol::PROTOCOL_VERSION,
+                requested_capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
+            },
+            AppMessage::Subscribe {
+                id: ultty_protocol::RegionId::ROOT,
+                events: ultty_protocol::EVENT_KEY,
+            },
+        ] {
+            client.write_all(&encode(&msg)).unwrap();
+        }
+        server.poll(Some(Duration::from_millis(100))).unwrap();
+        let _handshake = socket_replies(&mut client);
+        let foreground = Some(own_process_group());
+        let key = ultty_protocol::Key::Char('k');
+        let mods = ultty_protocol::Modifiers::NONE;
+
+        assert!(!server.has_key_subscribers(foreground));
+        server.broadcast_key(key.clone(), mods, foreground);
+        server.broadcast_text_input("typed".to_string(), foreground);
+        assert!(socket_replies(&mut client).is_empty());
+
+        client.write_all(&encode(&root_child())).unwrap();
+        server.poll(Some(Duration::from_millis(100))).unwrap();
+        let _ = socket_replies(&mut client);
         assert!(server.has_key_subscribers(foreground));
         server.broadcast_key(key, mods, foreground);
         assert_eq!(key_downs(&socket_replies(&mut client)), 1);
@@ -1683,16 +1757,12 @@ mod tests {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
         server.in_band_input(TAB_A, Some(42), Vec::new, &hello_bytes(), false);
-        server.in_band_input(
-            TAB_A,
-            Some(42),
-            Vec::new,
-            &encode(&AppMessage::Subscribe {
-                id: ultty_protocol::RegionId::ROOT,
-                events: ultty_protocol::EVENT_KEY,
-            }),
-            false,
-        );
+        let mut later = encode(&root_child());
+        later.extend(encode(&AppMessage::Subscribe {
+            id: ultty_protocol::RegionId::ROOT,
+            events: ultty_protocol::EVENT_KEY,
+        }));
+        server.in_band_input(TAB_A, Some(42), Vec::new, &later, false);
         let _ = in_band_output(&mut server, TAB_A);
 
         assert!(server.has_key_subscribers(Some(42)));

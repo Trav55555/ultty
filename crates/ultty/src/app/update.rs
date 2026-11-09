@@ -31,6 +31,10 @@ impl App {
                 .as_ref()
                 .map_or(0, |server| server.session_count()),
             control_wait: self.next_control_wait_deadline(),
+            anchor_release: self
+                .protocol_server
+                .as_ref()
+                .and_then(|server| server.next_pairing_deadline()),
         }
         .next_wake(now)
     }
@@ -589,6 +593,8 @@ struct WakeState {
     /// The earliest `ulttyctl wait-for` timeout or quiet-period end. Text
     /// and events wake the UI on their own, so waits need no tick.
     control_wait: Option<Instant>,
+    /// When an inline surface anchor that no surface claimed is released.
+    anchor_release: Option<Instant>,
 }
 
 impl WakeState {
@@ -617,6 +623,7 @@ impl WakeState {
             self.config_reload,
             maintenance,
             self.control_wait,
+            self.anchor_release,
         ]
         .into_iter()
         .flatten()
@@ -865,6 +872,7 @@ mod tests {
             config_reload: None,
             native_sessions: 0,
             control_wait: None,
+            anchor_release: None,
         }
     }
 
@@ -929,6 +937,20 @@ mod tests {
             ..idle(now)
         };
         assert_eq!(wait.next_wake(now), Some(deadline));
+    }
+
+    /// An anchor no surface claimed is released on time even when nothing
+    /// else would wake the window (no native session, so no tick).
+    #[test]
+    fn a_waiting_anchor_wakes_at_its_release() {
+        let now = Instant::now();
+        let release = now + Duration::from_millis(1500);
+        let state = WakeState {
+            anchor_release: Some(release),
+            ..idle(now)
+        };
+        assert_eq!(state.next_wake(now), Some(release));
+        assert_eq!(idle(now).next_wake(now), None);
     }
 
     #[test]
