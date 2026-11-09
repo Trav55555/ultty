@@ -37,7 +37,7 @@ impl App {
             accessibility_snapshot(
                 &self.terminal_manager,
                 &self.tab_bar.tabs,
-                self.window.inner_size(),
+                self.renderer.surface_size(),
                 self.renderer.tab_bar_height(),
                 self.renderer.cell_dimensions(),
             )
@@ -47,8 +47,10 @@ impl App {
 
     /// A digest of what the tree shows besides screen text and titles,
     /// which arrive as events: the tabs, their bar titles, the active tab,
-    /// its panes, the focused pane and the geometry. Hashing it each pass is
-    /// cheaper than finding every place these change.
+    /// its panes and their rectangles (so dragging a divider counts), the
+    /// focused pane and the cell size. Hashing it each pass is cheaper than
+    /// finding every place these change. The window size is the renderer's,
+    /// kept from the last resize, not asked of the window system.
     fn shown_digest(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for tab in &self.tab_bar.tabs {
@@ -61,10 +63,19 @@ impl App {
             }
             tab.focused_terminal.raw().hash(&mut hasher);
         }
-        let size = self.window.inner_size();
-        (size.width, size.height).hash(&mut hasher);
+        let (width, height) = self.renderer.surface_size();
+        let top = self.renderer.tab_bar_height();
+        for (id, (x, y, w, h)) in self
+            .terminal_manager
+            .active_pane_rects(width as f32, height as f32 - top)
+        {
+            id.raw().hash(&mut hasher);
+            for value in [x, y, w, h] {
+                value.to_bits().hash(&mut hasher);
+            }
+        }
         let (cell_width, cell_height) = self.renderer.cell_dimensions();
-        for value in [cell_width, cell_height, self.renderer.tab_bar_height()] {
+        for value in [cell_width, cell_height, top] {
             value.to_bits().hash(&mut hasher);
         }
         hasher.finish()
@@ -79,7 +90,7 @@ impl App {
 fn accessibility_snapshot(
     terminal_manager: &ultty::terminal_manager::TerminalManager,
     bar: &[ultty::tabs::TabState],
-    window_size: winit::dpi::PhysicalSize<u32>,
+    (window_width, window_height): (u32, u32),
     tab_bar_height: f32,
     (cell_width, cell_height): (f32, f32),
 ) -> Snapshot {
@@ -93,10 +104,7 @@ fn accessibility_snapshot(
         .collect();
     let focused = terminal_manager.focused_terminal_id();
     let panes = terminal_manager
-        .active_pane_rects(
-            window_size.width as f32,
-            window_size.height as f32 - tab_bar_height,
-        )
+        .active_pane_rects(window_width as f32, window_height as f32 - tab_bar_height)
         .into_iter()
         .filter_map(|(id, (x, y, width, height))| {
             let managed = terminal_manager.terminal(id)?;
