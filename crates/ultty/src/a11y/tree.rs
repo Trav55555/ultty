@@ -5,7 +5,8 @@
 //! ├── TabList
 //! │   └── Tab, one per tab, the active one selected
 //! └── TabPanel (the active tab's title)
-//!     ├── Terminal (the focused pane's title): one TextRun per screen row,
+//!     ├── Terminal (the focused pane's title): one TextRun per screen row
+//!     │   (a row past 255 characters is several, on one line),
 //!     │   the caret at the cursor; focus rests here
 //!     └── Group (each other pane's title), no children
 //! ```
@@ -68,9 +69,9 @@ pub struct GridSnapshot {
     cell_height: f64,
 }
 
-/// One screen row as a text run: its characters (a cell's whole grapheme
-/// each, a wide character once), the columns they start at and how many
-/// they span, and the line break unless the row soft-wraps.
+/// One screen row: its characters (a cell's whole grapheme each, a wide
+/// character once), the columns they start at and how many they span,
+/// where words start, and the line break unless the row soft-wraps.
 #[derive(Debug, Clone, PartialEq)]
 struct RowText {
     text: String,
@@ -80,7 +81,22 @@ struct RowText {
     columns: Vec<u16>,
     /// Columns each character spans; 0 for the line break.
     widths: Vec<u8>,
+    /// Whether a word starts at each character.
+    word_starts: Vec<bool>,
     line_break: bool,
+}
+
+/// The most characters in one `TextRun`. AccessKit's word starts are a
+/// list of `u8` and its consumer keeps character indices in a `u8`, so a
+/// longer row is split into runs on the same line.
+const MAX_RUN_CHARS: usize = 255;
+
+/// How a row begins: on a new line, or continuing a soft-wrapped one whose
+/// last character was blank or not (a word running on across the wrap).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RowStart {
+    NewLine,
+    After { blank: bool },
 }
 
 impl GridSnapshot {
@@ -89,23 +105,33 @@ impl GridSnapshot {
     /// runs with the terminal locked.
     pub fn capture(grid: &Grid, cell_width: f64, cell_height: f64) -> Self {
         let dims = grid.dimensions();
-        let cursor = grid.cursor().position;
+        let cursor = grid.cursor();
+        // With a wrap pending the cursor is past the last column, not on it.
+        let cursor_col = cursor.position.col + u16::from(cursor.wrap_pending);
         let mut caret = None;
-        let rows = (0..dims.rows)
-            .filter_map(|index| {
-                let row = grid.row(index)?;
-                let line_break = index + 1 < dims.rows && !row.is_wrapped();
-                if index == cursor.row {
-                    // Keep the blanks before the cursor, so the caret after
-                    // a prompt's trailing space lands after it.
-                    let text = RowText::capture(row, cursor.col, line_break);
-                    caret = Some((usize::from(index), text.char_index_at(cursor.col)));
-                    Some(text)
-                } else {
-                    Some(RowText::capture(row, 0, line_break))
+        let mut start = RowStart::NewLine;
+        let mut rows = Vec::with_capacity(usize::from(dims.rows));
+        for index in 0..dims.rows {
+            let Some(row) = grid.row(index) else { break };
+            let line_break = index + 1 < dims.rows && !row.is_wrapped();
+            let text = if index == cursor.position.row {
+                // Keep the blanks before the cursor, so the caret after a
+                // prompt's trailing space lands after it.
+                let text = RowText::capture(row, cursor_col, line_break, start);
+                caret = Some((usize::from(index), text.char_index_at(cursor_col)));
+                text
+            } else {
+                RowText::capture(row, 0, line_break, start)
+            };
+            start = if row.is_wrapped() {
+                RowStart::After {
+                    blank: text.ends_blank(),
                 }
-            })
-            .collect();
+            } else {
+                RowStart::NewLine
+            };
+            rows.push(text);
+        }
         Self {
             rows,
             caret,
@@ -117,25 +143,40 @@ impl GridSnapshot {
 
 impl RowText {
     /// The row's characters through its last non-blank column, or through
-    /// `keep_columns` if that is further. A hidden (concealed) cell reads as
-    /// a blank, as it is drawn.
-    fn capture(row: &Row, keep_columns: u16, line_break: bool) -> Self {
+    /// `keep_columns` if that is further; all of them when the row
+    /// soft-wraps, since its trailing blanks separate words from the next
+    /// row's. A hidden (concealed) cell reads as a blank, as it is drawn.
+    ///
+    /// A wide character that did not fit at the end of a wrapping row
+    /// leaves its last column as an ordinary blank cell (the grid does not
+    /// mark it), so that blank is read as a space, as copying does.
+    fn capture(row: &Row, keep_columns: u16, line_break: bool, start: RowStart) -> Self {
         let shows = |col: u16| {
             row.get(col).is_some_and(|cell| {
                 !cell.has_flag(CellFlags::HIDDEN)
                     && (cell.is_wide_spacer() || cell.char() != ' ' || cell.is_wide())
             })
         };
-        let end = (0..row.width())
-            .rev()
-            .find(|&col| shows(col))
-            .map_or(0, |col| col + 1)
-            .max(keep_columns.min(row.width()));
+        let end = if row.is_wrapped() {
+            row.width()
+        } else {
+            (0..row.width())
+                .rev()
+                .find(|&col| shows(col))
+                .map_or(0, |col| col + 1)
+                .max(keep_columns.min(row.width()))
+        };
 
-        let mut text = String::with_capacity(usize::from(end) + 1);
-        let mut lengths = Vec::with_capacity(usize::from(end) + 1);
-        let mut columns = Vec::with_capacity(usize::from(end) + 1);
-        let mut widths = Vec::with_capacity(usize::from(end) + 1);
+        let capacity = usize::from(end) + 1;
+        let mut text = String::with_capacity(capacity);
+        let mut lengths = Vec::with_capacity(capacity);
+        let mut columns = Vec::with_capacity(capacity);
+        let mut widths = Vec::with_capacity(capacity);
+        let mut word_starts = Vec::with_capacity(capacity);
+        let mut previous_blank = match start {
+            RowStart::NewLine => None,
+            RowStart::After { blank } => Some(blank),
+        };
         for col in 0..end {
             let Some(cell) = row.get(col) else { break };
             if cell.is_wide_spacer() {
@@ -150,6 +191,12 @@ impl RowText {
                     push_within(&mut text, start, c);
                 }
             }
+            let blank = text[start..].chars().all(char::is_whitespace);
+            // A line's first character starts a word (its leading blanks
+            // are a word of their own); after that, a word starts after
+            // blanks. Trailing blanks belong to the word before them.
+            word_starts.push(previous_blank.is_none_or(|previous| previous && !blank));
+            previous_blank = Some(blank);
             // `push_within` keeps every character under 256 bytes.
             lengths.push(u8::try_from(text.len() - start).unwrap_or(u8::MAX));
             columns.push(col);
@@ -160,12 +207,14 @@ impl RowText {
             lengths.push(1);
             columns.push(end);
             widths.push(0);
+            word_starts.push(previous_blank.is_none());
         }
         Self {
             text,
             lengths,
             columns,
             widths,
+            word_starts,
             line_break,
         }
     }
@@ -173,6 +222,15 @@ impl RowText {
     /// Characters before the line break.
     fn visible_len(&self) -> usize {
         self.lengths.len() - usize::from(self.line_break)
+    }
+
+    /// Whether the row's last character is blank, or it has none.
+    fn ends_blank(&self) -> bool {
+        let count = self.visible_len();
+        count == 0
+            || self.text[self.byte_range(&(count - 1..count))]
+                .chars()
+                .all(char::is_whitespace)
     }
 
     /// The index of the character at column `col`: the one that covers it,
@@ -190,35 +248,37 @@ impl RowText {
         }
     }
 
-    /// Where words start: after each run of blanks, and at 0 (a line's
-    /// leading blanks are a word of their own). Trailing blanks and the line
-    /// break belong to the word before them.
-    fn word_starts(&self) -> Vec<u8> {
-        let mut starts = Vec::new();
-        let mut previous_blank = true;
-        for (index, (offset, &len)) in self.char_offsets().zip(&self.lengths).enumerate() {
-            let blank = self.text[offset..offset + usize::from(len)]
-                .chars()
-                .all(char::is_whitespace);
-            if index == 0 || (previous_blank && !blank) {
-                // `word_starts` is a list of u8; a row past 255 characters
-                // keeps the word boundaries that fit.
-                match u8::try_from(index) {
-                    Ok(index) => starts.push(index),
-                    Err(_) => break,
-                }
-            }
-            previous_blank = blank;
-        }
-        starts
+    /// The row's text runs: ranges of at most [`MAX_RUN_CHARS`] characters,
+    /// and always one, empty for an empty last row.
+    fn runs(&self) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+        let len = self.lengths.len();
+        let count = len.div_ceil(MAX_RUN_CHARS).max(1);
+        (0..count).map(move |run| run * MAX_RUN_CHARS..((run + 1) * MAX_RUN_CHARS).min(len))
     }
 
-    fn char_offsets(&self) -> impl Iterator<Item = usize> + '_ {
-        self.lengths.iter().scan(0, |offset, &len| {
-            let start = *offset;
-            *offset += usize::from(len);
-            Some(start)
-        })
+    /// The run and the index within it of character `index`; past the end,
+    /// the end of the last run.
+    fn run_position(&self, index: usize) -> (usize, usize) {
+        let len = self.lengths.len();
+        if index >= len {
+            let last = len.div_ceil(MAX_RUN_CHARS).max(1) - 1;
+            (last, len - last * MAX_RUN_CHARS)
+        } else {
+            (index / MAX_RUN_CHARS, index % MAX_RUN_CHARS)
+        }
+    }
+
+    /// The byte range of characters `chars` in the text.
+    fn byte_range(&self, chars: &std::ops::Range<usize>) -> std::ops::Range<usize> {
+        let start: usize = self.lengths[..chars.start]
+            .iter()
+            .map(|&l| usize::from(l))
+            .sum();
+        let len: usize = self.lengths[chars.clone()]
+            .iter()
+            .map(|&l| usize::from(l))
+            .sum();
+        start..start + len
     }
 }
 
@@ -288,50 +348,56 @@ pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
         let mut terminal = Node::new(Role::Terminal);
         terminal.set_label(pane.title.as_str());
         terminal.set_bounds(pane.bounds);
-        let row_ids: Vec<NodeId> = (0..grid.rows.len())
-            .map(|row| row_node_id(pane.id, row))
-            .collect();
-        if let Some((row, index)) = grid.caret {
-            let caret = TextPosition {
-                node: row_ids[row],
-                character_index: index,
-            };
+        let caret = grid.caret.and_then(|(row, index)| {
+            let (run, character_index) = grid.rows.get(row)?.run_position(index);
+            Some(TextPosition {
+                node: run_node_id(pane.id, row, run),
+                character_index,
+            })
+        });
+        if let Some(caret) = caret {
             terminal.set_text_selection(TextSelection {
                 anchor: caret,
                 focus: caret,
             });
         }
-        terminal.set_children(row_ids.clone());
-        nodes.push((id, terminal));
-        focus = id;
-
-        for (index, (row, row_id)) in grid.rows.iter().zip(row_ids).enumerate() {
+        let mut children = Vec::with_capacity(grid.rows.len());
+        let mut runs = Vec::with_capacity(grid.rows.len());
+        for (index, row) in grid.rows.iter().enumerate() {
             let top = pane.bounds.y0 + index as f64 * grid.cell_height;
-            let mut run = Node::new(Role::TextRun);
-            run.set_value(row.text.as_str());
-            run.set_text_direction(TextDirection::LeftToRight);
-            run.set_bounds(Rect {
-                x0: pane.bounds.x0,
-                y0: top,
-                x1: pane.bounds.x1,
-                y1: top + grid.cell_height,
-            });
-            run.set_character_lengths(row.lengths.as_slice());
-            run.set_character_positions(
-                row.columns
-                    .iter()
-                    .map(|&col| (f64::from(col) * grid.cell_width) as f32)
-                    .collect::<Vec<_>>(),
-            );
-            run.set_character_widths(
-                row.widths
-                    .iter()
-                    .map(|&width| (f64::from(width) * grid.cell_width) as f32)
-                    .collect::<Vec<_>>(),
-            );
-            run.set_word_starts(row.word_starts());
-            nodes.push((row_id, run));
+            let ranges: Vec<_> = row.runs().collect();
+            let last = ranges.len() - 1;
+            for (run, chars) in ranges.into_iter().enumerate() {
+                let first_col = match run {
+                    0 => 0,
+                    _ => row.columns.get(chars.start).copied().unwrap_or(0),
+                };
+                let right = match row.columns.get(chars.end) {
+                    Some(&col) if run < last => pane.bounds.x0 + f64::from(col) * grid.cell_width,
+                    _ => pane.bounds.x1,
+                };
+                let bounds = Rect {
+                    x0: pane.bounds.x0 + f64::from(first_col) * grid.cell_width,
+                    y0: top,
+                    x1: right,
+                    y1: top + grid.cell_height,
+                };
+                let mut node = text_run(row, chars, bounds, first_col, grid.cell_width);
+                if run > 0 {
+                    node.set_previous_on_line(run_node_id(pane.id, index, run - 1));
+                }
+                if run < last {
+                    node.set_next_on_line(run_node_id(pane.id, index, run + 1));
+                }
+                let run_id = run_node_id(pane.id, index, run);
+                children.push(run_id);
+                runs.push((run_id, node));
+            }
         }
+        terminal.set_children(children);
+        nodes.push((id, terminal));
+        nodes.extend(runs);
+        focus = id;
     }
 
     TreeUpdate {
@@ -340,6 +406,43 @@ pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
         tree_id: TreeId::ROOT,
         focus,
     }
+}
+
+/// A text run of characters `chars` of `row`, at `bounds`, whose first
+/// character is in column `first_col` of cells `cell_width` wide.
+fn text_run(
+    row: &RowText,
+    chars: std::ops::Range<usize>,
+    bounds: Rect,
+    first_col: u16,
+    cell_width: f64,
+) -> Node {
+    let mut node = Node::new(Role::TextRun);
+    node.set_value(&row.text[row.byte_range(&chars)]);
+    node.set_text_direction(TextDirection::LeftToRight);
+    node.set_bounds(bounds);
+    node.set_character_lengths(&row.lengths[chars.clone()]);
+    node.set_character_positions(
+        row.columns[chars.clone()]
+            .iter()
+            .map(|&col| (f64::from(col - first_col) * cell_width) as f32)
+            .collect::<Vec<_>>(),
+    );
+    node.set_character_widths(
+        row.widths[chars.clone()]
+            .iter()
+            .map(|&width| (f64::from(width) * cell_width) as f32)
+            .collect::<Vec<_>>(),
+    );
+    node.set_word_starts(
+        row.word_starts[chars]
+            .iter()
+            .enumerate()
+            // A run holds at most 255 characters, so its indices fit.
+            .filter_map(|(at, &start)| start.then(|| u8::try_from(at).ok()).flatten())
+            .collect::<Vec<_>>(),
+    );
+    node
 }
 
 /// A tab's node, `t<id>`.
@@ -352,9 +455,19 @@ pub fn pane_node_id(pane: usize) -> NodeId {
     node_id(&format!("p{pane}"))
 }
 
-/// Screen row `row` of a pane, `p<id>r<row>`.
+/// Screen row `row` of a pane, `p<id>r<row>`: the row's first text run.
 pub fn row_node_id(pane: usize, row: usize) -> NodeId {
     node_id(&format!("p{pane}r{row}"))
+}
+
+/// Text run `run` of a screen row: the row's own id for the first, and
+/// `p<id>r<row>s<run>` for the rest of a row past 255 characters.
+pub fn run_node_id(pane: usize, row: usize, run: usize) -> NodeId {
+    if run == 0 {
+        row_node_id(pane, row)
+    } else {
+        node_id(&format!("p{pane}r{row}s{run}"))
+    }
 }
 
 /// The id of the node named `name`: its 64-bit FNV-1a hash, which is the
@@ -508,6 +621,101 @@ mod tests {
         let update = build("Ultty", &one_pane(screen(4, 3, "abcdef")));
         assert_eq!(node(&update, row_node_id(1, 0)).value(), Some("abcd"));
         assert_eq!(node(&update, row_node_id(1, 1)).value(), Some("ef\n"));
+    }
+
+    #[test]
+    fn a_blank_at_the_wrap_column_keeps_the_words_apart() {
+        let update = build("Ultty", &one_pane(screen(4, 3, "abc def")));
+        let first = node(&update, row_node_id(1, 0));
+        let second = node(&update, row_node_id(1, 1));
+
+        assert_eq!(first.value(), Some("abc "));
+        assert_eq!(first.word_starts(), &[0]);
+        assert_eq!(second.value(), Some("def\n"));
+        // "def" starts a word: the row before ended in a blank.
+        assert_eq!(second.word_starts(), &[0]);
+    }
+
+    #[test]
+    fn a_word_running_on_across_a_wrap_starts_no_word_on_the_next_row() {
+        let update = build("Ultty", &one_pane(screen(4, 3, "ab cdef gh")));
+        assert_eq!(node(&update, row_node_id(1, 0)).word_starts(), &[0, 3]);
+        let middle = node(&update, row_node_id(1, 1));
+        assert_eq!(middle.value(), Some("def "));
+        assert!(
+            middle.word_starts().is_empty(),
+            "{:?}",
+            middle.word_starts()
+        );
+        // After the blank that ended the row before, "gh" starts a word.
+        assert_eq!(node(&update, row_node_id(1, 2)).word_starts(), &[0]);
+    }
+
+    #[test]
+    fn a_wide_character_that_did_not_fit_leaves_a_blank_before_the_wrap() {
+        // The grid leaves the last column an ordinary blank cell, so it is
+        // read as a space, as copying the text gives it.
+        let update = build("Ultty", &one_pane(screen(4, 3, "abc中")));
+        assert_eq!(node(&update, row_node_id(1, 0)).value(), Some("abc "));
+        assert_eq!(node(&update, row_node_id(1, 1)).value(), Some("中\n"));
+    }
+
+    #[test]
+    fn a_caret_with_a_wrap_pending_is_past_the_last_column() {
+        let update = build("Ultty", &one_pane(screen(4, 2, "abcd")));
+        assert_eq!(
+            caret(&update, 1),
+            TextPosition {
+                node: row_node_id(1, 0),
+                character_index: 4
+            }
+        );
+    }
+
+    #[test]
+    fn a_row_past_255_characters_is_split_into_runs_on_one_line() {
+        let text = "word ".repeat(60);
+        let update = build("Ultty", &one_pane(screen(300, 2, &text)));
+        let first = node(&update, row_node_id(1, 0));
+        let second = node(&update, run_node_id(1, 0, 1));
+
+        assert_eq!(
+            node(&update, pane_node_id(1)).children(),
+            &[row_node_id(1, 0), run_node_id(1, 0, 1), row_node_id(1, 1)]
+        );
+        assert_eq!(first.value(), Some(&text[..255]));
+        assert_eq!(first.character_lengths().len(), 255);
+        assert_eq!(first.next_on_line(), Some(run_node_id(1, 0, 1)));
+        assert_eq!(first.previous_on_line(), None);
+        assert_eq!(first.word_starts().last(), Some(&250));
+
+        // The rest of the row and its line break, positioned from the run's
+        // own left edge at column 255.
+        assert_eq!(second.value(), Some(format!("{}\n", &text[255..]).as_str()));
+        assert_eq!(second.previous_on_line(), Some(row_node_id(1, 0)));
+        assert_eq!(second.next_on_line(), None);
+        assert_eq!(
+            second.bounds().map(|bounds| bounds.x0),
+            Some(255.0 * CELL_W)
+        );
+        assert_eq!(second.character_positions().map(|p| p[0]), Some(0.0));
+        assert_eq!(second.word_starts(), &[0, 5, 10, 15, 20, 25, 30, 35, 40]);
+        // The cursor, wrap pending after character 300, sits on the break.
+        assert_eq!(
+            caret(&update, 1),
+            TextPosition {
+                node: run_node_id(1, 0, 1),
+                character_index: 45
+            }
+        );
+
+        let tree = accesskit_consumer::Tree::new(update, true);
+        let state = tree.state();
+        let terminal = state.focus().expect("a focused node");
+        assert_eq!(terminal.document_range().text(), format!("{text}\n"));
+        let caret = terminal.text_selection_focus().expect("a caret");
+        assert_eq!(caret.to_global_usv_index(), 300);
+        assert_eq!(caret.to_line_index(), 0);
     }
 
     #[test]
