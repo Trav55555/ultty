@@ -40,7 +40,8 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   is unchanged (margins are always sent); code that wants an `Auto` margin
   sets it. Full-scene apps lay out again: content that `Auto` margins used
   to spread out or centre now packs to the start of its container; centre
-  it with `justify_center`/`align_center`. `ScrollView`, `List`, `Table`
+  it with `justify_center`/`align_center`, or spread it with the new
+  `Column::justify_around` (porygon-tui's boot screen does). `ScrollView`, `List`, `Table`
   and `Modal` now pad their children one cell inside their border, where
   the ANSI renderer puts them; before, a native border took no room and
   children could sit on it.
