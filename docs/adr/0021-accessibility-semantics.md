@@ -475,7 +475,12 @@ Each slice is independently testable and mergeable.
      child regions and theirs) is marked `live` `Off`, else each new or
      growing line would be spoken besides the announcements, unthrottled.
      Only a region's own `live` queues its appends. The region's own node is still
-     announced (its label) when it is first added.
+     announced (its label) when it is first added. A consequence for the
+     "one region per message" pattern: a new child region added under a
+     live log is not spoken when it appears (it is `Off`); an app that wants
+     each message read streams it into the live region with `AppendContent`,
+     or marks the message region live itself. Slice 7 (ulttui) should make
+     `MarkdownView` streaming do the former.
    - `busy` follows the region's open stream, also when `StreamStart`
      came before the region was created.
    - Idle with a screen reader listening after the stream: 20 wakeups in
