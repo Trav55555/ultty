@@ -53,6 +53,34 @@ their sum. The first run only shows memory flat for the 15 minutes
 between warm-up and the reclaim, which is too short to judge. D5's memory
 criterion needs a run measured this way.
 
+## Third run: memory flat
+
+A third run, judging anonymous RSS plus swap, was stopped at minute 265
+(about 4 of the planned 10 hours) to take its window off the desktop.
+Swap stayed at 0 throughout.
+
+| | |
+|---|---|
+| anonymous RSS + swap after warm-up (minute 31) | 23.5 MiB |
+| at minute 265 | 23.2 MiB |
+| peak | 25.3 MiB |
+| trend after warm-up | +0.09 MiB/hour (limit 1) |
+| RSS (file pages included, not judged) | 80.9 MiB peak, 29.8 MiB at the end |
+| CPU | 1017 s, about 6% of one core |
+
+RSS fell from about 75 to 33 MiB at minute 42 while the anonymous part
+stayed put: the kernel reclaimed the mapped libraries' pages, which is why
+RSS is no longer judged. This meets D5's memory criterion over four hours.
+
+Frame times are not usable from this run. From minute 129 on, 119 of 137
+minutes had a p99 over 5 ms (worst 4.46 s). That is when parallel builds
+and test runs started on the same machine, and the window was a real
+Wayland window that the compositor stops taking frames from when it is
+covered; minutes 2 to 128 had a p99 under 5 ms except minute 1 (start).
+Minutes 141 to 147 also had a third tab open by mistake (a test's
+commands reached this instance). A rerun on Xvfb, with the fixed script
+and an idle machine, is still needed for the 10-hour frame-time figure.
+
 ## Before this run
 
 The first trial of the soak found each resize leaving the process up to

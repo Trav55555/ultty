@@ -30,7 +30,9 @@ for _ in $(seq 50); do [ -s "$out/display" ] && break; sleep 0.1; done
 # Frame times come from the pipeline trace; the log is appended to so it
 # can be truncated after each sample.
 : >"$out/ultty.log"
-DISPLAY=":$(cat "$out/display")" ULTTY_TRACE_PIPELINE=1 \
+# Without unsetting WAYLAND_DISPLAY, a Wayland session in the environment
+# wins over DISPLAY and the window opens on the desktop instead of Xvfb.
+env -u WAYLAND_DISPLAY DISPLAY=":$(cat "$out/display")" ULTTY_TRACE_PIPELINE=1 \
     RUST_LOG=info,ultty::perf=info target/release/ultty >>"$out/ultty.log" 2>&1 &
 ultty_pid=$!
 export ULTTY_PID=$ultty_pid PATH="$PWD/target/release:$PATH"
