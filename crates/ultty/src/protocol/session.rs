@@ -172,6 +172,9 @@ pub struct NativeSession {
     recent_protocol_errors: VecDeque<String>,
     /// Last successful layout computation duration.
     last_layout_duration: Option<std::time::Duration>,
+    /// Counts changes to what the session shows; see
+    /// [`NativeSession::shown_generation`].
+    shown_generation: u64,
 }
 
 /// How a session's app is connected.
@@ -307,6 +310,7 @@ impl NativeSession {
             awaiting_pong: false,
             recent_protocol_errors: VecDeque::with_capacity(MAX_RECENT_PROTOCOL_ERRORS),
             last_layout_duration: None,
+            shown_generation: 0,
         }
     }
 
@@ -328,6 +332,16 @@ impl NativeSession {
 
     pub fn session_id(&self) -> u64 {
         self.session_id
+    }
+
+    /// A number that changes whenever what the session shows may have
+    /// changed: a scene message applied (regions, content, semantics,
+    /// scroll), focus or blur, a relayout, a surface placed, dropped, or
+    /// moved onto or off the screen. Reading it is free; the accessibility
+    /// tree compares it between passes to know when to rebuild, so nothing
+    /// is done per frame while no screen reader listens.
+    pub fn shown_generation(&self) -> u64 {
+        self.shown_generation
     }
 
     /// Whether the session offers inline surfaces (ADR 0020) to an app that
@@ -443,6 +457,7 @@ impl NativeSession {
         }
         self.compute_and_send_layout(None, LayoutTrigger::Resize)?;
         self.mark_scene_layout_clean();
+        self.mark_shown_changed();
         Ok(())
     }
 
@@ -3162,5 +3177,43 @@ mod tests {
             .unwrap();
         assert!(!session.is_subscribed(RegionId::new(6), ultty_protocol::EVENT_MOUSE));
         assert_eq!(session.focused_region(), None);
+    }
+
+    #[test]
+    fn shown_generation_moves_with_scene_and_focus_but_not_keepalives() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        let mut seen = session.shown_generation();
+        let mut moved = |session: &NativeSession| {
+            let now = session.shown_generation();
+            let changed = now != seen;
+            seen = now;
+            changed
+        };
+
+        run_frame(&mut session, 1, vec![create_region(1, 0)]);
+        assert!(moved(&session), "a frame");
+        session.handle_message(focus(1)).unwrap();
+        assert!(moved(&session), "focus");
+        session.handle_message(AppMessage::Blur).unwrap();
+        assert!(moved(&session), "blur");
+
+        session.handle_message(AppMessage::Pong).unwrap();
+        session.handle_message(subscribe_keys(1)).unwrap();
+        session.handle_message(AppMessage::ClipboardGet).unwrap();
+        assert!(!moved(&session), "keepalives, subscriptions, clipboard");
+
+        run_frame(&mut session, 2, vec![create_surface(5, 2)]);
+        assert!(moved(&session));
+        session.place_surface(RegionId::new(5), 1).unwrap();
+        assert!(moved(&session), "a surface placed");
+        session
+            .set_surface_view(RegionId::new(5), Some(0), true)
+            .unwrap();
+        assert!(!moved(&session), "still shown");
+        session
+            .set_surface_view(RegionId::new(5), Some(0), false)
+            .unwrap();
+        assert!(moved(&session), "scrolled off the screen");
     }
 }

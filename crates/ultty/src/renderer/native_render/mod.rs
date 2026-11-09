@@ -194,33 +194,19 @@ fn visible_surfaces(
     grid_top: f32,
     cell_height: f32,
 ) -> Vec<(u64, SurfaceOrigin)> {
-    use crate::protocol::pairing::{rows_on_screen, visual_row};
-
-    if terminal.is_alternate_screen() {
-        return Vec::new();
-    }
-    let buffer = terminal.main_buffer();
-    let screen_rows = buffer.dimensions().rows;
-    let mut visible = Vec::new();
-    for session in sessions {
-        for surface in session.placed_surfaces() {
-            let Some(line) = buffer.anchor_line(surface.tag) else {
-                continue;
-            };
-            let row = visual_row(buffer, line);
-            if rows_on_screen(row, surface.rows, screen_rows) {
-                visible.push((
-                    session.session_id(),
-                    SurfaceOrigin {
-                        id: surface.id,
-                        rows: surface.rows,
-                        top: grid_top + row as f32 * cell_height,
-                    },
-                ));
-            }
-        }
-    }
-    visible
+    crate::protocol::pairing::surfaces_on_screen(terminal, sessions.iter().copied())
+        .into_iter()
+        .map(|surface| {
+            (
+                surface.session_id,
+                SurfaceOrigin {
+                    id: surface.id,
+                    rows: surface.rows,
+                    top: grid_top + surface.row as f32 * cell_height,
+                },
+            )
+        })
+        .collect()
 }
 
 impl Renderer {

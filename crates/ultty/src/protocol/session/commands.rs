@@ -15,9 +15,27 @@ use super::errors::NativeProtocolError;
 use super::{NativeSession, StyleAnimation};
 use crate::scene::region::Region;
 
+/// Whether applying `msg` may change what the session shows, its focus
+/// included. Keepalives, the clipboard and subscriptions do not.
+fn changes_what_is_shown(msg: &AppMessage) -> bool {
+    !matches!(
+        msg,
+        AppMessage::ClientHello { .. }
+            | AppMessage::Subscribe { .. }
+            | AppMessage::Unsubscribe { .. }
+            | AppMessage::ClipboardGet
+            | AppMessage::ClipboardSet { .. }
+            | AppMessage::Pong
+            | AppMessage::Disconnect
+    )
+}
+
 impl NativeSession {
     /// Apply one decoded app message outside frame batching.
     pub(super) fn apply_message(&mut self, msg: AppMessage) -> io::Result<bool> {
+        if changes_what_is_shown(&msg) {
+            self.mark_shown_changed();
+        }
         match msg {
             AppMessage::ClientHello {
                 version,
@@ -513,6 +531,7 @@ impl NativeSession {
             return false;
         }
         self.mark_full_scene_rebuild();
+        self.mark_shown_changed();
         self.forget_regions(&removed);
         self.surface_states.remove(&id);
         debug!("Deleted region {:?}", id);

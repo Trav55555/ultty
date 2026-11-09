@@ -8,11 +8,19 @@
 //!     ├── Terminal (the focused pane's title): one TextRun per screen row
 //!     │   (a row past 255 characters is several, on one line),
 //!     │   the caret at the cursor; focus rests here
+//!     │   └── an inline surface's root, after its anchor row's runs
+//!     │       and described by that row, with its region tree
 //!     └── Group (each other pane's title), no children
 //! ```
 //!
+//! While a native app shows a full scene the grid is hidden under it, so
+//! the focused pane is a `Group` (its title) holding the app's `ROOT`
+//! region tree instead, and focus is on the app's focused region, or on
+//! its root when nothing is focused ([`super::scene`]).
+//!
 //! The grid is the live screen: scrollback, per-command nodes (OSC 133),
-//! the selection and native scenes are later slices of ADR 0021.
+//! the selection and live-region announcements are later slices of
+//! ADR 0021.
 //!
 //! [`GridSnapshot::capture`] copies what the tree needs out of a locked
 //! grid; [`build`] turns a [`Snapshot`] into a full [`TreeUpdate`] with no
@@ -25,6 +33,7 @@ use accesskit::{
     TreeUpdate,
 };
 
+use super::scene::{resolve_relations, SceneSnapshot};
 use crate::grid::{CellFlags, Grid, Row};
 
 /// The window's node, the root of the tree.
@@ -55,8 +64,23 @@ pub struct PaneSnapshot {
     pub title: String,
     /// Where the pane is, in window pixels.
     pub bounds: Rect,
-    /// The screen's text, for the focused pane only.
+    /// The screen's text, for the focused pane only, unless a native app
+    /// hides it under a full scene.
     pub grid: Option<GridSnapshot>,
+    /// The `ROOT` trees of the full-scene native apps the focused pane
+    /// shows, in drawing order; when there are any, they replace the grid.
+    pub scenes: Vec<SceneSnapshot>,
+    /// The inline surfaces on the focused pane's screen.
+    pub surfaces: Vec<SurfaceSnapshot>,
+}
+
+/// An inline surface on the screen (ADR 0020).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SurfaceSnapshot {
+    /// The screen row its first row (its anchor row) shows on; negative
+    /// when it starts above the screen.
+    pub row: i64,
+    pub scene: SceneSnapshot,
 }
 
 /// The text of a pane's screen, copied out of its grid.
@@ -293,12 +317,14 @@ fn push_within(text: &mut String, start: usize, c: char) {
 
 /// The full tree for a window titled `window_title` showing `snapshot`.
 ///
-/// Focus is on the focused pane's `Terminal` node, or on the window when no
-/// pane has a grid.
+/// Focus is on the focused pane's `Terminal` node; on a full-scene app's
+/// focused region, or its root with none; or on the window when no pane
+/// has a grid or a scene.
 pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
     let tab_list_id = node_id("tabs");
     let panel_id = node_id("panel");
     let mut nodes = Vec::new();
+    let mut relations = Vec::new();
     let mut focus = WINDOW_ID;
 
     let mut window = Node::new(Role::Window);
@@ -338,6 +364,30 @@ pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
 
     for pane in &snapshot.panes {
         let id = pane_node_id(pane.id);
+        let scenes: Vec<&SceneSnapshot> = pane.scenes.iter().filter(|s| !s.is_empty()).collect();
+        if let Some(last) = scenes.last() {
+            let mut group = Node::new(Role::Group);
+            group.set_label(pane.title.as_str());
+            group.set_bounds(pane.bounds);
+            group.set_children(
+                scenes
+                    .iter()
+                    .map(|scene| scene.root_node_id())
+                    .collect::<Vec<_>>(),
+            );
+            nodes.push((id, group));
+            for scene in &scenes {
+                scene.push_nodes(&mut nodes, &mut relations);
+            }
+            // The app drawn last is on top; with several, the last one
+            // with a focused region has the keyboard.
+            focus = scenes
+                .iter()
+                .rev()
+                .find_map(|scene| scene.focus_node_id())
+                .unwrap_or_else(|| last.root_node_id());
+            continue;
+        }
         let Some(grid) = &pane.grid else {
             let mut group = Node::new(Role::Group);
             group.set_label(pane.title.as_str());
@@ -363,6 +413,18 @@ pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
         }
         let mut children = Vec::with_capacity(grid.rows.len());
         let mut runs = Vec::with_capacity(grid.rows.len());
+        // Surfaces in reading order: each after its anchor row, one that
+        // starts above the screen first, one below the last row last.
+        let mut surfaces: Vec<&SurfaceSnapshot> = pane
+            .surfaces
+            .iter()
+            .filter(|s| !s.scene.is_empty())
+            .collect();
+        surfaces.sort_by_key(|surface| surface.row);
+        let mut surfaces = surfaces.into_iter().peekable();
+        while let Some(surface) = surfaces.next_if(|surface| surface.row < 0) {
+            children.push(surface.scene.root_node_id());
+        }
         for (index, row) in grid.rows.iter().enumerate() {
             let top = pane.bounds.y0 + index as f64 * grid.cell_height;
             let ranges: Vec<_> = row.runs().collect();
@@ -393,12 +455,32 @@ pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
                 children.push(run_id);
                 runs.push((run_id, node));
             }
+            while let Some(surface) = surfaces.next_if(|surface| surface.row == index as i64) {
+                children.push(surface.scene.root_node_id());
+            }
+        }
+        for surface in surfaces {
+            children.push(surface.scene.root_node_id());
         }
         terminal.set_children(children);
         nodes.push((id, terminal));
         nodes.extend(runs);
+        for surface in &pane.surfaces {
+            let root = nodes.len();
+            surface.scene.push_nodes(&mut nodes, &mut relations);
+            // A surface is described by its anchor row, the fallback text.
+            if let Some(row) = usize::try_from(surface.row)
+                .ok()
+                .filter(|&row| row < grid.rows.len())
+            {
+                if let Some((_, node)) = nodes.get_mut(root) {
+                    node.push_described_by(row_node_id(pane.id, row));
+                }
+            }
+        }
         focus = id;
     }
+    resolve_relations(&mut nodes, &relations);
 
     TreeUpdate {
         nodes,
@@ -470,6 +552,16 @@ pub fn run_node_id(pane: usize, row: usize, run: usize) -> NodeId {
     }
 }
 
+/// Region `region` of native session `session`, `s<session>:<region>`.
+pub fn region_node_id(session: u64, region: u32) -> NodeId {
+    node_id(&format!("s{session}:{region}"))
+}
+
+/// Line `line` of region `region`'s text, `s<session>:<region>l<line>`.
+pub fn region_line_node_id(session: u64, region: u32, line: usize) -> NodeId {
+    node_id(&format!("s{session}:{region}l{line}"))
+}
+
 /// The id of the node named `name`: its 64-bit FNV-1a hash, which is the
 /// same in every run, kept off the window's id.
 fn node_id(name: &str) -> NodeId {
@@ -510,6 +602,8 @@ mod tests {
                 y1: 140.0,
             },
             grid,
+            scenes: Vec::new(),
+            surfaces: Vec::new(),
         }
     }
 

@@ -32,6 +32,48 @@ pub fn rows_on_screen(first: i64, rows: u16, screen_rows: u16) -> bool {
     first < i64::from(screen_rows) && first + i64::from(rows) > 0
 }
 
+/// A placed surface with at least one row on the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurfaceOnScreen {
+    pub session_id: u64,
+    pub id: RegionId,
+    pub rows: u16,
+    /// The screen row its first row shows on (see [`visual_row`]);
+    /// negative when it starts above the screen.
+    pub row: i64,
+}
+
+/// The placed surfaces of `sessions` that show on `terminal`'s screen, in
+/// drawing order: none while the alternate screen shows.
+pub fn surfaces_on_screen<'a>(
+    terminal: &Terminal,
+    sessions: impl IntoIterator<Item = &'a NativeSession>,
+) -> Vec<SurfaceOnScreen> {
+    if terminal.is_alternate_screen() {
+        return Vec::new();
+    }
+    let buffer = terminal.main_buffer();
+    let screen_rows = buffer.dimensions().rows;
+    let mut visible = Vec::new();
+    for session in sessions {
+        for surface in session.placed_surfaces() {
+            let Some(line) = buffer.anchor_line(surface.tag) else {
+                continue;
+            };
+            let row = visual_row(buffer, line);
+            if rows_on_screen(row, surface.rows, screen_rows) {
+                visible.push(SurfaceOnScreen {
+                    session_id: session.session_id(),
+                    id: surface.id,
+                    rows: surface.rows,
+                    row,
+                });
+            }
+        }
+    }
+    visible
+}
+
 /// An anchor that no surface has claimed yet.
 #[derive(Debug, Clone, Copy)]
 struct PendingAnchor {
