@@ -2,6 +2,7 @@
 
 use super::atlas::{GlyphAtlas, GlyphInfo};
 use super::decoration::{strikethrough_quad, underline_quads, DecorationMetrics, Quad};
+use super::emoji::{emoji_presentation, pick_emoji_family};
 use super::pipeline::TextPipeline;
 use super::powerline::is_powerline_triangle;
 use super::text_cache::{GridTextCache, GridTextKey};
@@ -311,6 +312,47 @@ fn styled_attrs(family: &str, bold: bool, italic: bool, styles: FaceStyles) -> A
     attrs
 }
 
+/// Attributes to shape the grapheme cluster `text` with, and the style the
+/// glyphs are drawn in. An emoji-presentation cluster is shaped with
+/// `emoji_family` when one is installed, unstyled: color emoji fonts have no
+/// bold or italic faces, and a skewed or recolored emoji is no improvement.
+/// Anything else, or with no emoji family, uses the configured family.
+fn cluster_attrs<'a>(
+    text: &str,
+    style: CellStyle,
+    family: &'a str,
+    face_styles: FaceStyles,
+    emoji_family: Option<&'a str>,
+) -> (Attrs<'a>, CellStyle) {
+    match emoji_family.filter(|_| emoji_presentation(text)) {
+        Some(emoji) => (
+            Attrs::new().family(Family::Name(emoji)),
+            CellStyle::default(),
+        ),
+        None => (
+            styled_attrs(family, style.bold, style.italic, face_styles),
+            style,
+        ),
+    }
+}
+
+/// The color emoji family to shape emoji with (see [`pick_emoji_family`]),
+/// warning when the configured `font.emoji` is not installed.
+fn installed_emoji_family(db: &cosmic_text::fontdb::Database, configured: &str) -> Option<String> {
+    let installed: Vec<&str> = db
+        .faces()
+        .flat_map(|face| face.families.iter().map(|(name, _)| name.as_str()))
+        .collect();
+    let family = pick_emoji_family(configured, &installed);
+    if !configured.is_empty() && !family.is_some_and(|f| f.eq_ignore_ascii_case(configured)) {
+        tracing::warn!(
+            "font.emoji {configured:?} is not installed; using {}",
+            family.unwrap_or("the fallback fonts")
+        );
+    }
+    family.map(str::to_owned)
+}
+
 pub struct TextRenderer {
     font_system: FontSystem,
     atlas: GlyphAtlas,
@@ -323,6 +365,9 @@ pub struct TextRenderer {
     font_family: String,
     /// Real bold and italic faces available in `font_family`.
     face_styles: FaceStyles,
+    /// Installed color emoji family that emoji-presentation cells are
+    /// shaped with, if any (see [`emoji_presentation`]).
+    emoji_family: Option<String>,
     ligatures: bool,
     shaping_cache: HashMap<ShapingCacheKey, ShapedGlyph>,
     /// Shaped runs for ligatures; see [`ligature_run_end`].
@@ -421,6 +466,7 @@ impl TextRenderer {
         let styled_text_buffer = Buffer::new(&mut font_system, metrics);
 
         let face_styles = FaceStyles::of_family(font_system.db(), &font_family);
+        let emoji_family = installed_emoji_family(font_system.db(), &font_config.emoji);
         let mut renderer = Self {
             font_system,
             atlas,
@@ -435,6 +481,7 @@ impl TextRenderer {
             },
             device,
             face_styles,
+            emoji_family,
             font_family,
             ligatures: font_config.ligatures,
             shaping_cache: HashMap::with_capacity(256),
@@ -541,8 +588,9 @@ impl TextRenderer {
             .next()
     }
 
-    /// Shape `text` and return every glyph of its first layout run, each
-    /// positioned relative to the start of the run.
+    /// Shape `text`, one grapheme cluster, and return every glyph of its
+    /// first layout run, each positioned relative to the start of the run.
+    /// Emoji are shaped with the color emoji family (see [`cluster_attrs`]).
     fn shape_text(
         &mut self,
         buffer: &mut Buffer,
@@ -550,11 +598,12 @@ impl TextRenderer {
         style: CellStyle,
         shaping: Shaping,
     ) -> Vec<ShapedGlyph> {
-        let attrs = styled_attrs(
+        let (attrs, style) = cluster_attrs(
+            text,
+            style,
             &self.font_family,
-            style.bold,
-            style.italic,
             self.face_styles,
+            self.emoji_family.as_deref(),
         );
         buffer.set_text(text, &attrs, shaping, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
@@ -1834,6 +1883,43 @@ mod tests {
             Some(&[0u8][..]),
             "other faces stay"
         );
+    }
+
+    #[test]
+    fn cluster_attrs_shapes_emoji_with_the_emoji_family_unstyled() {
+        let styles = FaceStyles {
+            bold: true,
+            italic: true,
+        };
+        let bold = CellStyle {
+            bold: true,
+            italic: false,
+        };
+        let emoji = Some("Noto Color Emoji");
+        let shape = |text, emoji_family| cluster_attrs(text, bold, "Mono", styles, emoji_family);
+
+        let (attrs, style) = shape("\u{1F600}", emoji);
+        assert_eq!(attrs.family, Family::Name("Noto Color Emoji"));
+        assert_eq!(attrs.weight, Weight::NORMAL, "no bold emoji face exists");
+        assert_eq!(style, CellStyle::default(), "nothing to synthesize");
+
+        let (attrs, _) = shape("\u{2764}\u{FE0F}", emoji);
+        assert_eq!(attrs.family, Family::Name("Noto Color Emoji"));
+
+        for text in ["\u{2764}", "\u{1F600}\u{FE0E}", "a"] {
+            let (attrs, style) = shape(text, emoji);
+            assert_eq!(attrs.family, Family::Name("Mono"), "{text:?} is text");
+            assert_eq!(attrs.weight, Weight::BOLD);
+            assert_eq!(style, bold);
+        }
+
+        let (attrs, style) = shape("\u{1F600}", None);
+        assert_eq!(
+            attrs.family,
+            Family::Name("Mono"),
+            "without an emoji font, font fallback decides"
+        );
+        assert_eq!(style, bold);
     }
 
     #[test]
