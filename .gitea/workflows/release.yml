@@ -60,6 +60,7 @@ jobs:
           cp ../../../dist/ultty.desktop package/dist/
           cp -R ../../../dist/icons package/dist/
           cp -R ../../../dist/terminfo package/dist/
+          cp -R ../../../dist/shell-integration package/dist/
           tar czf "../../../ultty-$GITHUB_REF_NAME-$TARGET.tar.gz" -C package .
 
       - name: Smoke tarball
