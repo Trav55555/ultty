@@ -816,3 +816,92 @@ fn an_anchor_at_the_last_column_keeps_its_text_on_its_row() {
     assert_eq!(term.grid().row(0).unwrap().text_trimmed(), "012345678X");
     assert_eq!(tags(&term), vec![tag, 0, 0, 0]);
 }
+
+/// A row of `width` cells reading `text`, as a surface rasteriser makes.
+fn card_row(width: u16, text: &str) -> ultty_vt::grid::Row {
+    let mut row = ultty_vt::grid::Row::new(width);
+    for (col, c) in (0..width).zip(text.chars()) {
+        row[col].set_char(c);
+    }
+    row
+}
+
+/// Rasterising a surface writes its cells into the reserved rows, on the
+/// screen and in scrollback alike: each row keeps its anchor tag and shell
+/// marks, does not wrap, and is clipped or padded to the buffer's width.
+#[test]
+fn replacing_a_reserved_row_keeps_its_tag_and_marks() {
+    let mut term = term(10, 3);
+    // Output starts on the card's first row (OSC 133;C), so it has marks.
+    feed(
+        &mut term,
+        b"\x1b]133;A\x07$ \x1b]133;B\x07run\r\n\x1b]133;C\x07",
+    );
+    let tag = place(&mut term, 1, 2);
+    // Eleven columns of fallback wrap into the second row.
+    feed(&mut term, b"fallback 1+");
+    let marks = term.buffer().marks_at(1).unwrap();
+    assert!(!marks.is_empty());
+    assert!(term.buffer().row_at(1).unwrap().is_wrapped());
+
+    let buffer = term.main_buffer_mut();
+    assert!(buffer.replace_row(1, &card_row(14, "card one wide!")));
+    assert!(buffer.replace_row(2, &card_row(4, "two")));
+    assert!(!buffer.replace_row(99, &card_row(10, "nowhere")));
+    assert_eq!(lines(&term)[1..3], ["card one w", "two"].map(String::from));
+    let first = term.buffer().row_at(1).unwrap();
+    assert_eq!(first.width(), 10);
+    assert!(!first.is_wrapped());
+    assert_eq!(first.anchor(), ultty_vt::grid::AnchorTag::new(tag, true));
+    assert_eq!(term.buffer().marks_at(1), Some(marks));
+    assert_eq!(tags(&term)[1..3], [tag, tag]);
+
+    // The same in scrollback: the rows are re-encoded in place.
+    feed(&mut term, b"\r\nx\r\ny\r\nz");
+    assert_eq!(term.buffer().anchor_line(tag), Some(1));
+    assert!(term
+        .main_buffer_mut()
+        .replace_row(2, &card_row(10, "later")));
+    assert_eq!(
+        lines(&term)[1..3],
+        ["card one w", "later"].map(String::from)
+    );
+    assert_eq!(term.buffer().marks_at(1), Some(marks));
+    assert_eq!(tags(&term)[1..3], [tag, tag]);
+    assert_eq!(term.buffer().anchor_line(tag), Some(1));
+    assert_eq!(take_events(&mut term), vec![]);
+    term.check_integrity().unwrap();
+}
+
+/// Replacing a row is a change of its content: a selection over it is
+/// dropped, as over streaming output, and one elsewhere on the screen is
+/// kept. Seen while scrolled back, a scrollback row changing drops it too.
+#[test]
+fn replacing_a_row_drops_a_selection_over_it() {
+    use ultty_vt::grid::{SelectionMode, SelectionPoint};
+    let mut term = term(10, 4);
+    feed(&mut term, b"prose\r\n");
+    place(&mut term, 1, 1);
+    feed(&mut term, b"fallback\r\nmore");
+
+    term.start_selection(SelectionPoint::new(0, 0), SelectionMode::Normal);
+    term.update_selection(SelectionPoint::new(3, 0));
+    term.main_buffer_mut().replace_row(1, &card_row(10, "card"));
+    assert_eq!(term.selected_text().as_deref(), Some("pros"));
+
+    term.start_selection(SelectionPoint::new(0, 1), SelectionMode::Normal);
+    term.update_selection(SelectionPoint::new(3, 2));
+    term.main_buffer_mut()
+        .replace_row(1, &card_row(10, "card 2"));
+    assert_eq!(term.selected_text(), None);
+
+    feed(&mut term, b"\r\n1\r\n2\r\n3");
+    assert_eq!(term.buffer().history_len(), 2);
+    term.buffer_mut().scroll_up(2);
+    term.start_selection(SelectionPoint::new(0, 0), SelectionMode::Normal);
+    term.update_selection(SelectionPoint::new(3, 0));
+    assert_eq!(term.selected_text().as_deref(), Some("pros"));
+    term.main_buffer_mut()
+        .replace_row(1, &card_row(10, "card 3"));
+    assert_eq!(term.selected_text(), None);
+}

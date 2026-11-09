@@ -1570,6 +1570,12 @@ impl Grid {
         }
     }
 
+    /// Record a change to content outside the grid (a scrollback row), so
+    /// the content version moves on without any of the grid's rows.
+    fn note_content_change(&mut self) {
+        self.content_version = self.content_version.wrapping_add(1);
+    }
+
     /// Mark all rows as dirty.
     fn mark_all_dirty(&mut self) {
         self.content_version = self.content_version.wrapping_add(1);

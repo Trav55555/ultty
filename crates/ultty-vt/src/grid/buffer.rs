@@ -591,9 +591,47 @@ impl Buffer {
         }
     }
 
-    /// The anchor tag of the row at `absolute_index`, without decoding a
-    /// scrollback row.
-    fn anchor_at(&self, absolute_index: usize) -> Option<AnchorTag> {
+    /// Replace the cells of the row at `absolute_index` (as for
+    /// [`Buffer::row_at`]) with those of `row`, as rasterising an inline
+    /// surface does (ADR 0020). The row keeps its anchor tag and shell
+    /// marks, does not wrap, and is clipped or padded to the buffer's
+    /// width; a scrollback row is re-encoded in place. The content version
+    /// moves on, so a selection over the row is dropped. Returns `false`,
+    /// changing nothing, when there is no such row.
+    pub fn replace_row(&mut self, absolute_index: usize, row: &Row) -> bool {
+        let cols = self.grid.dimensions().cols;
+        let history_len = self.history.len();
+        if absolute_index < history_len {
+            let Some(compact) = self.history.get_mut(absolute_index) else {
+                return false;
+            };
+            let mut replaced = row.clone();
+            replaced.resize(cols);
+            replaced.set_wrapped(false);
+            replaced.set_marks(compact.marks());
+            replaced.set_anchor(compact.anchor());
+            compact.encode_from(&replaced);
+            self.grid.note_content_change();
+            return true;
+        }
+        let Ok(index) = u16::try_from(absolute_index - history_len) else {
+            return false;
+        };
+        let Some(target) = self.grid.row_mut(index) else {
+            return false;
+        };
+        let (marks, anchor) = (target.marks(), target.anchor());
+        target.copy_from(row);
+        target.resize(cols);
+        target.set_wrapped(false);
+        target.set_marks(marks);
+        target.set_anchor(anchor);
+        true
+    }
+
+    /// The anchor tag of the row at `absolute_index` (as for
+    /// [`Buffer::row_at`]), without decoding a scrollback row.
+    pub fn anchor_at(&self, absolute_index: usize) -> Option<AnchorTag> {
         #[cfg(test)]
         self.anchor_visits.set(self.anchor_visits.get() + 1);
         let history_len = self.history.len();

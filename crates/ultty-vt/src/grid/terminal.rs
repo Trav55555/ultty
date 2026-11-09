@@ -506,6 +506,12 @@ impl Terminal {
         &self.main
     }
 
+    /// Mutable access to the main screen's buffer, whichever screen is
+    /// shown, for writing an inline surface into its rows (ADR 0020).
+    pub fn main_buffer_mut(&mut self) -> &mut Buffer {
+        &mut self.main
+    }
+
     /// Get mutable access to the active buffer.
     ///
     /// This does not touch the selection: cursor moves and viewport scrolling
