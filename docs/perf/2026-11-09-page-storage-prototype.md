@@ -115,8 +115,7 @@ round called C level, but its intervals there were 0.951–1.102 and
 measurement 1; the first round already reported the other corpora's wall
 clock for information only), and on instructions C is +0.5% to +1.4%, so
 the gate passes. Taken as time, the same 3% would not be met. Why +1%
-instructions costs about 4% of time has not been looked into; the style
-cache's misses on mostly new templates are the first suspect. For real
+instructions costs about 4% of time is in the next section. For real
 colorful output, which repeats a handful of styles, the instruction counts
 above show C ahead of the reference.
 
@@ -132,6 +131,93 @@ second round's.
 | every other GO criterion | as before | as in the second round | yes |
 | "A only": A's share of C's wall-clock gain | two thirds or more | 60% and 49% | no |
 | NO-GO: C's wall-clock gain on ascii | fires under +10% | +44.8% / +50.9% | does not fire |
+
+### sgr-dense wall clock
+
+Why C is about 4% slower in time on sgr-dense while executing only
++0.5% to +1.4% more instructions. Measured on the workstation (load 4–12),
+with the third-round binary (`1f451d0`, nothing in the prototype changed).
+`perf` is not available there (`perf_event_paranoid` 4), so the hardware
+side comes from paired wall clock and getrusage, and the counts from
+callgrind with `--cache-sim=yes --branch-sim=yes`. The PTY is not needed:
+`ultty-bench vt --suite vt,proto-c --corpus sgr-dense --size-mib 8 --runs
+150` gives C/ref paired medians of 0.945–0.957, the same gap in process.
+
+There are two causes, and the style cache is not one of them.
+
+**1. Fresh memory every round (a harness effect, about 1 point at 32 MiB
+and 2.5 at 8 MiB).** Every round builds a new terminal in the same
+process. When a C terminal is dropped, glibc gives its large history page
+buffers back to the kernel, so the next round faults them in again. The
+reference's history is many small blocks, which stay in the heap and are
+reused.
+
+| 8 MiB passes, 120x40 | ref | C |
+|---|---:|---:|
+| minor faults, first pass (above a parse-only run) | 4,092 | 2,988 |
+| minor faults, each later pass | 731 | 2,857 |
+| system time, 40 passes | 0.09–0.11 s | 0.20–0.26 s |
+| C/ref paired median | | 0.949, 0.952 |
+| the same with `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=268435456:glibc.malloc.trim_threshold=1073741824` | | 0.978, 0.978 |
+| 32 MiB passes, without / with the tunables (one run each) | | 0.968 / 0.976 |
+
+With the tunables both arms fault about 100 pages a pass and C's gap
+shrinks by 2.5 points at 8 MiB and about 1 point at 32 MiB (the size the
+PTY runs use; history fills once per pass, so the cost is fixed per round).
+A long-lived terminal faults its history in once, and C needs fewer pages
+than the reference for it, so this part does not apply outside the
+harness.
+
+**2. Steady state: C adds slow instructions and saves fast ones (about 2–3
+points).** With the history already full (8 MiB fed untimed, 16 MiB timed,
+paired over 40–60 rounds) C runs 0.968–0.986 of the reference. Turning
+scrollback off in both arms separates the two halves:
+
+| per 8 MiB, history full | ref | C | C − ref |
+|---|---:|---:|---:|
+| instructions, whole parse | | | +17.7 M (+2.4%) |
+| instructions, with scrollback 0 (screen and style path only)\* | | | +33.6 M (+5%) |
+| simulated mispredicted branches, scrollback 0\* | 9.20 M | 9.84 M | +0.64 M (+7%) |
+| instructions in the history copy | 79 M | 54 M | −25 M |
+| C/ref wall clock, scrollback 0\* | | | 0.886, 0.891 |
+| C/ref wall clock, full\* | | | 0.968, 0.978 |
+
+\* Measured with the `set_attrs` copy removed (see What was tried), which
+saves 9.3 M; the third-round code is about +43 M here.
+
+The 8 MiB gate pass is about half history fill, where C is cheaper; the
+steady state alone is +2.4%. On the screen side, C's packed writes save
+instructions, but the per-template style path costs more than they save:
+`Style::of` and the `Cell` copy in `set_attrs`, `inline_key`, then for the
+47% of templates that need the table, `intern` and the cache probe in
+`StyleTable::insert` (together about 45 M instructions per 8 MiB). Those
+branch on the style itself (truecolor or not, cache hit or not), which in
+sgr-dense is a coin flip per template. In time, the screen side is 11%
+slower and the history side's 25 M saved instructions buy back only about
+two thirds of it. The reference's history copy is about 20% of its time
+on this corpus (212 MiB/s without scrollback, 169 with).
+
+**What was tried.** Dropping the `Cell` copy in `set_attrs` (C keeps only
+the `Style`) cut 9.3 M instructions (−1.3%). Writing `inline_key`'s tests
+and `remap_key_to_page`'s with `|` instead of `||`, so that a coin-flip
+style costs one mispredict rather than up to four, gained 1.5–2 points in
+the steady-state loop. Together they put sgr-dense at −0.5% to +0.5%
+instructions with every other corpus within 1.2% of the second round. In
+`ultty-bench vt`, the gate's own binary, the same source gave 0.938–0.943
+against the third-round binary's 0.947–0.957: a code-layout effect of the
+same size as the gain. A branch-free style comparison in the cache probe
+cut 6.8 M instructions and was slower. None of these is kept: without
+cycle counters, a 1–2% change cannot be told apart from layout here.
+
+**What this means for the gate.** The instruction criterion stands. Of the
+quiet machine's 4%, about 1 point is the harness, and the rest is the
+style path on a stream where nearly every template is new. A real
+implementation would apply SGR to the style key directly instead of
+through a scratch `Terminal` and `Style::of`, which removes most of that
+path; the prototype cannot show what is left without being rewritten.
+To confirm the harness share on the quiet machine, rerun
+`proto-flood --corpus sgr-dense` with and without the `GLIBC_TUNABLES`
+above.
 
 ## Second round: style handling
 
