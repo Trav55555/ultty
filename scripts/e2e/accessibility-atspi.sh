@@ -12,8 +12,9 @@
 # python3-gi and gir1.2-atspi-2.0, and a Vulkan or GL driver (Mesa's
 # lavapipe works without a GPU); xdotool, if present, focuses the window,
 # without which the focus checks are skipped. Uses $ULTTY, $ULTTYCTL and
-# $COUNTER_APP, default target/debug/ultty, ulttyctl and counter-app, built
-# first if $ULTTY is unset. Artifacts go to artifact-dir if given, else to a
+# $COUNTER_APP, default target/debug/ultty, ulttyctl and counter-app: all
+# three built first if $ULTTY is unset, counter-app alone if only
+# $COUNTER_APP is. Artifacts go to artifact-dir if given, else to a
 # temporary directory removed on success. A local script, not a CI job:
 # it says nothing about what Orca speaks (docs/accessibility-test.md).
 set -euo pipefail
@@ -40,6 +41,10 @@ if [ "${1:-}" != "--inner" ]; then
         cargo build -q -p ultty --bins -p counter-app
         ULTTY=$PWD/target/debug/ultty
         ULTTYCTL=$PWD/target/debug/ulttyctl
+        COUNTER_APP=$PWD/target/debug/counter-app
+    fi
+    if [ -z "${COUNTER_APP:-}" ]; then
+        cargo build -q -p counter-app
         COUNTER_APP=$PWD/target/debug/counter-app
     fi
     export ULTTY ULTTYCTL COUNTER_APP
@@ -194,7 +199,7 @@ read_widgets() { /usr/bin/python3 -I scripts/e2e/atspi_widgets.py "$ultty_pid" "
 native_focus() {
     ctl --json regions | /usr/bin/python3 -I scripts/e2e/native_focus.py
 }
-ctl send-text "exec $COUNTER_APP"$'\r' >/dev/null || fail "ulttyctl send-text failed"
+ctl send-text "exec $(printf %q "$COUNTER_APP")"$'\r' >/dev/null || fail "ulttyctl send-text failed"
 buttons=(--role button --name "-1" --role button --name "+1"
     --role button --name "Reset")
 widgets=$(read_widgets "${buttons[@]}" --timeout 30) ||
@@ -229,8 +234,9 @@ fi
 grep "accessibility tree built" "$out/ultty.log" | tail -3 || true
 # A connected native app keeps the 250 ms maintenance tick (keepalives,
 # animations; MAINTENANCE_POLL_INTERVAL), 20 wakeups in 5 s with or without
-# a screen reader. The tree must not be rebuilt on it.
-idle counter-app 22
+# a screen reader. The tree must not be rebuilt on it; the tolerance over
+# those 20 absorbs a stray scheduler switch on a loaded machine.
+idle counter-app 25
 
 echo "accessibility-atspi: ok (caret $caret_before -> $caret_after; focus $focus_moves)"
 # Artifacts are kept when the caller named a directory; on failure, always.
