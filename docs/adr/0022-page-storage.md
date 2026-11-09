@@ -27,6 +27,8 @@ Results for C:
 
 The clause not met is "spread under 5%": per-arm IQR/median is 8–10% on the shared workstation, pinned or not. "A only" still does not qualify (A carries 55–66% of C's wall-clock gain), and NO-GO does not fire. If accepted, §1 changes: bits 24..64 become one style key, either an inline style or a 24-bit table id, which spends the reserved bits of open question 6, and the "interned per page" table becomes approximate. Accepting the ADR on these numbers, or after a wall-clock rerun on a quiet machine, is the owners' decision.
 
+**Prototype round 3, 2026-11-09: GO** (same note, "Third round: quiet machine"). The round-2 wall clock, rerun unchanged on an idle AWS c7a.2xlarge, gives per-arm IQR/median 0.3–2.6% (C 0.3–0.7%), so the spread clause is met and the gate passes as written. C runs ascii +44.8% and +50.9% (95% CI ±0.2%) and cjk +52% to +54%. "A only" still does not qualify (60% and 49% of C's gain), and NO-GO does not fire. The quiet machine also shows sgr-dense 3.6–4.4% slower in C on the wall clock, where round 2 read it as level; the sgr-dense criterion is measured in instructions (+0.5% to +1.4%), so this does not fail the gate, but it is outside +3% if read as time. Acceptance remains the owners' decision.
+
 ## Context
 
 ### The gap

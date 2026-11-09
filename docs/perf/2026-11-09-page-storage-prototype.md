@@ -33,6 +33,106 @@ does not qualify and the NO-GO rule does not fire. Whether to accept the
 ADR on these numbers, or to rerun the wall clock on a quiet machine
 first, is for the ADR's owners.
 
+**Third-round verdict (quiet machine): GO.** The second round's wall clock
+was rerun unchanged on an idle AWS instance. Per-arm IQR/median is 0.3–2.6%
+(C 0.3–0.7%), under the 5% limit, so the spread clause is met and with it
+every GO criterion. The medians match the workstation's: C runs ascii
++44.8% and +50.9% (95% CI ±0.2%). "A only" still does not qualify (A
+carries 60% and 49% of C's gain) and NO-GO does not fire. One thing the
+quiet machine shows that the workstation could not: sgr-dense is about 4%
+slower in C on the wall clock, not level (see below).
+
+## Third round: quiet machine
+
+The wall-clock half of the second round, rerun on a machine with nothing
+else on it. The binary and the method are the second round's; nothing in
+the prototype changed.
+
+- AWS c7a.2xlarge (AMD EPYC 9R14, 8 vCPUs, one thread per core, so no SMT
+  sibling to share), us-east-1, on demand. Ubuntu 26.04.1, kernel
+  7.0.0-1016-aws, rustc 1.98.1. The instance exposes no cpufreq interface,
+  so there is no governor or turbo to set. Not pinned (`pin` 0-7).
+- Branch `adr-0022-sgr` at `1c91725`, built on the instance with
+  `cargo build --release --locked -p ultty-bench --features proto`.
+  `proto-check` passed on ascii, sgr-dense and cjk before the runs.
+- Quiet: nothing ran but the harness and the SSH session that started it.
+  Timers that could fire during the run (sysstat, apt, man-db, fwupd,
+  fstrim, tmpfiles, update-notifier) and snapd were stopped first. The
+  1-minute load average was 0.20 before the first batch; during the runs it
+  was 1.0–1.5, which is the harness itself (`dd`, the reader and the frame
+  thread on 8 cores).
+
+The method is the Commands section's: three batches of
+`proto-flood --corpus ascii --rounds 40`, then
+`proto-flood --corpus sgr-dense,cjk --rounds 12`, both geometries, plus one
+extra `--corpus sgr-dense --rounds 40` to check the sgr-dense result. Paired
+medians are the median of per-round arm/ref ratios; the 95% intervals are a
+percentile bootstrap over rounds (10,000 resamples).
+
+| case | arm | median MiB/s | IQR / median | paired median vs ref | 95% CI (bootstrap) |
+|---|---|---:|---:|---:|---:|
+| ascii 120x40 | ref | 200.5 | 0.7% | | |
+| ascii 120x40 | A | 255.0 | 2.6% | 1.270 | 1.268–1.274 |
+| ascii 120x40 | C | 290.6 | 0.7% | 1.448 | 1.447–1.451 |
+| ascii 300x75 | ref | 187.5 | 0.7% | | |
+| ascii 300x75 | A | 234.6 | 0.4% | 1.251 | 1.249–1.252 |
+| ascii 300x75 | C | 283.2 | 0.3% | 1.509 | 1.507–1.511 |
+
+| batch | 1-min load before → after | C vs ref 120x40 / 300x75 | A vs ref 120x40 / 300x75 | largest arm IQR/median |
+|---|---|---|---|---:|
+| 1 | 0.20 → 1.02 | 1.450 / 1.511 | 1.270 / 1.251 | 2.7% (A, 120x40) |
+| 2 | 1.02 → 1.42 | 1.454 / 1.507 | 1.274 / 1.252 | 2.6% (A, 120x40) |
+| 3 | 1.42 → 1.24 | 1.445 / 1.507 | 1.269 / 1.249 | 2.6% (A, 120x40) |
+
+The batches agree within 0.6%. Every arm's IQR is under 1% of its median
+except A at 120x40 (2.6%), whose runs fall in two clusters about 3% apart.
+The paired ratios are as tight (IQR/median 0.6–0.8% for C). So the
+workstation's 8–10% was the shared machine, not the harness. Absolute
+rates are about 15% below the workstation's (a 3.7 GHz server core against
+a desktop Ryzen), and the ratios are within 2.5 points of the second
+round's 1.424 and 1.492.
+
+A's share of C's gain is 60% at 120x40 and 49% at 300x75 (per batch 60 /
+60 / 60% and 49 / 50 / 49%), below two thirds as before.
+
+Other corpora (12 rounds at load 1.24 → 1.30; the sgr-dense rows with 40
+rounds at 0.78 → 1.22). Every arm's IQR/median is 1.2% or less.
+
+| case | ref | A | C | A vs ref | C vs ref (95% CI) |
+|---|---:|---:|---:|---:|---:|
+| sgr-dense 120x40, 12 rounds | 98.1 | 93.9 | 94.1 | 0.952 | 0.957 (0.953–0.962) |
+| sgr-dense 300x75, 12 rounds | 97.3 | 92.8 | 93.7 | 0.956 | 0.964 (0.963–0.966) |
+| sgr-dense 120x40, 40 rounds | 98.8 | 93.9 | 94.4 | 0.952 | 0.956 (0.953–0.957) |
+| sgr-dense 300x75, 40 rounds | 97.4 | 93.1 | 93.8 | 0.956 | 0.963 (0.960–0.965) |
+| cjk 120x40 | 67.4 | 84.7 | 102.3 | 1.256 | 1.519 (1.514–1.523) |
+| cjk 300x75 | 65.3 | 81.5 | 100.7 | 1.244 | 1.541 (1.534–1.543) |
+
+**sgr-dense is not level on the wall clock.** C runs it 3.6–4.4% slower
+than the reference (4–5% more time), and A 4.4–4.8% slower. The second
+round called C level, but its intervals there were 0.951–1.102 and
+0.966–1.039; the quiet machine resolves the difference. The gate's
+"no worse than +3%" for sgr-dense is an instruction criterion (§Prototype,
+measurement 1; the first round already reported the other corpora's wall
+clock for information only), and on instructions C is +0.5% to +1.4%, so
+the gate passes. Taken as time, the same 3% would not be met. Why +1%
+instructions costs about 4% of time has not been looked into; the style
+cache's misses on mostly new templates are the first suspect. For real
+colorful output, which repeats a handful of styles, the instruction counts
+above show C ahead of the reference.
+
+### The gate, third round
+
+Only the wall-clock rows change; the instruction and heap rows are the
+second round's.
+
+| criterion (C) | needed | measured | met |
+|---|---|---|---|
+| PTY ascii median, 120x40 and 300x75 | +15% or better | +44.8% and +50.9% (95% CI 1.447–1.451 and 1.507–1.511) | yes |
+| spread of those medians | under 5% | IQR/median 0.3–2.6% per arm (C 0.3–0.7%); batches agree within 0.6% | **yes** |
+| every other GO criterion | as before | as in the second round | yes |
+| "A only": A's share of C's wall-clock gain | two thirds or more | 60% and 49% | no |
+| NO-GO: C's wall-clock gain on ascii | fires under +10% | +44.8% / +50.9% | does not fire |
+
 ## Second round: style handling
 
 Branch `adr-0022-sgr`, on top of the first round. Only the prototype's
