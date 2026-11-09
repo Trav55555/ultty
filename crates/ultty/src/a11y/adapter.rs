@@ -1,11 +1,18 @@
-//! The platform accessibility adapter for Ultty's window.
+//! The platform accessibility adapter for Ultty's window, and when it is
+//! sent a new tree.
+
+use std::time::{Duration, Instant};
 
 use accesskit_winit::{Event, WindowEvent as AccessKitEvent};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::Window;
 
-use super::tree;
+use super::tree::{self, Snapshot};
+
+/// The shortest time between two trees sent to assistive technology
+/// (ADR 0021 §3): output that changes the screen faster is coalesced.
+pub const REBUILD_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Owns the AccessKit adapter for one window.
 ///
@@ -18,6 +25,9 @@ pub struct Adapter {
     /// The window's title as last set. winit cannot read it back on X11 or
     /// Wayland (`Window::title` is always empty there).
     window_title: String,
+    rebuilds: Rebuilds,
+    /// What [`Adapter::observe_shown`] last saw.
+    shown: Option<u64>,
 }
 
 impl Adapter {
@@ -40,6 +50,8 @@ impl Adapter {
         Self {
             inner: accesskit_winit::Adapter::with_event_loop_proxy(event_loop, window, proxy),
             window_title: window_title.to_owned(),
+            rebuilds: Rebuilds::default(),
+            shown: None,
         }
     }
 
@@ -49,7 +61,8 @@ impl Adapter {
         self.inner.process_event(window, event);
     }
 
-    /// Answer a request AccessKit sent through the event loop.
+    /// Answer a request AccessKit sent through the event loop. A tree it
+    /// asked for is sent by the next [`Adapter::update`].
     pub fn handle(&mut self, window: &Window, event: AccessKitEvent) {
         match event {
             AccessKitEvent::InitialTreeRequested => {
@@ -59,12 +72,14 @@ impl Adapter {
                 // be a 0x0 frame to screen readers and magnifiers.
                 self.inner
                     .process_event(window, &WindowEvent::Resized(window.inner_size()));
-                self.send_tree();
+                self.rebuilds.activate();
+                self.shown = None;
             }
             AccessKitEvent::AccessibilityDeactivated => {
-                // The adapter is inactive again; nothing is sent until the
-                // next `InitialTreeRequested`.
+                // Nothing is built or sent until the next
+                // `InitialTreeRequested`.
                 tracing::debug!("Accessibility deactivated");
+                self.rebuilds.deactivate();
             }
             AccessKitEvent::ActionRequested(request) => {
                 tracing::debug!(action = ?request.action, "Accessibility action not handled yet");
@@ -72,17 +87,189 @@ impl Adapter {
         }
     }
 
-    /// The window was retitled; a screen reader in use hears the new name.
+    /// Whether assistive technology is listening. While it is not, the app
+    /// gathers nothing for the tree.
+    pub fn is_active(&self) -> bool {
+        self.rebuilds.active
+    }
+
+    /// The window was retitled.
     pub fn set_window_title(&mut self, title: &str) {
         if self.window_title != title {
             self.window_title = title.to_owned();
-            self.send_tree();
+            self.rebuilds.changed();
         }
     }
 
-    /// Send the tree, if assistive technology has asked for it.
-    fn send_tree(&mut self) {
+    /// Something the tree shows changed: the focused pane's screen or a
+    /// title. Ignored while inactive.
+    pub fn changed(&mut self) {
+        self.rebuilds.changed();
+    }
+
+    /// Note a digest of the window's structure (tabs, panes, focus,
+    /// geometry); a new value means the tree must be rebuilt.
+    pub fn observe_shown(&mut self, digest: u64) {
+        if self.shown != Some(digest) {
+            self.shown = Some(digest);
+            self.rebuilds.changed();
+        }
+    }
+
+    /// When the loop must wake to send a coalesced tree, if one is waiting.
+    /// `None` while inactive or with nothing changed.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.rebuilds.deadline()
+    }
+
+    /// Send a tree of what `snapshot` gathers, if one is due at `now`;
+    /// `snapshot` is not called otherwise.
+    pub fn update(&mut self, now: Instant, snapshot: impl FnOnce() -> Snapshot) {
+        if !self.rebuilds.take_due(now) {
+            return;
+        }
         let title = &self.window_title;
-        self.inner.update_if_active(|| tree::window_only(title));
+        self.inner.update_if_active(|| {
+            let started = Instant::now();
+            let update = tree::build(title, &snapshot());
+            tracing::debug!(
+                target: "ultty::a11y",
+                nodes = update.nodes.len(),
+                micros = started.elapsed().as_micros(),
+                "accessibility tree built"
+            );
+            update
+        });
+    }
+}
+
+/// Whether and when to rebuild the tree: only while assistive technology
+/// is active, only after a change, and at most once per
+/// [`REBUILD_INTERVAL`]. The first change after a quiet interval is sent at
+/// once, so a keystroke's echo is not delayed; changes inside the interval
+/// wait for its end and go out as one tree.
+#[derive(Debug, Default)]
+struct Rebuilds {
+    active: bool,
+    /// A change not yet sent.
+    pending: bool,
+    last_sent: Option<Instant>,
+}
+
+impl Rebuilds {
+    /// Assistive technology asked for the tree: send one at once.
+    fn activate(&mut self) {
+        *self = Self {
+            active: true,
+            pending: true,
+            last_sent: None,
+        };
+    }
+
+    fn deactivate(&mut self) {
+        *self = Self::default();
+    }
+
+    fn changed(&mut self) {
+        self.pending |= self.active;
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        if !self.pending {
+            return None;
+        }
+        // `pending` is only ever set while active.
+        Some(
+            self.last_sent
+                .map_or_else(Instant::now, |sent| sent + REBUILD_INTERVAL),
+        )
+    }
+
+    /// Whether to rebuild at `now`; if so, the change counts as sent.
+    fn take_due(&mut self, now: Instant) -> bool {
+        let due = self.pending
+            && self
+                .last_sent
+                .is_none_or(|sent| now.saturating_duration_since(sent) >= REBUILD_INTERVAL);
+        if due {
+            self.pending = false;
+            self.last_sent = Some(now);
+        }
+        due
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn activation_sends_a_tree_at_once() {
+        let mut rebuilds = Rebuilds::default();
+        rebuilds.activate();
+        let now = Instant::now();
+        assert!(rebuilds.deadline().is_some_and(|at| at <= Instant::now()));
+        assert!(rebuilds.take_due(now));
+        assert!(!rebuilds.take_due(now));
+        assert_eq!(rebuilds.deadline(), None);
+    }
+
+    #[test]
+    fn changes_within_the_interval_coalesce_into_one_rebuild() {
+        let mut rebuilds = Rebuilds::default();
+        rebuilds.activate();
+        let start = Instant::now();
+        assert!(rebuilds.take_due(start));
+
+        let mut sent = 0;
+        for step in 1..=40 {
+            rebuilds.changed();
+            sent += usize::from(rebuilds.take_due(start + ms(step)));
+        }
+        assert_eq!(sent, 0, "nothing goes out inside the interval");
+        assert_eq!(rebuilds.deadline(), Some(start + REBUILD_INTERVAL));
+        assert!(rebuilds.take_due(start + REBUILD_INTERVAL));
+        assert!(!rebuilds.take_due(start + ms(80)));
+        assert_eq!(rebuilds.deadline(), None);
+    }
+
+    #[test]
+    fn a_change_after_a_quiet_interval_goes_out_at_once() {
+        let mut rebuilds = Rebuilds::default();
+        rebuilds.activate();
+        let start = Instant::now();
+        assert!(rebuilds.take_due(start));
+        rebuilds.changed();
+        assert!(rebuilds.take_due(start + ms(500)));
+    }
+
+    #[test]
+    fn nothing_is_rebuilt_or_scheduled_while_inactive() {
+        let mut rebuilds = Rebuilds::default();
+        let now = Instant::now();
+        rebuilds.changed();
+        assert_eq!(rebuilds.deadline(), None);
+        assert!(!rebuilds.take_due(now));
+
+        rebuilds.activate();
+        assert!(rebuilds.take_due(now));
+        rebuilds.deactivate();
+        rebuilds.changed();
+        assert_eq!(rebuilds.deadline(), None);
+        assert!(!rebuilds.take_due(now + ms(100)));
+    }
+
+    #[test]
+    fn a_still_screen_schedules_nothing_while_active() {
+        let mut rebuilds = Rebuilds::default();
+        rebuilds.activate();
+        let now = Instant::now();
+        assert!(rebuilds.take_due(now));
+        assert_eq!(rebuilds.deadline(), None);
+        assert!(!rebuilds.take_due(now + ms(1000)));
     }
 }
