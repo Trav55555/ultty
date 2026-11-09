@@ -300,7 +300,10 @@ Where accessibility meets inline surfaces, for 0020 to settle or hand back:
   `described_by` the row's first run; its role comes from its semantics
   (`Group` by default). A surface whose anchor row is above the screen
   comes first, described by nothing. Text runs inside it are not used
-  (slice 5), so the `Terminal`'s document stays the grid.
+  (slice 5), so the `Terminal`'s document stays the grid. While the pane
+  is scrolled back its surfaces are left out of the tree: the grid's
+  rows are the live screen (§2), so an anchor row in view would be
+  matched to the wrong row.
 - Surfaces take `SetSemantics` and defaults like any region. One that
   scrolls off the visible screen leaves the tree with its rows until
   scrollback is exposed (§2, deferred). Live queues are per region, so a
@@ -359,8 +362,11 @@ Each slice is independently testable and mergeable.
    node. Check: starts with and without a session bus; startup and
    idle-wakeup numbers before and after. Done 2026-11-08: no startup cost,
    but zbus's `blocking` pool thread wakes twice a second, so the adapter
-   is opt-in (`accessibility = false` by default) per Consequences;
-   `docs/perf/2026-11-08-accessibility-adapter.md`.
+   was made opt-in per Consequences;
+   `docs/perf/2026-11-08-accessibility-adapter.md`. Since then
+   `Cargo.lock` pins `blocking` 1.6.2, whose idle threads exit, and the
+   adapter is on by default (`accessibility = true`);
+   `scripts/e2e/accessibility-no-bus.sh` fails if idle wakeups return.
 4. **Grid as Terminal**: tabs, panes, focused grid rows and caret, coalesced
    rebuilds. Check: builder tests; manual steps 1 to 3 recorded. Done
    2026-11-08 except the Orca run: the steps are written in
@@ -389,17 +395,28 @@ Each slice is independently testable and mergeable.
      join the `Terminal`'s document. One-line text is a `Label` (AccessKit
      names a label by its value); text the name does not already say is
      one `Label` child per non-empty line (`s<session>:<region>l<line>`),
-     the last 200 lines, under the region's node (`Paragraph` for `Text`).
-     An input's text is its `value`; its caret is not exposed yet.
+     the last 200 lines, under the region's node (`Paragraph` for `Text`,
+     also when the app set a `value_text`, which a `Label` cannot carry
+     beside its name). Only those lines are copied out of the scene. An
+     input's text is its `value`; its caret is not exposed yet.
+   - Apps are not trusted with the tree's shape. A pane's native scenes
+     add at most 5000 nodes, regions and lines together, ending with a
+     "… truncated" label when cut. Node ids are unkeyed FNV-1a hashes of
+     names the app partly chooses, so a collision can be found offline;
+     the builder takes each id once and leaves out a native node (and its
+     subtree) whose id is already in the tree, since AccessKit panics on
+     a duplicate. Scenes are copied after the pane's terminal lock is
+     released.
    - Bounds are the computed layout in cells, scaled by the cell size,
      from the pane's origin (a surface's from its first row), less the
      scroll offsets of the regions above; line labels have none.
    - Nodes advertise no actions: `Action::Focus` and `Click` are not
      handled yet (§3 Actions).
    - Sessions count changes to what they show (`shown_generation`:
-     applied scene messages, focus, relayout, surfaces placed, dropped or
-     moved on or off screen), which the app hashes into its shown digest
-     only while a screen reader listens. Idle wakeups with a screen
+     scene messages applied without error, except styles and streams;
+     focus; scroll steps; relayout; surfaces placed, dropped or moved on
+     or off screen), which the app hashes into its shown digest only
+     while a screen reader listens. Idle wakeups with a screen
      reader listening and a still screen: 0 in 5 s at the prompt; 21 in
      5 s with `counter-app`, against 20 with accessibility off, all from
      the 250 ms maintenance tick native sessions already have, with no
