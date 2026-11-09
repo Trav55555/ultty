@@ -13,6 +13,20 @@ Proposed 2026-11-09, draft. Not accepted until the prototype gate in §Prototype
 
 The failure is sgr-dense, at +16% to +23% instructions and −12% to −16% wall clock against a limit of +3%. The cost is interning styles that are mostly new, which A pays as well. "A only" does not qualify: A carries 38–81% of C's instruction cut and 61–71% of its wall-clock gain, below two thirds. The NO-GO kill rule does not fire. Not accepted as written. Accepting it would need either a measured fix for sgr-dense interning or a decision to change that criterion.
 
+**Prototype round 2, 2026-11-09: GO on every criterion but the wall-clock spread** (same note, "Second round"). The prototype's style handling changed in four ways:
+- styles with no truecolor, underline color or hyperlink are stored inline in the cell's top 40 bits (a tag bit, fg and bg as kind plus index, and the flags), so they never touch the table;
+- the table interns approximately, through a 256-slot cache of recent styles, and a miss appends a new id instead of a hash lookup and insert;
+- collection waits for max(4096, 2 × screen cells) new styles;
+- the history cell copy is tighter.
+
+Results for C:
+- sgr-dense is +0.5% to +1.4% instructions (was +16% to +23%) and level with the reference on the wall clock;
+- every other instruction criterion still passes (ascii 18.7–19.5 per byte, scroll −35% to −43%, wide-wrap −46% to −56%, cjk −36% to −43%);
+- the PTY harness gives ascii +42.4% and +49.2% (95% CI ±1.5–3%);
+- live heap is 1.20 / 1.34 / 9.99 MB.
+
+The clause not met is "spread under 5%": per-arm IQR/median is 8–10% on the shared workstation, pinned or not. "A only" still does not qualify (A carries 55–66% of C's wall-clock gain), and NO-GO does not fire. If accepted, §1 changes: bits 24..64 become one style key, either an inline style or a 24-bit table id, which spends the reserved bits of open question 6, and the "interned per page" table becomes approximate. Accepting the ADR on these numbers, or after a wall-clock rerun on a quiet machine, is the owners' decision.
+
 ## Context
 
 ### The gap
