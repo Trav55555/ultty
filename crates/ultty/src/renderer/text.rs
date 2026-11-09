@@ -1,6 +1,6 @@
 //! Text rendering with cosmic-text and glyph atlas.
 
-use super::atlas::GlyphAtlas;
+use super::atlas::{GlyphAtlas, GlyphInfo};
 use super::decoration::{strikethrough_quad, underline_quads, DecorationMetrics, Quad};
 use super::pipeline::TextPipeline;
 use super::powerline::is_powerline_triangle;
@@ -27,6 +27,10 @@ struct ShapedGlyph {
     /// Bold was requested but the matched face is not bold, so the glyph is
     /// drawn in a brighter color instead.
     synthetic_bold: bool,
+    /// A zero-width mark the font did not position: it sits at its base's
+    /// origin, at the height it was drawn for, so it may collide with the
+    /// base (see [`stack_unpositioned_marks`]).
+    unpositioned_mark: bool,
 }
 
 /// Rendering decisions derived from a cell's attribute flags.
@@ -560,6 +564,9 @@ impl TextRenderer {
         };
         let line_y = run.line_y;
         let mut shaped = Vec::with_capacity(run.glyphs.len());
+        // Origin of the last glyph that advances the pen: the base an
+        // unpositioned mark falls back onto.
+        let mut base_x = None;
         for glyph in run.glyphs {
             let face = self
                 .font_system
@@ -573,12 +580,19 @@ impl TextRenderer {
                 physical.cache_key.flags |= CacheKeyFlags::FAKE_ITALIC;
             }
 
+            let unpositioned_mark =
+                glyph.w == 0.0 && glyph.y_offset == 0.0 && base_x == Some(physical.x);
+            if glyph.w != 0.0 {
+                base_x = Some(physical.x);
+            }
+
             shaped.push(ShapedGlyph {
                 cache_key: physical.cache_key,
                 x_offset: physical.x as f32,
                 y_offset: physical.y as f32,
                 line_y,
                 synthetic_bold,
+                unpositioned_mark,
             });
         }
         shaped
@@ -1154,6 +1168,7 @@ impl TextRenderer {
         let solid_uv = self.atlas.solid_uv();
         let mut quads: Vec<Quad> = Vec::new();
         let mut cluster_glyphs: Vec<ShapedGlyph> = Vec::new();
+        let mut cluster_inks: Vec<Option<GlyphInfo>> = Vec::new();
         // Cells before this column had their glyphs drawn by a run.
         let mut run_drawn_until = 0u16;
 
@@ -1273,6 +1288,14 @@ impl TextRenderer {
                 self.cluster_text.push(ch);
                 self.cluster_text.extend(extra);
                 self.load_cluster_glyphs(buffer, style, &mut cluster_glyphs);
+                if cluster_glyphs.iter().any(|glyph| glyph.unpositioned_mark) {
+                    cluster_inks.clear();
+                    for glyph in &cluster_glyphs {
+                        let ink = self.atlas.get_glyph(&mut self.font_system, glyph.cache_key);
+                        cluster_inks.push(ink);
+                    }
+                    stack_unpositioned_marks(&mut cluster_glyphs, &cluster_inks);
+                }
                 &cluster_glyphs
             } else {
                 let cache_key_lookup = shaping_cache_key(ch, self.ligatures, style);
@@ -1591,10 +1614,90 @@ fn shape_run_glyphs(
                 y_offset: physical.y as f32,
                 line_y,
                 synthetic_bold,
+                unpositioned_mark: false,
             },
         ));
     }
     shaped
+}
+
+/// Space left between a stacked mark and the ink below or above it.
+const MARK_GAP: f32 = 1.0;
+
+/// A glyph's ink box in pixels: x from the cell origin, y up from the
+/// baseline.
+#[derive(Clone, Copy)]
+struct InkBox {
+    left: f32,
+    right: f32,
+    bottom: f32,
+    top: f32,
+}
+
+impl InkBox {
+    fn of(glyph: &ShapedGlyph, ink: &GlyphInfo) -> Option<Self> {
+        if ink.width == 0.0 || ink.height == 0.0 {
+            return None;
+        }
+        let left = glyph.x_offset + ink.left;
+        let top = ink.top - glyph.y_offset;
+        Some(Self {
+            left,
+            right: left + ink.width,
+            bottom: top - ink.height,
+            top,
+        })
+    }
+
+    fn overlaps(&self, other: &Self) -> bool {
+        self.left < other.right
+            && other.left < self.right
+            && self.bottom < other.top
+            && other.bottom < self.top
+    }
+
+    fn union(&self, other: &Self) -> Self {
+        Self {
+            left: self.left.min(other.left),
+            right: self.right.max(other.right),
+            bottom: self.bottom.min(other.bottom),
+            top: self.top.max(other.top),
+        }
+    }
+}
+
+/// Stack the marks of one grapheme that the font left unpositioned, the
+/// way shapers place marks for fonts without mark positioning.
+///
+/// A font with no anchor for a mark on its base (common once the shaper
+/// has composed the base with an earlier mark, as e + U+0301 into é)
+/// leaves the mark at the base's origin, at the height it was drawn for:
+/// a second accent lands on the first. Each such mark whose ink collides
+/// with the ink before it moves up above that ink or, if it sits lower
+/// than the middle of the base, down below it. `inks` holds each glyph's
+/// rasterized ink, `None` where it has none.
+fn stack_unpositioned_marks(glyphs: &mut [ShapedGlyph], inks: &[Option<GlyphInfo>]) {
+    let mut base_middle = None;
+    let mut drawn: Option<InkBox> = None;
+    for (glyph, ink) in glyphs.iter_mut().zip(inks) {
+        let Some(mut ink_box) = ink.as_ref().and_then(|ink| InkBox::of(glyph, ink)) else {
+            continue;
+        };
+        if let (true, Some(under), Some(middle)) = (glyph.unpositioned_mark, drawn, base_middle) {
+            if ink_box.overlaps(&under) {
+                let raise = if ink_box.bottom + ink_box.top >= 2.0 * middle {
+                    under.top + MARK_GAP - ink_box.bottom
+                } else {
+                    under.bottom - MARK_GAP - ink_box.top
+                };
+                glyph.y_offset -= raise;
+                ink_box.bottom += raise;
+                ink_box.top += raise;
+            }
+        }
+        base_middle.get_or_insert((ink_box.bottom + ink_box.top) / 2.0);
+        drawn = Some(drawn.map_or(ink_box, |drawn| drawn.union(&ink_box)));
+    }
 }
 
 fn cell_glyph_origin(
@@ -1912,6 +2015,7 @@ mod tests {
             y_offset: -2.0,
             line_y: 13.0,
             synthetic_bold: false,
+            unpositioned_mark: false,
         };
         let glyph = super::super::atlas::GlyphInfo {
             uv: [0.0, 0.0, 1.0, 1.0],
@@ -1926,6 +2030,102 @@ mod tests {
 
         assert_eq!(x, 29.0);
         assert_eq!(y, 61.0);
+    }
+
+    fn glyph_at(x_offset: f32, unpositioned_mark: bool) -> ShapedGlyph {
+        let (cache_key, _, _) = CacheKey::new(
+            cosmic_text::fontdb::ID::dummy(),
+            1,
+            14.0,
+            (0.0, 0.0),
+            cosmic_text::fontdb::Weight::NORMAL,
+            cosmic_text::CacheKeyFlags::empty(),
+        );
+        ShapedGlyph {
+            cache_key,
+            x_offset,
+            y_offset: 0.0,
+            line_y: 11.0,
+            synthetic_bold: false,
+            unpositioned_mark,
+        }
+    }
+
+    /// Ink of a glyph `width` x `height` px, `left` px right of its origin
+    /// and `top` px above the baseline.
+    fn ink(left: f32, top: f32, width: f32, height: f32) -> Option<super::super::atlas::GlyphInfo> {
+        Some(super::super::atlas::GlyphInfo {
+            uv: [0.0; 4],
+            width,
+            height,
+            left,
+            top,
+            is_color: false,
+        })
+    }
+
+    #[test]
+    fn unpositioned_mark_stacks_above_an_accented_base() {
+        // "é̃" in Droid Sans Mono: the font composes e + U+0301 into é, whose
+        // acute reaches 11 px above the baseline, and has no anchor for a
+        // tilde on é, so the tilde stays at its lowercase height (8-11 px)
+        // and drew over the acute.
+        let mut glyphs = [glyph_at(0.0, false), glyph_at(0.0, true)];
+        let inks = [ink(0.0, 11.0, 8.0, 12.0), ink(1.0, 11.0, 6.0, 3.0)];
+        stack_unpositioned_marks(&mut glyphs, &inks);
+
+        assert_eq!(glyphs[0].y_offset, 0.0);
+        // Raised so its bottom clears the acute by a pixel: 11 + 1 = 8 + 4.
+        assert_eq!(glyphs[1].y_offset, -4.0);
+        assert_eq!(glyphs[1].x_offset, 0.0);
+    }
+
+    #[test]
+    fn unpositioned_mark_that_clears_its_base_stays() {
+        // "ụ̃": the tilde already sits above the u.
+        let mut glyphs = [glyph_at(0.0, false), glyph_at(0.0, true)];
+        let inks = [ink(1.0, 8.0, 7.0, 11.0), ink(1.0, 11.0, 6.0, 3.0)];
+        stack_unpositioned_marks(&mut glyphs, &inks);
+        assert_eq!(glyphs[1].y_offset, 0.0);
+    }
+
+    #[test]
+    fn unpositioned_mark_below_stacks_under_the_base() {
+        // A dot below on a base whose ink already reaches 3 px below the
+        // baseline goes under it.
+        let mut glyphs = [glyph_at(0.0, false), glyph_at(0.0, true)];
+        let inks = [ink(1.0, 8.0, 7.0, 11.0), ink(3.0, -1.0, 2.0, 2.0)];
+        stack_unpositioned_marks(&mut glyphs, &inks);
+        // Top lowered from -1 to 1 px below the base's bottom (-3): -4.
+        assert_eq!(glyphs[1].y_offset, 3.0);
+    }
+
+    #[test]
+    fn marks_after_an_unpositioned_mark_stack_on_it() {
+        let mut glyphs = [
+            glyph_at(0.0, false),
+            glyph_at(0.0, true),
+            glyph_at(0.0, true),
+        ];
+        let inks = [
+            ink(0.0, 11.0, 8.0, 12.0),
+            ink(1.0, 11.0, 6.0, 3.0),
+            ink(1.0, 11.0, 6.0, 3.0),
+        ];
+        stack_unpositioned_marks(&mut glyphs, &inks);
+        assert_eq!(glyphs[1].y_offset, -4.0);
+        // On top of the first tilde, now 12-15 px up.
+        assert_eq!(glyphs[2].y_offset, -8.0);
+    }
+
+    #[test]
+    fn marks_the_font_positioned_are_kept() {
+        // A mark the font attached itself is drawn where the font put it,
+        // even if its ink touches the base.
+        let mut glyphs = [glyph_at(0.0, false), glyph_at(0.0, false)];
+        let inks = [ink(0.0, 11.0, 8.0, 12.0), ink(1.0, 11.0, 6.0, 3.0)];
+        stack_unpositioned_marks(&mut glyphs, &inks);
+        assert_eq!(glyphs[1].y_offset, 0.0);
     }
 
     /// This test verifies that cosmic-text Buffer requires set_size before layout_runs
