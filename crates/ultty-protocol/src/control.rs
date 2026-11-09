@@ -5,6 +5,7 @@
 
 use crate::{Key, Modifiers};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Output format used by `ulttyctl` responses.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -38,15 +39,24 @@ pub enum ControlRequest {
     // === Input Injection ===
     SendText {
         text: String,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     SendKey {
         key: Key,
         modifiers: Modifiers,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     SendRaw {
         data: Vec<u8>,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     // === Command Execution ===
@@ -60,6 +70,9 @@ pub enum ControlRequest {
     RunCommand {
         command: String,
         args: Vec<String>,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     CloseTab {
@@ -70,13 +83,42 @@ pub enum ControlRequest {
     GetText {
         include_scrollback: bool,
         scrollback_lines: Option<usize>,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
-    GetSelection,
+    GetSelection {
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
 
     ListTabs,
 
+    /// Every pane in every tab, tabs in order and panes in layout order.
+    ListPanes,
+
+    /// The native apps drawing in a pane's tab: each one's region tree
+    /// with computed layout, content and focus. Read-only.
+    Regions {
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
+
     GetInfo,
+
+    /// The last command the pane's shell ran (or is running) and what it
+    /// printed, from OSC 133 shell integration marks.
+    LastCommand {
+        /// Keep only the last this many lines of output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tail_lines: Option<u64>,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
 
     // === Search ===
     Search {
@@ -84,13 +126,36 @@ pub enum ControlRequest {
         regex: bool,
         case_sensitive: bool,
         include_scrollback: bool,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     // === Wait Operations ===
+    /// Wait until something happens in a pane: `pattern` appears (the
+    /// default), or the event `until` names. The pane is fixed when the
+    /// request arrives: `target`, or the pane focused at that moment.
     WaitFor {
+        /// Text to wait for; ignored unless `until` is `Text`.
+        #[serde(default)]
         pattern: String,
+        #[serde(default)]
         regex: bool,
         timeout_ms: u64,
+        #[serde(default, skip_serializing_if = "WaitCondition::is_text")]
+        until: WaitCondition,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
+
+    // === Events ===
+    /// Turn this connection into an event stream: after the `Subscribed`
+    /// reply, one [`ControlEvent`] per line until the client disconnects.
+    Subscribe {
+        /// Only events about this pane; every pane's events when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     // === Window Control ===
@@ -111,8 +176,13 @@ pub enum ControlRequest {
         opacity: f32,
     },
 
-    SetAgentStatus {
-        status: AgentStatusUpdate,
+    /// Show what a pane is doing in the tab bar; `None` clears it.
+    SetPaneStatus {
+        #[serde(default)]
+        status: Option<PaneStatus>,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     // === Screenshot ===
@@ -146,40 +216,86 @@ pub enum ControlRequest {
     Version,
 }
 
-/// Agent status update for terminal status bar display.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentStatusUpdate {
-    /// Current cumulative spend in USD.
-    pub cost_usd: f64,
-    /// Configured budget ceiling in USD.
-    pub budget_usd: f64,
-    /// Pressure indicator (for example: low/normal/high).
-    pub pressure: String,
-    /// Active model name.
-    pub model: String,
-    /// Context quality summary shown in the status bar.
-    pub context_quality: String,
-    /// Current workflow step.
-    pub step: String,
-    /// Agent display name.
-    pub agent_name: String,
+/// What a `WaitFor` request waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitCondition {
+    /// The pattern appears on screen or in scrollback.
+    #[default]
+    Text,
+    /// The next command finishes (OSC 133;D; needs shell integration).
+    CommandFinished,
+    /// The bell rings.
+    Bell,
+    /// No output for `ms` milliseconds.
+    Quiet { ms: u64 },
 }
 
-impl AgentStatusUpdate {
-    /// Validate that numeric fields are finite (not NaN or Inf).
-    pub fn is_valid(&self) -> bool {
-        self.cost_usd.is_finite() && self.budget_usd.is_finite()
+impl WaitCondition {
+    pub fn is_text(&self) -> bool {
+        *self == WaitCondition::Text
+    }
+}
+
+/// What a program says it is doing in its pane, shown in the tab bar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneStatus {
+    pub state: PaneState,
+    /// A few words, such as "running tests". Shown in the title band.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    /// How far along, from 0 to 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<f32>,
+    /// Ask for the user: marks the window urgent while it is unfocused.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attention: bool,
+}
+
+/// The kind of thing a pane is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneState {
+    Idle,
+    Working,
+    /// Waiting on the user.
+    Waiting,
+    Done,
+    Error,
+}
+
+impl PaneStatus {
+    /// Longest label kept, in characters.
+    pub const MAX_LABEL_CHARS: usize = 64;
+
+    /// The status with its label cut to [`Self::MAX_LABEL_CHARS`] and free
+    /// of control characters, and its progress finite and within 0..=1.
+    pub fn sanitized(mut self) -> Self {
+        self.label = self
+            .label
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(Self::MAX_LABEL_CHARS)
+            .collect::<String>()
+            .trim()
+            .to_string();
+        self.progress = self
+            .progress
+            .filter(|progress| progress.is_finite())
+            .map(|progress| progress.clamp(0.0, 1.0));
+        self
     }
 
-    /// Clamp cost and budget to finite values, replacing NaN/Inf with 0.0.
-    pub fn sanitized(mut self) -> Self {
-        if !self.cost_usd.is_finite() {
-            self.cost_usd = 0.0;
+    /// How much the status asks for the user's eye: an error first, then a
+    /// pane waiting on the user, then work in progress.
+    pub fn urgency(&self) -> u8 {
+        match (self.state, self.attention) {
+            (PaneState::Error, _) => 4,
+            (PaneState::Waiting, _) | (_, true) => 3,
+            (PaneState::Working, _) => 2,
+            (PaneState::Done, _) => 1,
+            (PaneState::Idle, _) => 0,
         }
-        if !self.budget_usd.is_finite() {
-            self.budget_usd = 0.0;
-        }
-        self
     }
 }
 
@@ -201,17 +317,108 @@ pub enum ControlResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlData {
     Info(TerminalInfo),
-    Tabs { tabs: Vec<TabInfo> },
-    Selection { text: Option<String> },
+    Tabs {
+        tabs: Vec<TabInfo>,
+    },
+    Panes {
+        panes: Vec<PaneInfo>,
+    },
+    Selection {
+        text: Option<String>,
+    },
     Version(VersionInfo),
     Pong,
-    ScreenshotSaved { path: String },
-    ScreenshotData { data: Vec<u8> },
-    SearchResults { matches: Vec<SearchMatch> },
-    BatchResults { results: Vec<ControlResponse> },
+    ScreenshotSaved {
+        path: String,
+    },
+    ScreenshotData {
+        data: Vec<u8>,
+    },
+    SearchResults {
+        matches: Vec<SearchMatch>,
+    },
+    BatchResults {
+        results: Vec<ControlResponse>,
+    },
     Authenticated,
-    WaitMatched { line: usize, col: usize },
+    WaitMatched {
+        line: usize,
+        col: usize,
+    },
+    /// A `WaitFor` for an event saw it.
+    WaitEvent {
+        event: ControlEvent,
+    },
+    /// A `WaitFor` for quiet saw no output for the whole period.
+    WaitQuiet,
     WaitTimeout,
+    /// The connection is now an event stream.
+    Subscribed,
+    /// `NewTab` opened a tab; `pane` is its pane's id.
+    TabOpened {
+        tab_index: usize,
+        pane: u64,
+    },
+    /// The native apps in a pane's tab; see `ControlRequest::Regions`.
+    Regions {
+        scenes: Vec<NativeScene>,
+    },
+    /// A pane's last command; see `ControlRequest::LastCommand`.
+    LastCommand {
+        command: String,
+        /// What it printed; empty when `output_available` is false.
+        output: String,
+        /// Its exit status once finished, if the shell reported one.
+        exit_code: Option<i32>,
+        /// Still running: `output` is what it printed so far.
+        running: bool,
+        /// False when the output's rows are gone (cleared, reset, or out
+        /// of the scrollback).
+        output_available: bool,
+    },
+}
+
+/// Something that happened in a pane, sent to subscribers one per line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum ControlEvent {
+    /// A pane was opened (a new tab or a split).
+    PaneOpened { pane: u64, tab_index: usize },
+    /// A pane was closed.
+    PaneClosed { pane: u64 },
+    /// The shell started running a command (OSC 133;C).
+    CommandStarted { pane: u64 },
+    /// The command finished (OSC 133;D), with its exit code when the shell
+    /// reported one.
+    CommandFinished { pane: u64, exit_code: Option<i32> },
+    /// The bell rang.
+    Bell { pane: u64 },
+    /// A program asked for a desktop notification (OSC 9/777).
+    Notification {
+        pane: u64,
+        title: String,
+        body: String,
+    },
+    /// A program set the pane title (OSC 0/2).
+    TitleChanged { pane: u64, title: String },
+    /// The pane's shell process exited.
+    ProcessExited { pane: u64, status: i32 },
+}
+
+impl ControlEvent {
+    /// The pane the event is about.
+    pub fn pane(&self) -> u64 {
+        match self {
+            ControlEvent::PaneOpened { pane, .. }
+            | ControlEvent::PaneClosed { pane }
+            | ControlEvent::CommandStarted { pane }
+            | ControlEvent::CommandFinished { pane, .. }
+            | ControlEvent::Bell { pane }
+            | ControlEvent::Notification { pane, .. }
+            | ControlEvent::TitleChanged { pane, .. }
+            | ControlEvent::ProcessExited { pane, .. } => *pane,
+        }
+    }
 }
 
 /// A single text search match.
@@ -265,6 +472,98 @@ pub struct TabInfo {
     pub cwd: Option<String>,
 }
 
+/// One native app's scene, as `ControlRequest::Regions` reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NativeScene {
+    /// The app's session, unique for the terminal's lifetime.
+    pub session: u64,
+    /// Connected in-band over the PTY rather than over the tab's socket.
+    pub in_band: bool,
+    /// The region with keyboard focus, if any.
+    pub focused: Option<u32>,
+    /// Every region, root first, in depth-first (drawing) order.
+    pub regions: Vec<RegionInfo>,
+}
+
+/// One region of a native scene. Positions and sizes are in cells, from
+/// the top left of the app's area, before any scrolled ancestor moves it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegionInfo {
+    pub id: u32,
+    /// None for the root.
+    pub parent: Option<u32>,
+    /// The root is 0.
+    pub depth: usize,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// How far the region's content is scrolled, in cells.
+    pub scroll_x: f32,
+    pub scroll_y: f32,
+    /// `none`, `text`, `rich_text`, or a widget: `input`, `markdown`,
+    /// `code`, `progress`, `spinner`, `image`, `button`.
+    pub content: String,
+    /// The text the region shows, for content that has text (an input's
+    /// value, a button's label).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Key-value pairs the app set with `SetRegionMetadata` (a later
+    /// duplicate key wins).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+    /// Effective accessibility role (spec §10.5), snake_case: `group`,
+    /// `text`, `log`, `input`, `button`, `list_item` and so on. Derived
+    /// from the content unless the app set one with `SetSemantics`.
+    /// Empty from a terminal that predates semantics.
+    #[serde(default)]
+    pub role: String,
+    /// Effective accessible name, if the region has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// `off`, `polite` or `assertive`; left out of JSON when `off`.
+    #[serde(default = "live_off", skip_serializing_if = "is_live_off")]
+    pub live: String,
+}
+
+fn live_off() -> String {
+    "off".to_string()
+}
+
+fn is_live_off(live: &str) -> bool {
+    live == "off"
+}
+
+/// Metadata describing a single pane (one terminal in a tab's layout).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneInfo {
+    /// Pane id. Unique within one Ultty process and never reused, so it
+    /// stays valid across splits, focus changes and tab switches until the
+    /// pane closes. Treat it as opaque.
+    pub id: u64,
+    /// Index of the tab holding the pane.
+    pub tab_index: usize,
+    /// Whether this is the focused pane of its tab.
+    pub active: bool,
+    /// Whether this pane has keyboard focus: the active pane of the active tab.
+    pub focused: bool,
+    /// Title the program set (OSC 0/2); empty when none was set.
+    pub title: String,
+    /// Name of the foreground process, when it can be read.
+    pub foreground: Option<String>,
+    /// Shell process ID.
+    pub pid: Option<u32>,
+    /// Working directory, if known.
+    pub cwd: Option<String>,
+    /// Pane width in cells.
+    pub cols: u16,
+    /// Pane height in cells.
+    pub rows: u16,
+    /// What the pane's program said it is doing, if it set a status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<PaneStatus>,
+}
+
 /// Build and protocol version information.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VersionInfo {
@@ -307,6 +606,26 @@ mod tests {
                     cwd: None,
                 }],
             },
+            ControlData::Panes {
+                panes: vec![PaneInfo {
+                    id: 7,
+                    tab_index: 0,
+                    active: true,
+                    focused: false,
+                    title: "vim".to_string(),
+                    foreground: Some("vim".to_string()),
+                    pid: Some(42),
+                    cwd: None,
+                    cols: 40,
+                    rows: 24,
+                    status: Some(PaneStatus {
+                        state: PaneState::Working,
+                        label: "tests".to_string(),
+                        progress: Some(0.5),
+                        attention: false,
+                    }),
+                }],
+            },
             ControlData::Selection {
                 text: Some("picked".to_string()),
             },
@@ -338,6 +657,49 @@ mod tests {
             ControlData::Authenticated,
             ControlData::WaitMatched { line: 1, col: 2 },
             ControlData::WaitTimeout,
+            ControlData::Subscribed,
+            ControlData::WaitEvent {
+                event: ControlEvent::CommandFinished {
+                    pane: 1,
+                    exit_code: Some(2),
+                },
+            },
+            ControlData::WaitQuiet,
+            ControlData::TabOpened {
+                tab_index: 2,
+                pane: 9,
+            },
+            ControlData::LastCommand {
+                command: "make".to_string(),
+                output: "ok".to_string(),
+                exit_code: Some(0),
+                running: false,
+                output_available: true,
+            },
+            ControlData::Regions {
+                scenes: vec![NativeScene {
+                    session: 3,
+                    in_band: false,
+                    focused: Some(2),
+                    regions: vec![RegionInfo {
+                        id: 2,
+                        parent: Some(0),
+                        depth: 1,
+                        x: 0.0,
+                        y: 1.0,
+                        width: 80.0,
+                        height: 22.0,
+                        scroll_x: 0.0,
+                        scroll_y: 4.0,
+                        content: "text".to_string(),
+                        text: Some("log line".to_string()),
+                        metadata: BTreeMap::from([("id".to_string(), "log".to_string())]),
+                        role: "log".to_string(),
+                        label: Some("Build log".to_string()),
+                        live: "polite".to_string(),
+                    }],
+                }],
+            },
         ];
         let mut responses = vec![
             ControlResponse::Ok,
@@ -351,6 +713,128 @@ mod tests {
         ];
         responses.extend(data.into_iter().map(ControlResponse::Data));
         responses
+    }
+
+    #[test]
+    fn pane_status_is_cleaned_before_it_is_shown() {
+        let status = PaneStatus {
+            state: PaneState::Working,
+            label: format!("  run\x1b[31m{}", "x".repeat(100)),
+            progress: Some(7.0),
+            attention: false,
+        }
+        .sanitized();
+        assert!(!status.label.contains('\x1b'));
+        assert!(status.label.starts_with("run ["));
+        assert_eq!(
+            status.label.chars().count(),
+            PaneStatus::MAX_LABEL_CHARS - 2
+        );
+        assert_eq!(status.progress, Some(1.0));
+        let nan = PaneStatus {
+            progress: Some(f32::NAN),
+            ..status
+        };
+        assert_eq!(nan.sanitized().progress, None);
+    }
+
+    #[test]
+    fn errors_outrank_waiting_outranks_work() {
+        let status = |state, attention| PaneStatus {
+            state,
+            label: String::new(),
+            progress: None,
+            attention,
+        };
+        let error = status(PaneState::Error, false).urgency();
+        let waiting = status(PaneState::Waiting, false).urgency();
+        let attention = status(PaneState::Working, true).urgency();
+        let working = status(PaneState::Working, false).urgency();
+        let done = status(PaneState::Done, false).urgency();
+        assert!(error > waiting && waiting == attention && attention > working && working > done);
+    }
+
+    #[test]
+    fn pane_status_json_is_small() {
+        let json = serde_json::to_string(&PaneStatus {
+            state: PaneState::Done,
+            label: String::new(),
+            progress: None,
+            attention: false,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"state":"done"}"#);
+    }
+
+    #[test]
+    fn events_are_flat_json_objects_named_by_event() {
+        let event = ControlEvent::CommandFinished {
+            pane: 3,
+            exit_code: Some(1),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            json,
+            r#"{"event":"command_finished","pane":3,"exit_code":1}"#
+        );
+        assert_eq!(serde_json::from_str::<ControlEvent>(&json).unwrap(), event);
+        assert_eq!(event.pane(), 3);
+    }
+
+    #[test]
+    fn wait_condition_defaults_to_text_and_round_trips() {
+        let old: ControlRequest = serde_json::from_str(
+            r#"{"type":"wait_for","pattern":"ok","regex":false,"timeout_ms":5}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            old,
+            ControlRequest::WaitFor {
+                until: WaitCondition::Text,
+                ..
+            }
+        ));
+        for until in [
+            WaitCondition::CommandFinished,
+            WaitCondition::Bell,
+            WaitCondition::Quiet { ms: 500 },
+        ] {
+            let request = ControlRequest::WaitFor {
+                pattern: String::new(),
+                regex: false,
+                timeout_ms: 1000,
+                until,
+                target: None,
+            };
+            let json = serde_json::to_string(&request).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ControlRequest>(&json).unwrap(),
+                request
+            );
+        }
+    }
+
+    /// Clients written before pane targets keep working: an omitted `target`
+    /// means the focused pane, and an unset one is not sent.
+    #[test]
+    fn target_is_optional_on_the_wire() {
+        let old: ControlRequest =
+            serde_json::from_str(r#"{"type":"send_text","text":"hi"}"#).unwrap();
+        assert_eq!(
+            old,
+            ControlRequest::SendText {
+                text: "hi".to_string(),
+                target: None
+            }
+        );
+        let old: ControlRequest = serde_json::from_str(r#"{"type":"get_selection"}"#).unwrap();
+        assert_eq!(old, ControlRequest::GetSelection { target: None });
+
+        let untargeted = serde_json::to_string(&ControlRequest::GetSelection { target: None });
+        assert_eq!(untargeted.unwrap(), r#"{"type":"get_selection"}"#);
+        let targeted: ControlRequest =
+            serde_json::from_str(r#"{"type":"get_selection","target":4}"#).unwrap();
+        assert_eq!(targeted, ControlRequest::GetSelection { target: Some(4) });
     }
 
     /// ulttyctl reads every reply as JSON, so each one must survive the trip.

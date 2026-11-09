@@ -115,11 +115,22 @@ cargo run --manifest-path examples/porygon-tui/Cargo.toml
 
 Native apps auto-detect whether they're talking to Ultty. On an Ultty tab's own terminal they use the tab's socket. Anywhere else they probe the terminal, and if it is Ultty they carry the native protocol in-band in the terminal byte stream. That covers ssh, `sudo`, containers, and `script` recordings. In both cases the terminal does layout and rendering. Everywhere else they use ANSI mode via ratatui on supported Unix terminals. That includes tmux, screen, and zellij, where Ultty cannot know where a pane sits, so the probe is skipped or dropped. Set `ULTTY_IN_BAND=0` to skip the probe. See [spec §1.3](docs/PROTOCOL_SPEC.md) and [ADR 0018](docs/adr/0018-in-band-native-transport.md).
 
+## Privacy
+
+No account, no telemetry, no network calls. Ultty does not phone home,
+check for updates, or report crashes; it contains no networking code. The
+network is reached only by programs you run in it, and by a link you
+Ctrl+click, which Ultty hands to your browser. Its sockets (the control
+socket that `ulttyctl` uses and each tab's native socket) are local Unix
+sockets that only your user can open.
+
 ## ANSI Compatibility
 
 Ultty emulates an xterm-style terminal; ordinary terminal programs are the
 baseline, not an afterthought. `TERM` is `xterm-256color` by default, or
 `xterm-ultty` with `terminal.term` (see [Configuration](docs/configuration.md#terminal-type)).
+The [compatibility scorecard](docs/compat-scorecard.md) checks, from tests,
+the features that agent CLIs and other modern programs rely on.
 
 Implemented:
 
@@ -137,10 +148,11 @@ Implemented:
 - Bracketed paste (pasted text has ESC and C1 controls removed), focus
   reporting
 - Alternate screen (47, 1047, 1049), synchronized output (2026), grapheme
-  clustering (2027), DECSCNM reverse video
+  clustering (2027), light/dark theme reports (2031 and `CSI ? 996 n`),
+  DECSCNM reverse video
 - Sixel graphics, OSC 8 hyperlinks, OSC 52 clipboard writes (reads are
   refused), OSC 7 working directory, OSC 133 prompt marks, OSC 9 and 777
-  notifications
+  notifications, OSC 9;4 progress on the tab
 - Queries: DA1, DA2, DSR, DECXCPR, DECRQM, DECRQSS, XTVERSION, XTGETTCAP,
   XTWINOPS 14/16/18, the title stack (XTWINOPS 22/23)
 - Tabs, splits, scrollback, vim-style copy mode
@@ -235,14 +247,16 @@ Current dated reports:
 | Idle CPU/GPU work | near-zero when terminal and native app state are unchanged |
 | Layout recompute | < 1ms |
 | Frame render | < 5ms |
-| Input latency | < 10ms (target; not measured) |
+| Input latency | < 10ms (3.6 ms keypress to pixel on a Tesla T4 under X11, idle) |
 | Memory (terminal) | < 50MB |
 
-The input latency row is a target. A keystroke's echo is drawn without waiting
-for the 16 ms frame interval, so Ultty adds no pacing delay to it, but the time
-from key press to pixels on screen (including GPU and compositor) has not been
-measured on real hardware. The `input_latency` bench measures only parsing and
-grid updates, in nanoseconds to microseconds.
+A keystroke's echo is drawn without waiting for the 16 ms frame interval. Key
+press to pixels on screen was measured on a Tesla T4 under X11 (XTest
+injection, then polling the window's pixels): 3.6 ms median idle, level with
+Alacritty, 5.5 ms under 10 MiB/s of output and 22 ms under maximum output
+([T4 comparison](docs/perf/2026-11-08-t4-comparison.md)). Wayland and the
+development workstation are not measured yet. The `input_latency` bench
+measures only parsing and grid updates, in nanoseconds to microseconds.
 
 Run the published benchmark set:
 
@@ -334,6 +348,8 @@ examples/           Nine workspace example apps: hello-native, counter-app,
 - [Contributing](CONTRIBUTING.md) — Toolchain, checks, and pull request expectations
 - [Getting Started](docs/GETTING_STARTED.md) — Installation and first app
 - [Configuration](docs/configuration.md) — `TERM`, scrollback, exit, clipboard, paste, and link settings
+- [Drive Ultty from an agent](docs/agents.md) — MCP, shell integration, panes, waits, last command, events
+- [Test your TUI with ulttyctl](docs/testing-tuis.md) — End-to-end tests that press keys and read the screen
 - [Changelog](CHANGELOG.md) — Changes in each release
 - [Architecture](docs/ARCHITECTURE.md) — System design and components
 - [Architecture Vocabulary](CONTEXT.md) — Stable terms for core seams

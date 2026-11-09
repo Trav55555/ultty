@@ -51,6 +51,16 @@ The current dated evidence set is:
 - [`2026-11-07-unicode-throughput.md`](./2026-11-07-unicode-throughput.md) for
   the non-ASCII and scrolling instruction cuts, and corrected instruction
   counts (the earlier gate undercounted).
+- [`2026-11-08-glyph-atlas.md`](./2026-11-08-glyph-atlas.md) for the glyph
+  atlas starting at 1024x1024 and growing (GPU memory 22.9 to 11.4 MB).
+- [`2026-11-08-control-latency.md`](./2026-11-08-control-latency.md) for
+  control request and event delivery latency, and background tabs no longer
+  redrawing the window.
+- [`2026-11-08-t4-comparison.md`](./2026-11-08-t4-comparison.md) for the
+  T4 rerun with keypress-to-pixel latency, where startup goes, and the
+  NVIDIA driver's idle wakeups.
+- [`2026-11-08-agent-soak.md`](./2026-11-08-agent-soak.md) for the ten-hour
+  agent-session soak: frame time met, memory inconclusive (host reclaimed pages).
 - [`2026-11-07-idle-footprint.md`](./2026-11-07-idle-footprint.md) for idle
   wakeups (now none with the cursor steady), the memory breakdown, and the
   startup stage split.

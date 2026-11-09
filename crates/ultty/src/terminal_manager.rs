@@ -59,6 +59,27 @@ impl TerminalId {
     }
 }
 
+/// The pane status a progress report (OSC 9;4) stands for.
+pub fn progress_status(
+    progress: crate::protocol::ansi::Progress,
+) -> Option<ultty_protocol::control::PaneStatus> {
+    use crate::protocol::ansi::Progress;
+    use ultty_protocol::control::{PaneState, PaneStatus};
+    let (state, percent) = match progress {
+        Progress::Clear => return None,
+        Progress::Normal(percent) => (PaneState::Working, Some(percent)),
+        Progress::Indeterminate => (PaneState::Working, None),
+        Progress::Error(percent) => (PaneState::Error, percent),
+        Progress::Paused(percent) => (PaneState::Waiting, percent),
+    };
+    Some(PaneStatus {
+        state,
+        label: String::new(),
+        progress: percent.map(|p| f32::from(p) / 100.0),
+        attention: false,
+    })
+}
+
 /// A single terminal instance.
 pub struct ManagedTerminal {
     /// Unique ID
@@ -69,9 +90,19 @@ pub struct ManagedTerminal {
     pub tab_id: TabId,
     /// Display title
     pub title: String,
+    /// What the pane's program said it is doing (`ulttyctl status`).
+    pub status: Option<ultty_protocol::control::PaneStatus>,
+    /// The status its last progress report (OSC 9;4) implies.
+    pub progress: Option<ultty_protocol::control::PaneStatus>,
 }
 
 impl ManagedTerminal {
+    /// The status to show for the pane: what was set through the control
+    /// socket, else what the program's progress reports imply.
+    pub fn shown_status(&self) -> Option<&ultty_protocol::control::PaneStatus> {
+        self.status.as_ref().or(self.progress.as_ref())
+    }
+
     /// Create a new managed terminal whose shell gets `env` on top of the
     /// inherited environment.
     pub fn new(
@@ -88,6 +119,8 @@ impl ManagedTerminal {
             event_loop,
             tab_id,
             title: format!("Terminal {}", id.0),
+            status: None,
+            progress: None,
         })
     }
 
@@ -255,13 +288,22 @@ impl TerminalManager {
     }
 
     /// Set the colours terminals are drawn with, for existing terminals and
-    /// any created later, so colour queries report the live theme.
+    /// any created later, so colour queries report the live theme. Programs
+    /// that asked (mode 2031) hear of a switch between dark and light.
     pub fn set_theme_colors(&mut self, theme: ThemeColors) {
-        for terminal in &self.terminals {
-            terminal
-                .event_loop
-                .terminal()
-                .set_theme_colors(theme.clone());
+        for terminal in &mut self.terminals {
+            let report = {
+                let mut state = terminal.event_loop.terminal();
+                state.set_theme_colors(theme.clone());
+                // The I/O thread sends replies as it parses, so anything
+                // queued now is the report.
+                state.take_responses().concat()
+            };
+            if !report.is_empty() {
+                if let Err(err) = terminal.event_loop.send_input(&report) {
+                    tracing::debug!("theme change report not sent: {err}");
+                }
+            }
         }
         self.theme_colors = theme;
     }
@@ -862,6 +904,12 @@ impl TerminalManager {
             .collect()
     }
 
+    /// Whether the pane is in the active tab, so its output shows.
+    pub fn is_on_screen(&self, id: TerminalId) -> bool {
+        self.active_tab()
+            .is_some_and(|tab| tab.terminals.contains(&id))
+    }
+
     /// Get the focused terminal ID in the active tab.
     pub fn focused_terminal_id(&self) -> Option<TerminalId> {
         self.active_tab().map(|t| t.focused_terminal)
@@ -921,10 +969,15 @@ impl TerminalManager {
             full_args.push(arg);
         }
 
+        // A failed chdir in the child is tolerated: the command then starts
+        // in the directory Ultty runs in.
+        let dir = working_dir
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(crate::pty::current_dir);
         let child = Child::spawn(
             command,
             &full_args,
-            &crate::pty::current_dir(),
+            &dir,
             PtySize::new(self.default_cols, self.default_rows),
             env,
         )
@@ -932,17 +985,13 @@ impl TerminalManager {
         let event_loop =
             TerminalEventLoop::from_child(child, self.default_cols, self.default_rows)?;
 
-        // Change working directory if specified
-        if let Some(dir) = working_dir {
-            // Working dir is handled in spawn, but we can set it for display
-            let _ = dir; // Already passed to spawn
-        }
-
         let terminal = ManagedTerminal {
             id: terminal_id,
             event_loop,
             tab_id,
             title: format!("Terminal {}", terminal_id.0),
+            status: None,
+            progress: None,
         };
 
         self.push_terminal(terminal);
@@ -1330,6 +1379,8 @@ impl ManagedTerminal {
             event_loop,
             tab_id,
             title: format!("Terminal {}", id.0),
+            status: None,
+            progress: None,
         })
     }
 }
@@ -1337,6 +1388,30 @@ impl ManagedTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_reports_map_to_pane_statuses() {
+        use crate::protocol::ansi::Progress;
+        use ultty_protocol::control::PaneState;
+        let shown = |progress| progress_status(progress).map(|s| (s.state, s.progress));
+        assert_eq!(shown(Progress::Clear), None);
+        assert_eq!(
+            shown(Progress::Normal(40)),
+            Some((PaneState::Working, Some(0.4)))
+        );
+        assert_eq!(
+            shown(Progress::Indeterminate),
+            Some((PaneState::Working, None))
+        );
+        assert_eq!(
+            shown(Progress::Error(Some(70))),
+            Some((PaneState::Error, Some(0.7)))
+        );
+        assert_eq!(
+            shown(Progress::Paused(None)),
+            Some((PaneState::Waiting, None))
+        );
+    }
 
     #[test]
     fn terminals_report_the_cell_size_and_theme_they_are_drawn_with() {
@@ -1467,6 +1542,102 @@ mod tests {
             .unwrap();
         manager.close_tab(first);
         manager
+    }
+
+    use std::time::{Duration, Instant};
+
+    /// Process output until the focused pane's screen contains `text`.
+    fn wait_for_screen(manager: &mut TerminalManager, text: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            manager.process_all().unwrap();
+            let screen = {
+                let state = manager.focused_terminal().unwrap().event_loop.terminal();
+                let grid = state.grid();
+                (0..grid.dimensions().rows)
+                    .filter_map(|r| grid.row(r).map(|row| row.text_trimmed()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            if screen.contains(text) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn a_program_that_asked_hears_the_theme_turn_light() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        manager.set_theme_colors(ThemeColors {
+            background: [0x20, 0x20, 0x20],
+            ..ThemeColors::default()
+        });
+        // Turn on mode 2031, then print the next 9 bytes of input.
+        let script = "stty raw -echo; printf '\\033[?2031hready'; \
+                      r=$(dd bs=1 count=9 2>/dev/null | tr '\\033' E); \
+                      printf ' got:%s' \"$r\"; sleep 5";
+        manager
+            .create_tab_with_command(
+                "/bin/sh",
+                &["-c".to_string(), script.to_string()],
+                None,
+                None,
+                &mut no_tab_env,
+            )
+            .unwrap();
+        assert!(wait_for_screen(&mut manager, "ready"));
+        manager.set_theme_colors(ThemeColors {
+            background: [0xf8, 0xf8, 0xf8],
+            ..ThemeColors::default()
+        });
+        assert!(wait_for_screen(&mut manager, "got:E[?997;2n"));
+    }
+
+    #[test]
+    fn only_the_active_tabs_panes_are_on_screen() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let first = manager.focused_terminal_id().unwrap();
+        let split = manager.split_horizontal().unwrap().unwrap();
+        assert!(manager.is_on_screen(first) && manager.is_on_screen(split));
+        manager.create_tab().unwrap();
+        let other = manager.focused_terminal_id().unwrap();
+        assert!(manager.is_on_screen(other));
+        assert!(!manager.is_on_screen(first) && !manager.is_on_screen(split));
+        manager.switch_to_tab(0);
+        assert!(manager.is_on_screen(first) && !manager.is_on_screen(other));
+    }
+
+    #[test]
+    fn a_tab_command_starts_in_the_working_directory_it_was_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        manager
+            .create_tab_with_command(
+                "sleep",
+                &["5".to_string()],
+                Some(dir.to_str().unwrap()),
+                None,
+                &mut no_tab_env,
+            )
+            .unwrap();
+        // The child changes directory between fork and exec, so poll
+        // briefly rather than racing it.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let cwd = loop {
+            let cwd = manager
+                .focused_terminal()
+                .unwrap()
+                .event_loop
+                .child_working_directory();
+            if cwd.as_deref() == dir.to_str() || Instant::now() > deadline {
+                break cwd;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(cwd.as_deref(), dir.to_str());
     }
 
     #[test]

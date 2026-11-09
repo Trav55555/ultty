@@ -11,7 +11,7 @@ use polling::{Event, Events, Poller};
 use tracing::{debug, error, info, warn};
 
 use ultty_protocol::control::{
-    ControlData, ControlEnvelope, ControlRequest, ControlResponse, OutputFormat,
+    ControlData, ControlEnvelope, ControlEvent, ControlRequest, ControlResponse, OutputFormat,
 };
 
 use super::paths::{control_dir, ControlEndpoint};
@@ -27,6 +27,13 @@ const CLIENT_KEY_BASE: usize = 100;
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
 const READ_CHUNK: usize = 64 * 1024;
+
+/// Most event bytes kept for one subscriber that is not reading. A
+/// subscriber further behind than this is disconnected.
+pub const MAX_SUBSCRIBER_BACKLOG: usize = 1024 * 1024;
+
+/// Most event subscriptions open at once.
+pub const MAX_SUBSCRIBERS: usize = 64;
 
 pub struct ControlServer {
     listener: UnixListener,
@@ -55,8 +62,12 @@ struct ClientState {
     /// the socket unanswered.
     awaiting_response: bool,
     /// Reply bytes the socket has not taken yet. While non-empty the client
-    /// is polled for writability; it is closed once the reply is out.
+    /// is polled for writability; it is closed once the reply is out,
+    /// unless it is a subscriber.
     reply: Vec<u8>,
+    /// Set once the client subscribed: the connection stays open and gets
+    /// events, for this pane only when `Some(Some(pane))`.
+    subscription: Option<Option<u64>>,
 }
 
 impl ClientState {
@@ -180,6 +191,19 @@ impl ControlServer {
             .collect()
     }
 
+    fn is_subscriber(&self, key: usize) -> bool {
+        self.clients
+            .get(&key)
+            .is_some_and(|client| client.subscription.is_some())
+    }
+
+    /// Whether any client is subscribed to events.
+    pub fn has_subscribers(&self) -> bool {
+        self.clients
+            .values()
+            .any(|client| client.subscription.is_some())
+    }
+
     /// Whether the client `key` has reply bytes still waiting to be written.
     fn is_sending_reply(&self, key: usize) -> bool {
         self.clients
@@ -194,6 +218,8 @@ impl ControlServer {
         for event in events.iter() {
             if event.key == LISTENER_KEY {
                 self.accept_connections()?;
+            } else if self.is_subscriber(event.key) {
+                self.service_subscriber(event.key)?;
             } else if self.is_sending_reply(event.key) {
                 self.continue_reply(event.key)?;
             } else {
@@ -231,6 +257,7 @@ impl ControlServer {
                             oversized: false,
                             awaiting_response: false,
                             reply: Vec::new(),
+                            subscription: None,
                         },
                     );
                     debug!("Control client connected: {}", key);
@@ -330,6 +357,142 @@ impl ControlServer {
             // already out of the poller; that delete fails harmlessly.
             let _ = self.poller.delete(&client.stream);
         }
+    }
+
+    /// Turn client `key`'s connection into an event stream for `target`
+    /// (every pane when `None`), after replying `Subscribed`. Refused with an
+    /// error reply when [`MAX_SUBSCRIBERS`] are already open.
+    pub fn start_subscription(&mut self, key: usize, target: Option<u64>) {
+        let open = self
+            .clients
+            .values()
+            .filter(|client| client.subscription.is_some())
+            .count();
+        if open >= MAX_SUBSCRIBERS {
+            self.send_response(
+                key,
+                &ControlResponse::Error {
+                    code: 429,
+                    message: format!("at most {MAX_SUBSCRIBERS} subscriptions can be open"),
+                },
+            );
+            return;
+        }
+        let Some(client) = self.clients.get_mut(&key) else {
+            return;
+        };
+        client.subscription = Some(target);
+        client.awaiting_response = false;
+        client.reply.extend_from_slice(
+            format_response(
+                &ControlResponse::Data(ControlData::Subscribed),
+                client.output_format,
+            )
+            .as_bytes(),
+        );
+        // The client left the poller when its request was complete; it comes
+        // back so a disconnect (EOF) ends the subscription.
+        // SAFETY: the stream fd stays valid while the client is in
+        // self.clients, and remove_client deletes it from the poller.
+        let added = unsafe { self.poller.add(&client.stream, Event::readable(key)) };
+        if let Err(e) = added {
+            warn!("Failed to poll control subscriber {}: {}", key, e);
+            self.remove_client(key);
+            return;
+        }
+        debug!("Control client {} subscribed (pane {:?})", key, target);
+        self.flush_subscriber(key);
+    }
+
+    /// Send `event` to every subscriber that wants it.
+    pub fn publish(&mut self, event: &ControlEvent) {
+        let pane = event.pane();
+        let mut line = match serde_json::to_vec(event) {
+            Ok(line) => line,
+            Err(e) => {
+                warn!("Failed to serialize control event: {}", e);
+                return;
+            }
+        };
+        line.push(b'\n');
+        let keys: Vec<usize> = self
+            .clients
+            .iter()
+            .filter(|(_, client)| {
+                client
+                    .subscription
+                    .is_some_and(|target| target.is_none_or(|t| t == pane))
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for key in keys {
+            let Some(client) = self.clients.get_mut(&key) else {
+                continue;
+            };
+            if client.reply.len() + line.len() > MAX_SUBSCRIBER_BACKLOG {
+                warn!(
+                    "Control subscriber {} fell too far behind; disconnecting",
+                    key
+                );
+                self.remove_client(key);
+                continue;
+            }
+            client.reply.extend_from_slice(&line);
+            self.flush_subscriber(key);
+        }
+    }
+
+    /// Write what a subscriber's socket takes now and poll for writability
+    /// while some is left. A failed write ends the subscription.
+    fn flush_subscriber(&mut self, key: usize) {
+        let Some(client) = self.clients.get_mut(&key) else {
+            return;
+        };
+        match client.flush_reply() {
+            Ok(done) => {
+                let interest = if done {
+                    Event::readable(key)
+                } else {
+                    Event::all(key)
+                };
+                if let Err(e) = self.poller.modify(&client.stream, interest) {
+                    warn!("Failed to poll control subscriber {}: {}", key, e);
+                    self.remove_client(key);
+                }
+            }
+            Err(e) => {
+                debug!("Control subscriber {} went away: {}", key, e);
+                self.remove_client(key);
+            }
+        }
+    }
+
+    /// A subscriber's socket is ready: it closed (the subscription ends),
+    /// sent something (ignored), or can take more of its backlog.
+    fn service_subscriber(&mut self, key: usize) -> io::Result<()> {
+        let Some(client) = self.clients.get_mut(&key) else {
+            return Ok(());
+        };
+        let mut chunk = [0u8; 4096];
+        loop {
+            match client.stream.read(&mut chunk) {
+                Ok(0) => {
+                    debug!("Control subscriber {} disconnected", key);
+                    self.remove_client(key);
+                    return Ok(());
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    debug!("Control subscriber {} failed: {}", key, e);
+                    self.remove_client(key);
+                    return Ok(());
+                }
+            }
+        }
+        self.flush_subscriber(key);
+        Ok(())
     }
 
     pub fn take_pending_requests(&mut self) -> Vec<(usize, ControlRequest)> {
@@ -527,27 +690,33 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
         "version" => Some(ControlRequest::Version),
         "info" => Some(ControlRequest::GetInfo),
         "tabs" => Some(ControlRequest::ListTabs),
+        "panes" => Some(ControlRequest::ListPanes),
         "text" => {
             let include_scrollback = parts.next() == Some("--scrollback");
             Some(ControlRequest::GetText {
                 include_scrollback,
                 scrollback_lines: None,
+                target: None,
             })
         }
-        "selection" => Some(ControlRequest::GetSelection),
+        "selection" => Some(ControlRequest::GetSelection { target: None }),
         "send-text" => {
             let text: String = parts.collect::<Vec<_>>().join(" ");
             if text.is_empty() {
                 None
             } else {
-                Some(ControlRequest::SendText { text })
+                Some(ControlRequest::SendText { text, target: None })
             }
         }
         "send-key" => {
             let key_str = parts.next()?;
             let key = parse_key(key_str)?;
             let modifiers = parse_modifiers(parts.next().unwrap_or(""));
-            Some(ControlRequest::SendKey { key, modifiers })
+            Some(ControlRequest::SendKey {
+                key,
+                modifiers,
+                target: None,
+            })
         }
         "new-tab" => {
             let command = parts.next().map(String::from);
@@ -576,12 +745,16 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
         "send-raw" => {
             let hex_str: String = parts.collect::<Vec<_>>().join("");
             let data = hex_decode(&hex_str)?;
-            Some(ControlRequest::SendRaw { data })
+            Some(ControlRequest::SendRaw { data, target: None })
         }
         "run" => {
             let command = parts.next()?.to_string();
             let args: Vec<String> = parts.map(String::from).collect();
-            Some(ControlRequest::RunCommand { command, args })
+            Some(ControlRequest::RunCommand {
+                command,
+                args,
+                target: None,
+            })
         }
         "resize" => {
             let width: u32 = parts.next()?.parse().ok()?;
@@ -602,6 +775,7 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
                     regex: false,
                     case_sensitive: false,
                     include_scrollback: true,
+                    target: None,
                 })
             }
         }
@@ -628,6 +802,8 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
                     pattern,
                     regex: false,
                     timeout_ms,
+                    until: Default::default(),
+                    target: None,
                 })
             }
         }
@@ -644,7 +820,7 @@ fn parse_request_only(data: &[u8]) -> Option<ControlRequest> {
     parse_request(data).map(|parsed| parsed.request)
 }
 
-fn parse_key(s: &str) -> Option<ultty_protocol::Key> {
+pub(crate) fn parse_key(s: &str) -> Option<ultty_protocol::Key> {
     match s.to_lowercase().as_str() {
         "enter" | "return" => Some(ultty_protocol::Key::Enter),
         "tab" => Some(ultty_protocol::Key::Tab),
@@ -678,7 +854,7 @@ fn parse_display_tab_index(s: &str) -> Option<usize> {
     s.parse::<usize>().ok()?.checked_sub(1)
 }
 
-fn parse_modifiers(s: &str) -> ultty_protocol::Modifiers {
+pub(crate) fn parse_modifiers(s: &str) -> ultty_protocol::Modifiers {
     let mut mods = ultty_protocol::Modifiers::NONE;
     let lower = s.to_lowercase();
     if lower.contains("shift") {
@@ -743,6 +919,40 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                 }
                 out
             }
+            ControlData::Panes { panes } => {
+                let mut out = String::new();
+                for pane in panes {
+                    let marker = if pane.focused { "*" } else { " " };
+                    let label = [pane.foreground.as_deref(), Some(pane.title.as_str())]
+                        .into_iter()
+                        .chain([pane.cwd.as_deref()])
+                        .flatten()
+                        .find(|label| !label.is_empty())
+                        .unwrap_or("");
+                    out.push_str(&format!(
+                        "{}{} tab:{} {}x{} {}",
+                        marker,
+                        pane.id,
+                        pane.tab_index + 1,
+                        pane.cols,
+                        pane.rows,
+                        label
+                    ));
+                    if let Some(status) = &pane.status {
+                        let state = serde_json::to_value(status.state)
+                            .ok()
+                            .and_then(|state| state.as_str().map(str::to_string))
+                            .unwrap_or_default();
+                        let mut detail = status.label.clone();
+                        if let Some(progress) = status.progress {
+                            detail = format!("{detail} {:.0}%", progress * 100.0);
+                        }
+                        out.push_str(&format!(" [{}: {}]", state, detail.trim()));
+                    }
+                    out.push('\n');
+                }
+                out
+            }
             ControlData::Selection { text } => match text {
                 Some(text) => format!("{}\n", text),
                 None => "(no selection)\n".to_string(),
@@ -778,6 +988,46 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                 format!("MATCHED at {}:{}\n", line + 1, col + 1)
             }
             ControlData::WaitTimeout => "TIMEOUT\n".to_string(),
+            ControlData::Subscribed => "SUBSCRIBED\n".to_string(),
+            ControlData::WaitEvent { event } => match event {
+                ControlEvent::CommandFinished {
+                    exit_code: Some(code),
+                    ..
+                } => format!("COMMAND FINISHED exit {code}\n"),
+                ControlEvent::CommandFinished { .. } => "COMMAND FINISHED\n".to_string(),
+                ControlEvent::Bell { .. } => "BELL\n".to_string(),
+                other => format!(
+                    "{}\n",
+                    serde_json::to_string(other).unwrap_or_else(|_| "EVENT".to_string())
+                ),
+            },
+            ControlData::WaitQuiet => "QUIET\n".to_string(),
+            // Just the id, so a script can write P=$(ulttyctl new-tab ...).
+            ControlData::TabOpened { pane, .. } => format!("{pane}\n"),
+            ControlData::LastCommand {
+                command,
+                output,
+                exit_code,
+                running,
+                output_available,
+            } => {
+                let mut out = format!("$ {command}\n");
+                if *output_available {
+                    if !output.is_empty() {
+                        out.push_str(output);
+                        out.push('\n');
+                    }
+                } else {
+                    out.push_str("(output no longer on screen or in scrollback)\n");
+                }
+                match (running, exit_code) {
+                    (true, _) => out.push_str("[running]\n"),
+                    (false, Some(code)) => out.push_str(&format!("[exit {code}]\n")),
+                    (false, None) => out.push_str("[finished]\n"),
+                }
+                out
+            }
+            ControlData::Regions { scenes } => format_regions(scenes),
         },
         ControlResponse::Error { code, message } => {
             format!("ERROR {}: {}\n", code, message)
@@ -785,9 +1035,80 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
     }
 }
 
+/// Characters of a region's text the text format shows; `--json` has it all.
+const REGION_TEXT_PREVIEW: usize = 60;
+
+/// One line per region, indented by depth: id, content kind, accessibility
+/// role (and liveness when live), position and size in cells, scroll when
+/// scrolled, metadata, the accessible label when it is not just the text,
+/// and the start of its text.
+fn format_regions(scenes: &[ultty_protocol::control::NativeScene]) -> String {
+    use std::fmt::Write as _;
+    if scenes.is_empty() {
+        return "(no native app in this tab)\n".to_string();
+    }
+    let mut out = String::new();
+    for scene in scenes {
+        let transport = if scene.in_band { "in-band" } else { "socket" };
+        let _ = write!(out, "session {} ({transport})", scene.session);
+        if let Some(focused) = scene.focused {
+            let _ = write!(out, ", focus #{focused}");
+        }
+        out.push('\n');
+        for region in &scene.regions {
+            let _ = write!(
+                out,
+                "{:indent$}#{} {}",
+                "",
+                region.id,
+                region.content,
+                indent = region.depth * 2
+            );
+            match (region.role.as_str(), region.live.as_str()) {
+                ("", _) => {}
+                (role, "off") => {
+                    let _ = write!(out, " ({role})");
+                }
+                (role, live) => {
+                    let _ = write!(out, " ({role}, {live})");
+                }
+            }
+            let _ = write!(
+                out,
+                " {},{} {}x{}",
+                region.x, region.y, region.width, region.height,
+            );
+            if region.scroll_x != 0.0 || region.scroll_y != 0.0 {
+                let _ = write!(out, " scroll {},{}", region.scroll_x, region.scroll_y);
+            }
+            for (key, value) in &region.metadata {
+                let _ = write!(out, " {key}={value}");
+            }
+            if let Some(label) = region
+                .label
+                .as_deref()
+                .filter(|label| region.text.as_deref() != Some(*label))
+            {
+                let _ = write!(out, " label={label:?}");
+            }
+            if let Some(text) = region.text.as_deref().filter(|text| !text.is_empty()) {
+                let first_line = text.lines().next().unwrap_or("");
+                let mut preview: String = first_line.chars().take(REGION_TEXT_PREVIEW).collect();
+                if preview.len() < text.len() {
+                    preview.push_str("...");
+                }
+                let _ = write!(out, " {preview:?}");
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader};
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
 
@@ -888,6 +1209,10 @@ mod tests {
     #[test]
     fn parse_ping() {
         assert_eq!(parse_request_only(b"ping"), Some(ControlRequest::Ping));
+        assert_eq!(
+            parse_request_only(b"panes"),
+            Some(ControlRequest::ListPanes)
+        );
     }
 
     #[test]
@@ -903,7 +1228,8 @@ mod tests {
         assert_eq!(
             parse_request_only(b"send-text hello world"),
             Some(ControlRequest::SendText {
-                text: "hello world".to_string()
+                text: "hello world".to_string(),
+                target: None,
             })
         );
     }
@@ -913,7 +1239,8 @@ mod tests {
         assert_eq!(
             parse_request_only(b"send-raw 1b5b41"),
             Some(ControlRequest::SendRaw {
-                data: vec![0x1b, 0x5b, 0x41]
+                data: vec![0x1b, 0x5b, 0x41],
+                target: None,
             })
         );
     }
@@ -943,7 +1270,8 @@ mod tests {
             ControlRequest::WithToken {
                 token: "abc123".to_string(),
                 request: Box::new(ControlRequest::SendText {
-                    text: "hello world".to_string()
+                    text: "hello world".to_string(),
+                    target: None,
                 }),
             }
         );
@@ -985,6 +1313,8 @@ mod tests {
                 pattern: "$".to_string(),
                 regex: false,
                 timeout_ms: 5000,
+                until: Default::default(),
+                target: None,
             })
         );
     }
@@ -998,6 +1328,7 @@ mod tests {
                 regex: false,
                 case_sensitive: false,
                 include_scrollback: true,
+                target: None,
             })
         );
     }
@@ -1046,6 +1377,135 @@ mod tests {
     fn format_pong_text() {
         let response = ControlResponse::Data(ControlData::Pong);
         assert_eq!(format_response(&response, OutputFormat::Text), "PONG\n");
+    }
+
+    #[test]
+    fn format_panes_text_marks_focus_and_prefers_the_foreground_process() {
+        use ultty_protocol::control::PaneInfo;
+        let pane = |id, focused, title: &str, foreground: Option<&str>| PaneInfo {
+            id,
+            tab_index: 0,
+            active: focused,
+            focused,
+            title: title.to_string(),
+            foreground: foreground.map(str::to_string),
+            pid: None,
+            cwd: None,
+            cols: 40,
+            rows: 24,
+            status: None,
+        };
+        let response = ControlResponse::Data(ControlData::Panes {
+            panes: vec![
+                pane(3, true, "~/src", Some("vim")),
+                PaneInfo {
+                    status: Some(ultty_protocol::control::PaneStatus {
+                        state: ultty_protocol::control::PaneState::Working,
+                        label: "make".to_string(),
+                        progress: Some(0.25),
+                        attention: false,
+                    }),
+                    ..pane(5, false, "build log", None)
+                },
+                PaneInfo {
+                    cwd: Some("/srv".to_string()),
+                    ..pane(8, false, "", None)
+                },
+            ],
+        });
+        assert_eq!(
+            format_response(&response, OutputFormat::Text),
+            "*3 tab:1 40x24 vim\n 5 tab:1 40x24 build log [working: make 25%]\n 8 tab:1 40x24 /srv\n"
+        );
+    }
+
+    #[test]
+    fn format_regions_text_indents_by_depth_and_previews_text() {
+        use ultty_protocol::control::{NativeScene, RegionInfo};
+        let region = |id, parent, depth, content: &str, text: Option<&str>| RegionInfo {
+            role: content.to_string(),
+            label: None,
+            live: "off".to_string(),
+            id,
+            parent,
+            depth,
+            x: 0.0,
+            y: id as f32,
+            width: 80.0,
+            height: 1.0,
+            scroll_x: 0.0,
+            scroll_y: 0.0,
+            content: content.to_string(),
+            text: text.map(str::to_string),
+            metadata: Default::default(),
+        };
+        let mut log = region(2, Some(0), 1, "text", Some(&"x".repeat(70)));
+        log.scroll_y = 3.0;
+        log.metadata.insert("id".to_string(), "log".to_string());
+        log.role = "log".to_string();
+        log.live = "polite".to_string();
+        log.label = Some("Build log".to_string());
+        let mut root = region(0, None, 0, "none", None);
+        root.role = "group".to_string();
+        let mut title = region(1, Some(0), 1, "text", Some("Build"));
+        title.label = Some("Build".to_string());
+        let scenes = vec![NativeScene {
+            session: 4,
+            in_band: true,
+            focused: Some(3),
+            regions: vec![
+                root,
+                title,
+                log,
+                region(3, Some(0), 1, "input", Some("ls\nmore")),
+            ],
+        }];
+        assert_eq!(
+            format_response(
+                &ControlResponse::Data(ControlData::Regions { scenes }),
+                OutputFormat::Text
+            ),
+            format!(
+                "session 4 (in-band), focus #3\n\
+                 #0 none (group) 0,0 80x1\n\
+                 \x20 #1 text (text) 0,1 80x1 \"Build\"\n\
+                 \x20 #2 text (log, polite) 0,2 80x1 scroll 0,3 id=log label=\"Build log\" \"{}...\"\n\
+                 \x20 #3 input (input) 0,3 80x1 \"ls...\"\n",
+                "x".repeat(60)
+            )
+        );
+        assert_eq!(
+            format_response(
+                &ControlResponse::Data(ControlData::Regions { scenes: vec![] }),
+                OutputFormat::Text
+            ),
+            "(no native app in this tab)\n"
+        );
+    }
+
+    #[test]
+    fn format_last_command_text_shows_how_it_ended() {
+        let last = |output: &str, exit_code, running, output_available| {
+            format_response(
+                &ControlResponse::Data(ControlData::LastCommand {
+                    command: "make test".to_string(),
+                    output: output.to_string(),
+                    exit_code,
+                    running,
+                    output_available,
+                }),
+                OutputFormat::Text,
+            )
+        };
+        assert_eq!(
+            last("1 failed", Some(2), false, true),
+            "$ make test\n1 failed\n[exit 2]\n"
+        );
+        assert_eq!(last("", None, true, true), "$ make test\n[running]\n");
+        assert_eq!(
+            last("", Some(0), false, false),
+            "$ make test\n(output no longer on screen or in scrollback)\n[exit 0]\n"
+        );
     }
 
     #[test]
@@ -1135,7 +1595,8 @@ mod tests {
         assert_eq!(
             pending[0].1,
             ControlRequest::SendText {
-                text: "hi".to_string()
+                text: "hi".to_string(),
+                target: None,
             }
         );
     }
@@ -1185,6 +1646,103 @@ mod tests {
         .unwrap()
     }
 
+    /// Connect, send `subscribe` for `target` without closing the write
+    /// side, and start the subscription the way the app does.
+    fn subscribe(server: &mut ControlServer, target: Option<u64>) -> BufReader<UnixStream> {
+        let mut client = UnixStream::connect(server.socket_path()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = json_request(ControlRequest::Subscribe { target });
+        request.push(b'\n');
+        client.write_all(&request).unwrap();
+        let pending = poll_until_pending(server);
+        assert_eq!(pending[0].1, ControlRequest::Subscribe { target });
+        server.start_subscription(pending[0].0, target);
+        BufReader::new(client)
+    }
+
+    fn next_line(reader: &mut BufReader<UnixStream>) -> String {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        line
+    }
+
+    #[test]
+    fn subscriber_gets_an_ack_then_one_event_per_line() {
+        let mut server = test_server("subscribe-events");
+        let mut events = subscribe(&mut server, None);
+        assert!(server.has_subscribers());
+        assert_eq!(
+            next_line(&mut events),
+            format_response(
+                &ControlResponse::Data(ControlData::Subscribed),
+                OutputFormat::Json
+            )
+        );
+
+        server.publish(&ControlEvent::Bell { pane: 2 });
+        server.publish(&ControlEvent::CommandFinished {
+            pane: 5,
+            exit_code: Some(0),
+        });
+        assert_eq!(next_line(&mut events), "{\"event\":\"bell\",\"pane\":2}\n");
+        assert_eq!(
+            next_line(&mut events),
+            "{\"event\":\"command_finished\",\"pane\":5,\"exit_code\":0}\n"
+        );
+    }
+
+    #[test]
+    fn pane_subscriber_hears_only_its_pane() {
+        let mut server = test_server("subscribe-pane");
+        let mut events = subscribe(&mut server, Some(7));
+        next_line(&mut events);
+
+        server.publish(&ControlEvent::Bell { pane: 1 });
+        server.publish(&ControlEvent::Bell { pane: 7 });
+        assert_eq!(next_line(&mut events), "{\"event\":\"bell\",\"pane\":7}\n");
+    }
+
+    #[test]
+    fn closing_the_connection_ends_the_subscription() {
+        let mut server = test_server("subscribe-close");
+        let events = subscribe(&mut server, None);
+        drop(events);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.has_subscribers() {
+            assert!(Instant::now() < deadline, "subscriber was never dropped");
+            server.poll(Some(Duration::from_millis(10))).unwrap();
+        }
+    }
+
+    #[test]
+    fn subscriber_that_stops_reading_is_disconnected_not_buffered_forever() {
+        let mut server = test_server("subscribe-backlog");
+        let _events = subscribe(&mut server, None);
+        let event = ControlEvent::Notification {
+            pane: 1,
+            title: String::new(),
+            body: "x".repeat(64 * 1024),
+        };
+        // The socket buffer takes some; the backlog limit takes the rest.
+        for _ in 0..(4 * MAX_SUBSCRIBER_BACKLOG / (64 * 1024)) {
+            server.publish(&event);
+        }
+        assert!(!server.has_subscribers());
+    }
+
+    #[test]
+    fn subscriptions_beyond_the_limit_are_refused() {
+        let mut server = test_server("subscribe-limit");
+        let _open: Vec<_> = (0..MAX_SUBSCRIBERS)
+            .map(|_| subscribe(&mut server, None))
+            .collect();
+        let mut refused = subscribe(&mut server, None);
+        assert!(next_line(&mut refused).contains("\"code\":429"));
+    }
+
     #[test]
     fn request_larger_than_one_read_is_answered() {
         let mut server = test_server("large-request");
@@ -1194,12 +1752,16 @@ mod tests {
         client
             .write_all(&json_request(ControlRequest::SendText {
                 text: text.clone(),
+                target: None,
             }))
             .unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
 
         let pending = poll_until_pending(&mut server);
-        assert_eq!(pending[0].1, ControlRequest::SendText { text });
+        assert_eq!(
+            pending[0].1,
+            ControlRequest::SendText { text, target: None }
+        );
         server.send_response(pending[0].0, &ControlResponse::Ok);
         assert_eq!(
             read_reply_while_polling(&mut server, client),
@@ -1224,7 +1786,8 @@ mod tests {
         assert_eq!(
             pending[0].1,
             ControlRequest::SendText {
-                text: "hello".to_string()
+                text: "hello".to_string(),
+                target: None,
             }
         );
     }

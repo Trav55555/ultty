@@ -3,25 +3,52 @@
 use std::time::{Duration, Instant};
 
 use regex::Regex;
+use ultty::event_loop::TerminalEvent;
+use ultty::terminal_manager::TerminalId;
 
 pub(super) struct PendingControlWait {
     client_key: usize,
-    matcher: WaitMatcher,
-    start: Instant,
-    timeout: Duration,
+    /// The pane being watched, fixed when the request arrived.
+    pane: TerminalId,
+    condition: Condition,
+    /// When the wait gives up.
+    expires: Instant,
+}
+
+/// What a pending wait is waiting for.
+pub(super) enum Condition {
+    /// Text on screen or in scrollback; checked whenever the UI wakes.
+    Text(WaitMatcher),
+    /// The pane's next OSC 133;D.
+    CommandFinished,
+    /// The pane's next bell.
+    Bell,
+    /// No output from the pane for `period`; `until` moves on each output.
+    Quiet { period: Duration, until: Instant },
+}
+
+impl Condition {
+    pub(super) fn quiet(period: Duration, now: Instant) -> Condition {
+        Condition::Quiet {
+            period,
+            until: now + period,
+        }
+    }
 }
 
 impl PendingControlWait {
     pub(super) fn new(
         client_key: usize,
-        matcher: WaitMatcher,
+        pane: TerminalId,
+        condition: Condition,
         timeout: Duration,
+        now: Instant,
     ) -> PendingControlWait {
         PendingControlWait {
             client_key,
-            matcher,
-            start: Instant::now(),
-            timeout,
+            pane,
+            condition,
+            expires: now + timeout,
         }
     }
 
@@ -29,12 +56,48 @@ impl PendingControlWait {
         self.client_key
     }
 
-    pub(super) fn matcher(&self) -> &WaitMatcher {
-        &self.matcher
+    pub(super) fn pane(&self) -> TerminalId {
+        self.pane
     }
 
-    pub(super) fn is_expired(&self) -> bool {
-        self.start.elapsed() >= self.timeout
+    /// The text matcher, for a wait on text.
+    pub(super) fn matcher(&self) -> Option<&WaitMatcher> {
+        match &self.condition {
+            Condition::Text(matcher) => Some(matcher),
+            _ => None,
+        }
+    }
+
+    /// The next instant this wait needs the UI awake for: its timeout, or
+    /// the end of its quiet period. Text and events wake the UI themselves.
+    pub(super) fn deadline(&self) -> Instant {
+        match self.condition {
+            Condition::Quiet { until, .. } => until.min(self.expires),
+            _ => self.expires,
+        }
+    }
+
+    pub(super) fn is_expired(&self, now: Instant) -> bool {
+        now >= self.expires
+    }
+
+    /// Whether a quiet wait has seen no output for its whole period.
+    pub(super) fn is_quiet(&self, now: Instant) -> bool {
+        matches!(self.condition, Condition::Quiet { until, .. } if now >= until)
+    }
+
+    /// Note an event from this wait's pane. Returns true when it is the
+    /// event being waited for; output restarts a quiet period.
+    pub(super) fn observe(&mut self, event: &TerminalEvent, now: Instant) -> bool {
+        match (&mut self.condition, event) {
+            (Condition::CommandFinished, TerminalEvent::CommandFinished { .. })
+            | (Condition::Bell, TerminalEvent::Bell) => true,
+            (Condition::Quiet { period, until }, TerminalEvent::Redraw) => {
+                *until = now + *period;
+                false
+            }
+            _ => false,
+        }
     }
 }
 
@@ -125,6 +188,56 @@ pub(super) fn find_ignore_case<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wait(condition: Condition, now: Instant) -> PendingControlWait {
+        PendingControlWait::new(
+            1,
+            TerminalId::new(0),
+            condition,
+            Duration::from_secs(10),
+            now,
+        )
+    }
+
+    #[test]
+    fn event_waits_answer_only_their_event() {
+        let now = Instant::now();
+        let mut command = wait(Condition::CommandFinished, now);
+        assert!(!command.observe(&TerminalEvent::Bell, now));
+        assert!(!command.observe(&TerminalEvent::CommandStarted, now));
+        assert!(command.observe(&TerminalEvent::CommandFinished { exit_code: Some(0) }, now));
+
+        let mut bell = wait(Condition::Bell, now);
+        assert!(!bell.observe(&TerminalEvent::Redraw, now));
+        assert!(bell.observe(&TerminalEvent::Bell, now));
+    }
+
+    #[test]
+    fn output_restarts_a_quiet_period() {
+        let now = Instant::now();
+        let period = Duration::from_millis(500);
+        let mut quiet = wait(Condition::quiet(period, now), now);
+        assert_eq!(quiet.deadline(), now + period);
+
+        let later = now + Duration::from_millis(400);
+        assert!(!quiet.observe(&TerminalEvent::Redraw, later));
+        assert!(!quiet.is_quiet(now + period));
+        assert_eq!(quiet.deadline(), later + period);
+        assert!(quiet.is_quiet(later + period));
+    }
+
+    #[test]
+    fn deadline_is_the_timeout_unless_a_quiet_period_ends_first() {
+        let now = Instant::now();
+        let matcher = WaitMatcher::new("x", false).unwrap();
+        assert_eq!(
+            wait(Condition::Text(matcher), now).deadline(),
+            now + Duration::from_secs(10)
+        );
+        let long = wait(Condition::quiet(Duration::from_secs(60), now), now);
+        assert_eq!(long.deadline(), now + Duration::from_secs(10));
+        assert!(long.is_expired(now + Duration::from_secs(10)));
+    }
 
     #[test]
     fn plain_match_is_case_insensitive() {

@@ -259,17 +259,30 @@ fn holds_complete_frame(buf: &[u8]) -> bool {
 }
 
 /// Send the in-band probe on `tty` and report whether the terminal speaks
-/// the protocol: `ClientHello`, then DA1. A protocol terminal's first frame
+/// the protocol.
+///
+/// First it asks the terminal's name (XTVERSION, then DA1) and stops unless
+/// the answer is Ultty's. The APC string carrying the hello is not harmless
+/// everywhere: tmux takes it as the pane's title, and a tmux pane reached
+/// over ssh cannot be recognised from the environment. The reply comes from
+/// whatever draws the screen, which is what the APC string would reach.
+///
+/// Then it sends `ClientHello` and DA1. A protocol terminal's first frame
 /// (normally `ServerHello`) arrives before its DA1 reply; other terminals
 /// answer only DA1. Frame bytes received are appended to `read_buf`, ready
 /// for the rest of the handshake.
 ///
-/// Errors when the terminal answers neither within `timeout`, or closes.
+/// Errors when the terminal does not answer DA1 within `timeout`, or closes.
 pub fn probe(
     tty: &mut InBandTty,
     read_buf: &mut Vec<u8>,
     timeout: Duration,
 ) -> Result<bool, crate::Error> {
+    let deadline = Instant::now() + timeout;
+    if !named_ultty(tty, deadline)? {
+        return Ok(false);
+    }
+
     let hello = AppMessage::ClientHello {
         version: ultty_protocol::PROTOCOL_VERSION,
         requested_capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
@@ -277,7 +290,6 @@ pub fn probe(
     tty.write_frames(&hello.encode_to_bytes())?;
     tty.write_raw(b"\x1b[c")?;
 
-    let deadline = Instant::now() + timeout;
     let mut da1 = Da1Scanner::default();
     // Both callbacks see both flags; whichever arrives first decides.
     let answered = std::cell::Cell::new(false);
@@ -306,6 +318,44 @@ pub fn probe(
         }
     }
     Ok(answered.get())
+}
+
+/// What Ultty's XTVERSION reply starts with: `DCS > | ultty <version> ST`.
+const ULTTY_VERSION_REPLY: &[u8] = b"\x1bP>|ultty ";
+
+/// Ask the terminal's name (XTVERSION) and report whether it is Ultty, once
+/// the DA1 sent after it is answered. Terminals that ignore XTVERSION answer
+/// only DA1.
+fn named_ultty(tty: &mut InBandTty, deadline: Instant) -> Result<bool, crate::Error> {
+    tty.write_raw(b"\x1b[>q\x1b[c")?;
+    // The name reply comes first; keystrokes typed meanwhile can follow it,
+    // so a bounded prefix is enough.
+    const KEEP: usize = 4096;
+    let mut replies = Vec::new();
+    let mut da1 = Da1Scanner::default();
+    let mut answered = false;
+    while !answered {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(crate::Error::Timeout("the DA1 reply"));
+        }
+        let status = tty.read(
+            (deadline - now).min(Duration::from_millis(50)),
+            // No frames are expected before the hello; drop any.
+            |_| {},
+            |other| {
+                let room = KEEP.saturating_sub(replies.len());
+                replies.extend_from_slice(&other[..other.len().min(room)]);
+                if !answered && da1.feed(other) {
+                    answered = true;
+                }
+            },
+        )?;
+        if status == ReadStatus::Closed {
+            return Err(crate::Error::ConnectionClosed);
+        }
+    }
+    Ok(find(&replies, ULTTY_VERSION_REPLY).is_some())
 }
 
 /// Finds a DA1 reply (`ESC [ ? <digits and ;> c`) in stdin bytes that may
@@ -359,9 +409,14 @@ mod tests {
 
     use ultty_protocol::{Encode, TerminalMessage};
 
-    /// Run the probe against a fake terminal on a PTY that answers with
-    /// `reply` once it has seen the probe.
-    fn probe_against(reply: Vec<u8>) -> Result<bool, crate::Error> {
+    /// Run the probe against a fake terminal on a PTY. It answers the name
+    /// query with `name_reply` and, if the probe goes on to send its hello,
+    /// answers that with `hello_reply`. Returns the result and every byte
+    /// the probe wrote.
+    fn probe_against(
+        name_reply: &[u8],
+        hello_reply: Vec<u8>,
+    ) -> (Result<bool, crate::Error>, Vec<u8>) {
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
         let (mut master, slave) = {
             let (mut m, mut s) = (0, 0);
@@ -386,28 +441,39 @@ mod tests {
                 )
             }
         };
+        let name_reply = name_reply.to_vec();
+        let goes_on = name_reply.starts_with(super::ULTTY_VERSION_REPLY);
         let terminal = std::thread::spawn(move || {
             let mut seen = Vec::new();
             let mut buf = [0u8; 4096];
-            while !(seen.windows(3).any(|w| w == b"\x1b[c")) {
-                let n = master.read(&mut buf).expect("read probe");
-                seen.extend_from_slice(&buf[..n]);
+            let da1_requests = |seen: &[u8]| seen.windows(3).filter(|w| w == b"\x1b[c").count();
+            for (round, reply) in [name_reply, hello_reply].into_iter().enumerate() {
+                if round == 1 && !goes_on {
+                    break;
+                }
+                while da1_requests(&seen) <= round {
+                    let n = master.read(&mut buf).expect("read probe");
+                    seen.extend_from_slice(&buf[..n]);
+                }
+                master.write_all(&reply).expect("reply");
             }
-            master.write_all(&reply).expect("reply");
             // Closing the master would hang up the slave and discard the
             // reply before the probe reads it.
             (seen, master)
         });
-        let mut tty = InBandTty::open_on(slave.as_raw_fd(), slave.as_raw_fd())?;
+        let mut tty = InBandTty::open_on(slave.as_raw_fd(), slave.as_raw_fd()).expect("open");
         let mut read_buf = Vec::new();
         let result = probe(&mut tty, &mut read_buf, Duration::from_secs(2));
         let (seen, _master) = terminal.join().unwrap();
-        assert!(
-            seen.starts_with(b"\x1b_U"),
-            "probe starts with an in-band hello"
-        );
         drop(tty);
-        result
+        (result, seen)
+    }
+
+    const ULTTY_NAME: &[u8] = b"\x1bP>|ultty 0.1.0\x1b\\\x1b[?62;22c";
+    const TMUX_NAME: &[u8] = b"\x1bP>|tmux 3.6\x1b\\\x1b[?1;2c";
+
+    fn sent_hello(seen: &[u8]) -> bool {
+        seen.windows(3).any(|w| w == b"\x1b_U")
     }
 
     fn server_hello_wire() -> Vec<u8> {
@@ -422,19 +488,39 @@ mod tests {
     fn probe_succeeds_when_the_hello_reply_precedes_da1() {
         let mut reply = server_hello_wire();
         reply.extend_from_slice(b"\x1b[?62;22c");
-        assert!(probe_against(reply).unwrap());
+        let (result, seen) = probe_against(ULTTY_NAME, reply);
+        assert!(result.unwrap());
+        assert!(seen.starts_with(b"\x1b[>q\x1b[c"), "asks the name first");
+        assert!(sent_hello(&seen));
     }
 
     #[test]
-    fn probe_fails_on_a_terminal_that_only_answers_da1() {
-        assert!(!probe_against(b"\x1b[?62;22c".to_vec()).unwrap());
+    fn probe_fails_on_ultty_that_only_answers_da1() {
+        let (result, _) = probe_against(ULTTY_NAME, b"\x1b[?62;22c".to_vec());
+        assert!(!result.unwrap());
     }
 
     #[test]
     fn probe_fails_when_da1_comes_first() {
         let mut reply = b"\x1b[?1;2c".to_vec();
         reply.extend(server_hello_wire());
-        assert!(!probe_against(reply).unwrap());
+        let (result, _) = probe_against(ULTTY_NAME, reply);
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn probe_sends_no_hello_to_another_terminal() {
+        // tmux would take the hello's APC string as the pane title.
+        let (result, seen) = probe_against(TMUX_NAME, Vec::new());
+        assert!(!result.unwrap());
+        assert!(!sent_hello(&seen), "sent {seen:?}");
+    }
+
+    #[test]
+    fn probe_sends_no_hello_to_a_terminal_without_a_name() {
+        let (result, seen) = probe_against(b"\x1b[?62;22c", Vec::new());
+        assert!(!result.unwrap());
+        assert!(!sent_hello(&seen), "sent {seen:?}");
     }
 
     #[test]

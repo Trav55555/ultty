@@ -119,6 +119,11 @@ Building and running it changed five things.
 - **Multiplexers.** tmux takes an APC string as a pane title and screen as
   its hardstatus, so the probe would rename the pane. `ulttui` does not
   probe when `TMUX` or `STY` is set or `TERM` is `tmux*` or `screen*`.
+  That missed a tmux pane with `TERM=xterm-256color` reached over ssh,
+  where neither variable survives; the remote app's hello renamed the local
+  pane. Since 2026-11-08 the probe first asks the terminal's name
+  (XTVERSION) and sends the hello only to Ultty: the multiplexer answers
+  for itself. This costs one more round trip at start.
   Ultty no longer passes `TMUX`, `TMUX_PANE`, `STY`, or `WINDOW` to its
   shells: its tabs are not inside that multiplexer.
 - **Liveness.** The terminal never pings in-band, because a ping to a dead

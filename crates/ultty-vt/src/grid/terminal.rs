@@ -1,8 +1,28 @@
 //! Terminal state management with alternate screen support.
 
 use super::{
-    Buffer, CursorPosition, Dimensions, Grid, ImageStore, Palette, TerminalImage, ThemeColors,
+    Anchor, AnchorRefusal, Buffer, CursorPosition, Dimensions, Grid, ImageStore, Palette, RowMarks,
+    TerminalImage, ThemeColors,
 };
+
+/// Most anchor events kept for the embedder; past it the oldest go.
+pub const MAX_ANCHOR_EVENTS: usize = 4096;
+
+/// What happened to inline surface anchors (ADR 0020), for the embedder to
+/// pair with sessions. See [`Terminal::take_anchor_events`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorEvent {
+    /// Rows were reserved and tagged `tag` on the main screen.
+    Placed { tag: u16, anchor: Anchor },
+    /// The anchor reserved nothing.
+    Refused {
+        anchor: Anchor,
+        reason: AnchorRefusal,
+    },
+    /// The anchor's first row is gone: erased, cleared, reset, or evicted
+    /// from scrollback. Its tag is free again.
+    Lost { tag: u16, anchor: Anchor },
+}
 
 /// Maximum number of distinct OSC 8 hyperlink URIs remembered per terminal.
 ///
@@ -90,6 +110,8 @@ pub struct TerminalModes {
     pub alternate_scroll: bool,
     /// Synchronized update mode - batches screen updates for flicker-free rendering
     pub synchronized_update: bool,
+    /// Mode 2031: report light/dark theme changes unasked.
+    pub color_scheme_updates: bool,
     /// Line feed/new line mode (LNM, ANSI mode 20): LF, VT and FF also
     /// return the carriage, and Enter should send CR LF.
     pub linefeed_newline: bool,
@@ -119,6 +141,7 @@ impl Default for TerminalModes {
             // Enable by default so mouse wheel works in less, vim, etc.
             alternate_scroll: true,
             synchronized_update: false,
+            color_scheme_updates: false,
             linefeed_newline: false,
             allow_column_mode_switch: false,
             column_mode_132: false,
@@ -148,7 +171,37 @@ pub struct ShellIntegration {
     pub command_executing: bool,
     /// Last command exit code
     pub last_exit_code: Option<i32>,
+    /// Commands started (OSC 133;C) so far; tags the row marks of the
+    /// current one (ADR 0019).
+    pub command_number: u32,
+    /// Column command input started at (OSC 133;B), until output starts.
+    pub input_col: Option<u16>,
+    /// The current or last command line, read when its output started.
+    pub command: Option<String>,
+    /// Output the last command left on the row it finished on, before the
+    /// cursor, when it did not end in a newline. The prompt that follows
+    /// usually shares that row, so it is saved when the command finishes.
+    pub output_tail: Option<String>,
 }
+
+/// The last command a shell ran, as `last_command` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastCommand {
+    /// The command line, as typed after the prompt.
+    pub command: String,
+    /// What it printed; empty when `output_available` is false.
+    pub output: String,
+    /// Its exit status, once finished, if the shell reported one.
+    pub exit_code: Option<i32>,
+    /// Still running: `output` is what it has printed so far.
+    pub running: bool,
+    /// False when the rows holding the output are gone: the screen was
+    /// cleared or reset, or they left the scrollback.
+    pub output_available: bool,
+}
+
+/// How far above the output to look for the command line's row.
+const MAX_COMMAND_LINE_ROWS: usize = 256;
 
 /// Terminal state with main and alternate screen buffers.
 ///
@@ -217,6 +270,11 @@ pub struct Terminal {
     /// Dimensions the inactive alternate buffer still has to be resized to.
     /// Reflowing it on every drag frame is wasted work while it is hidden.
     pending_alternate_resize: Option<Dimensions>,
+    /// Anchor events not yet taken by the embedder, oldest first.
+    anchor_events: std::collections::VecDeque<AnchorEvent>,
+    /// Anchors in the output reserve rows; see
+    /// [`Terminal::set_inline_anchors`].
+    inline_anchors: bool,
 }
 
 impl Terminal {
@@ -277,6 +335,8 @@ impl Terminal {
             pending_column_resize: None,
             terminal_name: DEFAULT_TERMINAL_NAME.to_string(),
             pending_alternate_resize: None,
+            anchor_events: std::collections::VecDeque::new(),
+            inline_anchors: false,
         }
     }
 
@@ -305,6 +365,65 @@ impl Terminal {
     /// Check if there are pending responses.
     pub fn has_pending_responses(&self) -> bool {
         !self.pending_responses.is_empty()
+    }
+
+    /// Whether inline surface anchors in the output reserve rows (ADR
+    /// 0020). Off by default: until the embedder pairs anchors with
+    /// sessions and releases them, anchors in output (a `cat`ed recording,
+    /// say) are parsed and ignored.
+    pub fn set_inline_anchors(&mut self, enabled: bool) {
+        self.inline_anchors = enabled;
+    }
+
+    /// Whether inline surface anchors reserve rows; see
+    /// [`Terminal::set_inline_anchors`].
+    pub fn inline_anchors(&self) -> bool {
+        self.inline_anchors
+    }
+
+    /// Apply an inline surface anchor at the cursor (ADR 0020). On the main
+    /// screen its rows are reserved and tagged; on the alternate screen
+    /// nothing is. Either way an [`AnchorEvent`] says what happened. With
+    /// inline anchors off this does nothing.
+    pub fn place_anchor(&mut self, anchor: Anchor) {
+        if !self.inline_anchors {
+            return;
+        }
+        // Free the tags of anchors already gone, so they can be reused.
+        self.sweep_anchors();
+        let event = if self.using_alternate {
+            AnchorEvent::Refused {
+                anchor,
+                reason: AnchorRefusal::AlternateScreen,
+            }
+        } else {
+            match self.main.place_anchor(anchor) {
+                Ok(tag) => AnchorEvent::Placed { tag, anchor },
+                Err(reason) => AnchorEvent::Refused { anchor, reason },
+            }
+        };
+        tracing::trace!(?event, "inline anchor");
+        self.push_anchor_event(event);
+    }
+
+    /// Anchor events since the last call, oldest first. Anchors whose first
+    /// row is gone are found now, so call this after feeding output.
+    pub fn take_anchor_events(&mut self) -> Vec<AnchorEvent> {
+        self.sweep_anchors();
+        self.anchor_events.drain(..).collect()
+    }
+
+    fn sweep_anchors(&mut self) {
+        for (tag, anchor) in self.main.sweep_anchors() {
+            self.push_anchor_event(AnchorEvent::Lost { tag, anchor });
+        }
+    }
+
+    fn push_anchor_event(&mut self, event: AnchorEvent) {
+        if self.anchor_events.len() >= MAX_ANCHOR_EVENTS {
+            self.anchor_events.pop_front();
+        }
+        self.anchor_events.push_back(event);
     }
 
     /// Keep at most `lines` lines of main-screen scrollback, dropping the
@@ -592,8 +711,36 @@ impl Terminal {
 
     /// Tell the terminal which colours it is drawn with, so colour queries
     /// report the live theme. Palette changes applications made stay.
+    ///
+    /// With mode 2031 set, a switch between a dark and a light theme queues
+    /// the same report `CSI ? 996 n` asks for.
     pub fn set_theme_colors(&mut self, theme: ThemeColors) {
+        let was_dark = self.is_dark();
         self.palette.set_theme(theme);
+        if self.modes.color_scheme_updates && self.is_dark() != was_dark {
+            self.queue_response(self.color_scheme_report());
+        }
+    }
+
+    /// Whether the theme's background is dark (relative luminance below
+    /// one half).
+    pub fn is_dark(&self) -> bool {
+        let [r, g, b] = self
+            .palette
+            .theme()
+            .background
+            .map(|c| f32::from(c) / 255.0);
+        0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5
+    }
+
+    /// The answer to `CSI ? 996 n`: `CSI ? 997 ; 1 n` for a dark theme,
+    /// `CSI ? 997 ; 2 n` for a light one.
+    pub fn color_scheme_report(&self) -> Vec<u8> {
+        if self.is_dark() {
+            b"\x1b[?997;1n".to_vec()
+        } else {
+            b"\x1b[?997;2n".to_vec()
+        }
     }
 
     /// The palette: theme colours and the entries applications changed
@@ -649,24 +796,118 @@ impl Terminal {
         tracing::trace!("Prompt started at line {}", row);
     }
 
-    /// Mark command start (OSC 133;B).
+    /// Mark command start (OSC 133;B): input begins at the cursor.
     pub fn mark_command_start(&mut self) {
-        let row = self.grid().cursor().position.row;
-        self.shell_integration.command_line = Some(row);
-        tracing::trace!("Command started at line {}", row);
+        let position = self.grid().cursor().position;
+        self.shell_integration.command_line = Some(position.row);
+        self.shell_integration.input_col = Some(position.col);
+        let tag = RowMarks::tag(self.shell_integration.command_number.wrapping_add(1));
+        self.update_cursor_row_marks(|marks| marks.input_start = tag);
+        tracing::trace!("Command started at line {}", position.row);
     }
 
-    /// Mark command executed (OSC 133;C).
+    /// Mark command executed (OSC 133;C): output begins at the cursor's
+    /// row. Reads the command line typed since OSC 133;B.
     pub fn mark_command_executed(&mut self) {
-        self.shell_integration.command_executing = true;
+        let shell = &mut self.shell_integration;
+        shell.command_number = shell.command_number.wrapping_add(1);
+        shell.command_executing = true;
+        shell.last_exit_code = None;
+        shell.output_tail = None;
+        let tag = RowMarks::tag(shell.command_number);
+        let input_col = shell.input_col.take();
+        self.shell_integration.command = Some(self.command_line_before_cursor(tag, input_col));
+        self.update_cursor_row_marks(|marks| marks.output_start = tag);
         tracing::trace!("Command executing");
     }
 
-    /// Mark command finished (OSC 133;D).
+    /// Mark command finished (OSC 133;D). A D with no command running (the
+    /// one shells send before their first prompt) marks nothing.
     pub fn mark_command_finished(&mut self, exit_code: Option<i32>) {
+        if self.shell_integration.command_executing {
+            let tag = RowMarks::tag(self.shell_integration.command_number);
+            self.update_cursor_row_marks(|marks| marks.command_end = tag);
+            let cursor = self.grid().cursor().position;
+            self.shell_integration.output_tail = (cursor.col > 0)
+                .then(|| self.grid().row(cursor.row))
+                .flatten()
+                .map(|row| row.copy_text(0, cursor.col - 1).trim_end().to_string())
+                .filter(|tail| !tail.is_empty());
+        }
         self.shell_integration.command_executing = false;
         self.shell_integration.last_exit_code = exit_code;
         tracing::trace!("Command finished with exit code: {:?}", exit_code);
+    }
+
+    fn update_cursor_row_marks(&mut self, update: impl FnOnce(&mut RowMarks)) {
+        let row = self.grid().cursor().position.row;
+        if let Some(row) = self.grid_mut().row_mut(row) {
+            let mut marks = row.marks();
+            update(&mut marks);
+            row.set_marks(marks);
+        }
+    }
+
+    /// The command line typed after the prompt: from the row marked as
+    /// input start for `tag` (at `input_col`) up to the cursor's row.
+    fn command_line_before_cursor(&self, tag: u8, input_col: Option<u16>) -> String {
+        let buffer = self.buffer();
+        let cursor = buffer.history_len() + self.grid().cursor().position.row as usize;
+        let input_row = (cursor.saturating_sub(MAX_COMMAND_LINE_ROWS)..=cursor)
+            .rev()
+            .find(|&index| buffer.marks_at(index).is_some_and(|m| m.input_start == tag));
+        match (input_row, input_col) {
+            (Some(row), Some(col)) => buffer.text_of_rows(row, cursor.max(row + 1), col),
+            _ => String::new(),
+        }
+    }
+
+    /// The last command the shell ran (or is running), found through the
+    /// OSC 133 marks on the main screen's rows (ADR 0019). `None` before
+    /// the first command. `tail_lines` keeps only the end of long output.
+    pub fn last_command(&self, tail_lines: Option<usize>) -> Option<LastCommand> {
+        let shell = &self.shell_integration;
+        if shell.command_number == 0 {
+            return None;
+        }
+        let tag = RowMarks::tag(shell.command_number);
+        let buffer = &self.main;
+        let total = buffer.total_lines();
+        let start = (0..total).rev().find(|&index| {
+            buffer
+                .marks_at(index)
+                .is_some_and(|m| m.output_start == tag)
+        });
+        let end = start.and_then(|start| {
+            (start..total)
+                .find(|&index| buffer.marks_at(index).is_some_and(|m| m.command_end == tag))
+        });
+        let running = shell.command_executing;
+        let rows = match (start, end) {
+            (Some(start), Some(end)) => Some((start, end)),
+            (Some(start), None) if running => Some((start, total)),
+            _ => None,
+        };
+        let mut output = rows
+            .map(|(start, end)| buffer.text_of_rows(start, end, 0))
+            .unwrap_or_default();
+        if let (Some(_), false, Some(tail)) = (rows, running, &shell.output_tail) {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(tail);
+        }
+        if let Some(tail) = tail_lines {
+            let lines: Vec<&str> = output.lines().collect();
+            output = lines[lines.len().saturating_sub(tail)..].join("\n");
+        }
+        Some(LastCommand {
+            command: shell.command.clone().unwrap_or_default(),
+            output,
+            exit_code: if running { None } else { shell.last_exit_code },
+            running,
+            output_available: rows.is_some(),
+        })
     }
 
     /// Get the image store.
@@ -876,6 +1117,11 @@ impl Terminal {
         self.alternate.grid_mut().cursor_mut().position = CursorPosition::origin();
         self.alternate.clear_history();
         self.main.clear_history();
+        // The main grid keeps its text when the reset came on the
+        // alternate screen, but no anchor survives a reset.
+        for (tag, anchor) in self.main.drop_all_anchors() {
+            self.push_anchor_event(AnchorEvent::Lost { tag, anchor });
+        }
         self.images.clear();
         self.hyperlinks.clear();
         self.hyperlink_ids.clear();
@@ -964,11 +1210,14 @@ impl Terminal {
             return None;
         }
 
-        // Check if we should report motion
+        // Motion is reported in button-event mode only while a button is
+        // held (a drag), and in any-event mode always. `Release` with motion
+        // means no button is held.
         if motion {
+            let button_held = pressed && button != MouseButton::Release;
             match self.modes.mouse_mode {
                 MouseMode::AnyEvent => {}
-                MouseMode::ButtonEvent if pressed => {}
+                MouseMode::ButtonEvent if button_held => {}
                 _ => return None,
             }
         }

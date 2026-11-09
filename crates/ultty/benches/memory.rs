@@ -10,8 +10,10 @@
 //! cargo bench -p ultty --bench memory   (release profile, LTO: slow to build)
 //! cargo test -p ultty --bench memory    (same allocations, builds faster)
 //!
-//! Exits non-zero when any case is over budget. RSS is printed for context
-//! only: it depends on the allocator's page reuse and is not gated.
+//! Exits non-zero when any case is over budget. A case can also budget its
+//! peak heap, for work whose transient allocations would stay resident (the
+//! allocator rarely returns them). RSS is printed for context only: it
+//! depends on the allocator's page reuse and is not gated.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
@@ -168,6 +170,8 @@ struct Case {
     name: &'static str,
     /// Live heap bytes allowed after the workload (measured + 5%).
     budget: usize,
+    /// Peak heap bytes allowed during it, where that is gated.
+    peak_budget: Option<usize>,
     run: fn() -> Measurement,
 }
 
@@ -181,16 +185,19 @@ const CASES: &[Case] = &[
     Case {
         name: "empty_terminal_80x24",
         budget: 185_000,
+        peak_budget: None,
         run: || measure(|| Terminal::new(Dimensions::new(80, 24))),
     },
     Case {
         name: "empty_terminal_300x75",
         budget: 1_229_000,
+        peak_budget: None,
         run: || measure(|| Terminal::new(Dimensions::new(300, 75))),
     },
     Case {
         name: "typical_10k_lines_80x24",
         budget: 2_915_000,
+        peak_budget: None,
         run: || {
             let input = typical_lines(10_024);
             measure(|| filled_terminal(80, 24, &input))
@@ -199,6 +206,7 @@ const CASES: &[Case] = &[
     Case {
         name: "typical_10k_lines_120x40",
         budget: 3_461_000,
+        peak_budget: None,
         run: || {
             let input = typical_lines(10_040);
             measure(|| filled_terminal(120, 40, &input))
@@ -207,14 +215,35 @@ const CASES: &[Case] = &[
     Case {
         name: "typical_10k_lines_300x75",
         budget: 4_358_000,
+        peak_budget: None,
         run: || {
             let input = typical_lines(10_075);
             measure(|| filled_terminal(300, 75, &input))
         },
     },
     Case {
+        // Resizing reflows the scrollback; it must stay as compact as it
+        // was (found by the 2026-11-08 soak: RSS grew with each resize).
+        name: "typical_10k_lines_120x40_resized",
+        budget: 3_461_000,
+        // Measured 4_699_129 (it was 149 MB when reflow decoded the whole
+        // scrollback at once) + 5%.
+        peak_budget: Some(4_935_000),
+        run: || {
+            let input = typical_lines(10_040);
+            measure(|| {
+                let mut terminal = filled_terminal(120, 40, &input);
+                for (cols, rows) in [(100, 30), (140, 45), (90, 35), (120, 40)] {
+                    terminal.resize(Dimensions::new(cols, rows));
+                }
+                terminal
+            })
+        },
+    },
+    Case {
         name: "sgr_dense_10k_lines_120x40",
         budget: 18_980_000,
+        peak_budget: None,
         run: || {
             let input = sgr_dense_lines(10_040, 120);
             measure(|| filled_terminal(120, 40, &input))
@@ -223,6 +252,7 @@ const CASES: &[Case] = &[
     Case {
         name: "scene_tree_1000_regions",
         budget: 953_000,
+        peak_budget: None,
         run: || measure(|| scene_tree(1000)),
     },
 ];
@@ -240,7 +270,7 @@ fn main() -> ExitCode {
     let mut over = 0;
     for case in CASES.iter().filter(|case| case.name.contains(&filter)) {
         let m = (case.run)();
-        let ok = m.live <= case.budget;
+        let ok = m.live <= case.budget && case.peak_budget.is_none_or(|peak| m.peak <= peak);
         if !ok {
             over += 1;
         }

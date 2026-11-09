@@ -17,7 +17,10 @@ release:
 
 install: release
 	install -Dm755 target/release/ultty $(DESTDIR)$(PREFIX)/bin/ultty
+	install -Dm755 target/release/ulttyctl $(DESTDIR)$(PREFIX)/bin/ulttyctl
 	install -Dm644 dist/ultty.desktop $(DESTDIR)$(PREFIX)/share/applications/ultty.desktop
+	install -Dm644 dist/shell-integration/ultty.bash $(DESTDIR)$(PREFIX)/share/ultty/shell-integration/ultty.bash
+	install -Dm644 dist/shell-integration/ultty.zsh $(DESTDIR)$(PREFIX)/share/ultty/shell-integration/ultty.zsh
 	@if command -v tic >/dev/null 2>&1; then \
 		mkdir -p "$(DESTDIR)$(TERMINFO_DIR)" && \
 		tic -x -o "$(DESTDIR)$(TERMINFO_DIR)" dist/terminfo/ultty.terminfo && \
@@ -27,7 +30,8 @@ install: release
 	fi
 
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/bin/ultty
+	rm -f $(DESTDIR)$(PREFIX)/bin/ultty $(DESTDIR)$(PREFIX)/bin/ulttyctl
+	rm -rf $(DESTDIR)$(PREFIX)/share/ultty/shell-integration
 	rm -f $(DESTDIR)$(PREFIX)/share/applications/ultty.desktop
 	rm -f $(DESTDIR)$(TERMINFO_DIR)/x/xterm-ultty
 

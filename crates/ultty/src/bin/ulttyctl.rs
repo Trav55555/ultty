@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
@@ -7,7 +7,8 @@ use std::path::Path;
 use ultty::control::format_response;
 use ultty::control::paths::{control_dir, ControlEndpoint};
 use ultty_protocol::control::{
-    ControlData, ControlEnvelope, ControlRequest, ControlResponse, OutputFormat,
+    ControlData, ControlEnvelope, ControlEvent, ControlRequest, ControlResponse, OutputFormat,
+    PaneState, PaneStatus, WaitCondition,
 };
 use ultty_protocol::{Key, Modifiers};
 
@@ -22,6 +23,16 @@ fn main() {
     if should_print_version(&args) {
         println!("{}", version_output());
         std::process::exit(0);
+    }
+
+    if args.first().map(String::as_str) == Some("mcp") {
+        std::process::exit(match run_mcp() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                1
+            }
+        });
     }
 
     let use_json = args.iter().any(|a| a == "--json");
@@ -54,6 +65,7 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let subscribe = matches!(request, ControlRequest::Subscribe { .. });
     let request = with_auth_token(request, read_auth_token(&endpoint.token));
     // Always ask for JSON so the reply can be parsed and the exit status set
     // from it; text output is rendered here with the server's formatter.
@@ -63,6 +75,16 @@ fn main() {
     };
     let command =
         serde_json::to_string(&envelope).expect("control request envelope should serialize");
+
+    if subscribe {
+        match stream_events(&endpoint.socket, &command, &mut std::io::stdout()) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
 
     let response = match send_command(&endpoint.socket, &command, read_timeout)
         .and_then(|raw| parse_response(&raw))
@@ -79,9 +101,7 @@ fn main() {
         OutputFormat::Text
     };
     print!("{}", format_response(&response, format));
-    if response_is_failure(&response) {
-        std::process::exit(1);
-    }
+    std::process::exit(exit_status(&response));
 }
 
 /// Socket read timeout for `request`: long enough to outlast a `wait-for`,
@@ -107,6 +127,35 @@ fn parse_response(raw: &str) -> Result<ControlResponse, String> {
 
 /// Whether `response` should make ulttyctl exit non-zero: an error, or a
 /// `wait-for` that timed out.
+/// ulttyctl's exit status for `response`: 1 for an error or a timed-out
+/// wait, the command's own status for `wait-for --command-done`, else 0.
+fn exit_status(response: &ControlResponse) -> i32 {
+    if response_is_failure(response) {
+        return 1;
+    }
+    match response {
+        ControlResponse::Data(ControlData::WaitEvent {
+            event:
+                ControlEvent::CommandFinished {
+                    exit_code: Some(code),
+                    ..
+                },
+        })
+        | ControlResponse::Data(ControlData::LastCommand {
+            exit_code: Some(code),
+            running: false,
+            ..
+        }) => {
+            if (0..=255).contains(code) {
+                *code
+            } else {
+                1
+            }
+        }
+        _ => 0,
+    }
+}
+
 fn response_is_failure(response: &ControlResponse) -> bool {
     matches!(
         response,
@@ -180,6 +229,18 @@ fn remove_flag_with_value(args: Vec<String>, flag: &str) -> Vec<String> {
 }
 
 fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
+    // `--pane <id>` comes before the command, so it can never be mistaken
+    // for part of the text that send-text or search take.
+    if args.first().map(String::as_str) == Some("--pane") {
+        let id = args
+            .get(1)
+            .ok_or_else(|| "--pane requires a pane id (see `ulttyctl panes`)".to_string())?
+            .parse()
+            .map_err(|_| "--pane requires a numeric pane id".to_string())?;
+        let mut request = parse_cli_request(&args[2..])?;
+        return set_target(&mut request, id).map(|()| request);
+    }
+
     let command = args
         .first()
         .ok_or_else(|| "missing command".to_string())?
@@ -191,17 +252,19 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
         "version" => Ok(ControlRequest::Version),
         "info" => Ok(ControlRequest::GetInfo),
         "tabs" => Ok(ControlRequest::ListTabs),
+        "panes" => Ok(ControlRequest::ListPanes),
         "text" => Ok(ControlRequest::GetText {
             include_scrollback: rest.iter().any(|arg| arg == "--scrollback"),
             scrollback_lines: None,
+            target: None,
         }),
-        "selection" => Ok(ControlRequest::GetSelection),
+        "selection" => Ok(ControlRequest::GetSelection { target: None }),
         "send-text" => {
             let text = rest.join(" ");
             if text.is_empty() {
                 Err("send-text requires text".to_string())
             } else {
-                Ok(ControlRequest::SendText { text })
+                Ok(ControlRequest::SendText { text, target: None })
             }
         }
         "send-key" => {
@@ -211,12 +274,16 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             )
             .ok_or_else(|| "unknown key".to_string())?;
             let modifiers = parse_modifiers(rest.get(1).map(String::as_str).unwrap_or(""));
-            Ok(ControlRequest::SendKey { key, modifiers })
+            Ok(ControlRequest::SendKey {
+                key,
+                modifiers,
+                target: None,
+            })
         }
         "send-raw" => {
             let hex = rest.join("");
             let data = hex_decode(&hex).ok_or_else(|| "send-raw requires valid hex".to_string())?;
-            Ok(ControlRequest::SendRaw { data })
+            Ok(ControlRequest::SendRaw { data, target: None })
         }
         "new-tab" => Ok(ControlRequest::NewTab {
             title: None,
@@ -253,6 +320,7 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             Ok(ControlRequest::RunCommand {
                 command,
                 args: rest.iter().skip(1).cloned().collect(),
+                target: None,
             })
         }
         "resize" => {
@@ -281,10 +349,30 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
                     regex: false,
                     case_sensitive: false,
                     include_scrollback: true,
+                    target: None,
                 })
             }
         }
         "wait-for" => parse_wait_for(rest),
+        "subscribe" => Ok(ControlRequest::Subscribe { target: None }),
+        "last-command" => {
+            let tail_lines = match rest {
+                [] => None,
+                [flag, lines] if flag == "--tail" => Some(
+                    lines
+                        .parse()
+                        .map_err(|_| "--tail requires a number of lines".to_string())?,
+                ),
+                _ => return Err("usage: last-command [--tail <lines>]".to_string()),
+            };
+            Ok(ControlRequest::LastCommand {
+                tail_lines,
+                target: None,
+            })
+        }
+        "regions" if rest.is_empty() => Ok(ControlRequest::Regions { target: None }),
+        "regions" => Err("usage: regions".to_string()),
+        "status" => parse_status(rest),
         "auth" => Ok(ControlRequest::Authenticate {
             token: rest
                 .first()
@@ -297,11 +385,32 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
 
 fn parse_wait_for(args: &[String]) -> Result<ControlRequest, String> {
     let mut timeout_ms = 30000;
+    let mut until = WaitCondition::Text;
     let mut pattern_parts = Vec::new();
     let mut index = 0;
 
     while index < args.len() {
-        if args[index] == "--timeout" {
+        let event = match args[index].as_str() {
+            "--command-done" => Some(WaitCondition::CommandFinished),
+            "--bell" => Some(WaitCondition::Bell),
+            "--quiet" => {
+                let ms = args
+                    .get(index + 1)
+                    .ok_or_else(|| "wait-for --quiet requires milliseconds".to_string())?
+                    .parse()
+                    .map_err(|_| "wait-for --quiet must be a number".to_string())?;
+                index += 1;
+                Some(WaitCondition::Quiet { ms })
+            }
+            _ => None,
+        };
+        if let Some(event) = event {
+            if !until.is_text() {
+                return Err("wait-for takes one of --command-done, --bell, --quiet".to_string());
+            }
+            until = event;
+            index += 1;
+        } else if args[index] == "--timeout" {
             let timeout = args
                 .get(index + 1)
                 .ok_or_else(|| "wait-for --timeout requires milliseconds".to_string())?;
@@ -316,14 +425,98 @@ fn parse_wait_for(args: &[String]) -> Result<ControlRequest, String> {
     }
 
     let pattern = pattern_parts.join(" ");
-    if pattern.is_empty() {
-        Err("wait-for requires a pattern".to_string())
-    } else {
-        Ok(ControlRequest::WaitFor {
+    match (until.is_text(), pattern.is_empty()) {
+        (true, true) => Err("wait-for requires a pattern or an event to wait for".to_string()),
+        (false, false) => Err("wait-for takes a pattern or an event, not both".to_string()),
+        _ => Ok(ControlRequest::WaitFor {
             pattern,
             regex: false,
             timeout_ms,
-        })
+            until,
+            target: None,
+        }),
+    }
+}
+
+/// `status clear`, or `status <state> [label...] [--progress <0-1|N%>]
+/// [--attention]`.
+fn parse_status(args: &[String]) -> Result<ControlRequest, String> {
+    let state = match args.first().map(String::as_str) {
+        Some("clear") if args.len() == 1 => {
+            return Ok(ControlRequest::SetPaneStatus {
+                status: None,
+                target: None,
+            })
+        }
+        Some("idle") => PaneState::Idle,
+        Some("working") => PaneState::Working,
+        Some("waiting") => PaneState::Waiting,
+        Some("done") => PaneState::Done,
+        Some("error") => PaneState::Error,
+        _ => return Err("status takes idle, working, waiting, done, error or clear".to_string()),
+    };
+    let mut status = PaneStatus {
+        state,
+        label: String::new(),
+        progress: None,
+        attention: false,
+    };
+    let mut label = Vec::new();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--attention" => status.attention = true,
+            "--progress" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "--progress requires a value".to_string())?;
+                status.progress = Some(parse_progress(value)?);
+                index += 1;
+            }
+            word => label.push(word),
+        }
+        index += 1;
+    }
+    status.label = label.join(" ");
+    Ok(ControlRequest::SetPaneStatus {
+        status: Some(status),
+        target: None,
+    })
+}
+
+/// A fraction from 0 to 1, or a percentage such as `40%`.
+fn parse_progress(value: &str) -> Result<f32, String> {
+    let (number, scale) = match value.strip_suffix('%') {
+        Some(percent) => (percent, 100.0),
+        None => (value, 1.0),
+    };
+    number
+        .parse::<f32>()
+        .ok()
+        .filter(|n| n.is_finite())
+        .map(|n| (n / scale).clamp(0.0, 1.0))
+        .ok_or_else(|| format!("--progress must be 0-1 or a percentage, not {value}"))
+}
+
+/// Point a pane-scoped request at pane `id`; other requests refuse `--pane`.
+fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
+    match request {
+        ControlRequest::GetText { target, .. }
+        | ControlRequest::GetSelection { target }
+        | ControlRequest::SendText { target, .. }
+        | ControlRequest::SendKey { target, .. }
+        | ControlRequest::SendRaw { target, .. }
+        | ControlRequest::RunCommand { target, .. }
+        | ControlRequest::Search { target, .. }
+        | ControlRequest::WaitFor { target, .. }
+        | ControlRequest::Subscribe { target }
+        | ControlRequest::SetPaneStatus { target, .. }
+        | ControlRequest::LastCommand { target, .. }
+        | ControlRequest::Regions { target } => {
+            *target = Some(id);
+            Ok(())
+        }
+        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for, subscribe, status, last-command and regions".to_string()),
     }
 }
 
@@ -417,6 +610,62 @@ fn send_command(socket_path: &Path, command: &str, timeout_secs: u64) -> Result<
     read_response(&mut stream, timeout_secs)
 }
 
+/// Serve MCP on stdin and stdout. Each tool call finds the running Ultty
+/// afresh, so the server outlives a restarted terminal.
+fn run_mcp() -> std::io::Result<()> {
+    const MCP_READ_TIMEOUT_SECS: u64 = 10;
+    let mut send = |request: ControlRequest| {
+        let endpoint = find_instance()?;
+        let read_timeout = read_timeout_for(&request, MCP_READ_TIMEOUT_SECS);
+        let envelope = ControlEnvelope {
+            output_format: OutputFormat::Json,
+            request: with_auth_token(request, read_auth_token(&endpoint.token)),
+        };
+        let command = serde_json::to_string(&envelope)
+            .map_err(|e| format!("failed to encode request: {}", e))?;
+        send_command(&endpoint.socket, &command, read_timeout).and_then(|raw| parse_response(&raw))
+    };
+    // Screenshots go to the private control directory, not a shared /tmp.
+    let screenshot_dir = control_dir().ok();
+    let stdin = std::io::stdin();
+    ultty::control::mcp::serve(
+        stdin.lock(),
+        std::io::stdout().lock(),
+        &mut send,
+        screenshot_dir.as_deref(),
+    )
+}
+
+/// Subscribe and copy each event line to `out` until Ultty closes the
+/// stream. The write side stays open: shutting it down ends a subscription.
+fn stream_events(socket_path: &Path, command: &str, out: &mut impl Write) -> Result<(), String> {
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|e| format!("failed to connect to ultty (is it running?): {}", e))?;
+    stream
+        .write_all(format!("{command}\n").as_bytes())
+        .map_err(|e| format!("failed to send command: {}", e))?;
+    let mut lines = BufReader::new(stream).lines();
+    let first = lines
+        .next()
+        .ok_or_else(|| "ultty closed the connection without answering".to_string())?
+        .map_err(|e| format!("failed to read reply: {}", e))?;
+    match parse_response(&first)? {
+        ControlResponse::Data(ControlData::Subscribed) => {}
+        other => {
+            return Err(format_response(&other, OutputFormat::Text)
+                .trim()
+                .to_string())
+        }
+    }
+    for line in lines {
+        let line = line.map_err(|e| format!("failed to read event: {}", e))?;
+        writeln!(out, "{line}")
+            .and_then(|()| out.flush())
+            .map_err(|e| format!("failed to write event: {}", e))?;
+    }
+    Ok(())
+}
+
 fn read_response(stream: &mut UnixStream, timeout_secs: u64) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut response = Vec::new();
@@ -460,6 +709,10 @@ GLOBAL FLAGS:
     --json                  Output in JSON format
     --read-timeout <secs>   Socket read timeout in seconds (default: 5;
                             wait-for always waits out its own timeout)
+    --pane <id>             Act on pane <id> (from `panes`) instead of the
+                            focused one. Goes before the command; applies to
+                            text, selection, send-*, run, search, wait-for,
+                            subscribe, status, last-command, regions
     -V, --version           Show ulttyctl version without connecting to Ultty
     -h, --help              Show this help
 
@@ -473,16 +726,33 @@ TAB COMMANDS:
     switch-tab <n>          Switch to tab number n (1-indexed)
     close-tab [n]           Close tab n (or current if omitted)
     tabs                    List all tabs
+    panes                   List every pane with its id (* marks the focused one)
 
 QUERY COMMANDS:
     info                    Get terminal info (size, cursor, etc.)
     text [--scrollback]     Get visible text (optionally with scrollback)
     selection               Get current selection
     search <pattern>        Search for pattern in scrollback
+    last-command [--tail <lines>]
+                            The last command the shell ran and its output
+                            (needs OSC 133 shell integration); exits with
+                            the command's status
+    regions                 The native apps in the pane's tab: each region
+                            by depth with its content kind, accessibility
+                            role, position and size in cells, metadata and
+                            text (all of it with --json)
 
 WAIT COMMANDS:
     wait-for <pattern> [--timeout <ms>]
                             Wait for pattern to appear (default 30s timeout)
+    wait-for --command-done | --bell | --quiet <ms> [--timeout <ms>]
+                            Wait for the next command to finish (exits with
+                            its status; needs shell integration), the next
+                            bell, or <ms> without output
+    subscribe               Print events as JSON lines until ultty exits:
+                            pane_opened, pane_closed, command_started,
+                            command_finished (needs shell integration),
+                            bell, notification, title_changed, process_exited
 
 WINDOW COMMANDS:
     focus                   Focus the ultty window
@@ -492,6 +762,18 @@ WINDOW COMMANDS:
 
 EXECUTION:
     run <command> [args]    Run a command in current tab
+
+STATUS:
+    status <state> [label] [--progress <0-1|N%>] [--attention]
+                            Show what this pane is doing in the tab bar:
+                            idle, working, waiting, done or error.
+                            --attention marks an unfocused window urgent
+    status clear            Remove the pane's status
+
+MCP:
+    mcp                     Serve the tools above to an AI agent over MCP
+                            (stdio). For Claude Code:
+                            claude mcp add ultty -- ulttyctl mcp
 
 AUTHENTICATION:
     Inside an ultty window, ulttyctl talks to that window's ultty (found
@@ -539,8 +821,8 @@ EXIT STATUS:
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_cli_request, parse_response, read_response, read_timeout_for, response_is_failure,
-        should_print_version, version_output, with_auth_token,
+        exit_status, parse_cli_request, parse_response, read_response, read_timeout_for,
+        response_is_failure, should_print_version, version_output, with_auth_token,
     };
 
     use std::io::Write;
@@ -548,7 +830,10 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use ultty_protocol::control::{ControlData, ControlRequest, ControlResponse};
+    use ultty_protocol::control::{
+        ControlData, ControlEvent, ControlRequest, ControlResponse, PaneState, PaneStatus,
+        WaitCondition,
+    };
 
     #[test]
     fn read_response_retries_until_delayed_writer_closes() {
@@ -627,6 +912,7 @@ mod tests {
                     "-lc".to_string(),
                     "printf 'hello world\\n'".to_string(),
                 ],
+                target: None,
             }
         );
     }
@@ -670,6 +956,158 @@ mod tests {
             parse_cli_request(&["info".to_string()]).unwrap(),
             ControlRequest::GetInfo
         );
+        assert_eq!(
+            parse_cli_request(&["panes".to_string()]).unwrap(),
+            ControlRequest::ListPanes
+        );
+    }
+
+    fn args(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn leading_pane_flag_targets_pane_scoped_commands() {
+        assert_eq!(
+            parse_cli_request(&args("--pane 3 send-text hi there")).unwrap(),
+            ControlRequest::SendText {
+                text: "hi there".to_string(),
+                target: Some(3),
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("--pane 3 selection")).unwrap(),
+            ControlRequest::GetSelection { target: Some(3) }
+        );
+    }
+
+    #[test]
+    fn wait_for_takes_a_pattern_or_one_event() {
+        let until = |line: &str| match parse_cli_request(&args(line)).unwrap() {
+            ControlRequest::WaitFor { until, .. } => until,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(until("wait-for ready"), WaitCondition::Text);
+        assert_eq!(
+            until("wait-for --command-done"),
+            WaitCondition::CommandFinished
+        );
+        assert_eq!(until("wait-for --bell --timeout 5"), WaitCondition::Bell);
+        assert_eq!(
+            until("wait-for --quiet 300"),
+            WaitCondition::Quiet { ms: 300 }
+        );
+        for bad in [
+            "wait-for",
+            "wait-for ready --bell",
+            "wait-for --bell --command-done",
+            "wait-for --quiet",
+        ] {
+            assert!(parse_cli_request(&args(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn command_done_exits_with_the_commands_status() {
+        let finished = |exit_code| {
+            ControlResponse::Data(ControlData::WaitEvent {
+                event: ControlEvent::CommandFinished { pane: 0, exit_code },
+            })
+        };
+        assert_eq!(exit_status(&finished(Some(0))), 0);
+        assert_eq!(exit_status(&finished(Some(3))), 3);
+        assert_eq!(exit_status(&finished(Some(-1))), 1);
+        assert_eq!(exit_status(&finished(None)), 0);
+        assert_eq!(
+            exit_status(&ControlResponse::Data(ControlData::WaitTimeout)),
+            1
+        );
+    }
+
+    #[test]
+    fn status_takes_a_state_label_progress_and_attention() {
+        assert_eq!(
+            parse_cli_request(&args(
+                "--pane 2 status waiting need a review --attention --progress 40%"
+            ))
+            .unwrap(),
+            ControlRequest::SetPaneStatus {
+                status: Some(PaneStatus {
+                    state: PaneState::Waiting,
+                    label: "need a review".to_string(),
+                    progress: Some(0.4),
+                    attention: true,
+                }),
+                target: Some(2),
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("status clear")).unwrap(),
+            ControlRequest::SetPaneStatus {
+                status: None,
+                target: None
+            }
+        );
+        for bad in [
+            "status",
+            "status busy",
+            "status working --progress",
+            "status working --progress x",
+        ] {
+            assert!(parse_cli_request(&args(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn regions_takes_a_pane_and_no_arguments() {
+        assert_eq!(
+            parse_cli_request(&args("--pane 3 regions")).unwrap(),
+            ControlRequest::Regions { target: Some(3) }
+        );
+        assert!(parse_cli_request(&args("regions extra")).is_err());
+    }
+
+    #[test]
+    fn last_command_takes_a_tail_and_exits_with_the_commands_status() {
+        assert_eq!(
+            parse_cli_request(&args("--pane 1 last-command --tail 20")).unwrap(),
+            ControlRequest::LastCommand {
+                tail_lines: Some(20),
+                target: Some(1),
+            }
+        );
+        assert!(parse_cli_request(&args("last-command --tail")).is_err());
+        assert!(parse_cli_request(&args("last-command extra")).is_err());
+
+        let last = |exit_code, running| {
+            ControlResponse::Data(ControlData::LastCommand {
+                command: "make".to_string(),
+                output: String::new(),
+                exit_code,
+                running,
+                output_available: true,
+            })
+        };
+        assert_eq!(exit_status(&last(Some(2), false)), 2);
+        assert_eq!(exit_status(&last(None, true)), 0);
+    }
+
+    #[test]
+    fn pane_flag_after_the_command_is_just_text() {
+        assert_eq!(
+            parse_cli_request(&args("send-text --pane 3")).unwrap(),
+            ControlRequest::SendText {
+                text: "--pane 3".to_string(),
+                target: None,
+            }
+        );
+    }
+
+    #[test]
+    fn pane_flag_is_refused_where_it_cannot_apply() {
+        assert!(parse_cli_request(&args("--pane 3 tabs")).is_err());
+        assert!(parse_cli_request(&args("--pane x text")).is_err());
+        assert!(parse_cli_request(&args("--pane")).is_err());
     }
 
     #[test]
@@ -710,6 +1148,8 @@ mod tests {
             pattern: "DONE".to_string(),
             regex: false,
             timeout_ms: 10_000,
+            until: Default::default(),
+            target: None,
         };
         assert_eq!(read_timeout_for(&wait, 5), 15);
         assert_eq!(read_timeout_for(&wait, 60), 60);

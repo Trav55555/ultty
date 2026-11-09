@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted. Amended 2026-11-05: PTY output no longer goes through the wakeup
-bridge. Each terminal's I/O thread parses its PTY and wakes the UI itself
+Accepted. Amended 2026-11-07: a control connection can become an event
+subscription (see "Event subscriptions"). Amended 2026-11-05: PTY output no
+longer goes through the wakeup bridge. Each terminal's I/O thread parses its PTY and wakes the UI itself
 (`ultty::event_loop`); the bridge watches only the native protocol and control
 sockets.
 
@@ -35,3 +36,32 @@ The control socket is local-only. If a control token is configured, every reques
 - Socket readability wakes the runtime without a 60 Hz polling loop.
 - Tests should cover socket fd publication, control auth behavior, protocol frame compatibility, and wait semantics.
 - Windows support needs an explicit named-pipe or ConPTY-era replacement for this Unix fd contract.
+
+## Event subscriptions (amendment, 2026-11-07)
+
+A control connection normally carries one request and one reply, then
+closes. Agents and tests also need to hear what happens in a pane (a command
+finished, the bell rang) without polling `get_text` or holding a `wait-for`
+open per condition.
+
+A `subscribe` request, optionally limited to one pane with `target`, turns
+its connection into an event stream:
+
+- The reply is the usual JSON response (`{"status":"data","type":"subscribed"}`)
+  or an error. After a success the connection stays open and Ultty writes one
+  JSON object per line per event, each naming its pane: `pane_opened`,
+  `pane_closed`, `command_started` and `command_finished` (OSC 133 C and D,
+  with the exit code), `bell`, `notification` (OSC 9/777), `title_changed`
+  and `process_exited`.
+- The subscription ends when the client closes the connection or shuts down
+  its write side. Ultty watches a subscriber for readability only to notice
+  that; anything else the client sends is ignored. A subscriber therefore
+  costs no wakeups while nothing happens.
+- Events are never queued without bound. A subscriber more than 1 MiB of
+  events behind is disconnected, and at most 64 subscriptions are open at
+  once. A client that needs every event reads promptly.
+- Subscribing needs the control token, like every request that reveals pane
+  content. `subscribe` inside a `batch` is an error, as `wait-for` is.
+
+Events about native protocol sessions (connected, dropped) are not part of
+this amendment: they need a session-to-pane mapping first.

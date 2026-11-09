@@ -3,6 +3,7 @@
 mod actions;
 mod blink;
 mod control;
+mod control_events;
 mod control_wait;
 mod input;
 mod pacing;
@@ -70,9 +71,10 @@ const INPUT_ECHO_WINDOW: Duration = Duration::from_millis(50);
 /// Maximum time to suppress drawing during synchronized update mode.
 const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(200);
 
-/// Maintenance tick while native sessions (keepalives, animations) or
-/// `ulttyctl wait-for` timeouts need checking. Nothing else polls: with
-/// neither, an idle window sleeps until input, output or a socket wakes it.
+/// Maintenance tick while native sessions (keepalives, animations) need
+/// checking. Nothing else polls: without one, an idle window sleeps until
+/// input, output, a socket or a timer it set (such as a `wait-for`
+/// deadline) wakes it.
 const MAINTENANCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Faster PTY polling while a frame is dirty but not ready to render.
@@ -138,6 +140,9 @@ pub struct App {
     mouse_pos: PhysicalPosition<f64>,
     /// Whether left mouse button is pressed (for selection drag)
     mouse_pressed: bool,
+    /// The button held down while the program reports the mouse: drags are
+    /// reported with it and its release names it.
+    reported_button: Option<ultty::grid::MouseButton>,
     /// Last click time for double/triple click detection
     last_click_time: Instant,
     /// Click count (1=single, 2=double, 3=triple)
@@ -176,6 +181,8 @@ pub struct App {
     control_server: Option<ControlServer>,
     /// Control wait requests that are checked after terminal output is drained.
     pending_control_waits: Vec<control_wait::PendingControlWait>,
+    /// Panes subscribers were last told about, for pane opened/closed events.
+    published_panes: Vec<ultty::terminal_manager::TerminalId>,
     /// Cross-thread wakeups from PTY readiness into winit.
     socket_wakeup: wakeup::SocketWakeup,
     /// Search matches for native protocol regions
@@ -245,7 +252,9 @@ impl App {
         // finds no adapter. An instance with every backend brings up GL as
         // well, which loads and initializes the EGL driver even when Vulkan
         // is then chosen: startup time and resident memory for nothing.
-        let (surface, adapter) = match request_gpu(event_loop, &window, wgpu::Backends::PRIMARY) {
+        // `WGPU_BACKEND` (vulkan, gl, ...) picks one for diagnosis.
+        let primary = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY);
+        let (surface, adapter) = match request_gpu(event_loop, &window, primary) {
             Ok(gpu) => gpu,
             Err(primary) => {
                 tracing::info!("No primary GPU backend ({primary:#}); trying GL");
@@ -254,6 +263,14 @@ impl App {
             }
         };
         tracing::debug!(target: "ultty::startup", "GPU adapter ready");
+        let info = adapter.get_info();
+        tracing::info!(
+            "GPU: {} ({:?}, {:?}, {})",
+            info.name,
+            info.backend,
+            info.device_type,
+            info.driver
+        );
 
         // Scale font size to physical pixels so cosmic-text metrics match
         // the orthographic projection (which uses physical window dimensions).
@@ -302,6 +319,10 @@ impl App {
         // Each terminal's I/O thread parses on its own and pokes the UI
         // through this proxy when there is something new to draw.
         let pty_proxy = std::sync::Mutex::new(event_proxy.clone());
+        let published_panes = control_events::open_panes(&terminal_manager)
+            .into_iter()
+            .map(|(pane, _)| pane)
+            .collect();
         terminal_manager.set_waker(std::sync::Arc::new(move || {
             if let Ok(proxy) = pty_proxy.lock() {
                 let _ = proxy.send_event(AppEvent::RuntimeReadable);
@@ -351,6 +372,7 @@ impl App {
             clipboard,
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             mouse_pressed: false,
+            reported_button: None,
             last_click_time: Instant::now() - CLICK_THRESHOLD * 2,
             click_count: 0,
             last_click_pos: (0, 0),
@@ -374,6 +396,7 @@ impl App {
             protocol_server,
             control_server,
             pending_control_waits: Vec::new(),
+            published_panes,
             socket_wakeup,
             native_search_matches: Vec::new(),
             native_search_active: false,
@@ -768,6 +791,7 @@ impl App {
             tab_width_override,
         );
         self.update_title_location();
+        self.update_tab_statuses();
 
         // Update renderer's tab bar height for dimension calculations
         let new_height = self.tab_bar.content_top();
@@ -781,6 +805,23 @@ impl App {
         }
 
         self.refresh_runtime_wakeup_fds();
+    }
+
+    /// Show each tab's most urgent pane status, and the focused pane's in
+    /// the title band.
+    fn update_tab_statuses(&mut self) {
+        let manager = &self.terminal_manager;
+        for (state, tab) in self.tab_bar.tabs.iter_mut().zip(manager.tabs()) {
+            state.status = tab
+                .terminals
+                .iter()
+                .filter_map(|&pane| manager.terminal(pane)?.shown_status())
+                .max_by_key(|status| status.urgency())
+                .cloned();
+        }
+        self.tab_bar.title_status = manager
+            .focused_terminal()
+            .and_then(|terminal| terminal.shown_status().cloned());
     }
 
     fn freeze_tab_width_after_close(&mut self) {

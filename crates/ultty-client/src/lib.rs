@@ -852,10 +852,18 @@ mod tests {
             }
         };
         let fake = thread::spawn(move || {
-            // Answer the probe the way Ultty does: frames before DA1.
+            // Answer the probe the way Ultty does: its name, then frames
+            // before DA1.
             let mut seen = Vec::new();
             let mut buf = [0u8; 4096];
             while !seen.windows(3).any(|w| w == b"\x1b[c") {
+                let n = master.read(&mut buf).unwrap();
+                seen.extend_from_slice(&buf[..n]);
+            }
+            master
+                .write_all(b"\x1bP>|ultty 0.1.0\x1b\\\x1b[?62;22c")
+                .unwrap();
+            while seen.windows(3).filter(|w| w == b"\x1b[c").count() < 2 {
                 let n = master.read(&mut buf).unwrap();
                 seen.extend_from_slice(&buf[..n]);
             }
