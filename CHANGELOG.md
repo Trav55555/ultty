@@ -17,11 +17,16 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   (never when stdout is not a terminal: a card is then written once, in its
   last state). A thread of its own keeps the session alive while the app
   blocks, and a lost session falls back to text instead of failing.
-  See [inline cards](docs/inline-cards.md).
+  In-band, keys typed while the console is native are kept for
+  `take_input` instead of being swallowed. See [inline cards](docs/inline-cards.md).
 - `ultty-client`: `open_surface` writes a surface's anchor and fallback
   text and sends `CreateSurface` with its contents in one frame;
   `close_surface`, `write_output`, `set_output` and `is_closed` go with it.
   The client now tracks `Resize`, so `viewport_width` stays current.
+  In-band it keeps the keys it reads while looking for protocol data
+  (`take_input`) instead of dropping them, can send its heartbeat without
+  reading the tty (`heartbeat`), and connects on a given terminal
+  (`connect_in_band_on`).
 - `examples/agent-transcript`, a made-up agent session with a tool card and
   a diff card, and `scripts/e2e/agent-transcript.sh`, which checks it in a
   headless Ultty (screenshot and `text --scrollback`, with shell output
@@ -33,7 +38,12 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   instead of `Auto` ones, which took a container's free space: a column of
   fixed-height widgets taller than its content spread them apart. The wire
   is unchanged (margins are always sent); code that wants an `Auto` margin
-  sets it.
+  sets it. Full-scene apps lay out again: content that `Auto` margins used
+  to spread out or centre now packs to the start of its container; centre
+  it with `justify_center`/`align_center`. `ScrollView`, `List`, `Table`
+  and `Modal` now pad their children one cell inside their border, where
+  the ANSI renderer puts them; before, a native border took no room and
+  children could sit on it.
 
 ### Fixed
 
