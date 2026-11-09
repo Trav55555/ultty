@@ -280,7 +280,11 @@ output, prose, a diff card, while a loop prints shell output under it.
    failure to reach Ultty is the `Fallback`, which is also chosen when
    stdout is not a terminal. A fallback card is final once the width
    changes or when it is as tall as the screen, as well as after other
-   output. `examples/agent-transcript` and `scripts/e2e/agent-transcript.sh`
+   output, and when stdout is not a terminal a card is never redrawn but
+   written once in its last state. The console answers the keepalive from
+   a thread of its own (an agent blocks on its model for longer than the
+   10 s in-band timeout) and falls back to text if the session is lost.
+   `examples/agent-transcript` and `scripts/e2e/agent-transcript.sh`
    pass in a headless Ultty and under tmux.
 6. **Later, each its own slice:** growth of the bottom-most live surface,
    surfaces in split panes, mouse actions on surface regions.

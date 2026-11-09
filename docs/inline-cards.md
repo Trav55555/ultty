@@ -34,11 +34,25 @@ console.close(card)?;
 - `close(card)` ends it. In Ultty its rows keep what it last showed, as
   text.
 - `poll_events()` returns what the terminal reported (placed, hidden, shown,
-  evicted, closed). Call it every second or two while idle: it also answers
-  the terminal's keepalive.
+  evicted, closed).
+- The console answers the terminal's keepalive from a thread of its own, so
+  the app can block (on a model, say) for as long as it likes. If the
+  session is lost anyway, the console carries on as the fallback: open
+  cards stay as they were last drawn, and new ones are printed as text.
 - Print through the console, not `println!`. In-band (over ssh) the
   terminal is in raw mode, and the console ends lines with `\r\n` and keeps
-  them in order with the cards.
+  them in order with the cards. Text that another thread prints to stdout
+  while a card opens can land between its anchor and its fallback lines;
+  the card then covers the wrong rows.
+
+**Redraws in the fallback** move the cursor up over the card, so they assume
+the console printed everything on the screen since the card. Output that
+bypasses it (stderr, `tracing`, a subprocess) does not make the card final,
+and the next redraw lands on the wrong lines; send such output through
+`print`. When stdout is not a terminal (a pipe, a log file), cards are
+never redrawn: each is written once, as plain text in its last state, when
+something is printed after it, when it closes, or when the console is
+dropped.
 
 **Width.** A card takes the terminal's width when it opens. In Ultty a live
 card is laid out again when the window is resized, and a closed one is text

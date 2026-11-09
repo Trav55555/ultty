@@ -13,16 +13,32 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   prints a transcript with live cards. In Ultty each card is an inline
   surface drawn in the scrollback and left there as text when closed;
   elsewhere (tmux, other terminals, no tty) it is printed as the view's ANSI
-  rendering and redrawn in place only while it is the last thing printed.
+  rendering and redrawn in place only while it is the last thing printed
+  (never when stdout is not a terminal: a card is then written once, in its
+  last state). A thread of its own keeps the session alive while the app
+  blocks, and a lost session falls back to text instead of failing.
   See [inline cards](docs/inline-cards.md).
 - `ultty-client`: `open_surface` writes a surface's anchor and fallback
   text and sends `CreateSurface` with its contents in one frame;
-  `close_surface`, `write_output` and `set_output` go with it. The client
-  now tracks `Resize`, so `viewport_width` stays current.
+  `close_surface`, `write_output`, `set_output` and `is_closed` go with it.
+  The client now tracks `Resize`, so `viewport_width` stays current.
 - `examples/agent-transcript`, a made-up agent session with a tool card and
   a diff card, and `scripts/e2e/agent-transcript.sh`, which checks it in a
   headless Ultty (screenshot and `text --scrollback`, with shell output
   under the live cards) and under tmux.
+
+### Changed
+
+- `ultty_protocol::Constraints::default()` has zero margins, as in CSS,
+  instead of `Auto` ones, which took a container's free space: a column of
+  fixed-height widgets taller than its content spread them apart. The wire
+  is unchanged (margins are always sent); code that wants an `Auto` margin
+  sets it.
+
+### Fixed
+
+- `DiffView`'s line texts are one cell high in native mode; they were laid
+  out with no height.
 
 ## [0.2.0] - 2026-11-08
 
