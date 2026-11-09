@@ -4,8 +4,9 @@
 use std::collections::VecDeque;
 
 use super::{
-    collect_table, collect_threshold, row_erase, style_id, used_len, Head, Storage, Style,
-    StyleTable, BLANK, CP_MASK, GRAPHEME, SPACER, WIDE, WIDTH_MASK,
+    base, collect_table, collect_threshold, mark_live, remap_key, row_erase, style_key, used_len,
+    Head, Storage, Style, StyleTable, BLANK, CP_MASK, GRAPHEME, SPACER, STYLE_MASK, WIDE,
+    WIDTH_MASK,
 };
 use crate::grid::cell::{Cell, CellFlags};
 use crate::grid::row::{AnchorTag, RowMarks};
@@ -78,7 +79,7 @@ impl CompactRow {
             if len > 0 {
                 self.runs.push(Run {
                     len: len as u16,
-                    style: styles.get(head.style),
+                    style: styles.style(head.style),
                 });
             }
             return;
@@ -88,9 +89,9 @@ impl CompactRow {
         self.text.reserve(cells.len());
         let mut col = 0;
         while col < cells.len() {
-            let id = style_id(cells[col]);
+            let key = style_key(cells[col]);
             let start = col;
-            while col < cells.len() && style_id(cells[col]) == id {
+            while col < cells.len() && style_key(cells[col]) == key {
                 let cell = cells[col];
                 self.push_char(cell);
                 if cell & (WIDTH_MASK | GRAPHEME) != 0 {
@@ -98,8 +99,8 @@ impl CompactRow {
                         && cell & GRAPHEME == 0
                         && cells
                             .get(col + 1)
-                            .is_some_and(|&next| (next & !super::STYLE_MASK) == (BLANK | SPACER))
-                        && cells.get(col + 1).map(|&next| style_id(next)) == Some(id)
+                            .is_some_and(|&next| (next & !STYLE_MASK) == (BLANK | SPACER))
+                        && cells.get(col + 1).map(|&next| style_key(next)) == Some(key)
                     {
                         self.push_char(cells[col + 1]);
                         self.marks.push((col as u16, WIDE_MARK));
@@ -114,7 +115,7 @@ impl CompactRow {
             }
             self.runs.push(Run {
                 len: (col - start) as u16,
-                style: styles.get(id),
+                style: styles.style(key),
             });
         }
     }
@@ -194,21 +195,21 @@ impl StoreA {
     fn collect(&mut self) {
         let mut live = vec![false; self.styles.len()];
         for row in &self.rows {
-            live[row.head.style as usize] = true;
+            mark_live(&mut live, row.head.style);
             for &cell in &row.cells[..usize::from(row.head.used)] {
-                live[style_id(cell) as usize] = true;
+                mark_live(&mut live, style_key(cell));
             }
         }
         let map = collect_table(&mut self.styles, &live);
         for row in &mut self.rows {
-            row.head.style = map[row.head.style as usize];
+            row.head.style = remap_key(&map, row.head.style);
             for cell in &mut row.cells[..usize::from(row.head.used)] {
-                let id = map[style_id(*cell) as usize];
-                *cell = (*cell & !super::STYLE_MASK) | super::base(id);
+                *cell = (*cell & !STYLE_MASK) | base(remap_key(&map, style_key(*cell)));
             }
         }
         self.generation = self.generation.wrapping_add(1);
-        self.collect_at = collect_threshold(self.styles.len());
+        let cells = self.rows.len() * self.rows.first().map_or(0, |row| row.cells.len());
+        self.collect_at = collect_threshold(self.styles.len(), cells);
     }
 }
 
@@ -218,7 +219,7 @@ impl Storage for StoreA {
             rows: (0..rows).map(|_| PackedRow::new(cols)).collect(),
             styles: StyleTable::new(),
             generation: 0,
-            collect_at: collect_threshold(0),
+            collect_at: collect_threshold(0, usize::from(cols) * usize::from(rows)),
             history: VecDeque::new(),
             max_history,
             evicted: 0,
@@ -230,7 +231,7 @@ impl Storage for StoreA {
     }
 
     fn intern(&mut self, style: Style) -> u32 {
-        // Collecting when due, before the lookup, keeps it to one hash.
+        // Collect before adding, so the new id survives.
         if self.styles.len() >= self.collect_at {
             self.collect();
         }
@@ -266,10 +267,10 @@ impl Storage for StoreA {
         self.history.push_back(compact);
     }
 
-    fn scroll_up(&mut self, erase_id: u32) {
+    fn scroll_up(&mut self, erase_key: u64) {
         self.rows.rotate_left(1);
         if let Some(bottom) = self.rows.last_mut() {
-            row_erase(&mut bottom.cells, &mut bottom.head, erase_id);
+            row_erase(&mut bottom.cells, &mut bottom.head, erase_key);
         }
     }
 

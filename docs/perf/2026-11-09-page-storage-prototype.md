@@ -5,7 +5,7 @@ interned styles, a screen page with slot rotation, and append-only history
 pages. It says not to refactor until a prototype has passed a gate. This
 note is that prototype's measurements and the gate applied to them.
 
-**Verdict: not GO.** The page design (variant C) passes every criterion but
+**First-round verdict: not GO.** The page design (variant C) passes every criterion but
 one. It cuts ASCII to 18.6–19.4 instructions per byte and runs the PTY flood
 45–50% faster, but sgr-dense costs 16–23% more instructions and 12–16% more
 wall-clock time, against a limit of +3%. Packed cells alone (variant A) does
@@ -17,10 +17,355 @@ so the ADR is not accepted. The one failing criterion is the cost of
 interning styles, and a fix for it would need its own measurement (see
 Interpretation).
 
+That was the first round. A second round, below, changed the prototype's
+style handling and re-ran the whole gate.
+
+**Second-round verdict: GO on every criterion but the wall-clock spread.**
+Every criterion that measures the design now passes, sgr-dense
+included (+0.5% to +1.4% instructions). The one clause still not met is
+the spread of the PTY medians: under 5% is required, and this shared
+workstation gives 8–10% per arm (4–7.6% in the first round); pinning the
+harness did not help. The medians themselves are +42% and +49%, with 95%
+intervals of about ±2–3%, three times the +15% bar. Read literally, the
+gate is therefore still not GO, on that clause alone; the design question
+it guards (is the gain real and well above +15%?) is answered. "A only"
+does not qualify and the NO-GO rule does not fire. Whether to accept the
+ADR on these numbers, or to rerun the wall clock on a quiet machine
+first, is for the ADR's owners.
+
+**Third-round verdict (quiet machine): GO.** The second round's wall clock
+was rerun unchanged on an idle AWS instance. Per-arm IQR/median is 0.3–2.6%
+(C 0.3–0.7%), under the 5% limit, so the spread clause is met and with it
+every GO criterion. The medians match the workstation's: C runs ascii
++44.8% and +50.9% (95% CI ±0.2%). "A only" still does not qualify (A
+carries 60% and 49% of C's gain) and NO-GO does not fire. One thing the
+quiet machine shows that the workstation could not: sgr-dense is about 4%
+slower in C on the wall clock, not level (see below).
+
+## Third round: quiet machine
+
+The wall-clock half of the second round, rerun on a machine with nothing
+else on it. The binary and the method are the second round's; nothing in
+the prototype changed.
+
+- AWS c7a.2xlarge (AMD EPYC 9R14, 8 vCPUs, one thread per core, so no SMT
+  sibling to share), us-east-1, on demand. Ubuntu 26.04.1, kernel
+  7.0.0-1016-aws, rustc 1.98.1. The instance exposes no cpufreq interface,
+  so there is no governor or turbo to set. Not pinned (`pin` 0-7).
+- Branch `adr-0022-sgr` at `1c91725`, built on the instance with
+  `cargo build --release --locked -p ultty-bench --features proto`.
+  `proto-check` passed on ascii, sgr-dense and cjk before the runs.
+- Quiet: nothing ran but the harness and the SSH session that started it.
+  Timers that could fire during the run (sysstat, apt, man-db, fwupd,
+  fstrim, tmpfiles, update-notifier) and snapd were stopped first. The
+  1-minute load average was 0.20 before the first batch; during the runs it
+  was 1.0–1.5, which is the harness itself (`dd`, the reader and the frame
+  thread on 8 cores).
+
+The method is the Commands section's: three batches of
+`proto-flood --corpus ascii --rounds 40`, then
+`proto-flood --corpus sgr-dense,cjk --rounds 12`, both geometries, plus one
+extra `--corpus sgr-dense --rounds 40` to check the sgr-dense result. Paired
+medians are the median of per-round arm/ref ratios; the 95% intervals are a
+percentile bootstrap over rounds (10,000 resamples).
+
+| case | arm | median MiB/s | IQR / median | paired median vs ref | 95% CI (bootstrap) |
+|---|---|---:|---:|---:|---:|
+| ascii 120x40 | ref | 200.5 | 0.7% | | |
+| ascii 120x40 | A | 255.0 | 2.6% | 1.270 | 1.268–1.274 |
+| ascii 120x40 | C | 290.6 | 0.7% | 1.448 | 1.447–1.451 |
+| ascii 300x75 | ref | 187.5 | 0.7% | | |
+| ascii 300x75 | A | 234.6 | 0.4% | 1.251 | 1.249–1.252 |
+| ascii 300x75 | C | 283.2 | 0.3% | 1.509 | 1.507–1.511 |
+
+| batch | 1-min load before → after | C vs ref 120x40 / 300x75 | A vs ref 120x40 / 300x75 | largest arm IQR/median |
+|---|---|---|---|---:|
+| 1 | 0.20 → 1.02 | 1.450 / 1.511 | 1.270 / 1.251 | 2.7% (A, 120x40) |
+| 2 | 1.02 → 1.42 | 1.454 / 1.507 | 1.274 / 1.252 | 2.6% (A, 120x40) |
+| 3 | 1.42 → 1.24 | 1.445 / 1.507 | 1.269 / 1.249 | 2.6% (A, 120x40) |
+
+The batches agree within 0.6%. Every arm's IQR is under 1% of its median
+except A at 120x40 (2.6%), whose runs fall in two clusters about 3% apart.
+The paired ratios are as tight (IQR/median 0.6–0.8% for C). So the
+workstation's 8–10% was the shared machine, not the harness. Absolute
+rates are about 15% below the workstation's (a 3.7 GHz server core against
+a desktop Ryzen), and the ratios are within 2.5 points of the second
+round's 1.424 and 1.492.
+
+A's share of C's gain is 60% at 120x40 and 49% at 300x75 (per batch 60 /
+60 / 60% and 49 / 50 / 49%), below two thirds as before.
+
+Other corpora (12 rounds at load 1.24 → 1.30; the sgr-dense rows with 40
+rounds at 0.78 → 1.22). Every arm's IQR/median is 1.2% or less.
+
+| case | ref | A | C | A vs ref | C vs ref (95% CI) |
+|---|---:|---:|---:|---:|---:|
+| sgr-dense 120x40, 12 rounds | 98.1 | 93.9 | 94.1 | 0.952 | 0.957 (0.953–0.962) |
+| sgr-dense 300x75, 12 rounds | 97.3 | 92.8 | 93.7 | 0.956 | 0.964 (0.963–0.966) |
+| sgr-dense 120x40, 40 rounds | 98.8 | 93.9 | 94.4 | 0.952 | 0.956 (0.953–0.957) |
+| sgr-dense 300x75, 40 rounds | 97.4 | 93.1 | 93.8 | 0.956 | 0.963 (0.960–0.965) |
+| cjk 120x40 | 67.4 | 84.7 | 102.3 | 1.256 | 1.519 (1.514–1.523) |
+| cjk 300x75 | 65.3 | 81.5 | 100.7 | 1.244 | 1.541 (1.534–1.543) |
+
+**sgr-dense is not level on the wall clock.** C runs it 3.6–4.4% slower
+than the reference (4–5% more time), and A 4.4–4.8% slower. The second
+round called C level, but its intervals there were 0.951–1.102 and
+0.966–1.039; the quiet machine resolves the difference. The gate's
+"no worse than +3%" for sgr-dense is an instruction criterion (§Prototype,
+measurement 1; the first round already reported the other corpora's wall
+clock for information only), and on instructions C is +0.5% to +1.4%, so
+the gate passes. Taken as time, the same 3% would not be met. Why +1%
+instructions costs about 4% of time has not been looked into; the style
+cache's misses on mostly new templates are the first suspect. For real
+colorful output, which repeats a handful of styles, the instruction counts
+above show C ahead of the reference.
+
+### The gate, third round
+
+Only the wall-clock rows change; the instruction and heap rows are the
+second round's.
+
+| criterion (C) | needed | measured | met |
+|---|---|---|---|
+| PTY ascii median, 120x40 and 300x75 | +15% or better | +44.8% and +50.9% (95% CI 1.447–1.451 and 1.507–1.511) | yes |
+| spread of those medians | under 5% | IQR/median 0.3–2.6% per arm (C 0.3–0.7%); batches agree within 0.6% | **yes** |
+| every other GO criterion | as before | as in the second round | yes |
+| "A only": A's share of C's wall-clock gain | two thirds or more | 60% and 49% | no |
+| NO-GO: C's wall-clock gain on ascii | fires under +10% | +44.8% / +50.9% | does not fire |
+
+## Second round: style handling
+
+Branch `adr-0022-sgr`, on top of the first round. Only the prototype's
+style handling changed; the reference, the harnesses and the method are the
+same. Every number in this section is from the second-round build, with
+the reference re-measured in the same binary.
+
+### What the cost was
+
+The first round's profile (Detail, below) put the gap in interning: a
+foldhash `HashMap` lookup and insert for nearly every SGR change, plus a
+collection every few thousand styles that scanned the screen and rehashed
+the survivors. sgr-dense's 8 MiB, 120x40 pass computes 637,560 template
+styles; 343,188 of them are distinct. A cache of recent styles cannot help
+those, and lazy interning cannot either: the corpus prints one to four
+characters after every SGR, so no style is replaced before it is used.
+
+### What changed
+
+1. **Inline styles.** A cell's style field (bits 24..64, 40 bits) now holds
+   either a table id or, with its top bit set, the whole style: foreground
+   and background as a 2-bit kind (default, named, indexed) plus an 8-bit
+   value each, and the 16 flag bits, 37 bits in all. Any style with no
+   truecolor, no underline color and no hyperlink is stored this way and
+   never touches the table. A style that fits inline is always stored
+   inline, so equal keys still mean equal styles. History pages store
+   inline keys as they are; only table ids are remapped.
+2. **Approximate interning.** The table's hash index is replaced by a
+   256-slot direct-mapped cache of recent styles (a multiplicative hash of
+   the style's words). A hit returns the cached id; a miss appends a new id
+   without looking further. A style can then have more than one id. That
+   only splits a uniform row or a history run where it need not; equality
+   of ids still implies equality of styles, and collection drops the
+   duplicates no longer on screen.
+3. **Collection sized to the screen.** The next collection runs once the
+   table has grown by max(4096, 2 × the screen's cells) since the last one
+   (the first round used max(4096, 2 × live)). A collection scans every
+   screen cell, so its cost per new style is now a few instructions at any
+   screen size. The table can reach about three times the screen's cells,
+   about 1.4 MB at 300x75 under truecolor churn.
+4. **History cell copy.** The cells-form copy resizes the page buffer once
+   and writes into it, instead of an `extend_from_slice` per cell, and the
+   style remap's miss path is out of line. This is the same kind of tuning
+   as the first round's; it also helps cjk.
+
+The foldhash dependency is gone. `proto-check` passes 20 of 20 cases at 1
+and at 8 MiB, and the unit tests add an inline round trip and a stream
+that mixes inline and table styles through repeated collections (both fail
+if the key remap or the inline layout is broken).
+
+### Each step on sgr-dense (8 MiB, instructions)
+
+| build | 120x40 | vs ref | 300x75 | vs ref |
+|---|---:|---:|---:|---:|
+| reference | 725.7 M | | 730.2 M | |
+| C, first round | 841.2 M | +15.9% | 895.1 M | +22.6% |
+| + approximate interning | 798.6 M | +10.0% | 829.6 M | +13.6% |
+| + collection sized to the screen | 787.6 M | +8.5% | 792.7 M | +8.6% |
+| + inline styles | 753.1 M | +3.8% | 757.2 M | +3.7% |
+| + history cell copy (final) | 735.9 M | +1.4% | 740.1 M | +1.4% |
+
+Each step was kept because it won on its own. With inline styles, 53% of
+the template styles in this pass skip the table (302,508 of 637,560 go to
+it). The cache-and-append insert costs about 60 instructions (37.9 M over
+637,574 calls) against about 100 for the hash table's (63.8 M), which also
+re-inserted every survivor at each collection (16.9 M more).
+
+### The gate, second round
+
+| criterion (C) | needed | measured | met |
+|---|---|---|---|
+| vt/ascii instructions per byte, 1 and 8 MiB | ≤ 27 | 18.7 / 18.7 at 120x40, 19.5 / 19.5 at 300x75 | yes |
+| scroll | −25% or better | −34.8% to −43.0% | yes |
+| wide-wrap | −25% or better | −46.0% to −55.9% | yes |
+| cjk | no worse than +3% | −35.8% to −43.0% | yes |
+| sgr-dense | no worse than +3% | **+0.5% to +1.4%** | **yes** |
+| PTY ascii median, 120x40 and 300x75 | +15% or better | +42.4% and +49.2% (paired medians, 120 rounds; 95% CI 1.395–1.454 and 1.464–1.515) | yes |
+| spread of those medians | under 5% | IQR/median 8.2–10.0% per arm (7.7–9.8% for the reference and A); batch medians agree within 3% | no (as in the first round; see Wall clock) |
+| live heap | within the current budgets | 1.20 / 1.34 / 9.99 MB against 3.46 / 4.36 / 18.98 MB | yes |
+
+| "A only" test | needed | measured | met |
+|---|---|---|---|
+| A's share of C's instruction cut | two thirds or more | ascii 42–74%, scroll 30–53%, wide-wrap 54–80%, cjk 52–72% | no |
+| A's share of C's wall-clock gain (ascii) | two thirds or more | 66% at 120x40, 55% at 300x75 | no |
+
+| NO-GO test | fires when | measured | fires |
+|---|---|---|---|
+| C's wall-clock gain on ascii | under +10% | +42.4% / +49.2% | no |
+
+Instructions, callgrind inside the timed pass (`scripts/bench/proto-icount.sh
+--jobs 6`, 60 runs):
+
+| corpus | MiB | geometry | ref | A | C | ref instr/B | A instr/B | A vs ref | C instr/B | C vs ref | A's share of C's cut |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| ascii | 1 | 120x40 | 41,922,329 | 31,096,467 | 19,644,816 | 40.0 | 29.7 | -25.8% | 18.7 | -53.1% | 49% |
+| ascii | 1 | 300x75 | 45,238,481 | 34,744,525 | 20,482,817 | 43.1 | 33.1 | -23.2% | 19.5 | -54.7% | 42% |
+| ascii | 8 | 120x40 | 274,973,864 | 187,836,747 | 157,201,705 | 32.8 | 22.4 | -31.7% | 18.7 | -42.8% | 74% |
+| ascii | 8 | 300x75 | 300,907,611 | 217,174,847 | 163,928,790 | 35.9 | 25.9 | -27.8% | 19.5 | -45.5% | 61% |
+| wide-wrap | 1 | 120x40 | 37,113,057 | 25,844,517 | 16,379,398 | 35.4 | 24.6 | -30.4% | 15.6 | -55.9% | 54% |
+| wide-wrap | 1 | 300x75 | 26,907,941 | 17,626,927 | 12,849,629 | 25.7 | 16.8 | -34.5% | 12.3 | -52.2% | 66% |
+| wide-wrap | 8 | 120x40 | 242,360,275 | 153,428,561 | 130,964,340 | 28.9 | 18.3 | -36.7% | 15.6 | -46.0% | 80% |
+| wide-wrap | 8 | 300x75 | 199,338,275 | 125,248,668 | 103,306,001 | 23.8 | 14.9 | -37.2% | 12.3 | -48.2% | 77% |
+| scroll | 1 | 120x40 | 192,511,141 | 158,470,297 | 120,646,710 | 183.6 | 151.1 | -17.7% | 115.1 | -37.3% | 47% |
+| scroll | 1 | 300x75 | 227,835,402 | 198,465,096 | 129,828,534 | 217.3 | 189.3 | -12.9% | 123.8 | -43.0% | 30% |
+| scroll | 8 | 120x40 | 1,480,128,698 | 1,207,446,049 | 965,168,643 | 176.4 | 143.9 | -18.4% | 115.1 | -34.8% | 53% |
+| scroll | 8 | 300x75 | 1,762,023,231 | 1,527,507,465 | 1,038,551,928 | 210.0 | 182.1 | -13.3% | 123.8 | -41.1% | 32% |
+| sgr-dense | 1 | 120x40 | 91,814,931 | 94,680,907 | 92,843,394 | 87.6 | 90.3 | +3.1% | 88.5 | +1.1% | n/a |
+| sgr-dense | 1 | 300x75 | 92,218,274 | 94,438,942 | 92,641,680 | 87.9 | 90.1 | +2.4% | 88.3 | +0.5% | n/a |
+| sgr-dense | 8 | 120x40 | 725,710,475 | 747,249,996 | 735,907,626 | 86.5 | 89.1 | +3.0% | 87.7 | +1.4% | n/a |
+| sgr-dense | 8 | 300x75 | 730,214,780 | 750,500,034 | 740,128,548 | 87.0 | 89.5 | +2.8% | 88.2 | +1.4% | n/a |
+| cjk | 1 | 120x40 | 230,295,321 | 178,972,888 | 132,918,106 | 219.6 | 170.7 | -22.3% | 126.8 | -42.3% | 53% |
+| cjk | 1 | 300x75 | 234,772,241 | 182,460,639 | 133,791,459 | 223.9 | 174.0 | -22.3% | 127.6 | -43.0% | 52% |
+| cjk | 8 | 120x40 | 1,644,263,963 | 1,222,810,539 | 1,055,912,910 | 196.0 | 145.8 | -25.6% | 125.9 | -35.8% | 72% |
+| cjk | 8 | 300x75 | 1,675,354,788 | 1,256,825,225 | 1,063,715,913 | 199.7 | 149.8 | -25.0% | 126.8 | -36.5% | 68% |
+
+Against the first round, C's other corpora moved by under 1% except cjk
+(−3% to −5%, from the history copy). ascii and scroll are 0.5–0.9% worse:
+the wider style key in the row heads and the inline branch in the lookup.
+A is 1–2% worse on ascii and scroll for the same reasons. The reference's
+counts moved by up to 0.7% (cjk) between the two builds, as the first round
+saw the feature move it; each comparison is within one build.
+
+### Wall clock, second round
+
+Same harness and method as the first round: `proto-flood`, 32 MiB, three
+batches of 40 interleaved rounds for ascii, 12 rounds for sgr-dense and
+cjk. The batches ran right after a period of load 20–47 from other agents'
+builds, at load 5.8–11 (ascii) and 6.5–8.7 (sgr-dense and cjk). Absolute
+rates are about 10% below the first round's for every arm, the reference
+included.
+
+| case | arm | median MiB/s | IQR / median | paired median vs ref | 95% CI (bootstrap) |
+|---|---|---:|---:|---:|---:|
+| ascii 120x40 | ref | 233.1 | 9.8% | | |
+| ascii 120x40 | A | 302.1 | 7.7% | 1.278 | 1.261–1.292 |
+| ascii 120x40 | C | 336.5 | 10.0% | 1.424 | 1.395–1.454 |
+| ascii 300x75 | ref | 216.7 | 9.7% | | |
+| ascii 300x75 | A | 276.5 | 9.5% | 1.270 | 1.251–1.291 |
+| ascii 300x75 | C | 327.2 | 8.2% | 1.492 | 1.464–1.515 |
+
+Per batch, C over the reference was 1.416 / 1.427 / 1.448 at 120x40 and
+1.496 / 1.461 / 1.500 at 300x75; A over the reference 1.274 / 1.273 /
+1.291 and 1.262 / 1.270 / 1.278. A's share of C's gain is 66% and 55%,
+below two thirds. A fourth batch pinned to cores 8–11 (not part of the
+method, only to test whether pinning tightens it) gave 1.452 and 1.462
+with IQR/median 9.6–12.6%: the spread comes from the shared machine, not
+from scheduling across cores. The paired per-round ratios are as spread as
+the arms (IQR/median 10–12%), so pairing does not get under 5% either.
+
+| case | ref | A | C | A vs ref | C vs ref (95% CI) |
+|---|---:|---:|---:|---:|---:|
+| sgr-dense 120x40 | 112.1 | 111.2 | 117.0 | 0.955 | 1.061 (0.951–1.102) |
+| sgr-dense 300x75 | 119.8 | 113.3 | 118.7 | 0.952 | 1.001 (0.966–1.039) |
+| cjk 120x40 | 84.3 | 104.6 | 124.7 | 1.271 | 1.497 (1.463–1.530) |
+| cjk 300x75 | 79.7 | 100.3 | 121.6 | 1.253 | 1.518 (1.431–1.591) |
+
+sgr-dense is now level with the reference on the wall clock (it was 12–16%
+slower), in line with the instruction counts; A is still about 5% slower.
+
+### Live heap, second round
+
+| case | reference | A | C | budget |
+|---|---:|---:|---:|---:|
+| empty 300x75 | 1,172,860 | 268,983 | 265,709 | 1,229,000 |
+| typical 10k lines, 120x40 | 3,297,990 | 3,215,268 | 1,195,364 | 3,461,000 |
+| typical 10k lines, 300x75 | 4,152,860 | 3,359,703 | 1,338,189 | 4,358,000 |
+| sgr-dense 10k lines, 120x40 | 18,077,990 | 17,995,268 | 9,989,412 | 18,980,000 |
+
+C's typical cases grew by about 40 KB (about 4 bytes per history row, the
+wider style key in the row head); sgr-dense fell by 0.4 MB, because inline
+styles take no page style entries. All stay at a third of the reference or
+less, except sgr-dense at 55%.
+
+### How representative sgr-dense is, and real colorful output
+
+sgr-dense draws each SGR from seven kinds at random (256-color fg, truecolor
+fg, 256-color bg, a bold/dim/italic plus basic fg pair, a dark truecolor bg,
+reset, and bold-italic-underline) and prints one to four letters after each.
+The template accumulates until a reset, so about half of the printed
+templates carry a truecolor and almost every one is new. Real output was
+captured and replayed through the same passes for comparison: `ls -l
+--color=always` over three large directories, `git log -p --color=always`
+over 400 commits, `rustc` diagnostics for 400 broken functions, and the
+VT core's Rust source through `pygmentize` (monokai) as truecolor and as
+256-color. Each was reduced to text, SGR and CRLF (tabs expanded, other
+escapes dropped, which the prototype would ignore), repeated to about
+8 MiB, and passed `proto-check` cell for cell at both geometries.
+
+| input | SGR per KiB | cells per SGR | distinct templates | truecolor share |
+|---|---:|---:|---:|---:|
+| sgr-dense (8 MiB) | 80 | 2.4 | 343,188 | 47% |
+| ls --color | 33 | 24.8 | 7 | 0% |
+| git log -p | 68 | 10.6 | 7 | 0% |
+| rustc diagnostics | 80 | 8.1 | 6 | 0% |
+| pygmentize, 256-color | 108 | 2.0 | 7 | 0% |
+| pygmentize, truecolor | 75 | 2.0 | 7 | 100% |
+
+So sgr-dense is about as SGR-dense as highlighted source, but its styles
+almost never repeat, where real output repeats a handful. It stands for
+gradient and image output (lolcat, chafa, truecolor TUI gradients), not
+for `ls`, diffs, diagnostics or highlighters. Its worst case is still the
+right gate, because the table path is what such output takes.
+
+C against the reference on the captures (instructions; first-round C
+for comparison):
+
+| input | ref instr/B 120x40 | C first round | C now | A now | C now, 300x75 |
+|---|---:|---:|---:|---:|---:|
+| ls --color | 76.4 | -29.1% | -38.3% | -25.3% | -39.7% |
+| git log -p | 72.5 | -25.6% | -29.4% | -21.5% | -32.1% |
+| rustc diagnostics | 91.0 | -14.7% | -24.1% | -12.0% | -26.2% |
+| pygmentize, 256-color | 86.7 | -0.5% | -8.3% | -2.7% | -9.5% |
+| pygmentize, truecolor | 67.9 | -1.2% | -3.9% | +1.1% | -5.1% |
+
+Real colorful output was never as bad for C as sgr-dense, because the
+first round's hash table hit on repeated styles. The second round helps
+all of it: inline styles remove the table from the 256-color and
+basic-color cases, and the cache handles the truecolor highlighter's seven
+styles. Truecolor highlighting gains least: every token carries a
+truecolor SGR, so it takes the table path on every change, as sgr-dense
+does, though nearly always as a cache hit. (The first-round column is the
+first-round binary against the second-round reference; the reference moves
+by under 1% between builds.)
+
+The sections from here on are the first round's. Environment, What was
+built and Commands hold for both rounds, with the style handling replaced
+as described above.
+
 ## Environment
 
 - 2026-11-09. Branch `adr-0022-prototype`: `38c1ff5` (the ADR) plus
-  `cd31763` (the prototype).
+  `cd31763` (the prototype). Second round: branch `adr-0022-sgr`, the
+  same plus the style-handling commit.
 - Ryzen 5 7600 (6 cores, 12 threads), Ubuntu 26.04.1, Linux 7.0.0-42,
   governor `powersave`, EPP `balance_performance`, no pinning.
 - The workstation was shared with other agents' builds. The 1-minute load
@@ -83,7 +428,7 @@ target/release/ultty-proto-mem
 cargo test -p ultty-vt --features page-proto --lib proto
 ```
 
-## Summary: the gate
+## First round: the gate
 
 | criterion (C) | needed | measured | met |
 |---|---|---|---|
@@ -105,7 +450,7 @@ cargo test -p ultty-vt --features page-proto --lib proto
 |---|---|---|---|
 | C's wall-clock gain on ascii | under +10% | +45.5% / +49.9% | no |
 
-## Detail
+## First round: detail
 
 ### Instructions (callgrind inside the timed pass)
 
@@ -264,7 +609,7 @@ C uses 35%, 34% and 55% of the reference. These match the ADR §9 estimates
 (1.1–1.3, 1.3–1.5 and about 10.3 MB). A saves little, because its history
 is today's `CompactRow` format.
 
-## Interpretation
+## First round: interpretation
 
 - **The page design delivers what the ADR said for plain output, and more.**
   C reaches 18.6–19.4 instructions per byte on ascii, below the ADR's
