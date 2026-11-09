@@ -34,6 +34,9 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Added
 
+- Shift+click and Shift+drag select text even while a program tracks the
+  mouse, as in xterm and other terminals; the program sees none of it.
+
 - Shell integration for bash 4.4+ and zsh in `dist/shell-integration/`
   (OSC 133 prompt, command and exit status marks), installed by
   `install.sh`, `make install`, the packages and the Homebrew formula under
@@ -191,6 +194,13 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 - `install.sh` refuses platforms without a release build.
 
 ### Fixed
+
+- A program that tracks the mouse with motion (modes 1002/1003, as Claude
+  Code's full mouse mode sets) now sees drags: they were reported as
+  motion with no button (code 35) and the release as button 3, so Claude
+  Code's text selection never extended. Drags report the held button and
+  an SGR release names it. Mode 1002 alone no longer reports motion with
+  no button held.
 
 - Resizing the window no longer leaves the process up to 100 MB larger.
   Reflow decoded the whole scrollback and built every row at full size

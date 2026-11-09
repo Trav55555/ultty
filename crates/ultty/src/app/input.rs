@@ -187,8 +187,16 @@ impl App {
             return;
         }
 
-        // Check if mouse tracking is enabled and send event to PTY
-        if self.terminal().is_some_and(|t| t.mouse_tracking_enabled()) {
+        // A program tracking the mouse gets its presses, except with Shift
+        // held, which selects text as in other terminals. A release goes
+        // where its press went.
+        let report_to_program = self.terminal().is_some_and(|t| t.mouse_tracking_enabled())
+            && if state == ElementState::Pressed {
+                !self.modifiers.shift_key()
+            } else {
+                self.reported_button.is_some()
+            };
+        if report_to_program {
             // Don't intercept UI elements when mouse tracking is on
             if self.tab_bar.visible && y < self.tab_bar.height() {
                 // Still allow tab bar interaction
@@ -535,19 +543,6 @@ impl App {
                 col as f32,
                 row as f32,
             );
-        }
-
-        // Check if motion tracking is enabled
-        if self.terminal().is_some_and(|t| t.track_mouse_motion()) && self.mouse_pressed {
-            let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
-            // When button is held, report as Left button for drag
-            let mods = self.mouse_modifiers();
-            if let Some(bytes) = self.terminal().and_then(|t| {
-                t.encode_mouse_event(TerminalMouseButton::Left, col, row, true, true, mods)
-            }) {
-                let _ = self.send_report(&bytes);
-            }
-            return;
         }
 
         let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
