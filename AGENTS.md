@@ -1,7 +1,7 @@
 # Ultty — Agent Guide
 
 GPU-accelerated terminal emulator + TUI framework. Rust workspace, edition 2021,
-MSRV 1.89 (`rust-version` in the root `Cargo.toml`). The toolchain is pinned by
+MSRV 1.90 (`rust-version` in the root `Cargo.toml`). The toolchain is pinned by
 `rust-toolchain.toml`.
 
 [CLAUDE.md](CLAUDE.md) is the authoritative guide for build commands,
@@ -42,17 +42,21 @@ documentation; run `cargo test --workspace` and read the number from there.
 and CI live; GitHub (`github.com/Trav55555/ultty`) is a push mirror. Open PRs
 on Gitea (`tea pulls create`), not GitHub.
 
-**CI** (`.gitea/workflows/ci.yml`, Gitea Actions on Linux) runs eight jobs:
-`fmt`, `security-audit`, `clippy` (`--all-targets -D warnings`), `test`, `msrv`
-(`cargo check --workspace --all-targets` on 1.89), `vt-integrity`, `fuzz`, and
-`gui-smoke` (Ultty under Xvfb with software Vulkan). There is no coverage or
+**CI** (`.gitea/workflows/ci.yml`, Gitea Actions on Linux, `runs-on: ultty`)
+runs nine jobs: `fmt`, `security-audit`, `clippy` (`--all-targets -D
+warnings`), `test`, `msrv` (`cargo check --workspace --all-targets` on 1.90),
+`porygon-tui`, `vt-integrity`, `fuzz`, and `gui-smoke` (Ultty under Xvfb with
+software Vulkan). The `ultty` pool's image, defined in the gitea-server
+repository, provides every toolchain and package; jobs install nothing, and a
+toolchain bump means a new image. There is no coverage or
 benchmark job, and no macOS runner: macOS is only built by the release
 workflow. Windows requires future named-pipe/ConPTY platform work.
 **RUSTFLAGS=-Dwarnings** — all warnings are errors.
 
+`.gitea/workflows/release.yml` (tag push) builds the Linux x86_64 release on
+the same pool, publishes it on Gitea and then to the GitHub release.
 `.github/workflows/live-smoke.yml` (manual dispatch, self-hosted GUI runner) and
-`.github/workflows/release.yml` (tag push) are the other two workflows; they
-run on GitHub, from the mirror.
+`.github/workflows/release.yml` (tag push) run on GitHub, from the mirror.
 
 ## Code Style
 

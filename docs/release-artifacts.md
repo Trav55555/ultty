@@ -49,6 +49,25 @@ scripts/render-homebrew-formula.sh \
   --out artifacts/ultty.rb
 ```
 
+## Gitea Release Workflow
+
+`.gitea/workflows/release.yml` runs on Gitea for every pushed `v*` tag, on the
+`ultty` runner pool. It tests, builds the Linux x86_64 tarball, `.deb` and
+`.rpm` with the smokes above, writes `SHA256SUMS`, and publishes them as the
+Gitea release with the tag's `CHANGELOG.md` section as notes. It then
+publishes the same files to the GitHub release on `Trav55555/ultty`, which is
+where `install.sh` downloads from. It does not build macOS or aarch64 targets,
+render the Homebrew formula, or sign build provenance; the GitHub release
+workflow still does those.
+
+The GitHub step needs a Gitea Actions secret named `GH_RELEASE_TOKEN` on
+`trav/ultty`: a fine-grained GitHub personal access token for the
+`Trav55555/ultty` repository only, with Contents read and write. It waits for
+the push mirror to deliver the tag and checks that the tag names the commit
+that was built. If the GitHub release workflow published the release first,
+the step leaves it alone. A draft left by a failed attempt stops the step;
+delete the draft and re-run the job.
+
 ## Release Targets
 
 v0.1.0 was published with Linux x86_64 builds only, and `install.sh` refuses
