@@ -12,6 +12,10 @@
 //! the request on the same loop iteration, so pacing is the frame interval
 //! alone, as before.
 //!
+//! Because the callbacks pace frames on Wayland, the surface presents in
+//! Mailbox there rather than FIFO (`renderer::present_mode`): a FIFO present
+//! could otherwise be held a further frame by the driver's own throttling.
+//!
 //! An occluded window draws nothing and asks for nothing until it is shown
 //! again; output is still parsed meanwhile.
 
