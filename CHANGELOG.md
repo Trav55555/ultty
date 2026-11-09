@@ -9,6 +9,18 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Added
 
+- `ulttui-lua` (prototype): write a ulttui app in Luau, run it with
+  `ulttui-lua app.luau`, and every save reloads it, keeping its state. The
+  script returns an Elm-style app table (`init`, `update`, `view`, named
+  `every` timers) and builds views from `text`, `column`, `row`, `card`,
+  `scroll`, `list`, `progress`, `spinner`, `button` and `input`; unknown
+  props are errors with file and line. `run{}` starts processes only with
+  `--allow-exec`; `json.decode` reads their output. Scripts run in Luau's
+  sandbox. A broken save leaves the last good version running under an
+  error banner. Native in Ultty, ANSI elsewhere. Examples in
+  `examples/lua/`; see [Luau apps](docs/lua.md).
+- `ulttui`: `Row::padding` and `List::selected` builders.
+
 - `ulttui::inline::Console` (ADR 0020 slice 5): a command-line program
   prints a transcript with live cards. In Ultty each card is an inline
   surface drawn in the scrollback and left there as text when closed;
