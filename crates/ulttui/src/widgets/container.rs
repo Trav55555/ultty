@@ -358,6 +358,11 @@ impl Row {
         self
     }
 
+    pub fn padding(mut self, padding: f32) -> Self {
+        self.constraints = self.constraints.padding_all(Dimension::Cells(padding));
+        self
+    }
+
     pub fn justify_center(mut self) -> Self {
         self.constraints.justify_content = ultty_protocol::JustifyContent::Center;
         self
@@ -613,6 +618,24 @@ mod tests {
         assert_eq!(c.flex_direction, FlexDirection::Column);
         assert_eq!(c.gap.height, Dimension::Cells(2.0));
         assert_eq!(c.padding.top, Dimension::Cells(1.0));
+    }
+
+    #[test]
+    fn row_padding_insets_children_in_both_modes() {
+        let row = Row::new().padding(1.0).child(Text::new("ab"));
+        let c = <Row as View>::constraints(&row);
+        assert_eq!(c.padding.left, Dimension::Cells(1.0));
+        assert_eq!(c.padding.bottom, Dimension::Cells(1.0));
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(4, 3)).unwrap();
+        terminal
+            .draw(|frame| row.render_ansi(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 1)].symbol(), " ");
+        assert_eq!(buffer[(1, 1)].symbol(), "a");
+        assert_eq!(buffer[(2, 1)].symbol(), "b");
     }
 
     #[test]

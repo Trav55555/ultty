@@ -54,6 +54,12 @@ impl<T> List<T> {
         self
     }
 
+    /// Select the visible item at `index` (clamped to the last one).
+    pub fn selected(mut self, index: usize) -> Self {
+        self.select_index(index);
+        self
+    }
+
     pub fn selected_index(&self) -> usize {
         if self.filtered_indices.is_empty() {
             0
@@ -411,6 +417,13 @@ mod tests {
 
     fn ten_items() -> List<String> {
         List::new().items((0..10).map(|i| format!("item {i}")).collect())
+    }
+
+    #[test]
+    fn list_selected_builder_sets_and_clamps_selection() {
+        assert_eq!(ten_items().selected(4).selected_index(), 4);
+        assert_eq!(ten_items().selected(42).selected_index(), 9);
+        assert_eq!(List::<String>::new().selected(3).selected_index(), 0);
     }
 
     #[test]

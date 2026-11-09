@@ -6,6 +6,7 @@ members = [
     "crates/ultty-protocol",
     "crates/ultty-client",
     "crates/ultty-vt",
+    "crates/ulttui-lua",
     "examples/hello-native",
     "examples/counter-app",
     "examples/todo-app",
