@@ -30,6 +30,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
+/// The window's title until the focused pane sets one.
+const WINDOW_TITLE: &str = "Ultty";
+
 /// Default window dimensions.
 const DEFAULT_WIDTH: u32 = 800;
 const DEFAULT_HEIGHT: u32 = 600;
@@ -88,10 +91,18 @@ const TAB_CLOSE_WIDTH_FREEZE_DURATION: Duration = Duration::from_secs(3);
 const TAB_TITLE_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 /// User events sent to the winit application loop.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 enum AppEvent {
     /// At least one runtime fd is readable and should be drained on the UI thread.
     RuntimeReadable,
+    /// A request from assistive technology, for [`ultty::a11y::Adapter`].
+    Accessibility(accesskit_winit::Event),
+}
+
+impl From<accesskit_winit::Event> for AppEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        Self::Accessibility(event)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,6 +115,8 @@ struct TabWidthFreeze {
 pub struct App {
     /// Window
     window: Arc<Window>,
+    /// Bridge to assistive technology; `None` with `accessibility = false`.
+    accessibility: Option<ultty::a11y::Adapter>,
     /// wgpu surface
     surface: wgpu::Surface<'static>,
     /// GPU renderer
@@ -226,11 +239,13 @@ impl App {
 
         // Create window with transparency support if opacity < 1
         let attributes = Window::default_attributes()
-            .with_title("Ultty")
+            .with_title(WINDOW_TITLE)
             .with_inner_size(LogicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT))
             .with_min_inner_size(LogicalSize::new(200.0, 100.0))
             .with_transparent(true)
-            .with_decorations(false);
+            .with_decorations(false)
+            // AccessKit must see the window before it is first shown.
+            .with_visible(!config.behavior.accessibility);
         // The Wayland app id and X11 WM_CLASS: desktops match it to
         // ultty.desktop (StartupWMClass=ultty) to show Ultty's icon and name.
         // Wayland had no app id at all, so GNOME showed a generic icon.
@@ -241,6 +256,15 @@ impl App {
         let window = event_loop.create_window(attributes)?;
         let window = Arc::new(window);
         tracing::debug!(target: "ultty::startup", "window created");
+        // The adapter connects to the session bus on its own thread, so
+        // neither a slow nor a missing bus holds up the window.
+        let accessibility = config.behavior.accessibility.then(|| {
+            let adapter =
+                ultty::a11y::Adapter::new(event_loop, &window, WINDOW_TITLE, event_proxy.clone());
+            window.set_visible(true);
+            tracing::debug!(target: "ultty::startup", "accessibility adapter ready, window shown");
+            adapter
+        });
         // winit leaves input methods off; without this, fcitx and ibus
         // users cannot type Chinese, Japanese or Korean.
         window.set_ime_allowed(true);
@@ -355,6 +379,7 @@ impl App {
 
         let mut app = Self {
             window,
+            accessibility,
             surface,
             renderer,
             terminal_manager,
@@ -1532,6 +1557,13 @@ impl ApplicationHandler<AppEvent> for AppHandler {
             AppEvent::RuntimeReadable => {
                 if let Some(app) = self.app.as_mut() {
                     app.update_and_schedule(event_loop);
+                }
+            }
+            AppEvent::Accessibility(event) => {
+                if let Some(app) = self.app.as_mut() {
+                    if let Some(adapter) = app.accessibility.as_mut() {
+                        adapter.handle(&app.window, event.window_event);
+                    }
                 }
             }
         }

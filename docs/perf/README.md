@@ -67,6 +67,9 @@ The current dated evidence set is:
 - [`2026-11-08-nvidia-idle-wakeups.md`](./2026-11-08-nvidia-idle-wakeups.md)
   for the ~113 idle wakeups/s on NVIDIA, which come from a driver thread, not
   from Ultty.
+- [`2026-11-08-accessibility-adapter.md`](./2026-11-08-accessibility-adapter.md)
+  for the AccessKit adapter's cost: none at startup, two idle wakeups/s from
+  zbus's blocking pool, hence `accessibility = false` by default.
 - [`2026-11-08-live-throughput.md`](./2026-11-08-live-throughput.md) for the
   live flood profile (the PTY I/O thread is CPU-bound on parse, grid and
   scrollback encoding), the parser, scrollback and frame-cost cuts, and the

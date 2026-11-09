@@ -269,7 +269,10 @@ impl App {
 
     /// Reload configuration from disk.
     pub(super) fn reload_config(&mut self) {
-        let new_config = Config::load();
+        let mut new_config = Config::load();
+        if new_config.behavior.keep_start_only(&self.config.behavior) {
+            tracing::info!("behavior.accessibility changed; it takes effect after Ultty restarts");
+        }
 
         // Update color scheme
         self.renderer
