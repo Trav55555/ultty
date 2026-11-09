@@ -2387,6 +2387,8 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "ultty-protocol",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
