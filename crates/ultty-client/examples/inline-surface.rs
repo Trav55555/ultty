@@ -1,21 +1,23 @@
 //! Open one inline surface (ADR 0020) and hold it, for
 //! `scripts/e2e/inline-surface.sh`.
 //!
-//!     inline-surface [hold-seconds]
+//!     inline-surface [hold-seconds] [close-when]
 //!
 //! Writes the surface's anchor and three lines of fallback text to stdout,
 //! sends `CreateSurface` with an opaque magenta card over the socket, and
 //! keeps the session open (answering pings) for `hold-seconds`, 60 by
-//! default. Surface events go to stderr, one per line. Exits 1 outside
-//! Ultty or when the terminal does not offer inline surfaces.
+//! default. Once a file exists at the `close-when` path, it closes the
+//! surface (`CloseSurface`) and exits when the terminal says it is closed.
+//! Surface events go to stderr, one per line. Exits 1 outside Ultty or when
+//! the terminal does not offer inline surfaces.
 
 use std::io::Write;
 use std::time::{Duration, Instant};
 
 use ultty_client::UlttyClient;
 use ultty_protocol::{
-    AppMessage, Color, Constraints, Content, Dimension, RegionId, Style, TerminalMessage,
-    TextContent, CAP_INLINE_SURFACES,
+    AppMessage, Color, Constraints, Content, Dimension, RegionId, Style, SurfaceEventKind,
+    TerminalMessage, TextContent, CAP_INLINE_SURFACES,
 };
 
 /// The surface root's id; well clear of the ids the client hands out.
@@ -33,6 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|arg| arg.parse::<u64>())
         .transpose()?
         .map_or(Duration::from_secs(60), Duration::from_secs);
+    let close_when = std::env::args().nth(2).map(std::path::PathBuf::from);
 
     let mut client = UlttyClient::connect()?;
     if !client.supports_capability(CAP_INLINE_SURFACES) {
@@ -82,11 +85,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.end_frame(frame)?;
 
     let until = Instant::now() + hold;
+    let mut closing = false;
     while Instant::now() < until {
+        if !closing && close_when.as_deref().is_some_and(|path| path.exists()) {
+            let frame = client.begin_frame()?;
+            client.send(&AppMessage::CloseSurface { id: SURFACE })?;
+            client.end_frame(frame)?;
+            closing = true;
+        }
         for event in client.poll_events()? {
             match event {
                 TerminalMessage::SurfaceEvent { id, kind } => {
                     eprintln!("inline-surface: surface {} {:?}", id.0, kind);
+                    if kind == SurfaceEventKind::Closed {
+                        return Ok(());
+                    }
                 }
                 TerminalMessage::Error { code, message } => {
                     eprintln!("inline-surface: error {code}: {message}");

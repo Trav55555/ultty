@@ -241,6 +241,8 @@ pub struct Terminal {
     /// Content version of the active grid when the selection was made.
     /// A selection is only valid while the content it refers to is unchanged.
     selection_content_version: u64,
+    /// [`Buffer::rewrite_count`] when the selection was made.
+    selection_rewrite_count: u64,
     /// Whether the view was scrolled back when the selection started. New
     /// output snaps the view to the bottom, so such a selection cannot be
     /// kept per row.
@@ -335,6 +337,7 @@ impl Terminal {
             modes: TerminalModes::default(),
             selection: None,
             selection_content_version: 0,
+            selection_rewrite_count: 0,
             selection_started_scrolled: false,
             title: String::new(),
             title_stack: Vec::new(),
@@ -506,6 +509,12 @@ impl Terminal {
         &self.main
     }
 
+    /// Mutable access to the main screen's buffer, whichever screen is
+    /// shown, for writing an inline surface into its rows (ADR 0020).
+    pub fn main_buffer_mut(&mut self) -> &mut Buffer {
+        &mut self.main
+    }
+
     /// Get mutable access to the active buffer.
     ///
     /// This does not touch the selection: cursor moves and viewport scrolling
@@ -593,28 +602,47 @@ impl Terminal {
     /// written, scrolled, erased, or resized) since the selection was made.
     /// Changes to other rows, such as a spinner or status line an app keeps
     /// repainting, leave it alone. A selection made or viewed while scrolled
-    /// back is dropped by any change, because new output moves the view.
+    /// back is dropped by any change, because new output moves the view;
+    /// rows rewritten in place (an inline surface written into its rows)
+    /// do not move it, so they drop only a selection that covers them.
     pub fn selection(&self) -> Option<&Selection> {
         let selection = self.selection.as_ref()?;
         let grid = self.grid();
+        let (start, end) = selection.ordered();
+        let max_row = i32::from(grid.dimensions().rows) - 1;
+        let on_screen = end.row >= 0 && start.row <= max_row;
+        let first = start.row.clamp(0, max_row.max(0)) as u16;
+        let last = end.row.clamp(0, max_row.max(0)) as u16;
+        if self.rows_rewritten_since_selection(start.row, end.row) {
+            return None;
+        }
         if self.selection_content_version == grid.content_version() {
             return Some(selection);
         }
         if self.selection_started_scrolled || self.buffer().is_scrolled() {
             return None;
         }
-        let (start, end) = selection.ordered();
-        let max_row = i32::from(grid.dimensions().rows) - 1;
-        if end.row < 0 || start.row > max_row {
+        if !on_screen {
             return Some(selection);
         }
-        let first = start.row.clamp(0, max_row) as u16;
-        let last = end.row.clamp(0, max_row) as u16;
         if grid.rows_changed_since(self.selection_content_version, first..=last) {
             None
         } else {
             Some(selection)
         }
+    }
+
+    /// Whether any row the selection covers, visual rows `first..=last`
+    /// counted from the top of the view (negative above it, past the
+    /// screen below it), was rewritten in place since it was made.
+    fn rows_rewritten_since_selection(&self, first: i32, last: i32) -> bool {
+        let buffer = self.buffer();
+        let top = buffer.history_len().saturating_sub(buffer.scroll_offset()) as i64;
+        let line = |row: i32| (top + i64::from(row)).max(0) as usize;
+        let (first, last) = (line(first), line(last));
+        let end = buffer.total_lines().saturating_sub(1);
+        first <= end
+            && buffer.rows_rewritten_since(self.selection_rewrite_count, first..=last.min(end))
     }
 
     /// Start a new selection.
@@ -625,6 +653,7 @@ impl Terminal {
             mode,
         });
         self.selection_content_version = self.grid().content_version();
+        self.selection_rewrite_count = self.buffer().rewrite_count();
         self.selection_started_scrolled = self.buffer().is_scrolled();
     }
 

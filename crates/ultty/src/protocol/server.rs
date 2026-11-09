@@ -287,7 +287,12 @@ impl ProtocolServer {
     }
 
     fn remove_session(&mut self, key: usize) {
-        if let Some(session) = self.sessions.remove(&key) {
+        if let Some(mut session) = self.sessions.remove(&key) {
+            // Its surfaces freeze where they stand, with their last cells.
+            session.freeze_surfaces();
+            for pairing in self.pairings.values_mut() {
+                pairing.session_ending(&mut session);
+            }
             if let Some(fd) = session.stream_fd() {
                 let _ = self.poller.delete(fd);
             }
@@ -585,7 +590,8 @@ impl ProtocolServer {
     /// Pair the inline surfaces of `tab_id`'s sessions with the anchors in
     /// `terminal`'s output, as of `now`; see [`AnchorPairing::update`].
     /// `single_pane` says the terminal is the tab's only pane, and
-    /// `on_screen` that it is drawn now.
+    /// `on_screen` that it is drawn now. Returns whether a surface was
+    /// written into the terminal's rows.
     pub fn pair_inline_surfaces(
         &mut self,
         tab_id: TabId,
@@ -594,17 +600,18 @@ impl ProtocolServer {
         single_pane: bool,
         on_screen: bool,
         now: Instant,
-    ) {
+    ) -> bool {
         let mut sessions: Vec<&mut NativeSession> = self
             .sessions
             .values_mut()
             .filter(|session| session.tab_id() == tab_id)
             .collect();
         let pairing = self.pairings.entry(terminal_id).or_default();
-        pairing.update(terminal, &mut sessions, single_pane, on_screen, now);
+        let wrote = pairing.update(terminal, &mut sessions, single_pane, on_screen, now);
         if pairing.is_idle() {
             self.pairings.remove(&terminal_id);
         }
+        wrote
     }
 
     /// Drop, with `Error` 400, every surface whose anchor has not come in

@@ -1,7 +1,7 @@
 //! Terminal buffer with scrollback history.
 
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use super::history::CompactRow;
 use super::{AnchorTag, Cell, CellFlags, Dimensions, Grid, Row, RowMarks};
@@ -77,6 +77,12 @@ pub struct Buffer {
     lost_in_reflow: Vec<(u16, u64, Anchor)>,
     /// The serial the next placed anchor gets.
     next_anchor_serial: u64,
+    /// Rows rewritten in place ([`Buffer::replace_row`]) so far.
+    rewrites: u64,
+    /// The rewrite count after each line was last rewritten, by line
+    /// number (`evicted` plus absolute index). Lines evicted since are
+    /// pruned.
+    rewritten_lines: BTreeMap<usize, u64>,
     /// Rows looked at for anchor bookkeeping, so tests can bound its cost.
     #[cfg(test)]
     anchor_visits: std::cell::Cell<usize>,
@@ -430,6 +436,8 @@ impl Buffer {
             evicted: 0,
             lost_in_reflow: Vec::new(),
             next_anchor_serial: 1,
+            rewrites: 0,
+            rewritten_lines: BTreeMap::new(),
             #[cfg(test)]
             anchor_visits: std::cell::Cell::new(0),
         }
@@ -591,9 +599,92 @@ impl Buffer {
         }
     }
 
-    /// The anchor tag of the row at `absolute_index`, without decoding a
-    /// scrollback row.
-    fn anchor_at(&self, absolute_index: usize) -> Option<AnchorTag> {
+    /// Replace the cells of the row at `absolute_index` (as for
+    /// [`Buffer::row_at`]) with those of `row`, as writing an inline
+    /// surface does (ADR 0020). The row keeps its anchor tag and shell
+    /// marks, does not wrap, and is clipped or padded to the buffer's
+    /// width; a scrollback row is re-encoded in place. Returns whether the
+    /// row changed: one that already holds those cells, or that does not
+    /// exist, is left alone.
+    ///
+    /// A rewrite is not output: the content version stays, so selections
+    /// are kept unless they cover the row (see
+    /// [`Buffer::rows_rewritten_since`]).
+    pub fn replace_row(&mut self, absolute_index: usize, row: &Row) -> bool {
+        let cols = self.grid.dimensions().cols;
+        let history_len = self.history.len();
+        let mut replaced = row.clone();
+        replaced.resize(cols);
+        replaced.set_wrapped(false);
+        if absolute_index < history_len {
+            let Some(compact) = self.history.get_mut(absolute_index) else {
+                return false;
+            };
+            replaced.set_marks(compact.marks());
+            replaced.set_anchor(compact.anchor());
+            let old = compact.decode();
+            if old.same_content(&replaced) && !old.is_wrapped() {
+                return false;
+            }
+            compact.encode_from(&replaced);
+        } else {
+            let Ok(index) = u16::try_from(absolute_index - history_len) else {
+                return false;
+            };
+            let Some(target) = self.grid.row_mut_in_place(index) else {
+                return false;
+            };
+            if target.same_content(&replaced) && !target.is_wrapped() {
+                return false;
+            }
+            replaced.set_marks(target.marks());
+            replaced.set_anchor(target.anchor());
+            target.copy_from(&replaced);
+        }
+        self.note_rewrite(self.evicted + absolute_index);
+        true
+    }
+
+    /// Record that line `line` (as numbered in `rewritten_lines`) was
+    /// rewritten in place, forgetting lines evicted since.
+    ///
+    /// With no history (`max_history` 0) rows scrolled off are not counted
+    /// in `evicted`, so a line's number can come to name another row. That
+    /// costs at most a selection over that row being dropped, and the map
+    /// holds at most a screenful of such lines.
+    fn note_rewrite(&mut self, line: usize) {
+        self.rewrites += 1;
+        self.rewritten_lines.insert(line, self.rewrites);
+        while self
+            .rewritten_lines
+            .first_key_value()
+            .is_some_and(|(&line, _)| line < self.evicted)
+        {
+            self.rewritten_lines.pop_first();
+        }
+    }
+
+    /// How many rows were rewritten in place so far, for
+    /// [`Buffer::rows_rewritten_since`].
+    pub fn rewrite_count(&self) -> u64 {
+        self.rewrites
+    }
+
+    /// Whether any of the rows at absolute indices `rows` was rewritten in
+    /// place after [`Buffer::rewrite_count`] returned `since`.
+    pub fn rows_rewritten_since(&self, since: u64, rows: std::ops::RangeInclusive<usize>) -> bool {
+        if since == self.rewrites {
+            return false;
+        }
+        let lines = self.evicted + rows.start()..=self.evicted + rows.end();
+        self.rewritten_lines
+            .range(lines)
+            .any(|(_, &count)| count > since)
+    }
+
+    /// The anchor tag of the row at `absolute_index` (as for
+    /// [`Buffer::row_at`]), without decoding a scrollback row.
+    pub fn anchor_at(&self, absolute_index: usize) -> Option<AnchorTag> {
         #[cfg(test)]
         self.anchor_visits.set(self.anchor_visits.get() + 1);
         let history_len = self.history.len();
@@ -938,6 +1029,8 @@ impl Buffer {
         if new_dims == old_dims {
             return;
         }
+        // Reflow renumbers lines, and changes the content version anyway.
+        self.rewritten_lines.clear();
 
         // If width changed, we need to reflow both history and grid together
         if new_dims.cols != old_dims.cols {

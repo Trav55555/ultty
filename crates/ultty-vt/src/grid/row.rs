@@ -356,6 +356,13 @@ impl Row {
         self.dirty = true;
     }
 
+    /// Whether `other` shows the same: the same width, cells and grapheme
+    /// clusters. Wrapping, marks and anchor tags are not compared.
+    pub fn same_content(&self, other: &Row) -> bool {
+        self.cells == other.cells
+            && (0..self.width()).all(|col| self.grapheme_extra(col) == other.grapheme_extra(col))
+    }
+
     /// Codepoints following the base character of the cluster at `col`, if
     /// the cell holds a multi-codepoint grapheme.
     pub fn grapheme_extra(&self, col: u16) -> Option<&[char]> {

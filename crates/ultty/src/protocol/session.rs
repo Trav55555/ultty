@@ -142,6 +142,8 @@ pub struct NativeSession {
     inline_surfaces: bool,
     /// Placement of each surface root in `scene`, by its id.
     surface_states: HashMap<RegionId, surfaces::SurfaceState>,
+    /// Last rows of surfaces closed since the pairing last took them.
+    frozen_surfaces: Vec<surfaces::FrozenSurface>,
     /// Negotiated capabilities.
     capabilities: u32,
     /// Negotiated protocol version.
@@ -298,6 +300,7 @@ impl NativeSession {
             scroll_dirty: true,
             inline_surfaces: false,
             surface_states: HashMap::new(),
+            frozen_surfaces: Vec::new(),
             capabilities: 0,
             protocol_version: PROTOCOL_VERSION,
             subscriptions: HashMap::new(),
@@ -331,6 +334,7 @@ impl NativeSession {
                 root.constraints.flex_direction = FlexDirection::Column;
             }
             self.mark_full_scene_scroll_rebuild();
+            self.note_all_surfaces_changed();
         }
     }
 
@@ -729,6 +733,10 @@ impl NativeSession {
                 notify.push((id, nx, ny));
             }
         }
+        let scrolled: Vec<RegionId> = self.scroll_targets.keys().copied().collect();
+        for id in scrolled {
+            self.note_surface_change(id);
+        }
         for id in done {
             self.scroll_targets.remove(&id);
         }
@@ -814,6 +822,10 @@ impl NativeSession {
             }
         }
 
+        let animated: Vec<RegionId> = self.style_animations.keys().copied().collect();
+        for id in animated {
+            self.note_surface_change(id);
+        }
         for id in done {
             self.style_animations.remove(&id);
         }
@@ -3242,7 +3254,7 @@ mod tests {
 
         run_frame(&mut session, 2, vec![create_surface(5, 2)]);
         assert!(moved(&session));
-        session.place_surface(RegionId::new(5), 1).unwrap();
+        session.place_surface(RegionId::new(5), 1, 1).unwrap();
         assert!(moved(&session), "a surface placed");
         session
             .set_surface_view(RegionId::new(5), Some(0), true)

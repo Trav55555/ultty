@@ -237,10 +237,100 @@ fn bench_layout_full_cycle(c: &mut Criterion) {
     group.finish();
 }
 
+/// One streaming frame of an 8 x 120 inline surface (ADR 0020): a bordered
+/// card with a title and six lines of tool output, rasterised into cells
+/// and written into its rows, on the screen and in scrollback.
+fn bench_surface_raster(c: &mut Criterion) {
+    use ultty::grid::{Dimensions, Terminal};
+    use ultty::scene::raster::rasterise_surface;
+    use ultty_protocol::{BorderStyle, Content, Edges, Style, TextContent};
+
+    const COLS: u16 = 120;
+    const ROWS: u16 = 8;
+    let card = RegionId::new(100);
+    let log = RegionId::new(102);
+    let mut tree = SceneTree::new();
+    let mut root = Region::new(card);
+    root.style = Style {
+        border: BorderStyle::thin(),
+        ..Style::default()
+    };
+    root.constraints = Constraints {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Column,
+        padding: Edges {
+            top: Dimension::Cells(1.0),
+            right: Dimension::Cells(1.0),
+            bottom: Dimension::Cells(1.0),
+            left: Dimension::Cells(1.0),
+        },
+        ..Default::default()
+    };
+    tree.try_insert_surface(root, ROWS).expect("surface");
+    for (id, height, text) in [(101, 1.0, "cargo test --workspace"), (102, 5.0, "")] {
+        let mut region = Region::new(RegionId::new(id));
+        region.parent = Some(card);
+        region.constraints = Constraints {
+            width: Dimension::Percent(100.0),
+            height: Dimension::Cells(height),
+            ..Default::default()
+        };
+        region.content = Content::Text(TextContent::new(text));
+        tree.insert(region);
+    }
+    let mut engine = LayoutEngine::new();
+    engine
+        .compute_scene_layout(&mut tree, f32::from(COLS), 40.0)
+        .expect("layout");
+
+    // Each frame appends a line of output and shows the last five.
+    let output: Vec<String> = (0..64)
+        .map(|n| {
+            format!("test scene::raster::tests::case_{n:03} ... ok (streamed output line {n})")
+        })
+        .collect();
+    let mut frame = 0usize;
+    let mut next_frame = |tree: &mut SceneTree| {
+        frame = (frame + 1) % (output.len() - 5);
+        if let Some(region) = tree.get_mut(log) {
+            region.content = Content::Text(TextContent::new(output[frame..frame + 5].join("\n")));
+        }
+    };
+
+    let mut group = c.benchmark_group("surface_raster");
+    group.bench_function("rasterise_8x120", |b| {
+        b.iter(|| {
+            next_frame(&mut tree);
+            black_box(rasterise_surface(&tree, card, COLS, ROWS, |_| (0.0, 0.0)))
+        })
+    });
+
+    let mut terminal = Terminal::new(Dimensions::new(COLS, 40));
+    let history = 1000;
+    for _ in 0..history {
+        terminal.buffer_mut().newline();
+    }
+    let on_screen = terminal.main_buffer().history_len() + 10;
+    for (name, first) in [("screen", on_screen), ("scrollback", 10)] {
+        group.bench_function(format!("rasterise_and_write_8x120/{name}"), |b| {
+            b.iter(|| {
+                next_frame(&mut tree);
+                let rows = rasterise_surface(&tree, card, COLS, ROWS, |_| (0.0, 0.0));
+                let buffer = terminal.main_buffer_mut();
+                for (offset, row) in rows.iter().enumerate() {
+                    buffer.replace_row(first + offset, row);
+                }
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_layout_sync,
     bench_layout_compute,
-    bench_layout_full_cycle
+    bench_layout_full_cycle,
+    bench_surface_raster
 );
 criterion_main!(benches);
