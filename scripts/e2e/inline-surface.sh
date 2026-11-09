@@ -59,11 +59,13 @@ fi
 
 # Without unsetting WAYLAND_DISPLAY, a Wayland session in the environment
 # wins over DISPLAY and the window opens on the desktop instead of Xvfb.
+# PS1 fixes the prompt the wait below looks for: sh gives root (CI) "# ".
 env -u WAYLAND_DISPLAY \
     DISPLAY="$display" \
     XDG_RUNTIME_DIR="$runtime" \
     XDG_CONFIG_HOME="$out/config" \
     SHELL=/bin/sh \
+    PS1='$ ' \
     RUST_LOG="info,wgpu_core=warn,wgpu_hal=warn" \
     "$ULTTY" >"$out/ultty.log" 2>&1 &
 ultty_pid=$!
