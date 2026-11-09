@@ -58,13 +58,13 @@ fn describe_content(content: &ultty_protocol::Content) -> (&'static str, Option<
     }
 }
 
-/// Capabilities supported by this terminal.
+/// Capabilities supported by this terminal. `CAP_INLINE_SURFACES` is
+/// added per session; see [`NativeSession::set_inline_surfaces`].
 const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_WIDGET_SCROLL
     | CAP_APPEND_CONTENT
     | CAP_STREAM_LIFECYCLE
     | CAP_REGION_METADATA
-    | CAP_INLINE_SURFACES
     | CAP_SEMANTICS;
 
 /// An in-band session with no traffic from its app for this long has ended.
@@ -134,6 +134,9 @@ pub struct NativeSession {
     dirty_regions: HashSet<RegionId>,
     /// Whether scroll offsets changed since last render (requires clip/scroll cache rebuild).
     scroll_dirty: bool,
+    /// Whether this session offers `CAP_INLINE_SURFACES` in its
+    /// `ServerHello`.
+    inline_surfaces: bool,
     /// Negotiated capabilities.
     capabilities: u32,
     /// Negotiated protocol version.
@@ -282,6 +285,7 @@ impl NativeSession {
             render_dirty: true,
             dirty_regions: HashSet::new(),
             scroll_dirty: true,
+            inline_surfaces: false,
             capabilities: 0,
             protocol_version: PROTOCOL_VERSION,
             subscriptions: HashMap::new(),
@@ -318,6 +322,23 @@ impl NativeSession {
 
     pub fn session_id(&self) -> u64 {
         self.session_id
+    }
+
+    /// Whether the session offers inline surfaces (ADR 0020) to an app that
+    /// asks for them; it takes effect at the next `ClientHello`. Off by
+    /// default: until the terminal pairs surfaces with anchors and draws
+    /// them, an app that negotiated them would get surfaces nobody sees.
+    pub fn set_inline_surfaces(&mut self, enabled: bool) {
+        self.inline_surfaces = enabled;
+    }
+
+    /// Capabilities this session offers in its `ServerHello`.
+    fn supported_capabilities(&self) -> u32 {
+        if self.inline_surfaces {
+            TERMINAL_CAPABILITIES | CAP_INLINE_SURFACES
+        } else {
+            TERMINAL_CAPABILITIES
+        }
     }
 
     /// Tab that owns this session.
@@ -1078,6 +1099,7 @@ mod tests {
     }
 
     fn negotiate_all_test_capabilities(session: &mut NativeSession) {
+        session.set_inline_surfaces(true);
         session
             .handle_message(AppMessage::ClientHello {
                 version: PROTOCOL_VERSION,
@@ -2600,9 +2622,76 @@ mod tests {
         session.scene.surfaces().iter().map(|s| s.id.0).collect()
     }
 
+    /// Until surfaces are drawn, a session does not offer them, so an app
+    /// asking for everything it knows gets them refused.
     #[test]
-    fn terminal_advertises_inline_surfaces() {
-        assert_ne!(TERMINAL_CAPABILITIES & CAP_INLINE_SURFACES, 0);
+    fn a_default_session_does_not_offer_inline_surfaces() {
+        assert_eq!(TERMINAL_CAPABILITIES & CAP_INLINE_SURFACES, 0);
+        let mut session = make_session();
+        session
+            .handle_message(AppMessage::ClientHello {
+                version: PROTOCOL_VERSION,
+                requested_capabilities: ultty_protocol::CAP_ALL_KNOWN,
+            })
+            .unwrap();
+        let hello = drain_messages(&mut session)
+            .into_iter()
+            .find_map(|m| match m {
+                TerminalMessage::ServerHello { capabilities, .. } => Some(capabilities),
+                _ => None,
+            })
+            .expect("a ServerHello");
+        assert_eq!(hello & CAP_INLINE_SURFACES, 0);
+        assert_eq!(hello, TERMINAL_CAPABILITIES);
+
+        session.handle_message(create_surface(5, 2)).unwrap();
+        assert_eq!(error_codes(&drain_messages(&mut session)), vec![400]);
+        assert!(session.scene.surfaces().is_empty());
+    }
+
+    #[test]
+    fn a_session_offers_inline_surfaces_when_switched_on() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        assert_ne!(session.capabilities() & CAP_INLINE_SURFACES, 0);
+    }
+
+    #[test]
+    fn key_events_cannot_be_subscribed_on_a_surface_region() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        run_frame(
+            &mut session,
+            1,
+            vec![
+                create_region(1, 0),
+                create_surface(5, 2),
+                create_region(6, 5),
+            ],
+        );
+        drain_messages(&mut session);
+
+        let subscribe = |id, events| AppMessage::Subscribe {
+            id: RegionId::new(id),
+            events,
+        };
+        let key_and_mouse = ultty_protocol::EVENT_KEY | ultty_protocol::EVENT_MOUSE;
+        session.handle_message(subscribe(5, key_and_mouse)).unwrap();
+        session
+            .handle_message(subscribe(6, ultty_protocol::EVENT_KEY))
+            .unwrap();
+        session
+            .handle_message(subscribe(6, ultty_protocol::EVENT_MOUSE))
+            .unwrap();
+        session
+            .handle_message(subscribe(1, ultty_protocol::EVENT_KEY))
+            .unwrap();
+
+        assert_eq!(error_codes(&drain_messages(&mut session)), vec![400, 400]);
+        assert!(!session.is_subscribed(RegionId::new(5), key_and_mouse));
+        assert!(!session.is_subscribed(RegionId::new(6), ultty_protocol::EVENT_KEY));
+        assert!(session.is_subscribed(RegionId::new(6), ultty_protocol::EVENT_MOUSE));
+        assert!(session.is_subscribed(RegionId::new(1), ultty_protocol::EVENT_KEY));
     }
 
     #[test]

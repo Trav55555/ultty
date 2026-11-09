@@ -11,7 +11,7 @@ use ultty_protocol::{
 
 use super::content_limits::{text_bytes, trim_region_text, MAX_SESSION_TEXT_BYTES};
 use super::errors::NativeProtocolError;
-use super::{NativeSession, StyleAnimation, TERMINAL_CAPABILITIES};
+use super::{NativeSession, StyleAnimation};
 use crate::scene::region::Region;
 
 impl NativeSession {
@@ -152,7 +152,16 @@ impl NativeSession {
             }
 
             AppMessage::Subscribe { id, events } => {
-                self.subscriptions.insert(id, events);
+                if events & ultty_protocol::EVENT_KEY != 0 && self.scene.is_in_surface(id) {
+                    // An inline-only app reads keys from its tty (ADR 0020).
+                    warn!("Subscribe to key events on surface region {:?} refused", id);
+                    self.queue_protocol_error(NativeProtocolError::bad_request(format!(
+                        "subscribe: region {} is in a surface, which gets no key events",
+                        id.0
+                    )));
+                } else {
+                    self.subscriptions.insert(id, events);
+                }
             }
 
             AppMessage::Unsubscribe { id, events } => {
@@ -271,7 +280,7 @@ impl NativeSession {
         };
 
         self.protocol_version = negotiated_version;
-        self.capabilities = negotiate_capabilities(requested, TERMINAL_CAPABILITIES);
+        self.capabilities = negotiate_capabilities(requested, self.supported_capabilities());
 
         let hello = TerminalMessage::ServerHello {
             version: negotiated_version,

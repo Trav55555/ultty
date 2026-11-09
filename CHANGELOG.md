@@ -82,9 +82,10 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   spec §10.6). `CreateSurface` (`0x0015`) opens a region tree laid out on its
   own at the pane's width by 1 to 128 rows, `CloseSurface` (`0x0016`) or
   `DeleteRegion` closes it, and the terminal answers `SurfaceEvent`
-  (`0x0026`) `Closed`. A session holds at most 16. `regions` lists each
-  surface with its rows, state and region tree. Surfaces are not yet
-  anchored to rows or drawn.
+  (`0x0026`) `Closed`. A session holds at most 16, and surface regions
+  cannot subscribe to keys. `regions` lists each surface with its rows,
+  state and region tree. Surfaces are not yet anchored to rows or drawn, so
+  the terminal does not advertise the capability yet.
 - `ulttui` names each region it creates for a widget with an id
   (`SetRegionMetadata`, key `id`) and tells the terminal which region has
   focus, so `regions` can find widgets by id.

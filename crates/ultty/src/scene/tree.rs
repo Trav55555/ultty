@@ -190,6 +190,21 @@ impl SceneTree {
             .find(|surface| surface.id == id)
     }
 
+    /// True when `id` is a surface root or attached below one.
+    pub fn is_in_surface(&self, id: RegionId) -> bool {
+        let mut current = id;
+        for _ in 0..=self.regions.len() {
+            if self.surface(current).is_some() {
+                return true;
+            }
+            match self.regions.get(&current).and_then(|region| region.parent) {
+                Some(parent) => current = parent,
+                None => return false,
+            }
+        }
+        false
+    }
+
     /// True for the full-scene root and every surface root.
     fn is_root(&self, id: RegionId) -> bool {
         id == self.root || self.surface(id).is_some()
@@ -1595,6 +1610,13 @@ mod tests {
         assert_eq!(ids(tree.iter_tree(RegionId::new(10))), [10, 11, 12]);
         assert_eq!(ids(tree.iter_all()), [0, 1, 10, 11, 12]);
         assert_eq!(tree.len(), 5);
+        for (id, in_surface) in [(0, false), (1, false), (10, true), (12, true), (99, false)] {
+            assert_eq!(
+                tree.is_in_surface(RegionId::new(id)),
+                in_surface,
+                "region {id}"
+            );
+        }
     }
 
     #[test]

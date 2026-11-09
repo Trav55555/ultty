@@ -200,7 +200,12 @@ fn test_unknown_capability_bits_are_masked_during_handshake() {
     let msg1 = TerminalMessage::decode(&mut cursor).unwrap();
     match msg1 {
         TerminalMessage::ServerHello { capabilities, .. } => {
-            assert_eq!(capabilities, CAP_ALL_KNOWN);
+            // Inline surfaces are known but not offered until they are
+            // drawn (ADR 0020).
+            assert_eq!(
+                capabilities,
+                CAP_ALL_KNOWN & !ultty_protocol::CAP_INLINE_SURFACES
+            );
             assert_eq!(capabilities & unknown, 0);
         }
         other => panic!("Expected ServerHello, got {:?}", other),

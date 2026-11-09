@@ -586,7 +586,9 @@ All three app messages without `CAP_INLINE_SURFACES` are `Error` 400. Like other
 
 While `ROOT` has children the session is full-scene and its surfaces are hidden under it; with none, the grid is drawn and the surfaces over it.
 
-This terminal does not yet pair anchors with surfaces or draw them: a surface stays unplaced, and only `Closed` is sent (ADR 0020, slices 3 and 4). `ulttyctl regions` lists each surface with its rows, its state and its region tree.
+A region in a surface gets no key events: `Subscribe` with `EVENT_KEY` on a surface root or a region under one is `Error` 400. An inline-only app reads keys from its tty.
+
+Ultty does not advertise `CAP_INLINE_SURFACES` yet: it does not pair anchors with surfaces or draw them (ADR 0020, slices 3 and 4), so an app asking for it is not granted it and gets `Error` 400 for the messages above. When it is turned on (for tests today), a surface stays unplaced and only `Closed` is sent. `ulttyctl regions` lists each surface with its rows, its state and its region tree.
 
 ---
 
