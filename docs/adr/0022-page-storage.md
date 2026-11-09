@@ -4,6 +4,15 @@
 
 Proposed 2026-11-09, draft. Not accepted until the prototype gate in §Prototype passes; if it fails, this ADR is recorded as Rejected together with the measurements.
 
+**Prototype measured 2026-11-09: not GO** ([2026-11-09-page-storage-prototype.md](../perf/2026-11-09-page-storage-prototype.md)). Variant C meets every GO criterion but one:
+- vt/ascii is 18.6–19.4 instructions per byte at 1 and 8 MiB;
+- scroll is −35% to −44% and wide-wrap −46% to −56%;
+- cjk is −33% to −40%;
+- the PTY harness runs ascii +45.5% at 120x40 and +49.9% at 300x75 (paired medians, 120 rounds; per-arm IQR 4–7.6% of the median);
+- live heap is about a third of the reference's.
+
+The failure is sgr-dense, at +16% to +23% instructions and −12% to −16% wall clock against a limit of +3%. The cost is interning styles that are mostly new, which A pays as well. "A only" does not qualify: A carries 38–81% of C's instruction cut and 61–71% of its wall-clock gain, below two thirds. The NO-GO kill rule does not fire. Not accepted as written. Accepting it would need either a measured fix for sgr-dense interning or a decision to change that criterion.
+
 ## Context
 
 ### The gap
