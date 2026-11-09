@@ -274,6 +274,9 @@ impl App {
                                 // Only set window title from focused terminal
                                 if Some(terminal_id) == focused_id {
                                     self.window.set_title(&title);
+                                    if let Some(adapter) = self.accessibility.as_mut() {
+                                        adapter.set_window_title(&title);
+                                    }
                                 }
                             }
                             TerminalEvent::SetClipboard { clipboard: _, data } => {

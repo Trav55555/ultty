@@ -75,6 +75,12 @@ base64 = { workspace = true }
 png = "0.17"
 chrono = "0.4"
 
+# Accessibility (ADR 0021): AT-SPI on Linux, NSAccessibility on macOS. The
+# default features minus winit's, which the workspace already enables;
+# async-io because Ultty runs no tokio runtime.
+accesskit = "0.25.2"
+accesskit_winit = { version = "0.34.2", default-features = false, features = ["accesskit_unix", "async-io", "rwh_06"] }
+
 # Desktop notifications
 notify-rust = "4.10"
 
