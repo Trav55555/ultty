@@ -260,3 +260,148 @@ immediately, as the first-numbers note assumed) and how the probe's
 screencopy request interacts with it. Ghostty, at two frames, may pay the
 same period. The next step is a compositor-side trace (sway
 with `-d`, or `WAYLAND_DEBUG=server`) of one key.
+
+## Where the frame went: the probe
+
+The frame was the probe's. `k2p-wayland.py` sent the key and then, in the
+same instant, its first `zwlr_screencopy_frame_v1.copy_with_damage`
+request. In wlroots 0.19 every screencopy copy request, with damage or
+not, calls `wlr_output_update_needs_frame` ("we can't assume that the
+current front buffer is still usable"), so on an idle output sway commits
+an output frame at once, 0.1 ms after the key and before the terminal has
+drawn anything. The headless backend arms its frame timer on every output
+commit, and `output->frame_pending` stays set until it fires
+(`backend/headless/output.c`, `types/output/output.c`). The echo commit
+arrives 1 to 2 ms later, finds a frame pending, and waits for the timer:
+`frame_delay = 1000000 / refresh_mHz` integer milliseconds, so 16 ms at
+60 Hz and 4 ms at 240 Hz. Then sway draws it, screencopy reports `ready`,
+and the terminal's frame callback completes in the same `handle_frame`.
+Every number it produced for a terminal that echoes inside one frame was
+therefore "forced frame + one frame timer + composite", whatever the
+terminal did.
+
+The probe now sends its first frame request before the key: right after
+the baseline grab, so the forced frame and its period pass during the 50
+to 300 ms gap the probe already waits (`arm_quietly`). A request that
+completes during the gap (wlroots starts each client's damage tracking
+full, or something else drew) is replaced, and the key waits until the
+latest request is two frame periods old. A flood redraws every frame, so
+its requests never get that old; after 0.25 s the latest one is used,
+which forces nothing there because a busy output already has its next
+frame scheduled. `--arm after-key` (compare.sh `--k2p-arm after-key`)
+keeps the old order for comparison. `scripts/bench/test_k2p_wayland.py`
+checks the order against a fake compositor (no copy request between the
+key and the first frame; early completions re-armed; a busy output still
+gives a sample), and fails on the old probe.
+
+### Evidence
+
+**Intervention, same build, only the probe order changed.** Ultty `main`
+at 1915884 (release), probe order alternated run by run, idle, `cat`-style
+echo, cursor blink off. The AMD rows are headless sway 1.11 (Ubuntu's
+package, wlroots 0.19.2) on this workstation (RX 7900 XTX, Mesa,
+`WLR_RENDERER=gles2`); the T4 rows are a fresh g4dn.xlarge from the bench
+image (Tesla T4, NVIDIA 580.178.04, sway 1.11, wlroots 0.19.1, Ghostty
+1.4.0) running the same binaries. p50 / p90 in ms:
+
+| machine | output | terminal | after key (old) | before key (new) | n per arm |
+|---|---|---|---:|---:|---:|
+| AMD | 60 Hz | Ultty | 16.33 / 16.40 | 1.25 / 1.61 | 40 |
+| AMD | 60 Hz | Alacritty 0.16 | 16.28 / 16.34 | 0.67 / 0.84 | 40 |
+| AMD | 240 Hz | Ultty | 4.29 / 5.90 | 1.19 / 1.48 | 40 |
+| AMD | 240 Hz | Alacritty 0.16 | 4.22 / 4.28 | 0.66 / 0.90 | 40 |
+| T4 | 60 Hz | Ultty | 17.88 / 17.94 | 3.71 / 3.79 | 200 |
+| T4 | 60 Hz | Ghostty | 36.25 / 36.38 | 25.79 / 26.27 | 200 |
+| T4 | 240 Hz | Ultty | 5.80 / 5.88 | 3.67 / 3.80 | 200 |
+| T4 | 240 Hz | Ghostty | 13.18 / 18.28 | 12.77 / 16.12 | 200 |
+
+With the old order Ultty and Alacritty read the same 16.3 ms on the AMD
+box: the probe could not tell apart terminals that echo within a frame.
+
+**Protocol traces.** sway's own `WAYLAND_DEBUG=server` log (AMD, one key,
+times after the virtual keyboard's `key` request):
+
+```
+old order                                   new order
++0.03  copy_with_damage (probe)             (copy_with_damage sent 163 ms before the key)
++1.09  wl_surface.commit (Ultty, the echo)  +1.00  wl_surface.commit (Ultty, the echo)
++17.58 screencopy ready, damage             +2.38  screencopy ready, damage
++17.59 wl_callback.done (Ultty)             +2.39  wl_callback.done (Ultty)
+```
+
+The output commit the copy request forces is not a protocol message, so it
+does not appear; the wlroots source above and the intervention are the
+evidence for that step. On the T4, Ultty's own `WAYLAND_DEBUG=client`
+trace (`wl-echo-trace.py`, 32 keys per order, `Present mode: Mailbox`)
+shows one content commit per key at 1.4 to 1.6 ms (p50) in both orders,
+and the frame callback dispatched at 18.6 ms (p50) with the old order
+against 4.4 ms with the new. That is the "callback about 16.7 ms after the
+commit" reading from the T4 section above, and it moves with the probe,
+not with anything Ultty does.
+
+### The questions from the T4 section, answered
+
+- **Is it sway's scheduling?** Not in the sense suspected. wlroots does
+  composite an idle headless output at once (the first-numbers note was
+  right about that); the probe was keeping it from being idle. On a real
+  DRM output the same request would still force a frame, but that frame
+  would be paced by vblank, so the bias there would be up to one frame
+  rather than exactly one (reasoned from the code, not measured).
+- **NVIDIA?** No: the extra frame reproduces on AMD/Mesa, with the same
+  size. What NVIDIA adds is about 2.2 ms from Ultty's commit to the
+  composited frame (3.7 ms key to frame, commit at 1.4 ms), against 0.3 to
+  1.4 ms on the AMD box. Ultty's CPU side is about 0.8 ms a frame in the
+  pipeline trace (acquire 0.07, draw 0.55, present 0.13 ms), so the rest is
+  GPU time on both sides (Ultty's frame finishing before sway may use the
+  buffer, then sway's GLES composite). Not split further here. Ultty's X11
+  number on this instance type was 3.4 ms in the earlier runs (not rerun
+  here).
+- **`max_render_time`?** No effect on this setup, as expected from sway's
+  code: it delays rendering relative to the predicted next refresh, which
+  on an idle headless output is already in the past. `output *
+  max_render_time 10` plus `for_window [title=".*"] max_render_time 5`:
+  Ultty 16.31 against 16.33 ms (AMD, old order), 17.86 against 17.85 ms
+  (T4, old order); 1.23 against 1.25 ms (AMD) and 3.66 against 3.64 ms
+  (T4) with the new order. On a real display it can help a client whose
+  commit misses sway's render point, but it is not a fix for anything
+  measured here, so it is not recommended as user configuration.
+- **Is screencopy itself biased (completing a frame late)?** No: it
+  completes on the output commit that carries the damage, and its `ready`
+  time matched the terminal's frame callback in the server trace. The bias
+  was in when the probe asked.
+- **Anything for Ultty to change?** No. Ultty commits once per key with the
+  echo, 1 to 2 ms after the key, and the composite then follows at once.
+  Tearing (`wp_tearing_control_v1` async presentation) would only shorten
+  the vblank wait on a real display, which this setup does not have, and
+  sway tears only for a fullscreen view on an output with `allow_tearing`
+  (`output_can_tear`); not pursued.
+
+### Corrected numbers
+
+Idle Ultty on headless sway at 60 Hz is **3.7 ms on the T4** (about the
+same as X11's 3.4 ms from the earlier T4 runs) and **1.2 ms on the AMD workstation**, not one
+frame plus that. Ghostty's idle number drops from 36 to 26 ms at 60 Hz; it
+still takes more than a frame, so its second frame is its own (not traced
+here). Earlier Wayland k2p results from this probe,
+[2026-11-09-wayland-latency.md](2026-11-09-wayland-latency.md) and the T4
+table above, include the extra frame and should be read with it
+subtracted for idle cases.
+
+Flood rows, 10 MiB/s, T4, p50 / p90 in ms:
+
+| terminal | after key (old) | before key (new) | n per arm |
+|---|---:|---:|---:|
+| Ultty | 29.37 / 34.97 | 29.81 / 35.00 | 200 |
+| Ghostty | 26.86 / 35.25 | 27.87 / 35.38 | 200 |
+
+Under a flood the order makes no difference, as expected: the output is
+drawing every frame anyway, so a copy request forces nothing extra. Those
+earlier flood numbers stand.
+
+The T4 runs were two launches per terminal and case (`compare.sh --rounds
+2`), 100 samples each; the 60 Hz rows are from one campaign that
+alternated the two orders, and an earlier campaign gave the same idle
+medians (Ultty 3.64 ms new; `max_render_time` rows above).
+
+Raw data stayed on the machines that ran them (not committed); the T4
+instance has been terminated.
