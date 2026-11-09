@@ -587,7 +587,7 @@ impl Console {
     pub fn take_input(&mut self) -> Vec<u8> {
         let mut input = std::mem::take(&mut self.input);
         if let Link::Native(native) = &self.link {
-            input.extend(native.session().client.take_input());
+            ultty_client::append_input(&mut input, &native.session().client.take_input());
         }
         input
     }
@@ -627,7 +627,7 @@ impl Console {
             .unwrap_or_else(|| FallbackLink::stdout(Box::new(std::io::stdout())));
         let mut session = native.session();
         self.events.extend(session.events.drain(..));
-        self.input.extend(session.client.take_input());
+        ultty_client::append_input(&mut self.input, &session.client.take_input());
         drop(session);
         self.link = Link::Fallback(fallback);
         // A live card can no longer be redrawn; the cursor is where the

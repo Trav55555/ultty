@@ -671,7 +671,7 @@ impl UlttyClient {
                 let status = tty.read(
                     timeout.unwrap_or(Duration::ZERO),
                     |frames| read_buf.extend_from_slice(frames),
-                    |other| input.extend_from_slice(other),
+                    |other| append_input(input, other),
                 )?;
                 return match status {
                     in_band::ReadStatus::Open => Ok(()),
@@ -763,6 +763,23 @@ impl UlttyClient {
         let id = RegionId::new(self.next_region_id);
         self.next_region_id += 1;
         id
+    }
+}
+
+/// The most typed input [`UlttyClient::take_input`] holds; past it the
+/// oldest bytes are dropped.
+pub const INPUT_LIMIT: usize = 64 * 1024;
+
+/// Append typed `bytes` to `buffer`, keeping only the newest
+/// [`INPUT_LIMIT`] bytes and warning once each time older ones are dropped.
+pub fn append_input(buffer: &mut Vec<u8>, bytes: &[u8]) {
+    buffer.extend_from_slice(bytes);
+    if buffer.len() > INPUT_LIMIT {
+        let dropped = buffer.len() - INPUT_LIMIT;
+        buffer.drain(..dropped);
+        tracing::warn!(
+            "dropped the oldest {dropped} bytes of typed input: more than {INPUT_LIMIT} waited unread"
+        );
     }
 }
 
@@ -1203,6 +1220,22 @@ mod tests {
             fallback_lines(&["\u{2764}\u{fe0f}x"], 1, 2),
             vec!["\u{2764}\u{fe0f}".to_string()]
         );
+    }
+
+    #[test]
+    fn typed_input_keeps_only_the_newest_64_kib() {
+        let mut buffer = Vec::new();
+        let first: Vec<u8> = (0..INPUT_LIMIT).map(|i| (i % 251) as u8).collect();
+        append_input(&mut buffer, &first);
+        assert_eq!(buffer, first, "up to the limit nothing is dropped");
+        append_input(&mut buffer, b"0123456789");
+        assert_eq!(buffer.len(), INPUT_LIMIT);
+        assert_eq!(&buffer[..INPUT_LIMIT - 10], &first[10..], "the oldest went");
+        assert_eq!(&buffer[INPUT_LIMIT - 10..], b"0123456789");
+        // One read bigger than the limit keeps its own newest bytes.
+        let flood = vec![7u8; INPUT_LIMIT + 5];
+        append_input(&mut buffer, &flood);
+        assert_eq!(buffer, vec![7u8; INPUT_LIMIT]);
     }
 
     #[test]
