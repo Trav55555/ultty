@@ -382,8 +382,30 @@ pub fn clamp_surface_size(width: u32, height: u32, max_texture_dimension: u32) -
     clamped
 }
 
+/// The present mode for a window surface that supports `supported`.
+///
+/// Where the window system paces frames with frame callbacks (Wayland; see
+/// `app::pacing`), Ultty draws at most one frame per callback already, so
+/// the swapchain need not throttle as well. FIFO would: the driver holds a
+/// present behind the previous frame's FIFO barrier or callback, and on an
+/// idle window that can keep a keystroke's echo off the screen for a whole
+/// extra compositor frame (docs/perf/2026-11-09-wayland-echo-frame.md).
+/// Mailbox never blocks and never tears, so it is used when available.
+/// Elsewhere (X11) FIFO is the only pacing a present has, so it stays.
+pub fn present_mode(
+    supported: &[wgpu::PresentMode],
+    paced_by_frame_callbacks: bool,
+) -> wgpu::PresentMode {
+    if paced_by_frame_callbacks && supported.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else {
+        wgpu::PresentMode::AutoVsync
+    }
+}
+
 impl Renderer {
-    /// Create a new renderer with configuration.
+    /// Create a new renderer with configuration. `paced_by_frame_callbacks`
+    /// is whether the window system paces frames (see [`present_mode`]).
     pub async fn with_config(
         surface: &wgpu::Surface<'_>,
         adapter: &wgpu::Adapter,
@@ -391,8 +413,17 @@ impl Renderer {
         height: u32,
         color_config: &ColorConfig,
         font_config: &FontConfig,
+        paced_by_frame_callbacks: bool,
     ) -> anyhow::Result<Self> {
-        let mut renderer = Self::new(surface, adapter, width, height, font_config).await?;
+        let mut renderer = Self::new(
+            surface,
+            adapter,
+            width,
+            height,
+            font_config,
+            paced_by_frame_callbacks,
+        )
+        .await?;
         renderer.color_scheme = ColorScheme::from_config(color_config);
         Ok(renderer)
     }
@@ -404,6 +435,7 @@ impl Renderer {
         width: u32,
         height: u32,
         font_config: &FontConfig,
+        paced_by_frame_callbacks: bool,
     ) -> anyhow::Result<Self> {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -442,13 +474,15 @@ impl Renderer {
         } else {
             surface_caps.alpha_modes[0]
         };
+        let present_mode = present_mode(&surface_caps.present_modes, paced_by_frame_callbacks);
+        tracing::info!("Present mode: {present_mode:?}");
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width,
             height,
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode,
             alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -2009,6 +2043,31 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
+    use wgpu::PresentMode;
+
+    #[test]
+    fn frames_paced_by_callbacks_present_in_mailbox() {
+        let modes = [
+            PresentMode::Fifo,
+            PresentMode::Mailbox,
+            PresentMode::Immediate,
+        ];
+        assert_eq!(super::present_mode(&modes, true), PresentMode::Mailbox);
+    }
+
+    #[test]
+    fn frames_paced_by_callbacks_keep_vsync_without_mailbox() {
+        // Immediate may tear (Mesa can ask for asynchronous page flips).
+        let modes = [PresentMode::Fifo, PresentMode::Immediate];
+        assert_eq!(super::present_mode(&modes, true), PresentMode::AutoVsync);
+    }
+
+    #[test]
+    fn frames_without_callbacks_keep_vsync() {
+        let modes = [PresentMode::Fifo, PresentMode::Mailbox];
+        assert_eq!(super::present_mode(&modes, false), PresentMode::AutoVsync);
+    }
+
     #[test]
     fn surface_size_is_clamped_to_the_texture_limit() {
         assert_eq!(super::clamp_surface_size(800, 600, 8192), (800, 600));

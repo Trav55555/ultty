@@ -302,7 +302,14 @@ impl App {
         let mut scaled_font = config.font.clone();
         scaled_font.size *= scale_factor;
 
-        // Create renderer with config
+        // On Wayland, winit holds redraws for the compositor's frame
+        // callbacks (see `pacing`), which lets the swapchain skip FIFO.
+        let paced_by_frame_callbacks = {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            window
+                .window_handle()
+                .is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)))
+        };
         let mut renderer = pollster::block_on(Renderer::with_config(
             &surface,
             &adapter,
@@ -310,6 +317,7 @@ impl App {
             size.height,
             &config.colors,
             &scaled_font,
+            paced_by_frame_callbacks,
         ))?;
 
         tracing::debug!(target: "ultty::startup", "renderer ready");
