@@ -2,6 +2,7 @@
 //! the last version that loaded cleanly.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -126,12 +127,18 @@ pub struct Script {
     state: Value,
     /// Source of the last load attempt, good or bad.
     source: Option<String>,
-    /// Why the last load or update failed. Cleared by the next good load.
-    error: Option<String>,
+    /// Why the last load failed. Cleared by the next good load.
+    load_error: Option<String>,
+    /// Why the last update failed. Cleared by the next update that works
+    /// and by a good load.
+    update_error: Option<String>,
     /// Why the last view call failed; cleared by the next one that works.
     view_error: RefCell<Option<String>>,
     /// The last view that built, shown while `view` is failing.
     last_view: RefCell<Option<Rc<Node>>>,
+    /// The frozen global table: what every version's environment reads
+    /// through to.
+    base: Table,
     deadline: Rc<Cell<Option<Instant>>>,
     budget: Duration,
 }
@@ -155,6 +162,10 @@ impl Script {
         // still load other code from disk or from strings.
         globals.raw_set("require", Value::Nil)?;
         globals.raw_set("loadstring", Value::Nil)?;
+        // These would hand a script the environment table shared between
+        // versions (or another function's), past the per-load one.
+        globals.raw_set("getfenv", Value::Nil)?;
+        globals.raw_set("setfenv", Value::Nil)?;
         install_api(&lua, &globals, options.allow_exec)?;
         // Freezes the globals and the libraries: scripts write to their own
         // environment (see `try_load`).
@@ -177,9 +188,11 @@ impl Script {
             app: None,
             state: Value::Nil,
             source: None,
-            error: None,
+            load_error: None,
+            update_error: None,
             view_error: RefCell::new(None),
             last_view: RefCell::new(None),
+            base: globals,
             deadline,
             budget: options.call_budget,
         })
@@ -197,8 +210,9 @@ impl Script {
     /// The current error, if the last load or update failed or the view is
     /// failing.
     pub fn error(&self) -> Option<String> {
-        self.error
+        self.load_error
             .clone()
+            .or_else(|| self.update_error.clone())
             .or_else(|| self.view_error.borrow().clone())
     }
 
@@ -224,7 +238,7 @@ impl Script {
         let source = match std::fs::read_to_string(&self.path) {
             Ok(source) => source,
             Err(e) => {
-                self.error = Some(format!("{}: {e}", self.path.display()));
+                self.load_error = Some(format!("{}: {e}", self.path.display()));
                 return Reload::Failed;
             }
         };
@@ -237,25 +251,28 @@ impl Script {
             Ok((app, state, commands, view)) => {
                 self.app = Some(app);
                 self.state = state;
-                self.error = None;
+                self.load_error = None;
+                self.update_error = None;
                 *self.view_error.borrow_mut() = None;
                 *self.last_view.borrow_mut() = Some(view);
                 Reload::Loaded(commands)
             }
             Err(message) => {
-                self.error = Some(message);
+                self.load_error = Some(message);
                 Reload::Failed
             }
         }
     }
 
     fn try_load(&self, source: &str) -> Result<(AppFns, Value, Vec<Command>, Rc<Node>), String> {
-        // A fresh environment per load, so globals one version set do not
-        // leak into the next.
+        // A fresh environment per load, reading through to the frozen
+        // globals, so globals one version set do not leak into the next.
+        // `__metatable` hides the metatable from `getmetatable`.
         let env = self.lua.create_table().map_err(|e| e.to_string())?;
         let meta = self.lua.create_table().map_err(|e| e.to_string())?;
-        meta.set("__index", self.lua.globals())
+        meta.set("__index", self.base.clone())
             .map_err(|e| e.to_string())?;
+        meta.set("__metatable", false).map_err(|e| e.to_string())?;
         env.set_metatable(Some(meta)).map_err(|e| e.to_string())?;
 
         let value: Value = self
@@ -271,8 +288,12 @@ impl Script {
 
         let (state, commands) = match &app.init {
             Some(init) => {
+                // A copy, so an init that changes `prev` and then fails (or
+                // whose view fails) leaves the running version's state alone.
+                let prev = deep_copy(&self.lua, &self.state, &mut HashMap::new())
+                    .map_err(|e| e.to_string())?;
                 let (state, cmds): (Value, Value) = self
-                    .guarded(|| init.call(self.state.clone()))
+                    .guarded(|| init.call(prev))
                     .map_err(|e| format!("init: {}", describe_error(&e)))?;
                 if state.is_nil() {
                     return Err("init: returned nil; it must return the state".to_string());
@@ -292,7 +313,8 @@ impl Script {
         Ok((app, state, commands, view))
     }
 
-    /// Run `update(state, msg)`. On error the state is left as it was.
+    /// Run `update(state, msg)`. On error the state value is kept; changes
+    /// the update made to it in place before failing stay.
     pub fn update(&mut self, msg: &ScriptMsg) -> Vec<Command> {
         let Some(update) = self.app.as_ref().and_then(|app| app.update.clone()) else {
             return Vec::new();
@@ -306,15 +328,18 @@ impl Script {
                     self.state = state;
                 }
                 match commands_from(cmds) {
-                    Ok(commands) => commands,
+                    Ok(commands) => {
+                        self.update_error = None;
+                        commands
+                    }
                     Err(e) => {
-                        self.error = Some(format!("update: {e}"));
+                        self.update_error = Some(format!("update: {e}"));
                         Vec::new()
                     }
                 }
             }
             Err(e) => {
-                self.error = Some(format!("update: {}", describe_error(&e)));
+                self.update_error = Some(format!("update: {}", describe_error(&e)));
                 Vec::new()
             }
         }
@@ -368,6 +393,29 @@ impl Script {
             .eval()?;
         f.call(self.state.clone())
     }
+}
+
+/// Copy tables recursively (sharing and cycles preserved; metatables and
+/// non-table values are shared).
+fn deep_copy(
+    lua: &Lua,
+    value: &Value,
+    seen: &mut HashMap<*const std::ffi::c_void, Table>,
+) -> mlua::Result<Value> {
+    let Value::Table(table) = value else {
+        return Ok(value.clone());
+    };
+    if let Some(copy) = seen.get(&table.to_pointer()) {
+        return Ok(Value::Table(copy.clone()));
+    }
+    let copy = lua.create_table()?;
+    seen.insert(table.to_pointer(), copy.clone());
+    for pair in table.pairs::<Value, Value>() {
+        let (k, v) = pair?;
+        copy.raw_set(deep_copy(lua, &k, seen)?, deep_copy(lua, &v, seen)?)?;
+    }
+    copy.set_metatable(table.metatable())?;
+    Ok(Value::Table(copy))
 }
 
 fn app_fns(value: Value) -> Result<AppFns, String> {

@@ -67,7 +67,7 @@ to the script. Ctrl+C quits.
 
 | Command | Meaning |
 |---------|---------|
-| `run { id = "panes", argv = { "ulttyctl", "--json", "panes" } }` | Start a process (no shell, stdin closed). Its output arrives as a `done` message with the same `id`. Running an `id` again cancels and kills the previous run. Needs `--allow-exec`: without it `run` raises an error naming the flag. |
+| `run { id = "panes", argv = { "ulttyctl", "--json", "panes" } }` | Start a process (no shell, stdin closed). Its output arrives as a `done` message with the same `id`. Running an `id` again cancels and kills the previous run (the process itself, not processes it started in the background). Needs `--allow-exec`: without it `run` raises an error naming the flag. |
 | `quit()` | Exit. |
 
 ## Views
@@ -132,10 +132,12 @@ checks that every constructor and prop in it is named on this page.
 Scripts run in Luau's sandbox mode: the globals and libraries are read-only,
 and each loaded version gets its own global environment, so a global set by
 one version is gone in the next. There is no `io`, no `os.execute`, no
-`require`, no `loadstring` and no `debug`. The only way to affect the system
-is `run{}`, and only with `--allow-exec`. A call into the script (load,
-`init`, `update`, `view`) that runs for more than a second is stopped with an
-error, and the VM is capped at 256 MiB.
+`require`, no `loadstring`, no `getfenv`/`setfenv` and no `debug`. The
+only way to affect the system is `run{}`, and only with `--allow-exec`. A
+call into the script (load, `init`, `update`, `view`) that runs Luau code for
+more than a second is stopped with an error; the check runs at loops and
+calls, so a single slow library call (a pathological `string.find` pattern)
+can overrun it. The VM is capped at 256 MiB.
 
 ## Hot reload and errors
 
@@ -146,11 +148,14 @@ bytes differ, loads it: the new chunk must return an app table, its
 `init(prev)` must return a state, and its `view` must build a view. If all of
 that works, the new version replaces the old one, keeping the state that
 `init` returned. If anything fails, the last good version keeps running with
-its state, and a red banner (region id `ulttui-lua-error`) above it shows the
+its state (the new `init` gets a copy of it, so changes it made are
+dropped), and a red banner (region id `ulttui-lua-error`) above it shows the
 error with its file and line. The next good load clears it.
 
-Errors at run time are shown the same way: a failing `update` leaves the
-state as it was, and a failing `view` shows the last view that built.
+Errors at run time are shown the same way. A failing `update` keeps the
+state value it was given, but changes it had already made to that table in
+place stay; its banner clears on the next `update` that works. A failing
+`view` shows the last view that built until `view` works again.
 
 With `--log FILE`, each frame drawn after a reload logs `seen_to_frame_us`
 (from the watch seeing the change to the backend returning from drawing the

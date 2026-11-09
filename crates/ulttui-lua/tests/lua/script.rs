@@ -362,6 +362,65 @@ fn globals_do_not_leak_from_one_version_to_the_next() {
 }
 
 #[test]
+fn a_version_cannot_reach_past_its_environment() {
+    let path = write(
+        "env-escape",
+        r#"
+local reached = {}
+if getfenv then reached.getfenv = pcall(function() getfenv(0).leaked = "yes" end) end
+local meta = getmetatable(getfenv and getfenv(1) or {})
+if type(meta) == "table" and meta.__index then
+  reached.index = pcall(function() meta.__index.text = function() return "hijacked" end end)
+end
+return app { view = function() return text(tostring(reached.getfenv) .. tostring(reached.index)) end }
+"#,
+    );
+    let mut script = Script::new(&path, ScriptOptions::default()).unwrap();
+    script.reload();
+    assert_eq!(script.error(), None);
+    assert_eq!(view_texts(&script), ["nilnil"]);
+    std::fs::write(
+        &path,
+        "return app { view = function() return text(tostring(leaked) .. ' ' .. 'b') end }",
+    )
+    .unwrap();
+    assert!(matches!(script.reload(), Reload::Loaded(_)));
+    assert_eq!(view_texts(&script), ["nil b"]);
+}
+
+#[test]
+fn a_failed_reload_does_not_touch_the_running_state() {
+    let path = write("init-mutates", COUNTER);
+    let mut script = Script::new(&path, ScriptOptions::default()).unwrap();
+    script.reload();
+    script.update(&key("up"));
+    std::fs::write(
+        &path,
+        "return app { init = function(p) p.count = 99; return p end,\n view = function() error('no') end }",
+    )
+    .unwrap();
+    assert_eq!(script.reload(), Reload::Failed);
+    assert_eq!(int(&script, "state.count"), 1);
+    assert_eq!(view_texts(&script), ["Count: 1"]);
+}
+
+#[test]
+fn an_update_error_clears_on_the_next_good_update() {
+    let mut script = load(
+        "update-recovers",
+        r#"return app { init = function() return { n = 0 } end,
+  update = function(s, m) if m.key == "x" then error("bad") end s.n += 1 return s end,
+  view = function(s) return text(s.n) end }"#,
+        ScriptOptions::default(),
+    );
+    script.update(&key("x"));
+    assert!(script.error().unwrap().contains("bad"));
+    script.update(&key("a"));
+    assert_eq!(script.error(), None);
+    assert_eq!(view_texts(&script), ["1"]);
+}
+
+#[test]
 fn json_decode() {
     let script = load(
         "json",
