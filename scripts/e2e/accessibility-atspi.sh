@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# Check what a screen reader sees of Ultty's terminal over AT-SPI (ADR 0021
-# slice 4), on a virtual X display with a private session bus and AT-SPI
-# bus: a `terminal` object whose text is the screen, which follows output
-# (`echo hello`) and whose caret moves with the cursor.
+# Check what a screen reader sees of Ultty over AT-SPI (ADR 0021 slices 4
+# and 5), on a virtual X display with a private session bus and AT-SPI bus:
+# a `terminal` object whose text is the screen, which follows output (`echo
+# hello`) and whose caret moves with the cursor; then, with the native
+# `counter-app` running in it, a `button` per button, the focused
+# button as the focused object, and Tab moving that focus.
 #
 #   scripts/e2e/accessibility-atspi.sh [artifact-dir]
 #
 # Needs Xvfb, dbus-run-session, at-spi-bus-launcher, the system Python with
 # python3-gi and gir1.2-atspi-2.0, and a Vulkan or GL driver (Mesa's
-# lavapipe works without a GPU); xdotool, if present, focuses the window.
-# Uses $ULTTY and $ULTTYCTL, default target/debug/ultty and ulttyctl, built
-# first if unset. Artifacts go to artifact-dir if given, else to a
+# lavapipe works without a GPU); xdotool, if present, focuses the window,
+# without which the focus checks are skipped. Uses $ULTTY, $ULTTYCTL and
+# $COUNTER_APP, default target/debug/ultty, ulttyctl and counter-app, built
+# first if $ULTTY is unset. Artifacts go to artifact-dir if given, else to a
 # temporary directory removed on success. A local script, not a CI job:
 # it says nothing about what Orca speaks (docs/accessibility-test.md).
 set -euo pipefail
@@ -21,6 +24,7 @@ if [ "${1:-}" != "--inner" ]; then
     self=$(absolute "$0")
     if [ -n "${ULTTY:-}" ]; then ULTTY=$(absolute "$ULTTY"); fi
     if [ -n "${ULTTYCTL:-}" ]; then ULTTYCTL=$(absolute "$ULTTYCTL"); fi
+    if [ -n "${COUNTER_APP:-}" ]; then COUNTER_APP=$(absolute "$COUNTER_APP"); fi
     if [ -n "${1:-}" ]; then
         out=$(absolute "$1")
         keep=true
@@ -33,11 +37,12 @@ if [ "${1:-}" != "--inner" ]; then
         command -v "$tool" >/dev/null || { echo "$tool is required" >&2; exit 2; }
     done
     if [ -z "${ULTTY:-}" ]; then
-        cargo build -q -p ultty --bins
+        cargo build -q -p ultty --bins -p counter-app
         ULTTY=$PWD/target/debug/ultty
         ULTTYCTL=$PWD/target/debug/ulttyctl
+        COUNTER_APP=$PWD/target/debug/counter-app
     fi
-    export ULTTY ULTTYCTL
+    export ULTTY ULTTYCTL COUNTER_APP
     mkdir -p "$out"
     # A session bus of our own: the desktop's AT-SPI state is left alone.
     exec dbus-run-session -- "$self" --inner "$out" "$keep"
@@ -47,6 +52,7 @@ cd "$(dirname "$0")/../.."
 out="$2"
 keep="$3"
 ULTTYCTL="${ULTTYCTL:-$PWD/target/debug/ulttyctl}"
+COUNTER_APP="${COUNTER_APP:-$PWD/target/debug/counter-app}"
 launcher=$(ls /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher 2>/dev/null | head -1 || true)
 [ -n "$launcher" ] || { echo "at-spi-bus-launcher is required" >&2; exit 2; }
 mkdir -p "$out/config/ultty"
@@ -148,9 +154,84 @@ if $focus_checked; then
     echo "$after" | grep -q '"focused": true' ||
         fail "the window has focus but the terminal is not the focused object"
 fi
+
+# With a screen reader listening and nothing changing on screen, nothing is
+# rebuilt and Ultty does not wake beyond what it does without one. `idle
+# <name> <max>` measures 5 s after 3 s to settle, allowing <max> context
+# switches, and keeps each thread's switches in the artifacts.
+switches() {
+    cat /proc/"$ultty_pid"/task/*/status 2>/dev/null |
+        awk '/_ctxt_switches/ { s += $2 } END { print s + 0 }'
+}
+builds() { grep -c "accessibility tree built" "$out/ultty.log" || true; }
+threads() {
+    for task in /proc/"$ultty_pid"/task/*; do
+        printf '%s %s\n' "$(cat "$task/comm" 2>/dev/null)" \
+            "$(awk '/_ctxt_switches/ { s += $2 } END { print s + 0 }' "$task/status" 2>/dev/null)"
+    done
+}
+idle() {
+    local switches_before builds_before woke rebuilt
+    sleep 3
+    threads >"$out/threads-$1-before.txt"
+    switches_before=$(switches)
+    builds_before=$(builds)
+    sleep 5
+    woke=$(( $(switches) - switches_before ))
+    rebuilt=$(( $(builds) - builds_before ))
+    threads >"$out/threads-$1-after.txt"
+    echo "idle with AT active ($1), 5 s: $woke context switches, $rebuilt trees built" |
+        tee -a "$out/idle.txt"
+    [ "$rebuilt" -eq 0 ] || fail "a still screen ($1) rebuilt the tree $rebuilt times in 5 s"
+    [ "$woke" -le "$2" ] || fail "Ultty woke $woke times in 5 s of idle ($1, at most $2)"
+}
+idle prompt 2
+
+# Slice 5: a native app's regions. counter-app connects over the tab's
+# socket (the shell has ULTTY_SOCKET) and shows a full scene.
+read_widgets() { /usr/bin/python3 -I scripts/e2e/atspi_widgets.py "$ultty_pid" "$@"; }
+# The label of the region the app has focused, from `ulttyctl regions`.
+native_focus() {
+    ctl --json regions | /usr/bin/python3 -I scripts/e2e/native_focus.py
+}
+ctl send-text "exec $COUNTER_APP"$'\r' >/dev/null || fail "ulttyctl send-text failed"
+buttons=(--role button --name "-1" --role button --name "+1"
+    --role button --name "Reset")
+widgets=$(read_widgets "${buttons[@]}" --timeout 30) ||
+    fail "no buttons -1, +1 and Reset on the AT-SPI bus: $widgets"
+echo "$widgets" >"$out/widgets.json"
+echo "native: -1, +1 and Reset are buttons"
+
+focus_moves="not checked (no xdotool)"
+if $focus_checked; then
+    first=$(native_focus)
+    [ -n "$first" ] || fail "counter-app focused no labelled region: $(ctl regions)"
+    widgets=$(read_widgets --focused "$first" --timeout 15) ||
+        fail "the focused object is not the app's focused button $first: $widgets"
+    echo "$widgets" | grep -q '"focused": {"role": "button"' ||
+        fail "the focused object is not a button: $widgets"
+    ctl send-key tab >/dev/null || fail "ulttyctl send-key failed"
+    second=$first
+    for _ in $(seq 50); do
+        second=$(native_focus)
+        [ -n "$second" ] && [ "$second" != "$first" ] && break
+        sleep 0.1
+    done
+    [ "$second" != "$first" ] || fail "Tab did not move the app's focus from $first"
+    widgets=$(read_widgets --focused "$second" --timeout 15) ||
+        fail "after Tab the focused object is not $second: $widgets"
+    echo "$widgets" >"$out/widgets-after-tab.json"
+    focus_moves="$first -> $second"
+    echo "native: focus $focus_moves"
+fi
+
 ! grep -q "panicked at" "$out/ultty.log" || fail "Ultty logged a panic"
 grep "accessibility tree built" "$out/ultty.log" | tail -3 || true
+# A connected native app keeps the 250 ms maintenance tick (keepalives,
+# animations; MAINTENANCE_POLL_INTERVAL), 20 wakeups in 5 s with or without
+# a screen reader. The tree must not be rebuilt on it.
+idle counter-app 22
 
-echo "accessibility-atspi: ok (caret $caret_before -> $caret_after)"
+echo "accessibility-atspi: ok (caret $caret_before -> $caret_after; focus $focus_moves)"
 # Artifacts are kept when the caller named a directory; on failure, always.
 $keep || rm -rf "$out"
