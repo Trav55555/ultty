@@ -139,6 +139,7 @@ impl View for Modal {
             width: Dimension::Cells(self.width),
             height: Dimension::Cells(10.0),
             margin: ultty_protocol::Edges::all(Dimension::Auto),
+            padding: super::BORDER_PADDING,
             ..Default::default()
         }
     }

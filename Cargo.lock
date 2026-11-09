@@ -4831,6 +4831,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "ulttui",
  "ultty-bench",
  "ultty-protocol",
  "ultty-vt",

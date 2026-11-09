@@ -166,6 +166,7 @@ impl<T: std::fmt::Display> View for List<T> {
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
             width: Dimension::Percent(100.0),
+            padding: super::BORDER_PADDING,
             ..Default::default()
         }
     }

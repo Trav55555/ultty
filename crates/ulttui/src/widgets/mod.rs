@@ -169,6 +169,18 @@ pub(crate) fn render_view_to_native(
     Ok(region_id)
 }
 
+/// Padding that keeps a bordered widget's children off its border. A native
+/// border takes no room in the layout (spec section 10.6), so without it
+/// children sit on the border line; one cell on each side matches the inner
+/// area of the ANSI renderer's bordered `Block`.
+pub(crate) const BORDER_PADDING: ultty_protocol::Edges<ultty_protocol::Dimension> =
+    ultty_protocol::Edges {
+        top: ultty_protocol::Dimension::Cells(1.0),
+        right: ultty_protocol::Dimension::Cells(1.0),
+        bottom: ultty_protocol::Dimension::Cells(1.0),
+        left: ultty_protocol::Dimension::Cells(1.0),
+    };
+
 /// Trait for renderable views.
 pub trait View {
     fn constraints(&self) -> ultty_protocol::Constraints {
