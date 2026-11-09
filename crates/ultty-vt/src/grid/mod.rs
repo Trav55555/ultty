@@ -34,6 +34,9 @@ mod cluster;
 mod history;
 mod image;
 mod palette;
+#[cfg(feature = "page-proto")]
+#[doc(hidden)]
+pub mod proto;
 mod row;
 mod term_handler;
 mod terminal;

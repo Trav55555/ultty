@@ -15,3 +15,12 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 nix = { version = "0.29", features = ["term", "poll", "fs"] }
 x11rb = { version = "0.13", features = ["xtest"] }
+
+[features]
+# The ADR 0022 page-storage prototype: `ultty-bench vt --suite proto`,
+# `ultty-bench proto-check`, `ultty-bench proto-flood` and `ultty-proto-mem`.
+proto = ["ultty-vt/page-proto"]
+
+[[bin]]
+name = "ultty-proto-mem"
+required-features = ["proto"]

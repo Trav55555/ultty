@@ -4871,6 +4871,7 @@ dependencies = [
 name = "ultty-vt"
 version = "0.2.0"
 dependencies = [
+ "foldhash",
  "proptest",
  "serde",
  "tracing",
