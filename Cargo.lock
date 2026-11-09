@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "async-fetch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "tokio",
@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "chat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ulttui",
@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "counter-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ulttui",
@@ -1171,7 +1171,7 @@ dependencies = [
 
 [[package]]
 name = "dashboard"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ulttui",
@@ -1548,7 +1548,7 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "form-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ulttui",
@@ -1791,7 +1791,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello-native"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "tracing",
@@ -4125,7 +4125,7 @@ dependencies = [
 
 [[package]]
 name = "split-panes"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "tracing",
@@ -4255,7 +4255,7 @@ dependencies = [
 
 [[package]]
 name = "sysmon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "sysinfo",
@@ -4511,7 +4511,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "todo-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ulttui",
@@ -4764,7 +4764,7 @@ dependencies = [
 
 [[package]]
 name = "ulttui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "crossterm",
@@ -4787,7 +4787,7 @@ dependencies = [
 
 [[package]]
 name = "ultty"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -4832,7 +4832,7 @@ dependencies = [
 
 [[package]]
 name = "ultty-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nix 0.29.0",
  "serde_json",
@@ -4843,7 +4843,7 @@ dependencies = [
 
 [[package]]
 name = "ultty-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "libc",
@@ -4854,7 +4854,7 @@ dependencies = [
 
 [[package]]
 name = "ultty-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.21.7",
  "bytes",
@@ -4868,7 +4868,7 @@ dependencies = [
 
 [[package]]
 name = "ultty-vt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "serde",

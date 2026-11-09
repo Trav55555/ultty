@@ -7,6 +7,17 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-08
+
+Highlights: a security review's findings fixed (paste injection, clipboard
+queries, link schemes, per-process control sockets, key routing); much wider
+terminal compatibility (kitty keyboard protocol, IME, undercurl and underline
+colour, truthful DA/DECRQM/XTVERSION replies, a VT conformance suite); a
+control plane for agents and TUI tests (`ulttyctl panes`, `subscribe`,
+`last-command`, `wait-for --command-done`, MCP); and large speedups: non-ASCII
+text is about 3x faster to process, ASCII about 1.3x, Wayland throughput no
+longer collapses, and an idle window no longer wakes up.
+
 ### Security
 
 - Bracketed pastes drop every ESC and C1 control character, so pasted text
@@ -117,6 +128,10 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   `--bell` and `--quiet <ms>` wait for the next command to finish, the next
   bell, or a period without output, instead of for text. Control request:
   `wait_for` with `until`.
+- `behavior.accessibility` (default `false`) exposes the window to screen
+  readers through AccessKit (AT-SPI on Linux): for now a single window node
+  named after the title. It is off by default because its D-Bus client wakes
+  an idle window twice a second.
 - `behavior.cursor_blink` (default `true`); `false` keeps the cursor steady.
 - `dist/terminfo/ultty.terminfo`, the `xterm-ultty` entry, installed by
   `install.sh`, `make install`, the packages and the Homebrew formula.
@@ -144,6 +159,16 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Changed
 
+- Throughput: the VT core takes 25-40% fewer instructions per byte on
+  non-ASCII text and about a third fewer on ASCII (a combined width and
+  cluster-class table, an in-place cell writer, scrollback that copies plain
+  rows instead of re-encoding them, single-pass UTF-8 decoding), and the
+  parser keeps escape sequences on a fast path. On a Tesla T4, live
+  unicode-mixed output went from 16 to 24 MiB/s and ASCII from 71 to 93 MiB/s.
+- Frames are drawn when the window system asks for them: under Wayland a
+  hidden or throttled window no longer blocks the main thread in present, and
+  frames are presented after the terminal locks are released, so output keeps
+  being parsed while a frame waits.
 - The minimum supported Rust version is 1.90, raised from 1.89: `wgpu-hal`
   30 depends on `ordered-float` 5.5, which needs it. The CI MSRV job did not
   actually build with the MSRV before, so this went unnoticed.
@@ -208,6 +233,10 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Fixed
 
+- Under Wayland, output throughput fell to about 1 MiB/s because a frame held
+  the terminal lock while waiting to present.
+- A shell's last output could be cut off on a busy machine: the exit is now
+  reported only after the PTY's unread output has been read (2 s at most).
 - A program that tracks the mouse with motion (modes 1002/1003, as Claude
   Code's full mouse mode sets) now sees drags: they were reported as
   motion with no button (code 35) and the release as button 3, so Claude
@@ -254,5 +283,6 @@ First public release, built for Linux x86_64 only.
 - `ulttyctl` and an MCP server for automation.
 - `install.sh`, release tarball, `.deb`, `.rpm`, and a Homebrew formula.
 
-[Unreleased]: https://github.com/Trav55555/ultty/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Trav55555/ultty/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Trav55555/ultty/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Trav55555/ultty/releases/tag/v0.1.0

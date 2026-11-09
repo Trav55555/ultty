@@ -8,9 +8,9 @@
 #
 # The GitHub step needs the GH_RELEASE_TOKEN Actions secret on this
 # repository: a fine-grained GitHub token with Contents read/write on
-# Trav55555/ultty only. The GitHub release workflow also runs for tags the
-# mirror receives; whichever publishes first wins, and this workflow leaves
-# an existing published GitHub release alone.
+# Trav55555/ultty only. GitHub's own release workflow runs only when started
+# by hand, so tags publish once; this workflow still leaves an existing
+# published GitHub release alone.
 name: Release
 
 on:
