@@ -124,14 +124,18 @@ impl App {
     /// tabs' output (ADR 0020). A terminal gets a pass when it had output
     /// (`with_output`) or still has surfaces to place or follow; the pass
     /// also tells apps when a surface scrolls off or back onto the screen.
+    /// Returns whether a surface was written into the focused pane's rows,
+    /// which changes what a screen reader is shown.
     fn pair_inline_surfaces(
         &mut self,
         with_output: &[ultty::terminal_manager::TerminalId],
         now: Instant,
-    ) {
+    ) -> bool {
         let Some(server) = self.protocol_server.as_mut() else {
-            return;
+            return false;
         };
+        let focused = self.terminal_manager.focused_terminal().map(|t| t.id);
+        let mut focused_written = false;
         let active = self.terminal_manager.active_tab().map(|tab| tab.id);
         for tab in self.terminal_manager.tabs() {
             let single_pane = tab.terminals.len() == 1;
@@ -144,7 +148,7 @@ impl App {
                     continue;
                 };
                 let mut terminal = managed.event_loop.terminal();
-                server.pair_inline_surfaces(
+                let wrote = server.pair_inline_surfaces(
                     tab.id,
                     terminal_id,
                     &mut terminal,
@@ -152,6 +156,7 @@ impl App {
                     single_pane && Some(tab.id) == active,
                     now,
                 );
+                focused_written |= wrote && Some(terminal_id) == focused;
             }
         }
         server.expire_unplaced_surfaces(now);
@@ -161,6 +166,7 @@ impl App {
         if server.active_tab_sessions().any(|s| s.is_render_dirty()) {
             self.needs_redraw = true;
         }
+        focused_written
     }
 
     /// Whether the focused pane's cursor should blink: the config allows
@@ -391,7 +397,7 @@ impl App {
 
                 // Clean up exited terminals
                 self.terminal_manager.cleanup_exited();
-                self.pair_inline_surfaces(&with_output, now);
+                shown_changed |= self.pair_inline_surfaces(&with_output, now);
                 let tab_state_after_cleanup = (
                     self.terminal_manager.tab_count(),
                     self.terminal_manager.active_tab().map(|tab| tab.id),

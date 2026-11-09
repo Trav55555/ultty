@@ -566,7 +566,6 @@ impl NativeSession {
                 self.mark_full_scene_rebuild();
                 self.surface_states
                     .insert(id, super::surfaces::SurfaceState::new(Instant::now()));
-                self.forget_frozen_surfaces(id);
                 debug!("Created surface {:?} ({} rows)", id, rows);
             }
             Err(error) => {

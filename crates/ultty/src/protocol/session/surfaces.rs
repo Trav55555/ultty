@@ -301,11 +301,6 @@ impl NativeSession {
         }
     }
 
-    /// Drop rows kept for an earlier surface `id`: the id is in use again.
-    pub(super) fn forget_frozen_surfaces(&mut self, id: RegionId) {
-        self.frozen_surfaces.retain(|frozen| frozen.id != id);
-    }
-
     /// Freeze every placed surface where it stands: the session is ending.
     pub fn freeze_surfaces(&mut self) {
         let ids: Vec<RegionId> = self.scene.surfaces().iter().map(|s| s.id).collect();

@@ -75,20 +75,22 @@ pub struct AnchorPairing {
 
 /// Write `rows`, a surface's cells, over the rows tagged `tag` that hold
 /// it, from its first row on. Rows past the reservation, or that lost the
-/// tag, are left alone.
-fn write_rows(buffer: &mut Buffer, tag: u16, rows: &[Row]) {
+/// tag, are left alone. Returns whether any row changed.
+fn write_rows(buffer: &mut Buffer, tag: u16, rows: &[Row]) -> bool {
     let Some(first) = buffer.anchor_line(tag) else {
-        return;
+        return false;
     };
+    let mut changed = false;
     for (offset, row) in rows.iter().enumerate() {
         let line = first + offset;
         if buffer
             .anchor_at(line)
             .is_some_and(|anchor| anchor.tag() == tag)
         {
-            buffer.replace_row(line, row);
+            changed |= buffer.replace_row(line, row);
         }
     }
+    changed
 }
 
 impl AnchorPairing {
@@ -208,7 +210,8 @@ impl AnchorPairing {
     /// the cells of each surface whose scene changed into its rows (and of
     /// each closed one, before releasing its anchor), release anchors
     /// nobody claims and tell each placed surface's app whether it is on
-    /// the screen.
+    /// the screen. Returns whether any of the terminal's rows changed, so
+    /// what a screen reader is shown can be looked at again.
     ///
     /// `claimable` says the terminal is its tab's only pane; otherwise new
     /// anchors are released at once. `on_screen` says it is drawn now (its
@@ -224,7 +227,8 @@ impl AnchorPairing {
         claimable: bool,
         on_screen: bool,
         now: Instant,
-    ) {
+    ) -> bool {
+        let mut wrote = false;
         // A tab split while an anchor waited: it can no longer be claimed.
         if !claimable {
             for pending in std::mem::take(&mut self.pending) {
@@ -300,7 +304,7 @@ impl AnchorPairing {
                     Some(frozen.swap_remove(index).rows)
                 };
                 if let Some(rows) = closed.or_else(ended) {
-                    write_rows(terminal.main_buffer_mut(), claimed.tag, &rows);
+                    wrote |= write_rows(terminal.main_buffer_mut(), claimed.tag, &rows);
                 }
                 terminal.release_anchor(claimed.tag);
             }
@@ -362,7 +366,7 @@ impl AnchorPairing {
                 let rows = find(sessions, claimed.session_id)
                     .and_then(|session| session.take_surface_rows(claimed.surface, cols));
                 if let Some(rows) = rows {
-                    write_rows(buffer, claimed.tag, &rows);
+                    wrote |= write_rows(buffer, claimed.tag, &rows);
                 }
             }
         }
@@ -381,6 +385,7 @@ impl AnchorPairing {
                 report(claimed.session_id, viewed);
             }
         }
+        wrote
     }
 }
 
@@ -548,12 +553,13 @@ mod tests {
             buffer.text_of_rows(0, buffer.total_lines(), 0)
         }
 
-        fn update(&mut self) {
-            self.update_with(true, true);
+        /// A pass; whether it changed any of the terminal's rows.
+        fn update(&mut self) -> bool {
+            self.update_with(true, true)
         }
 
-        fn update_with(&mut self, claimable: bool, on_screen: bool) {
-            self.pairing.update(
+        fn update_with(&mut self, claimable: bool, on_screen: bool) -> bool {
+            let wrote = self.pairing.update(
                 &mut self.term,
                 &mut [&mut self.session],
                 claimable,
@@ -561,6 +567,7 @@ mod tests {
                 self.now,
             );
             self.session.expire_unplaced_surfaces(self.now);
+            wrote
         }
 
         fn sent(&mut self) -> (Vec<(u32, SurfaceEventKind)>, Vec<u16>) {
@@ -1071,9 +1078,9 @@ mod tests {
         let mut scribble = crate::grid::Row::new(20);
         scribble[0].set_char('#');
         rig.term.main_buffer_mut().replace_row(1, &scribble);
-        rig.update();
+        assert!(!rig.update(), "a pass without a change writes nothing");
         feed(&mut rig.term, b"more output\r\n");
-        rig.update();
+        assert!(!rig.update());
         assert!(rig.text().starts_with("prose 1\n#\n"));
 
         // Metadata does not change what is drawn; content does.
@@ -1081,11 +1088,13 @@ mod tests {
             id: RegionId::new(5),
             metadata: vec![("k".into(), "v".into())],
         }]);
-        rig.update();
+        assert!(!rig.update());
         assert!(rig.text().starts_with("prose 1\n#\n"));
         rig.set_text(5, "card line 1\ncard line 2");
-        rig.update();
+        assert!(rig.update(), "writing the card is a change to the screen");
         assert!(rig.text().starts_with(TRANSCRIPT));
+        rig.set_text(5, "card line 1\ncard line 2");
+        assert!(!rig.update(), "the same cells again change nothing");
     }
 
     /// The card goes on changing in scrollback, keeps its place as older
@@ -1179,6 +1188,34 @@ mod tests {
         feed(&mut rig.term, b"\x1b[?1049l");
         rig.update();
         assert_eq!(rig.text(), "prose 1\nwhile away\n\nprose 2");
+    }
+
+    /// An app that replaces a card in one frame (final content, close,
+    /// create the same id again) keeps the old card's last text in its
+    /// rows; the new one waits for its own anchor.
+    #[test]
+    fn replacing_a_card_in_one_frame_keeps_the_old_cards_last_text() {
+        let mut rig = Rig::new();
+        transcript(&mut rig);
+        rig.frame(vec![
+            set_text(5, "final 1\nfinal 2"),
+            AppMessage::CloseSurface {
+                id: RegionId::new(5),
+            },
+            AppMessage::CreateSurface {
+                id: RegionId::new(5),
+                rows: 1,
+                constraints: Constraints::default(),
+                style: Style::default(),
+            },
+        ]);
+        rig.update();
+        assert_eq!(rig.text(), "prose 1\nfinal 1\nfinal 2\nprose 2");
+        assert!(tags(&rig.term).iter().all(|&tag| tag == 0));
+        assert!(matches!(
+            rig.placement(5),
+            Some(SurfacePlacement::Unplaced { rows: 1, .. })
+        ));
     }
 
     /// A card changed and closed in one frame whose rows are then erased
