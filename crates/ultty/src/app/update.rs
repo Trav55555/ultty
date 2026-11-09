@@ -35,6 +35,10 @@ impl App {
                 .protocol_server
                 .as_ref()
                 .and_then(|server| server.next_pairing_deadline()),
+            accessibility: self
+                .accessibility
+                .as_ref()
+                .and_then(|adapter| adapter.next_deadline()),
         }
         .next_wake(now)
     }
@@ -259,6 +263,8 @@ impl App {
                 let mut content_changed = false;
                 let mut tab_titles_changed = false;
                 let mut with_output = Vec::new();
+                // What a screen reader is shown changed (ADR 0021 §3).
+                let mut shown_changed = false;
                 let subscribed = self
                     .control_server
                     .as_ref()
@@ -288,6 +294,7 @@ impl App {
                                 // Only update URL detection for focused terminal
                                 if Some(terminal_id) == focused_id {
                                     content_changed = true;
+                                    shown_changed = true;
                                     self.output_since_input = self.input_sent_at.is_some();
                                 }
                             }
@@ -320,6 +327,7 @@ impl App {
                             }
                             TerminalEvent::TitleChanged(title) => {
                                 tab_titles_changed = true;
+                                shown_changed = true;
                                 // Only set window title from focused terminal
                                 if Some(terminal_id) == focused_id {
                                     self.window.set_title(&title);
@@ -411,6 +419,8 @@ impl App {
 
                 // Check for column mode resize requests (DECCOLM - 132/80 column mode)
                 self.handle_column_resize_requests();
+
+                self.update_accessibility(shown_changed, Instant::now());
             }
             Err(e) => {
                 tracing::error!("Terminal error: {}", e);
@@ -595,6 +605,9 @@ struct WakeState {
     control_wait: Option<Instant>,
     /// When an inline surface anchor that no surface claimed is released.
     anchor_release: Option<Instant>,
+    /// When a coalesced accessibility tree is due; `None` unless a screen
+    /// reader is listening and the screen changed.
+    accessibility: Option<Instant>,
 }
 
 impl WakeState {
@@ -624,6 +637,7 @@ impl WakeState {
             maintenance,
             self.control_wait,
             self.anchor_release,
+            self.accessibility,
         ]
         .into_iter()
         .flatten()
@@ -873,6 +887,7 @@ mod tests {
             native_sessions: 0,
             control_wait: None,
             anchor_release: None,
+            accessibility: None,
         }
     }
 
@@ -951,6 +966,17 @@ mod tests {
         };
         assert_eq!(state.next_wake(now), Some(release));
         assert_eq!(idle(now).next_wake(now), None);
+    }
+
+    #[test]
+    fn a_coalesced_accessibility_tree_wakes_at_its_deadline() {
+        let now = Instant::now();
+        let due = now + Duration::from_millis(30);
+        let state = WakeState {
+            accessibility: Some(due),
+            ..idle(now)
+        };
+        assert_eq!(state.next_wake(now), Some(due));
     }
 
     #[test]

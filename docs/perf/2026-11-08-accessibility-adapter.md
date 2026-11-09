@@ -79,3 +79,26 @@ With `accessibility = true` on a private session bus with
 `ultty` application with one `frame` named after the window title; the name
 follows the pane's title, and turning `IsEnabled` off and on deactivates and
 reactivates the adapter.
+
+## Slice 4: the terminal tree
+
+Same method, release build of the slice-4 branch, `accessibility = true`,
+a private session bus with `at-spi-bus-launcher`. **Inactive** is
+`IsEnabled` false; **active** is `IsEnabled` true after an AT-SPI client
+read the terminal's text once. 10 s idle after 5 s settle, two runs each:
+
+| setup | switches/s (vol + invol) | threads | trees sent while idle |
+|---|---:|---:|---:|
+| inactive | 2.00 + 0 | 36 | 0 |
+| active, still screen | 2.00 + 0 | 36 | 0 |
+
+The 2/s is still `blocking-1` (above); an active adapter with a still
+screen adds no wakeups, because a rebuild is scheduled only after a
+change.
+
+Flooding the focused pane (a shell loop echoing 200 000 lines, about
+1.4 s of output) while active sent 24 trees, about 17 per second; the
+closest two were 47 ms apart in the log, which timestamps after the
+build, against the 50 ms coalescing interval. Building a 44-node tree
+for an 88x39 screen (snapshot under the pane's lock plus the build) took
+a median of 93 us and at most 2.8 ms under the flood.
