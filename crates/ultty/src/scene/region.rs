@@ -29,6 +29,9 @@ pub struct Region {
     /// Whether the region has received `AppendContent`. Text regions that
     /// have are derived as `Log` rather than `Text`.
     pub appended: bool,
+    /// Whether a stream (`StreamStart`, no `StreamEnd` yet) is open on the
+    /// region: assistive technology is told it is busy (ADR 0021 §3).
+    pub streaming: bool,
     /// Dirty flag for rendering.
     pub dirty: bool,
 }
@@ -60,6 +63,7 @@ impl Region {
             metadata: Vec::new(),
             semantics: None,
             appended: false,
+            streaming: false,
             dirty: true,
         }
     }

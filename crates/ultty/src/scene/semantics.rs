@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use ultty_protocol::{Content, Role, SemanticValue, Semantics, WidgetContent};
+use ultty_protocol::{Content, Live, Role, SemanticValue, Semantics, WidgetContent};
 
 use super::Region;
 
@@ -31,14 +31,19 @@ pub fn capped(text: &str) -> Cow<'_, str> {
 /// With role `Auto` (the default before any `SetSemantics`) the role comes
 /// from the content. Whatever the role, fields the app left empty are
 /// filled from the content where it has them; fields the app set win. A
-/// region with no label is named by its text when that is one line; an
-/// input's text is its value, never its name. `live` is never inferred.
+/// region with no label is named by its text when that is one line,
+/// unless it is live and has been appended to: that text is announced
+/// (ADR 0021 §3), and a live node whose name changes is spoken again. An
+/// input's text is its value, never its name. `live` is never inferred;
+/// `busy` is set while a stream is open on the region.
 pub fn effective_semantics(region: &Region) -> Semantics {
     let mut semantics = region.semantics().clone();
     if semantics.role == Role::Auto {
         semantics.role = content_role(&region.content, region.appended);
     }
-    fill_from_content(&mut semantics, &region.content);
+    let announced = region.appended && semantics.live != Live::Off;
+    fill_from_content(&mut semantics, &region.content, !announced);
+    semantics.busy |= region.streaming;
     semantics
 }
 
@@ -59,8 +64,9 @@ fn content_role(content: &Content, appended: bool) -> Role {
     }
 }
 
-/// Fill the fields the app left empty from what the content says.
-fn fill_from_content(semantics: &mut Semantics, content: &Content) {
+/// Fill the fields the app left empty from what the content says; a text
+/// names its region only if `named_by_text`.
+fn fill_from_content(semantics: &mut Semantics, content: &Content, named_by_text: bool) {
     match content {
         Content::Widget(WidgetContent::Input(input)) => {
             if semantics.value_text.is_none() && !input.password {
@@ -96,7 +102,7 @@ fn fill_from_content(semantics: &mut Semantics, content: &Content) {
             }
         }
         _ => {
-            if semantics.label.is_none() {
+            if semantics.label.is_none() && named_by_text {
                 semantics.label = one_line(content);
             }
         }
@@ -230,6 +236,29 @@ mod tests {
     }
 
     #[test]
+    fn an_open_stream_makes_any_region_busy() {
+        let mut region = region(text("partial"));
+        assert!(!effective_semantics(&region).busy);
+        region.streaming = true;
+        assert!(effective_semantics(&region).busy);
+        // Not live and never appended: still named by its one line.
+        assert_eq!(
+            effective_semantics(&region).label.as_deref(),
+            Some("partial")
+        );
+    }
+
+    #[test]
+    fn a_live_region_set_whole_is_still_named_by_its_text() {
+        let mut status = region(text("Building"));
+        status.semantics_mut().live = Live::Polite;
+        assert_eq!(
+            effective_semantics(&status).label.as_deref(),
+            Some("Building")
+        );
+    }
+
+    #[test]
     fn input_exposes_value_and_placeholder_but_is_not_named_by_them() {
         let semantics = effective_semantics(&region(widget(WidgetContent::Input(InputWidget {
             value: "cargo test".to_string(),
@@ -327,7 +356,10 @@ mod tests {
         let semantics = effective_semantics(&log);
         assert_eq!(semantics.role, Role::Status);
         assert_eq!(semantics.live, Live::Polite);
-        assert_eq!(semantics.label.as_deref(), Some("hello"), "text names it");
+        assert_eq!(
+            semantics.label, None,
+            "appended text is announced, not its name (a renamed live node is spoken again)"
+        );
 
         let mut button = region(widget(WidgetContent::Button(ButtonWidget::new("Run"))));
         button.semantics_mut().label = Some("Run all tests".to_string());

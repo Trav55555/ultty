@@ -37,6 +37,13 @@ in the cargo registry and the Orca source on GNOME GitLab):
 - Both platform adapters announce a node whose `live` is not `Off` **when
   the node is added** (AT-SPI `object:announcement`, macOS
   `NSAccessibilityAnnouncementRequested`); relabelling a node does not.
+  (Corrected in slice 6: both do announce a live node whose name
+  changes, `accesskit_atspi_common` 0.21.1 `notify_property_changes` and
+  `accesskit_macos` 0.27.2 `node_updated`, which also announces a node
+  that turns live or comes back into the filtered tree, and liveness is
+  inherited by descendants in `accesskit_consumer`. Announcing by adding nodes still
+  holds; what changed is that nothing else under a live region may be
+  named by the streamed text.)
   Text-change events come from diffing a text node's content between
   updates; a text node has role `Terminal`, `Document`, `Label` or a text
   input, and `TextRun` children with `character_lengths`.
@@ -423,6 +430,61 @@ Each slice is independently testable and mergeable.
      tree rebuilt.
 6. **Live regions**: queue, flush rules, cap, pruning, `busy`. Check: builder
    tests with a scripted clock; manual step 5, the B4 done criterion.
+   Done 2026-11-09 except the Orca run (`a11y/live.rs`);
+   `scripts/e2e/accessibility-live.sh` streams twelve lines into a polite
+   log with the `live-region` example of `ultty-client` and checks the
+   AT-SPI `object:announcement` events: every line once, in order, never
+   cut inside a line, at most four a second. Choices made where §3 was
+   open or did not survive contact:
+   - Only `AppendContent` feeds the queue, as §3 says; a `SetContent` on
+     a live region is not queued. A live region never appended to is
+     named by its one-line text, and on both platforms a renamed live
+     node is announced, which covers a one-line status set whole. Once
+     appended to, a live region is never named by its text again, not
+     even after a later `SetContent`: a stated choice, so a stream is
+     not spoken twice.
+   - "At most four flushes a second" is a spacing of 250 ms per session;
+     a flush is one announcement, of the region that has waited longest.
+   - A flush with a line break in it takes the complete lines only. The
+     line begun after them waits for its own break or 250 ms from its own
+     first byte; flushing everything once the queue was 250 ms old cut a
+     word in half whenever the cap had held lines back (seen over AT-SPI).
+   - Over 2 KiB, the cut is after the last line break inside the limit,
+     else after the last blank, else at a character boundary. An
+     announcement is not cut to the 1024-character name cap.
+   - Bounds: a region queues at most 16 KiB, cut back to 12 KiB from a
+     line start near the cut when it passes that; a session's live
+     regions hold at most 64 KiB, queued and announced together, cut back
+     to 48 KiB oldest first (announcements, then the queues that have
+     waited longest); a session holds at most 128 KiB of appended text
+     between two passes of the event loop, cut back to 64 KiB. Text is
+     kept only while AccessKit is active, only for sessions of the active
+     tab, and only when that tab has one pane (the only time scenes are
+     shown); inactive, appends cost one check.
+   - Announcement nodes are `s<session>:<region>a<serial>`, the serial
+     counting every flush since activation, so a kept node keeps its id
+     and a new one never reuses one. A region that leaves the tree drops
+     its queue and announcements, so that coming back adds no old node;
+     so does activation, and so does deleting the region, reported in
+     order with the appends so a region created again with the same id
+     inherits nothing. Announcements are counted against the node budget
+     before the region's text and children, so they are never held back.
+   - Because names and liveness work as corrected above: a live region
+     that has been appended to is not named by its text, and every node
+     under a live region that is not live itself (its line `Label`s,
+     child regions and theirs) is marked `live` `Off`, else each new or
+     growing line would be spoken besides the announcements, unthrottled.
+     Only a region's own `live` queues its appends. The region's own node is still
+     announced (its label) when it is first added. A consequence for the
+     "one region per message" pattern: a new child region added under a
+     live log is not spoken when it appears (it is `Off`); an app that wants
+     each message read streams it into the live region with `AppendContent`,
+     or marks the message region live itself. Slice 7 (ulttui) should make
+     `MarkdownView` streaming do the former.
+   - `busy` follows the region's open stream, also when `StreamStart`
+     came before the region was created.
+   - Idle with a screen reader listening after the stream: 20 wakeups in
+     5 s, the app's maintenance tick, and no tree rebuilt.
 7. **ulttui**: `View::semantics`, widget defaults, builders, `Semantic`,
    backend diffing, done-bar line. Check: widget snapshots gain semantics;
    `regions --json` on `chat` shows a `Log` with `Polite`.

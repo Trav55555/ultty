@@ -12,6 +12,7 @@ use std::time::Instant;
 use accesskit::Rect;
 use ultty::a11y::scene::{Placement, SceneSnapshot};
 use ultty::a11y::tree::{GridSnapshot, PaneSnapshot, Snapshot, SurfaceSnapshot, TabSnapshot};
+use ultty::protocol::session::LiveChange;
 use ultty::protocol::{NativeSession, ProtocolServer};
 use ultty::terminal_manager::ManagedTerminal;
 use ultty_protocol::RegionId;
@@ -19,20 +20,38 @@ use ultty_protocol::RegionId;
 use super::App;
 
 impl App {
-    /// Tell the accessibility adapter what changed this pass and send it a
-    /// tree if one is due. `screen_changed` is output in the focused pane or
-    /// a new title from any pane.
+    /// Tell the accessibility adapter what changed this pass, including
+    /// text appended to live regions, and send it a tree if one is due.
+    /// `screen_changed` is output in the focused pane or a new title from
+    /// any pane.
     ///
-    /// Inactive (no screen reader) this is one check: nothing is hashed,
-    /// locked or copied.
+    /// Inactive (no screen reader) this is two checks: nothing is hashed,
+    /// locked, kept or copied.
     pub(super) fn update_accessibility(&mut self, screen_changed: bool, now: Instant) {
-        if !self.accessibility.as_ref().is_some_and(|a| a.is_active()) {
+        let active = self.accessibility.as_ref().is_some_and(|a| a.is_active());
+        if let Some(server) = self.protocol_server.as_mut() {
+            server.set_live_announcements(active);
+        }
+        if !active {
             return;
         }
         let digest = self.shown_digest();
         let Some(adapter) = self.accessibility.as_mut() else {
             return;
         };
+        // Native scenes are shown only in a tab of one pane (see
+        // `accessibility_snapshot`); text for scenes that are not shown is
+        // dropped rather than flushed into a tree that leaves it out.
+        let scenes_shown = self.terminal_manager.active_pane_rects(1.0, 1.0).len() == 1;
+        if let Some(server) = self.protocol_server.as_mut() {
+            server.take_live_appends(|session, change| match change {
+                LiveChange::Appended { region, live, text } if scenes_shown => {
+                    adapter.appended(session, region.0, live, &text, now);
+                }
+                LiveChange::Appended { .. } => {}
+                LiveChange::Removed(region) => adapter.removed(session, region.0),
+            });
+        }
         if screen_changed {
             adapter.changed();
         }

@@ -1169,7 +1169,10 @@ mod tests {
     }
 
     /// Lay `card` out and rasterise it, failing if rasterising alone takes
-    /// longer than `budget`.
+    /// longer than `budget`. Budgets are seconds: they catch the hangs
+    /// these tests guard against (tens of seconds and up before the fixes,
+    /// microseconds to milliseconds after) without failing a debug build on
+    /// a loaded machine.
     fn rows_within(card: &mut Card, budget: std::time::Duration) -> Vec<Row> {
         LayoutEngine::new()
             .compute_scene_layout(&mut card.scene, f32::from(card.cols), 24.0)
@@ -1186,7 +1189,7 @@ mod tests {
     /// cost. Visiting its whole box took 0.8 s at 30 000 cells square.
     #[test]
     fn huge_regions_cost_only_their_visible_cells() {
-        let budget = std::time::Duration::from_millis(50);
+        let budget = std::time::Duration::from_secs(2);
         let huge = cells(1.0e9, 1.0e9);
 
         let mut card = Card::new(6, 3);
@@ -1325,7 +1328,7 @@ mod tests {
                 }
             }
         }
-        let rows = rows_within(&mut card, std::time::Duration::from_millis(400));
+        let rows = rows_within(&mut card, std::time::Duration::from_secs(5));
         let shown: Vec<String> = rows.iter().map(|row| row.text_trimmed()).collect();
         let expected: Vec<String> = (0..8).map(|row| format!("visible 120.{row}")).collect();
         assert_eq!(shown, expected);
@@ -1350,7 +1353,7 @@ mod tests {
             region.constraints.margin.left = Dimension::Cells(-LEFT);
             region.constraints.margin.top = Dimension::Cells(-20_000.0);
         }
-        let rows = rows_within(&mut card, std::time::Duration::from_millis(50));
+        let rows = rows_within(&mut card, std::time::Duration::from_secs(2));
         let shown: Vec<String> = rows.iter().map(|row| row.copy_text(0, 7)).collect();
         // Plain text starts a million columns off; the fills reach in. The
         // wide fill takes two rows, as the renderer wraps it.

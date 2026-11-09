@@ -2,9 +2,9 @@
 
 The script a person runs with a screen reader, from ADR 0021 §5. Each run
 is recorded below with the date, the Orca version and the distribution.
-Steps 1 to 3 cover the terminal grid (slice 4) and step 6 native scenes
-(slice 5); the rest wait on live regions and ulttui semantics (slices 6
-and 7) and are added with them.
+Steps 1 to 3 cover the terminal grid (slice 4), step 6 native scenes
+(slice 5) and step 5 live regions (slice 6); step 4 waits on ulttui
+semantics (slice 7) and is added with it.
 
 **Status: not yet run with Orca.** What has been checked without a screen
 reader is under "Automated stand-in" at the end.
@@ -58,6 +58,26 @@ across the screen, word review on a line with wide characters (`echo
 "a 中文 b"`), and whether the caret position is announced after moving
 with the arrow keys at the prompt.
 
+### 5. A streaming live region
+
+Until ulttui marks its streaming views live (slice 7), the `chat` example
+is not a live region; use the protocol example that is. Build it with
+`cargo build -p ultty-client --example live-region`, then in Ultty run
+`target/debug/examples/live-region 12 30` and do nothing. It shows one
+`Log` region labelled "Reply", marked polite and busy while it streams,
+and appends twelve lines five characters at a time, every 20 ms.
+
+Expect: each line announced once as it completes, in order, with no line
+re-read; at most four announcements a second, so lines that complete
+faster are read together; no cut inside a word except where a line took
+more than 250 ms to arrive (not the case here). Flat review then reads
+the whole reply line by line. Before Orca 49, politeness is ignored:
+note whether an announcement interrupts speech.
+
+Record: what Orca says while it streams and after; whether "busy" is
+spoken; whether any line is read twice. Repeat with `cargo run -p chat`
+once slice 7 has landed: that is the B4 done criterion.
+
 ### 6. Tab through a native app
 
 Build and run the counter: `cargo build -p counter-app`, then in Ultty
@@ -78,9 +98,9 @@ own when it changes (it should not be: it is not a live region).
 
 ## Runs
 
-| Date | Orca | Distribution | Step 1 | Step 2 | Step 3 | Step 6 | Notes |
-|---|---|---|---|---|---|---|---|
-| (none yet) | | | | | | | |
+| Date | Orca | Distribution | Step 1 | Step 2 | Step 3 | Step 5 | Step 6 | Notes |
+|---|---|---|---|---|---|---|---|---|
+| (none yet) | | | | | | | | |
 
 ## Automated stand-in
 
@@ -115,3 +135,21 @@ And on 2026-11-09 (slice 5):
   also counts idle wakeups with the AT-SPI bus enabled: none at the
   prompt, and with the app only the 250 ms maintenance tick native
   sessions always have, with no tree rebuilt.
+
+And on 2026-11-09 (slice 6):
+
+- `cargo test -p ultty --lib a11y::live`: the queue with a scripted
+  clock: a line break flushes complete lines at once, a partial line
+  after 250 ms from its first byte, at most one flush per 250 ms per
+  session with the rest accumulating, the 2 KiB cut at a line break, a
+  blank or a character, eight announcements kept, a flood bounded.
+  `a11y::scene` feeds consecutive trees to `accesskit_consumer` and
+  checks that each flush adds exactly one live node, with the flushed
+  text, and that kept ones are not added again.
+- `scripts/e2e/accessibility-live.sh`: the `live-region` example streams
+  twelve lines into a polite log; a Python AT-SPI listener records the
+  `object:announcement` events. First run: the log's name "Reply" when it
+  appeared, then ten announcements over 2.3 s carrying all twelve lines
+  in order (two of them two lines each), at most four in any second, all
+  polite. Then 20 wakeups in 5 s of idle with the app connected, none of
+  them a tree rebuild.
