@@ -8,6 +8,9 @@ mod content_limits;
 mod dirty;
 mod errors;
 mod frame;
+mod live_appends;
+
+pub use live_appends::LiveAppend;
 mod surfaces;
 mod transport;
 
@@ -180,6 +183,9 @@ pub struct NativeSession {
     /// Protocol errors queued so far, to tell a refused message from an
     /// applied one.
     protocol_errors: u64,
+    /// Text appended to live regions, for the accessibility bridge; `None`
+    /// unless a screen reader listens.
+    live_appends: Option<live_appends::LiveAppends>,
 }
 
 /// How a session's app is connected.
@@ -318,6 +324,7 @@ impl NativeSession {
             last_layout_duration: None,
             shown_generation: 0,
             protocol_errors: 0,
+            live_appends: None,
         }
     }
 
@@ -1612,6 +1619,37 @@ mod tests {
     }
 
     #[test]
+    fn an_open_stream_makes_its_region_busy_and_counts_as_shown() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        run_frame(&mut session, 1, vec![create_region(1, 0)]);
+        let id = RegionId::new(1);
+        let busy = |session: &NativeSession| {
+            crate::scene::semantics::effective_semantics(session.scene.get(id).unwrap()).busy
+        };
+
+        let before = session.shown_generation();
+        session
+            .handle_message(AppMessage::StreamStart { id, stream_id: 42 })
+            .unwrap();
+        assert!(busy(&session));
+        assert_ne!(session.shown_generation(), before, "StreamStart is shown");
+
+        // Another stream's end leaves it open.
+        session
+            .handle_message(AppMessage::StreamEnd { id, stream_id: 7 })
+            .unwrap();
+        assert!(busy(&session));
+
+        let before = session.shown_generation();
+        session
+            .handle_message(AppMessage::StreamEnd { id, stream_id: 42 })
+            .unwrap();
+        assert!(!busy(&session));
+        assert_ne!(session.shown_generation(), before, "StreamEnd is shown");
+    }
+
+    #[test]
     fn test_is_streaming_returns_false_for_unknown_region() {
         let session = make_session();
 
@@ -2071,6 +2109,66 @@ mod tests {
             })
             .unwrap();
         assert_eq!(role(&session), "log", "a log stays a log when replaced");
+    }
+
+    #[test]
+    fn text_appended_to_live_regions_is_kept_only_while_announcing() {
+        let mut session = make_session();
+        negotiate_all_test_capabilities(&mut session);
+        run_frame(
+            &mut session,
+            1,
+            vec![
+                create_region(1, 0),
+                set_semantics(1, polite_log()),
+                create_region(2, 0),
+            ],
+        );
+        let append = |session: &mut NativeSession, id: u32, text: &str| {
+            session
+                .handle_message(AppMessage::AppendContent {
+                    id: RegionId::new(id),
+                    text: text.to_string(),
+                })
+                .unwrap();
+        };
+
+        append(&mut session, 1, "unheard\n");
+        assert!(session.take_live_appends().is_empty(), "nobody listens");
+
+        session.set_live_announcements(true);
+        append(&mut session, 1, "Compiling ");
+        append(&mut session, 1, "ultty\n");
+        append(&mut session, 2, "not live\n");
+        assert_eq!(
+            session.take_live_appends(),
+            [LiveAppend {
+                region: RegionId::new(1),
+                live: ultty_protocol::Live::Polite,
+                text: "Compiling ultty\n".to_string(),
+            }]
+        );
+        assert!(session.take_live_appends().is_empty(), "taken once");
+
+        // A deleted region's text is dropped with it.
+        append(&mut session, 1, "gone\n");
+        run_frame(
+            &mut session,
+            2,
+            vec![AppMessage::DeleteRegion {
+                id: RegionId::new(1),
+            }],
+        );
+        assert!(session.take_live_appends().is_empty());
+
+        session.set_live_announcements(false);
+        run_frame(
+            &mut session,
+            3,
+            vec![create_region(1, 0), set_semantics(1, polite_log())],
+        );
+        append(&mut session, 1, "unheard again\n");
+        assert!(session.take_live_appends().is_empty());
     }
 
     /// `ulttyctl regions --json` for an app that declares semantics: an

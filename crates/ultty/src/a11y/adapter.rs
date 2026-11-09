@@ -8,7 +8,8 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::Window;
 
-use super::tree::{self, Snapshot};
+use super::live::LiveRegions;
+use super::tree::{self, region_node_id, Snapshot};
 
 /// The shortest time between two trees sent to assistive technology
 /// (ADR 0021 §3): output that changes the screen faster is coalesced.
@@ -28,6 +29,8 @@ pub struct Adapter {
     rebuilds: Rebuilds,
     /// What [`Adapter::observe_shown`] last saw.
     shown: Option<u64>,
+    /// Live regions' queues and announcements.
+    live: LiveRegions,
 }
 
 impl Adapter {
@@ -52,6 +55,7 @@ impl Adapter {
             window_title: window_title.to_owned(),
             rebuilds: Rebuilds::default(),
             shown: None,
+            live: LiveRegions::default(),
         }
     }
 
@@ -74,12 +78,14 @@ impl Adapter {
                     .process_event(window, &WindowEvent::Resized(window.inner_size()));
                 self.rebuilds.activate();
                 self.shown = None;
+                self.live.clear();
             }
             AccessKitEvent::AccessibilityDeactivated => {
                 // Nothing is built or sent until the next
                 // `InitialTreeRequested`.
                 tracing::debug!("Accessibility deactivated");
                 self.rebuilds.deactivate();
+                self.live.clear();
             }
             AccessKitEvent::ActionRequested(request) => {
                 tracing::debug!(action = ?request.action, "Accessibility action not handled yet");
@@ -116,22 +122,56 @@ impl Adapter {
         }
     }
 
-    /// When the loop must wake to send a coalesced tree, if one is waiting.
-    /// `None` while inactive or with nothing changed.
-    pub fn next_deadline(&self) -> Option<Instant> {
-        self.rebuilds.deadline()
+    /// `text` was appended at `now` to `region` of native `session`, whose
+    /// `live` is as given; it is announced when its flush is due
+    /// ([`super::live`]). Ignored while inactive.
+    pub fn appended(
+        &mut self,
+        session: u64,
+        region: u32,
+        live: ultty_protocol::Live,
+        text: &str,
+        now: Instant,
+    ) {
+        if self.rebuilds.active {
+            self.live.push(session, region, live, text, now);
+        }
     }
 
-    /// Send a tree of what `snapshot` gathers, if one is due at `now`;
-    /// `snapshot` is not called otherwise.
+    /// When the loop must wake to send a coalesced tree or flush a live
+    /// region, if either is waiting. `None` while inactive or with nothing
+    /// changed or queued.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        match (self.rebuilds.deadline(), self.live.next_deadline()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Flush the live regions that are due at `now`, then send a tree of
+    /// what `snapshot` gathers if one is due; `snapshot` is not called
+    /// otherwise.
     pub fn update(&mut self, now: Instant, snapshot: impl FnOnce() -> Snapshot) {
+        if self.live.flush(now) {
+            self.rebuilds.changed();
+        }
         if !self.rebuilds.take_due(now) {
             return;
         }
         let title = &self.window_title;
+        let live = &mut self.live;
         self.inner.update_if_active(|| {
             let started = Instant::now();
-            let update = tree::build(title, &snapshot());
+            let mut snapshot = snapshot();
+            if !live.is_empty() {
+                snapshot.set_announcements(live);
+            }
+            let update = tree::build(title, &snapshot);
+            if !live.is_empty() {
+                let built: std::collections::HashSet<accesskit::NodeId> =
+                    update.nodes.iter().map(|(id, _)| *id).collect();
+                live.retain(|session, region| built.contains(&region_node_id(session, region)));
+            }
             tracing::debug!(
                 target: "ultty::a11y",
                 nodes = update.nodes.len(),

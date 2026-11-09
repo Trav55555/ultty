@@ -37,7 +37,7 @@ use polling::{Event, Events, Poller};
 use tracing::{error, info, warn};
 
 use super::pairing::AnchorPairing;
-use super::session::NativeSession;
+use super::session::{LiveAppend, NativeSession};
 use crate::grid::Terminal;
 use crate::platform::socket::{peer_uid, set_cloexec, tab_socket_file_name};
 use crate::terminal_manager::{TabId, TerminalId};
@@ -85,6 +85,9 @@ pub struct ProtocolServer {
     in_band_openers: HashMap<TabId, Vec<u8>>,
     /// Inline surface anchors of each terminal that has had any (ADR 0020).
     pairings: HashMap<TerminalId, AnchorPairing>,
+    /// Whether sessions keep text appended to live regions for a screen
+    /// reader ([`ProtocolServer::set_live_announcements`]).
+    live_announcements: bool,
 }
 
 /// Whether `bytes` are, or may become, a complete `ClientHello` frame.
@@ -146,6 +149,7 @@ impl ProtocolServer {
             active_tab: None,
             in_band_openers: HashMap::new(),
             pairings: HashMap::new(),
+            live_announcements: false,
         })
     }
 
@@ -358,6 +362,7 @@ impl ProtocolServer {
                         );
                         let mut session = NativeSession::new(stream, session_id, tab.tab_id)?;
                         session.set_inline_surfaces(true);
+                        session.set_live_announcements(self.live_announcements);
                         accepted.push(session);
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -477,6 +482,7 @@ impl ProtocolServer {
                 );
                 let mut session = NativeSession::new_in_band(session_id, tab_id, pgrp, pids());
                 session.set_inline_surfaces(true);
+                session.set_live_announcements(self.live_announcements);
                 session.set_viewport(self.viewport_width, self.viewport_height);
                 let key = self.allocate_key();
                 self.sessions.insert(key, session);
@@ -646,6 +652,37 @@ impl ProtocolServer {
             .values()
             .filter_map(AnchorPairing::next_deadline)
             .min()
+    }
+
+    /// Whether every session, and every one that connects, keeps text
+    /// appended to its live regions for [`ProtocolServer::take_live_appends`]:
+    /// on while a screen reader listens (ADR 0021 §3).
+    pub fn set_live_announcements(&mut self, on: bool) {
+        if self.live_announcements != on {
+            self.live_announcements = on;
+            for session in self.sessions.values_mut() {
+                session.set_live_announcements(on);
+            }
+        }
+    }
+
+    /// Hand `appended` the text appended to the live regions of the active
+    /// tab's shown sessions since the last call, as (session id, append).
+    /// Other sessions' text is dropped: they are not on screen, and must
+    /// not be announced when their tab is shown later.
+    pub fn take_live_appends(&mut self, mut appended: impl FnMut(u64, LiveAppend)) {
+        if !self.live_announcements {
+            return;
+        }
+        let active = self.active_tab;
+        for session in self.sessions.values_mut() {
+            let shown = Some(session.tab_id()) == active && session.is_confirmed();
+            for append in session.take_live_appends() {
+                if shown {
+                    appended(session.session_id(), append);
+                }
+            }
+        }
     }
 
     /// Returns the number of currently connected native sessions.

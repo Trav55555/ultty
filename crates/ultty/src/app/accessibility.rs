@@ -19,20 +19,30 @@ use ultty_protocol::RegionId;
 use super::App;
 
 impl App {
-    /// Tell the accessibility adapter what changed this pass and send it a
-    /// tree if one is due. `screen_changed` is output in the focused pane or
-    /// a new title from any pane.
+    /// Tell the accessibility adapter what changed this pass, including
+    /// text appended to live regions, and send it a tree if one is due.
+    /// `screen_changed` is output in the focused pane or a new title from
+    /// any pane.
     ///
-    /// Inactive (no screen reader) this is one check: nothing is hashed,
-    /// locked or copied.
+    /// Inactive (no screen reader) this is two checks: nothing is hashed,
+    /// locked, kept or copied.
     pub(super) fn update_accessibility(&mut self, screen_changed: bool, now: Instant) {
-        if !self.accessibility.as_ref().is_some_and(|a| a.is_active()) {
+        let active = self.accessibility.as_ref().is_some_and(|a| a.is_active());
+        if let Some(server) = self.protocol_server.as_mut() {
+            server.set_live_announcements(active);
+        }
+        if !active {
             return;
         }
         let digest = self.shown_digest();
         let Some(adapter) = self.accessibility.as_mut() else {
             return;
         };
+        if let Some(server) = self.protocol_server.as_mut() {
+            server.take_live_appends(|session, append| {
+                adapter.appended(session, append.region.0, append.live, &append.text, now);
+            });
+        }
         if screen_changed {
             adapter.changed();
         }
