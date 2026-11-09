@@ -153,7 +153,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y
           libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libvulkan1
           libx11-xcb1 libxcursor1 libxrandr2 libxi6
-          xvfb mesa-vulkan-drivers fonts-dejavu-core
+          xvfb xdotool mesa-vulkan-drivers fonts-dejavu-core
       - run: cargo build --locked -p ultty -p hello-native -p counter-app --bins
       - run: scripts/ci-gui-smoke.sh "$RUNNER_TEMP/gui-smoke"
       - name: Upload smoke artifacts
