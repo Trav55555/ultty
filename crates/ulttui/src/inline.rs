@@ -27,7 +27,25 @@
 //! Cards have a fixed height of `rows` lines and the terminal's width.
 //! Print through the console rather than `println!`: in-band the terminal is
 //! in raw mode, and the console ends lines with `\r\n` and keeps them in
-//! order with cards.
+//! order with cards. Text another thread prints to stdout meanwhile can land
+//! between a card's anchor and its fallback lines, and push the card off
+//! its rows.
+//!
+//! **Keepalive.** Natively a background thread answers the terminal's
+//! keepalive every second, so an app may sit in a long call (waiting for a
+//! model, say) without its session timing out. If the session is lost
+//! anyway (the terminal closed it, or a reply never came), the console
+//! carries on in [`Mode::Fallback`]: open cards become final where they
+//! stand, and new ones are printed as text.
+//!
+//! **Fallback redraws** move the cursor up over the card's lines, so they
+//! assume the console saw everything on the screen since: output it did not
+//! print (stderr, `tracing`, a subprocess) makes the card final only if it
+//! went through the console. Send such output through [`Console::print`],
+//! or expect a redraw to land on the wrong lines. When stdout is not a
+//! terminal (a pipe, a log file) cards are never redrawn: each is written
+//! once, as plain text, in its last state, when something is printed after
+//! it or it is closed.
 //!
 //! **Width changes.** Natively the terminal lays a live card out again at
 //! the new width and clips or pads its rows; frozen cards are text and
@@ -36,8 +54,14 @@
 //! would land on rows the terminal may have re-wrapped). New cards use the
 //! current width.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
+
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -56,6 +80,11 @@ use crate::widgets::{render_view_to_native, View};
 
 /// What a [`CardEvent`] reports.
 pub use ultty_protocol::SurfaceEventKind;
+
+/// How often the keepalive thread reads from the terminal. The terminal
+/// ends an in-band session after 10 s of silence, and a socket session that
+/// does not answer a ping within 10 s.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How a [`Console`] shows its cards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,23 +131,92 @@ pub struct Console {
     /// counter, so ids never collide within the session.
     next_id: u32,
     last: Last,
-    events: VecDeque<CardEvent>,
+    /// Card events from a session since lost, still to be reported.
+    events: Vec<CardEvent>,
 }
 
 enum Link {
-    Native(Box<NativeLink>),
+    Native(NativeLink),
     Fallback(FallbackLink),
 }
 
+/// A native session, shared with the keepalive thread.
 struct NativeLink {
+    session: Arc<Mutex<Session>>,
+    /// Dropping it wakes the keepalive thread to end.
+    stop: Option<mpsc::Sender<()>>,
+    keepalive: Option<JoinHandle<()>>,
+    /// Where the console prints if the session is lost.
+    fallback_out: Option<Box<dyn Write + Send>>,
+}
+
+struct Session {
     client: UlttyClient,
     /// Each live card's regions as the terminal holds them.
     cards: HashMap<RegionId, RetainedTree>,
+    events: VecDeque<CardEvent>,
+}
+
+impl Session {
+    /// Read what the terminal sent: answer pings (and owe the in-band
+    /// heartbeat), keep card events, forget cards that take no more
+    /// updates. False once the terminal has hung up.
+    fn pump(&mut self) -> bool {
+        let messages = match self.client.poll_events() {
+            Ok(messages) => messages,
+            Err(err) => {
+                tracing::warn!("inline cards: reading from the terminal failed: {err}");
+                return false;
+            }
+        };
+        for message in messages {
+            match message {
+                TerminalMessage::SurfaceEvent { id, kind } => {
+                    if matches!(kind, SurfaceEventKind::Closed | SurfaceEventKind::Evicted) {
+                        self.cards.remove(&id);
+                    }
+                    self.events.push_back(CardEvent { card: id, kind });
+                }
+                TerminalMessage::Error { code, message } => {
+                    tracing::warn!("terminal error {code}: {message}");
+                }
+                _ => {}
+            }
+        }
+        !self.client.is_closed()
+    }
+}
+
+impl NativeLink {
+    fn session(&self) -> MutexGuard<'_, Session> {
+        self.session.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Drop for NativeLink {
+    fn drop(&mut self) {
+        self.stop.take();
+        if let Some(keepalive) = self.keepalive.take() {
+            if keepalive.join().is_err() {
+                tracing::warn!("inline cards: the keepalive thread panicked");
+            }
+        }
+    }
 }
 
 struct FallbackLink {
-    out: Box<dyn Write>,
+    out: Box<dyn Write + Send>,
     size: SizeSource,
+    /// Whether `out` is a terminal, where a card can be redrawn. If not,
+    /// the card waits in `pending` and is written once.
+    redraw: bool,
+    pending: Option<Pending>,
+}
+
+/// A card not yet written to a fallback that cannot redraw.
+struct Pending {
+    id: RegionId,
+    lines: Vec<String>,
 }
 
 /// Where the fallback learns the terminal's size.
@@ -130,11 +228,38 @@ enum SizeSource {
 }
 
 impl FallbackLink {
+    fn stdout(out: Box<dyn Write + Send>) -> Self {
+        Self {
+            out,
+            size: SizeSource::Terminal,
+            redraw: std::io::stdout().is_terminal(),
+            pending: None,
+        }
+    }
+
     fn size(&self) -> (u16, u16) {
         match self.size {
             SizeSource::Terminal => crossterm::terminal::size().unwrap_or((80, 24)),
             SizeSource::Fixed(cols, rows) => (cols, rows),
         }
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.out.write_all(bytes)?;
+        self.out.flush()
+    }
+
+    /// Write the pending card, if any, as it stands.
+    fn flush_pending(&mut self) -> std::io::Result<()> {
+        let Some(pending) = self.pending.take() else {
+            return Ok(());
+        };
+        let mut text = String::new();
+        for line in pending.lines {
+            text.push_str(&line);
+            text.push_str("\r\n");
+        }
+        self.write(text.as_bytes())
     }
 }
 
@@ -158,37 +283,71 @@ impl Console {
     /// `CAP_INLINE_SURFACES`. Anything else, including tmux, is
     /// [`Mode::Fallback`]; this never fails.
     pub fn connect() -> Self {
-        // SAFETY: isatty only inspects the fd.
-        let stdout_is_tty = unsafe { libc::isatty(1) == 1 };
-        if stdout_is_tty {
+        if std::io::stdout().is_terminal() {
             match UlttyClient::connect() {
                 Ok(client) if client.supports_capability(CAP_INLINE_SURFACES) => {
-                    return Self::native(client);
+                    return Self::native(client, Box::new(std::io::stdout()), KEEPALIVE_INTERVAL);
                 }
                 Ok(_) => tracing::debug!("the terminal does not offer inline surfaces"),
                 Err(err) => tracing::debug!("no Ultty session: {err}"),
             }
         }
-        Self::with_link(Link::Fallback(FallbackLink {
-            out: Box::new(std::io::stdout()),
-            size: SizeSource::Terminal,
-        }))
+        Self::with_link(Link::Fallback(FallbackLink::stdout(Box::new(
+            std::io::stdout(),
+        ))))
     }
 
     /// A fallback console writing to `out` as if to a terminal of `cols`
     /// columns and `lines` lines.
-    pub fn fallback(out: impl Write + 'static, cols: u16, lines: u16) -> Self {
+    pub fn fallback(out: impl Write + Send + 'static, cols: u16, lines: u16) -> Self {
         Self::with_link(Link::Fallback(FallbackLink {
             out: Box::new(out),
             size: SizeSource::Fixed(cols, lines),
+            redraw: true,
+            pending: None,
         }))
     }
 
-    fn native(client: UlttyClient) -> Self {
-        Self::with_link(Link::Native(Box::new(NativeLink {
+    /// A native console on `client`, read every `keepalive` by a thread of
+    /// its own, printing to `fallback_out` if the session is lost.
+    fn native(
+        client: UlttyClient,
+        fallback_out: Box<dyn Write + Send>,
+        keepalive: Duration,
+    ) -> Self {
+        let session = Arc::new(Mutex::new(Session {
             client,
             cards: HashMap::new(),
-        })))
+            events: VecDeque::new(),
+        }));
+        let (stop, stopped) = mpsc::channel::<()>();
+        let thread = {
+            let session = Arc::clone(&session);
+            std::thread::Builder::new()
+                .name("ulttui-keepalive".into())
+                .spawn(move || {
+                    // Ends when the console drops `stop`.
+                    while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(keepalive) {
+                        let mut session = session.lock().unwrap_or_else(PoisonError::into_inner);
+                        if !session.pump() {
+                            break;
+                        }
+                    }
+                })
+        };
+        let keepalive = match thread {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                tracing::warn!("inline cards: no keepalive thread: {err}");
+                None
+            }
+        };
+        Self::with_link(Link::Native(NativeLink {
+            session,
+            stop: Some(stop),
+            keepalive,
+            fallback_out: Some(fallback_out),
+        }))
     }
 
     fn with_link(link: Link) -> Self {
@@ -196,7 +355,7 @@ impl Console {
             link,
             next_id: 1,
             last: Last::LineStart,
-            events: VecDeque::new(),
+            events: Vec::new(),
         }
     }
 
@@ -211,7 +370,7 @@ impl Console {
     /// The terminal's width in columns, which new cards take.
     pub fn width(&self) -> u16 {
         match &self.link {
-            Link::Native(native) => native.client.viewport_width(),
+            Link::Native(native) => native.session().client.viewport_width(),
             Link::Fallback(fallback) => fallback.size().0,
         }
     }
@@ -221,6 +380,7 @@ impl Console {
         if text.is_empty() {
             return Ok(());
         }
+        self.check_session();
         let crlf = text.replace("\r\n", "\n").replace('\n', "\r\n");
         self.write(crlf.as_bytes())?;
         self.last = if text.ends_with('\n') {
@@ -228,7 +388,7 @@ impl Console {
         } else {
             Last::MidLine
         };
-        self.pump()
+        Ok(())
     }
 
     /// Print `text` and end the line.
@@ -249,6 +409,9 @@ impl Console {
                 "{rows} rows; a card is {MIN_SURFACE_ROWS} to {MAX_SURFACE_ROWS} rows"
             )));
         }
+        // Reading first also takes in a resize, so the card gets the width
+        // the terminal has now.
+        self.check_session();
         if self.last == Last::MidLine {
             self.write(b"\r\n")?;
         }
@@ -259,36 +422,51 @@ impl Console {
         match &mut self.link {
             Link::Native(native) => {
                 let fallback: Vec<String> = (0..rows).map(|y| plain_line(&buffer, y)).collect();
+                let mut session = native.session();
                 let mut tree = RetainedTree::new();
                 let contents = surface_messages(
                     &mut self.next_id,
                     id,
                     view,
                     &mut tree,
-                    native.client.supports_capability(CAP_APPEND_CONTENT),
+                    session.client.supports_capability(CAP_APPEND_CONTENT),
                 )?;
-                native.client.open_surface(
+                let opened = session.client.open_surface(
                     id,
                     rows,
                     &fallback,
                     Constraints::default(),
                     Style::default(),
                     contents,
-                )?;
-                native.cards.insert(id, tree);
+                );
+                match opened {
+                    Ok(()) => {
+                        session.cards.insert(id, tree);
+                    }
+                    Err(err) => {
+                        // The fallback text is out (unless stdout failed,
+                        // which the next print reports): it is the card.
+                        drop(session);
+                        self.lose_session(&err);
+                    }
+                }
             }
             Link::Fallback(fallback) => {
-                let mut text = String::new();
-                for y in 0..rows {
-                    text.push_str(&ansi_line(&buffer, y));
-                    text.push_str("\r\n");
+                fallback.flush_pending()?;
+                if fallback.redraw {
+                    let mut text = String::new();
+                    for y in 0..rows {
+                        text.push_str(&ansi_line(&buffer, y));
+                        text.push_str("\r\n");
+                    }
+                    fallback.write(text.as_bytes())?;
+                } else {
+                    let lines = (0..rows).map(|y| plain_line(&buffer, y)).collect();
+                    fallback.pending = Some(Pending { id, lines });
                 }
-                fallback.out.write_all(text.as_bytes())?;
-                fallback.out.flush()?;
             }
         }
         self.last = Last::Card { id, rows, width };
-        self.pump()?;
         Ok(Card { id, rows })
     }
 
@@ -299,33 +477,40 @@ impl Console {
     /// is left alone. In fallback, the card is redrawn in place with
     /// cursor-up only while it is the last thing the console printed, the
     /// width is unchanged and it is shorter than the screen; otherwise it is
-    /// final and this does nothing.
+    /// final and this does nothing. When stdout is not a terminal, the card
+    /// is not written until something follows it, so this only changes what
+    /// will be written.
     pub fn update(&mut self, card: &Card, view: &impl View) -> crate::Result<()> {
+        self.check_session();
         match &mut self.link {
             Link::Native(native) => {
-                let Some(tree) = native.cards.get_mut(&card.id) else {
+                let mut session = native.session();
+                let append = session.client.supports_capability(CAP_APPEND_CONTENT);
+                let Some(tree) = session.cards.get_mut(&card.id) else {
                     return Ok(());
                 };
-                let messages = surface_messages(
-                    &mut self.next_id,
-                    card.id,
-                    view,
-                    tree,
-                    native.client.supports_capability(CAP_APPEND_CONTENT),
-                )?;
-                if !messages.is_empty() {
-                    let frame = native.client.begin_frame()?;
-                    for message in &messages {
-                        native.client.send(message)?;
-                    }
-                    native.client.end_frame(frame)?;
+                let messages = surface_messages(&mut self.next_id, card.id, view, tree, append)?;
+                if messages.is_empty() {
+                    return Ok(());
+                }
+                let sent = send_frame(&mut session.client, &messages);
+                drop(session);
+                if let Err(err) = sent {
+                    self.lose_session(&err);
                 }
             }
             Link::Fallback(fallback) => {
+                let width = fallback.size().0.max(1);
+                if let Some(pending) = fallback.pending.as_mut().filter(|p| p.id == card.id) {
+                    let rows = card.rows;
+                    let buffer = render_buffer(view, width, rows);
+                    pending.lines = (0..rows).map(|y| plain_line(&buffer, y)).collect();
+                    return Ok(());
+                }
                 let Last::Card { id, rows, width } = self.last else {
                     return Ok(());
                 };
-                if id != card.id {
+                if id != card.id || !fallback.redraw {
                     return Ok(());
                 }
                 let (cols, lines) = fallback.size();
@@ -341,69 +526,115 @@ impl Console {
                     text.push_str(&ansi_line(&buffer, y));
                     text.push_str("\r\n");
                 }
-                fallback.out.write_all(text.as_bytes())?;
-                fallback.out.flush()?;
+                fallback.write(text.as_bytes())?;
             }
         }
-        self.pump()
+        Ok(())
     }
 
     /// Close `card`. Natively the terminal freezes it into its rows as
-    /// text; in fallback its lines simply stay as last drawn.
+    /// text; in fallback its lines simply stay as last drawn (or, when
+    /// stdout is not a terminal, are written now).
     pub fn close(&mut self, card: Card) -> crate::Result<()> {
-        if let Link::Native(native) = &mut self.link {
-            if native.cards.remove(&card.id).is_some() {
-                native.client.close_surface(card.id)?;
+        self.check_session();
+        match &mut self.link {
+            Link::Native(native) => {
+                let mut session = native.session();
+                if session.cards.remove(&card.id).is_some() {
+                    let closed = session.client.close_surface(card.id);
+                    drop(session);
+                    if let Err(err) = closed {
+                        self.lose_session(&err);
+                    }
+                }
+            }
+            Link::Fallback(fallback) => {
+                if fallback.pending.as_ref().is_some_and(|p| p.id == card.id) {
+                    fallback.flush_pending()?;
+                }
             }
         }
         if matches!(self.last, Last::Card { id, .. } if id == card.id) {
             self.last = Last::LineStart;
         }
-        self.pump()
+        Ok(())
     }
 
     /// What the terminal reported about cards since the last call (always
-    /// empty in fallback). Call this every second or two while otherwise
-    /// idle: it also answers the terminal's keepalive, without which an
-    /// in-band session ends after 10 s of silence and its cards freeze.
+    /// empty in fallback, apart from what a lost session reported first).
     pub fn poll_events(&mut self) -> crate::Result<Vec<CardEvent>> {
-        self.pump()?;
-        Ok(self.events.drain(..).collect())
+        self.check_session();
+        let mut events = std::mem::take(&mut self.events);
+        if let Link::Native(native) = &self.link {
+            events.extend(native.session().events.drain(..));
+        }
+        Ok(events)
     }
 
-    /// Read what the terminal sent: answer pings, keep card events, and
-    /// forget cards that can take no more updates.
-    fn pump(&mut self) -> crate::Result<()> {
-        let Link::Native(native) = &mut self.link else {
-            return Ok(());
+    /// Read from the terminal now, and fall back if the session is gone.
+    fn check_session(&mut self) {
+        let Link::Native(native) = &self.link else {
+            return;
         };
-        for message in native.client.poll_events()? {
-            match message {
-                TerminalMessage::SurfaceEvent { id, kind } => {
-                    if matches!(kind, SurfaceEventKind::Closed | SurfaceEventKind::Evicted) {
-                        native.cards.remove(&id);
-                    }
-                    self.events.push_back(CardEvent { card: id, kind });
-                }
-                TerminalMessage::Error { code, message } => {
-                    tracing::warn!("terminal error {code}: {message}");
-                }
-                _ => {}
-            }
+        let alive = native.session().pump();
+        if !alive {
+            self.lose_session(&"the terminal closed the session");
         }
-        Ok(())
+    }
+
+    /// Carry on in fallback after the native session failed: live cards
+    /// stay as the terminal froze them, and new output is plain text.
+    fn lose_session(&mut self, why: &dyn std::fmt::Display) {
+        let Link::Native(native) = &mut self.link else {
+            return;
+        };
+        tracing::warn!("inline cards: lost the Ultty session ({why}); printing cards as text");
+        let out = native
+            .fallback_out
+            .take()
+            .unwrap_or_else(|| Box::new(std::io::stdout()));
+        self.events.extend(native.session().events.drain(..));
+        self.link = Link::Fallback(FallbackLink::stdout(out));
+        // A live card can no longer be redrawn; the cursor is where the
+        // session left it, at the start of a line.
+        if matches!(self.last, Last::Card { .. }) {
+            self.last = Last::LineStart;
+        }
     }
 
     fn write(&mut self, bytes: &[u8]) -> crate::Result<()> {
         match &mut self.link {
-            Link::Native(native) => native.client.write_output(bytes)?,
+            Link::Native(native) => native.session().client.write_output(bytes)?,
             Link::Fallback(fallback) => {
-                fallback.out.write_all(bytes)?;
-                fallback.out.flush()?;
+                fallback.flush_pending()?;
+                fallback.write(bytes)?;
             }
         }
         Ok(())
     }
+}
+
+impl Drop for Console {
+    /// Write a card still waiting for a fallback that cannot redraw.
+    fn drop(&mut self) {
+        if let Link::Fallback(fallback) = &mut self.link {
+            if let Err(err) = fallback.flush_pending() {
+                tracing::debug!("inline cards: writing the last card failed: {err}");
+            }
+        }
+    }
+}
+
+/// Send `messages` as one frame and wait for its layout.
+fn send_frame(
+    client: &mut UlttyClient,
+    messages: &[AppMessage],
+) -> Result<(), ultty_client::Error> {
+    let frame = client.begin_frame()?;
+    for message in messages {
+        client.send(message)?;
+    }
+    client.end_frame(frame)
 }
 
 /// The messages that turn `tree` (the card's regions as the terminal holds
@@ -467,9 +698,22 @@ fn line_cells(buffer: &Buffer, y: u16) -> Vec<&ratatui::buffer::Cell> {
     cells
 }
 
+/// A cell's symbol without control characters, which a view's text could
+/// carry into the output as escape sequences; a cell left empty is a space.
+fn printable(symbol: &str) -> Cow<'_, str> {
+    if !symbol.chars().any(char::is_control) {
+        return Cow::Borrowed(symbol);
+    }
+    let kept: String = symbol.chars().filter(|ch| !ch.is_control()).collect();
+    Cow::Owned(if kept.is_empty() { " ".into() } else { kept })
+}
+
 /// Line `y` as plain text, without trailing blanks.
 fn plain_line(buffer: &Buffer, y: u16) -> String {
-    let text: String = line_cells(buffer, y).iter().map(|c| c.symbol()).collect();
+    let text: String = line_cells(buffer, y)
+        .iter()
+        .map(|c| printable(c.symbol()))
+        .collect();
     text.trim_end_matches(' ').to_string()
 }
 
@@ -495,7 +739,7 @@ fn ansi_line(buffer: &Buffer, y: u16) -> String {
             line.push_str(&sgr(style.0, style.1, style.2));
             current = style;
         }
-        line.push_str(cell.symbol());
+        line.push_str(&printable(cell.symbol()));
     }
     if current != plain {
         line.push_str("\x1b[0m");
@@ -551,11 +795,8 @@ fn colour_code(colour: TuiColor, background: bool) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
     use std::io::{Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
-    use std::rc::Rc;
-    use std::sync::{Arc, Mutex};
 
     use ratatui::layout::Rect;
     use ratatui::style::Style as TuiStyle;
@@ -569,17 +810,17 @@ mod tests {
 
     /// What a fallback console wrote, readable while it is in use.
     #[derive(Clone, Default)]
-    struct Output(Rc<RefCell<Vec<u8>>>);
+    struct Output(Arc<Mutex<Vec<u8>>>);
 
     impl Output {
         fn take(&self) -> String {
-            String::from_utf8(std::mem::take(&mut *self.0.borrow_mut())).unwrap()
+            String::from_utf8(std::mem::take(&mut *self.0.lock().unwrap())).unwrap()
         }
     }
 
     impl Write for Output {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.borrow_mut().extend_from_slice(buf);
+            self.0.lock().unwrap().extend_from_slice(buf);
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -590,6 +831,53 @@ mod tests {
     fn fallback_console(cols: u16, lines: u16) -> (Console, Output) {
         let output = Output::default();
         (Console::fallback(output.clone(), cols, lines), output)
+    }
+
+    /// A fallback console whose output is not a terminal (a pipe, a log).
+    fn log_console(cols: u16) -> (Console, Output) {
+        let output = Output::default();
+        let link = FallbackLink {
+            out: Box::new(output.clone()),
+            size: SizeSource::Fixed(cols, 24),
+            redraw: false,
+            pending: None,
+        };
+        (Console::with_link(Link::Fallback(link)), output)
+    }
+
+    #[test]
+    fn without_a_terminal_a_card_is_written_once_in_its_last_state() {
+        let (mut console, output) = log_console(20);
+        console.println("before").unwrap();
+        let card = console.open(2, &Text::new("queued")).unwrap();
+        console.update(&card, &Text::new("running")).unwrap();
+        console.update(&card, &Text::new("done\nok")).unwrap();
+        assert_eq!(output.take(), "before\r\n", "the card waits");
+        console.println("after").unwrap();
+        // Once something follows it, the card is final.
+        console.update(&card, &Text::new("too late")).unwrap();
+        console.close(card).unwrap();
+        assert_eq!(output.take(), "done\r\nok\r\nafter\r\n");
+    }
+
+    #[test]
+    fn without_a_terminal_a_card_is_written_on_close_or_drop() {
+        let (mut console, output) = log_console(20);
+        let first = console.open(1, &Text::new("first")).unwrap();
+        console.update(&first, &Text::new("first, done")).unwrap();
+        console.close(first).unwrap();
+        assert_eq!(output.take(), "first, done\r\n");
+        console.open(1, &Text::new("second")).unwrap();
+        drop(console);
+        assert_eq!(output.take(), "second\r\n", "never left unwritten");
+    }
+
+    #[test]
+    fn control_characters_in_a_view_do_not_reach_the_output() {
+        let (mut console, output) = fallback_console(20, 24);
+        console.open(1, &Text::new("a\x1b]0;x\x07b")).unwrap();
+        let text = output.take();
+        assert!(!text.contains('\x1b') && !text.contains('\x07'), "{text:?}");
     }
 
     #[test]
@@ -716,9 +1004,25 @@ mod tests {
         );
     }
 
-    /// A fake Ultty on a socket: answers the handshake (session 5, 40 x 10,
-    /// every capability) and every `EndFrame`, and returns all it received.
-    fn fake_ultty(listener: UnixListener) -> std::thread::JoinHandle<Vec<AppMessage>> {
+    /// What the fake Ultty does besides answering the handshake (session 5,
+    /// 40 x 10, every capability) and every `EndFrame`.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Script {
+        Plain,
+        /// Send a `Ping` after answering the first frame.
+        PingAfterFirstFrame,
+        /// Hang up after answering the first frame.
+        HangUpAfterFirstFrame,
+        /// Report a resize to this width right after the handshake.
+        ResizeTo(u16),
+    }
+
+    /// A fake Ultty on a socket, playing `script`; returns all it received.
+    fn fake_ultty(
+        listener: UnixListener,
+        script: Script,
+        seen: mpsc::Sender<AppMessage>,
+    ) -> std::thread::JoinHandle<Vec<AppMessage>> {
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let send = |stream: &mut UnixStream, msg: TerminalMessage| {
@@ -735,6 +1039,9 @@ mod tests {
                 frame.resize(8 + len as usize, 0);
                 stream.read_exact(&mut frame[8..]).unwrap();
                 let msg = AppMessage::decode(&mut frame.as_slice()).unwrap();
+                let first_frame = !received
+                    .iter()
+                    .any(|m| matches!(m, AppMessage::EndFrame { .. }));
                 match &msg {
                     AppMessage::ClientHello { .. } => {
                         send(
@@ -753,43 +1060,93 @@ mod tests {
                                 height: 10,
                             },
                         );
+                        if let Script::ResizeTo(width) = script {
+                            send(
+                                &mut stream,
+                                TerminalMessage::Resize(ultty_protocol::ResizeEvent {
+                                    width,
+                                    height: 10,
+                                }),
+                            );
+                        }
                     }
-                    AppMessage::EndFrame { frame_id } => send(
-                        &mut stream,
-                        TerminalMessage::LayoutComputed {
-                            frame_id: Some(FrameId(frame_id.0)),
-                            trigger: LayoutTrigger::ContentChange,
-                            regions: vec![ComputedRegionLayout {
-                                id: RegionId::ROOT,
-                                x: 0.0,
-                                y: 0.0,
-                                width: 40.0,
-                                height: 10.0,
-                                content_x: 0.0,
-                                content_y: 0.0,
-                                content_width: 40.0,
-                                content_height: 10.0,
-                                visible: true,
-                            }],
-                        },
-                    ),
+                    AppMessage::EndFrame { frame_id } => {
+                        send(&mut stream, layout_reply(*frame_id));
+                        if first_frame && script == Script::PingAfterFirstFrame {
+                            send(&mut stream, TerminalMessage::Ping);
+                        }
+                        if first_frame && script == Script::HangUpAfterFirstFrame {
+                            received.push(msg);
+                            return received;
+                        }
+                    }
                     _ => {}
                 }
+                let _ = seen.send(msg.clone());
                 received.push(msg);
             }
         })
     }
 
-    #[derive(Clone, Default)]
-    struct SharedOutput(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for SharedOutput {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
+    fn layout_reply(frame_id: FrameId) -> TerminalMessage {
+        TerminalMessage::LayoutComputed {
+            frame_id: Some(frame_id),
+            trigger: LayoutTrigger::ContentChange,
+            regions: vec![ComputedRegionLayout {
+                id: RegionId::ROOT,
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 10.0,
+                content_x: 0.0,
+                content_y: 0.0,
+                content_width: 40.0,
+                content_height: 10.0,
+                visible: true,
+            }],
         }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+    }
+
+    /// A native console against a fake Ultty playing `script`, keeping the
+    /// session alive every `keepalive`. Its anchors and text, and what it
+    /// prints after falling back, go to the returned output.
+    struct NativeRig {
+        console: Console,
+        output: Output,
+        terminal: std::thread::JoinHandle<Vec<AppMessage>>,
+        /// Each message as the terminal receives it.
+        seen: mpsc::Receiver<AppMessage>,
+        dir: std::path::PathBuf,
+    }
+
+    impl NativeRig {
+        fn new(name: &str, script: Script, keepalive: Duration) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("ulttui-inline-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("s");
+            let _ = std::fs::remove_file(&path);
+            let (tx, seen) = mpsc::channel();
+            let terminal = fake_ultty(UnixListener::bind(&path).unwrap(), script, tx);
+            let output = Output::default();
+            let mut client = UlttyClient::connect_to(&path).unwrap();
+            client.set_output(Box::new(output.clone()));
+            let console = Console::native(client, Box::new(output.clone()), keepalive);
+            Self {
+                console,
+                output,
+                terminal,
+                seen,
+                dir,
+            }
+        }
+
+        /// Drop the console and return what the terminal received.
+        fn finish(self) -> (Vec<AppMessage>, Output) {
+            drop(self.console);
+            let received = self.terminal.join().unwrap();
+            std::fs::remove_dir_all(&self.dir).unwrap();
+            (received, self.output)
         }
     }
 
@@ -829,17 +1186,15 @@ mod tests {
     }
 
     #[test]
-    fn native_cards_open_with_their_view_update_by_diff_and_close() {
-        let dir = std::env::temp_dir().join(format!("ulttui-inline-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("s");
-        let _ = std::fs::remove_file(&path);
-        let terminal = fake_ultty(UnixListener::bind(&path).unwrap());
+    fn console_is_send() {
+        fn send<T: Send>() {}
+        send::<Console>();
+    }
 
-        let output = SharedOutput::default();
-        let mut client = UlttyClient::connect_to(&path).unwrap();
-        client.set_output(Box::new(output.clone()));
-        let mut console = Console::native(client);
+    #[test]
+    fn native_cards_open_with_their_view_update_by_diff_and_close() {
+        let mut rig = NativeRig::new("cards", Script::Plain, KEEPALIVE_INTERVAL);
+        let console = &mut rig.console;
         assert_eq!(console.mode(), Mode::Native);
 
         console.println("prose").unwrap();
@@ -853,13 +1208,10 @@ mod tests {
         let second = console.open(2, &Text::new("diff")).unwrap();
         console.close(first).unwrap();
         console.close(second).unwrap();
-        drop(console);
-        let received = terminal.join().unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
+        let (received, output) = rig.finish();
 
-        let text = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
         assert_eq!(
-            text,
+            output.take(),
             "prose\r\n\
              \x1b_u5;1;3\x1b\\$ cargo test\r\nCompiling a\r\n\r\n\
              \x1b_u5;5;2\x1b\\diff\r\n\r\n",
@@ -908,5 +1260,67 @@ mod tests {
             frames[4],
             vec![AppMessage::CloseSurface { id: second_surface }]
         );
+    }
+
+    #[test]
+    fn an_idle_console_answers_the_keepalive_itself() {
+        let mut rig = NativeRig::new(
+            "keepalive",
+            Script::PingAfterFirstFrame,
+            Duration::from_millis(10),
+        );
+        let card = rig.console.open(1, &Text::new("one")).unwrap();
+        // Idle, as while waiting for a model: no call into the console
+        // until the terminal has its pong.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut answered = false;
+        while !answered {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match rig.seen.recv_timeout(left) {
+                Ok(msg) => answered = msg == AppMessage::Pong,
+                Err(_) => panic!("the ping was not answered while the console was idle"),
+            }
+        }
+        rig.console.update(&card, &Text::new("two")).unwrap();
+        assert_eq!(rig.console.mode(), Mode::Native);
+        let (received, _) = rig.finish();
+        assert_eq!(
+            frames(&received).len(),
+            2,
+            "the update went out: {received:?}"
+        );
+    }
+
+    #[test]
+    fn a_lost_session_falls_back_and_cards_become_final() {
+        let mut rig = NativeRig::new(
+            "lost",
+            Script::HangUpAfterFirstFrame,
+            Duration::from_millis(10),
+        );
+        let card = rig.console.open(1, &Text::new("one")).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        rig.output.take();
+
+        rig.console.update(&card, &Text::new("two")).unwrap();
+        assert_eq!(rig.console.mode(), Mode::Fallback);
+        rig.console.close(card).unwrap();
+        rig.console.println("after").unwrap();
+        let (_, output) = rig.finish();
+        assert_eq!(
+            output.take(),
+            "after\r\n",
+            "the card stays as the terminal froze it; printing carries on"
+        );
+    }
+
+    #[test]
+    fn a_card_takes_the_width_of_a_resize_that_just_arrived() {
+        let mut rig = NativeRig::new("resize", Script::ResizeTo(6), Duration::from_secs(60));
+        // The resize is on the socket, not yet read by anyone.
+        std::thread::sleep(Duration::from_millis(100));
+        rig.console.open(1, &Text::new("abcdefghij")).unwrap();
+        let (_, output) = rig.finish();
+        assert_eq!(output.take(), "\x1b_u5;1;1\x1b\\abcdef\r\n");
     }
 }
