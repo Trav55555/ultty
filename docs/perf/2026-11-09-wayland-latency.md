@@ -142,6 +142,14 @@ machine that ran the campaign (not committed).
 
 ## Interpretation
 
+**Correction (later 2026-11-09):** the probe added the extra frame: its
+first screencopy request, sent just after the key, made sway draw a frame
+before the echo, and the echo then waited a full frame period. With the
+request moved before the key, Ultty's idle Wayland p50 on the T4 is 3.7 ms
+at 60 Hz. See
+[2026-11-09-wayland-echo-frame.md](2026-11-09-wayland-echo-frame.md#where-the-frame-went-the-probe).
+The numbers below are as measured with the old probe.
+
 - The Wayland probe works for both terminals and all three cases, with no
   timeouts in 3,600 samples.
 - At idle on Wayland, Ultty's echo appears one compositor frame after the

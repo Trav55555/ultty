@@ -208,7 +208,12 @@ Terminal-neutral drivers in `tools/ultty-bench` run *inside* each terminal:
   the change (CLOCK_MONOTONIC, like the start), so the read-back cost is not
   in the number; the probe's receipt time is kept as `received_ms`. Pixels
   only exist on output frames, so the resolution is one frame (`frame_ms`,
-  16.7 ms at the default 60 Hz). Measured on headless sway 1.11 in
+  16.7 ms at the default 60 Hz). Every copy request makes wlroots draw a
+  frame at once, so the probe arms its first request before the key; until
+  2026-11-09 it armed it just after, which put one extra frame into every
+  idle sample (see
+  [2026-11-09-wayland-echo-frame.md](2026-11-09-wayland-echo-frame.md#where-the-frame-went-the-probe)).
+  First measured on headless sway 1.11 in
   [2026-11-09-wayland-latency.md](2026-11-09-wayland-latency.md). The first
   version (one `wtype` process per key, `grim` polling) never worked on
   headless sway: a seat with no keyboard drops a one-shot virtual keyboard's
