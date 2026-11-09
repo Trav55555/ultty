@@ -150,10 +150,26 @@ error with its file and line. The next good load clears it.
 Errors at run time are shown the same way: a failing `update` leaves the
 state as it was, and a failing `view` shows the last view that built.
 
-With `--log FILE`, each frame drawn after a reload logs
-`seen_to_frame_us` (from the change being noticed to the frame being handed
-to the terminal), `load_us` and `frame_unix_us` (wall clock, to compare with
-the time the file was written).
+With `--log FILE`, each frame drawn after a reload logs `seen_to_frame_us`
+(from the watch seeing the change to the backend returning from drawing the
+frame), split into `wait_us` (the settle delay plus the wait for the event
+loop's next tick), `reload_us` (compile, `init` and the trial `view`) and
+`render_us`, and `frame_unix_us` (wall clock, to compare with the time the
+file was written).
+
+Measured with `scripts/e2e/lua_reload_latency.py` on `hello.luau` (debug
+build, 20 saves, file write to frame):
+
+| Mode | Median | p90 | Max | Where the time goes (medians) |
+|------|--------|-----|-----|-------------------------------|
+| ANSI (pty) | 24.4 ms | 25.9 ms | 26.5 ms | wait 23.9, reload 0.3, render 0.1 |
+| Native (headless Ultty) | 40.7 ms | 43.5 ms | 45.0 ms | wait 22.9, reload 0.3, render 17.7 |
+
+Compiling and running the script is negligible. The wait is the 10 ms settle
+delay plus up to one 16 ms event-loop poll. In native mode `render` includes
+the backend's read of the terminal's reply after it has sent the frame,
+which waits out the same 16 ms poll timeout, so the frame reaches the
+terminal about 17 ms before the logged time.
 
 ## Example: a counter
 
@@ -231,7 +247,10 @@ return app {
   its fix) driven through the library with script files under `target/`.
 - `scripts/e2e/lua-panes.sh`: runs `panes.luau` in a headless Ultty, checks
   `ulttyctl regions` lists a row per pane, edits a label in a copy of the
-  script and checks the change reaches `regions` within a second; then runs
+  script and checks the change reaches `regions` within a second, checks a
+  broken save shows the banner over the running app, measures the native
+  reload latency of `hello.luau` in a second tab; then runs
   `hello.luau` under a plain pty and checks its ANSI output.
-- `scripts/lua-reload-latency.sh`: measures the time from writing the file to
-  the next frame over 20 reloads.
+- `scripts/e2e/lua_reload_latency.py`: measures the time from writing the file to
+  the next frame over 20 reloads (ANSI with `--spawn`; the e2e script runs it
+  natively).

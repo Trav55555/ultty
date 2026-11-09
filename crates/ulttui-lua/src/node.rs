@@ -451,10 +451,12 @@ fn push_children(out: &mut Vec<Rc<Node>>, value: Value, at: &str) -> Result<(), 
                 let (key, item) = pair.map_err(|e| e.to_string())?;
                 match key {
                     Value::Integer(i) => items.push((i, item)),
-                    other => return Err(format!(
+                    other => {
+                        return Err(format!(
                         "child {at} is a table with key {}; a nested child list must be an array",
                         describe_value(&other)
-                    )),
+                    ))
+                    }
                 }
             }
             items.sort_by_key(|(i, _)| *i);

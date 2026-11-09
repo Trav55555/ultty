@@ -43,9 +43,15 @@ pub struct LuaApp {
     reload_mark: Cell<Option<ReloadMark>>,
 }
 
+/// When each step of a reload happened, for the latency log.
 #[derive(Debug, Clone, Copy)]
 struct ReloadMark {
+    /// The watch saw the file change.
     seen: Instant,
+    /// The app started reloading (after the settle delay and the event
+    /// loop's next tick).
+    started: Instant,
+    /// Compile, `init` and the trial `view` were done.
     loaded: Instant,
 }
 
@@ -89,10 +95,12 @@ impl LuaApp {
 
     /// Reload the script (as on a file change) and return its commands.
     pub fn reload(&mut self, seen: Instant) -> Vec<Command> {
+        let started = Instant::now();
         let outcome = self.script.reload();
         if outcome != Reload::Unchanged {
             self.reload_mark.set(Some(ReloadMark {
                 seen,
+                started,
                 loaded: Instant::now(),
             }));
         }
@@ -347,10 +355,13 @@ impl Drop for FrameView {
         let unix_us = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_micros());
+        let us = |from: Instant, to: Instant| to.saturating_duration_since(from).as_micros() as u64;
         tracing::info!(
             target: "ulttui_lua::reload",
-            seen_to_frame_us = (now - mark.seen).as_micros() as u64,
-            load_us = (mark.loaded.saturating_duration_since(mark.seen)).as_micros() as u64,
+            seen_to_frame_us = us(mark.seen, now),
+            wait_us = us(mark.seen, mark.started),
+            reload_us = us(mark.started, mark.loaded),
+            render_us = us(mark.loaded, now),
             frame_unix_us = unix_us as u64,
             "frame after reload"
         );
