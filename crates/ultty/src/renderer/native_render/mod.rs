@@ -174,6 +174,17 @@ fn append_clipped_glyphs(
     }
 }
 
+/// The colour region's background is filled with: its own `bg`, or for a
+/// surface root without one the terminal's background, so the fallback text
+/// drawn under a surface never shows through it.
+fn region_background(
+    bg: Option<super::color::Rgba>,
+    is_surface_root: bool,
+    terminal_background: super::color::Rgba,
+) -> Option<super::color::Rgba> {
+    bg.or(is_surface_root.then_some(terminal_background))
+}
+
 /// Where the placed inline surfaces of `sessions` show on `terminal`'s
 /// screen, whose first row is at pixel `grid_top` and whose rows are
 /// `cell_height` high; see [`Renderer::visible_surfaces`].
@@ -481,9 +492,17 @@ impl Renderer {
             let bg_x1 = (x + w).min(clip_max_x);
             let bg_y1 = (y + h).min(clip_max_y);
 
-            if let Some(bg_color) = &region.style.bg {
+            let background = region_background(
+                region
+                    .style
+                    .bg
+                    .as_ref()
+                    .map(|bg| self.color_scheme.resolve_protocol_color(bg)),
+                scene.surface(region.id).is_some(),
+                self.color_scheme.background,
+            );
+            if let Some(color) = background {
                 if bg_x0 < bg_x1 && bg_y0 < bg_y1 {
-                    let color = self.color_scheme.resolve_protocol_color(bg_color);
                     let base_idx = bg_vertices.len() as u32;
 
                     bg_vertices.push(Vertex {
@@ -920,6 +939,21 @@ mod tests {
                     top,
                 },
             )]
+        }
+
+        /// A surface root is opaque even without a `bg`: it covers the
+        /// fallback text with the terminal's background. Other regions
+        /// without one stay transparent, and a `bg` wins.
+        #[test]
+        fn surface_roots_are_opaque_without_a_background() {
+            use super::super::region_background;
+            use crate::renderer::color::Rgba;
+            let terminal = Rgba::new(0.1, 0.1, 0.1, 1.0);
+            let own = Rgba::new(0.8, 0.2, 0.6, 1.0);
+            assert_eq!(region_background(None, true, terminal), Some(terminal));
+            assert_eq!(region_background(None, false, terminal), None);
+            assert_eq!(region_background(Some(own), true, terminal), Some(own));
+            assert_eq!(region_background(Some(own), false, terminal), Some(own));
         }
 
         /// The renderer rebuilds its cached native buffers when this list
