@@ -22,7 +22,7 @@ Offset  Size  Field
 
 Integers and finite IEEE-754 `f32` values are little-endian. Strings are `u32` length plus UTF-8, options have a `u8` 0/1 tag, and booleans/enums use `u8`.
 
-Limits: payload 16 MiB; string 1 MiB; regions 10,000; tracks 1,000; spans 10,000; metadata pairs 1,024 and metadata bytes 1 MiB; semantics strings 4 KiB each and 8 KiB together; image data 16 MiB; image width/height 16,384 each, with sufficient RGBA data.
+Limits: payload 16 MiB; string 1 MiB; regions 10,000; tracks 1,000; spans 10,000; metadata pairs 1,024 and metadata bytes 1 MiB; semantics strings 4 KiB each and 8 KiB together; surface rows 1 to 128; image data 16 MiB; image width/height 16,384 each, with sufficient RGBA data.
 
 ## Message Types
 
@@ -34,7 +34,8 @@ Codes are separate namespaces by direction.
 |------|---------|------|---------|
 | `0x0001` | `ClientHello` | `0x0010` | `CreateRegion` |
 | `0x0012` | `DeleteRegion` | `0x0013` | `ReparentRegion` |
-| `0x0014` | `SetRegionMetadata` | `0x0020` | `SetContent` |
+| `0x0014` | `SetRegionMetadata` | `0x0015` | `CreateSurface` |
+| `0x0016` | `CloseSurface` | `0x0020` | `SetContent` |
 | `0x0021` | `SetStyle` | `0x0022` | `SetConstraints` |
 | `0x0023` | `AppendContent` | `0x0024` | `StreamStart` |
 | `0x0025` | `StreamEnd` | `0x0026` | `SetSemantics` |
@@ -53,7 +54,8 @@ Codes are separate namespaces by direction.
 | `0x0010` | `LayoutComputed` | `0x0020` | `Input` |
 | `0x0022` | `Resize` | `0x0023` | `FocusEvent` |
 | `0x0024` | `ScrollEvent` | `0x0025` | `ClipboardContent` |
-| `0x0070` | `Ping` | `0x00FF` | `Error` |
+| `0x0026` | `SurfaceEvent` | `0x0070` | `Ping` |
+| `0x00FF` | `Error` | | |
 
 ## Scene Tree
 
@@ -70,6 +72,10 @@ Content is None, Text, RichText, or Widget. Widgets are Input, Markdown, Code, P
 ## Accessibility Semantics
 
 `SetSemantics` (gated by `CAP_SEMANTICS = 0x0200`) gives a region a role, label, liveness and state for screen readers; regions without it get roles derived from their content. See spec §10.5 and ADR 0021.
+
+## Inline Surfaces
+
+`CreateSurface` and `CloseSurface` (gated by `CAP_INLINE_SURFACES = 0x0100`) open and close region trees anchored to rows of the main screen, laid out at `cols × rows` independently of the root; the terminal answers with `SurfaceEvent`. See spec §10.6 and ADR 0020.
 
 ## Layout System
 

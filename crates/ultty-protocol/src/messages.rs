@@ -6,6 +6,7 @@ use crate::{
     layout::Constraints,
     semantics::Semantics,
     style::Style,
+    surface::SurfaceEventKind,
     RegionId,
 };
 
@@ -69,6 +70,21 @@ pub enum AppMessage {
 
     /// Delete a region.
     DeleteRegion { id: RegionId },
+
+    // Inline surfaces
+    /// Create region `id` as a second root of the scene, laid out at
+    /// `cols x rows` cells (ADR 0020). Its width and height constraints are
+    /// ignored.
+    CreateSurface {
+        id: RegionId,
+        /// `MIN_SURFACE_ROWS..=MAX_SURFACE_ROWS`.
+        rows: u16,
+        constraints: Constraints,
+        style: Style,
+    },
+
+    /// Close a surface and delete its subtree.
+    CloseSurface { id: RegionId },
 
     /// Move region to new parent.
     ReparentRegion {
@@ -161,6 +177,13 @@ pub enum TerminalMessage {
     // Clipboard
     /// Clipboard content response.
     ClipboardContent { text: Option<String> },
+
+    // Inline surfaces
+    /// Something happened to a surface.
+    SurfaceEvent {
+        id: RegionId,
+        kind: SurfaceEventKind,
+    },
 
     // Keepalive
     /// Ping request to the app (expects a Pong reply).

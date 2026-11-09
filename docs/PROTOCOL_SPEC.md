@@ -156,9 +156,8 @@ App                                          Terminal
 | `CAP_APPEND_CONTENT` | `0x0020` |
 | `CAP_STREAM_LIFECYCLE` | `0x0040` |
 | `CAP_REGION_METADATA` | `0x0080` |
+| `CAP_INLINE_SURFACES` | `0x0100` |
 | `CAP_SEMANTICS` | `0x0200` |
-
-Bit `0x0100` is reserved for inline surfaces ([ADR 0020](adr/0020-inline-surfaces.md)).
 
 `CAP_ALL_KNOWN` is the OR of those bits. Capabilities are negotiated as `requested & supported`; the version is `min(client, server)`. A version below `MIN_PROTOCOL_VERSION` is rejected with `Error` 426.
 
@@ -184,6 +183,7 @@ Integers are little-endian. Floats are IEEE-754 little-endian `f32`; NaN and inf
 | `MAX_METADATA_TOTAL_BYTES` | 1 MiB |
 | `MAX_SEMANTICS_STRING_LEN` | 4 KiB per `Semantics` string |
 | `MAX_SEMANTICS_TOTAL_BYTES` | 8 KiB across one `Semantics`' strings |
+| Surface rows | `MIN_SURFACE_ROWS` 1 to `MAX_SURFACE_ROWS` 128 |
 | `MAX_IMAGE_DATA_LEN` | 16 MiB, equal to the payload cap |
 | Image dimensions | width and height each at most 16,384; `width * height * 4 <= data_len` |
 
@@ -210,7 +210,8 @@ App and terminal codes are separate namespaces.
 |------|------|------|------|
 | `ClientHello` | `0x0001` | `CreateRegion` | `0x0010` |
 | `DeleteRegion` | `0x0012` | `ReparentRegion` | `0x0013` |
-| `SetRegionMetadata` | `0x0014` | `SetContent` | `0x0020` |
+| `SetRegionMetadata` | `0x0014` | `CreateSurface` | `0x0015` |
+| `CloseSurface` | `0x0016` | `SetContent` | `0x0020` |
 | `SetStyle` | `0x0021` | `SetConstraints` | `0x0022` |
 | `AppendContent` | `0x0023` | `StreamStart` | `0x0024` |
 | `StreamEnd` | `0x0025` | `SetSemantics` | `0x0026` |
@@ -221,8 +222,6 @@ App and terminal codes are separate namespaces.
 | `ClipboardSet` | `0x0061` | `Pong` | `0x0070` |
 | `Disconnect` | `0x00FF` | | |
 
-App codes `0x0015` and `0x0016` are reserved for inline surfaces ([ADR 0020](adr/0020-inline-surfaces.md)).
-
 #### Terminal → App
 
 | Type | Code | Type | Code |
@@ -231,9 +230,10 @@ App codes `0x0015` and `0x0016` are reserved for inline surfaces ([ADR 0020](adr
 | `LayoutComputed` | `0x0010` | `Input` | `0x0020` |
 | `Resize` | `0x0022` | `FocusEvent` | `0x0023` |
 | `ScrollEvent` | `0x0024` | `ClipboardContent` | `0x0025` |
-| `Ping` | `0x0070` | `Error` | `0x00FF` |
+| `SurfaceEvent` | `0x0026` | `Ping` | `0x0070` |
+| `Error` | `0x00FF` | | |
 
-Terminal code `0x0026` is reserved for inline surfaces ([ADR 0020](adr/0020-inline-surfaces.md)); the app code `0x0026` is `SetSemantics`.
+Code `0x0026` is `SetSemantics` from the app and `SurfaceEvent` from the terminal.
 
 ---
 
@@ -332,6 +332,8 @@ Track vectors encode a `u32` count then items. A placement encodes `start` then 
 ## 6. Computed Layout
 
 `ComputedRegionLayout` is `id: u32`, then eight `f32` values in this order: `x`, `y`, `width`, `height`, `content_x`, `content_y`, `content_width`, `content_height`; it ends with `visible: u8`.
+
+Positions are absolute cells from the top left of the region's root: the viewport for regions under `ROOT`, the surface for regions in an inline surface (section 10.6). `LayoutComputed` lists the `ROOT` tree first, then each surface's tree in the order the surfaces were created.
 
 ---
 
@@ -482,6 +484,8 @@ The terminal sends empty `Ping` after 30 seconds idle. It closes after 10 second
 | `StreamEnd` | id u32, stream_id u32 | `CAP_STREAM_LIFECYCLE` |
 | `SetRegionMetadata` | id u32, pair count u32, key/value strings | `CAP_REGION_METADATA` |
 | `SetSemantics` | id u32, `Semantics` (section 10.5) | `CAP_SEMANTICS` |
+| `CreateSurface` | id u32, rows u16, full `Constraints`, full `Style` (section 10.6) | `CAP_INLINE_SURFACES` |
+| `CloseSurface` | id u32 | `CAP_INLINE_SURFACES` |
 
 Metadata is opaque to the terminal; tools read it back (`ulttyctl regions`). By convention the key `id` holds the widget id of the region's widget, which `ulttui` sets for every region it creates for a widget with an id. `Focus` and `Blur` name the region with keyboard focus for those tools too; they do not change where key events go unless the focused region subscribed to `EVENT_KEY`.
 
@@ -560,6 +564,30 @@ Fields the app did set always win, except that `busy` has no unset value: a spin
 
 `ulttyctl regions` reports each region's effective `role`, `label` and `live`; the JSON form leaves out `label` when there is none and `live` when it is `off`.
 
+### 10.6 Inline Surfaces
+
+An inline surface is a region tree anchored to rows of the main screen, `rows` high and the pane's width wide, that scrolls with the text and into scrollback, and is frozen into plain styled text when closed ([ADR 0020](adr/0020-inline-surfaces.md)). A session can hold surfaces and a full-scene `ROOT` tree at once.
+
+| Message | Direction | Code | Payload in encoding order |
+|---------|-----------|------|---------------------------|
+| `CreateSurface` | app → terminal | `0x0015` | `id: u32`, `rows: u16`, full `Constraints`, full `Style` |
+| `CloseSurface` | app → terminal | `0x0016` | `id: u32` |
+| `SurfaceEvent` | terminal → app | `0x0026` | `id: u32`, `kind: u8` |
+
+`id` is never `0` (the root) and `rows` is 1 to 128; anything else is a decode error (`Error` 400). `SurfaceEvent` kinds are `Placed=0`, `Closed=1`, `Evicted=2`, `Hidden=3` and `Shown=4`; an unknown kind is a decode error.
+
+**Creating.** `CreateSurface` creates region `id` as a second root of the session's scene, laid out on its own at `cols × rows` cells, where `cols` is the viewport width. Its `width` and `height` constraints (and their minimum and maximum) are ignored; its other constraints and its style apply as for any region. Children attach with ordinary `CreateRegion { parent: id }`, and `SetConstraints`, `SetStyle`, `SetContent`, `AppendContent`, streams and metadata work on surface regions unchanged. A surface's regions, its root included, count toward the session's region count (`MAX_REGION_COUNT`, section 3) and text limits (section 8.2), and nesting depth is counted from the surface root. A session holds at most 16 live surfaces (`MAX_SURFACES`): one more is `Error` 400, as is an `id` already in use. The surface's height is fixed for its life. On a viewport resize every surface is laid out again at the new width.
+
+**Closing.** `CloseSurface` deletes the surface root and its subtree and answers `SurfaceEvent { kind: Closed }`. `DeleteRegion` on a surface root does the same. `CloseSurface` on a region that is not a surface root is `Error` 400, and on an unknown region `Error` 404. A surface root cannot be moved with `ReparentRegion` (400); regions inside a surface can be moved to and from other trees.
+
+All three app messages without `CAP_INLINE_SURFACES` are `Error` 400. Like other region messages they are batched by frames and applied at `EndFrame`, and a frame that creates or closes a surface gets a `LayoutComputed` reply.
+
+**Anchoring.** The place of a surface in the text is set by an APC string the app writes to its stdout, on both transports: `ESC _ u <session_id> ; <surface_id> ; <rows> ESC \` (decimal ASCII, at most 64 bytes, at column 0). The terminal reserves `rows` rows there, and the app then prints exactly `rows` lines of fallback text, which is what a terminal that drops the string shows. A surface is placed (`SurfaceEvent { kind: Placed }`) when its anchor and its `CreateSurface` have both arrived, in either order; the two `rows` must agree. Once placed it is drawn over its rows, `Hidden` and `Shown` report it scrolling off and back onto the screen (once per change), and `Evicted` reports its anchor row leaving scrollback or being erased, which freezes it. Session end freezes every live surface where it stands.
+
+While `ROOT` has children the session is full-scene and its surfaces are hidden under it; with none, the grid is drawn and the surfaces over it.
+
+This terminal does not yet pair anchors with surfaces or draw them: a surface stays unplaced, and only `Closed` is sent (ADR 0020, slices 3 and 4). `ulttyctl regions` lists each surface with its rows, its state and its region tree.
+
 ---
 
 ## 11. Atomic Updates
@@ -612,6 +640,7 @@ Supply row and column track vectors and place children with start/end `GridLine`
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.1.0-draft | 2026-11-08 | `CreateSurface` (`0x0015`), `CloseSurface` (`0x0016`), `SurfaceEvent` (terminal `0x0026`) and `CAP_INLINE_SURFACES` (`0x0100`), section 10.6 (ADR 0020) |
 | 0.1.0-draft | 2026-11-08 | `SetSemantics` (`0x0026`) and `CAP_SEMANTICS` (`0x0200`), section 10.5 (ADR 0021) |
 | 0.1.0-draft | 2026-09-22 | Regenerated wire-format sections from `codec.rs`; removed shared-memory/zero-copy claims |
 | 0.1.0-draft | 2026-01-30 | Initial draft |

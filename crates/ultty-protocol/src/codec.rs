@@ -27,6 +27,7 @@ use crate::{
     },
     messages::{ComputedRegionLayout, FrameId, LayoutTrigger},
     style::{BorderEdges, BorderStyle, BorderType, Color, Easing, NamedColor, Style, Transition},
+    surface::{SurfaceEventKind, MAX_SURFACE_ROWS, MIN_SURFACE_ROWS},
     AppMessage, ProtocolError, RegionId, Result, TerminalMessage,
 };
 
@@ -1980,6 +1981,8 @@ mod msg_type {
     pub const CLIENT_HELLO: u16 = 0x0001;
     pub const CREATE_REGION: u16 = 0x0010;
     pub const SET_REGION_METADATA: u16 = 0x0014;
+    pub const CREATE_SURFACE: u16 = 0x0015;
+    pub const CLOSE_SURFACE: u16 = 0x0016;
     pub const SET_CONTENT: u16 = 0x0020;
     pub const SET_STYLE: u16 = 0x0021;
     pub const SET_CONSTRAINTS: u16 = 0x0022;
@@ -2010,8 +2013,21 @@ mod msg_type {
     pub const FOCUS_EVENT: u16 = 0x0023;
     pub const SCROLL_EVENT: u16 = 0x0024;
     pub const CLIPBOARD_CONTENT: u16 = 0x0025;
+    pub const SURFACE_EVENT: u16 = 0x0026;
     pub const PING: u16 = 0x0070;
     pub const ERROR: u16 = 0x00FF;
+}
+
+/// Decode a surface root id: any region id but the root, which is the
+/// terminal's and never a surface.
+fn decode_surface_id(buf: &mut impl Buf) -> Result<RegionId> {
+    let id = RegionId::decode(buf)?;
+    if id == RegionId::ROOT {
+        return Err(ProtocolError::InvalidData(
+            "region 0 is the root and cannot be a surface".into(),
+        ));
+    }
+    Ok(id)
 }
 
 impl Encode for AppMessage {
@@ -2088,6 +2104,22 @@ impl Encode for AppMessage {
             AppMessage::DeleteRegion { id } => {
                 id.encode(buf);
                 msg_type::DELETE_REGION
+            }
+            AppMessage::CreateSurface {
+                id,
+                rows,
+                constraints,
+                style,
+            } => {
+                id.encode(buf);
+                buf.put_u16_le(*rows);
+                constraints.encode(buf);
+                style.encode(buf);
+                msg_type::CREATE_SURFACE
+            }
+            AppMessage::CloseSurface { id } => {
+                id.encode(buf);
+                msg_type::CLOSE_SURFACE
             }
             AppMessage::ReparentRegion {
                 id,
@@ -2263,6 +2295,33 @@ impl Decode for AppMessage {
                 let id = RegionId::decode(buf)?;
                 Ok(AppMessage::DeleteRegion { id })
             }
+            msg_type::CREATE_SURFACE => {
+                let id = decode_surface_id(buf)?;
+                if buf.remaining() < 2 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 2,
+                        have: buf.remaining(),
+                    });
+                }
+                let rows = buf.get_u16_le();
+                if !(MIN_SURFACE_ROWS..=MAX_SURFACE_ROWS).contains(&rows) {
+                    return Err(ProtocolError::InvalidData(format!(
+                        "surface rows {rows} outside {MIN_SURFACE_ROWS}..={MAX_SURFACE_ROWS}"
+                    )));
+                }
+                let constraints = Constraints::decode(buf)?;
+                let style = Style::decode(buf)?;
+                Ok(AppMessage::CreateSurface {
+                    id,
+                    rows,
+                    constraints,
+                    style,
+                })
+            }
+            msg_type::CLOSE_SURFACE => {
+                let id = decode_surface_id(buf)?;
+                Ok(AppMessage::CloseSurface { id })
+            }
             msg_type::REPARENT_REGION => {
                 let id = RegionId::decode(buf)?;
                 let new_parent = RegionId::decode(buf)?;
@@ -2422,6 +2481,11 @@ impl Encode for TerminalMessage {
                 encode_option_string(text, buf);
                 msg_type::CLIPBOARD_CONTENT
             }
+            TerminalMessage::SurfaceEvent { id, kind } => {
+                id.encode(buf);
+                buf.put_u8(*kind as u8);
+                msg_type::SURFACE_EVENT
+            }
             TerminalMessage::Ping => msg_type::PING,
             TerminalMessage::Error { code, message } => {
                 buf.put_u16_le(*code);
@@ -2511,6 +2575,20 @@ impl Decode for TerminalMessage {
             msg_type::RESIZE => Ok(TerminalMessage::Resize(ResizeEvent::decode(buf)?)),
             msg_type::FOCUS_EVENT => Ok(TerminalMessage::Focus(FocusEvent::decode(buf)?)),
             msg_type::SCROLL_EVENT => Ok(TerminalMessage::Scroll(ScrollEvent::decode(buf)?)),
+            msg_type::SURFACE_EVENT => {
+                let id = decode_surface_id(buf)?;
+                if buf.remaining() < 1 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 1,
+                        have: buf.remaining(),
+                    });
+                }
+                let value = buf.get_u8();
+                let kind = SurfaceEventKind::from_u8(value).ok_or_else(|| {
+                    ProtocolError::InvalidData(format!("invalid surface event kind: {value}"))
+                })?;
+                Ok(TerminalMessage::SurfaceEvent { id, kind })
+            }
             msg_type::PING => Ok(TerminalMessage::Ping),
             msg_type::CLIPBOARD_CONTENT => {
                 let text = decode_option_string(buf)?;
@@ -3242,12 +3320,14 @@ mod tests {
     #[test]
     fn message_type_codes_match_documented_table() {
         // Mirrors docs/PROTOCOL_SPEC.md section 3.2. Update both together.
-        let app: [(&str, u16); 23] = [
+        let app: [(&str, u16); 25] = [
             ("CLIENT_HELLO", 0x0001),
             ("CREATE_REGION", 0x0010),
             ("DELETE_REGION", 0x0012),
             ("REPARENT_REGION", 0x0013),
             ("SET_REGION_METADATA", 0x0014),
+            ("CREATE_SURFACE", 0x0015),
+            ("CLOSE_SURFACE", 0x0016),
             ("SET_CONTENT", 0x0020),
             ("SET_STYLE", 0x0021),
             ("SET_CONSTRAINTS", 0x0022),
@@ -3273,6 +3353,8 @@ mod tests {
             ("DELETE_REGION", msg_type::DELETE_REGION),
             ("REPARENT_REGION", msg_type::REPARENT_REGION),
             ("SET_REGION_METADATA", msg_type::SET_REGION_METADATA),
+            ("CREATE_SURFACE", msg_type::CREATE_SURFACE),
+            ("CLOSE_SURFACE", msg_type::CLOSE_SURFACE),
             ("SET_CONTENT", msg_type::SET_CONTENT),
             ("SET_STYLE", msg_type::SET_STYLE),
             ("SET_CONSTRAINTS", msg_type::SET_CONSTRAINTS),
@@ -3294,7 +3376,7 @@ mod tests {
         ];
         assert_eq!(actual_app, app);
 
-        let terminal: [(&str, u16); 10] = [
+        let terminal: [(&str, u16); 11] = [
             ("SERVER_HELLO", 0x0001),
             ("SESSION_READY", 0x0002),
             ("LAYOUT_COMPUTED", 0x0010),
@@ -3303,6 +3385,7 @@ mod tests {
             ("FOCUS_EVENT", 0x0023),
             ("SCROLL_EVENT", 0x0024),
             ("CLIPBOARD_CONTENT", 0x0025),
+            ("SURFACE_EVENT", 0x0026),
             ("PING", 0x0070),
             ("ERROR", 0x00FF),
         ];
@@ -3315,6 +3398,7 @@ mod tests {
             ("FOCUS_EVENT", msg_type::FOCUS_EVENT),
             ("SCROLL_EVENT", msg_type::SCROLL_EVENT),
             ("CLIPBOARD_CONTENT", msg_type::CLIPBOARD_CONTENT),
+            ("SURFACE_EVENT", msg_type::SURFACE_EVENT),
             ("PING", msg_type::PING),
             ("ERROR", msg_type::ERROR),
         ];
@@ -3325,8 +3409,9 @@ mod tests {
     fn capability_bits_and_triggers_match_documented_table() {
         // Mirrors docs/PROTOCOL_SPEC.md section 2.1 and 7.5.
         use crate::{
-            CAP_ALL_KNOWN, CAP_APPEND_CONTENT, CAP_LAYOUT_FLEXBOX, CAP_REGION_METADATA,
-            CAP_SEMANTICS, CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, MIN_PROTOCOL_VERSION,
+            CAP_ALL_KNOWN, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, CAP_LAYOUT_FLEXBOX,
+            CAP_REGION_METADATA, CAP_SEMANTICS, CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL,
+            MAX_SURFACES, MAX_SURFACE_ROWS, MIN_PROTOCOL_VERSION, MIN_SURFACE_ROWS,
             PROTOCOL_VERSION,
         };
         assert_eq!(CAP_LAYOUT_FLEXBOX, 0x0001);
@@ -3334,8 +3419,11 @@ mod tests {
         assert_eq!(CAP_APPEND_CONTENT, 0x0020);
         assert_eq!(CAP_STREAM_LIFECYCLE, 0x0040);
         assert_eq!(CAP_REGION_METADATA, 0x0080);
+        assert_eq!(CAP_INLINE_SURFACES, 0x0100);
         assert_eq!(CAP_SEMANTICS, 0x0200);
-        assert_eq!(CAP_ALL_KNOWN, 0x02F1);
+        assert_eq!(CAP_ALL_KNOWN, 0x03F1);
+        assert_eq!((MIN_SURFACE_ROWS, MAX_SURFACE_ROWS), (1, 128));
+        assert_eq!(MAX_SURFACES, 16);
         assert_eq!(PROTOCOL_VERSION, 1);
         assert_eq!(MIN_PROTOCOL_VERSION, 1);
 
@@ -3349,5 +3437,142 @@ mod tests {
         let mut buf = BytesMut::new();
         Dimension::Cells(3.0).encode(&mut buf);
         assert_eq!(&buf[..], &[1, 0, 0, 0x40, 0x40]);
+    }
+
+    #[test]
+    fn surface_messages_have_golden_frame_bytes() {
+        let close = AppMessage::CloseSurface { id: RegionId(7) }.encode_to_bytes();
+        assert_eq!(
+            &close[..],
+            &[0x55, 0x54, 0x16, 0x00, 4, 0, 0, 0, 7, 0, 0, 0]
+        );
+
+        let event = TerminalMessage::SurfaceEvent {
+            id: RegionId(7),
+            kind: SurfaceEventKind::Closed,
+        }
+        .encode_to_bytes();
+        assert_eq!(
+            &event[..],
+            &[0x55, 0x54, 0x26, 0x00, 5, 0, 0, 0, 7, 0, 0, 0, 1]
+        );
+
+        let create = AppMessage::CreateSurface {
+            id: RegionId(7),
+            rows: 0x0102,
+            constraints: Constraints::default(),
+            style: Style::default(),
+        }
+        .encode_to_bytes();
+        assert_eq!(&create[..4], &[0x55, 0x54, 0x15, 0x00]);
+        assert_eq!(&create[8..14], &[7, 0, 0, 0, 0x02, 0x01]);
+    }
+
+    fn create_surface_bytes(id: u32, rows: u16) -> Bytes {
+        AppMessage::CreateSurface {
+            id: RegionId(id),
+            rows,
+            constraints: Constraints::default(),
+            style: Style::default(),
+        }
+        .encode_to_bytes()
+    }
+
+    #[test]
+    fn create_surface_accepts_rows_one_to_128_only() {
+        for rows in [MIN_SURFACE_ROWS, 2, 127, MAX_SURFACE_ROWS] {
+            let bytes = create_surface_bytes(3, rows);
+            let decoded = AppMessage::decode(&mut bytes.as_ref()).unwrap();
+            assert!(
+                matches!(decoded, AppMessage::CreateSurface { rows: r, .. } if r == rows),
+                "rows {rows}"
+            );
+        }
+        for rows in [0, MAX_SURFACE_ROWS + 1, u16::MAX] {
+            let bytes = create_surface_bytes(3, rows);
+            assert!(
+                matches!(
+                    AppMessage::decode(&mut bytes.as_ref()),
+                    Err(ProtocolError::InvalidData(_))
+                ),
+                "rows {rows} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn surface_messages_refuse_the_root_id() {
+        let create = create_surface_bytes(0, 1);
+        let close = AppMessage::CloseSurface { id: RegionId::ROOT }.encode_to_bytes();
+        for bytes in [create, close] {
+            assert!(matches!(
+                AppMessage::decode(&mut bytes.as_ref()),
+                Err(ProtocolError::InvalidData(_))
+            ));
+        }
+        let event = TerminalMessage::SurfaceEvent {
+            id: RegionId::ROOT,
+            kind: SurfaceEventKind::Placed,
+        }
+        .encode_to_bytes();
+        assert!(matches!(
+            TerminalMessage::decode(&mut event.as_ref()),
+            Err(ProtocolError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn surface_event_refuses_unknown_kinds() {
+        for kind in SurfaceEventKind::ALL {
+            let bytes = TerminalMessage::SurfaceEvent {
+                id: RegionId(9),
+                kind,
+            }
+            .encode_to_bytes();
+            assert_eq!(
+                TerminalMessage::decode(&mut bytes.as_ref()).unwrap(),
+                TerminalMessage::SurfaceEvent {
+                    id: RegionId(9),
+                    kind
+                }
+            );
+        }
+        let mut bytes = BytesMut::from(
+            &TerminalMessage::SurfaceEvent {
+                id: RegionId(9),
+                kind: SurfaceEventKind::Shown,
+            }
+            .encode_to_bytes()[..],
+        );
+        let last = bytes.len() - 1;
+        bytes[last] = 5;
+        assert!(matches!(
+            TerminalMessage::decode(&mut bytes.as_ref()),
+            Err(ProtocolError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn truncated_surface_messages_are_eof_errors() {
+        let full = create_surface_bytes(3, 4);
+        // Cut the payload inside the rows field and declare what is left.
+        let mut cut = BytesMut::from(&full[..13]);
+        cut[4..8].copy_from_slice(&5u32.to_le_bytes());
+        assert!(matches!(
+            AppMessage::decode(&mut cut.as_ref()),
+            Err(ProtocolError::UnexpectedEof { .. })
+        ));
+
+        let event = TerminalMessage::SurfaceEvent {
+            id: RegionId(9),
+            kind: SurfaceEventKind::Placed,
+        }
+        .encode_to_bytes();
+        let mut cut = BytesMut::from(&event[..12]);
+        cut[4..8].copy_from_slice(&4u32.to_le_bytes());
+        assert!(matches!(
+            TerminalMessage::decode(&mut cut.as_ref()),
+            Err(ProtocolError::UnexpectedEof { .. })
+        ));
     }
 }

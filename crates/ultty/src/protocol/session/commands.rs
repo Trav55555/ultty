@@ -112,6 +112,13 @@ impl NativeSession {
                 self.handle_delete_region(id);
             }
 
+            AppMessage::CreateSurface { .. } | AppMessage::CloseSurface { .. } => {
+                // Not advertised yet, so never negotiated.
+                self.queue_protocol_error(NativeProtocolError::missing_capability(
+                    "inline_surfaces",
+                ));
+            }
+
             AppMessage::ReparentRegion {
                 id,
                 new_parent,
