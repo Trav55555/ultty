@@ -269,6 +269,8 @@ go through `scripts/ci-runner-step.sh`, which keeps the pool's heartbeat.
 | `gui-smoke` | `scripts/ci-gui-smoke.sh`: Ultty under Xvfb with software Vulkan, driven by the live smokes |
 
 There is no macOS runner; macOS is only built by the GitHub release workflow.
+`.gitea/workflows/release.yml` builds and publishes the Linux x86_64 release
+on the same pool; see [release artifacts](release-artifacts.md).
 Benchmarks are not in this pipeline. The fuller screenshot gates also run
 through `.github/workflows/live-smoke.yml` on manual dispatch. Benchmarks are run by hand and recorded under
 `docs/perf/`.

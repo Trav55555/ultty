@@ -1,0 +1,127 @@
+# Release on Gitea Actions for a pushed v* tag, on the ultty pool (see
+# ci.yml). Builds the Linux x86_64 artifacts the GitHub release workflow
+# builds, with the same names and smokes (tarball with terminfo, .deb, .rpm,
+# SHA256SUMS), publishes them as the Gitea release, then publishes the same
+# files to the release on the GitHub mirror, which install.sh downloads from.
+# The notes are the tag's section of CHANGELOG.md; a tag without one does not
+# publish.
+#
+# The GitHub step needs the GH_RELEASE_TOKEN Actions secret on this
+# repository: a fine-grained GitHub token with Contents read/write on
+# Trav55555/ultty only. The GitHub release workflow also runs for tags the
+# mirror receives; whichever publishes first wins, and this workflow leaves
+# an existing published GitHub release alone.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_REGION: us-east-1
+  SCCACHE_S3_KEY_PREFIX: ultty/
+  TARGET: x86_64-unknown-linux-gnu
+
+# Every job reads only, except `release`, which publishes.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test before publishing
+    runs-on: ultty
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all -- --check
+      - run: scripts/ci-runner-step.sh cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: scripts/ci-runner-step.sh cargo test --locked --workspace
+
+  release:
+    name: Build and publish Linux x86_64
+    needs: test
+    runs-on: ultty
+    timeout-minutes: 60
+    permissions:
+      contents: write # create the release and attach its files
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: scripts/ci-runner-step.sh cargo build --locked --release -p ultty --target "$TARGET"
+
+      - name: Package
+        run: |
+          cd "target/$TARGET/release"
+          mkdir -p package/dist
+          cp ultty ulttyctl package/
+          cp ../../../dist/ultty.desktop package/dist/
+          cp -R ../../../dist/icons package/dist/
+          cp -R ../../../dist/terminfo package/dist/
+          tar czf "../../../ultty-$GITHUB_REF_NAME-$TARGET.tar.gz" -C package .
+
+      - name: Smoke tarball
+        run: |
+          scripts/release-artifact-smoke.sh \
+            --tarball "ultty-$GITHUB_REF_NAME-$TARGET.tar.gz" \
+            --homebrew dist/homebrew/ultty.rb
+          scripts/release-artifact-smoke.sh \
+            --tarball "ultty-$GITHUB_REF_NAME-$TARGET.tar.gz" \
+            --run-binaries
+
+      - name: Compile the terminfo entry
+        run: mkdir -p target/terminfo && tic -x -o target/terminfo dist/terminfo/ultty.terminfo
+
+      - name: Build and smoke .deb
+        run: |
+          cargo deb -p ultty --no-build --target "$TARGET"
+          scripts/release-artifact-smoke.sh --deb target/debian/*.deb
+
+      - name: Build and smoke .rpm
+        run: |
+          cargo generate-rpm -p crates/ultty --target "$TARGET"
+          scripts/release-artifact-smoke.sh --rpm "target/$TARGET/generate-rpm/"*.rpm
+
+      - name: Collect artifacts and SHA256SUMS
+        run: |
+          mkdir artifacts
+          cp "ultty-$GITHUB_REF_NAME-$TARGET.tar.gz" target/debian/*.deb \
+            "target/$TARGET/generate-rpm/"*.rpm artifacts/
+          cd artifacts
+          # Written outside the directory first, so it does not list itself.
+          find . -maxdepth 1 -type f -printf '%P\n' \
+            | sort \
+            | xargs sha256sum >"$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
+          cat SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Extract release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md >"$RUNNER_TEMP/release-notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/release-notes.md"; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
+
+      - name: Publish the Gitea release
+        run: |
+          scripts/ci-runner-step.sh scripts/publish-gitea-release.sh \
+            --tag "$GITHUB_REF_NAME" --notes "$RUNNER_TEMP/release-notes.md" --dir artifacts
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+
+      - name: Publish to the GitHub release
+        run: |
+          scripts/ci-runner-step.sh scripts/publish-github-release.sh \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --notes "$RUNNER_TEMP/release-notes.md" --dir artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}

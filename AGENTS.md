@@ -53,9 +53,10 @@ benchmark job, and no macOS runner: macOS is only built by the release
 workflow. Windows requires future named-pipe/ConPTY platform work.
 **RUSTFLAGS=-Dwarnings** — all warnings are errors.
 
+`.gitea/workflows/release.yml` (tag push) builds the Linux x86_64 release on
+the same pool, publishes it on Gitea and then to the GitHub release.
 `.github/workflows/live-smoke.yml` (manual dispatch, self-hosted GUI runner) and
-`.github/workflows/release.yml` (tag push) are the other two workflows; they
-run on GitHub, from the mirror.
+`.github/workflows/release.yml` (tag push) run on GitHub, from the mirror.
 
 ## Code Style
 
