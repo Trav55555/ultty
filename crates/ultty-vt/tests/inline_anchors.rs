@@ -6,6 +6,7 @@
 use ultty_vt::ansi::AnsiParser;
 use ultty_vt::grid::{
     Anchor, AnchorEvent, AnchorRefusal, Dimensions, Terminal, TerminalHandler, MAX_ANCHORS,
+    MAX_ANCHOR_EVENTS, MAX_QUEUED_REFUSALS,
 };
 
 fn feed(term: &mut Terminal, bytes: &[u8]) {
@@ -527,6 +528,50 @@ fn reflow_drops_anchors_pushed_past_the_scrollback_limit() {
     // out of scrollback.
     term.resize(Dimensions::new(10, 3));
     assert_eq!(term.take_anchor_events(), vec![lost(tag, 1, 1)]);
+}
+
+/// A full table and a flood of refused anchors in one batch: the refusals
+/// are capped, so every `Placed` survives and nothing overflows.
+#[test]
+fn refusals_never_push_placements_out_of_the_queue() {
+    let mut term = term(20, 3);
+    let mut wire = Vec::new();
+    for surface in 0..(MAX_ANCHORS + MAX_ANCHOR_EVENTS) as u32 {
+        wire.extend(anchor_bytes(7, surface, 1));
+        wire.extend_from_slice(b"\r\n");
+    }
+    feed(&mut term, &wire);
+    let events = term.take_anchor_events();
+    let placed = events
+        .iter()
+        .filter(|e| matches!(e, AnchorEvent::Placed { .. }))
+        .count();
+    assert_eq!(placed, MAX_ANCHORS);
+    assert_eq!(events.len(), MAX_ANCHORS + MAX_QUEUED_REFUSALS);
+    assert!(!term.take_anchor_overflow());
+
+    // The cap is per batch: the next refusal is reported.
+    feed(&mut term, &anchor_bytes(7, 9999, 1));
+    assert_eq!(term.take_anchor_events().len(), 1);
+}
+
+/// More placements and losses than the queue holds: the oldest go and the
+/// overflow is reported once, so the embedder can reconcile.
+#[test]
+fn an_overflowing_queue_is_reported() {
+    let mut term = term(20, 3);
+    let mut wire = Vec::new();
+    for round in 0..5u32 {
+        for surface in 0..MAX_ANCHORS as u32 {
+            wire.extend(anchor_bytes(7, round * 10_000 + surface, 1));
+            wire.extend_from_slice(b"\r\n");
+        }
+        wire.extend_from_slice(b"\x1b[3J\x1b[2J\x1b[H");
+    }
+    feed(&mut term, &wire);
+    assert_eq!(term.take_anchor_events().len(), MAX_ANCHOR_EVENTS);
+    assert!(term.take_anchor_overflow());
+    assert!(!term.take_anchor_overflow());
 }
 
 #[test]
