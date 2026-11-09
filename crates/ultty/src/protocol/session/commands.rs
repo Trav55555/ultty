@@ -17,8 +17,8 @@ use crate::scene::region::Region;
 
 /// Whether applying `msg` may change what the accessibility tree shows of
 /// the session, its focus included. Keepalives, the clipboard,
-/// subscriptions and styles do not; nor, until live regions (ADR 0021
-/// slice 6), do streams.
+/// subscriptions and styles do not. Streams do: an open one makes its
+/// region busy (ADR 0021 §3).
 fn changes_what_is_shown(msg: &AppMessage) -> bool {
     !matches!(
         msg,
@@ -26,8 +26,6 @@ fn changes_what_is_shown(msg: &AppMessage) -> bool {
             | AppMessage::Subscribe { .. }
             | AppMessage::Unsubscribe { .. }
             | AppMessage::SetStyle { .. }
-            | AppMessage::StreamStart { .. }
-            | AppMessage::StreamEnd { .. }
             | AppMessage::ClipboardGet
             | AppMessage::ClipboardSet { .. }
             | AppMessage::Pong
@@ -115,6 +113,9 @@ impl NativeSession {
                 if self.has_capability(CAP_STREAM_LIFECYCLE) {
                     debug!("Stream {} started on region {:?}", stream_id, id);
                     self.active_streams.insert(id, stream_id);
+                    if let Some(region) = self.scene.get_mut(id) {
+                        region.streaming = true;
+                    }
                 } else {
                     self.queue_protocol_error(NativeProtocolError::missing_capability(
                         "stream_start",
@@ -128,6 +129,9 @@ impl NativeSession {
                     if let Some(active_id) = self.active_streams.get(&id) {
                         if *active_id == stream_id {
                             self.active_streams.remove(&id);
+                            if let Some(region) = self.scene.get_mut(id) {
+                                region.streaming = false;
+                            }
                         } else {
                             warn!(
                                 "StreamEnd mismatch for {:?}: active={}, got={}",
@@ -350,6 +354,8 @@ impl NativeSession {
         region.parent = Some(parent);
         region.constraints = constraints;
         region.style = style;
+        // A stream may be opened before its region is created.
+        region.streaming = self.active_streams.contains_key(&id);
 
         let index = usize::try_from(insert_index).unwrap_or(usize::MAX);
         match self.scene.try_insert_at(region, index) {
@@ -447,6 +453,13 @@ impl NativeSession {
             self.refuse_text_over_limit(id);
             return;
         }
+        // Kept for a screen reader, if one listens and the region is live.
+        let live = self.live_appends.is_some()
+            && self
+                .scene
+                .get(id)
+                .is_some_and(|region| region.semantics().live != ultty_protocol::Live::Off);
+        let mut announce = live.then(|| text.clone());
         if let Some(region) = self.scene.get_mut(id) {
             match &mut region.content {
                 Content::Text(tc) => {
@@ -485,6 +498,9 @@ impl NativeSession {
             region.appended = true;
             region.mark_dirty();
             self.mark_region_visual_changed(id);
+            if let Some(text) = announce.take() {
+                self.note_live_append(id, &text);
+            }
         } else {
             warn!("AppendContent for unknown region {:?}", id);
             self.queue_protocol_error(NativeProtocolError::region_not_found(id));
@@ -594,6 +610,7 @@ impl NativeSession {
         let mut region = Region::new(id);
         region.constraints = constraints;
         region.style = style;
+        region.streaming = self.active_streams.contains_key(&id);
         match self.scene.try_insert_surface(region, rows) {
             Ok(()) => {
                 self.mark_full_scene_rebuild();
@@ -639,6 +656,7 @@ impl NativeSession {
             self.style_animations.remove(id);
             self.active_streams.remove(id);
         }
+        self.forget_live_appends(removed);
         if self
             .focused_region
             .is_some_and(|focused| removed.contains(&focused))

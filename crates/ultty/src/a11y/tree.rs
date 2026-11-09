@@ -18,9 +18,11 @@
 //! region tree instead, and focus is on the app's focused region, or on
 //! its root when nothing is focused ([`super::scene`]).
 //!
-//! The grid is the live screen: scrollback, per-command nodes (OSC 133),
-//! the selection and live-region announcements are later slices of
-//! ADR 0021.
+//! A live region's announcements are `Label` children after its text and
+//! child regions ([`super::live`]).
+//!
+//! The grid is the live screen: scrollback, per-command nodes (OSC 133)
+//! and the selection are later work of ADR 0021.
 //!
 //! [`GridSnapshot::capture`] copies what the tree needs out of a locked
 //! grid; [`build`] turns a [`Snapshot`] into a full [`TreeUpdate`] with no
@@ -33,6 +35,7 @@ use accesskit::{
     TreeUpdate,
 };
 
+use super::live::LiveRegions;
 use super::scene::{Emitter, SceneSnapshot, MAX_PANE_NODES};
 use crate::grid::{CellFlags, Grid, Row};
 
@@ -46,6 +49,19 @@ pub struct Snapshot {
     pub tabs: Vec<TabSnapshot>,
     /// The panes of the selected tab, in layout order.
     pub panes: Vec<PaneSnapshot>,
+}
+
+impl Snapshot {
+    /// Give the live regions in the snapshot's scenes and surfaces what
+    /// `live` has announced for them.
+    pub fn set_announcements(&mut self, live: &LiveRegions) {
+        for pane in &mut self.panes {
+            let surfaces = pane.surfaces.iter_mut().map(|surface| &mut surface.scene);
+            for scene in pane.scenes.iter_mut().chain(surfaces) {
+                scene.set_announcements(live);
+            }
+        }
+    }
 }
 
 /// One tab of the tab bar.
@@ -578,6 +594,12 @@ pub fn region_node_id(session: u64, region: u32) -> NodeId {
 /// Line `line` of region `region`'s text, `s<session>:<region>l<line>`.
 pub fn region_line_node_id(session: u64, region: u32, line: usize) -> NodeId {
     node_id(&format!("s{session}:{region}l{line}"))
+}
+
+/// Announcement `serial` of live region `region`,
+/// `s<session>:<region>a<serial>` ([`super::live`]).
+pub fn region_announcement_node_id(session: u64, region: u32, serial: u64) -> NodeId {
+    node_id(&format!("s{session}:{region}a{serial}"))
 }
 
 /// The id of the node named `name`: its 64-bit FNV-1a hash, which is the
