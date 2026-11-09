@@ -20,9 +20,12 @@ pub struct Region {
     pub style: Style,
     /// Arbitrary metadata as key-value pairs.
     pub metadata: Vec<(String, String)>,
-    /// Accessibility semantics as the app last set them (`SetSemantics`);
-    /// see [`super::semantics::effective_semantics`] for what is exposed.
-    pub semantics: Semantics,
+    /// Accessibility semantics as the app last set them (`SetSemantics`),
+    /// boxed and absent until set: most regions never get any, and the
+    /// struct is larger than the rest of the region. Read with
+    /// [`Region::semantics`]; [`super::semantics::effective_semantics`]
+    /// says what is exposed.
+    semantics: Option<Box<Semantics>>,
     /// Whether the region has received `AppendContent`. Text regions that
     /// have are derived as `Log` rather than `Text`.
     pub appended: bool,
@@ -55,10 +58,27 @@ impl Region {
             content: Content::None,
             style: Style::default(),
             metadata: Vec::new(),
-            semantics: Semantics::default(),
+            semantics: None,
             appended: false,
             dirty: true,
         }
+    }
+
+    /// The semantics the app set, or the default (role `Auto`) if none.
+    pub fn semantics(&self) -> &Semantics {
+        static DEFAULT: std::sync::LazyLock<Semantics> =
+            std::sync::LazyLock::new(Semantics::default);
+        self.semantics.as_deref().unwrap_or(&DEFAULT)
+    }
+
+    /// Replace the semantics; the default is stored as nothing at all.
+    pub fn set_semantics(&mut self, semantics: Semantics) {
+        self.semantics = (semantics != Semantics::default()).then(|| Box::new(semantics));
+    }
+
+    /// Mutable semantics, allocated on first use.
+    pub fn semantics_mut(&mut self) -> &mut Semantics {
+        self.semantics.get_or_insert_with(Box::default)
     }
 
     /// Mark this region as dirty.

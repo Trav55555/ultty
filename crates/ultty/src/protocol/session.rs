@@ -1807,7 +1807,12 @@ mod tests {
 
         assert_eq!(error_codes(&drain_messages(&mut session)), vec![400]);
         assert_eq!(
-            session.scene.get(RegionId::new(1)).unwrap().semantics,
+            session
+                .scene
+                .get(RegionId::new(1))
+                .unwrap()
+                .semantics()
+                .clone(),
             ultty_protocol::Semantics::default()
         );
     }
@@ -1851,7 +1856,12 @@ mod tests {
             .handle_message(set_semantics(1, polite_log()))
             .unwrap();
         assert_eq!(
-            session.scene.get(RegionId::new(1)).unwrap().semantics,
+            session
+                .scene
+                .get(RegionId::new(1))
+                .unwrap()
+                .semantics()
+                .clone(),
             ultty_protocol::Semantics::default(),
             "queued until EndFrame"
         );
@@ -1862,7 +1872,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            session.scene.get(RegionId::new(1)).unwrap().semantics,
+            session
+                .scene
+                .get(RegionId::new(1))
+                .unwrap()
+                .semantics()
+                .clone(),
             polite_log()
         );
         assert!(error_codes(&drain_messages(&mut session)).is_empty());
@@ -1881,7 +1896,12 @@ mod tests {
             vec![create_region(1, 0), set_semantics(1, polite_log())],
         );
         assert_eq!(
-            session.scene.get(RegionId::new(1)).unwrap().semantics,
+            session
+                .scene
+                .get(RegionId::new(1))
+                .unwrap()
+                .semantics()
+                .clone(),
             polite_log()
         );
 
@@ -1898,7 +1918,12 @@ mod tests {
 
         assert!(error_codes(&drain_messages(&mut session)).is_empty());
         assert_eq!(
-            session.scene.get(RegionId::new(1)).unwrap().semantics,
+            session
+                .scene
+                .get(RegionId::new(1))
+                .unwrap()
+                .semantics()
+                .clone(),
             ultty_protocol::Semantics::default()
         );
     }

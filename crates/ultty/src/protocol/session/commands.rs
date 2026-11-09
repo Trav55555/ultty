@@ -448,7 +448,7 @@ impl NativeSession {
     /// scene stays clean.
     fn handle_set_semantics(&mut self, id: RegionId, semantics: Semantics) {
         if let Some(region) = self.scene.get_mut(id) {
-            region.semantics = semantics;
+            region.set_semantics(semantics);
         } else {
             warn!("SetSemantics for unknown region {:?}", id);
             self.queue_protocol_error(NativeProtocolError::region_not_found(id));

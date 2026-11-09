@@ -13,7 +13,7 @@ use super::Region;
 /// region with no label is named by its text when that is one line; an
 /// input's text is its value, never its name. `live` is never inferred.
 pub fn effective_semantics(region: &Region) -> Semantics {
-    let mut semantics = region.semantics.clone();
+    let mut semantics = region.semantics().clone();
     if semantics.role == Role::Auto {
         semantics.role = content_role(&region.content, region.appended);
     }
@@ -281,19 +281,19 @@ mod tests {
     fn explicit_semantics_override_and_auto_keeps_what_the_app_set() {
         let mut log = region(text("hello"));
         log.appended = true;
-        log.semantics = Semantics {
+        log.set_semantics(Semantics {
             role: Role::Status,
             live: Live::Polite,
             ..Semantics::default()
-        };
+        });
         let semantics = effective_semantics(&log);
         assert_eq!(semantics.role, Role::Status);
         assert_eq!(semantics.live, Live::Polite);
         assert_eq!(semantics.label.as_deref(), Some("hello"), "text names it");
 
         let mut button = region(widget(WidgetContent::Button(ButtonWidget::new("Run"))));
-        button.semantics.label = Some("Run all tests".to_string());
-        button.semantics.disabled = true;
+        button.semantics_mut().label = Some("Run all tests".to_string());
+        button.semantics_mut().disabled = true;
         let semantics = effective_semantics(&button);
         assert_eq!(semantics.role, Role::Button);
         assert_eq!(semantics.label.as_deref(), Some("Run all tests"));
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn explicit_role_still_gets_state_from_content() {
         let mut button = region(widget(WidgetContent::Button(ButtonWidget::new("Run"))));
-        button.semantics.role = Role::Button;
+        button.semantics_mut().role = Role::Button;
         assert_eq!(effective_semantics(&button).label.as_deref(), Some("Run"));
 
         let mut bar = region(widget(WidgetContent::Progress(ProgressWidget {
@@ -312,13 +312,13 @@ mod tests {
             animated: false,
             indeterminate: false,
         })));
-        bar.semantics.role = Role::Progress;
+        bar.semantics_mut().role = Role::Progress;
         let semantics = effective_semantics(&bar);
         assert_eq!(semantics.value.map(|value| value.now), Some(0.5));
         assert_eq!(semantics.label.as_deref(), Some("Upload"));
 
         let mut spinner = region(widget(WidgetContent::Spinner(SpinnerWidget::default())));
-        spinner.semantics.role = Role::Alert;
+        spinner.semantics_mut().role = Role::Alert;
         let semantics = effective_semantics(&spinner);
         assert_eq!(semantics.role, Role::Alert);
         assert!(semantics.busy);
@@ -329,16 +329,16 @@ mod tests {
             password: true,
             ..Default::default()
         })));
-        field.semantics.role = Role::Input;
-        field.semantics.description = Some("API token".to_string());
+        field.semantics_mut().role = Role::Input;
+        field.semantics_mut().description = Some("API token".to_string());
         let semantics = effective_semantics(&field);
         assert_eq!(semantics.value_text, None, "never a password");
         assert_eq!(semantics.description.as_deref(), Some("API token"));
         assert_eq!(semantics.label, None, "an input is not named by its value");
 
         let mut status = region(text("Saved"));
-        status.semantics.role = Role::Status;
-        status.semantics.value = Some(SemanticValue {
+        status.semantics_mut().role = Role::Status;
+        status.semantics_mut().value = Some(SemanticValue {
             now: 3.0,
             min: 0.0,
             max: 9.0,
