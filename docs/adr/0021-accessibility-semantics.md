@@ -351,7 +351,10 @@ Each slice is independently testable and mergeable.
 3. **Adapter, no tree**: dependency, invisible-then-shown window,
    `AppEvent::Accessibility`, `process_event`, config key, a lone `Window`
    node. Check: starts with and without a session bus; startup and
-   idle-wakeup numbers before and after.
+   idle-wakeup numbers before and after. Done 2026-11-08: no startup cost,
+   but zbus's `blocking` pool thread wakes twice a second, so the adapter
+   is opt-in (`accessibility = false` by default) per Consequences;
+   `docs/perf/2026-11-08-accessibility-adapter.md`.
 4. **Grid as Terminal**: tabs, panes, focused grid rows and caret, coalesced
    rebuilds. Check: builder tests; manual steps 1 to 3 recorded.
 5. **Native scenes**: regions to nodes, derived and explicit roles, focus.

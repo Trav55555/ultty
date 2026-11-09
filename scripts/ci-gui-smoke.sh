@@ -59,6 +59,9 @@ done
 scripts/live-smoke-gate.sh "$OUT/gate"
 scripts/terminal-workflow-smoke.sh "$OUT/terminal-workflow"
 scripts/regression-smoke.sh "$OUT/regression"
+# A second Ultty on its own display, with the accessibility adapter and no
+# session bus.
+ULTTY="$ROOT/target/debug/ultty" scripts/e2e/accessibility-no-bus.sh "$OUT/accessibility"
 
 # Catch panics that did not take the process down.
 if grep -q "panicked at" "$OUT/ultty.log"; then

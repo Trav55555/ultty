@@ -19,6 +19,9 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 impl App {
     /// Handle window event. Returns true if should exit.
     pub(super) fn handle_window_event(&mut self, event: WindowEvent) -> bool {
+        if let Some(adapter) = self.accessibility.as_mut() {
+            adapter.process_event(&self.window, &event);
+        }
         // Check for pending close from window control button
         if self.pending_close {
             tracing::info!("Close requested");
