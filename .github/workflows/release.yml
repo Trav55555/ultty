@@ -1,11 +1,19 @@
 name: Release
 
+# Releases are built and published by .gitea/workflows/release.yml on the
+# self-hosted runner pool, which also uploads to the GitHub release. This
+# workflow runs only when started by hand (for example to rebuild a release
+# with GitHub's runners), so a tag does not publish twice.
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish (for example v0.2.0)
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag }}
   # Pinned to match rust-toolchain.toml and ci.yml. Bump all three together.
   RUST_TOOLCHAIN: 1.98.1
   CROSS_VERSION: 0.2.5
@@ -20,6 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.tag }}
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -55,6 +65,8 @@ jobs:
             optional: true
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.tag }}
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
         with:
@@ -87,19 +99,19 @@ jobs:
           cp -R ../../../dist/icons package/dist/
           cp -R ../../../dist/terminfo package/dist/
           cp -R ../../../dist/shell-integration package/dist/
-          tar czf ../../../ultty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C package .
+          tar czf ../../../ultty-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz -C package .
 
       - name: Smoke tarball contents
         run: |
           scripts/release-artifact-smoke.sh \
-            --tarball ultty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
+            --tarball ultty-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz \
             --homebrew dist/homebrew/ultty.rb
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ultty-${{ matrix.target }}
-          path: ultty-${{ github.ref_name }}-${{ matrix.target }}.*
+          path: ultty-${{ env.RELEASE_TAG }}-${{ matrix.target }}.*
 
   deb:
     name: Build .deb
@@ -107,6 +119,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.tag }}
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -118,14 +132,14 @@ jobs:
           path: artifacts
       - run: |
           mkdir -p target/x86_64-unknown-linux-gnu/release
-          tar xzf artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
+          tar xzf artifacts/ultty-${{ env.RELEASE_TAG }}-x86_64-unknown-linux-gnu.tar.gz \
             -C target/x86_64-unknown-linux-gnu/release
       - name: Compile the terminfo entry
         run: mkdir -p target/terminfo && tic -x -o target/terminfo dist/terminfo/ultty.terminfo
       - name: Smoke Linux tarball binaries
         run: |
           scripts/release-artifact-smoke.sh \
-            --tarball artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
+            --tarball artifacts/ultty-${{ env.RELEASE_TAG }}-x86_64-unknown-linux-gnu.tar.gz \
             --run-binaries
       - run: cargo install cargo-deb --version 3.7.0 --locked
       - run: cargo deb -p ultty --no-build --target x86_64-unknown-linux-gnu
@@ -143,6 +157,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.tag }}
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -154,14 +170,14 @@ jobs:
           path: artifacts
       - run: |
           mkdir -p target/x86_64-unknown-linux-gnu/release
-          tar xzf artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
+          tar xzf artifacts/ultty-${{ env.RELEASE_TAG }}-x86_64-unknown-linux-gnu.tar.gz \
             -C target/x86_64-unknown-linux-gnu/release
       - name: Compile the terminfo entry
         run: mkdir -p target/terminfo && tic -x -o target/terminfo dist/terminfo/ultty.terminfo
       - name: Smoke Linux tarball binaries
         run: |
           scripts/release-artifact-smoke.sh \
-            --tarball artifacts/ultty-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz \
+            --tarball artifacts/ultty-${{ env.RELEASE_TAG }}-x86_64-unknown-linux-gnu.tar.gz \
             --run-binaries
       - run: cargo install cargo-generate-rpm --version 0.21.0 --locked
       - run: cargo generate-rpm -p crates/ultty --target x86_64-unknown-linux-gnu
@@ -184,6 +200,8 @@ jobs:
       attestations: write # store the attestation
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Download artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -196,14 +214,17 @@ jobs:
         working-directory: artifacts
         run: |
           rm -f SHA256SUMS
+          # Write outside the directory first: the shell creates the output
+          # file before find runs, so it would list itself with an empty hash.
           find . -maxdepth 1 -type f -printf '%P\n' \
             | sort \
-            | xargs sha256sum >SHA256SUMS
+            | xargs sha256sum >"$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
+          sha256sum --check SHA256SUMS
           cat SHA256SUMS
 
       # Signed build provenance for every artifact, verifiable with
-      # `gh attestation verify <file> --repo Trav55555/ultty`. The SHA must be
-      # filled in from the action's v2 release before this workflow is used.
+      # `gh attestation verify <file> --repo Trav55555/ultty`.
       - name: Attest build provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
@@ -219,7 +240,7 @@ jobs:
         id: homebrew
         shell: bash
         run: |
-          tag="${{ github.ref_name }}"
+          tag="${{ env.RELEASE_TAG }}"
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
             if [ ! -f "artifacts/ultty-$tag-$target.tar.gz" ]; then
               echo "::notice::no $target build; not publishing a Homebrew formula"
@@ -239,7 +260,7 @@ jobs:
       - name: Extract release notes
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           awk -v v="$version" '
             index($0, "## [" v "]") == 1 { found = 1; next }
             found && /^## \[/ { exit }
@@ -253,6 +274,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           body_path: ${{ runner.temp }}/release-notes.md
           files: artifacts/*
         env:
