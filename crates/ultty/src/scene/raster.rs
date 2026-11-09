@@ -1,0 +1,926 @@
+//! An inline surface's scene as styled cells (ADR 0020 §2): what its rows
+//! hold for copy, search and scrollback, live and after it is closed.
+//!
+//! The tree under a surface root, as last laid out, is drawn into `rows`
+//! rows of `cols` cells the way the GPU renderer draws it, region by region
+//! in drawing order: the background as cell `bg`, the border as box-drawing
+//! characters, then the content. Text breaks where the renderer breaks it
+//! ([`super::text_layout`]) and is written through a one-row [`Grid`], so
+//! wide characters and grapheme clusters take the cells the grid gives
+//! them. Everything is clipped to the surface and to each region's clip
+//! rect, as on the GPU; a wide character cut by a clip edge is blanked.
+//!
+//! Styles map to cells as follows: `RichText` spans and region styles give
+//! `fg`, bold, italic, underline and dim; `Foreground` and `Background`
+//! named colours are the cell's default colours; opacity is all or nothing
+//! (a region at 0 draws nothing of its own). Widgets give their label or
+//! value: a progress bar its label or percentage, a spinner its label after
+//! the frame's two columns, an input its value (masked for a password) or
+//! placeholder, a button its centred label, deprecated Markdown and Code
+//! widgets their source; an image is blank cells. What only moves on the
+//! GPU (spinner frames, the streaming cursor, search highlights) is not
+//! drawn.
+
+use ultty_protocol::{BorderType, Color as ProtoColor, Content, NamedColor, RegionId, Style};
+
+use super::geometry::{rebuild_scroll_geometry, ClipRects, ScrollAdjustments};
+use super::region::Region;
+use super::text_layout::{next_display_width_chunk_end, wrap_line};
+use super::tree::SceneTree;
+use crate::grid::{Cell, CellFlags, Color, CursorPosition, Dimensions, Grid, Row};
+
+/// Columns kept past the last visible one when writing text, so characters
+/// that overflow the line land where nothing is copied.
+const PEN_MARGIN: i32 = 4;
+
+/// Draw the tree under surface root `root` into `rows` rows of `cols`
+/// cells, from the regions' computed layout and the `scroll_offset` of
+/// each scrolling region.
+pub fn rasterise_surface(
+    scene: &SceneTree,
+    root: RegionId,
+    cols: u16,
+    rows: u16,
+    scroll_offset: impl Fn(RegionId) -> (f32, f32),
+) -> Vec<Row> {
+    let mut canvas = Canvas::new(cols, rows);
+    let mut adjustments = ScrollAdjustments::new();
+    let mut clips = ClipRects::new();
+    rebuild_scroll_geometry(
+        scene,
+        root,
+        scroll_offset,
+        1.0,
+        1.0,
+        (0.0, 0.0),
+        Some((0.0, 0.0, f32::from(cols), f32::from(rows))),
+        &mut adjustments,
+        &mut clips,
+    );
+    for region in scene.iter_tree(root) {
+        let (adjust_x, adjust_y) = adjustments.get(&region.id).copied().unwrap_or_default();
+        let Some(clip) = clips.get(&region.id).map(|&rect| Clip::from_rect(rect)) else {
+            continue;
+        };
+        canvas.draw_region(region, (adjust_x, adjust_y), clip);
+    }
+    canvas.rows
+}
+
+/// A clip rect in whole cells: columns `x0..x1` of rows `y0..y1`.
+#[derive(Debug, Clone, Copy)]
+struct Clip {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+}
+
+impl Clip {
+    fn from_rect((x0, y0, x1, y1): (f32, f32, f32, f32)) -> Self {
+        Self {
+            x0: x0.round() as i32,
+            y0: y0.round() as i32,
+            x1: x1.round() as i32,
+            y1: y1.round() as i32,
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.x0 >= self.x1 || self.y0 >= self.y1
+    }
+
+    fn contains(self, x: i32, y: i32) -> bool {
+        (self.x0..self.x1).contains(&x) && (self.y0..self.y1).contains(&y)
+    }
+}
+
+/// The cells being drawn, and the one-row grid text is written through.
+struct Canvas {
+    rows: Vec<Row>,
+    cols: u16,
+    pen: Option<Grid>,
+}
+
+impl Canvas {
+    fn new(cols: u16, rows: u16) -> Self {
+        Self {
+            rows: (0..rows).map(|_| Row::new(cols)).collect(),
+            cols,
+            pen: None,
+        }
+    }
+
+    /// Draw `region`'s background, border and content, shifted by the
+    /// scroll `adjust`ment of its ancestors and clipped to `clip`.
+    fn draw_region(&mut self, region: &Region, adjust: (f32, f32), clip: Clip) {
+        let layout = &region.computed;
+        if layout.width <= 0.0 || layout.height <= 0.0 || clip.is_empty() {
+            return;
+        }
+        if region.style.opacity <= 0.0 {
+            return;
+        }
+        let x = (layout.x - adjust.0).round() as i32;
+        let y = (layout.y - adjust.1).round() as i32;
+        let w = layout.width.round() as i32;
+        let h = layout.height.round() as i32;
+        let cx = (layout.content_x - adjust.0).round() as i32;
+        let cy = (layout.content_y - adjust.1).round() as i32;
+        let max_cols = layout.content_width as usize;
+        let style = &region.style;
+
+        if let Some(bg) = &style.bg {
+            self.fill_bg(x, y, w, h, clip, cell_color(bg));
+        }
+        self.draw_border(style, x, y, w, h, clip);
+
+        match &region.content {
+            Content::None => {}
+            Content::Text(text) => {
+                let template = template(style.fg.as_ref(), style);
+                let mut line_y = cy;
+                for line in text.text.split('\n') {
+                    // A line of one character fills the width, as a rule.
+                    let mut chars = line.chars();
+                    let fill = match (chars.next(), chars.next()) {
+                        (Some(c), None) if max_cols > 1 => Some(c.to_string().repeat(max_cols)),
+                        _ => None,
+                    };
+                    let line = fill.as_deref().unwrap_or(line);
+                    if line.is_empty() {
+                        line_y += 1;
+                        continue;
+                    }
+                    for piece in wrap_line(line, max_cols) {
+                        self.put_text(cx, line_y, &piece, template, clip);
+                        line_y += 1;
+                    }
+                }
+            }
+            Content::RichText(rich) => {
+                let mut col = 0usize;
+                let mut line = 0i32;
+                for span in &rich.spans {
+                    let mut span_style = span.style.clone();
+                    span_style.bold |= style.bold;
+                    span_style.italic |= style.italic;
+                    span_style.underline |= style.underline;
+                    span_style.dim |= style.dim;
+                    let template =
+                        template(span.style.fg.as_ref().or(style.fg.as_ref()), &span_style);
+                    if max_cols == 0 {
+                        col +=
+                            self.put_text(cx + col as i32, cy + line, &span.text, template, clip);
+                        continue;
+                    }
+                    for (index, segment) in span.text.split('\n').enumerate() {
+                        if index > 0 {
+                            col = 0;
+                            line += 1;
+                        }
+                        let mut pos = 0;
+                        while pos < segment.len() {
+                            let cols_left = max_cols.saturating_sub(col);
+                            if cols_left == 0 {
+                                col = 0;
+                                line += 1;
+                                continue;
+                            }
+                            let Some(end) = next_display_width_chunk_end(segment, pos, cols_left)
+                            else {
+                                break;
+                            };
+                            col += self.put_text(
+                                cx + col as i32,
+                                cy + line,
+                                &segment[pos..end],
+                                template,
+                                clip,
+                            );
+                            pos = end;
+                            if pos < segment.len() {
+                                col = 0;
+                                line += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            Content::Widget(widget) => {
+                self.draw_widget(widget, style, (x, y, w, h), (cx, cy), clip)
+            }
+        }
+    }
+
+    fn draw_widget(
+        &mut self,
+        widget: &ultty_protocol::WidgetContent,
+        style: &Style,
+        (x, y, w, h): (i32, i32, i32, i32),
+        (cx, cy): (i32, i32),
+        clip: Clip,
+    ) {
+        use ultty_protocol::{ButtonStyle, WidgetContent};
+
+        let plain = Style::default();
+        match widget {
+            WidgetContent::Progress(progress) => {
+                let text = match &progress.label {
+                    Some(label) => label.clone(),
+                    None if progress.indeterminate => return,
+                    None => format!("{:.0}%", progress.value.clamp(0.0, 1.0) * 100.0),
+                };
+                self.put_text(cx, cy, &text, template(None, &plain), clip);
+            }
+            WidgetContent::Spinner(spinner) => {
+                if let Some(label) = &spinner.label {
+                    let fg = style.fg.unwrap_or(ProtoColor::Named(NamedColor::Cyan));
+                    self.put_text(cx + 2, cy, label, template(Some(&fg), &plain), clip);
+                }
+            }
+            WidgetContent::Input(input) => {
+                let masked;
+                let (text, fg) = if input.value.is_empty() {
+                    (
+                        &input.placeholder,
+                        Some(ProtoColor::Named(NamedColor::BrightBlack)),
+                    )
+                } else if input.password {
+                    masked = "•".repeat(input.value.chars().count());
+                    (&masked, None)
+                } else {
+                    (&input.value, None)
+                };
+                self.put_text(cx, cy, text, template(fg.as_ref(), &plain), clip);
+            }
+            WidgetContent::Markdown(markdown) => self.put_lines(cx, cy, &markdown.source, clip),
+            WidgetContent::Code(code) => self.put_lines(cx, cy, &code.source, clip),
+            WidgetContent::Image(_) => {
+                let blank = Cell::default();
+                for row in y..y + h {
+                    for col in x..x + w {
+                        self.put_cell(col, row, blank, clip);
+                    }
+                }
+            }
+            WidgetContent::Button(button) => {
+                let fg = match button.style {
+                    ButtonStyle::Primary => Some(ProtoColor::Named(NamedColor::Blue)),
+                    ButtonStyle::Danger => Some(ProtoColor::Named(NamedColor::Red)),
+                    ButtonStyle::Success => Some(ProtoColor::Named(NamedColor::Green)),
+                    ButtonStyle::Default => None,
+                };
+                let label_cols = button.label.chars().count() as i32;
+                let offset_x = ((w - label_cols) / 2).max(0);
+                let offset_y = ((h - 1) / 2).max(0);
+                let bold = Style::new().bold();
+                self.put_text(
+                    cx + offset_x,
+                    cy + offset_y,
+                    &button.label,
+                    template(fg.as_ref(), &bold),
+                    clip,
+                );
+            }
+        }
+    }
+
+    /// `source` one line per row from `(x, y)`, in the default colours.
+    fn put_lines(&mut self, x: i32, y: i32, source: &str, clip: Clip) {
+        let template = template(None, &Style::default());
+        for (row, line) in source.lines().enumerate() {
+            self.put_text(x, y + row as i32, line, template, clip);
+        }
+    }
+
+    /// Set the background of the cells of `x, y, w, h` inside `clip`,
+    /// keeping what they show.
+    fn fill_bg(&mut self, x: i32, y: i32, w: i32, h: i32, clip: Clip, bg: Color) {
+        for row in y.max(clip.y0)..(y + h).min(clip.y1) {
+            for col in x.max(clip.x0)..(x + w).min(clip.x1) {
+                if let Some(cell) = self.cell_mut(col, row) {
+                    cell.set_bg(bg);
+                }
+            }
+        }
+    }
+
+    /// Box-drawing characters on the edges `style.border` names, in its
+    /// border colour, else its foreground, else the default.
+    fn draw_border(&mut self, style: &Style, x: i32, y: i32, w: i32, h: i32, clip: Clip) {
+        let Some(glyphs) = BorderGlyphs::of(style.border.style) else {
+            return;
+        };
+        let edges = style.border.edges;
+        let template = template(
+            style.border_color.as_ref().or(style.fg.as_ref()),
+            &Style::default(),
+        );
+        let (right, bottom) = (x + w - 1, y + h - 1);
+        let glyph = |col: i32, row: i32| {
+            let top = edges.top && row == y;
+            let below = edges.bottom && row == bottom;
+            let left = edges.left && col == x;
+            let side = edges.right && col == right;
+            match (top, below, left, side) {
+                (true, _, true, _) => Some(glyphs.top_left),
+                (true, _, _, true) => Some(glyphs.top_right),
+                (_, true, true, _) => Some(glyphs.bottom_left),
+                (_, true, _, true) => Some(glyphs.bottom_right),
+                (true, ..) | (_, true, ..) => Some(glyphs.horizontal),
+                (.., true, _) | (.., true) => Some(glyphs.vertical),
+                _ => None,
+            }
+        };
+        for row in y..=bottom {
+            for col in x..=right {
+                let on_edge = row == y || row == bottom || col == x || col == right;
+                if let Some(c) = on_edge.then(|| glyph(col, row)).flatten() {
+                    let mut cell = template;
+                    cell.set_char(c);
+                    self.put_cell(col, row, cell, clip);
+                }
+            }
+        }
+    }
+
+    /// Write `text` from `(x, y)` in `template`'s colours and attributes,
+    /// clipped to `clip`, the way the grid would print it. Returns the
+    /// columns it took, clipped or not.
+    fn put_text(&mut self, x: i32, y: i32, text: &str, template: Cell, clip: Clip) -> usize {
+        let visible_end = clip.x1 - x;
+        let needed = visible_end.max(1) + PEN_MARGIN;
+        let width = u16::try_from(needed).unwrap_or(u16::MAX);
+        let pen = match &mut self.pen {
+            Some(pen) if pen.dimensions().cols >= width => pen,
+            slot => {
+                let mut grid = Grid::new(Dimensions::new(width.max(self.cols), 1));
+                grid.set_auto_wrap(false);
+                slot.insert(grid)
+            }
+        };
+        pen.clear();
+        pen.cursor_mut().position = CursorPosition::origin();
+        pen.set_attrs(template);
+        let mut written = 0u16;
+        for c in text.chars().filter(|c| !c.is_control()) {
+            pen.write_char(c);
+            written = written.max(pen.cursor().position.col);
+        }
+        if y < clip.y0 || y >= clip.y1 || visible_end <= 0 {
+            return usize::from(written);
+        }
+        let first_visible = (clip.x0 - x).max(0);
+        let last = visible_end.min(i32::from(written));
+        let Some(line) = pen.row(0).cloned() else {
+            return usize::from(written);
+        };
+        for p in first_visible..last {
+            let Some(cell) = line.get(p as u16).copied() else {
+                break;
+            };
+            let cut = (cell.is_wide() && p + 1 >= visible_end)
+                || (cell.is_wide_spacer() && p == first_visible);
+            if cut {
+                let mut blank = template;
+                blank.set_char(' ');
+                blank.unset_flag(CellFlags::WIDE_CHAR);
+                blank.unset_flag(CellFlags::WIDE_CHAR_SPACER);
+                blank.unset_flag(CellFlags::HAS_COMBINING);
+                self.put_cell(x + p, y, blank, clip);
+            } else {
+                self.put(x + p, y, cell, line.grapheme_extra(p as u16));
+            }
+        }
+        usize::from(written)
+    }
+
+    /// Write one cell inside `clip`.
+    fn put_cell(&mut self, x: i32, y: i32, cell: Cell, clip: Clip) {
+        if clip.contains(x, y) {
+            self.put(x, y, cell, None);
+        }
+    }
+
+    /// Write `cell` (with the grapheme `extra` after its character) at
+    /// `(x, y)` on the background already there. A wide character it cuts
+    /// in half loses its other half too.
+    fn put(&mut self, x: i32, y: i32, mut cell: Cell, extra: Option<&[char]>) {
+        let (Ok(col), Ok(row)) = (u16::try_from(x), usize::try_from(y)) else {
+            return;
+        };
+        let cols = self.cols;
+        let Some(target) = self.rows.get_mut(row) else {
+            return;
+        };
+        let Some(old) = target.get(col).copied() else {
+            return;
+        };
+        if old.is_wide_spacer() && col > 0 {
+            blank(target, col - 1);
+        }
+        if old.is_wide() && col + 1 < cols {
+            blank(target, col + 1);
+        }
+        cell.set_bg(old.bg());
+        target[col] = cell;
+        target.set_grapheme_extra(col, extra.unwrap_or(&[]));
+    }
+
+    fn cell_mut(&mut self, x: i32, y: i32) -> Option<&mut Cell> {
+        let row = self.rows.get_mut(usize::try_from(y).ok()?)?;
+        row.get_mut(u16::try_from(x).ok()?)
+    }
+}
+
+/// Make the cell at `col` a space on the background it had.
+fn blank(row: &mut Row, col: u16) {
+    let bg = row[col].bg();
+    let mut cell = Cell::default();
+    cell.set_bg(bg);
+    row[col] = cell;
+    row.set_grapheme_extra(col, &[]);
+}
+
+/// The characters a border is drawn with.
+struct BorderGlyphs {
+    horizontal: char,
+    vertical: char,
+    top_left: char,
+    top_right: char,
+    bottom_left: char,
+    bottom_right: char,
+}
+
+impl BorderGlyphs {
+    fn of(border: BorderType) -> Option<Self> {
+        let [horizontal, vertical, top_left, top_right, bottom_left, bottom_right] = match border {
+            BorderType::None => return None,
+            BorderType::Thin => ['─', '│', '┌', '┐', '└', '┘'],
+            BorderType::Thick => ['━', '┃', '┏', '┓', '┗', '┛'],
+            BorderType::Double => ['═', '║', '╔', '╗', '╚', '╝'],
+            BorderType::Rounded => ['─', '│', '╭', '╮', '╰', '╯'],
+            BorderType::Dashed => ['╌', '╎', '┌', '┐', '└', '┘'],
+            BorderType::Ascii => ['-', '|', '+', '+', '+', '+'],
+        };
+        Some(Self {
+            horizontal,
+            vertical,
+            top_left,
+            top_right,
+            bottom_left,
+            bottom_right,
+        })
+    }
+}
+
+/// A blank cell in foreground `fg` (the default when `None`) with the
+/// attributes of `style`.
+fn template(fg: Option<&ProtoColor>, style: &Style) -> Cell {
+    let mut cell = Cell::default();
+    if let Some(fg) = fg {
+        cell.set_fg(cell_color(fg));
+    }
+    for (on, flag) in [
+        (style.bold, CellFlags::BOLD),
+        (style.italic, CellFlags::ITALIC),
+        (style.underline, CellFlags::UNDERLINE),
+        (style.dim, CellFlags::DIM),
+    ] {
+        if on {
+            cell.set_flag(flag);
+        }
+    }
+    cell
+}
+
+/// A protocol colour as a cell colour. `Foreground` and `Background` are
+/// the terminal's own, which a cell's default colours are.
+fn cell_color(color: &ProtoColor) -> Color {
+    match *color {
+        ProtoColor::Named(NamedColor::Foreground | NamedColor::Background) => Color::Default,
+        ProtoColor::Named(named) => Color::Named(named as u8),
+        ProtoColor::Rgb(r, g, b) => Color::Rgb(r, g, b),
+        ProtoColor::Indexed(index) => Color::Indexed(index),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ultty_protocol::{
+        BorderEdges, BorderStyle, ButtonWidget, Constraints, Dimension, Edges, InputWidget,
+        Overflow, OverflowAxis, ProgressWidget, RichText, SpinnerWidget, TextContent,
+        WidgetContent,
+    };
+
+    use super::*;
+    use crate::scene::layout::LayoutEngine;
+
+    const SURFACE: RegionId = RegionId::new(10);
+
+    /// A scene with an empty surface `rows` high, laid out `cols` wide.
+    struct Card {
+        scene: SceneTree,
+        cols: u16,
+        rows: u16,
+    }
+
+    impl Card {
+        fn new(cols: u16, rows: u16) -> Self {
+            Self::with_root_style(cols, rows, Style::default())
+        }
+
+        fn with_root_style(cols: u16, rows: u16, style: Style) -> Self {
+            let mut scene = SceneTree::new();
+            let mut root = Region::new(SURFACE);
+            root.style = style;
+            scene.try_insert_surface(root, rows).unwrap();
+            Self { scene, cols, rows }
+        }
+
+        /// Add region `id` under `parent`, `width x height` cells.
+        fn add(
+            &mut self,
+            id: u32,
+            parent: RegionId,
+            (width, height): (Dimension, Dimension),
+            style: Style,
+            content: Content,
+        ) -> RegionId {
+            let mut region = Region::new(RegionId::new(id));
+            region.parent = Some(parent);
+            let none = Dimension::Cells(0.0);
+            region.constraints = Constraints {
+                width,
+                height,
+                flex_shrink: 0.0,
+                margin: Edges {
+                    top: none,
+                    right: none,
+                    bottom: none,
+                    left: none,
+                },
+                ..Constraints::default()
+            };
+            region.style = style;
+            region.content = content;
+            self.scene.insert(region);
+            RegionId::new(id)
+        }
+
+        fn rows(&mut self) -> Vec<Row> {
+            LayoutEngine::new()
+                .compute_scene_layout(&mut self.scene, f32::from(self.cols), 24.0)
+                .unwrap();
+            rasterise_surface(&self.scene, SURFACE, self.cols, self.rows, |_| (0.0, 0.0))
+        }
+
+        fn text(&mut self) -> Vec<String> {
+            self.rows()
+                .iter()
+                .map(|row| row.copy_text(0, row.width()))
+                .collect()
+        }
+    }
+
+    fn cells(width: f32, height: f32) -> (Dimension, Dimension) {
+        (Dimension::Cells(width), Dimension::Cells(height))
+    }
+
+    fn text(text: &str) -> Content {
+        Content::Text(TextContent::new(text))
+    }
+
+    fn widget(widget: WidgetContent) -> Content {
+        Content::Widget(widget)
+    }
+
+    /// Region text breaks exactly where the renderer's `wrap_line` breaks
+    /// it, one piece per row.
+    #[test]
+    fn text_breaks_where_the_renderer_breaks_it() {
+        let prose = "the quick brown fox jumps over a lazy dog\nand then\n\nsleeps";
+        let mut card = Card::new(14, 8);
+        card.add(1, SURFACE, cells(12.0, 8.0), Style::default(), text(prose));
+        let expected: Vec<String> = prose
+            .split('\n')
+            .flat_map(|line| wrap_line(line, 12))
+            .map(|piece| format!("{piece:<14}"))
+            .chain(std::iter::repeat(" ".repeat(14)))
+            .take(8)
+            .collect();
+        assert_eq!(card.text(), expected);
+    }
+
+    #[test]
+    fn a_line_of_one_character_fills_the_width() {
+        let mut card = Card::new(8, 2);
+        card.add(
+            1,
+            SURFACE,
+            cells(5.0, 2.0),
+            Style::default(),
+            text("-\nx y"),
+        );
+        assert_eq!(card.text(), ["-----   ", "x y     "]);
+    }
+
+    /// Spans take their colours and attributes, with the region's added;
+    /// the region's background stays under the text.
+    #[test]
+    fn spans_and_styles_become_cell_colours_and_attributes() {
+        let mut card = Card::new(10, 1);
+        let rich = RichText::new()
+            .span("ab", Style::new().bold().fg(ProtoColor::RED))
+            .span("cd", Style::default());
+        let region_style = Style {
+            underline: true,
+            bg: Some(ProtoColor::Rgb(1, 2, 3)),
+            fg: Some(ProtoColor::Indexed(42)),
+            ..Style::default()
+        };
+        card.add(
+            1,
+            SURFACE,
+            cells(6.0, 1.0),
+            region_style,
+            Content::RichText(rich),
+        );
+        let rows = card.rows();
+        let row = &rows[0];
+        assert_eq!(row.copy_text(0, 9), "abcd      ");
+        assert_eq!(row[0].fg(), Color::RED);
+        assert!(row[0].has_flag(CellFlags::BOLD) && row[0].has_flag(CellFlags::UNDERLINE));
+        assert_eq!(row[2].fg(), Color::Indexed(42));
+        assert!(!row[2].has_flag(CellFlags::BOLD) && row[2].has_flag(CellFlags::UNDERLINE));
+        for col in 0..6 {
+            assert_eq!(row[col].bg(), Color::Rgb(1, 2, 3), "column {col}");
+        }
+        assert_eq!(row[6].bg(), Color::Default);
+
+        let dim = Style {
+            dim: true,
+            italic: true,
+            fg: Some(ProtoColor::Named(NamedColor::Foreground)),
+            ..Style::default()
+        };
+        let mut card = Card::new(4, 1);
+        card.add(1, SURFACE, cells(4.0, 1.0), dim, text("hi"));
+        let row = &card.rows()[0];
+        assert!(row[0].has_flag(CellFlags::DIM) && row[0].has_flag(CellFlags::ITALIC));
+        assert_eq!(row[0].fg(), Color::Default);
+    }
+
+    /// Rich text runs on across spans and breaks by display width, where
+    /// the renderer does.
+    #[test]
+    fn rich_text_flows_across_spans_and_lines() {
+        let mut card = Card::new(6, 3);
+        let rich = RichText::new().text("abcd").text("efg\nh");
+        card.add(
+            1,
+            SURFACE,
+            cells(5.0, 3.0),
+            Style::default(),
+            Content::RichText(rich),
+        );
+        assert_eq!(card.text(), ["abcde ", "fg    ", "h     "]);
+    }
+
+    #[test]
+    fn a_surface_root_background_fills_every_cell() {
+        let style = Style {
+            bg: Some(ProtoColor::Rgb(200, 40, 160)),
+            ..Style::default()
+        };
+        let mut card = Card::with_root_style(5, 2, style);
+        for row in card.rows() {
+            assert!(row
+                .cells()
+                .all(|cell| cell.bg() == Color::Rgb(200, 40, 160)));
+        }
+        // Without one, the cells are the terminal's own.
+        let mut card = Card::new(5, 2);
+        assert!(card
+            .rows()
+            .iter()
+            .all(|row| row.cells().all(|cell| *cell == Cell::default())));
+    }
+
+    #[test]
+    fn borders_are_drawn_with_the_characters_of_their_style() {
+        let boxes = [
+            (BorderType::Thin, ["┌──┐", "│  │", "└──┘"]),
+            (BorderType::Thick, ["┏━━┓", "┃  ┃", "┗━━┛"]),
+            (BorderType::Double, ["╔══╗", "║  ║", "╚══╝"]),
+            (BorderType::Rounded, ["╭──╮", "│  │", "╰──╯"]),
+            (BorderType::Dashed, ["┌╌╌┐", "╎  ╎", "└╌╌┘"]),
+            (BorderType::Ascii, ["+--+", "|  |", "+--+"]),
+            (BorderType::None, ["    ", "    ", "    "]),
+        ];
+        for (kind, expected) in boxes {
+            let mut card = Card::new(4, 3);
+            let style = Style {
+                border: BorderStyle {
+                    style: kind,
+                    edges: BorderEdges::ALL,
+                    radius: 0,
+                },
+                border_color: Some(ProtoColor::GREEN),
+                ..Style::default()
+            };
+            card.add(1, SURFACE, cells(4.0, 3.0), style, Content::None);
+            let rows = card.rows();
+            let text: Vec<String> = rows.iter().map(|row| row.copy_text(0, 3)).collect();
+            assert_eq!(text, expected, "{kind:?}");
+            if kind != BorderType::None {
+                assert_eq!(rows[0][0].fg(), Color::GREEN, "{kind:?}");
+            }
+        }
+    }
+
+    /// Only the edges asked for: a rule over the top and down the left.
+    #[test]
+    fn a_border_draws_only_its_edges() {
+        let mut card = Card::new(4, 3);
+        let style = Style {
+            border: BorderStyle {
+                style: BorderType::Ascii,
+                edges: BorderEdges {
+                    top: true,
+                    left: true,
+                    right: false,
+                    bottom: false,
+                },
+                radius: 0,
+            },
+            ..Style::default()
+        };
+        card.add(1, SURFACE, cells(4.0, 3.0), style, text(""));
+        assert_eq!(card.text(), ["+---", "|   ", "|   "]);
+    }
+
+    /// Text stops at the clip rect of an ancestor that hides overflow and
+    /// at the surface's own rows.
+    #[test]
+    fn content_is_clipped_to_its_clip_rect_and_the_surface() {
+        let mut card = Card::new(8, 2);
+        let clipper = card.add(1, SURFACE, cells(3.0, 1.0), Style::default(), Content::None);
+        if let Some(region) = card.scene.get_mut(clipper) {
+            region.constraints.overflow = Overflow {
+                x: OverflowAxis::Hidden,
+                y: OverflowAxis::Hidden,
+            };
+        }
+        card.add(
+            2,
+            clipper,
+            cells(6.0, 1.0),
+            Style::default(),
+            text("abcdef"),
+        );
+        card.add(
+            3,
+            SURFACE,
+            cells(8.0, 4.0),
+            Style::default(),
+            text("1\n2\n3\n4 5"),
+        );
+        assert_eq!(card.text(), ["abc     ", "11111111"]);
+    }
+
+    /// A wide character cut by a clip edge is blanked, as the grid blanks
+    /// one cut by a resize; graphemes keep their cell.
+    #[test]
+    fn wide_characters_at_a_clip_edge_are_blanked_and_clusters_kept() {
+        let mut card = Card::new(6, 2);
+        let clipper = card.add(1, SURFACE, cells(3.0, 1.0), Style::default(), Content::None);
+        if let Some(region) = card.scene.get_mut(clipper) {
+            region.constraints.overflow = Overflow {
+                x: OverflowAxis::Hidden,
+                y: OverflowAxis::Visible,
+            };
+        }
+        card.add(2, clipper, cells(4.0, 1.0), Style::default(), text("ab你"));
+        card.add(
+            3,
+            SURFACE,
+            cells(6.0, 1.0),
+            Style::default(),
+            text("cafe\u{301}你"),
+        );
+        let rows = card.rows();
+        assert_eq!(rows[0].copy_text(0, 5), "ab    ");
+        assert!(!rows[0][2].is_wide(), "half a wide character is not drawn");
+        assert_eq!(rows[1].copy_text(0, 5), "cafe\u{301}你");
+        assert_eq!(rows[1].grapheme(3).as_deref(), Some("e\u{301}"));
+        assert!(rows[1][4].is_wide() && rows[1][5].is_wide_spacer());
+        // At the surface's own edge too.
+        let mut card = Card::new(3, 1);
+        card.add(1, SURFACE, cells(4.0, 1.0), Style::default(), text("ab你"));
+        let row = &card.rows()[0];
+        assert_eq!(row.copy_text(0, 2), "ab ");
+        assert!(!row[2].is_wide());
+    }
+
+    /// Text over half of a wide character drawn before it blanks the other
+    /// half, so no cell is left a lone half.
+    #[test]
+    fn overwriting_half_a_wide_character_blanks_the_other_half() {
+        let mut card = Card::new(4, 1);
+        card.add(1, SURFACE, cells(4.0, 1.0), Style::default(), text("你你"));
+        let over = card.add(2, SURFACE, cells(1.0, 1.0), Style::default(), text("x"));
+        if let Some(region) = card.scene.get_mut(over) {
+            region.constraints.margin.left = Dimension::Cells(1.0);
+            region.constraints.margin.top = Dimension::Cells(-1.0);
+        }
+        let row = &card.rows()[0];
+        assert_eq!(row.copy_text(0, 3), " x你");
+        assert!(!row[0].is_wide() && !row[1].is_wide_spacer());
+    }
+
+    #[test]
+    fn widgets_show_their_label_or_value() {
+        let mut card = Card::new(12, 6);
+        let progress = |value: f32, label: Option<&str>| {
+            widget(WidgetContent::Progress(ProgressWidget {
+                value,
+                label: label.map(String::from),
+                animated: false,
+                indeterminate: false,
+            }))
+        };
+        let line = cells(12.0, 1.0);
+        let plain = Style::default;
+        card.add(1, SURFACE, line, plain(), progress(0.42, None));
+        let spinner = SpinnerWidget {
+            label: Some("wait".into()),
+            ..SpinnerWidget::default()
+        };
+        card.add(
+            2,
+            SURFACE,
+            line,
+            plain(),
+            widget(WidgetContent::Spinner(spinner)),
+        );
+        let password = InputWidget {
+            value: "pw".into(),
+            password: true,
+            ..InputWidget::default()
+        };
+        card.add(
+            3,
+            SURFACE,
+            line,
+            plain(),
+            widget(WidgetContent::Input(password)),
+        );
+        let empty = InputWidget {
+            placeholder: "type".into(),
+            ..InputWidget::default()
+        };
+        card.add(
+            4,
+            SURFACE,
+            line,
+            plain(),
+            widget(WidgetContent::Input(empty)),
+        );
+        let button = WidgetContent::Button(ButtonWidget::new("OK"));
+        card.add(5, SURFACE, cells(8.0, 1.0), plain(), widget(button));
+        card.add(6, SURFACE, line, plain(), progress(0.5, Some("half")));
+        let rows = card.rows();
+        let text: Vec<String> = rows.iter().map(|row| row.text_trimmed()).collect();
+        assert_eq!(text, ["42%", "  wait", "••", "type", "   OK", "half"]);
+        assert_eq!(rows[3][0].fg(), Color::BRIGHT_BLACK);
+        assert!(rows[4][3].has_flag(CellFlags::BOLD));
+    }
+
+    /// An image is blank cells: what drew there before it is gone.
+    #[test]
+    fn an_image_is_blank_cells() {
+        use ultty_protocol::{ImageScale, ImageWidget};
+        let mut card = Card::new(6, 1);
+        card.add(
+            1,
+            SURFACE,
+            cells(6.0, 1.0),
+            Style::default(),
+            text("abcdef"),
+        );
+        let image = WidgetContent::Image(ImageWidget {
+            data: vec![0; 4],
+            width: 1,
+            height: 1,
+            scale: ImageScale::Fit,
+        });
+        let id = card.add(2, SURFACE, cells(2.0, 1.0), Style::default(), widget(image));
+        if let Some(region) = card.scene.get_mut(id) {
+            region.constraints.margin.left = Dimension::Cells(2.0);
+            region.constraints.margin.top = Dimension::Cells(-1.0);
+        }
+        assert_eq!(card.text(), ["ab  ef"]);
+    }
+}

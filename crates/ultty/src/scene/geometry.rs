@@ -1,4 +1,5 @@
-//! Native scene scroll adjustment and clipping geometry.
+//! Scroll adjustment and clipping geometry of a scene tree, shared by the
+//! GPU renderer and the inline surface rasteriser.
 
 use std::collections::HashMap;
 
@@ -6,14 +7,14 @@ use ultty_protocol::{OverflowAxis, RegionId};
 
 use crate::scene::tree::SceneTree;
 
-pub(super) type ScrollAdjustments = HashMap<RegionId, (f32, f32)>;
-pub(super) type ClipRects = HashMap<RegionId, (f32, f32, f32, f32)>;
+pub(crate) type ScrollAdjustments = HashMap<RegionId, (f32, f32)>;
+pub(crate) type ClipRects = HashMap<RegionId, (f32, f32, f32, f32)>;
 
 /// Rebuild the scroll adjustments and clip rects of the tree under `root`
 /// (the full-scene root or a surface root), laid out from pixel `origin`.
 /// Every clip rect is also held within `bounds` when it is given.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn rebuild_scroll_geometry(
+pub(crate) fn rebuild_scroll_geometry(
     scene: &SceneTree,
     root: RegionId,
     scroll_offset: impl Fn(RegionId) -> (f32, f32),
