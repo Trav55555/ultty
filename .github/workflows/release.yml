@@ -86,6 +86,7 @@ jobs:
           cp ../../../dist/ultty.desktop package/dist/
           cp -R ../../../dist/icons package/dist/
           cp -R ../../../dist/terminfo package/dist/
+          cp -R ../../../dist/shell-integration package/dist/
           tar czf ../../../ultty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C package .
 
       - name: Smoke tarball contents

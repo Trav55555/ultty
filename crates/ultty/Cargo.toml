@@ -107,6 +107,8 @@ assets = [
     # Compiled from dist/terminfo/ultty.terminfo by the release workflow:
     # tic -x -o target/terminfo dist/terminfo/ultty.terminfo
     { source = "../../target/terminfo/x/xterm-ultty", dest = "/usr/share/terminfo/x/xterm-ultty", mode = "644" },
+    { source = "../../dist/shell-integration/ultty.bash", dest = "/usr/share/ultty/shell-integration/ultty.bash", mode = "644" },
+    { source = "../../dist/shell-integration/ultty.zsh", dest = "/usr/share/ultty/shell-integration/ultty.zsh", mode = "644" },
 ]
 
 [package.metadata.generate-rpm.requires]
@@ -126,6 +128,8 @@ assets = [
     # Compiled from dist/terminfo/ultty.terminfo by the release workflow:
     # tic -x -o target/terminfo dist/terminfo/ultty.terminfo
     ["../../target/terminfo/x/xterm-ultty", "usr/share/terminfo/x/xterm-ultty", "644"],
+    ["../../dist/shell-integration/ultty.bash", "usr/share/ultty/shell-integration/ultty.bash", "644"],
+    ["../../dist/shell-integration/ultty.zsh", "usr/share/ultty/shell-integration/ultty.zsh", "644"],
 ]
 
 [[bench]]

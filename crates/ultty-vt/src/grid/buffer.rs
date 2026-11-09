@@ -4,10 +4,49 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use super::history::CompactRow;
-use super::{Cell, CellFlags, Dimensions, Grid, Row};
+use super::{AnchorTag, Cell, CellFlags, Dimensions, Grid, Row, RowMarks};
 
 /// Default scrollback buffer size (lines).
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
+
+/// Most inline surface anchors a buffer holds at once (ADR 0020). Tags run
+/// from 1 to this.
+pub const MAX_ANCHORS: usize = 1024;
+
+/// An inline surface anchor placed in the text (ADR 0020): which session's
+/// surface it is for and how many rows it reserved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Anchor {
+    pub session_id: u64,
+    pub surface_id: u32,
+    pub rows: u16,
+}
+
+/// Why an anchor reserved nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorRefusal {
+    /// Anchors live on the main screen only.
+    AlternateScreen,
+    /// The buffer already holds [`MAX_ANCHORS`] anchors.
+    TableFull,
+    /// The cursor is outside the scroll region, or the region is shorter
+    /// than the reservation, so its rows could not all stay on the screen.
+    NoRoom,
+}
+
+/// A live anchor and where its first row was last seen.
+#[derive(Debug, Clone, Copy)]
+struct AnchorEntry {
+    anchor: Anchor,
+    /// The first row's line number: lines evicted from history before it
+    /// plus its absolute index. Scrolling and eviction leave it right;
+    /// anything else that moves rows makes it a stale hint, which lookups
+    /// check against the row's tag. The row is the truth.
+    first_line: usize,
+    /// All its rows are in scrollback and were found intact there, so
+    /// only eviction can still take it.
+    settled: bool,
+}
 
 /// Terminal buffer with scrollback history.
 ///
@@ -24,6 +63,18 @@ pub struct Buffer {
     max_history: usize,
     /// Current scroll offset (0 = at bottom, >0 = scrolled up)
     scroll_offset: usize,
+    /// Inline surface anchors by tag - 1 (ADR 0020); `None` is a free tag.
+    /// At most [`MAX_ANCHORS`] long, with no trailing free entries.
+    anchors: Vec<Option<AnchorEntry>>,
+    /// Lines dropped from the front of history so far, cleared ones
+    /// included, so `evicted + absolute index` numbers a line for good.
+    evicted: usize,
+    /// Anchors a reflow pushed out of scrollback, for the next sweep to
+    /// report.
+    lost_in_reflow: Vec<(u16, Anchor)>,
+    /// Rows looked at for anchor bookkeeping, so tests can bound its cost.
+    #[cfg(test)]
+    anchor_visits: std::cell::Cell<usize>,
 }
 
 /// A cell being re-wrapped, plus the extra codepoints of its grapheme.
@@ -33,6 +84,271 @@ fn push_reflow_cells(line: &mut Vec<ReflowCell>, row: &Row) {
     for (col, cell) in row.cells().enumerate() {
         let extra = row.grapheme_extra(col as u16).map(<[char]>::to_vec);
         line.push((*cell, extra));
+    }
+}
+
+/// Where [`Buffer::reflow_all`] puts rewrapped rows: the last screenful
+/// whole, for the grid, and older rows compacted into history as they leave
+/// it, keeping at most `max_history`.
+struct Rewrap {
+    cols: u16,
+    screen_rows: usize,
+    max_history: usize,
+    history: VecDeque<CompactRow>,
+    screen: VecDeque<Row>,
+    /// Rows made so far, including those dropped past the history limit.
+    total: usize,
+    /// Logical lines finished so far (empty ones still pending included).
+    lines: usize,
+    /// The cursor's logical line and its offset in it, once seen.
+    cursor: Option<(usize, usize)>,
+    /// The cursor's new absolute row and column, once placed.
+    cursor_at: Option<(usize, usize)>,
+    /// Empty, unmarked lines not yet emitted: dropped if nothing follows.
+    pending_empty: usize,
+}
+
+impl Rewrap {
+    fn new(cols: u16, screen_rows: usize, max_history: usize) -> Self {
+        Self {
+            cols,
+            screen_rows,
+            max_history,
+            history: VecDeque::with_capacity(max_history.min(1000)),
+            screen: VecDeque::with_capacity(screen_rows + 1),
+            total: 0,
+            lines: 0,
+            cursor: None,
+            cursor_at: None,
+            pending_empty: 0,
+        }
+    }
+
+    /// The cursor is in the logical line being gathered, `offset` cells in.
+    /// Only the first call counts.
+    fn set_cursor(&mut self, offset: usize) {
+        if self.cursor.is_none() {
+            self.cursor = Some((self.lines, offset));
+        }
+    }
+
+    fn push_row(&mut self, row: Row) {
+        self.total += 1;
+        self.screen.push_back(row);
+        if self.screen.len() > self.screen_rows {
+            let Some(old) = self.screen.pop_front() else {
+                return;
+            };
+            if self.max_history > 0 {
+                self.history.push_back(CompactRow::encode(&old));
+                if self.history.len() > self.max_history {
+                    self.history.pop_front();
+                }
+            }
+        }
+    }
+
+    /// Finish a logical line: trim trailing blanks and lay it out, leaving
+    /// `line` empty for the next one. Trailing empty lines without marks
+    /// are held back and dropped if nothing follows them.
+    fn finish_line(&mut self, line: &mut Vec<ReflowCell>, marks: RowMarks) {
+        while line.last().is_some_and(|(c, _)| c.is_blank()) {
+            line.pop();
+        }
+        let index = self.lines;
+        self.lines += 1;
+        if line.is_empty() && marks.is_empty() {
+            self.pending_empty += 1;
+            return;
+        }
+        let first_pending = index - self.pending_empty;
+        for pending in first_pending..index {
+            self.lay_out(pending, &[], RowMarks::default());
+        }
+        self.pending_empty = 0;
+        self.lay_out(index, line, marks);
+        line.clear();
+    }
+
+    /// Lay out a row carrying an anchor tag (ADR 0020): a logical line of
+    /// its own that never wraps, clipped or padded to the new width, with
+    /// its tag and marks. A wide character cut in half by the clip is
+    /// blanked. Returns the row's index among the rows made.
+    fn finish_tagged(&mut self, row: &Row) -> usize {
+        let index = self.lines;
+        self.lines += 1;
+        for pending in index - self.pending_empty..index {
+            self.lay_out(pending, &[], RowMarks::default());
+        }
+        self.pending_empty = 0;
+
+        let mut new_row = row.clone();
+        let cols = self.cols;
+        if cols > 0 && cols < new_row.width() {
+            let last = new_row[cols - 1];
+            if last.is_wide() {
+                new_row.erase_range(cols - 1, cols, last.bg());
+            }
+        }
+        new_row.resize(cols);
+        new_row.set_wrapped(false);
+        if let Some((line, col)) = self.cursor {
+            if line == index {
+                self.cursor_at = Some((self.total, col.min(usize::from(cols.saturating_sub(1)))));
+            }
+        }
+        let made = self.total;
+        self.push_row(new_row);
+        made
+    }
+
+    /// Wrap logical line `index` to the new width, placing the cursor if it
+    /// is in this line.
+    fn lay_out(&mut self, index: usize, line: &[ReflowCell], marks: RowMarks) {
+        let cursor_col = match self.cursor {
+            // Allow the cursor at len(): one past the last character.
+            Some((cursor_line, col)) if cursor_line == index => Some(col.min(line.len())),
+            _ => None,
+        };
+        let new_cols = self.cols;
+        if line.is_empty() || new_cols == 0 {
+            // An empty line, or a zero-width row where nothing can be
+            // placed: one row per logical line keeps row counts meaningful.
+            if cursor_col.is_some() {
+                self.cursor_at = Some((self.total, 0));
+            }
+            let mut row = Row::new(new_cols);
+            row.set_marks(marks);
+            self.push_row(row);
+            return;
+        }
+
+        let mut pos = 0;
+        while pos < line.len() {
+            let row_start = pos;
+            let mut new_row = Row::new(new_cols);
+            let mut col = 0u16;
+
+            while col < new_cols && pos < line.len() {
+                let (cell, extra) = &line[pos];
+
+                // Skip spacer cells from old layout — regenerated when placing wide chars
+                if cell.is_wide_spacer() {
+                    pos += 1;
+                    continue;
+                }
+
+                // Wide char needs 2 columns; if only 1 remains, wrap to next row
+                if cell.is_wide() && col + 1 >= new_cols {
+                    if col > 0 {
+                        break;
+                    }
+                    // The row is empty and the wide char can never fit
+                    // (single-column terminal): emit a blank placeholder
+                    // so `pos` always advances and the loop terminates.
+                    if let Some(dest) = new_row.get_mut(col) {
+                        *dest = *cell;
+                        dest.set_char(' ');
+                        dest.unset_flag(CellFlags::WIDE_CHAR);
+                        dest.unset_flag(CellFlags::HAS_COMBINING);
+                    }
+                    col += 1;
+                    pos += 1;
+                    continue;
+                }
+
+                if let Some(dest) = new_row.get_mut(col) {
+                    *dest = *cell;
+                }
+                if let Some(extra) = extra {
+                    new_row.set_grapheme_extra(col, extra);
+                }
+                col += 1;
+                pos += 1;
+
+                // After placing a wide char, insert its spacer cell
+                if cell.is_wide() {
+                    if let Some(spacer) = new_row.get_mut(col) {
+                        spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
+                    }
+                    col += 1;
+                }
+            }
+
+            if let Some(cursor_col) = cursor_col {
+                if self.cursor_at.is_none() && cursor_col >= row_start && cursor_col < pos {
+                    self.cursor_at = Some((self.total, cursor_col - row_start));
+                }
+            }
+            if pos < line.len() {
+                new_row.set_wrapped(true);
+            }
+            if row_start == 0 {
+                new_row.set_marks(marks);
+            }
+            self.push_row(new_row);
+        }
+
+        // Cursor at exact end of logical line
+        if let Some(cursor_col) = cursor_col {
+            if self.cursor_at.is_none() {
+                let col = cursor_col
+                    .saturating_sub(line.len().saturating_sub(line.len() % new_cols as usize));
+                self.cursor_at = Some((self.total.saturating_sub(1), col));
+            }
+        }
+    }
+}
+
+/// Which tagged rows a reflow keeps tagged (ADR 0020): a live anchor's
+/// first row and the `rows - 1` rows right after it that carry its tag.
+/// Any other tag is stale and dropped, so the rows rewrap as text.
+struct AnchorRuns {
+    /// Each tag's reserved rows, if its anchor is live.
+    rows: Vec<Option<u16>>,
+    /// Where each tag's first row went, as an index among the rows made.
+    made_at: Vec<Option<usize>>,
+    /// The run being followed: its tag and how many rows it has left.
+    run: Option<(u16, u16)>,
+}
+
+impl AnchorRuns {
+    fn new(anchors: &[Option<AnchorEntry>]) -> Self {
+        Self {
+            rows: anchors
+                .iter()
+                .map(|entry| entry.map(|e| e.anchor.rows))
+                .collect(),
+            made_at: vec![None; anchors.len()],
+            run: None,
+        }
+    }
+
+    /// Whether the next row, tagged `anchor`, stays tagged. A first row
+    /// kept here must be [`AnchorRuns::placed`] once laid out.
+    fn keep(&mut self, anchor: AnchorTag) -> bool {
+        let tag = anchor.tag();
+        let index = usize::from(tag).wrapping_sub(1);
+        if anchor.is_first() {
+            if let Some(Some(rows)) = self.rows.get(index) {
+                if self.made_at[index].is_none() {
+                    self.run = Some((tag, rows - 1));
+                    return true;
+                }
+            }
+        } else if let Some((run_tag, left)) = self.run {
+            if run_tag == tag && left > 0 {
+                self.run = Some((tag, left - 1));
+                return true;
+            }
+        }
+        self.run = None;
+        false
+    }
+
+    /// Anchor `tag`'s first row became row `made` of the reflow.
+    fn placed(&mut self, tag: u16, made: usize) {
+        self.made_at[usize::from(tag) - 1] = Some(made);
     }
 }
 
@@ -61,6 +377,35 @@ impl Buffer {
                 .check_integrity(super::MAX_COMBINING_PER_CELL)
                 .map_err(|e| format!("history row {index}: {e}"))?;
         }
+        self.check_anchors()
+    }
+
+    /// Every first row belongs to a live anchor, and no anchor has two.
+    /// Other tagged rows may be stale (see [`Buffer::strip_anchor_rows`]).
+    fn check_anchors(&self) -> Result<(), String> {
+        if self.anchors.len() > MAX_ANCHORS {
+            return Err(format!(
+                "anchor table holds {} entries, limit is {MAX_ANCHORS}",
+                self.anchors.len()
+            ));
+        }
+        let mut first_seen = vec![false; self.anchors.len()];
+        for line in 0..self.total_lines() {
+            let Some(anchor) = self.anchor_at(line).filter(|a| a.is_first()) else {
+                continue;
+            };
+            let index = usize::from(anchor.tag()) - 1;
+            if !self.anchors.get(index).is_some_and(Option::is_some) {
+                return Err(format!(
+                    "line {line} is the first row of tag {}, which no anchor has",
+                    anchor.tag()
+                ));
+            }
+            if first_seen[index] {
+                return Err(format!("anchor {} has two first rows", anchor.tag()));
+            }
+            first_seen[index] = true;
+        }
         Ok(())
     }
 
@@ -76,6 +421,11 @@ impl Buffer {
             history: VecDeque::with_capacity(max_history.min(1000)), // Pre-allocate reasonably
             max_history,
             scroll_offset: 0,
+            anchors: Vec::new(),
+            evicted: 0,
+            lost_in_reflow: Vec::new(),
+            #[cfg(test)]
+            anchor_visits: std::cell::Cell::new(0),
         }
     }
 
@@ -139,15 +489,19 @@ impl Buffer {
             return;
         }
         for index in 0..n.min(self.grid.dimensions().rows as usize) {
-            let Some(source) = self.grid.row(index as u16) else {
+            let Some(anchor) = self.grid.row(index as u16).map(Row::anchor) else {
                 break;
             };
             let mut row = if self.history.len() >= self.max_history {
+                self.evicted += 1;
                 self.history.pop_front().unwrap_or_default()
             } else {
                 CompactRow::default()
             };
-            row.encode_from(source);
+            self.note_row_to_history(anchor);
+            if let Some(source) = self.grid.row(index as u16) {
+                row.encode_from(source);
+            }
             self.history.push_back(row);
         }
     }
@@ -159,8 +513,10 @@ impl Buffer {
         }
         for row in rows {
             if self.history.len() >= self.max_history {
+                self.evicted += 1;
                 self.history.pop_front();
             }
+            self.note_row_to_history(row.anchor());
             self.history.push_back(CompactRow::encode(&row));
         }
     }
@@ -217,8 +573,313 @@ impl Buffer {
         }
     }
 
+    /// The shell marks of the row at `absolute_index` (as for
+    /// [`Buffer::row_at`]), without decoding a scrollback row.
+    pub fn marks_at(&self, absolute_index: usize) -> Option<RowMarks> {
+        let history_len = self.history.len();
+        if absolute_index < history_len {
+            self.history.get(absolute_index).map(CompactRow::marks)
+        } else {
+            let grid_index = u16::try_from(absolute_index - history_len).ok()?;
+            self.grid.row(grid_index).map(Row::marks)
+        }
+    }
+
+    /// The anchor tag of the row at `absolute_index`, without decoding a
+    /// scrollback row.
+    fn anchor_at(&self, absolute_index: usize) -> Option<AnchorTag> {
+        #[cfg(test)]
+        self.anchor_visits.set(self.anchor_visits.get() + 1);
+        let history_len = self.history.len();
+        if absolute_index < history_len {
+            self.history.get(absolute_index).map(CompactRow::anchor)
+        } else {
+            let grid_index = u16::try_from(absolute_index - history_len).ok()?;
+            self.grid.row(grid_index).map(Row::anchor)
+        }
+    }
+
+    /// Reserve `anchor.rows` rows at the cursor for an inline surface
+    /// (ADR 0020): scroll them in as `rows - 1` line feeds would, tag each,
+    /// and put the cursor back on the first. Returns the tag.
+    ///
+    /// Anchors whose first row is gone are not freed here; call
+    /// [`Buffer::sweep_anchors`] first so their tags can be reused.
+    pub fn place_anchor(&mut self, anchor: Anchor) -> Result<u16, AnchorRefusal> {
+        let region = self.grid.effective_scroll_region();
+        let cursor_row = self.grid.cursor().position.row;
+        let height = region.bottom - region.top + 1;
+        if anchor.rows == 0 || anchor.rows > height || !region.contains(cursor_row) {
+            return Err(AnchorRefusal::NoRoom);
+        }
+        let index = match self.anchors.iter().position(Option::is_none) {
+            Some(index) => index,
+            None if self.anchors.len() < MAX_ANCHORS => {
+                self.anchors.push(None);
+                self.anchors.len() - 1
+            }
+            None => return Err(AnchorRefusal::TableFull),
+        };
+        let tag = index as u16 + 1;
+
+        for _ in 1..anchor.rows {
+            self.newline();
+        }
+        let last = self.grid.cursor().position.row;
+        let first = last + 1 - anchor.rows;
+        for row in first..=last {
+            if let Some(row_ref) = self.grid.row_mut(row) {
+                row_ref.set_anchor(AnchorTag::new(tag, row == first));
+            }
+        }
+        // Back on the first row, with no wrap pending: fallback text
+        // printed at the last column must not wrap out of the reservation.
+        let cursor = self.grid.cursor_mut();
+        cursor.position.row = first;
+        cursor.wrap_pending = false;
+        self.anchors[index] = Some(AnchorEntry {
+            anchor,
+            first_line: self.evicted + self.history.len() + usize::from(first),
+            settled: false,
+        });
+        Ok(tag)
+    }
+
+    /// The anchor tagged `tag`, if it is live.
+    pub fn anchor(&self, tag: u16) -> Option<Anchor> {
+        let index = usize::from(tag).checked_sub(1)?;
+        Some(self.anchors.get(index)?.as_ref()?.anchor)
+    }
+
+    /// Live anchors and their tags, in tag order.
+    pub fn anchors(&self) -> impl Iterator<Item = (u16, Anchor)> + '_ {
+        self.anchors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| Some((index as u16 + 1, entry.as_ref()?.anchor)))
+    }
+
+    /// Where `entry`'s hint says its first row is, as an absolute index;
+    /// negative once that line was evicted.
+    fn hinted_line(&self, entry: &AnchorEntry) -> isize {
+        entry.first_line as isize - self.evicted as isize
+    }
+
+    /// The absolute index (as for [`Buffer::row_at`]) of the first row of
+    /// anchor `tag`, or `None` if that row is gone.
+    ///
+    /// Scrollback rows move only by eviction, which the hint counts, and by
+    /// reflow, which rewrites it, and a first row going into scrollback
+    /// sets it. So a hint that misses can only be stale for a row that
+    /// moved on the grid (insert or delete line, scroll regions), and only
+    /// the grid is searched: a lookup costs at most a screenful.
+    pub fn anchor_line(&self, tag: u16) -> Option<usize> {
+        let index = usize::from(tag).checked_sub(1)?;
+        let entry = self.anchors.get(index)?.as_ref()?;
+        let first = AnchorTag::new(tag, true);
+        if let Ok(hint) = usize::try_from(self.hinted_line(entry)) {
+            if self.anchor_at(hint) == Some(first) {
+                return Some(hint);
+            }
+        }
+        let history_len = self.history.len();
+        (history_len..self.total_lines()).find(|&line| self.anchor_at(line) == Some(first))
+    }
+
+    /// Whether the `rows` rows from `first` are all reserved for `tag`: the
+    /// first row and then `rows - 1` rows carrying the tag.
+    fn run_intact(&self, first: usize, tag: u16, rows: u16) -> bool {
+        let rest = AnchorTag::new(tag, false);
+        (1..usize::from(rows)).all(|offset| self.anchor_at(first + offset) == Some(rest))
+    }
+
+    /// Find every live anchor's first row, refreshing where it was seen.
+    /// Anchors that lost a reserved row (erased, evicted, cleared, moved
+    /// apart by insert or delete line, pushed out of scrollback by reflow)
+    /// are dropped: their tags are freed and taken off their rows, and they
+    /// are returned.
+    ///
+    /// An anchor whose rows are all in scrollback cannot change but by
+    /// eviction, so once checked there it costs one row per sweep; the
+    /// others cost their rows plus, when they moved, a screenful.
+    pub fn sweep_anchors(&mut self) -> Vec<(u16, Anchor)> {
+        let mut lost = std::mem::take(&mut self.lost_in_reflow);
+        for index in 0..self.anchors.len() {
+            let Some(entry) = self.anchors[index] else {
+                continue;
+            };
+            let tag = index as u16 + 1;
+            let rows = entry.anchor.rows;
+            let found = self.anchor_line(tag);
+            let intact = match found {
+                Some(_) if entry.settled => true,
+                Some(line) => self.run_intact(line, tag, rows),
+                None => false,
+            };
+            if intact {
+                let line = found.unwrap_or_default();
+                let settled = line + usize::from(rows) <= self.history.len();
+                if let Some(entry) = &mut self.anchors[index] {
+                    entry.first_line = self.evicted + line;
+                    entry.settled = settled;
+                }
+            } else {
+                let from = found.map_or_else(|| self.hinted_line(&entry), |line| line as isize);
+                self.anchors[index] = None;
+                self.strip_anchor_rows(tag, from, rows);
+                lost.push((tag, entry.anchor));
+            }
+        }
+        self.trim_anchor_table();
+        lost
+    }
+
+    /// Drop anchor `tag` and take its tag off its rows, as when its surface
+    /// is closed. Returns it if it was live.
+    pub fn release_anchor(&mut self, tag: u16) -> Option<Anchor> {
+        let index = usize::from(tag).checked_sub(1)?;
+        let entry = (*self.anchors.get(index)?)?;
+        let from = self
+            .anchor_line(tag)
+            .map_or_else(|| self.hinted_line(&entry), |line| line as isize);
+        self.anchors[index] = None;
+        self.strip_anchor_rows(tag, from, entry.anchor.rows);
+        self.trim_anchor_table();
+        Some(entry.anchor)
+    }
+
+    /// Drop every anchor and take all tags off rows, as a full reset does.
+    /// Returns the anchors that were live. This walks all of scrollback; a
+    /// reset clears it first.
+    pub fn drop_all_anchors(&mut self) -> Vec<(u16, Anchor)> {
+        let mut live = std::mem::take(&mut self.lost_in_reflow);
+        live.extend(self.anchors());
+        self.anchors.clear();
+        for compact in &mut self.history {
+            if !compact.anchor().is_none() {
+                compact.set_anchor(AnchorTag::NONE);
+            }
+        }
+        self.strip_grid_tags(|_| true);
+        live
+    }
+
+    /// Take tag `tag` off the scrollback rows an anchor whose first row is
+    /// (or was) at absolute index `from` reserved, and off any grid row.
+    /// Rows the anchor lost track of elsewhere in scrollback (pulled apart
+    /// by insert line before scrolling off) keep the stale tag; it marks no
+    /// first row, so nothing reads it, and the next reflow drops it.
+    fn strip_anchor_rows(&mut self, tag: u16, from: isize, rows: u16) {
+        let history_len = self.history.len() as isize;
+        let start = from.clamp(0, history_len) as usize;
+        let end = from.saturating_add(rows as isize).clamp(0, history_len) as usize;
+        for line in start..end {
+            #[cfg(test)]
+            self.anchor_visits.set(self.anchor_visits.get() + 1);
+            if let Some(compact) = self.history.get_mut(line) {
+                if compact.anchor().tag() == tag {
+                    compact.set_anchor(AnchorTag::NONE);
+                }
+            }
+        }
+        self.strip_grid_tags(|t| t == tag);
+    }
+
+    /// Clear the anchor tag of every grid row whose tag `drop` picks.
+    fn strip_grid_tags(&mut self, drop: impl Fn(u16) -> bool) {
+        // `row_mut` marks a row dirty, so only for rows that change.
+        for index in 0..self.grid.dimensions().rows {
+            let picked = self
+                .grid
+                .row(index)
+                .is_some_and(|row| !row.anchor().is_none() && drop(row.anchor().tag()));
+            if picked {
+                if let Some(row) = self.grid.row_mut(index) {
+                    row.set_anchor(AnchorTag::NONE);
+                }
+            }
+        }
+    }
+
+    /// After a reflow, point each anchor's hint at where its first row went
+    /// (`made_at`, counting `dropped` rows that fell past the history
+    /// limit). Anchors whose first row was dropped or not found are lost,
+    /// and reported by the next sweep.
+    fn place_anchors_after_reflow(&mut self, made_at: &[Option<usize>], dropped: usize) {
+        for (index, &made) in made_at.iter().enumerate() {
+            let Some(entry) = self.anchors[index] else {
+                continue;
+            };
+            match made {
+                Some(made) if made >= dropped => {
+                    if let Some(entry) = &mut self.anchors[index] {
+                        entry.first_line = self.evicted + made - dropped;
+                        entry.settled = false;
+                    }
+                }
+                _ => {
+                    let tag = index as u16 + 1;
+                    let from = made.map_or(isize::MIN / 2, |made| made as isize - dropped as isize);
+                    self.anchors[index] = None;
+                    self.strip_anchor_rows(tag, from, entry.anchor.rows);
+                    self.lost_in_reflow.push((tag, entry.anchor));
+                }
+            }
+        }
+        self.trim_anchor_table();
+    }
+
+    /// Rows that went back from scrollback to the grid can be erased
+    /// again, so anchors that were settled there must be checked again.
+    fn unsettle_anchors(&mut self) {
+        for entry in self.anchors.iter_mut().flatten() {
+            entry.settled = false;
+        }
+    }
+
+    /// A row tagged `anchor` is about to become scrollback line
+    /// `history.len()`: if it is a first row, that is where its anchor is.
+    fn note_row_to_history(&mut self, anchor: AnchorTag) {
+        if !anchor.is_first() {
+            return;
+        }
+        let line = self.evicted + self.history.len();
+        if let Some(Some(entry)) = self.anchors.get_mut(usize::from(anchor.tag()) - 1) {
+            entry.first_line = line;
+        }
+    }
+
+    fn trim_anchor_table(&mut self) {
+        while self.anchors.last().is_some_and(Option::is_none) {
+            self.anchors.pop();
+        }
+    }
+
+    /// The text of rows `start..end` (absolute indices), from column
+    /// `first_col` of the first row. A soft-wrapped row runs on into the
+    /// next; other rows end in a newline. Trailing blanks and blank lines
+    /// at the end are dropped.
+    pub fn text_of_rows(&self, start: usize, end: usize, first_col: u16) -> String {
+        let mut text = String::new();
+        for index in start..end.min(self.total_lines()) {
+            let Some(row) = self.row_at(index) else {
+                break;
+            };
+            let from = if index == start { first_col } else { 0 };
+            if row.is_wrapped() {
+                text.push_str(&row.copy_text(from, row.width()));
+            } else {
+                text.push_str(row.copy_text(from, row.width()).trim_end());
+                text.push('\n');
+            }
+        }
+        text.truncate(text.trim_end().len());
+        text
+    }
+
     /// Clear scrollback history.
     pub fn clear_history(&mut self) {
+        self.evicted += self.history.len();
         self.history.clear();
         self.scroll_offset = 0;
     }
@@ -239,6 +900,7 @@ impl Buffer {
         self.max_history = max_history;
         let excess = self.history.len().saturating_sub(max_history);
         self.history.drain(..excess);
+        self.evicted += excess;
         self.scroll_offset = self.scroll_offset.min(self.history.len());
         excess
     }
@@ -276,7 +938,11 @@ impl Buffer {
             let cursor_row = self.grid.cursor().position.row as usize;
             let blank_below = (cursor_row + 1..old_rows)
                 .rev()
-                .take_while(|&row| self.grid.row(row as u16).is_some_and(Row::is_blank))
+                .take_while(|&row| {
+                    self.grid
+                        .row(row as u16)
+                        .is_some_and(|row| row.is_blank() && row.anchor().is_none())
+                })
                 .count();
             let rows_to_move = (old_rows - new_rows).saturating_sub(blank_below);
             let grid_rows: Vec<Row> = self.grid.rows().take(rows_to_move).cloned().collect();
@@ -300,6 +966,7 @@ impl Buffer {
                     .collect();
                 // Insert at beginning of grid
                 self.grid.prepend_rows(pulled);
+                self.unsettle_anchors();
             }
         }
     }
@@ -309,230 +976,127 @@ impl Buffer {
     /// Tracks cursor position through the reflow so it stays on the same
     /// logical content after re-wrapping.
     fn reflow_all(&mut self, new_dims: Dimensions) {
-        let new_cols = new_dims.cols;
         let new_rows = new_dims.rows as usize;
         let old_cursor_row = self.grid.cursor().position.row as usize;
         let old_cursor_col = self.grid.cursor().position.col as usize;
 
-        // Track cursor as (logical_line_index, offset_within_logical_line)
-        let mut cursor_logical_line: usize = 0;
-        let mut cursor_logical_col: usize = 0;
-        let mut found_cursor = false;
+        // Each logical line is rewrapped as soon as it is complete, and rows
+        // older than a screenful are compacted into history as they are
+        // made, so the scrollback is never held decoded all at once.
+        let mut out = Rewrap::new(new_dims.cols, new_rows, self.max_history);
 
-        // Collect all logical lines from history and grid. Each cell carries
-        // the extra codepoints of its grapheme cluster so reflow keeps them.
-        let mut logical_lines: Vec<Vec<ReflowCell>> = Vec::new();
+        // Each cell carries the extra codepoints of its grapheme cluster so
+        // reflow keeps them. Shell marks of a logical line, gathered from
+        // its rows, go on the first row of its new layout (ADR 0019).
         let mut current_line: Vec<ReflowCell> = Vec::new();
-        let mut current_logical_idx: usize = 0;
+        let mut current_marks = RowMarks::default();
 
-        // Process history rows
-        for compact in self.history.drain(..) {
-            let row = compact.decode();
-            push_reflow_cells(&mut current_line, &row);
-            if !row.is_wrapped() {
-                while current_line.last().is_some_and(|(c, _)| c.is_blank()) {
-                    current_line.pop();
-                }
-                logical_lines.push(std::mem::take(&mut current_line));
-                current_logical_idx += 1;
+        // A row a live anchor reserved ends the logical line before it and
+        // is one of its own (ADR 0020); stale tags are dropped. `open` is
+        // whether a soft-wrapped line is being gathered, which a reserved
+        // row must finish first even if it has no cells.
+        let mut runs = AnchorRuns::new(&self.anchors);
+        let mut open = false;
+        let finish_open = |out: &mut Rewrap,
+                           line: &mut Vec<ReflowCell>,
+                           marks: &mut RowMarks,
+                           open: &mut bool| {
+            if std::mem::take(open) {
+                out.finish_line(line, std::mem::take(marks));
             }
-        }
-
-        // Process grid rows, but skip trailing blank rows
-        let grid_rows: Vec<_> = self.grid.rows().cloned().collect();
-
-        let last_content_row = grid_rows
-            .iter()
-            .rposition(|row| !row.is_blank())
-            .unwrap_or(0);
-
-        for (idx, row) in grid_rows.iter().enumerate() {
-            if idx > last_content_row && row.is_blank() {
-                // Track cursor on blank trailing rows before skipping
-                if idx == old_cursor_row && !found_cursor {
-                    cursor_logical_line = current_logical_idx;
-                    cursor_logical_col = 0;
-                    found_cursor = true;
-                }
-                continue;
-            }
-
-            let cells_before = current_line.len();
-            push_reflow_cells(&mut current_line, row);
-
-            // Track cursor: it's on this grid row
-            if idx == old_cursor_row && !found_cursor {
-                cursor_logical_line = current_logical_idx;
-                cursor_logical_col = cells_before + old_cursor_col;
-                found_cursor = true;
-            }
-
-            if !row.is_wrapped() {
-                while current_line.last().is_some_and(|(c, _)| c.is_blank()) {
-                    current_line.pop();
-                }
-                // Clamp cursor col if it fell in trimmed blanks
-                // (allow cursor at len() — one past last char is valid)
-                if found_cursor && cursor_logical_line == current_logical_idx {
-                    cursor_logical_col = cursor_logical_col.min(current_line.len());
-                }
-                logical_lines.push(std::mem::take(&mut current_line));
-                current_logical_idx += 1;
-            }
-        }
-
-        if !current_line.is_empty() {
-            while current_line.last().is_some_and(|(c, _)| c.is_blank()) {
-                current_line.pop();
-            }
-            if found_cursor && cursor_logical_line == current_logical_idx {
-                cursor_logical_col = cursor_logical_col.min(current_line.len());
-            }
-            logical_lines.push(current_line);
-        }
-
-        while logical_lines.last().is_some_and(|line| line.is_empty()) {
-            logical_lines.pop();
-        }
-
-        // Re-wrap all logical lines to new width, tracking cursor
-        let mut all_rows: Vec<Row> = Vec::new();
-        let mut new_cursor_abs_row: Option<usize> = None;
-        let mut new_cursor_col: usize = 0;
-
-        for (line_idx, line) in logical_lines.iter().enumerate() {
-            if line.is_empty() {
-                if found_cursor && line_idx == cursor_logical_line {
-                    new_cursor_abs_row = Some(all_rows.len());
-                    new_cursor_col = 0;
-                }
-                all_rows.push(Row::new(new_cols));
-                continue;
-            }
-
-            if new_cols == 0 {
-                // Nothing can be placed in a zero-width row; keep one row per
-                // logical line so row counts stay meaningful.
-                if found_cursor && line_idx == cursor_logical_line {
-                    new_cursor_abs_row = Some(all_rows.len());
-                    new_cursor_col = 0;
-                }
-                all_rows.push(Row::new(0));
-                continue;
-            }
-
-            let mut pos = 0;
-            while pos < line.len() {
-                let row_start = pos;
-                let mut new_row = Row::new(new_cols);
-                let mut col = 0u16;
-
-                while col < new_cols && pos < line.len() {
-                    let (cell, extra) = &line[pos];
-
-                    // Skip spacer cells from old layout — regenerated when placing wide chars
-                    if cell.is_wide_spacer() {
-                        pos += 1;
-                        continue;
-                    }
-
-                    // Wide char needs 2 columns; if only 1 remains, wrap to next row
-                    if cell.is_wide() && col + 1 >= new_cols {
-                        if col > 0 {
-                            break;
-                        }
-                        // The row is empty and the wide char can never fit
-                        // (single-column terminal): emit a blank placeholder
-                        // so `pos` always advances and the loop terminates.
-                        if let Some(dest) = new_row.get_mut(col) {
-                            *dest = *cell;
-                            dest.set_char(' ');
-                            dest.unset_flag(CellFlags::WIDE_CHAR);
-                            dest.unset_flag(CellFlags::HAS_COMBINING);
-                        }
-                        col += 1;
-                        pos += 1;
-                        continue;
-                    }
-
-                    if let Some(dest) = new_row.get_mut(col) {
-                        *dest = *cell;
-                    }
-                    if let Some(extra) = extra {
-                        new_row.set_grapheme_extra(col, extra);
-                    }
-                    col += 1;
-                    pos += 1;
-
-                    // After placing a wide char, insert its spacer cell
-                    if cell.is_wide() {
-                        if let Some(spacer) = new_row.get_mut(col) {
-                            spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
-                        }
-                        col += 1;
-                    }
-                }
-
-                // Check if cursor falls in this physical row
-                if found_cursor
-                    && line_idx == cursor_logical_line
-                    && new_cursor_abs_row.is_none()
-                    && cursor_logical_col >= row_start
-                    && cursor_logical_col < pos
-                {
-                    new_cursor_abs_row = Some(all_rows.len());
-                    new_cursor_col = cursor_logical_col - row_start;
-                }
-
-                if pos < line.len() {
-                    new_row.set_wrapped(true);
-                }
-
-                all_rows.push(new_row);
-            }
-
-            // Cursor at exact end of logical line
-            if found_cursor && line_idx == cursor_logical_line && new_cursor_abs_row.is_none() {
-                new_cursor_abs_row = Some(all_rows.len().saturating_sub(1));
-                new_cursor_col = cursor_logical_col
-                    .saturating_sub(line.len().saturating_sub(line.len() % new_cols as usize));
-            }
-        }
-
-        while all_rows.len() < new_rows {
-            all_rows.push(Row::new(new_cols));
-        }
-
-        // Split into history and visible grid
-        let split_point = if all_rows.len() > new_rows {
-            let sp = all_rows.len() - new_rows;
-            if self.max_history > 0 {
-                self.history = all_rows
-                    .drain(..sp)
-                    .map(|row| CompactRow::encode(&row))
-                    .collect();
-                while self.history.len() > self.max_history {
-                    self.history.pop_front();
-                }
-            } else {
-                all_rows.drain(..sp);
-                self.history.clear();
-            }
-            sp
-        } else {
-            self.history.clear();
-            0
         };
 
-        self.grid.set_rows(all_rows, new_dims);
+        for compact in std::mem::take(&mut self.history) {
+            let row = compact.decode();
+            if runs.keep(row.anchor()) {
+                finish_open(&mut out, &mut current_line, &mut current_marks, &mut open);
+                let made = out.finish_tagged(&row);
+                if row.anchor().is_first() {
+                    runs.placed(row.anchor().tag(), made);
+                }
+                continue;
+            }
+            // Laid out as text from its cells, so a stale tag goes with it.
+            push_reflow_cells(&mut current_line, &row);
+            current_marks = current_marks.or(row.marks());
+            open = row.is_wrapped();
+            if !open {
+                out.finish_line(&mut current_line, std::mem::take(&mut current_marks));
+            }
+        }
 
-        // Restore tracked cursor position
-        if let Some(abs_row) = new_cursor_abs_row {
+        // Grid rows, skipping trailing blank ones. A blank row with shell
+        // marks (output that has not started yet) or an anchor tag (a
+        // reservation not yet printed) counts as content; a stale tag does
+        // not.
+        let grid_rows: Vec<Row> = self.grid.rows().cloned().collect();
+        let kept: Vec<bool> = grid_rows
+            .iter()
+            .map(|row| runs.keep(row.anchor()))
+            .collect();
+        let has_content = |idx: usize| {
+            let row = &grid_rows[idx];
+            !row.is_blank() || !row.marks().is_empty() || kept[idx]
+        };
+        let last_content_row = (0..grid_rows.len()).rposition(has_content).unwrap_or(0);
+
+        for (idx, row) in grid_rows.iter().enumerate() {
+            if idx > last_content_row && !has_content(idx) {
+                if idx == old_cursor_row {
+                    out.set_cursor(0);
+                }
+                continue;
+            }
+            if kept[idx] {
+                finish_open(&mut out, &mut current_line, &mut current_marks, &mut open);
+                if idx == old_cursor_row {
+                    out.set_cursor(old_cursor_col);
+                }
+                let made = out.finish_tagged(row);
+                if row.anchor().is_first() {
+                    runs.placed(row.anchor().tag(), made);
+                }
+                continue;
+            }
+            if idx == old_cursor_row {
+                out.set_cursor(current_line.len() + old_cursor_col);
+            }
+            push_reflow_cells(&mut current_line, row);
+            current_marks = current_marks.or(row.marks());
+            open = row.is_wrapped();
+            if !open {
+                out.finish_line(&mut current_line, std::mem::take(&mut current_marks));
+            }
+        }
+        if !current_line.is_empty() {
+            out.finish_line(&mut current_line, current_marks);
+        }
+
+        let Rewrap {
+            history,
+            screen,
+            total,
+            cursor_at,
+            ..
+        } = out;
+        // Rows made but dropped past the history limit.
+        let dropped = total - history.len() - screen.len();
+        self.history = history;
+        let mut rows: Vec<Row> = screen.into();
+        while rows.len() < new_rows {
+            rows.push(Row::new(new_dims.cols));
+        }
+        // Rows before the screen, including any dropped past the history
+        // limit, which absolute cursor rows count.
+        let split_point = total.saturating_sub(new_rows);
+        self.grid.set_rows(rows, new_dims);
+        self.place_anchors_after_reflow(&runs.made_at, dropped);
+
+        if let Some((abs_row, col)) = cursor_at {
             let grid_row = abs_row.saturating_sub(split_point);
             self.grid.cursor_mut().position.row =
                 (grid_row as u16).min(new_dims.rows.saturating_sub(1));
-            self.grid.cursor_mut().position.col =
-                (new_cursor_col as u16).min(new_dims.cols.saturating_sub(1));
+            self.grid.cursor_mut().position.col = (col as u16).min(new_dims.cols.saturating_sub(1));
         }
     }
 
@@ -845,6 +1409,91 @@ mod tests {
             bytes * 20 < full_rows,
             "scrollback holds {bytes} bytes for {DEFAULT_SCROLLBACK} lines; full rows were {full_rows}"
         );
+    }
+
+    fn one_row_anchor(surface_id: u32) -> Anchor {
+        Anchor {
+            session_id: 1,
+            surface_id,
+            rows: 1,
+        }
+    }
+
+    fn three_row_anchor(surface_id: u32) -> Anchor {
+        Anchor {
+            rows: 3,
+            ..one_row_anchor(surface_id)
+        }
+    }
+
+    /// `lines` lines of text, scrolled through `buf`.
+    fn fill(buf: &mut Buffer, lines: usize) {
+        for _ in 0..lines {
+            buf.write_ascii_span(b"some output");
+            buf.grid_mut().carriage_return();
+            buf.newline();
+        }
+    }
+
+    #[test]
+    fn anchor_bookkeeping_costs_a_screenful_not_the_scrollback() {
+        // Each anchor lands on the previous one's first row, so every
+        // sweep finds one lost: with a full scrollback, finding and
+        // stripping it must look at the grid and the anchor's rows only.
+        let mut buf = Buffer::with_scrollback(Dimensions::new(80, 24), 10_000);
+        fill(&mut buf, 10_024);
+        buf.anchor_visits.set(0);
+        let mut lost = 0;
+        for surface in 0..1000 {
+            lost += buf.sweep_anchors().len();
+            buf.place_anchor(one_row_anchor(surface)).unwrap();
+        }
+        lost += buf.sweep_anchors().len();
+        assert_eq!(lost, 999);
+        let per_anchor = buf.anchor_visits.get() / 1000;
+        assert!(
+            per_anchor <= 2 * 24,
+            "{per_anchor} rows looked at per anchor"
+        );
+    }
+
+    #[test]
+    fn settled_anchors_cost_one_row_per_sweep() {
+        let mut buf = Buffer::with_scrollback(Dimensions::new(80, 24), 10_000);
+        for surface in 0..100 {
+            buf.place_anchor(three_row_anchor(surface)).unwrap();
+            fill(&mut buf, 50);
+        }
+        // The first sweep checks every reservation's rows...
+        assert!(buf.sweep_anchors().is_empty());
+        buf.anchor_visits.set(0);
+        // ...after which only the first rows are looked at.
+        assert!(buf.sweep_anchors().is_empty());
+        assert_eq!(buf.anchor_visits.get(), 100);
+    }
+
+    #[test]
+    fn reflow_leaves_exact_hints_for_the_next_sweep() {
+        let mut buf = Buffer::with_scrollback(Dimensions::new(80, 24), 10_000);
+        for surface in 0..100 {
+            buf.place_anchor(one_row_anchor(surface)).unwrap();
+            buf.write_ascii_span(b"a card");
+            buf.grid_mut().carriage_return();
+            buf.newline();
+            // Doubling on the narrower screen keeps them all in scrollback.
+            for _ in 0..40 {
+                buf.write_ascii_span(&[b'x'; 70]);
+                buf.grid_mut().carriage_return();
+                buf.newline();
+            }
+        }
+        assert!(buf.sweep_anchors().is_empty());
+        buf.resize(Dimensions::new(40, 24));
+        buf.anchor_visits.set(0);
+        assert!(buf.sweep_anchors().is_empty());
+        // One hint check each, no searching.
+        assert_eq!(buf.anchor_visits.get(), 100);
+        buf.check_integrity().unwrap();
     }
 
     #[test]

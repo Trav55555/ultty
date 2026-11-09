@@ -1491,6 +1491,11 @@ impl TextRenderer {
         }
     }
 
+    /// The glyph atlas epoch; see [`super::atlas::GlyphAtlas::epoch`].
+    pub fn atlas_epoch(&self) -> u64 {
+        self.atlas.epoch()
+    }
+
     /// Get the atlas bind group for rendering labels.
     pub fn atlas_bind_group(&self) -> &wgpu::BindGroup {
         self.atlas.bind_group()

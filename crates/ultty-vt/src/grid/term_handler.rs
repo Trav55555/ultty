@@ -61,6 +61,16 @@ impl<'a> TerminalHandler<'a> {
             // Protocol data for the embedder; it does not touch the grid.
             Action::InBand(_) => {}
 
+            Action::InlineAnchor {
+                session_id,
+                surface_id,
+                rows,
+            } => self.terminal.place_anchor(crate::grid::Anchor {
+                session_id,
+                surface_id,
+                rows,
+            }),
+
             // Cursor movement
             Action::CursorUp(n) => self.terminal.grid_mut().cursor_up(n),
             Action::CursorDown(n) => self.terminal.grid_mut().cursor_down(n),
@@ -266,6 +276,10 @@ impl<'a> TerminalHandler<'a> {
                 self.reply(format!("\x1b[?{row};{col}R"));
             }
             Action::DeviceStatusReport => self.reply("\x1b[0n".to_string()),
+            Action::ReportColorScheme => {
+                let report = self.terminal.color_scheme_report();
+                self.terminal.queue_response(report);
+            }
             Action::DeviceAttributes => {
                 self.terminal
                     .queue_response(PRIMARY_DEVICE_ATTRIBUTES.to_vec());
@@ -387,9 +401,8 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.end_hyperlink();
                 self.terminal.grid_mut().set_hyperlink_id(0);
             }
-            Action::Notification { title: _, body: _ } => {
-                // Notification is handled at the app level, not terminal level
-                // The terminal handler ignores this and the app will handle it
+            Action::Notification { title: _, body: _ } | Action::Progress(_) => {
+                // Handled by the app, which shows them; no terminal state.
             }
             Action::KittyKeyboardPush(flags) => {
                 self.terminal.push_kitty_keyboard_mode(flags);
@@ -553,6 +566,7 @@ impl<'a> TerminalHandler<'a> {
             2004 => modes.bracketed_paste,
             2026 => modes.synchronized_update,
             2027 => grid.grapheme_clustering(),
+            2031 => modes.color_scheme_updates,
             _ => return 0,
         };
         if set {
@@ -850,6 +864,9 @@ impl<'a> TerminalHandler<'a> {
             }
             Mode::GraphemeClustering => {
                 self.terminal.set_grapheme_clustering(enabled);
+            }
+            Mode::ColorSchemeUpdates => {
+                self.terminal.modes_mut().color_scheme_updates = enabled;
             }
         }
     }
@@ -1361,6 +1378,32 @@ mod tests {
         assert_eq!(term.modes().mouse_encoding, MouseEncoding::Urxvt);
         process(&mut term, b"\x1b[?1015l");
         assert_eq!(term.modes().mouse_encoding, MouseEncoding::X10);
+    }
+
+    /// What Claude Code's full mouse mode (1000, 1002, 1003, 1006) needs: a
+    /// drag is the held button plus 32, motion with no button is 35, and
+    /// button-event mode (1002 alone) reports only drags.
+    #[test]
+    fn mouse_motion_reports_drags_and_buttonless_motion_by_mode() {
+        use crate::grid::{MouseButton, MouseModifiers};
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+        let none = MouseModifiers::default();
+
+        process(&mut term, b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h");
+        let drag = term.encode_mouse_event(MouseButton::Left, 3, 4, true, true, none);
+        assert_eq!(drag.as_deref(), Some(&b"\x1b[<32;4;5M"[..]));
+        let hover = term.encode_mouse_event(MouseButton::Release, 3, 4, true, true, none);
+        assert_eq!(hover.as_deref(), Some(&b"\x1b[<35;4;5M"[..]));
+
+        process(&mut term, b"\x1b[?1003l\x1b[?1002h");
+        let drag = term.encode_mouse_event(MouseButton::Right, 3, 4, true, true, none);
+        assert_eq!(drag.as_deref(), Some(&b"\x1b[<34;4;5M"[..]));
+        let hover = term.encode_mouse_event(MouseButton::Release, 3, 4, true, true, none);
+        assert_eq!(hover, None, "1002 reports motion only with a button held");
+
+        process(&mut term, b"\x1b[?1002l\x1b[?1000h");
+        let drag = term.encode_mouse_event(MouseButton::Left, 3, 4, true, true, none);
+        assert_eq!(drag, None, "1000 reports no motion");
     }
 
     #[test]

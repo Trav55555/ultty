@@ -38,15 +38,16 @@ mod row;
 mod term_handler;
 mod terminal;
 
-pub use buffer::{Buffer, DEFAULT_SCROLLBACK};
+pub use buffer::{Anchor, AnchorRefusal, Buffer, DEFAULT_SCROLLBACK, MAX_ANCHORS};
 pub use cell::{Cell, CellFlags, Color, UnderlineStyle};
 pub use image::{decode_sixel, ImageId, ImageStore, TerminalImage};
 pub use palette::{format_color_spec, Palette, Rgb, ThemeColors};
-pub use row::Row;
+pub use row::{AnchorTag, Row, RowMarks};
 pub use term_handler::TerminalHandler;
 pub use terminal::{
-    MouseButton, MouseEncoding, MouseMode, MouseModifiers, Selection, SelectionMode,
-    SelectionPoint, ShellIntegration, Terminal, TerminalModes, DEFAULT_TERMINAL_NAME,
+    AnchorEvent, LastCommand, MouseButton, MouseEncoding, MouseMode, MouseModifiers, Selection,
+    SelectionMode, SelectionPoint, ShellIntegration, Terminal, TerminalModes,
+    DEFAULT_TERMINAL_NAME,
 };
 
 use std::ops::{Index, IndexMut};

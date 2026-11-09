@@ -74,6 +74,9 @@ jobs:
       # without flaking. Fails when a case exceeds its budget (+5%).
       - name: Memory budgets
         run: scripts/ci-runner-step.sh cargo test -p ultty --bench memory
+      # The compatibility scorecard page must match its scorecard_ tests.
+      - name: Compatibility scorecard
+        run: scripts/ci-runner-step.sh scripts/compat-scorecard.sh --check
 
   msrv:
     name: MSRV

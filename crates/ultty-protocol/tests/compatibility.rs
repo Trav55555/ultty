@@ -1,7 +1,7 @@
 use ultty_protocol::{
     negotiate_capabilities, negotiate_protocol_version, CAP_ALL_KNOWN, CAP_APPEND_CONTENT,
-    CAP_LAYOUT_FLEXBOX, CAP_REGION_METADATA, CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL,
-    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    CAP_LAYOUT_FLEXBOX, CAP_REGION_METADATA, CAP_SEMANTICS, CAP_STREAM_LIFECYCLE,
+    CAP_WIDGET_SCROLL, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
 #[test]
@@ -82,4 +82,5 @@ fn known_capabilities_include_optional_protocol_features() {
     assert_ne!(CAP_ALL_KNOWN & CAP_APPEND_CONTENT, 0);
     assert_ne!(CAP_ALL_KNOWN & CAP_STREAM_LIFECYCLE, 0);
     assert_ne!(CAP_ALL_KNOWN & CAP_REGION_METADATA, 0);
+    assert_ne!(CAP_ALL_KNOWN & CAP_SEMANTICS, 0);
 }

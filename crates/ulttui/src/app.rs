@@ -504,6 +504,7 @@ impl<A: Application> App<A> {
             }
             self.focus_initialized = self.focus.focused_id().is_some();
         }
+        self.backend.report_focus(self.focus.focused_id())?;
 
         Ok(())
     }

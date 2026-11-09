@@ -22,6 +22,22 @@ mod sgr;
 
 use serde::{Deserialize, Serialize};
 
+/// A program's progress report (OSC 9;4), as Windows Terminal and Ghostty
+/// read it. Percentages are 0 to 100.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Progress {
+    /// State 0: no progress to show.
+    Clear,
+    /// State 1: this far along.
+    Normal(u8),
+    /// State 2: failed, optionally at a percentage.
+    Error(Option<u8>),
+    /// State 3: busy, with no idea how far along.
+    Indeterminate,
+    /// State 4: paused or waiting, optionally at a percentage.
+    Paused(Option<u8>),
+}
+
 /// Actions the ANSI parser can emit.
 ///
 /// This enum represents all terminal control operations that
@@ -218,6 +234,9 @@ pub enum Action {
     /// Desktop notification (OSC 9 or OSC 777)
     Notification { title: String, body: String },
 
+    /// Progress report (OSC 9;4, ConEmu's sequence)
+    Progress(Progress),
+
     /// Kitty keyboard protocol: push mode with flags (CSI > flags u)
     KittyKeyboardPush(u8),
 
@@ -280,6 +299,9 @@ pub enum Action {
     /// Device status report, operating status (DSR - CSI 5 n)
     DeviceStatusReport,
 
+    /// Report whether the theme is dark or light (CSI ? 996 n)
+    ReportColorScheme,
+
     /// Extended cursor position report (DECXCPR - CSI ? 6 n)
     ReportExtendedCursorPosition,
 
@@ -311,6 +333,16 @@ pub enum Action {
     /// stays free of protocol dependencies. Strings longer than
     /// [`MAX_IN_BAND_APC`] are dropped.
     InBand(Vec<u8>),
+
+    /// Inline surface anchor (ADR 0020):
+    /// `ESC _ u <session_id> ; <surface_id> ; <rows> ESC \`, in decimal.
+    /// Malformed strings, `rows` outside 1 to [`MAX_ANCHOR_ROWS`], and
+    /// strings longer than [`MAX_ANCHOR_APC`] are dropped.
+    InlineAnchor {
+        session_id: u64,
+        surface_id: u32,
+        rows: u16,
+    },
 
     /// Application keypad mode (DECKPAM — ESC =)
     ApplicationKeypadMode,
@@ -458,6 +490,9 @@ pub enum Mode {
     /// Grapheme cluster processing (CSI ?2027h/l) - multi-codepoint
     /// graphemes occupy one cell with their Unicode width
     GraphemeClustering,
+    /// Report light/dark theme changes (CSI ?2031h/l), as contour, kitty
+    /// and Ghostty do
+    ColorSchemeUpdates,
     /// Allow 80 <-> 132 column switching (CSI ?40h/l). DECCOLM is ignored
     /// unless this is set, as in xterm.
     AllowColumnModeSwitch,
@@ -580,6 +615,12 @@ pub(super) enum State {
 /// room for senders that pick a slightly larger chunk.
 pub const MAX_IN_BAND_APC: usize = 128 * 1024;
 
+/// Longest inline anchor string kept, in bytes after the `u`.
+pub const MAX_ANCHOR_APC: usize = 64;
+
+/// Most rows an inline anchor may reserve.
+pub const MAX_ANCHOR_ROWS: u16 = 128;
+
 /// Classification of the APC string being parsed, from its first byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ApcKind {
@@ -587,7 +628,9 @@ pub(super) enum ApcKind {
     Unknown,
     /// `U`: Ultty in-band protocol data, collected.
     InBand,
-    /// An in-band string that exceeded [`MAX_IN_BAND_APC`]; dropped.
+    /// `u`: an inline surface anchor, collected.
+    Anchor,
+    /// A collected string that exceeded its limit; dropped.
     Oversized,
     /// Any other APC (kitty graphics and so on); consumed and ignored.
     Other,

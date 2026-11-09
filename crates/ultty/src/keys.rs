@@ -891,6 +891,15 @@ mod tests {
         String::from_utf8(encode(&KeyInput::press(key, mods), modes)).unwrap()
     }
 
+    /// Compatibility scorecard row: agent CLIs read Shift+Enter as "new
+    /// line, don't send", which only the kitty protocol tells apart.
+    #[test]
+    fn scorecard_kitty_keyboard_shift_enter() {
+        assert_eq!(enc(Key::Enter, S, legacy()), "\r");
+        assert_eq!(enc(Key::Enter, S, kitty(DISAMBIGUATE)), "\x1b[13;2u");
+        assert_eq!(enc(Key::Enter, Mods::NONE, kitty(DISAMBIGUATE)), "\r");
+    }
+
     /// A character key as a US keyboard types it: its shifted form and its
     /// text follow from the key and the modifiers.
     fn us_key(key: char, mods: Mods) -> KeyInput<'static> {

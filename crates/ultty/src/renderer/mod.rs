@@ -267,6 +267,8 @@ pub struct Renderer {
     has_animations: bool,
     /// Cached native session GPU buffers.
     cached_native_buffers: NativeBufferCache<NativeBufferSet>,
+    /// The glyph atlas epoch those buffers' UVs belong to.
+    cached_native_atlas_epoch: u64,
     /// Previous frame vertex/index counts for smarter pre-allocation
     prev_bg_count: (usize, usize),
     prev_text_count: (usize, usize),
@@ -412,6 +414,7 @@ impl Renderer {
                 ..Default::default()
             })
             .await?;
+        tracing::debug!(target: "ultty::startup", "GPU device ready");
         let (width, height) =
             clamp_surface_size(width, height, device.limits().max_texture_dimension_2d);
 
@@ -448,6 +451,7 @@ impl Renderer {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
+        tracing::debug!(target: "ultty::startup", "surface configured");
 
         // Create uniform buffer
         let uniforms = Uniforms::orthographic(width as f32, height as f32);
@@ -484,6 +488,7 @@ impl Renderer {
 
         // Create render pipeline
         let bg_pipeline = RenderPipeline::new(&device, surface_format, &uniform_bind_group_layout)?;
+        tracing::debug!(target: "ultty::startup", "background pipeline ready");
 
         // Create text renderer
         let text_renderer = TextRenderer::with_config(
@@ -495,6 +500,7 @@ impl Renderer {
         )?;
 
         // Get cell dimensions from text renderer
+        tracing::debug!(target: "ultty::startup", "text renderer ready");
         let (cell_width, cell_height) = text_renderer.cell_dimensions();
 
         Ok(Self {
@@ -519,6 +525,7 @@ impl Renderer {
             animated_progress: std::collections::HashMap::new(),
             has_animations: false,
             cached_native_buffers: NativeBufferCache::default(),
+            cached_native_atlas_epoch: 0,
             prev_bg_count: (0, 0),
             prev_text_count: (0, 0),
             scroll_adjustments_cache: std::collections::HashMap::new(),
@@ -649,6 +656,7 @@ impl Renderer {
             animated_progress: std::collections::HashMap::new(),
             has_animations: false,
             cached_native_buffers: NativeBufferCache::default(),
+            cached_native_atlas_epoch: 0,
             prev_bg_count: (0, 0),
             prev_text_count: (0, 0),
             scroll_adjustments_cache: std::collections::HashMap::new(),
@@ -1472,7 +1480,10 @@ impl Renderer {
 
         let any_dirty = sessions.iter().any(|s| s.is_render_dirty());
 
-        if !any_dirty && self.has_cached_native_buffers() {
+        // Cached text quads sample the atlas; after it grows or empties
+        // their UVs point at the wrong glyphs.
+        let atlas_unchanged = self.cached_native_atlas_epoch == self.text_renderer.atlas_epoch();
+        if !any_dirty && atlas_unchanged && self.has_cached_native_buffers() {
             self.draw_cached_native_buffers(&mut encoder, view);
         } else {
             self.clear_cached_native_buffers();

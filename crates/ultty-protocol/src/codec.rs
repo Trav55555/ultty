@@ -7,6 +7,7 @@
 //! - Payload: variable
 
 mod frame;
+mod semantics;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -69,6 +70,14 @@ const MAX_METADATA_PAIRS: usize = 1024;
 
 /// Maximum total bytes across all metadata keys and values (1 MB).
 const MAX_METADATA_TOTAL_BYTES: usize = 1024 * 1024;
+
+/// Maximum bytes of one `Semantics` string (label, description,
+/// value_text). Accessible names are short; the session does not charge
+/// semantics against its text budget, so the codec bounds them.
+const MAX_SEMANTICS_STRING_LEN: usize = 4 * 1024;
+
+/// Maximum bytes across all strings of one `Semantics`.
+const MAX_SEMANTICS_TOTAL_BYTES: usize = 8 * 1024;
 
 // ============================================================================
 // Validation helpers
@@ -1977,6 +1986,7 @@ mod msg_type {
     pub const APPEND_CONTENT: u16 = 0x0023;
     pub const STREAM_START: u16 = 0x0024;
     pub const STREAM_END: u16 = 0x0025;
+    pub const SET_SEMANTICS: u16 = 0x0026;
     pub const DELETE_REGION: u16 = 0x0012;
     pub const REPARENT_REGION: u16 = 0x0013;
     pub const BEGIN_FRAME: u16 = 0x0030;
@@ -2069,6 +2079,11 @@ impl Encode for AppMessage {
                     encode_string(value, buf);
                 }
                 msg_type::SET_REGION_METADATA
+            }
+            AppMessage::SetSemantics { id, semantics } => {
+                id.encode(buf);
+                semantics.encode(buf);
+                msg_type::SET_SEMANTICS
             }
             AppMessage::DeleteRegion { id } => {
                 id.encode(buf);
@@ -2238,6 +2253,11 @@ impl Decode for AppMessage {
                     metadata.push((key, value));
                 }
                 Ok(AppMessage::SetRegionMetadata { id, metadata })
+            }
+            msg_type::SET_SEMANTICS => {
+                let id = RegionId::decode(buf)?;
+                let semantics = crate::Semantics::decode(buf)?;
+                Ok(AppMessage::SetSemantics { id, semantics })
             }
             msg_type::DELETE_REGION => {
                 let id = RegionId::decode(buf)?;
@@ -3010,6 +3030,17 @@ mod tests {
                     indeterminate: false,
                 })),
             },
+            AppMessage::SetSemantics {
+                id: RegionId(1),
+                semantics: crate::Semantics {
+                    value: Some(crate::SemanticValue {
+                        now: SENTINEL,
+                        min: 0.0,
+                        max: 1.0,
+                    }),
+                    ..Default::default()
+                },
+            },
         ];
         for msg in messages {
             let good = msg.encode_to_bytes();
@@ -3211,7 +3242,7 @@ mod tests {
     #[test]
     fn message_type_codes_match_documented_table() {
         // Mirrors docs/PROTOCOL_SPEC.md section 3.2. Update both together.
-        let app: [(&str, u16); 22] = [
+        let app: [(&str, u16); 23] = [
             ("CLIENT_HELLO", 0x0001),
             ("CREATE_REGION", 0x0010),
             ("DELETE_REGION", 0x0012),
@@ -3223,6 +3254,7 @@ mod tests {
             ("APPEND_CONTENT", 0x0023),
             ("STREAM_START", 0x0024),
             ("STREAM_END", 0x0025),
+            ("SET_SEMANTICS", 0x0026),
             ("BEGIN_FRAME", 0x0030),
             ("END_FRAME", 0x0031),
             ("SCROLL", 0x0040),
@@ -3247,6 +3279,7 @@ mod tests {
             ("APPEND_CONTENT", msg_type::APPEND_CONTENT),
             ("STREAM_START", msg_type::STREAM_START),
             ("STREAM_END", msg_type::STREAM_END),
+            ("SET_SEMANTICS", msg_type::SET_SEMANTICS),
             ("BEGIN_FRAME", msg_type::BEGIN_FRAME),
             ("END_FRAME", msg_type::END_FRAME),
             ("SCROLL", msg_type::SCROLL),
@@ -3293,14 +3326,16 @@ mod tests {
         // Mirrors docs/PROTOCOL_SPEC.md section 2.1 and 7.5.
         use crate::{
             CAP_ALL_KNOWN, CAP_APPEND_CONTENT, CAP_LAYOUT_FLEXBOX, CAP_REGION_METADATA,
-            CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+            CAP_SEMANTICS, CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, MIN_PROTOCOL_VERSION,
+            PROTOCOL_VERSION,
         };
         assert_eq!(CAP_LAYOUT_FLEXBOX, 0x0001);
         assert_eq!(CAP_WIDGET_SCROLL, 0x0010);
         assert_eq!(CAP_APPEND_CONTENT, 0x0020);
         assert_eq!(CAP_STREAM_LIFECYCLE, 0x0040);
         assert_eq!(CAP_REGION_METADATA, 0x0080);
-        assert_eq!(CAP_ALL_KNOWN, 0x00F1);
+        assert_eq!(CAP_SEMANTICS, 0x0200);
+        assert_eq!(CAP_ALL_KNOWN, 0x02F1);
         assert_eq!(PROTOCOL_VERSION, 1);
         assert_eq!(MIN_PROTOCOL_VERSION, 1);
 

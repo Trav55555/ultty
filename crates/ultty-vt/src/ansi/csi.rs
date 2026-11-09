@@ -254,6 +254,7 @@ impl AnsiParser {
             (Some(b'?'), None, b'K') => callback(Action::EraseInLine(first_or_zero.min(2) as u8)),
             // DECXCPR (CSI ? 6 n)
             (Some(b'?'), None, b'n') if p1 == 6 => callback(Action::ReportExtendedCursorPosition),
+            (Some(b'?'), None, b'n') if p1 == 996 => callback(Action::ReportColorScheme),
             // DECRQM - Request DEC Private Mode (CSI ? Ps $ p)
             (Some(b'?'), Some(b'$'), b'p') => callback(Action::RequestPrivateMode(p1)),
             // DECRQM for ANSI modes (CSI Ps $ p)
@@ -433,6 +434,7 @@ impl AnsiParser {
             2004 => Some(Action::SetMode(Mode::BracketedPaste)),
             2026 => Some(Action::SetMode(Mode::SynchronizedUpdate)),
             2027 => Some(Action::SetMode(Mode::GraphemeClustering)),
+            2031 => Some(Action::SetMode(Mode::ColorSchemeUpdates)),
             _ => None,
         }
     }
@@ -464,6 +466,7 @@ impl AnsiParser {
             2004 => Some(Action::ResetMode(Mode::BracketedPaste)),
             2026 => Some(Action::ResetMode(Mode::SynchronizedUpdate)),
             2027 => Some(Action::ResetMode(Mode::GraphemeClustering)),
+            2031 => Some(Action::ResetMode(Mode::ColorSchemeUpdates)),
             _ => None,
         }
     }

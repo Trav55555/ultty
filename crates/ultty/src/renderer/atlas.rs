@@ -2,19 +2,27 @@
 //!
 //! Uses a texture atlas to store rasterized glyphs for efficient GPU rendering.
 //!
-//! When the atlas runs out of space (or the cache hits its cap) the eviction
-//! is deferred to the next [`GlyphAtlas::begin_frame`]: quads already emitted
-//! in the current frame keep referencing valid slots, the glyph that did not
-//! fit is skipped once, and [`GlyphAtlas::frame_incomplete`] tells the caller
-//! to schedule another frame.
+//! The texture starts at [`INITIAL_ATLAS_SIZE`] square, enough for a
+//! terminal using one face, and doubles up to [`MAX_ATLAS_SIZE`] when it
+//! fills. When it runs out of space (or the cache hits its cap) the growth
+//! or eviction is deferred to the next [`GlyphAtlas::begin_frame`]: quads
+//! already emitted in the current frame keep referencing valid slots, the
+//! glyph that did not fit is skipped once, and
+//! [`GlyphAtlas::frame_incomplete`] tells the caller to schedule another
+//! frame. Either way every glyph is dropped and the epoch changes, since
+//! UVs are fractions of the texture size.
 
 use cosmic_text::{CacheKey, SwashCache, SwashContent, SwashImage};
 // Looked up for every drawn glyph; see the note in `text.rs`.
 use foldhash::{HashMap, HashMapExt};
 use std::sync::Arc;
 
-/// Size of the glyph atlas texture.
-const ATLAS_SIZE: u32 = 2048;
+/// Edge of the atlas texture at start: 4 MiB of RGBA8.
+const INITIAL_ATLAS_SIZE: u32 = 1024;
+
+/// Largest edge the atlas grows to: 16 MiB of RGBA8. Past this, a full
+/// atlas is emptied instead.
+const MAX_ATLAS_SIZE: u32 = 2048;
 
 /// Padding between glyphs in the atlas.
 const GLYPH_PADDING: u32 = 1;
@@ -71,6 +79,8 @@ struct PlacedGlyph {
 /// Kept separate from the texture so the eviction policy can be unit-tested
 /// without a device.
 struct AtlasLayout {
+    /// Edge of the texture, in pixels.
+    size: u32,
     /// Cached glyphs with LRU tracking
     cache: HashMap<CacheKey, CacheEntry>,
     /// Current rows in the atlas (shelf packing)
@@ -88,6 +98,8 @@ struct AtlasLayout {
     needs_eviction: bool,
     /// At least one glyph could not be placed this frame.
     frame_incomplete: bool,
+    /// The texture had no room (not just the cache cap): grow if allowed.
+    out_of_space: bool,
     /// Bumped by every reset; UVs handed out are valid only while it holds.
     epoch: u64,
 }
@@ -95,6 +107,7 @@ struct AtlasLayout {
 impl AtlasLayout {
     fn new() -> Self {
         Self {
+            size: INITIAL_ATLAS_SIZE,
             cache: HashMap::with_capacity(1024),
             rows: Vec::new(),
             current_y: RESERVED_ROWS,
@@ -103,19 +116,26 @@ impl AtlasLayout {
             cache_misses: 0,
             needs_eviction: false,
             frame_incomplete: false,
+            out_of_space: false,
             epoch: 0,
         }
     }
 
-    /// Start a frame: apply any eviction requested by the previous frame.
+    /// Start a frame: apply any growth or eviction requested by the
+    /// previous frame. True when the texture must grow to `self.size`.
     ///
     /// Nothing emitted in the previous frame is still in flight for the CPU
     /// side at this point, so resetting every slot is safe.
-    fn begin_frame(&mut self) {
+    fn begin_frame(&mut self) -> bool {
+        let grow = self.needs_eviction && self.out_of_space && self.size < MAX_ATLAS_SIZE;
+        if grow {
+            self.size *= 2;
+        }
         if self.needs_eviction {
             self.reset();
         }
         self.frame_incomplete = false;
+        grow
     }
 
     fn frame_incomplete(&self) -> bool {
@@ -173,10 +193,11 @@ impl AtlasLayout {
             );
             self.needs_eviction = true;
             self.frame_incomplete = true;
+            self.out_of_space = true;
             return None;
         };
 
-        let atlas_size = ATLAS_SIZE as f32;
+        let atlas_size = self.size as f32;
         let info = GlyphInfo {
             uv: [
                 x as f32 / atlas_size,
@@ -215,7 +236,7 @@ impl AtlasLayout {
 
         // Try to fit in existing row
         for row in &mut self.rows {
-            if row.height >= height && row.x + width <= ATLAS_SIZE {
+            if row.height >= height && row.x + width <= self.size {
                 let x = row.x;
                 row.x += width;
                 return Some((x, row.y));
@@ -223,7 +244,7 @@ impl AtlasLayout {
         }
 
         // Need a new row
-        if self.current_y + height > ATLAS_SIZE {
+        if self.current_y + height > self.size {
             return None;
         }
 
@@ -250,6 +271,7 @@ impl AtlasLayout {
         self.rows.clear();
         self.current_y = RESERVED_ROWS;
         self.needs_eviction = false;
+        self.out_of_space = false;
         self.epoch += 1;
 
         tracing::debug!("Evicted all {} glyphs from atlas", evicted);
@@ -259,6 +281,7 @@ impl AtlasLayout {
         AtlasStats {
             cached_glyphs: self.cache.len(),
             atlas_usage: self.current_y - RESERVED_ROWS,
+            atlas_size: self.size,
             cache_hits: self.cache_hits,
             cache_misses: self.cache_misses,
         }
@@ -269,12 +292,14 @@ impl AtlasLayout {
 pub struct GlyphAtlas {
     /// The texture atlas
     texture: wgpu::Texture,
-    /// Texture view
-    _view: wgpu::TextureView,
     /// Bind group for the atlas
     bind_group: wgpu::BindGroup,
     /// Bind group layout
     bind_group_layout: wgpu::BindGroupLayout,
+    /// Sampler shared by every texture the atlas grows into
+    sampler: wgpu::Sampler,
+    /// Device, to make a larger texture when the atlas grows
+    device: Arc<wgpu::Device>,
     /// Slot allocation and glyph cache
     layout: AtlasLayout,
     /// Swash cache for rasterization
@@ -286,24 +311,6 @@ pub struct GlyphAtlas {
 impl GlyphAtlas {
     /// Create a new glyph atlas.
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
-        // Create the atlas texture
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("glyph_atlas"),
-            size: wgpu::Extent3d {
-                width: ATLAS_SIZE,
-                height: ATLAS_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("glyph_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -338,49 +345,16 @@ impl GlyphAtlas {
             ],
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("glyph_atlas_bind_group"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
-
-        // Solid white block for decoration quads; it lives in the reserved
-        // rows so no glyph slot ever overwrites it.
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &[255u8; (RESERVED_ROWS * RESERVED_ROWS * 4) as usize],
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(RESERVED_ROWS * 4),
-                rows_per_image: Some(RESERVED_ROWS),
-            },
-            wgpu::Extent3d {
-                width: RESERVED_ROWS,
-                height: RESERVED_ROWS,
-                depth_or_array_layers: 1,
-            },
-        );
-
+        let layout = AtlasLayout::new();
+        let (texture, bind_group) =
+            create_texture(&device, &queue, &bind_group_layout, &sampler, layout.size);
         Self {
             texture,
-            _view: view,
             bind_group,
             bind_group_layout,
-            layout: AtlasLayout::new(),
+            sampler,
+            device,
+            layout,
             swash_cache: SwashCache::new(),
             queue,
         }
@@ -391,7 +365,7 @@ impl GlyphAtlas {
     /// A quad whose four corners all use this coordinate samples pure white
     /// with full alpha, so the text pipeline renders it in the vertex color.
     pub fn solid_uv(&self) -> [f32; 2] {
-        let centre = RESERVED_ROWS as f32 * 0.5 / ATLAS_SIZE as f32;
+        let centre = RESERVED_ROWS as f32 * 0.5 / self.layout.size as f32;
         [centre, centre]
     }
 
@@ -408,7 +382,17 @@ impl GlyphAtlas {
     /// Start a frame. Call before emitting any quad that samples the atlas;
     /// this is the only point at which slots are evicted.
     pub fn begin_frame(&mut self) {
-        self.layout.begin_frame();
+        if self.layout.begin_frame() {
+            let size = self.layout.size;
+            tracing::debug!(size, "growing the glyph atlas");
+            (self.texture, self.bind_group) = create_texture(
+                &self.device,
+                &self.queue,
+                &self.bind_group_layout,
+                &self.sampler,
+                size,
+            );
+        }
     }
 
     /// Whether a glyph was skipped this frame because the atlas was full.
@@ -534,6 +518,69 @@ impl GlyphAtlas {
     }
 }
 
+/// A `size` x `size` atlas texture with the solid white block written, and
+/// its bind group.
+fn create_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    size: u32,
+) -> (wgpu::Texture, wgpu::BindGroup) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("glyph_atlas"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("glyph_atlas_bind_group"),
+        layout: bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    });
+
+    // Solid white block for decoration quads; it lives in the reserved
+    // rows so no glyph slot ever overwrites it.
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[255u8; (RESERVED_ROWS * RESERVED_ROWS * 4) as usize],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(RESERVED_ROWS * 4),
+            rows_per_image: Some(RESERVED_ROWS),
+        },
+        wgpu::Extent3d {
+            width: RESERVED_ROWS,
+            height: RESERVED_ROWS,
+            depth_or_array_layers: 1,
+        },
+    );
+    (texture, bind_group)
+}
+
 /// Statistics about the glyph atlas.
 #[derive(Debug, Clone, Copy)]
 pub struct AtlasStats {
@@ -541,6 +588,8 @@ pub struct AtlasStats {
     pub cached_glyphs: usize,
     /// Current Y position in atlas (indicates usage)
     pub atlas_usage: u32,
+    /// Edge of the atlas texture, in pixels
+    pub atlas_size: u32,
     /// Number of cache hits
     pub cache_hits: u64,
     /// Number of cache misses
@@ -564,13 +613,21 @@ mod tests {
     use super::*;
     use cosmic_text::CacheKeyFlags;
 
-    /// Glyph edge (px) chosen so a whole number of glyphs fit per shelf:
-    /// (128 + padding) * 15 = 1935 <= 2048, and 15 shelves fit below the
-    /// reserved rows.
+    /// A large glyph edge (px), so few fill the atlas.
     const GLYPH_PX: u32 = 128;
-    const GLYPHS_PER_SHELF: u32 = ATLAS_SIZE / (GLYPH_PX + GLYPH_PADDING);
-    const SHELVES: u32 = (ATLAS_SIZE - RESERVED_ROWS) / (GLYPH_PX + GLYPH_PADDING);
-    const CAPACITY: u16 = (GLYPHS_PER_SHELF * SHELVES) as u16;
+
+    /// How many `GLYPH_PX` glyphs fit in a `size` atlas: whole glyphs per
+    /// shelf times whole shelves below the reserved rows.
+    fn capacity(size: u32) -> u16 {
+        let per_shelf = size / (GLYPH_PX + GLYPH_PADDING);
+        let shelves = (size - RESERVED_ROWS) / (GLYPH_PX + GLYPH_PADDING);
+        (per_shelf * shelves) as u16
+    }
+
+    /// Place glyphs `from..to`, returning those that did not fit.
+    fn fill(layout: &mut AtlasLayout, ids: std::ops::Range<u16>) -> Vec<u16> {
+        ids.filter(|&id| place(layout, id).is_none()).collect()
+    }
 
     fn key(glyph_id: u16) -> CacheKey {
         CacheKey::new(
@@ -589,25 +646,27 @@ mod tests {
     }
 
     #[test]
-    fn full_atlas_defers_eviction_to_next_frame_and_then_fits_missing_glyphs() {
+    fn a_full_atlas_grows_at_the_next_frame_and_then_fits_missing_glyphs() {
         let mut layout = AtlasLayout::new();
-        layout.begin_frame();
+        assert!(!layout.begin_frame());
+        assert_eq!(layout.size, INITIAL_ATLAS_SIZE);
 
         let first = place(&mut layout, 0).expect("empty atlas has room");
-        let total = CAPACITY + 40;
-        let missing: Vec<u16> = (1..total)
-            .filter(|&id| place(&mut layout, id).is_none())
-            .collect();
+        let capacity = capacity(INITIAL_ATLAS_SIZE);
+        let missing = fill(&mut layout, 1..capacity + 40);
 
         assert_eq!(missing.len(), 40, "everything past capacity is skipped");
         assert!(layout.frame_incomplete());
         // Nothing emitted earlier in this frame was disturbed.
-        assert_eq!(layout.stats().cached_glyphs, usize::from(CAPACITY));
+        assert_eq!(layout.stats().cached_glyphs, usize::from(capacity));
         assert_eq!(layout.get(key(0)).unwrap().uv, first.info.uv);
+        assert_eq!(layout.size, INITIAL_ATLAS_SIZE, "no growth mid-frame");
 
-        // The next frame starts from an empty atlas and every glyph that was
-        // skipped can now be placed.
-        layout.begin_frame();
+        // The next frame starts from an empty atlas twice the size, and
+        // every glyph that was skipped can now be placed.
+        assert!(layout.begin_frame(), "the texture must grow");
+        assert_eq!(layout.size, 2 * INITIAL_ATLAS_SIZE);
+        assert_eq!(layout.epoch, 1);
         assert!(!layout.frame_incomplete());
         assert_eq!(layout.stats().cached_glyphs, 0);
         for id in &missing {
@@ -618,6 +677,27 @@ mod tests {
         }
         assert!(!layout.frame_incomplete());
         assert_eq!(layout.stats().cached_glyphs, missing.len());
+        // UVs are fractions of the grown texture.
+        let placed = place(&mut layout, 9999).unwrap();
+        let uv_width = placed.info.uv[2] - placed.info.uv[0];
+        assert!((uv_width - GLYPH_PX as f32 / layout.size as f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_full_atlas_at_its_largest_is_emptied_not_grown() {
+        let mut layout = AtlasLayout::new();
+        while layout.size < MAX_ATLAS_SIZE {
+            let ids = 0..capacity(layout.size) + 1;
+            fill(&mut layout, ids);
+            assert!(layout.begin_frame());
+        }
+        let missing = fill(&mut layout, 0..capacity(MAX_ATLAS_SIZE) + 5);
+        assert_eq!(missing.len(), 5);
+
+        assert!(!layout.begin_frame());
+        assert_eq!(layout.size, MAX_ATLAS_SIZE);
+        assert_eq!(layout.stats().cached_glyphs, 0);
+        assert!(fill(&mut layout, 0..5).is_empty());
     }
 
     #[test]
@@ -653,9 +733,10 @@ mod tests {
         assert_eq!(layout.stats().cached_glyphs, MAX_CACHED_GLYPHS);
         assert!(!layout.frame_incomplete(), "cap alone does not skip glyphs");
 
-        layout.begin_frame();
+        assert!(!layout.begin_frame(), "a full cache is not a full texture");
 
         assert_eq!(layout.stats().cached_glyphs, 0);
+        assert_eq!(layout.size, INITIAL_ATLAS_SIZE);
     }
 
     #[test]

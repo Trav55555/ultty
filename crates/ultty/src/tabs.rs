@@ -8,6 +8,7 @@
 //! layout and drawing all agree on one scale.
 
 use crate::terminal_manager::{Tab, TabId};
+use ultty_protocol::control::PaneStatus;
 
 /// Height of the window control band in logical pixels.
 pub const TITLE_BAR_HEIGHT: f32 = 44.0;
@@ -25,6 +26,13 @@ pub const TERMINAL_TOP_PADDING: f32 = 4.0;
 
 /// Padding inside each tab.
 pub const TAB_PADDING: f32 = 12.0;
+
+/// Room a pane status marker takes before a tab's title: the marker and a
+/// gap, in logical pixels.
+pub const TAB_STATUS_MARKER_SPACE: f32 = 14.0;
+
+/// Side of the square status marker, in logical pixels.
+pub const STATUS_MARKER_SIZE: f32 = 7.0;
 
 /// Distance between the tab close target and the tab's right edge.
 pub const TAB_CLOSE_EDGE_PADDING: f32 = 8.0;
@@ -209,6 +217,8 @@ pub struct TabBarState {
     pub title_path: String,
     /// The git branch at `title_path` (short commit when detached).
     pub title_branch: Option<String>,
+    /// The focused pane's status, shown after the location.
+    pub title_status: Option<PaneStatus>,
     /// Letters of `ultty` the title shows: 0 shows `->>>_`; the launch
     /// animation types the rest.
     pub title_letters: usize,
@@ -239,6 +249,7 @@ impl TabBarState {
             hovered_close_button: None,
             title_path: String::new(),
             title_branch: None,
+            title_status: None,
             title_letters: TITLE_WORD_LETTERS,
             menu_open: false,
             hovered_menu_item: None,
@@ -367,6 +378,7 @@ impl TabBarState {
                 is_active,
                 is_hovered: self.hovered_tab == Some(index),
                 scale: self.scale,
+                status: None,
             });
 
             x += tab_width;
@@ -676,6 +688,8 @@ pub struct TabState {
     pub is_hovered: bool,
     /// The bar's scale factor, copied from [`TabBarState::scale`].
     pub scale: f32,
+    /// The most urgent status among the tab's panes.
+    pub status: Option<PaneStatus>,
 }
 
 impl TabState {
@@ -708,11 +722,25 @@ impl TabState {
         )
     }
 
+    /// Left edge of the title, after the status marker when there is one.
+    pub fn label_x(&self) -> f32 {
+        self.x + self.scaled(TAB_PADDING) + self.status_marker_space()
+    }
+
+    fn status_marker_space(&self) -> f32 {
+        if self.status.is_some() {
+            self.scaled(TAB_STATUS_MARKER_SPACE)
+        } else {
+            0.0
+        }
+    }
+
     /// Get the maximum text width.
     pub fn max_text_width(&self) -> f32 {
         // Leave space for close button
         self.width
             - self.scaled(TAB_PADDING)
+            - self.status_marker_space()
             - self.scaled(TAB_CLOSE_EDGE_PADDING)
             - self.scaled(TAB_CLOSE_BUTTON_SIZE)
             - self.scaled(4.0)

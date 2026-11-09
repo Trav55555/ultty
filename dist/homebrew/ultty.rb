@@ -28,6 +28,7 @@ class Ultty < Formula
 
     (share/"terminfo").mkpath
     system "tic", "-x", "-o", share/"terminfo", "dist/terminfo/ultty.terminfo"
+    (share/"ultty").install "dist/shell-integration"
 
     if OS.linux?
       (share/"applications").install "dist/ultty.desktop"

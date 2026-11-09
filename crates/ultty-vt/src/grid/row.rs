@@ -3,6 +3,83 @@
 use super::cell::{Cell, CellFlags};
 use std::ops::{Index, IndexMut};
 
+/// Shell integration marks on a row (OSC 133; ADR 0019).
+///
+/// Each mark is 0 when unset, otherwise the tag of the command it belongs
+/// to: the low bits of a per-terminal command number, from 1 to 255. Three
+/// bytes, so they fit in padding rows already have.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RowMarks {
+    /// Command input starts on this row (OSC 133;B).
+    pub input_start: u8,
+    /// Command output starts at the beginning of this row (OSC 133;C).
+    pub output_start: u8,
+    /// The command finished at the beginning of this row (OSC 133;D).
+    pub command_end: u8,
+}
+
+impl RowMarks {
+    /// The tag a command number is stored as: never 0, which means unset.
+    pub fn tag(command: u32) -> u8 {
+        (command % 255) as u8 + 1
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == RowMarks::default()
+    }
+
+    /// These marks, with any unset one taken from `other`.
+    pub fn or(self, other: RowMarks) -> RowMarks {
+        let pick = |a: u8, b: u8| if a != 0 { a } else { b };
+        RowMarks {
+            input_start: pick(self.input_start, other.input_start),
+            output_start: pick(self.output_start, other.output_start),
+            command_end: pick(self.command_end, other.command_end),
+        }
+    }
+}
+
+/// An inline surface's anchor tag on a row (ADR 0020).
+///
+/// The low bits hold the per-buffer tag, 0 for none; the top bit marks the
+/// first row of the reservation, which is where the surface is drawn and
+/// what decides whether it is still there. Two bytes, so a compact
+/// scrollback row keeps it in padding it already had.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AnchorTag(u16);
+
+impl AnchorTag {
+    /// No anchor.
+    pub const NONE: AnchorTag = AnchorTag(0);
+
+    const FIRST: u16 = 1 << 15;
+
+    /// Tag `tag` (1 to `0x7fff`), on the first row of its reservation when
+    /// `first` is set.
+    pub fn new(tag: u16, first: bool) -> AnchorTag {
+        let tag = tag & !Self::FIRST;
+        if first && tag != 0 {
+            AnchorTag(tag | Self::FIRST)
+        } else {
+            AnchorTag(tag)
+        }
+    }
+
+    /// The tag, 0 for none.
+    pub fn tag(self) -> u16 {
+        self.0 & !Self::FIRST
+    }
+
+    /// Whether this is the first row of the reservation.
+    pub fn is_first(self) -> bool {
+        self.0 & Self::FIRST != 0
+    }
+
+    pub fn is_none(self) -> bool {
+        self.0 == 0
+    }
+}
+
 /// A row of terminal cells.
 ///
 /// Provides efficient storage and manipulation of a single line
@@ -14,6 +91,10 @@ pub struct Row {
     dirty: bool,
     /// Whether this row is wrapped (continues on next line due to soft wrap)
     wrapped: bool,
+    /// Shell integration marks; see [`RowMarks`].
+    marks: RowMarks,
+    /// Inline surface anchor; see [`AnchorTag`].
+    anchor: AnchorTag,
     /// Every cell at or after this column is [`Cell::default`]. It may
     /// overstate the used part of the row, never understate it, so code
     /// that only cares about non-default cells (history encoding, erasing a
@@ -190,6 +271,8 @@ impl Row {
             cells: vec![Cell::default(); width as usize],
             dirty: true,
             wrapped: false,
+            marks: RowMarks::default(),
+            anchor: AnchorTag::NONE,
             used: 0,
             plain: true,
             graphemes: GraphemeMap::default(),
@@ -266,6 +349,8 @@ impl Row {
         self.cells.clone_from(&other.cells);
         self.graphemes.clone_from(&other.graphemes);
         self.wrapped = other.wrapped;
+        self.marks = other.marks;
+        self.anchor = other.anchor;
         self.used = other.used;
         self.plain = other.plain;
         self.dirty = true;
@@ -408,6 +493,32 @@ impl Row {
         self.dirty = true;
     }
 
+    /// The row's shell integration marks.
+    #[inline]
+    pub fn marks(&self) -> RowMarks {
+        self.marks
+    }
+
+    /// Replace the row's shell integration marks. They do not change what
+    /// is drawn, so the row stays clean.
+    #[inline]
+    pub fn set_marks(&mut self, marks: RowMarks) {
+        self.marks = marks;
+    }
+
+    /// The row's inline surface anchor tag.
+    #[inline]
+    pub fn anchor(&self) -> AnchorTag {
+        self.anchor
+    }
+
+    /// Replace the row's anchor tag. Like marks, it does not change what is
+    /// drawn, so the row stays clean.
+    #[inline]
+    pub fn set_anchor(&mut self, anchor: AnchorTag) {
+        self.anchor = anchor;
+    }
+
     /// Get the width of the row.
     #[inline]
     pub fn width(&self) -> u16 {
@@ -468,6 +579,8 @@ impl Row {
         }
         self.graphemes.clear();
         self.wrapped = false;
+        self.marks = RowMarks::default();
+        self.anchor = AnchorTag::NONE;
         self.dirty = true;
     }
 

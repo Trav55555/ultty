@@ -12,7 +12,7 @@
 //! something reads them, which is at most a screenful while scrolled back.
 
 use super::cell::{Cell, CellFlags, PackedColor};
-use super::row::Row;
+use super::row::{AnchorTag, Row, RowMarks};
 
 /// Everything about a cell except its character. Colors stay packed so
 /// comparing styles, done for every cell, is integer comparison.
@@ -85,6 +85,10 @@ struct Run {
 pub(super) struct CompactRow {
     width: u16,
     wrapped: bool,
+    /// Shell integration marks (ADR 0019); three bytes in padding.
+    row_marks: RowMarks,
+    /// Inline surface anchor (ADR 0020); two bytes in padding.
+    anchor: AnchorTag,
     /// One character per stored cell, as UTF-8, each followed by its extra
     /// grapheme codepoints if it has any. Bytes rather than `String` so
     /// ASCII is a plain push; [`CompactRow::decode`] checks it.
@@ -121,6 +125,8 @@ impl CompactRow {
     pub(super) fn encode_from(&mut self, row: &Row) {
         self.width = row.width();
         self.wrapped = row.is_wrapped();
+        self.row_marks = row.marks();
+        self.anchor = row.anchor();
         self.text.clear();
         self.runs.clear();
         self.marks.clear();
@@ -302,6 +308,20 @@ impl CompactRow {
     }
 
     /// The full row this was encoded from.
+    /// The row's shell marks, without decoding it.
+    pub(super) fn marks(&self) -> RowMarks {
+        self.row_marks
+    }
+
+    /// The row's anchor tag, without decoding it.
+    pub(super) fn anchor(&self) -> AnchorTag {
+        self.anchor
+    }
+
+    pub(super) fn set_anchor(&mut self, anchor: AnchorTag) {
+        self.anchor = anchor;
+    }
+
     pub(super) fn decode(&self) -> Row {
         let mut row = Row::new(self.width);
         let text = std::str::from_utf8(&self.text).unwrap_or_default();
@@ -335,6 +355,8 @@ impl CompactRow {
             }
         }
         row.set_wrapped(self.wrapped);
+        row.set_marks(self.row_marks);
+        row.set_anchor(self.anchor);
         row.clear_dirty();
         row
     }
@@ -350,6 +372,8 @@ mod tests {
     fn same(a: &Row, b: &Row) -> bool {
         a.width() == b.width()
             && a.is_wrapped() == b.is_wrapped()
+            && a.marks() == b.marks()
+            && a.anchor() == b.anchor()
             && a.cells().eq(b.cells())
             && (0..a.width()).all(|col| a.grapheme_extra(col) == b.grapheme_extra(col))
     }
@@ -410,64 +434,79 @@ mod tests {
             1u16..60,
             any::<bool>(),
             prop::bool::weighted(0.3),
+            (any::<[u8; 3]>(), any::<u16>()),
             prop::collection::vec(cell, 0..60),
         )
-            .prop_map(|(width, wrapped, raw_flags, cells)| {
-                let mut row = Row::new(width);
-                let mut wide = Vec::new();
-                for (col, (c, fg, bg, flag_bits, link, (ul_style, ul_color), extra, is_wide)) in
-                    cells.into_iter().take(width as usize).enumerate()
-                {
-                    let col = col as u16;
-                    if is_wide {
-                        wide.push(col);
-                    }
-                    let mut flags = CellFlags::NONE;
-                    if raw_flags {
-                        for (bit, flag) in [
-                            (8, CellFlags::WIDE_CHAR),
-                            (9, CellFlags::WIDE_CHAR_SPACER),
-                            (11, CellFlags::HAS_COMBINING),
-                        ] {
-                            if flag_bits & (1 << bit) != 0 {
-                                flags.set(flag);
+            .prop_map(
+                |(
+                    width,
+                    wrapped,
+                    raw_flags,
+                    ([input_start, output_start, command_end], anchor),
+                    cells,
+                )| {
+                    let mut row = Row::new(width);
+                    let mut wide = Vec::new();
+                    for (col, (c, fg, bg, flag_bits, link, (ul_style, ul_color), extra, is_wide)) in
+                        cells.into_iter().take(width as usize).enumerate()
+                    {
+                        let col = col as u16;
+                        if is_wide {
+                            wide.push(col);
+                        }
+                        let mut flags = CellFlags::NONE;
+                        if raw_flags {
+                            for (bit, flag) in [
+                                (8, CellFlags::WIDE_CHAR),
+                                (9, CellFlags::WIDE_CHAR_SPACER),
+                                (11, CellFlags::HAS_COMBINING),
+                            ] {
+                                if flag_bits & (1 << bit) != 0 {
+                                    flags.set(flag);
+                                }
                             }
                         }
+                        if flag_bits & 1 != 0 {
+                            flags.set(CellFlags::BOLD);
+                        }
+                        if flag_bits & (1 << 2) != 0 {
+                            flags.set(CellFlags::ITALIC);
+                        }
+                        if flag_bits & (1 << 3) != 0 {
+                            flags.set(CellFlags::UNDERLINE);
+                        }
+                        let mut cell = Cell::with_attrs(c, fg, bg, flags);
+                        cell.set_hyperlink_id(link);
+                        cell.set_underline_style(ul_style);
+                        cell.set_underline_color(ul_color);
+                        row[col] = cell;
+                        if let Some(extra) = extra {
+                            row.set_grapheme_extra(col, &extra);
+                        }
                     }
-                    if flag_bits & 1 != 0 {
-                        flags.set(CellFlags::BOLD);
+                    // As the writer leaves a wide character: its spacer is a
+                    // blank in the same style.
+                    for col in wide {
+                        if col + 1 < width {
+                            row[col].set_flag(CellFlags::WIDE_CHAR);
+                            let mut spacer = row[col];
+                            spacer.set_char(' ');
+                            spacer.unset_flag(CellFlags::WIDE_CHAR);
+                            spacer.unset_flag(CellFlags::HAS_COMBINING);
+                            spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
+                            row[col + 1] = spacer;
+                        }
                     }
-                    if flag_bits & (1 << 2) != 0 {
-                        flags.set(CellFlags::ITALIC);
-                    }
-                    if flag_bits & (1 << 3) != 0 {
-                        flags.set(CellFlags::UNDERLINE);
-                    }
-                    let mut cell = Cell::with_attrs(c, fg, bg, flags);
-                    cell.set_hyperlink_id(link);
-                    cell.set_underline_style(ul_style);
-                    cell.set_underline_color(ul_color);
-                    row[col] = cell;
-                    if let Some(extra) = extra {
-                        row.set_grapheme_extra(col, &extra);
-                    }
-                }
-                // As the writer leaves a wide character: its spacer is a
-                // blank in the same style.
-                for col in wide {
-                    if col + 1 < width {
-                        row[col].set_flag(CellFlags::WIDE_CHAR);
-                        let mut spacer = row[col];
-                        spacer.set_char(' ');
-                        spacer.unset_flag(CellFlags::WIDE_CHAR);
-                        spacer.unset_flag(CellFlags::HAS_COMBINING);
-                        spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
-                        row[col + 1] = spacer;
-                    }
-                }
-                row.set_wrapped(wrapped);
-                row
-            })
+                    row.set_wrapped(wrapped);
+                    row.set_marks(RowMarks {
+                        input_start,
+                        output_start,
+                        command_end,
+                    });
+                    row.set_anchor(AnchorTag::new(anchor, anchor & 1 != 0));
+                    row
+                },
+            )
     }
 
     proptest! {
@@ -554,5 +593,18 @@ mod tests {
         }
         let decoded = CompactRow::encode(&row).decode();
         assert!(same(&row, &decoded), "{row:?}\n!=\n{decoded:?}");
+    }
+}
+
+#[cfg(test)]
+mod size {
+    /// Scrollback keeps up to tens of thousands of these. The shell marks
+    /// (ADR 0019) and the anchor tag (ADR 0020) fit in padding; keep it
+    /// that way. Screen rows grew by the anchor tag (ADR 0020) and number
+    /// only a screenful.
+    #[test]
+    fn rows_do_not_grow() {
+        assert_eq!(std::mem::size_of::<super::CompactRow>(), 80);
+        assert_eq!(std::mem::size_of::<super::Row>(), 64);
     }
 }

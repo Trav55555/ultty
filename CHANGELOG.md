@@ -34,6 +34,80 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Added
 
+- Shift+click and Shift+drag select text even while a program tracks the
+  mouse, as in xterm and other terminals; the program sees none of it.
+
+- Shell integration for bash 4.4+ and zsh in `dist/shell-integration/`
+  (OSC 133 prompt, command and exit status marks), installed by
+  `install.sh`, `make install`, the packages and the Homebrew formula under
+  `share/ultty/shell-integration/`. `last-command`, `wait-for
+  --command-done` and command events need it. Guides: `docs/agents.md` and
+  `docs/testing-tuis.md`, with `scripts/e2e/counter-app.sh` and
+  `scripts/e2e/run-headless.sh`.
+- `ulttyctl new-tab` prints the new tab's pane id (control reply
+  `tab_opened`), so a script can write `pane=$(ulttyctl new-tab ...)`.
+- `make install` installs `ulttyctl` too.
+- `ulttyctl panes` (control request `list_panes`) lists every pane in every
+  tab with a pane id, tab index, focus, title, foreground process, shell
+  PID, working directory and size. Pane ids are unique within an Ultty
+  process and never reused, so they stay valid across splits, focus changes
+  and tab moves until the pane closes.
+- Control requests that read or drive a pane (`text`, `selection`,
+  `send-text`, `send-key`, `send-raw`, `run`, `search`, `wait-for`) take an
+  optional pane `target`; `ulttyctl --pane <id> <command>` sets it. Without
+  one they act on the focused pane, as before. An id naming no open pane is
+  error 6.
+- `ulttyctl subscribe [--pane <id>]` (control request `subscribe`) keeps
+  the connection open and prints one JSON event per line: `pane_opened`,
+  `pane_closed`, `command_started` and `command_finished` with the exit code
+  (OSC 133, needs shell integration), `bell`, `notification`,
+  `title_changed` and `process_exited`. An idle subscriber costs no
+  wakeups. A subscriber more than 1 MiB behind is disconnected, and at most
+  64 can be open.
+- `ulttyctl [--pane <id>] regions` (control request `regions`, MCP tool
+  `ultty_regions`) shows the native apps in a pane's tab: each app's
+  region tree in drawing order with every region's position and size in
+  cells, scroll, content kind and text, metadata, and the focused region.
+  `--json` has the full text, so a test can assert on a native program
+  ([testing TUIs](docs/testing-tuis.md)). Read-only.
+- Native protocol: `SetSemantics` (`0x0026`, capability
+  `CAP_SEMANTICS = 0x0200`) gives a region an accessibility role, label,
+  liveness and state ([ADR 0021](docs/adr/0021-accessibility-semantics.md),
+  spec §10.5). Regions without it get a role derived from their content;
+  text a region received by `AppendContent` makes it a `Log`. `regions`
+  reports each region's effective `role`, `label` and `live`. Nothing is
+  exposed to screen readers yet.
+- `ulttui` names each region it creates for a widget with an id
+  (`SetRegionMetadata`, key `id`) and tells the terminal which region has
+  focus, so `regions` can find widgets by id.
+- `ulttyctl [--pane <id>] last-command [--tail <lines>]` (control request
+  `last_command`, MCP tool `ultty_last_command`) prints the last command the
+  pane's shell ran, its output and how it ended, or what it has printed so
+  far while it runs, and exits with the command's status. It needs OSC 133
+  shell integration. Output survives scrolling into the scrollback and
+  window resizes; when its lines are gone (cleared, reset, or out of the
+  scrollback) it says so instead of showing another command's output. OSC
+  133 marks now live on rows (ADR 0019) at no memory cost.
+- `ulttyctl [--pane <id>] status <state> [label] [--progress <0-1|N%>]
+  [--attention]` (control request `set_pane_status`, MCP tool
+  `ultty_set_status`) shows what a pane is doing: a colored marker before
+  its tab title (blue working, yellow waiting, green done, red error), a
+  progress line along the tab, and the focused pane's marker and label after
+  the location in the title band. A tab shows its most urgent pane.
+  `--attention` marks an unfocused window urgent. `status clear` removes
+  it; `ulttyctl panes` lists it. It replaces `set_agent_status`, which was
+  accepted but never shown.
+- `ulttyctl mcp` serves Ultty's control plane to AI agents over MCP
+  (stdio): list panes, read text, type text, send keys, run a command, wait
+  (for text, a finished command with its exit code, the bell, or quiet),
+  search, open a tab (returns its pane id), screenshot and info. Every pane
+  tool takes a pane id. For Claude Code: `claude mcp add ultty -- ulttyctl
+  mcp`. It replaces `mcp/ultty-mcp-server.py`, which framed messages with
+  `Content-Length` headers that MCP's stdio transport does not use.
+- `ulttyctl wait-for --command-done` (exits with the command's status),
+  `--bell` and `--quiet <ms>` wait for the next command to finish, the next
+  bell, or a period without output, instead of for text. Control request:
+  `wait_for` with `until`.
 - `behavior.cursor_blink` (default `true`); `false` keeps the cursor steady.
 - `dist/terminfo/ultty.terminfo`, the `xterm-ultty` entry, installed by
   `install.sh`, `make install`, the packages and the Homebrew formula.
@@ -54,12 +128,38 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 - LNM (mode 20), DECSCNM reverse video, and mode 1048.
 - A behavioural VT conformance suite (`crates/ultty-vt/tests/conformance.rs`).
 - `behavior.bell_urgent` marks an unfocused window as wanting attention.
+- Mode 2031 and `CSI ? 996 n`: programs can ask whether the theme is dark
+  or light, and hear when it switches, as in contour, kitty and Ghostty.
+- `docs/compat-scorecard.md`: which modern terminal features Ultty supports,
+  generated from tests by `scripts/compat-scorecard.sh`.
 
 ### Changed
 
+- The glyph atlas starts at 1024x1024 and grows to 2048x2048 only when it
+  fills, halving GPU memory for a typical session (22.9 to 11.4 MB under
+  lavapipe).
+- Output in a background tab no longer redraws the window. A hidden tab
+  streaming 100 lines a second cost 272 frames and 0.24 s of CPU per 5 s;
+  now none beyond the cursor blink, and 0.05 s.
+- A command given by name runs the first executable file of that name on
+  `PATH`. A file without execute permission, such as the `~/.local/bin/env`
+  that uv installs to be sourced, no longer hides `/usr/bin/env` (it made
+  `ulttyctl new-tab env ...` fail).
+- `ulttyctl new-tab` with a working directory (the control request's
+  `working_dir`, the MCP tool's `cwd`) starts the command there; it was
+  ignored.
+- Naming the program in front of a pane (tab titles, `ulttyctl panes`, the
+  native session foreground check) reads the process group's leader and
+  walks only its relatives, not every process on the machine. With the
+  shell in front, five commands' worth of title refreshes went from 7,805
+  `/proc` opens to 150.
+- A pending `wait-for` watches the pane that was focused when it was sent
+  (or its `--pane` target), not whichever pane has focus at each check, and
+  fails with error 6 if that pane closes first.
 - An idle window no longer wakes up. The cursor blinks only while the
   window has focus and the cursor is in a blinking style; nothing else
-  polls unless a native app is connected or `ulttyctl wait-for` is waiting.
+  polls unless a native app is connected. A pending `ulttyctl wait-for`
+  wakes the window only at its timeout.
   Config edits are reloaded 100 ms after the file stops changing.
 - The GPU is opened with the primary API (Vulkan on Linux) alone, and GL
   only if that finds no adapter. Probing GL as well cost startup time and
@@ -95,6 +195,25 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Fixed
 
+- A program that tracks the mouse with motion (modes 1002/1003, as Claude
+  Code's full mouse mode sets) now sees drags: they were reported as
+  motion with no button (code 35) and the release as button 3, so Claude
+  Code's text selection never extended. Drags report the held button and
+  an SGR release names it. Mode 1002 alone no longer reports motion with
+  no button held.
+
+- Resizing the window no longer leaves the process up to 100 MB larger.
+  Reflow decoded the whole scrollback and built every row at full size
+  before compacting it again, peaking at 149 MB of heap for 10,000 lines,
+  which the allocator kept; it now rewraps line by line and peaks at
+  4.7 MB. It is also about three times faster.
+- A progress report (`OSC 9;4`) is shown as progress on the tab, not as a
+  desktop notification reading "4;1;50". Control-socket statuses take
+  precedence; the report is cleared by `OSC 9;4;0` or, with shell
+  integration, when the command finishes.
+- An `ulttui` app run over ssh from a tmux pane no longer renames that pane.
+  The in-band probe now asks the terminal's name first and sends its hello
+  only to Ultty, at the cost of one more round trip at start.
 - Widening the window gives the new columns tab stops.
 - A window larger than the GPU's texture limit no longer aborts the process.
 - Sixel images are sized with the real cell size.

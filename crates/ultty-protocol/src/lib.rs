@@ -48,6 +48,7 @@ mod events;
 pub mod in_band;
 mod layout;
 mod messages;
+mod semantics;
 mod style;
 
 pub use codec::{Decode, Encode, MAX_REGION_COUNT};
@@ -67,6 +68,11 @@ pub use layout::{
     TrackSizingFunction,
 };
 pub use messages::{AppMessage, ComputedRegionLayout, FrameId, LayoutTrigger, TerminalMessage};
+pub use semantics::{
+    Expanded, Live, Role, SemanticValue, Semantics, SetPosition, Toggled, SEMANTICS_FLAGS_ALL,
+    SEMANTICS_FLAG_ATOMIC, SEMANTICS_FLAG_BUSY, SEMANTICS_FLAG_DISABLED, SEMANTICS_FLAG_HIDDEN,
+    SEMANTICS_FLAG_MODAL, SEMANTICS_FLAG_READ_ONLY,
+};
 pub use style::{
     BorderEdges, BorderStyle, BorderType, Color, Easing, NamedColor, Style, Transition,
     TRANSITION_ALL, TRANSITION_BG, TRANSITION_BORDER_COLOR, TRANSITION_FG, TRANSITION_OPACITY,
@@ -102,13 +108,17 @@ pub const CAP_APPEND_CONTENT: u32 = 0x0020;
 pub const CAP_STREAM_LIFECYCLE: u32 = 0x0040;
 /// Capability: Region metadata transport.
 pub const CAP_REGION_METADATA: u32 = 0x0080;
+// 0x0100 is reserved for inline surfaces (ADR 0020).
+/// Capability: Accessibility semantics (`SetSemantics`, ADR 0021).
+pub const CAP_SEMANTICS: u32 = 0x0200;
 
 /// All capabilities known by this protocol version.
 pub const CAP_ALL_KNOWN: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_WIDGET_SCROLL
     | CAP_APPEND_CONTENT
     | CAP_STREAM_LIFECYCLE
-    | CAP_REGION_METADATA;
+    | CAP_REGION_METADATA
+    | CAP_SEMANTICS;
 
 /// Default capability request for current clients.
 pub const CLIENT_DEFAULT_CAPABILITIES: u32 = CAP_ALL_KNOWN;

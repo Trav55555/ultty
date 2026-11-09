@@ -9,8 +9,9 @@ use std::time::Duration;
 use bytes::BytesMut;
 use ultty_protocol::{
     AppMessage, ComputedRegionLayout, Content, FrameId, InputEvent, InputType, Key, Modifiers,
-    RegionId, TerminalMessage, CAP_APPEND_CONTENT, CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY,
-    EVENT_MOUSE, EVENT_SCROLL, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_REGION_METADATA,
+    CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
 };
 
 use crate::event::Event;
@@ -22,6 +23,29 @@ use super::native_diff::{
 };
 use transport::{FrameError, ReadOutcome};
 use ultty_client::{detect, in_band};
+
+/// The metadata key that carries a region's native key (its widget id),
+/// which `ulttyctl regions` shows and tests select regions by.
+pub const REGION_ID_METADATA_KEY: &str = "id";
+
+/// Name every region this frame creates that has a native key, so tools
+/// reading the terminal's scene can find it. A retained region keeps its
+/// key, so it is named once.
+fn name_new_regions(messages: &mut Vec<AppMessage>, tree: &RetainedTree) {
+    let names: Vec<AppMessage> = messages
+        .iter()
+        .filter_map(|message| match message {
+            AppMessage::CreateRegion { id, .. } => {
+                tree.key_of(*id).map(|key| AppMessage::SetRegionMetadata {
+                    id: *id,
+                    metadata: vec![(REGION_ID_METADATA_KEY.to_string(), key.to_string())],
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    messages.extend(names);
+}
 
 /// How long one event poll waits for terminal messages.
 const POLL_TIMEOUT: Duration = Duration::from_millis(16);
@@ -47,6 +71,8 @@ pub struct NativeBackend {
     region_layouts: HashMap<RegionId, ComputedRegionLayout>,
     /// Regions the terminal retains from the last frame, with stable ids.
     retained: RetainedTree,
+    /// The region last reported to the terminal as focused.
+    reported_focus: Option<RegionId>,
     pending_events: VecDeque<Event>,
 }
 
@@ -65,6 +91,7 @@ impl NativeBackend {
             next_frame_id: 1,
             region_layouts: HashMap::new(),
             retained: RetainedTree::new(),
+            reported_focus: None,
             pending_events: VecDeque::new(),
         }
     }
@@ -117,11 +144,11 @@ impl NativeBackend {
     /// Probe for in-band support and, if the terminal has it, run the
     /// handshake over the app's own terminal.
     ///
-    /// The probe is `ClientHello` followed by DA1. A terminal that speaks
-    /// the protocol answers `ServerHello` before its DA1 reply; any other
-    /// terminal ignores the APC string and answers only DA1. Inside tmux or
-    /// screen the bare string is dropped, so apps there fall back to ANSI,
-    /// which is right: the outer terminal cannot know where the pane is.
+    /// The probe asks the terminal's name and, only if it is Ultty, sends
+    /// `ClientHello` followed by DA1 ([`in_band::probe`]). Inside tmux or
+    /// screen the multiplexer answers for itself, so apps there fall back
+    /// to ANSI, which is right: the outer terminal cannot know where the
+    /// pane is.
     fn init_in_band(&mut self) -> crate::Result<()> {
         let mut tty = in_band::InBandTty::open()?;
         let mut received = Vec::new();
@@ -182,12 +209,15 @@ impl NativeBackend {
     /// renders the same as the last frame sends nothing at all.
     pub fn render(&mut self, view: &impl View) -> crate::Result<()> {
         let (frame_messages, native_keys) = self.collect_frame(view)?;
-        let (optimized_messages, next_tree) = optimize_frame_messages(
+        let (mut optimized_messages, next_tree) = optimize_frame_messages(
             &self.retained,
             frame_messages,
             &native_keys,
             self.supports_capability(CAP_APPEND_CONTENT),
         );
+        if self.supports_capability(CAP_REGION_METADATA) {
+            name_new_regions(&mut optimized_messages, &next_tree);
+        }
         self.retained = next_tree;
 
         if !optimized_messages.is_empty() {
@@ -203,6 +233,25 @@ impl NativeBackend {
         self.process_pending_messages()?;
 
         Ok(())
+    }
+
+    /// Tell the terminal which region has focus: the one whose native key is
+    /// `widget_id`. Only for the terminal's view of the app (`ulttyctl
+    /// regions`); key routing in the app does not depend on it. Sends
+    /// nothing while the focused region is unchanged.
+    pub fn report_focus(&mut self, widget_id: Option<&str>) -> crate::Result<()> {
+        if !self.is_connected() {
+            return Ok(());
+        }
+        let region = widget_id.and_then(|key| self.retained.region_with_key(key));
+        if region == self.reported_focus {
+            return Ok(());
+        }
+        self.reported_focus = region;
+        match region {
+            Some(id) => self.send_message(&AppMessage::Focus { id }),
+            None => self.send_message(&AppMessage::Blur),
+        }
     }
 
     /// Walk the view tree into provisional-id messages, recording the native
@@ -663,5 +712,68 @@ mod tests {
         for (index, (id, _)) in first_ids.iter().enumerate() {
             assert_eq!(retained_children[index + 1], *id);
         }
+    }
+
+    fn names(messages: &[AppMessage]) -> Vec<(RegionId, String)> {
+        messages
+            .iter()
+            .filter_map(|m| match m {
+                AppMessage::SetRegionMetadata { id, metadata } => {
+                    Some((*id, metadata[0].1.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn new_keyed_regions_are_named_once_when_the_terminal_takes_metadata() {
+        let (mut backend, mut reader) = backend_over_pair();
+        backend.render(&buttons(&["a"])).unwrap();
+        assert!(
+            names(&drain_messages(&mut reader)).is_empty(),
+            "not negotiated"
+        );
+
+        let (mut backend, mut reader) = backend_over_pair();
+        backend.negotiated_capabilities = ultty_protocol::CAP_REGION_METADATA;
+        backend.render(&buttons(&["a", "b"])).unwrap();
+        let first = drain_messages(&mut reader);
+        let labels = button_labels(&first);
+        assert_eq!(
+            names(&first),
+            vec![
+                (labels[0].0, "a".to_string()),
+                (labels[1].0, "b".to_string())
+            ]
+        );
+        assert!(matches!(first.last(), Some(AppMessage::EndFrame { .. })));
+
+        backend.render(&buttons(&["a", "b", "c"])).unwrap();
+        let second = drain_messages(&mut reader);
+        assert_eq!(
+            names(&second),
+            vec![(button_labels(&second)[0].0, "c".to_string())]
+        );
+    }
+
+    #[test]
+    fn focus_is_reported_when_it_moves_to_another_region() {
+        let (mut backend, mut reader) = backend_over_pair();
+        backend.render(&buttons(&["a", "b"])).unwrap();
+        let ids = button_labels(&drain_messages(&mut reader));
+
+        backend.report_focus(Some("b")).unwrap();
+        assert_eq!(
+            drain_messages(&mut reader),
+            vec![AppMessage::Focus { id: ids[1].0 }]
+        );
+        backend.report_focus(Some("b")).unwrap();
+        assert!(
+            drain_messages(&mut reader).is_empty(),
+            "unchanged focus is not resent"
+        );
+        backend.report_focus(Some("missing")).unwrap();
+        assert_eq!(drain_messages(&mut reader), vec![AppMessage::Blur]);
     }
 }

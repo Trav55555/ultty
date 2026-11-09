@@ -151,6 +151,8 @@ verify_tarball() {
   require_list_entry "$list" "dist/icons/hicolor/scalable/apps/ultty.svg" "$label"
   require_list_entry "$list" "dist/icons/hicolor/256x256/apps/ultty.png" "$label"
   require_list_entry "$list" "dist/terminfo/ultty.terminfo" "$label"
+  require_list_entry "$list" "dist/shell-integration/ultty.bash" "$label"
+  require_list_entry "$list" "dist/shell-integration/ultty.zsh" "$label"
 
   if [[ "$RUN_BINARIES" -eq 1 ]]; then
     local unpack_dir
@@ -183,6 +185,8 @@ verify_deb() {
   require_list_entry "$list" "usr/share/icons/hicolor/scalable/apps/ultty.svg" "$label"
   require_list_entry "$list" "usr/share/icons/hicolor/256x256/apps/ultty.png" "$label"
   require_list_entry "$list" "usr/share/terminfo/x/xterm-ultty" "$label"
+  require_list_entry "$list" "usr/share/ultty/shell-integration/ultty.bash" "$label"
+  require_list_entry "$list" "usr/share/ultty/shell-integration/ultty.zsh" "$label"
 
   local unpack_dir
   unpack_dir="$(mktemp -d)"
@@ -213,6 +217,8 @@ verify_rpm() {
   require_list_entry "$list" "/usr/share/icons/hicolor/scalable/apps/ultty.svg" "$label"
   require_list_entry "$list" "/usr/share/icons/hicolor/256x256/apps/ultty.png" "$label"
   require_list_entry "$list" "/usr/share/terminfo/x/xterm-ultty" "$label"
+  require_list_entry "$list" "/usr/share/ultty/shell-integration/ultty.bash" "$label"
+  require_list_entry "$list" "/usr/share/ultty/shell-integration/ultty.zsh" "$label"
 }
 
 verify_homebrew_formula() {
@@ -242,6 +248,10 @@ verify_homebrew_formula() {
   }
   grep -Fq '"dist/terminfo/ultty.terminfo"' "$formula" || {
     echo "$label must compile the xterm-ultty terminfo entry" >&2
+    exit 1
+  }
+  grep -Fq '(share/"ultty").install "dist/shell-integration"' "$formula" || {
+    echo "$label must install the shell integration scripts" >&2
     exit 1
   }
 }
