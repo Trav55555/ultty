@@ -14,7 +14,9 @@
 //!
 //! Layout sizes are not bounded, so the work is: per region, the cells of
 //! it that are visible (at most `rows × cols`), plus its text up to the
-//! surface's last row. Coordinates are held to ±2^20 cells.
+//! surface's last row, each visible line costing its length and at most
+//! `cols` more however far left of the clip it starts. Coordinates are
+//! held to ±2^20 cells.
 //!
 //! Styles map to cells as follows: `RichText` spans and region styles give
 //! `fg`, bold, italic, underline and dim; `Foreground` and `Background`
@@ -29,7 +31,7 @@
 
 use ultty_protocol::{BorderType, Color as ProtoColor, Content, NamedColor, RegionId, Style};
 
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::geometry::{rebuild_scroll_geometry, ClipRects, ScrollAdjustments};
 use super::region::Region;
@@ -39,7 +41,11 @@ use crate::grid::{Cell, CellFlags, Color, CursorPosition, Dimensions, Grid, Row}
 
 /// Columns kept past the last visible one when writing text, so characters
 /// that overflow the line land where nothing is copied.
-const PEN_MARGIN: i32 = 4;
+const PEN_MARGIN: i64 = 4;
+
+/// How far left of its clip text may start before the part that cannot
+/// show is skipped rather than written; see `Canvas::put_text`.
+const SKIP_FROM: i64 = 1024;
 
 /// Draw the tree under surface root `root` into `rows` rows of `cols`
 /// cells, from the regions' computed layout and the `scroll_offset` of
@@ -445,56 +451,87 @@ impl Canvas {
     /// Write `text` from `(x, y)` in `template`'s colours and attributes,
     /// clipped to `clip`, the way the grid would print it. Returns the
     /// columns it took, clipped or not.
+    ///
+    /// The text goes through a pen grid no wider than the text can be (two
+    /// columns a character) or than what of it can show, so its cost
+    /// follows the text, not how far left of the clip it starts. Text more
+    /// than [`SKIP_FROM`] columns left of the clip starts at the first
+    /// character near the clip's edge, counted by Unicode width; wide
+    /// clusters (emoji sequences) skipped that way can shift what shows by
+    /// the difference between their Unicode and grid widths.
     fn put_text(&mut self, x: i32, y: i32, text: &str, template: Cell, clip: Clip) -> usize {
+        let unicode_width = || UnicodeWidthStr::width(text);
         if y < clip.y0 || y >= clip.y1 {
             // Nothing of it shows, so its width by Unicode will do.
-            return UnicodeWidthStr::width(text);
+            return unicode_width();
         }
-        let visible_end = clip.x1.saturating_sub(x);
-        let needed = visible_end.max(1) + PEN_MARGIN;
+        let mut visible_end = i64::from(clip.x1) - i64::from(x);
+        let mut first_visible = (i64::from(clip.x0) - i64::from(x)).max(0);
+        let mut bound = 2 * text.chars().count() as i64;
+        if visible_end <= 0 || bound <= first_visible {
+            return unicode_width();
+        }
+        let (mut skipped, mut start) = (0i64, 0usize);
+        if first_visible > SKIP_FROM {
+            let target = first_visible - PEN_MARGIN;
+            for (index, c) in text.char_indices() {
+                let width = UnicodeWidthChar::width(c).unwrap_or(0) as i64;
+                if width > 0 && skipped + width > target {
+                    break;
+                }
+                skipped += width;
+                start = index + c.len_utf8();
+            }
+            visible_end -= skipped;
+            first_visible -= skipped;
+            bound = 2 * text[start..].chars().count() as i64;
+        }
+        let needed = visible_end.min(bound) + PEN_MARGIN;
         let width = u16::try_from(needed).unwrap_or(u16::MAX);
-        let pen = match &mut self.pen {
-            Some(pen) if pen.dimensions().cols >= width => pen,
-            slot => {
-                let mut grid = Grid::new(Dimensions::new(width.max(self.cols), 1));
+        let mut pen = match self.pen.take() {
+            Some(pen)
+                if (width..=width.saturating_mul(2).max(self.cols))
+                    .contains(&pen.dimensions().cols) =>
+            {
+                pen
+            }
+            _ => {
+                let mut grid = Grid::new(Dimensions::new(width, 1));
                 grid.set_auto_wrap(false);
-                slot.insert(grid)
+                grid
             }
         };
         pen.clear();
         pen.cursor_mut().position = CursorPosition::origin();
         pen.set_attrs(template);
         let mut written = 0u16;
-        for c in text.chars().filter(|c| !c.is_control()) {
+        for c in text[start..].chars().filter(|c| !c.is_control()) {
             pen.write_char(c);
             written = written.max(pen.cursor().position.col);
         }
-        if visible_end <= 0 {
-            return usize::from(written);
-        }
-        let first_visible = (clip.x0 - x).max(0);
-        let last = visible_end.min(i32::from(written));
-        let Some(line) = pen.row(0).cloned() else {
-            return usize::from(written);
-        };
-        for p in first_visible..last {
-            let Some(cell) = line.get(p as u16).copied() else {
-                break;
-            };
-            let cut = (cell.is_wide() && p + 1 >= visible_end)
-                || (cell.is_wide_spacer() && p == first_visible);
-            if cut {
-                let mut blank = template;
-                blank.set_char(' ');
-                blank.unset_flag(CellFlags::WIDE_CHAR);
-                blank.unset_flag(CellFlags::WIDE_CHAR_SPACER);
-                blank.unset_flag(CellFlags::HAS_COMBINING);
-                self.put_cell(x + p, y, blank, clip);
-            } else {
-                self.put(x + p, y, cell, line.grapheme_extra(p as u16));
+        let last = visible_end.min(i64::from(written));
+        if let Some(line) = pen.row(0) {
+            for p in first_visible..last {
+                let Some(cell) = line.get(p as u16).copied() else {
+                    break;
+                };
+                let col = x.saturating_add((skipped + p) as i32);
+                let cut = (cell.is_wide() && p + 1 >= visible_end)
+                    || (cell.is_wide_spacer() && p == first_visible);
+                if cut {
+                    let mut blank = template;
+                    blank.set_char(' ');
+                    blank.unset_flag(CellFlags::WIDE_CHAR);
+                    blank.unset_flag(CellFlags::WIDE_CHAR_SPACER);
+                    blank.unset_flag(CellFlags::HAS_COMBINING);
+                    self.put_cell(col, y, blank, clip);
+                } else {
+                    self.put(col, y, cell, line.grapheme_extra(p as u16));
+                }
             }
         }
-        usize::from(written)
+        self.pen = Some(pen);
+        usize::try_from(skipped).unwrap_or(0) + usize::from(written)
     }
 
     /// Write one cell inside `clip`.
@@ -1149,5 +1186,59 @@ mod tests {
             };
         }
         assert_eq!(card.text(), ["┌─────┐", "│Hello│", "└─────┘"]);
+    }
+
+    /// Text starting far left of its clip (a negative margin, or a region
+    /// scrolled sideways) costs what it is and what of it shows, not how
+    /// far left it starts: twenty regions over the same eight rows, each
+    /// with eight lines starting 100 000 columns left of the surface.
+    #[test]
+    fn text_far_left_of_the_clip_costs_what_shows() {
+        const LEFT: f32 = 100_000.0;
+        let mut card = Card::new(14, 8);
+        if let Some(root) = card.scene.get_mut(SURFACE) {
+            root.constraints.display = ultty_protocol::Display::Flex;
+            root.constraints.flex_direction = ultty_protocol::FlexDirection::Column;
+        }
+        let line = format!("{}visible {{}}", "a".repeat(LEFT as usize));
+        for id in 101..=120u32 {
+            let lines: Vec<String> = (0..8)
+                .map(|row| line.replace("{}", &format!("{id}.{row}")))
+                .collect();
+            let region = card.add(
+                id,
+                SURFACE,
+                cells(2.0 * LEFT, 8.0),
+                Style::default(),
+                text(&lines.join("\n")),
+            );
+            if let Some(region) = card.scene.get_mut(region) {
+                region.constraints.margin.left = Dimension::Cells(-LEFT);
+                if id > 101 {
+                    region.constraints.margin.top = Dimension::Cells(-8.0);
+                }
+            }
+        }
+        let rows = rows_within(&mut card, std::time::Duration::from_millis(400));
+        let shown: Vec<String> = rows.iter().map(|row| row.text_trimmed()).collect();
+        let expected: Vec<String> = (0..8).map(|row| format!("visible 120.{row}")).collect();
+        assert_eq!(shown, expected);
+    }
+
+    /// Text just left of its clip starts in the right column, wide
+    /// characters and all, whether or not its start is skipped.
+    #[test]
+    fn text_left_of_the_clip_keeps_its_columns() {
+        for left in [3usize, 2000] {
+            let mut card = Card::new(6, 1);
+            let line = format!("{}你b", "a".repeat(left));
+            let id = card.add(1, SURFACE, cells(1.0e5, 1.0), Style::default(), text(&line));
+            if let Some(region) = card.scene.get_mut(id) {
+                region.constraints.margin.left = Dimension::Cells(-(left as f32 - 1.0));
+            }
+            let rows = card.rows();
+            assert_eq!(rows[0].copy_text(0, 5), "a你b  ", "{left} columns left");
+            assert!(rows[0][1].is_wide());
+        }
     }
 }
