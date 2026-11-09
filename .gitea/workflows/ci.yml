@@ -144,6 +144,7 @@ jobs:
       # image carries the X11 client libraries winit loads at runtime.
       - run: scripts/ci-runner-step.sh cargo build -p ultty -p hello-native -p counter-app --bins
       - run: scripts/ci-runner-step.sh cargo build --locked -p ultty-client --example inline-surface
+      - run: scripts/ci-runner-step.sh cargo build --locked -p agent-transcript
       - run: scripts/ci-runner-step.sh scripts/ci-gui-smoke.sh "$RUNNER_TEMP/gui-smoke"
       # Upstream upload-artifact v4.2.0 with its GitHub-only host check
       # removed: Gitea's artifact API lists and serves only v4 uploads.

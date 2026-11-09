@@ -45,14 +45,17 @@ use ratatui::style::{Color as TuiColor, Modifier};
 use ratatui::Terminal;
 use ultty_client::UlttyClient;
 use ultty_protocol::{
-    AppMessage, Constraints, Dimension, RegionId, Style, SurfaceEventKind, TerminalMessage,
-    CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, MAX_SURFACE_ROWS, MIN_SURFACE_ROWS,
+    AppMessage, Constraints, Dimension, RegionId, Style, TerminalMessage, CAP_APPEND_CONTENT,
+    CAP_INLINE_SURFACES, MAX_SURFACE_ROWS, MIN_SURFACE_ROWS,
 };
 
 use crate::backend::native_diff::{
     begin_native_key_recording, optimize_frame_messages, take_native_keys, RetainedTree,
 };
 use crate::widgets::{render_view_to_native, View};
+
+/// What a [`CardEvent`] reports.
+pub use ultty_protocol::SurfaceEventKind;
 
 /// How a [`Console`] shows its cards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
