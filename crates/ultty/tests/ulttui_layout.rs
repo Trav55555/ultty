@@ -3,7 +3,7 @@
 //! layout engine. Catches layouts that differ from the widget's ANSI
 //! rendering, such as children drawn on a border.
 
-use ulttui::widgets::{render_view_messages, List, ScrollView, Text, View};
+use ulttui::widgets::{render_view_messages, List, Modal, ScrollView, Table, Text, View};
 use ultty::scene::layout::LayoutEngine;
 use ultty::scene::{Region, SceneTree};
 use ultty_protocol::{AppMessage, ComputedRegionLayout, Content, RegionId};
@@ -90,4 +90,34 @@ fn a_bordered_list_keeps_its_items_inside_the_border() {
         item.x - outer.x >= 1.0 && item.y - outer.y >= 1.0,
         "the first item is on the border: {item:?} in {outer:?}"
     );
+}
+
+/// The region holding `needle` sits at least one cell inside the view's own
+/// bordered region.
+fn assert_inside_border(view: &dyn View, needle: &str) {
+    let (scene, regions) = layout(view, 40.0, 12.0);
+    let outer = first_child_of_root(&scene, &regions);
+    let inner = region_with_text(&scene, &regions, needle);
+    assert!(
+        inner.x - outer.x >= 1.0 && inner.y - outer.y >= 1.0,
+        "{needle:?} is on the border: {inner:?} in {outer:?}"
+    );
+}
+
+#[test]
+fn a_bordered_table_keeps_its_header_inside_the_border() {
+    let view = Table::new()
+        .headers(vec!["Name", "Size"])
+        .rows(vec![vec!["a.rs", "12"]]);
+    assert_inside_border(&view, "Name");
+}
+
+#[test]
+fn a_bordered_modal_keeps_its_body_inside_the_border() {
+    let view = Modal::new()
+        .title("Confirm")
+        .body("Apply the change?")
+        .buttons(vec!["Yes", "No"])
+        .visible(true);
+    assert_inside_border(&view, "Apply the change?");
 }
