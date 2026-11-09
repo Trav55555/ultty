@@ -413,6 +413,13 @@ impl Terminal {
         self.anchor_events.drain(..).collect()
     }
 
+    /// Drop anchor `tag` from the main screen and take its tag off its
+    /// rows, leaving their text: the surface is closed, refused or never
+    /// claimed (ADR 0020). Returns the anchor if it was live.
+    pub fn release_anchor(&mut self, tag: u16) -> Option<Anchor> {
+        self.main.release_anchor(tag)
+    }
+
     fn sweep_anchors(&mut self) {
         for (tag, anchor) in self.main.sweep_anchors() {
             self.push_anchor_event(AnchorEvent::Lost { tag, anchor });
@@ -442,6 +449,12 @@ impl Terminal {
         } else {
             &self.main
         }
+    }
+
+    /// The main screen's buffer, whichever screen is shown. Inline surface
+    /// anchors live there.
+    pub fn main_buffer(&self) -> &Buffer {
+        &self.main
     }
 
     /// Get mutable access to the active buffer.

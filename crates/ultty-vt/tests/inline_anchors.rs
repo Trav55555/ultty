@@ -574,6 +574,23 @@ fn releasing_an_anchor_frees_its_tag_and_rows() {
     term.check_integrity().unwrap();
 }
 
+/// The embedder pairs and releases anchors whichever screen is shown: they
+/// are always on the main one.
+#[test]
+fn anchors_are_read_and_released_on_the_main_screen_under_the_alternate() {
+    let mut term = term(20, 5);
+    let tag = place(&mut term, 1, 2);
+    feed(&mut term, b"\x1b[?1049h");
+    assert_eq!(term.main_buffer().anchor_line(tag), Some(0));
+    assert_eq!(term.buffer().anchor_line(tag), None);
+
+    assert_eq!(term.release_anchor(tag), Some(anchor(1, 2)));
+    assert_eq!(term.main_buffer().anchor_line(tag), None);
+    feed(&mut term, b"\x1b[?1049l");
+    assert!(tags(&term).iter().all(|&t| t == 0));
+    assert_eq!(term.take_anchor_events(), vec![]);
+}
+
 #[test]
 fn a_new_anchor_over_an_old_first_row_replaces_it() {
     let mut term = term(20, 5);
