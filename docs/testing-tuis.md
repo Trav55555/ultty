@@ -81,7 +81,10 @@ with `id`, `rows`, `state` (`unplaced`, `placed` or `hidden`), once placed
 `anchor_line` (the line of its first row, as `text --scrollback` numbers
 them from 0), and its own `regions`, positioned from the surface's top
 left. `scripts/e2e/inline-surface.sh` checks a card this way and in
-screenshots.
+screenshots. A live or closed card's rows hold its text, so `text
+--scrollback` reads it in order with the output around it;
+`scripts/e2e/agent-transcript.sh` checks a whole transcript that way, in
+Ultty and under tmux ([inline cards](inline-cards.md)).
 
 There is no `wait-for` on regions yet; poll `regions` in a loop, or wait
 for something the program prints to the grid.

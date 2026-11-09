@@ -350,6 +350,7 @@ examples/           Nine workspace example apps: hello-native, counter-app,
 - [Configuration](docs/configuration.md) — `TERM`, scrollback, exit, clipboard, paste, and link settings
 - [Drive Ultty from an agent](docs/agents.md) — MCP, shell integration, panes, waits, last command, events
 - [Test your TUI with ulttyctl](docs/testing-tuis.md) — End-to-end tests that press keys and read the screen
+- [Inline cards](docs/inline-cards.md) — Native cards in a command-line program's scrollback, ANSI text elsewhere
 - [Changelog](CHANGELOG.md) — Changes in each release
 - [Architecture](docs/ARCHITECTURE.md) — System design and components
 - [Architecture Vocabulary](CONTEXT.md) — Stable terms for core seams

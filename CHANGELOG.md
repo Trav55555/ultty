@@ -7,6 +7,23 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ## [Unreleased]
 
+### Added
+
+- `ulttui::inline::Console` (ADR 0020 slice 5): a command-line program
+  prints a transcript with live cards. In Ultty each card is an inline
+  surface drawn in the scrollback and left there as text when closed;
+  elsewhere (tmux, other terminals, no tty) it is printed as the view's ANSI
+  rendering and redrawn in place only while it is the last thing printed.
+  See [inline cards](docs/inline-cards.md).
+- `ultty-client`: `open_surface` writes a surface's anchor and fallback
+  text and sends `CreateSurface` with its contents in one frame;
+  `close_surface`, `write_output` and `set_output` go with it. The client
+  now tracks `Resize`, so `viewport_width` stays current.
+- `examples/agent-transcript`, a made-up agent session with a tool card and
+  a diff card, and `scripts/e2e/agent-transcript.sh`, which checks it in a
+  headless Ultty (screenshot and `text --scrollback`, with shell output
+  under the live cards) and under tmux.
+
 ## [0.2.0] - 2026-11-08
 
 Highlights: a security review's findings fixed (paste injection, clipboard
