@@ -101,8 +101,20 @@ longer collapses, and an idle window no longer wakes up.
   `DeleteRegion` closes it, and the terminal answers `SurfaceEvent`
   (`0x0026`) `Closed`. A session holds at most 16, and surface regions
   cannot subscribe to keys. `regions` lists each surface with its rows,
-  state and region tree. Surfaces are not yet anchored to rows or drawn, so
-  the terminal does not advertise the capability yet.
+  state and region tree.
+- Native protocol: inline surfaces, part two (ADR 0020 slice 3). The
+  terminal advertises `CAP_INLINE_SURFACES`, pairs each surface with the
+  anchor its app printed (`ESC _ u <session>;<surface>;<rows> ESC \`) in
+  either order, and draws it over those rows of a single-pane tab, moving
+  with them through output and scrollback. `SurfaceEvent` reports `Placed`,
+  `Hidden` and `Shown` as it leaves and returns to the screen, and
+  `Evicted` when its rows leave scrollback or are erased. A surface or
+  anchor without its other half for 2 s, or whose rows disagree, is
+  dropped with `Error` 400 and the fallback text stays. `regions` shows
+  `placed`, `unplaced` or `hidden` and the anchor line. A frozen surface
+  keeps the app's fallback text; drawing its last frame into the rows comes
+  with rasterisation. A session with no full-scene regions no longer hides
+  the grid, and gets keys only once it has some. `scripts/e2e/inline-surface.sh` checks it headless.
 - `ulttui` names each region it creates for a widget with an id
   (`SetRegionMetadata`, key `id`) and tells the terminal which region has
   focus, so `regions` can find widgets by id.

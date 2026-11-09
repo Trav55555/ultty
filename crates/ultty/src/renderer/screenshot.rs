@@ -315,7 +315,8 @@ impl Renderer {
         self.capture_screenshot_with_native(terminal, overlay, path, &[])
     }
 
-    /// Capture a screenshot including native protocol sessions.
+    /// Capture a screenshot including the native protocol sessions of the
+    /// tab `terminal` is in.
     pub fn capture_screenshot_with_native(
         &mut self,
         terminal: &Terminal,
@@ -407,9 +408,15 @@ impl Renderer {
             &self.uniform_bind_group,
         );
 
-        for session in native_sessions {
-            self.render_native_session(&mut encoder, &view, session, None, 0);
-        }
+        let surfaces = self.visible_surfaces(terminal, native_sessions);
+        self.draw_native_scenes(
+            &mut encoder,
+            &view,
+            terminal,
+            native_sessions,
+            &surfaces,
+            None,
+        );
 
         self.render_screenshot_overlays(&mut encoder, &view, terminal, overlay);
         if let Some(tab_bar) = overlay.tab_bar {
@@ -511,9 +518,15 @@ impl Renderer {
             &self.uniform_bind_group,
         );
 
-        for session in native_sessions {
-            self.render_native_session(&mut encoder, &view, session, None, 0);
-        }
+        let surfaces = self.visible_surfaces(terminal, native_sessions);
+        self.draw_native_scenes(
+            &mut encoder,
+            &view,
+            terminal,
+            native_sessions,
+            &surfaces,
+            None,
+        );
 
         self.render_screenshot_overlays(&mut encoder, &view, terminal, overlay);
         if let Some(tab_bar) = overlay.tab_bar {

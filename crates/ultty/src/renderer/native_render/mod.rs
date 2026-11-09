@@ -122,6 +122,24 @@ fn is_variation_selector(ch: char) -> bool {
     matches!(ch, '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}')
 }
 
+/// Where an inline surface is drawn: its root, its height in rows, and
+/// the pixel row its top is at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceOrigin {
+    pub id: ultty_protocol::RegionId,
+    pub rows: u16,
+    pub top: f32,
+}
+
+/// Vertices of native regions, built before they are uploaded.
+struct NativeVertices {
+    bg_vertices: Vec<Vertex>,
+    bg_indices: Vec<u32>,
+    text_vertices: Vec<Vertex>,
+    text_indices: Vec<u32>,
+    deferred_images: Vec<DeferredImageRender>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_clipped_glyphs(
     verts: &[Vertex],
@@ -156,6 +174,55 @@ fn append_clipped_glyphs(
     }
 }
 
+/// The colour region's background is filled with: its own `bg`, or for a
+/// surface root without one the terminal's background, so the fallback text
+/// drawn under a surface never shows through it.
+fn region_background(
+    bg: Option<super::color::Rgba>,
+    is_surface_root: bool,
+    terminal_background: super::color::Rgba,
+) -> Option<super::color::Rgba> {
+    bg.or(is_surface_root.then_some(terminal_background))
+}
+
+/// Where the placed inline surfaces of `sessions` show on `terminal`'s
+/// screen, whose first row is at pixel `grid_top` and whose rows are
+/// `cell_height` high; see [`Renderer::visible_surfaces`].
+fn visible_surfaces(
+    terminal: &crate::grid::Terminal,
+    sessions: &[&crate::protocol::NativeSession],
+    grid_top: f32,
+    cell_height: f32,
+) -> Vec<(u64, SurfaceOrigin)> {
+    use crate::protocol::pairing::{rows_on_screen, visual_row};
+
+    if terminal.is_alternate_screen() {
+        return Vec::new();
+    }
+    let buffer = terminal.main_buffer();
+    let screen_rows = buffer.dimensions().rows;
+    let mut visible = Vec::new();
+    for session in sessions {
+        for surface in session.placed_surfaces() {
+            let Some(line) = buffer.anchor_line(surface.tag) else {
+                continue;
+            };
+            let row = visual_row(buffer, line);
+            if rows_on_screen(row, surface.rows, screen_rows) {
+                visible.push((
+                    session.session_id(),
+                    SurfaceOrigin {
+                        id: surface.id,
+                        rows: surface.rows,
+                        top: grid_top + row as f32 * cell_height,
+                    },
+                ));
+            }
+        }
+    }
+    visible
+}
+
 impl Renderer {
     fn next_capacity(prev: usize, estimate: usize, per_region: usize) -> usize {
         let baseline = estimate.saturating_mul(per_region);
@@ -169,7 +236,91 @@ impl Renderer {
         growth_target.min(max_retained)
     }
 
-    /// Render a native protocol session's scene tree (backgrounds, text, widgets, images).
+    /// Where the placed inline surfaces of `sessions` show on `terminal`'s
+    /// screen, by session id, in drawing order. Surfaces with no row on the
+    /// screen, and all of them while the alternate screen shows, are left
+    /// out.
+    pub(crate) fn visible_surfaces(
+        &self,
+        terminal: &crate::grid::Terminal,
+        sessions: &[&crate::protocol::NativeSession],
+    ) -> Vec<(u64, SurfaceOrigin)> {
+        visible_surfaces(terminal, sessions, self.tab_bar_height, self.cell_height)
+    }
+
+    /// Draw the native scenes of the visible tab's `sessions` over
+    /// `terminal`: every session's full-scene tree, with the `search`
+    /// matches and the index of the current one, when any is full-scene;
+    /// else the `surfaces` (from [`Renderer::visible_surfaces`]) over the
+    /// grid.
+    pub(crate) fn draw_native_scenes(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        terminal: &crate::grid::Terminal,
+        sessions: &[&crate::protocol::NativeSession],
+        surfaces: &[(u64, SurfaceOrigin)],
+        search: Option<(&[crate::scene::SearchMatch], usize)>,
+    ) {
+        if sessions.iter().any(|session| session.is_full_scene()) {
+            let (matches, current) = search.map_or((None, 0), |(m, i)| (Some(m), i));
+            for session in sessions {
+                self.render_native_session(encoder, view, session, matches, current);
+            }
+            return;
+        }
+        let dims = terminal.dimensions();
+        let pane = (
+            0.0,
+            self.tab_bar_height,
+            f32::from(dims.cols) * self.cell_width,
+            self.tab_bar_height + f32::from(dims.rows) * self.cell_height,
+        );
+        for session in sessions {
+            let origins: Vec<SurfaceOrigin> = surfaces
+                .iter()
+                .filter(|(session_id, _)| *session_id == session.session_id())
+                .map(|&(_, origin)| origin)
+                .collect();
+            if !origins.is_empty() {
+                self.render_native_surfaces(encoder, view, session, &origins, pane);
+            }
+        }
+    }
+
+    /// Vertex buffers for `region_count` regions, sized from the last
+    /// frame's use.
+    fn native_vertices_for(&self, region_count: usize) -> NativeVertices {
+        let est = region_count.saturating_mul(4);
+        NativeVertices {
+            bg_vertices: Vec::with_capacity(Self::next_capacity(self.prev_bg_count.0, est, 4)),
+            bg_indices: Vec::with_capacity(Self::next_capacity(self.prev_bg_count.1, est, 6)),
+            text_vertices: Vec::with_capacity(Self::next_capacity(self.prev_text_count.0, est, 4)),
+            text_indices: Vec::with_capacity(Self::next_capacity(self.prev_text_count.1, est, 6)),
+            deferred_images: Vec::new(),
+        }
+    }
+
+    /// Upload, draw and cache `vertices`, then draw their images.
+    fn draw_native_vertices(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        vertices: NativeVertices,
+    ) {
+        self.upload_draw_and_cache_native_buffers(
+            encoder,
+            view,
+            &vertices.bg_vertices,
+            &vertices.bg_indices,
+            &vertices.text_vertices,
+            &vertices.text_indices,
+        );
+        self.render_deferred_native_images(encoder, view, &vertices.deferred_images);
+    }
+
+    /// Render a native protocol session's full-scene tree (backgrounds,
+    /// text, widgets, images) over the whole pane.
     pub fn render_native_session(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -178,25 +329,9 @@ impl Renderer {
         search_matches: Option<&[crate::scene::SearchMatch]>,
         current_match_index: usize,
     ) {
-        use ultty_protocol::Content;
-
         let scene = session.scene();
-        let region_count = scene.iter_depth_first().count();
-        let est = region_count.saturating_mul(4);
-        let bg_vertex_cap = Self::next_capacity(self.prev_bg_count.0, est, 4);
-        let bg_index_cap = Self::next_capacity(self.prev_bg_count.1, est, 6);
-        let text_vertex_cap = Self::next_capacity(self.prev_text_count.0, est, 4);
-        let text_index_cap = Self::next_capacity(self.prev_text_count.1, est, 6);
-        let mut bg_vertices = Vec::with_capacity(bg_vertex_cap);
-        let mut bg_indices = Vec::with_capacity(bg_index_cap);
-        let mut text_vertices = Vec::with_capacity(text_vertex_cap);
-        let mut text_indices = Vec::with_capacity(text_index_cap);
-        let mut deferred_images: Vec<DeferredImageRender> = Vec::new();
-
-        // Build a set of matched region IDs for quick lookup
-        let matched_regions: std::collections::HashSet<ultty_protocol::RegionId> = search_matches
-            .map(|matches| matches.iter().map(|m| m.region_id).collect())
-            .unwrap_or_default();
+        let mut vertices = self.native_vertices_for(scene.iter_depth_first().count());
+        let origin = (0.0, self.tab_bar_height);
 
         let needs_scroll_rebuild =
             session.is_scroll_dirty() || self.scroll_adjustments_cache.is_empty();
@@ -204,16 +339,120 @@ impl Renderer {
         if needs_scroll_rebuild {
             geometry::rebuild_scroll_geometry(
                 scene,
+                ultty_protocol::RegionId::ROOT,
                 |id| session.scroll_offset(id),
                 self.cell_width,
                 self.cell_height,
-                self.tab_bar_height,
+                origin,
+                None,
                 &mut self.scroll_adjustments_cache,
                 &mut self.clip_rects_cache,
             );
         }
 
-        for region in scene.iter_depth_first() {
+        let scroll_adjustments = std::mem::take(&mut self.scroll_adjustments_cache);
+        let clip_rects = std::mem::take(&mut self.clip_rects_cache);
+        self.build_tree_vertices(
+            session,
+            ultty_protocol::RegionId::ROOT,
+            origin,
+            &scroll_adjustments,
+            &clip_rects,
+            search_matches,
+            current_match_index,
+            &mut vertices,
+        );
+        self.scroll_adjustments_cache = scroll_adjustments;
+        self.clip_rects_cache = clip_rects;
+
+        self.draw_native_vertices(encoder, view, vertices);
+    }
+
+    /// Render `session`'s placed inline surfaces (ADR 0020): each at its
+    /// pixel `top` and the pane's left edge, clipped to its own rows and to
+    /// `pane`, the grid area as `(min_x, min_y, max_x, max_y)` in pixels.
+    pub fn render_native_surfaces(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        session: &crate::protocol::NativeSession,
+        surfaces: &[SurfaceOrigin],
+        pane: (f32, f32, f32, f32),
+    ) {
+        let scene = session.scene();
+        let mut vertices = self.native_vertices_for(scene.len());
+        let mut scroll_adjustments = geometry::ScrollAdjustments::new();
+        let mut clip_rects = geometry::ClipRects::new();
+        for surface in surfaces {
+            let origin = (pane.0, surface.top);
+            let rows = (
+                origin.0,
+                origin.1,
+                pane.2,
+                origin.1 + f32::from(surface.rows) * self.cell_height,
+            );
+            let bounds = (
+                rows.0.max(pane.0),
+                rows.1.max(pane.1),
+                rows.2.min(pane.2),
+                rows.3.min(pane.3),
+            );
+            geometry::rebuild_scroll_geometry(
+                scene,
+                surface.id,
+                |id| session.scroll_offset(id),
+                self.cell_width,
+                self.cell_height,
+                origin,
+                Some(bounds),
+                &mut scroll_adjustments,
+                &mut clip_rects,
+            );
+            self.build_tree_vertices(
+                session,
+                surface.id,
+                origin,
+                &scroll_adjustments,
+                &clip_rects,
+                None,
+                0,
+                &mut vertices,
+            );
+        }
+        self.draw_native_vertices(encoder, view, vertices);
+    }
+
+    /// Append the vertices of the tree under `root`, laid out from pixel
+    /// `origin`, with the scroll adjustments and clip rects of its regions.
+    #[allow(clippy::too_many_arguments)]
+    fn build_tree_vertices(
+        &mut self,
+        session: &crate::protocol::NativeSession,
+        root: ultty_protocol::RegionId,
+        (origin_x, origin_y): (f32, f32),
+        scroll_adjustments: &geometry::ScrollAdjustments,
+        clip_rects: &geometry::ClipRects,
+        search_matches: Option<&[crate::scene::SearchMatch]>,
+        current_match_index: usize,
+        vertices: &mut NativeVertices,
+    ) {
+        use ultty_protocol::Content;
+
+        let scene = session.scene();
+        let NativeVertices {
+            bg_vertices,
+            bg_indices,
+            text_vertices,
+            text_indices,
+            deferred_images,
+        } = vertices;
+
+        // Build a set of matched region IDs for quick lookup
+        let matched_regions: std::collections::HashSet<ultty_protocol::RegionId> = search_matches
+            .map(|matches| matches.iter().map(|m| m.region_id).collect())
+            .unwrap_or_default();
+
+        for region in scene.iter_tree(root) {
             if region.id == ultty_protocol::RegionId::ROOT {
                 continue;
             }
@@ -223,23 +462,21 @@ impl Renderer {
                 continue;
             }
 
-            let (sadj_x, sadj_y) = self
-                .scroll_adjustments_cache
+            let (sadj_x, sadj_y) = scroll_adjustments
                 .get(&region.id)
                 .copied()
                 .unwrap_or((0.0, 0.0));
-            let x = ((layout.x - sadj_x) * self.cell_width).round();
-            let y = ((layout.y - sadj_y) * self.cell_height + self.tab_bar_height).round();
+            let x = ((layout.x - sadj_x) * self.cell_width + origin_x).round();
+            let y = ((layout.y - sadj_y) * self.cell_height + origin_y).round();
             let w = (layout.width * self.cell_width).round();
             let h = (layout.height * self.cell_height).round();
 
-            let cx = ((layout.content_x - sadj_x) * self.cell_width).round();
-            let cy = ((layout.content_y - sadj_y) * self.cell_height + self.tab_bar_height).round();
+            let cx = ((layout.content_x - sadj_x) * self.cell_width + origin_x).round();
+            let cy = ((layout.content_y - sadj_y) * self.cell_height + origin_y).round();
             let cw = layout.content_width;
 
             // Use inherited clip rect (intersected with overflow ancestors)
-            let (clip_min_x, clip_min_y, clip_max_x, clip_max_y) = self
-                .clip_rects_cache
+            let (clip_min_x, clip_min_y, clip_max_x, clip_max_y) = clip_rects
                 .get(&region.id)
                 .copied()
                 .unwrap_or((x, y, x + w, y + h));
@@ -255,9 +492,17 @@ impl Renderer {
             let bg_x1 = (x + w).min(clip_max_x);
             let bg_y1 = (y + h).min(clip_max_y);
 
-            if let Some(bg_color) = &region.style.bg {
+            let background = region_background(
+                region
+                    .style
+                    .bg
+                    .as_ref()
+                    .map(|bg| self.color_scheme.resolve_protocol_color(bg)),
+                scene.surface(region.id).is_some(),
+                self.color_scheme.background,
+            );
+            if let Some(color) = background {
                 if bg_x0 < bg_x1 && bg_y0 < bg_y1 {
-                    let color = self.color_scheme.resolve_protocol_color(bg_color);
                     let base_idx = bg_vertices.len() as u32;
 
                     bg_vertices.push(Vertex {
@@ -306,8 +551,8 @@ impl Renderer {
                 bg_y0,
                 bg_x1 - bg_x0,
                 bg_y1 - bg_y0,
-                &mut bg_vertices,
-                &mut bg_indices,
+                bg_vertices,
+                bg_indices,
             );
 
             match &region.content {
@@ -380,8 +625,8 @@ impl Renderer {
                                 clip_min_y,
                                 clip_max_x,
                                 clip_max_y,
-                                &mut text_vertices,
-                                &mut text_indices,
+                                text_vertices,
+                                text_indices,
                             );
                             visual_line += 1;
                         }
@@ -418,8 +663,8 @@ impl Renderer {
                                 clip_min_y,
                                 clip_max_x,
                                 clip_max_y,
-                                &mut text_vertices,
-                                &mut text_indices,
+                                text_vertices,
+                                text_indices,
                             );
                         }
                     }
@@ -467,8 +712,8 @@ impl Renderer {
                                 clip_min_y,
                                 clip_max_x,
                                 clip_max_y,
-                                &mut text_vertices,
-                                &mut text_indices,
+                                text_vertices,
+                                text_indices,
                             );
                             cursor_x += advance;
                             continue;
@@ -512,8 +757,8 @@ impl Renderer {
                                     clip_min_y,
                                     clip_max_x,
                                     clip_max_y,
-                                    &mut text_vertices,
-                                    &mut text_indices,
+                                    text_vertices,
+                                    text_indices,
                                 );
                                 cursor_x += advance;
                                 byte_pos = chunk_end;
@@ -535,11 +780,11 @@ impl Renderer {
                         w,
                         h,
                         &region.style,
-                        &mut bg_vertices,
-                        &mut bg_indices,
-                        &mut text_vertices,
-                        &mut text_indices,
-                        &mut deferred_images,
+                        bg_vertices,
+                        bg_indices,
+                        text_vertices,
+                        text_indices,
+                        deferred_images,
                     );
                 }
                 Content::None => {}
@@ -616,23 +861,127 @@ impl Renderer {
                 }
             }
         }
-
-        self.upload_draw_and_cache_native_buffers(
-            encoder,
-            view,
-            &bg_vertices,
-            &bg_indices,
-            &text_vertices,
-            &text_indices,
-        );
-
-        self.render_deferred_native_images(encoder, view, &deferred_images);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod surfaces {
+        use std::os::unix::net::UnixStream;
+        use std::time::Instant;
+
+        use ultty_protocol::{
+            AppMessage, Constraints, FrameId, RegionId, Style, CAP_INLINE_SURFACES,
+            PROTOCOL_VERSION,
+        };
+        use ultty_vt::ansi::AnsiParser;
+        use ultty_vt::grid::{Dimensions, Terminal, TerminalHandler};
+
+        use super::super::{visible_surfaces, SurfaceOrigin};
+        use crate::protocol::pairing::AnchorPairing;
+        use crate::protocol::NativeSession;
+        use crate::terminal_manager::TabId;
+
+        fn feed(term: &mut Terminal, bytes: &[u8]) {
+            let mut parser = AnsiParser::new();
+            let mut handler = TerminalHandler::new(term);
+            parser.feed(bytes, |action| handler.handle(action));
+        }
+
+        /// A 20x4 terminal with session 3's two-row surface 9 placed on
+        /// its first two lines.
+        fn placed_card() -> (Terminal, NativeSession, UnixStream) {
+            let (ours, peer) = UnixStream::pair().unwrap();
+            let mut session = NativeSession::new(ours, 3, TabId::new(0)).unwrap();
+            session.set_inline_surfaces(true);
+            for msg in [
+                AppMessage::ClientHello {
+                    version: PROTOCOL_VERSION,
+                    requested_capabilities: CAP_INLINE_SURFACES,
+                },
+                AppMessage::BeginFrame {
+                    frame_id: FrameId(1),
+                },
+                AppMessage::CreateSurface {
+                    id: RegionId::new(9),
+                    rows: 2,
+                    constraints: Constraints::default(),
+                    style: Style::default(),
+                },
+                AppMessage::EndFrame {
+                    frame_id: FrameId(1),
+                },
+            ] {
+                session.handle_message_for_test(msg).unwrap();
+            }
+            let mut term = Terminal::new(Dimensions::new(20, 4));
+            term.set_inline_anchors(true);
+            feed(&mut term, b"\x1b_u3;9;2\x1b\\card 1\r\ncard 2\r\n");
+            AnchorPairing::default().update(
+                &mut term,
+                &mut [&mut session],
+                true,
+                true,
+                Instant::now(),
+            );
+            assert_eq!(session.placed_surfaces().count(), 1);
+            (term, session, peer)
+        }
+
+        fn at(top: f32) -> Vec<(u64, SurfaceOrigin)> {
+            vec![(
+                3,
+                SurfaceOrigin {
+                    id: RegionId::new(9),
+                    rows: 2,
+                    top,
+                },
+            )]
+        }
+
+        /// A surface root is opaque even without a `bg`: it covers the
+        /// fallback text with the terminal's background. Other regions
+        /// without one stay transparent, and a `bg` wins.
+        #[test]
+        fn surface_roots_are_opaque_without_a_background() {
+            use super::super::region_background;
+            use crate::renderer::color::Rgba;
+            let terminal = Rgba::new(0.1, 0.1, 0.1, 1.0);
+            let own = Rgba::new(0.8, 0.2, 0.6, 1.0);
+            assert_eq!(region_background(None, true, terminal), Some(terminal));
+            assert_eq!(region_background(None, false, terminal), None);
+            assert_eq!(region_background(Some(own), true, terminal), Some(own));
+            assert_eq!(region_background(Some(own), false, terminal), Some(own));
+        }
+
+        /// The renderer rebuilds its cached native buffers when this list
+        /// changes, so it must follow every move of the anchor rows.
+        #[test]
+        fn surfaces_move_with_output_and_scrollback_and_leave_the_screen() {
+            let (mut term, session, _peer) = placed_card();
+            let draw = |term: &Terminal| visible_surfaces(term, &[&session], 30.0, 10.0);
+            assert_eq!(draw(&term), at(30.0));
+
+            // Output scrolls the card half off the top, then off.
+            feed(&mut term, b"1\r\n2\r\n");
+            assert_eq!(draw(&term), at(20.0));
+            feed(&mut term, b"3\r\n");
+            assert_eq!(draw(&term), Vec::new(), "no row on the screen");
+
+            // Scrolling back brings it to where its text is.
+            term.buffer_mut().scroll_up(1);
+            assert_eq!(draw(&term), at(20.0));
+            term.buffer_mut().scroll_up(1);
+            assert_eq!(draw(&term), at(30.0));
+
+            // The alternate screen hides it.
+            term.buffer_mut().scroll_to_bottom();
+            feed(&mut term, b"\x1b[?1049h");
+            assert_eq!(draw(&term), Vec::new());
+        }
+    }
 
     #[test]
     fn wrap_line_short_text_unchanged() {

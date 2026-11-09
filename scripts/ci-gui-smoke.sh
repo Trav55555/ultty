@@ -62,6 +62,14 @@ scripts/regression-smoke.sh "$OUT/regression"
 # A second Ultty on its own display, with the accessibility adapter and no
 # session bus.
 ULTTY="$ROOT/target/debug/ultty" scripts/e2e/accessibility-no-bus.sh "$OUT/accessibility"
+# A third, for an inline surface over scrolling output (ADR 0020). It turns
+# the mouse wheel with xdotool; runners without it skip the check, loudly.
+if command -v xdotool >/dev/null 2>&1; then
+  ULTTY="$ROOT/target/debug/ultty" ULTTYCTL="$ULTTYCTL" \
+    scripts/e2e/inline-surface.sh "$OUT/inline-surface"
+else
+  echo "SKIPPED: scripts/e2e/inline-surface.sh needs xdotool" >&2
+fi
 
 # Catch panics that did not take the process down.
 if grep -q "panicked at" "$OUT/ultty.log"; then

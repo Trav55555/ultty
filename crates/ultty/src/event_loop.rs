@@ -333,6 +333,9 @@ impl EventLoop {
     pub fn from_child(child: Child, cols: u16, rows: u16) -> io::Result<Self> {
         let mut terminal = Terminal::new(Dimensions::new(cols, rows));
         terminal.set_terminal_name(child.term());
+        // The UI thread pairs these anchors with native sessions' inline
+        // surfaces (ADR 0020); see `ProtocolServer::pair_inline_surfaces`.
+        terminal.set_inline_anchors(true);
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 terminal,

@@ -200,12 +200,9 @@ fn test_unknown_capability_bits_are_masked_during_handshake() {
     let msg1 = TerminalMessage::decode(&mut cursor).unwrap();
     match msg1 {
         TerminalMessage::ServerHello { capabilities, .. } => {
-            // Inline surfaces are known but not offered until they are
-            // drawn (ADR 0020).
-            assert_eq!(
-                capabilities,
-                CAP_ALL_KNOWN & !ultty_protocol::CAP_INLINE_SURFACES
-            );
+            // Every capability the protocol knows is offered, inline
+            // surfaces (ADR 0020) included.
+            assert_eq!(capabilities, CAP_ALL_KNOWN);
             assert_eq!(capabilities & unknown, 0);
         }
         other => panic!("Expected ServerHello, got {:?}", other),
@@ -543,8 +540,10 @@ fn test_key_event_delivery() {
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
 
-    // Subscribe ROOT to key events
+    // Subscribe ROOT to key events; a region under ROOT makes the session
+    // full-scene, which keys go to.
     let mut buf = BytesMut::new();
+    encode_root_child(&mut buf);
     AppMessage::Subscribe {
         id: RegionId::ROOT,
         events: EVENT_KEY,
@@ -587,8 +586,10 @@ fn test_key_up_event_delivery() {
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
 
-    // Subscribe ROOT to key events
+    // Subscribe ROOT to key events; a region under ROOT makes the session
+    // full-scene, which keys go to.
     let mut buf = BytesMut::new();
+    encode_root_child(&mut buf);
     AppMessage::Subscribe {
         id: RegionId::ROOT,
         events: EVENT_KEY,
@@ -1404,8 +1405,10 @@ fn test_unsubscribe_stops_events() {
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
 
-    // Subscribe ROOT to key events
+    // Subscribe ROOT to key events; a region under ROOT makes the session
+    // full-scene, which keys go to.
     let mut buf = BytesMut::new();
+    encode_root_child(&mut buf);
     AppMessage::Subscribe {
         id: RegionId::ROOT,
         events: EVENT_KEY,
@@ -1681,8 +1684,10 @@ fn test_text_input_delivery() {
 
     let (mut client, _root) = handshake(&mut server, &socket_path);
 
-    // Subscribe ROOT to key events (TextInput is keyboard-adjacent)
+    // Subscribe ROOT to key events (TextInput is keyboard-adjacent), with a
+    // region under ROOT: keys go to full-scene sessions.
     let mut buf = BytesMut::new();
+    encode_root_child(&mut buf);
     AppMessage::Subscribe {
         id: RegionId::ROOT,
         events: EVENT_KEY,
@@ -1968,8 +1973,22 @@ fn read_messages(client: &mut UnixStream) -> Vec<TerminalMessage> {
     out
 }
 
+/// Encode a region under ROOT, which makes a session full-scene: only
+/// full-scene sessions get keys (ADR 0020).
+fn encode_root_child(buf: &mut BytesMut) {
+    AppMessage::CreateRegion {
+        id: RegionId::new(900),
+        parent: RegionId::ROOT,
+        insert_index: -1,
+        constraints: Constraints::default(),
+        style: Style::default(),
+    }
+    .encode(buf);
+}
+
 fn subscribe_root_keys(client: &mut UnixStream, server: &mut ProtocolServer) {
     let mut buf = BytesMut::new();
+    encode_root_child(&mut buf);
     AppMessage::Subscribe {
         id: RegionId::ROOT,
         events: EVENT_KEY,

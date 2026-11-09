@@ -8,12 +8,21 @@ use super::{
 /// Most anchor events kept for the embedder; past it the oldest go.
 pub const MAX_ANCHOR_EVENTS: usize = 4096;
 
+/// Most `Refused` anchor events queued at once; later refusals are dropped
+/// until the queue is taken, so they never push out `Placed` or `Lost`.
+pub const MAX_QUEUED_REFUSALS: usize = 64;
+
 /// What happened to inline surface anchors (ADR 0020), for the embedder to
 /// pair with sessions. See [`Terminal::take_anchor_events`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnchorEvent {
     /// Rows were reserved and tagged `tag` on the main screen.
-    Placed { tag: u16, anchor: Anchor },
+    Placed {
+        tag: u16,
+        /// See [`Buffer::anchor_serial`].
+        serial: u64,
+        anchor: Anchor,
+    },
     /// The anchor reserved nothing.
     Refused {
         anchor: Anchor,
@@ -21,7 +30,12 @@ pub enum AnchorEvent {
     },
     /// The anchor's first row is gone: erased, cleared, reset, or evicted
     /// from scrollback. Its tag is free again.
-    Lost { tag: u16, anchor: Anchor },
+    Lost {
+        tag: u16,
+        /// The serial it was placed with.
+        serial: u64,
+        anchor: Anchor,
+    },
 }
 
 /// Maximum number of distinct OSC 8 hyperlink URIs remembered per terminal.
@@ -272,6 +286,10 @@ pub struct Terminal {
     pending_alternate_resize: Option<Dimensions>,
     /// Anchor events not yet taken by the embedder, oldest first.
     anchor_events: std::collections::VecDeque<AnchorEvent>,
+    /// `Refused` events in `anchor_events`.
+    queued_refusals: usize,
+    /// Events were dropped since [`Terminal::take_anchor_overflow`].
+    anchor_events_overflowed: bool,
     /// Anchors in the output reserve rows; see
     /// [`Terminal::set_inline_anchors`].
     inline_anchors: bool,
@@ -336,6 +354,8 @@ impl Terminal {
             terminal_name: DEFAULT_TERMINAL_NAME.to_string(),
             pending_alternate_resize: None,
             anchor_events: std::collections::VecDeque::new(),
+            queued_refusals: 0,
+            anchor_events_overflowed: false,
             inline_anchors: false,
         }
     }
@@ -398,7 +418,11 @@ impl Terminal {
             }
         } else {
             match self.main.place_anchor(anchor) {
-                Ok(tag) => AnchorEvent::Placed { tag, anchor },
+                Ok((tag, serial)) => AnchorEvent::Placed {
+                    tag,
+                    serial,
+                    anchor,
+                },
                 Err(reason) => AnchorEvent::Refused { anchor, reason },
             }
         };
@@ -410,18 +434,50 @@ impl Terminal {
     /// row is gone are found now, so call this after feeding output.
     pub fn take_anchor_events(&mut self) -> Vec<AnchorEvent> {
         self.sweep_anchors();
+        self.queued_refusals = 0;
         self.anchor_events.drain(..).collect()
     }
 
+    /// Drop anchor `tag` from the main screen and take its tag off its
+    /// rows, leaving their text: the surface is closed, refused or never
+    /// claimed (ADR 0020). Returns the anchor if it was live.
+    pub fn release_anchor(&mut self, tag: u16) -> Option<Anchor> {
+        self.main.release_anchor(tag)
+    }
+
     fn sweep_anchors(&mut self) {
-        for (tag, anchor) in self.main.sweep_anchors() {
-            self.push_anchor_event(AnchorEvent::Lost { tag, anchor });
+        for (tag, serial, anchor) in self.main.sweep_anchors() {
+            self.push_anchor_event(AnchorEvent::Lost {
+                tag,
+                serial,
+                anchor,
+            });
         }
     }
 
+    /// Whether anchor events were lost since the last call because more
+    /// than [`MAX_ANCHOR_EVENTS`] were queued. The embedder then reconciles
+    /// with [`Buffer::anchors`] of the [`Terminal::main_buffer`] instead of
+    /// trusting the events it got.
+    pub fn take_anchor_overflow(&mut self) -> bool {
+        std::mem::take(&mut self.anchor_events_overflowed)
+    }
+
     fn push_anchor_event(&mut self, event: AnchorEvent) {
+        if matches!(event, AnchorEvent::Refused { .. }) {
+            // A refused anchor holds nothing, so losing word of it costs at
+            // most a waiting surface its timeout; a flood of them must not
+            // push out the events that do hold tags.
+            if self.queued_refusals >= MAX_QUEUED_REFUSALS {
+                return;
+            }
+            self.queued_refusals += 1;
+        }
         if self.anchor_events.len() >= MAX_ANCHOR_EVENTS {
-            self.anchor_events.pop_front();
+            if let Some(AnchorEvent::Refused { .. }) = self.anchor_events.pop_front() {
+                self.queued_refusals -= 1;
+            }
+            self.anchor_events_overflowed = true;
         }
         self.anchor_events.push_back(event);
     }
@@ -442,6 +498,12 @@ impl Terminal {
         } else {
             &self.main
         }
+    }
+
+    /// The main screen's buffer, whichever screen is shown. Inline surface
+    /// anchors live there.
+    pub fn main_buffer(&self) -> &Buffer {
+        &self.main
     }
 
     /// Get mutable access to the active buffer.
@@ -1119,8 +1181,12 @@ impl Terminal {
         self.main.clear_history();
         // The main grid keeps its text when the reset came on the
         // alternate screen, but no anchor survives a reset.
-        for (tag, anchor) in self.main.drop_all_anchors() {
-            self.push_anchor_event(AnchorEvent::Lost { tag, anchor });
+        for (tag, serial, anchor) in self.main.drop_all_anchors() {
+            self.push_anchor_event(AnchorEvent::Lost {
+                tag,
+                serial,
+                anchor,
+            });
         }
         self.images.clear();
         self.hyperlinks.clear();

@@ -75,10 +75,13 @@ regions | jq -e '.scenes[0] as $s | $s.regions[]
 ```
 
 An app's inline surfaces ([ADR 0020](adr/0020-inline-surfaces.md)) come
-after its main tree, each as a `surface #id (rows, state)` line followed by
-its regions; in JSON they are `.scenes[0].surfaces[]`, each with `id`,
-`rows`, `state` and its own `regions`, positioned from the surface's top
-left.
+after its main tree, each as a `surface #id (rows, state at line N)` line
+followed by its regions; in JSON they are `.scenes[0].surfaces[]`, each
+with `id`, `rows`, `state` (`unplaced`, `placed` or `hidden`), once placed
+`anchor_line` (the line of its first row, as `text --scrollback` numbers
+them from 0), and its own `regions`, positioned from the surface's top
+left. `scripts/e2e/inline-surface.sh` checks a card this way and in
+screenshots.
 
 There is no `wait-for` on regions yet; poll `regions` in a loop, or wait
 for something the program prints to the grid.

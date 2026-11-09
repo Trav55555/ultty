@@ -31,6 +31,10 @@ impl App {
                 .as_ref()
                 .map_or(0, |server| server.session_count()),
             control_wait: self.next_control_wait_deadline(),
+            anchor_release: self
+                .protocol_server
+                .as_ref()
+                .and_then(|server| server.next_pairing_deadline()),
             accessibility: self
                 .accessibility
                 .as_ref()
@@ -113,6 +117,49 @@ impl App {
                 tracing::warn!("Failed to send in-band data to tab {}: {}", tab_id.raw(), e);
                 server.end_in_band_session(tab_id);
             }
+        }
+    }
+
+    /// Pair native sessions' inline surfaces with the anchors in their
+    /// tabs' output (ADR 0020). A terminal gets a pass when it had output
+    /// (`with_output`) or still has surfaces to place or follow; the pass
+    /// also tells apps when a surface scrolls off or back onto the screen.
+    fn pair_inline_surfaces(
+        &mut self,
+        with_output: &[ultty::terminal_manager::TerminalId],
+        now: Instant,
+    ) {
+        let Some(server) = self.protocol_server.as_mut() else {
+            return;
+        };
+        let active = self.terminal_manager.active_tab().map(|tab| tab.id);
+        for tab in self.terminal_manager.tabs() {
+            let single_pane = tab.terminals.len() == 1;
+            for &terminal_id in &tab.terminals {
+                if !with_output.contains(&terminal_id) && !server.needs_pairing(tab.id, terminal_id)
+                {
+                    continue;
+                }
+                let Some(managed) = self.terminal_manager.terminal(terminal_id) else {
+                    continue;
+                };
+                let mut terminal = managed.event_loop.terminal();
+                server.pair_inline_surfaces(
+                    tab.id,
+                    terminal_id,
+                    &mut terminal,
+                    single_pane,
+                    single_pane && Some(tab.id) == active,
+                    now,
+                );
+            }
+        }
+        server.expire_unplaced_surfaces(now);
+        let terminal_manager = &self.terminal_manager;
+        server.retain_pairings(|terminal_id| terminal_manager.terminal(terminal_id).is_some());
+        // A surface placed or dropped just now is drawn in this frame.
+        if server.active_tab_sessions().any(|s| s.is_render_dirty()) {
+            self.needs_redraw = true;
         }
     }
 
@@ -215,6 +262,7 @@ impl App {
             Ok(all_events) => {
                 let mut content_changed = false;
                 let mut tab_titles_changed = false;
+                let mut with_output = Vec::new();
                 // What a screen reader is shown changed (ADR 0021 §3).
                 let mut shown_changed = false;
                 let subscribed = self
@@ -234,6 +282,7 @@ impl App {
                         }
                         match event {
                             TerminalEvent::Redraw => {
+                                with_output.push(terminal_id);
                                 // A background tab's output is drawn when
                                 // the tab is shown.
                                 if self.terminal_manager.is_on_screen(terminal_id) {
@@ -342,6 +391,7 @@ impl App {
 
                 // Clean up exited terminals
                 self.terminal_manager.cleanup_exited();
+                self.pair_inline_surfaces(&with_output, now);
                 let tab_state_after_cleanup = (
                     self.terminal_manager.tab_count(),
                     self.terminal_manager.active_tab().map(|tab| tab.id),
@@ -553,6 +603,8 @@ struct WakeState {
     /// The earliest `ulttyctl wait-for` timeout or quiet-period end. Text
     /// and events wake the UI on their own, so waits need no tick.
     control_wait: Option<Instant>,
+    /// When an inline surface anchor that no surface claimed is released.
+    anchor_release: Option<Instant>,
     /// When a coalesced accessibility tree is due; `None` unless a screen
     /// reader is listening and the screen changed.
     accessibility: Option<Instant>,
@@ -584,6 +636,7 @@ impl WakeState {
             self.config_reload,
             maintenance,
             self.control_wait,
+            self.anchor_release,
             self.accessibility,
         ]
         .into_iter()
@@ -833,6 +886,7 @@ mod tests {
             config_reload: None,
             native_sessions: 0,
             control_wait: None,
+            anchor_release: None,
             accessibility: None,
         }
     }
@@ -898,6 +952,20 @@ mod tests {
             ..idle(now)
         };
         assert_eq!(wait.next_wake(now), Some(deadline));
+    }
+
+    /// An anchor no surface claimed is released on time even when nothing
+    /// else would wake the window (no native session, so no tick).
+    #[test]
+    fn a_waiting_anchor_wakes_at_its_release() {
+        let now = Instant::now();
+        let release = now + Duration::from_millis(1500);
+        let state = WakeState {
+            anchor_release: Some(release),
+            ..idle(now)
+        };
+        assert_eq!(state.next_wake(now), Some(release));
+        assert_eq!(idle(now).next_wake(now), None);
     }
 
     #[test]

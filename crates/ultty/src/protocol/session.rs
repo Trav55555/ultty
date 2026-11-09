@@ -8,7 +8,10 @@ mod content_limits;
 mod dirty;
 mod errors;
 mod frame;
+mod surfaces;
 mod transport;
+
+pub use surfaces::{PlacedSurface, SurfacePlacement, SURFACE_PAIRING_TIMEOUT};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
@@ -137,6 +140,8 @@ pub struct NativeSession {
     /// Whether this session offers `CAP_INLINE_SURFACES` in its
     /// `ServerHello`.
     inline_surfaces: bool,
+    /// Placement of each surface root in `scene`, by its id.
+    surface_states: HashMap<RegionId, surfaces::SurfaceState>,
     /// Negotiated capabilities.
     capabilities: u32,
     /// Negotiated protocol version.
@@ -286,6 +291,7 @@ impl NativeSession {
             dirty_regions: HashSet::new(),
             scroll_dirty: true,
             inline_surfaces: false,
+            surface_states: HashMap::new(),
             capabilities: 0,
             protocol_version: PROTOCOL_VERSION,
             subscriptions: HashMap::new(),
@@ -326,8 +332,9 @@ impl NativeSession {
 
     /// Whether the session offers inline surfaces (ADR 0020) to an app that
     /// asks for them; it takes effect at the next `ClientHello`. Off by
-    /// default: until the terminal pairs surfaces with anchors and draws
-    /// them, an app that negotiated them would get surfaces nobody sees.
+    /// default: a session's surfaces are seen only where something pairs
+    /// them with anchors and draws them, as `ProtocolServer` and the
+    /// renderer do, and the server turns it on for every session.
     pub fn set_inline_surfaces(&mut self, enabled: bool) {
         self.inline_surfaces = enabled;
     }
@@ -606,13 +613,15 @@ impl NativeSession {
             .scene
             .surfaces()
             .iter()
-            .map(|surface| SurfaceInfo {
-                id: surface.id.0,
-                rows: surface.rows,
-                // Anchors are paired with surfaces in ADR 0020 slice 3.
-                state: "unplaced".to_string(),
-                anchor_line: None,
-                regions: self.describe_tree(surface.id),
+            .map(|surface| {
+                let (state, anchor_line) = self.surface_report(surface.id);
+                SurfaceInfo {
+                    id: surface.id.0,
+                    rows: surface.rows,
+                    state: state.to_string(),
+                    anchor_line,
+                    regions: self.describe_tree(surface.id),
+                }
             })
             .collect();
         NativeScene {
@@ -1088,6 +1097,26 @@ impl NativeSession {
             scroll_x,
             scroll_y,
         }))
+    }
+}
+
+#[cfg(test)]
+impl NativeSession {
+    /// Apply `msg` as if the app had sent it.
+    pub(crate) fn handle_message_for_test(&mut self, msg: AppMessage) -> io::Result<bool> {
+        self.handle_message(msg)
+    }
+
+    /// Every message queued for the app since the last call.
+    pub(crate) fn take_sent_messages(&mut self) -> Vec<TerminalMessage> {
+        use ultty_protocol::Decode;
+        let bytes = self.write_buf.split().freeze();
+        let mut cursor = bytes.as_ref();
+        let mut out = Vec::new();
+        while !cursor.is_empty() {
+            out.push(TerminalMessage::decode(&mut cursor).expect("valid terminal message"));
+        }
+        out
     }
 }
 
