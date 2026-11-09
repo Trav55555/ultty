@@ -4,8 +4,8 @@
 use std::collections::VecDeque;
 
 use super::{
-    base, collect_table, collect_threshold, row_erase, style_id, unpack, used_len, Head, Storage,
-    Style, StyleTable, BLANK, GRAPHEME, STYLE_MASK,
+    base, collect_table, collect_threshold, lookup, mark_live, remap_key, row_erase, style_key,
+    unpack, used_len, Head, Storage, Style, StyleTable, BLANK, GRAPHEME, INLINE, STYLE_MASK,
 };
 use crate::grid::cell::Cell;
 use crate::grid::row::{AnchorTag, RowMarks};
@@ -51,7 +51,8 @@ struct HistHead {
     wrapped: bool,
     _marks: RowMarks,
     _anchor: AnchorTag,
-    style: u32,
+    /// The style key of a uniform row, in the page's ids.
+    style: u64,
 }
 
 /// Up to [`PAGE_ROWS`] history rows, appended in place.
@@ -182,21 +183,22 @@ impl History {
                 page.bytes.truncate(start + len);
             }
             let len = page.bytes.len() - start;
-            let style = remap_id(remap, page, screen, head.style);
+            let style = remap_key_to_page(remap, &mut page.styles, screen, head.style);
             (Kind::Uniform, len, style)
         } else {
             let cells = &used[..used_len(used)];
-            page.bytes.reserve(cells.len() * 8);
-            let (mut last_id, mut last_page_id) = (0, 0);
-            for &cell in cells {
+            let start = page.bytes.len();
+            page.bytes.resize(start + cells.len() * 8, 0);
+            let (out, _) = page.bytes[start..].as_chunks_mut::<8>();
+            let (mut last_key, mut last_page_key) = (0, 0);
+            for (out, &cell) in out.iter_mut().zip(cells) {
                 assert!(cell & GRAPHEME == 0, "the prototype stores no graphemes");
-                let id = style_id(cell);
-                if id != last_id {
-                    last_id = id;
-                    last_page_id = remap_id(remap, page, screen, id);
+                let key = style_key(cell);
+                if key != last_key {
+                    last_key = key;
+                    last_page_key = remap_key_to_page(remap, &mut page.styles, screen, key);
                 }
-                let stored = (cell & !STYLE_MASK) | base(last_page_id);
-                page.bytes.extend_from_slice(&stored.to_le_bytes());
+                *out = ((cell & !STYLE_MASK) | base(last_page_key)).to_le_bytes();
             }
             (Kind::Cells, cells.len(), 0)
         };
@@ -221,7 +223,7 @@ impl History {
         out.clear();
         match head.kind {
             Kind::Uniform => {
-                let style = page.styles[head.style as usize];
+                let style = lookup(&page.styles, head.style);
                 let bytes = &page.bytes[start..start + usize::from(head.len)];
                 out.extend(
                     bytes
@@ -256,25 +258,41 @@ impl History {
     }
 }
 
-/// The newest page's id for screen style `id`, interning it on a miss.
-#[inline]
-fn remap_id(remap: &mut Vec<u32>, page: &mut HistoryPage, screen: &StyleTable, id: u32) -> u32 {
-    if id == 0 {
-        return 0;
+/// The newest page's key for screen style key `key`: inline keys and the
+/// default are the same on every page; a table id is added to the page's
+/// list (`styles`) on a miss.
+#[inline(always)]
+fn remap_key_to_page(
+    remap: &mut Vec<u32>,
+    styles: &mut Vec<Style>,
+    screen: &StyleTable,
+    key: u64,
+) -> u64 {
+    if key == 0 || key & INLINE != 0 {
+        return key;
     }
-    let index = id as usize;
-    if let Some(&mapped) = remap.get(index) {
-        if mapped != UNMAPPED {
-            return mapped;
-        }
+    match remap.get(key as usize) {
+        Some(&mapped) if mapped != UNMAPPED => u64::from(mapped),
+        _ => add_to_page(remap, styles, screen, key),
     }
-    let mapped = page.styles.len() as u32;
-    page.styles.push(screen.get(id));
+}
+
+/// `remap_key_to_page`'s miss: append the screen style to the page.
+#[inline(never)]
+fn add_to_page(
+    remap: &mut Vec<u32>,
+    styles: &mut Vec<Style>,
+    screen: &StyleTable,
+    key: u64,
+) -> u64 {
+    let index = key as usize;
+    let mapped = styles.len() as u32;
+    styles.push(screen.style(key));
     if remap.len() <= index {
         remap.resize(index + 1, UNMAPPED);
     }
     remap[index] = mapped;
-    mapped
+    u64::from(mapped)
 }
 
 /// Variant C's storage.
@@ -290,22 +308,22 @@ impl StoreC {
         let page = &mut self.screen;
         let mut live = vec![false; page.styles.len()];
         for (slot, head) in page.heads.iter().enumerate() {
-            live[head.style as usize] = true;
+            mark_live(&mut live, head.style);
             let start = slot * page.cols;
             for &cell in &page.cells[start..start + usize::from(head.used)] {
-                live[style_id(cell) as usize] = true;
+                mark_live(&mut live, style_key(cell));
             }
         }
         let map = collect_table(&mut page.styles, &live);
         for (slot, head) in page.heads.iter_mut().enumerate() {
-            head.style = map[head.style as usize];
+            head.style = remap_key(&map, head.style);
             let start = slot * page.cols;
             for cell in &mut page.cells[start..start + usize::from(head.used)] {
-                *cell = (*cell & !STYLE_MASK) | base(map[style_id(*cell) as usize]);
+                *cell = (*cell & !STYLE_MASK) | base(remap_key(&map, style_key(*cell)));
             }
         }
         self.generation = self.generation.wrapping_add(1);
-        self.collect_at = collect_threshold(page.styles.len());
+        self.collect_at = collect_threshold(page.styles.len(), page.cells.len());
     }
 }
 
@@ -322,7 +340,7 @@ impl Storage for StoreC {
                 _graphemes: (Vec::new(), Vec::new()),
             },
             generation: 0,
-            collect_at: collect_threshold(0),
+            collect_at: collect_threshold(0, cols * rows),
             history: History::new(max_history),
         }
     }
@@ -332,7 +350,7 @@ impl Storage for StoreC {
     }
 
     fn intern(&mut self, style: Style) -> u32 {
-        // Collecting when due, before the lookup, keeps it to one hash.
+        // Collect before adding, so the new id survives.
         if self.screen.styles.len() >= self.collect_at {
             self.collect();
         }
@@ -365,14 +383,14 @@ impl Storage for StoreC {
         );
     }
 
-    fn scroll_up(&mut self, erase_id: u32) {
+    fn scroll_up(&mut self, erase_key: u64) {
         self.screen.slots.rotate_left(1);
         let bottom = self.screen.slots.len() as u16 - 1;
         let (slot, range) = self.screen.slot_range(bottom);
         row_erase(
             &mut self.screen.cells[range],
             &mut self.screen.heads[slot],
-            erase_id,
+            erase_key,
         );
     }
 

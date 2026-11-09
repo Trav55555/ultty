@@ -15,16 +15,15 @@
 //! `Buffer` and `Grid` for the cases above, and the row operations below,
 //! so the difference between them is only where rows and history live.
 //! SGR goes through the existing attribute code (a scratch [`Terminal`]
-//! and [`TerminalHandler`]) and the resulting template is interned once
-//! per change. Grapheme clusters are not supported: nothing in the
-//! measured corpora makes one, and the correctness check would catch it.
+//! and [`TerminalHandler`]) and the resulting template gets its style key
+//! once per change, when the next character is printed: inline in the
+//! cell when it has no truecolor, underline color or hyperlink, otherwise
+//! from the style table (see [`INLINE`] and [`StyleTable`]). Grapheme
+//! clusters are not supported: nothing in the measured corpora makes one,
+//! and the correctness check would catch it.
 
 pub mod a;
 pub mod c;
-
-use std::hash::{Hash, Hasher};
-
-use foldhash::{HashMap, HashMapExt};
 
 use super::cell::{Cell, CellFlags, PackedColor};
 use super::cluster::{self, CharProps, Tail};
@@ -45,16 +44,6 @@ pub struct Style {
     underline_color: PackedColor,
     flags: CellFlags,
     hyperlink_id: u32,
-}
-
-impl Hash for Style {
-    /// Three words rather than five fields: hashing is most of interning.
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_u64(u64::from(self.fg.bits()) | u64::from(self.bg.bits()) << 32);
-        state
-            .write_u64(u64::from(self.underline_color.bits()) | u64::from(self.flags.bits()) << 32);
-        state.write_u32(self.hyperlink_id);
-    }
 }
 
 impl Style {
@@ -86,61 +75,81 @@ impl Style {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
+
+    /// The style's slot in [`StyleTable`]'s cache: a multiplicative hash
+    /// of its words.
+    #[inline]
+    fn slot(&self) -> usize {
+        let colors = u64::from(self.fg.bits()) | u64::from(self.bg.bits()) << 32;
+        let rest = u64::from(self.underline_color.bits())
+            ^ u64::from(self.flags.bits()) << 32
+            ^ u64::from(self.hyperlink_id).rotate_left(16);
+        let hash = (colors ^ rest.rotate_left(29)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        (hash >> (64 - RECENT.trailing_zeros())) as usize
+    }
 }
 
-/// Styles interned to ids; id 0 is always the default style.
+/// Styles by id; id 0 is always the default style.
+///
+/// Interning is approximate: a small direct-mapped cache of recent styles
+/// finds a style that is still hot, and anything else is appended under a
+/// new id. An id always names one style, but a style may have several ids
+/// (a uniform row or a history run may then split where it need not).
+/// That trades a hash table lookup and insert per new style, which most
+/// of an SGR-heavy stream is, for one cache probe. Collection drops the
+/// duplicates that are no longer on screen.
 pub struct StyleTable {
     styles: Vec<Style>,
-    index: HashMap<Style, u32>,
+    /// Slot to id of the style last interned there; 0 means empty (the
+    /// default style never reaches the cache).
+    recent: Box<[u32; RECENT]>,
 }
+
+/// Slots in [`StyleTable`]'s cache of recent styles.
+const RECENT: usize = 256;
 
 impl StyleTable {
     fn new() -> Self {
-        let mut table = Self {
-            styles: Vec::new(),
-            index: HashMap::new(),
-        };
-        table.clear();
-        table
+        Self {
+            styles: vec![Style::default()],
+            recent: Box::new([0; RECENT]),
+        }
     }
 
-    /// Back to only the default style, keeping capacity.
-    fn clear(&mut self) {
-        self.styles.clear();
-        self.index.clear();
-        self.styles.push(Style::default());
-        self.index.insert(Style::default(), 0);
-    }
-
-    fn get(&self, id: u32) -> Style {
-        self.styles[id as usize]
+    /// The style `key` names, inline or in this table.
+    fn style(&self, key: u64) -> Style {
+        lookup(&self.styles, key)
     }
 
     fn len(&self) -> usize {
         self.styles.len()
     }
 
-    /// `style`'s id, added if new: one hash lookup either way.
+    /// An id for `style`: the cached one if `style` is still in the
+    /// cache, otherwise a new one.
+    #[inline]
     fn insert(&mut self, style: Style) -> u32 {
         if style.is_default() {
             return 0;
         }
-        let next = self.styles.len() as u32;
-        let id = *self.index.entry(style).or_insert(next);
-        if id == next {
-            self.styles.push(style);
+        let slot = style.slot();
+        let cached = self.recent[slot];
+        if cached != 0 && self.styles[cached as usize] == style {
+            return cached;
         }
+        let id = self.styles.len() as u32;
+        self.styles.push(style);
+        self.recent[slot] = id;
         id
     }
 
     fn heap_bytes(&self) -> usize {
-        self.styles.capacity() * std::mem::size_of::<Style>()
-            + self.index.capacity() * (std::mem::size_of::<(Style, u32)>() + 1)
+        self.styles.capacity() * std::mem::size_of::<Style>() + RECENT * 4
     }
 }
 
 // Packed cells (ADR §1): codepoint in bits 0..21, width in 21..23, the
-// grapheme bit at 23 and the style id in 24..48.
+// grapheme bit at 23 and the style key in 24..64.
 pub(crate) const BLANK: u64 = 0x20;
 const CP_MASK: u64 = 0x1F_FFFF;
 const WIDE: u64 = 1 << 21;
@@ -148,16 +157,64 @@ const SPACER: u64 = 2 << 21;
 const WIDTH_MASK: u64 = 3 << 21;
 const GRAPHEME: u64 = 1 << 23;
 const STYLE_SHIFT: u32 = 24;
-const STYLE_MASK: u64 = 0xFF_FFFF << STYLE_SHIFT;
+const STYLE_MASK: u64 = !0 << STYLE_SHIFT;
+
+/// A style key (the cell's top 40 bits) with this bit set holds its style
+/// inline: foreground and background as a 2-bit kind (default, named,
+/// indexed) and an 8-bit value each, then the 16 flag bits. Without it,
+/// the key is an id in the style table (0 the default style). A style that
+/// fits inline is always stored inline, so the two never overlap.
+const INLINE: u64 = 1 << 39;
 
 #[inline]
-fn style_id(cell: u64) -> u32 {
-    ((cell & STYLE_MASK) >> STYLE_SHIFT) as u32
+fn style_key(cell: u64) -> u64 {
+    cell >> STYLE_SHIFT
 }
 
 #[inline]
-fn base(id: u32) -> u64 {
-    u64::from(id) << STYLE_SHIFT
+fn base(key: u64) -> u64 {
+    key << STYLE_SHIFT
+}
+
+/// `style`'s inline key, or `None` if it needs the table: a truecolor
+/// foreground or background, an underline color or a hyperlink. The
+/// default style is key 0.
+#[inline]
+fn inline_key(style: &Style) -> Option<u64> {
+    const RGB: u32 = 3;
+    let (fg, bg) = (style.fg.bits(), style.bg.bits());
+    if fg >> 24 == RGB
+        || bg >> 24 == RGB
+        || style.underline_color != PackedColor::DEFAULT
+        || style.hyperlink_id != 0
+    {
+        return None;
+    }
+    let color = |bits: u32| u64::from((bits >> 24) << 8 | (bits & 0xFF));
+    let key = color(fg) | color(bg) << 10 | u64::from(style.flags.bits()) << 20;
+    Some(if key == 0 { 0 } else { key | INLINE })
+}
+
+/// The style an inline key holds.
+fn inline_style(key: u64) -> Style {
+    let color = |c: u64| PackedColor::from_bits(((c >> 8 & 3) << 24 | c & 0xFF) as u32);
+    Style {
+        fg: color(key & 0x3FF),
+        bg: color(key >> 10 & 0x3FF),
+        underline_color: PackedColor::DEFAULT,
+        flags: CellFlags::from_bits((key >> 20) as u16),
+        hyperlink_id: 0,
+    }
+}
+
+/// The style `key` names, inline or in `styles`.
+#[inline]
+fn lookup(styles: &[Style], key: u64) -> Style {
+    if key & INLINE != 0 {
+        inline_style(key)
+    } else {
+        styles[key as usize]
+    }
 }
 
 fn unpack(cell: u64, styles: &[Style]) -> Cell {
@@ -171,7 +228,7 @@ fn unpack(cell: u64, styles: &[Style]) -> Cell {
     if cell & GRAPHEME != 0 {
         structural.set(CellFlags::HAS_COMBINING);
     }
-    styles[style_id(cell) as usize].cell(c, structural)
+    lookup(styles, style_key(cell)).cell(c, structural)
 }
 
 /// The number of cells up to and including the last one that is not
@@ -200,9 +257,10 @@ pub struct Head {
     /// Every cell at or after this column is [`BLANK`]. May overstate.
     used: u16,
     /// Every cell before `used` is ASCII, with no structural bits, in
-    /// style `style`. May understate; generalises `Row::plain`.
+    /// style `style` (a style key). May understate; generalises
+    /// `Row::plain`.
     uniform: bool,
-    style: u32,
+    style: u64,
     wrapped: bool,
     /// The row has grapheme extras somewhere. Never set here (see the
     /// module docs); the write paths test it as the real ones would.
@@ -229,21 +287,21 @@ impl Head {
 
 // Row operations shared by both variants.
 
-/// Write ASCII `bytes` at `col` in style `id`. The span fits on the row and
-/// the caller has cleared wide characters straddling its edges.
+/// Write ASCII `bytes` at `col` in style `key`. The span fits on the row
+/// and the caller has cleared wide characters straddling its edges.
 #[inline]
-fn row_write_ascii(cells: &mut [u64], head: &mut Head, col: usize, bytes: &[u8], id: u32) {
+fn row_write_ascii(cells: &mut [u64], head: &mut Head, col: usize, bytes: &[u8], key: u64) {
     let end = col + bytes.len();
     let used = usize::from(head.used);
     // The real write drops extras here; testing the flag costs the same.
     assert!(!head.has_graphemes, "the prototype stores no graphemes");
     if col == 0 && end >= used {
         head.uniform = true;
-        head.style = id;
-    } else if head.style != id || (col > used && id != 0) {
+        head.style = key;
+    } else if head.style != key || (col > used && key != 0) {
         head.uniform = false;
     }
-    let style = base(id);
+    let style = base(key);
     for (cell, &byte) in cells[col..end].iter_mut().zip(bytes) {
         *cell = style | u64::from(byte);
     }
@@ -272,7 +330,7 @@ fn row_write_char_in_place(
     col: usize,
     c: char,
     width: usize,
-    id: u32,
+    key: u64,
 ) -> bool {
     let end = col + width;
     let Some(span) = cells.get_mut(col..end) else {
@@ -281,7 +339,7 @@ fn row_write_char_in_place(
     if span.iter().any(|&cell| cell & WIDTH_MASK != 0) {
         return false;
     }
-    let style = base(id);
+    let style = base(key);
     if width > 1 {
         span[0] = style | c as u64 | WIDE;
         span[1] = style | BLANK | SPACER;
@@ -303,7 +361,7 @@ fn row_write_char_slow(
     col: usize,
     c: char,
     width: usize,
-    id: u32,
+    key: u64,
 ) {
     let cols = cells.len();
     if cells[col] & WIDTH_MASK == WIDE && col + 1 < cols {
@@ -315,7 +373,7 @@ fn row_write_char_slow(
     if width > 1 && col + 2 < cols && cells[col + 1] & WIDTH_MASK == WIDE {
         cells[col + 2] = BLANK;
     }
-    let style = base(id);
+    let style = base(key);
     cells[col] = style | c as u64 | if width > 1 { WIDE } else { 0 };
     let mut end = col + 1;
     if width > 1 && col + 1 < cols {
@@ -326,17 +384,17 @@ fn row_write_char_slow(
     head.used = head.used.max(end as u16);
 }
 
-/// `Row::erase` with a blank in style `id` (0, or a background only).
+/// `Row::erase` with a blank in style `key` (0, or a background only).
 #[inline]
-fn row_erase(cells: &mut [u64], head: &mut Head, id: u32) {
-    if id == 0 {
+fn row_erase(cells: &mut [u64], head: &mut Head, key: u64) {
+    if key == 0 {
         cells[..usize::from(head.used)].fill(BLANK);
         *head = Head::BLANK;
     } else {
-        cells.fill(base(id) | BLANK);
+        cells.fill(base(key) | BLANK);
         *head = Head {
             used: cells.len() as u16,
-            style: id,
+            style: key,
             ..Head::BLANK
         };
     }
@@ -348,8 +406,8 @@ pub trait Storage {
     /// Changes whenever style ids are rewritten (collection), which
     /// invalidates every cached id.
     fn generation(&self) -> u32;
-    /// The id of `style` in the screen's table, collecting first if the
-    /// table is due.
+    /// The id of `style` (one that does not fit inline) in the screen's
+    /// table, collecting first if the table is due.
     fn intern(&mut self, style: Style) -> u32;
     #[doc(hidden)]
     fn row_mut(&mut self, row: u16) -> (&mut [u64], &mut Head);
@@ -360,8 +418,8 @@ pub trait Storage {
     /// Copy screen row 0 into history (evicting the oldest row when full).
     fn save_top_row(&mut self);
     /// Scroll the whole screen up one row and erase the new bottom row
-    /// with style `erase_id`.
-    fn scroll_up(&mut self, erase_id: u32);
+    /// with style `erase_key`.
+    fn scroll_up(&mut self, erase_key: u64);
     fn history_len(&self) -> usize;
     /// History row `index` (0 oldest) unpacked into `out`, padded to the
     /// width it was stored at; returns whether it was soft-wrapped.
@@ -393,9 +451,9 @@ pub struct Core<S: Storage> {
     wrap_pending: bool,
     attrs: Cell,
     style: Style,
-    /// `style`'s id, valid while `id_generation` matches the storage's.
-    id: u32,
-    id_generation: u32,
+    /// `style`'s key, valid while `key_generation` matches the storage's.
+    key: u64,
+    key_generation: u32,
     dirty: Vec<bool>,
     row_versions: Vec<u64>,
     content_version: u64,
@@ -416,8 +474,8 @@ impl<S: Storage> Core<S> {
             wrap_pending: false,
             attrs: Cell::default(),
             style: Style::default(),
-            id: 0,
-            id_generation: NO_GENERATION,
+            key: 0,
+            key_generation: NO_GENERATION,
             dirty: vec![true; usize::from(rows)],
             row_versions: vec![0; usize::from(rows)],
             content_version: 0,
@@ -430,23 +488,32 @@ impl<S: Storage> Core<S> {
     fn set_attrs(&mut self, attrs: Cell) {
         self.attrs = attrs;
         self.style = Style::of(&attrs);
-        self.id_generation = NO_GENERATION;
+        self.key_generation = NO_GENERATION;
+    }
+
+    /// `style`'s key: inline if it fits, otherwise interned.
+    #[inline]
+    fn key(&mut self, style: Style) -> u64 {
+        match inline_key(&style) {
+            Some(key) => key,
+            None => u64::from(self.store.intern(style)),
+        }
     }
 
     #[inline]
-    fn template_id(&mut self) -> u32 {
-        if self.id_generation != self.store.generation() {
-            self.id = self.store.intern(self.style);
-            self.id_generation = self.store.generation();
+    fn template_key(&mut self) -> u64 {
+        if self.key_generation != self.store.generation() {
+            self.key = self.key(self.style);
+            self.key_generation = self.store.generation();
         }
-        self.id
+        self.key
     }
 
-    fn erase_id(&mut self) -> u32 {
+    fn erase_key(&mut self) -> u64 {
         if self.attrs.packed_bg() == PackedColor::DEFAULT {
             0
         } else {
-            self.store.intern(Style {
+            self.key(Style {
                 bg: self.attrs.packed_bg(),
                 ..Style::default()
             })
@@ -472,7 +539,7 @@ impl<S: Storage> Core<S> {
 
     /// Scroll up one line (the history copy is the caller's).
     fn scroll_up(&mut self) {
-        let erase = self.erase_id();
+        let erase = self.erase_key();
         self.store.scroll_up(erase);
         self.content_version = self.content_version.wrapping_add(1);
         self.row_versions.fill(self.content_version);
@@ -519,10 +586,10 @@ impl<S: Storage> Core<S> {
             }
             let (row, col) = (self.row, usize::from(self.col));
             let end = col + chunk_len;
-            let id = self.template_id();
+            let key = self.template_key();
             let (cells, head) = self.store.row_mut(row);
             row_clear_ascii_edges(cells, head, col, end);
-            row_write_ascii(cells, head, col, &remaining[..chunk_len], id);
+            row_write_ascii(cells, head, col, &remaining[..chunk_len], key);
             self.mark_dirty(row);
             self.last_char = remaining[chunk_len - 1] as char;
             remaining = &remaining[chunk_len..];
@@ -550,9 +617,9 @@ impl<S: Storage> Core<S> {
         let width = props.width();
         if (1..=2).contains(&width) && !self.wrap_pending && self.col + width <= self.cols {
             let (row, col) = (self.row, self.col);
-            let id = self.template_id();
+            let key = self.template_key();
             let (cells, head) = self.store.row_mut(row);
-            if row_write_char_in_place(cells, head, usize::from(col), c, usize::from(width), id) {
+            if row_write_char_in_place(cells, head, usize::from(col), c, usize::from(width), key) {
                 self.mark_dirty(row);
                 self.last_char = c;
                 self.advance_cursor(width);
@@ -576,10 +643,10 @@ impl<S: Storage> Core<S> {
             self.wrap_pending_cursor();
         }
         let (row, col) = (self.row, self.col);
-        let id = self.template_id();
+        let key = self.template_key();
         self.mark_dirty(row);
         let (cells, head) = self.store.row_mut(row);
-        row_write_char_slow(cells, head, usize::from(col), c, usize::from(width), id);
+        row_write_char_slow(cells, head, usize::from(col), c, usize::from(width), key);
         self.last_char = c;
         self.advance_cursor(width);
         self.record_print(row, col, Tail::start(c));
@@ -688,23 +755,49 @@ impl<S: Storage> ProtoTerminal<S> {
 }
 
 /// Collect a screen style table in place: keep the ids `live` marks,
-/// renumber them densely (0 stays 0) and return the old-to-new map.
+/// renumber them densely (0 stays 0), keep the cache pointing at the
+/// survivors, and return the old-to-new map (0 for a dropped id).
 fn collect_table(table: &mut StyleTable, live: &[bool]) -> Vec<u32> {
     let mut map = vec![0u32; table.len()];
-    let capacity = table.styles.capacity();
-    let old = std::mem::replace(&mut table.styles, Vec::with_capacity(capacity));
-    table.clear();
-    for (id, style) in old.into_iter().enumerate().skip(1) {
+    let mut next = 1;
+    for id in 1..table.styles.len() {
         if live[id] {
-            map[id] = table.insert(style);
+            table.styles[next] = table.styles[id];
+            map[id] = next as u32;
+            next += 1;
         }
+    }
+    table.styles.truncate(next);
+    for slot in table.recent.iter_mut() {
+        *slot = map[*slot as usize];
     }
     map
 }
 
-/// The table size at which the next collection runs (ADR §2).
-fn collect_threshold(live: usize) -> usize {
-    4096.max(2 * live)
+/// Mark the table id `key` names, if it names one.
+#[inline]
+fn mark_live(live: &mut [bool], key: u64) {
+    if key & INLINE == 0 {
+        live[key as usize] = true;
+    }
+}
+
+/// `key` after a collection that renumbered the table by `map`.
+#[inline]
+fn remap_key(map: &[u32], key: u64) -> u64 {
+    if key & INLINE == 0 {
+        u64::from(map[key as usize])
+    } else {
+        key
+    }
+}
+
+/// The table size at which the next collection runs: once as many new
+/// styles as twice the screen's cells (at least 4096) have been added
+/// since the last one, so a collection, which scans every screen cell,
+/// costs a few instructions per new style at any screen size.
+fn collect_threshold(live: usize, cells: usize) -> usize {
+    live + 4096.max(2 * cells)
 }
 
 #[cfg(test)]
@@ -783,6 +876,55 @@ mod tests {
     #[test]
     fn variant_c_matches_the_reference() {
         check::<c::StoreC>(21, 5, &sample());
+    }
+
+    #[test]
+    fn inline_keys_round_trip() {
+        let colors = [PackedColor::DEFAULT]
+            .into_iter()
+            .chain((0..16).map(|n| PackedColor::from_bits(1 << 24 | n)))
+            .chain((0..=255).map(|n| PackedColor::from_bits(2 << 24 | n)));
+        let mut keys = std::collections::HashSet::new();
+        for (i, fg) in colors.enumerate() {
+            let style = Style {
+                fg,
+                bg: PackedColor::from_bits(2 << 24 | ((i as u32 * 7) % 256)),
+                flags: CellFlags::from_bits((i as u16).wrapping_mul(0x1F3) & !STRUCTURAL.bits()),
+                ..Style::default()
+            };
+            let key = inline_key(&style).expect("no truecolor, so it fits inline");
+            assert_eq!(inline_style(key), style);
+            assert!(keys.insert(key), "two styles share key {key:#x}");
+        }
+        assert_eq!(inline_key(&Style::default()), Some(0));
+        let truecolor = Style {
+            fg: PackedColor::from_bits(3 << 24 | 0x12_3456),
+            ..Style::default()
+        };
+        assert_eq!(inline_key(&truecolor), None);
+    }
+
+    #[test]
+    fn inline_and_table_styles_survive_collection() {
+        let mut input = Vec::new();
+        for i in 0..30_000u32 {
+            let sgr = match i % 4 {
+                0 => format!("\x1b[38;5;{}m", i % 256),
+                1 => format!("\x1b[48;2;{};{};{}m", i % 256, i / 256 % 256, 7),
+                2 => format!("\x1b[1;4;3{}m", i % 8),
+                _ => format!("\x1b[58;2;{};0;0m", i % 256),
+            };
+            input.extend_from_slice(sgr.as_bytes());
+            input.push(b'a' + (i % 26) as u8);
+            if i % 7 == 0 {
+                input.extend_from_slice(b"\x1b[0m");
+            }
+            if i % 50 == 49 {
+                input.extend_from_slice(b"\x1b[0m\r\n");
+            }
+        }
+        check::<a::StoreA>(60, 10, &input);
+        check::<c::StoreC>(60, 10, &input);
     }
 
     #[test]
