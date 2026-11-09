@@ -37,6 +37,12 @@ in the cargo registry and the Orca source on GNOME GitLab):
 - Both platform adapters announce a node whose `live` is not `Off` **when
   the node is added** (AT-SPI `object:announcement`, macOS
   `NSAccessibilityAnnouncementRequested`); relabelling a node does not.
+  (Corrected in slice 6: both do announce a live node whose name
+  changes, `accesskit_atspi_common` 0.21.1 `notify_property_changes` and
+  `accesskit_macos` 0.27.2 `node_updated`, and liveness is inherited by
+  descendants in `accesskit_consumer`. Announcing by adding nodes still
+  holds; what changed is that nothing else under a live region may be
+  named by the streamed text.)
   Text-change events come from diffing a text node's content between
   updates; a text node has role `Terminal`, `Document`, `Label` or a text
   input, and `TextRun` children with `character_lengths`.
@@ -423,6 +429,41 @@ Each slice is independently testable and mergeable.
      tree rebuilt.
 6. **Live regions**: queue, flush rules, cap, pruning, `busy`. Check: builder
    tests with a scripted clock; manual step 5, the B4 done criterion.
+   Done 2026-11-09 except the Orca run (`a11y/live.rs`);
+   `scripts/e2e/accessibility-live.sh` streams twelve lines into a polite
+   log with the `live-region` example of `ultty-client` and checks the
+   AT-SPI `object:announcement` events: every line once, in order, never
+   cut inside a line, at most four a second. Choices made where §3 was
+   open or did not survive contact:
+   - Only `AppendContent` feeds the queue, as §3 says; a `SetContent` on
+     a live region is not announced here (on both platforms a live node
+     whose name changes is announced, which covers a one-line status).
+   - "At most four flushes a second" is a spacing of 250 ms per session;
+     a flush is one announcement, of the region that has waited longest.
+   - A flush with a line break in it takes the complete lines only. The
+     line begun after them waits for its own break or 250 ms from its own
+     first byte; flushing everything once the queue was 250 ms old cut a
+     word in half whenever the cap had held lines back (seen over AT-SPI).
+   - Over 2 KiB, the cut is after the last line break inside the limit,
+     else after the last blank, else at a character boundary. An
+     announcement is not cut to the 1024-character name cap.
+   - Bounds: a region queues at most 16 KiB, dropping the oldest text
+     from a line start; a session holds at most 64 KiB between two passes
+     of the event loop. Text is kept only while AccessKit is active, and
+     only for sessions of the active tab; inactive, appends cost one
+     check.
+   - Announcement nodes are `s<session>:<region>a<serial>`, the serial
+     counting the region's announcements, so a kept node keeps its id and
+     a new one never reuses one. A region that leaves the tree drops its
+     queue and announcements, so that coming back adds no old node; so
+     does activation.
+   - Because names and liveness work as corrected above: a live region
+     that has been appended to is not named by its text, and its line
+     `Label`s are `live` `Off`, else each new or growing line would be
+     spoken besides the announcement. The region's own node is still
+     announced (its label) when it is first added.
+   - Idle with a screen reader listening after the stream: 20 wakeups in
+     5 s, the app's maintenance tick, and no tree rebuilt.
 7. **ulttui**: `View::semantics`, widget defaults, builders, `Semantic`,
    backend diffing, done-bar line. Check: widget snapshots gain semantics;
    `regions --json` on `chat` shows a `Log` with `Polite`.
