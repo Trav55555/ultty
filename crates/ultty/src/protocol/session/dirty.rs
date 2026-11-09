@@ -5,6 +5,12 @@ use ultty_protocol::{LayoutTrigger, RegionId};
 use super::NativeSession;
 
 impl NativeSession {
+    /// Note that what the session shows may have changed; see
+    /// [`NativeSession::shown_generation`].
+    pub(super) fn mark_shown_changed(&mut self) {
+        self.shown_generation = self.shown_generation.wrapping_add(1);
+    }
+
     /// Mark a whole-scene rebuild where the region tree changed shape.
     pub(super) fn mark_full_scene_rebuild(&mut self) {
         self.scene_dirty = true;
