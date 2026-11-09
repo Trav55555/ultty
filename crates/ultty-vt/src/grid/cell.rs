@@ -55,6 +55,18 @@ impl CellFlags {
         self.0 == 0
     }
 
+    /// The raw bits, for the page-storage prototype's style hashing.
+    #[cfg(feature = "page-proto")]
+    pub(crate) fn bits(self) -> u16 {
+        self.0
+    }
+
+    /// Flags from raw bits, for the page-storage prototype's inline styles.
+    #[cfg(feature = "page-proto")]
+    pub(crate) const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
     /// The flags set in both.
     #[inline]
     pub(crate) fn intersection(self, other: CellFlags) -> CellFlags {
@@ -159,6 +171,18 @@ pub(crate) struct PackedColor(u32);
 
 impl PackedColor {
     pub(crate) const DEFAULT: Self = Self(0);
+
+    /// The packed value, for the page-storage prototype's style hashing.
+    #[cfg(feature = "page-proto")]
+    pub(crate) fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// A packed value back, for the page-storage prototype's inline styles.
+    #[cfg(feature = "page-proto")]
+    pub(crate) const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
 
     pub(crate) const fn pack(color: Color) -> Self {
         Self(match color {
