@@ -294,7 +294,13 @@ Where accessibility meets inline surfaces, for 0020 to settle or hand back:
   `TextRun`s, so the plan is a `Group` child of the pane after the anchor
   row's `TextRun`, `described_by` that row. ADR 0020 provides both inputs:
   a surface is `(session_id, surface_id)` and its rows carry an anchor tag
-  the tree builder can find while they are on screen.
+  the tree builder can find while they are on screen. As built (slice
+  5): the surface's root region is that child, under the pane's
+  `Terminal` node, after the last run of its anchor row and
+  `described_by` the row's first run; its role comes from its semantics
+  (`Group` by default). A surface whose anchor row is above the screen
+  comes first, described by nothing. Text runs inside it are not used
+  (slice 5), so the `Terminal`'s document stays the grid.
 - Surfaces take `SetSemantics` and defaults like any region. One that
   scrolls off the visible screen leaves the tree with its rows until
   scrollback is exposed (§2, deferred). Live queues are per region, so a
@@ -365,7 +371,39 @@ Each slice is independently testable and mergeable.
    tab pattern). The rows are the live screen even while the view is
    scrolled back (scrollback is deferred, §2).
 5. **Native scenes**: regions to nodes, derived and explicit roles, focus.
-   Check: builder tests; manual step 6.
+   Check: builder tests; manual step 6. Done 2026-11-09 except the Orca
+   run (`a11y/scene.rs`); `scripts/e2e/accessibility-atspi.sh` runs
+   `counter-app` and finds its buttons as AT-SPI `button`s, the focused
+   one focused, and Tab moving focus. Mappings chosen where this ADR was
+   open:
+   - Native scenes are exposed only when the active tab has one pane,
+     the only time the renderer draws them. While a session is
+     full-scene the grid is hidden under it, so the focused pane node is
+     a `Group` (the pane title), not a `Terminal`, and its children are
+     the `ROOT` nodes of every full-scene session, by session id. Focus
+     is the focused region of the last of them that has one, else the
+     last one's root (§3, `Blur`).
+   - A region's text is not `TextRun`s: AccessKit gives text ranges only
+     to `Label`, `Document`, `Terminal` and text inputs, and its run
+     iterator descends through other nodes, so runs in a surface would
+     join the `Terminal`'s document. One-line text is a `Label` (AccessKit
+     names a label by its value); text the name does not already say is
+     one `Label` child per non-empty line (`s<session>:<region>l<line>`),
+     the last 200 lines, under the region's node (`Paragraph` for `Text`).
+     An input's text is its `value`; its caret is not exposed yet.
+   - Bounds are the computed layout in cells, scaled by the cell size,
+     from the pane's origin (a surface's from its first row), less the
+     scroll offsets of the regions above; line labels have none.
+   - Nodes advertise no actions: `Action::Focus` and `Click` are not
+     handled yet (§3 Actions).
+   - Sessions count changes to what they show (`shown_generation`:
+     applied scene messages, focus, relayout, surfaces placed, dropped or
+     moved on or off screen), which the app hashes into its shown digest
+     only while a screen reader listens. Idle wakeups with a screen
+     reader listening and a still screen: 0 in 5 s at the prompt; 21 in
+     5 s with `counter-app`, against 20 with accessibility off, all from
+     the 250 ms maintenance tick native sessions already have, with no
+     tree rebuilt.
 6. **Live regions**: queue, flush rules, cap, pruning, `busy`. Check: builder
    tests with a scripted clock; manual step 5, the B4 done criterion.
 7. **ulttui**: `View::semantics`, widget defaults, builders, `Semantic`,
