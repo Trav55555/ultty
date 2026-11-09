@@ -80,6 +80,29 @@ With `accessibility = true` on a private session bus with
 follows the pane's title, and turning `IsEnabled` off and on deactivates and
 reactivates the adapter.
 
+## Slice 4: the terminal tree
+
+Same method, release build of the slice-4 branch, `accessibility = true`,
+a private session bus with `at-spi-bus-launcher`. **Inactive** is
+`IsEnabled` false; **active** is `IsEnabled` true after an AT-SPI client
+read the terminal's text once. 10 s idle after 5 s settle, two runs each:
+
+| setup | switches/s (vol + invol) | threads | trees sent while idle |
+|---|---:|---:|---:|
+| inactive | 2.00 + 0 | 36 | 0 |
+| active, still screen | 2.00 + 0 | 36 | 0 |
+
+The 2/s is still `blocking-1` (above); an active adapter with a still
+screen adds no wakeups, because a rebuild is scheduled only after a
+change.
+
+Flooding the focused pane (a shell loop echoing 200 000 lines, about
+1.4 s of output) while active sent 24 trees, about 17 per second; the
+closest two were 47 ms apart in the log, which timestamps after the
+build, against the 50 ms coalescing interval. Building a 44-node tree
+for an 88x39 screen (snapshot under the pane's lock plus the build) took
+a median of 93 us and at most 2.8 ms under the flood.
+
 ## Update: the wakeups were blocking 1.7.0; on by default
 
 The `blocking` pool thread's 500 ms wake loop is a regression in `blocking`
@@ -103,4 +126,3 @@ as the ADR intends. `scripts/e2e/accessibility-no-bus.sh` (run in CI's GUI
 smoke job) now fails if an idle window with the adapter on context-switches
 more than twice in 5 s; it fails with 1.7.0 (10 in 5 s) and passes with
 1.6.2 (0), so a `cargo update` that brings 1.7.0 back is caught.
-
