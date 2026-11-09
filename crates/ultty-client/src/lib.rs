@@ -380,6 +380,13 @@ impl UlttyClient {
         Ok(())
     }
 
+    /// Send [`UlttyClient::write_output`] text, inline surface anchors and
+    /// their fallback text to `out` instead of stdout. Socket transport only:
+    /// in-band they must share the tty with the frames.
+    pub fn set_output(&mut self, out: Box<dyn Write + Send>) {
+        self.text_out = out;
+    }
+
     /// Open an inline surface (spec §10.6, ADR 0020) at the cursor, which
     /// must be at column 0 of the app's terminal.
     ///
@@ -1028,7 +1035,7 @@ mod tests {
             assert!(matches!(terminal.read_one(), AppMessage::EndFrame { .. }));
             terminal.send(&layout_reply(FrameId(2)));
         });
-        client.text_out = Box::new(output.clone());
+        client.set_output(Box::new(output.clone()));
 
         client
             .open_surface(
@@ -1056,7 +1063,7 @@ mod tests {
     fn open_surface_refuses_without_the_capability_and_writes_nothing() {
         let output = SharedOutput::default();
         let (mut client, handle) = connect_with(PROTOCOL_VERSION, |_| {});
-        client.text_out = Box::new(output.clone());
+        client.set_output(Box::new(output.clone()));
         client.negotiated_capabilities &= !CAP_INLINE_SURFACES;
         let err = client
             .open_surface(

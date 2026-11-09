@@ -28,7 +28,7 @@ pub(super) struct RegionSnapshot {
 
 /// Regions the terminal currently retains: stable ids plus sibling order.
 #[derive(Debug)]
-pub(super) struct RetainedTree {
+pub(crate) struct RetainedTree {
     regions: HashMap<RegionId, RegionSnapshot>,
     /// Ordered children per parent; parents include the terminal's root.
     children: HashMap<RegionId, Vec<RegionId>>,
@@ -44,7 +44,7 @@ impl Default for RetainedTree {
 }
 
 impl RetainedTree {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             regions: HashMap::new(),
             children: HashMap::new(),
@@ -54,10 +54,16 @@ impl RetainedTree {
 
     /// Make sure `id` (for example the terminal-owned root) is never handed
     /// out as a stable id.
-    pub(super) fn reserve(&mut self, id: RegionId) {
+    pub(crate) fn reserve(&mut self, id: RegionId) {
         if id.0 >= self.next_id {
             self.next_id = id.0.wrapping_add(1);
         }
+    }
+
+    /// The next stable id this tree would hand out; every id it holds or
+    /// reserved is below it.
+    pub(crate) fn next_id(&self) -> u32 {
+        self.next_id
     }
 
     /// The native key of retained region `id`, if it has one.
@@ -102,11 +108,11 @@ pub(crate) fn record_native_key(id: RegionId, key: &str) {
     });
 }
 
-pub(super) fn begin_native_key_recording() {
+pub(crate) fn begin_native_key_recording() {
     KEY_RECORDER.with(|recorder| *recorder.borrow_mut() = Some(HashMap::new()));
 }
 
-pub(super) fn take_native_keys() -> HashMap<RegionId, String> {
+pub(crate) fn take_native_keys() -> HashMap<RegionId, String> {
     KEY_RECORDER.with(|recorder| recorder.borrow_mut().take().unwrap_or_default())
 }
 
@@ -130,7 +136,7 @@ struct Reconciliation {
     next: RetainedTree,
 }
 
-pub(super) fn optimize_frame_messages(
+pub(crate) fn optimize_frame_messages(
     previous: &RetainedTree,
     frame_messages: Vec<AppMessage>,
     native_keys: &HashMap<RegionId, String>,
