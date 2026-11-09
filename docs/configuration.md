@@ -90,11 +90,30 @@ Font settings are read at start; restart Ultty after changing them.
 
 ## Emoji and accents
 
+```toml
+[font]
+emoji = "Noto Color Emoji"
+```
+
 Characters the configured font lacks come from other installed fonts. Color
 emoji need a color emoji font such as Noto Color Emoji
-(`fonts-noto-color-emoji` on Debian and Ubuntu). An emoji sequence (a ZWJ
-family, a flag, a skin tone) is drawn as one glyph in whatever design that
-font gives it. Noto Color Emoji 2.051, for example, draws the family
+(`fonts-noto-color-emoji` on Debian and Ubuntu). Characters that display as
+emoji by default (`😀`, `🎉`, flags, skin tones), and any character followed
+by the emoji variation selector U+FE0F (`❤️`, `☺️`, `1️⃣`), are drawn from
+that font, in color. Characters that display as text by default (`❤`, `☺`,
+`™`), and emoji followed by the text variation selector U+FE0E (`⌚︎`), keep
+the text font, or whichever installed font has them. Bold and italic do not
+change an emoji. An emoji still takes two cells.
+
+`emoji` names the color emoji font. When it is empty (the default) or not
+installed, Ultty uses the first installed of Noto Color Emoji, Apple Color
+Emoji, Segoe UI Emoji, Twemoji, Twitter Color Emoji, JoyPixels and OpenMoji
+Color. With none of them installed, emoji come from whatever installed font
+has them, often in black and white. Like the other font settings, `emoji` is
+read at start.
+
+An emoji sequence (a ZWJ family, a flag, a skin tone) is drawn as one glyph
+in whatever design the emoji font gives it. Noto Color Emoji 2.051, for example, draws the family
 sequences as grey silhouettes on a light tile. That is the font's design,
 not a missing-glyph box.
 

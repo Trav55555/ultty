@@ -497,6 +497,11 @@ pub struct FontConfig {
     /// Single cells and multi-codepoint graphemes always get full shaping
     /// (with font fallback) either way.
     pub ligatures: bool,
+    /// Color emoji font family for emoji-presentation characters (`😀`,
+    /// `❤️`). Empty (the default) picks the first installed of Noto Color
+    /// Emoji, Apple Color Emoji, Segoe UI Emoji, Twemoji, Twitter Color
+    /// Emoji, JoyPixels and OpenMoji Color.
+    pub emoji: String,
 }
 
 impl Default for FontConfig {
@@ -511,6 +516,7 @@ impl Default for FontConfig {
             // more line spacing for regular text.
             line_height: 1.0,
             ligatures: true,
+            emoji: String::new(),
         }
     }
 }
@@ -1137,6 +1143,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.font.family, DEFAULT_FONT_FAMILY);
         assert_eq!(config.font.size, 14.0);
+        assert_eq!(config.font.emoji, "", "picked from the installed fonts");
         assert_eq!(config.behavior.scrollback_lines, 10_000);
     }
 
@@ -1228,6 +1235,7 @@ background = "#000000"
 [font]
 family = "Fira Code"
 size = 16.0
+emoji = "Twemoji"
 
 [keybindings]
 copy = "ctrl+c"
@@ -1238,6 +1246,7 @@ copy = "ctrl+c"
         assert_eq!(config.colors.foreground.g, 0xFF);
         assert_eq!(config.font.family, "Fira Code");
         assert_eq!(config.font.size, 16.0);
+        assert_eq!(config.font.emoji, "Twemoji");
         assert_eq!(config.keybindings.copy, "ctrl+c");
     }
 

@@ -11,6 +11,7 @@ pub mod block_chars;
 pub mod color;
 mod cursor;
 mod decoration;
+mod emoji;
 mod image;
 mod native_render;
 mod overlays;
