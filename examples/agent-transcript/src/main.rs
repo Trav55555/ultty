@@ -25,7 +25,7 @@ const TOOL_ROWS: u16 = 8;
 const TOOL_BG: Color = Color::Rgb(24, 52, 96);
 
 /// The diff card: a title line and the hunk.
-const DIFF_ROWS: u16 = 6;
+const DIFF_ROWS: u16 = 7;
 const DIFF_BG: Color = Color::Rgb(28, 72, 40);
 
 /// What the fake `cargo test` prints, one line per tick.

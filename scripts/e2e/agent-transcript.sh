@@ -37,7 +37,8 @@ ULTTY=$(realpath "$ULTTY")
 ULTTYCTL=$(realpath "$ULTTYCTL")
 tmux_bin=$(command -v tmux || true)
 
-out="${1:-$(mktemp -d)}"
+# Without an artifact dir, use a temporary one and remove it on success.
+if [ -n "${1:-}" ]; then out=$1; keep_out=1; else out=$(mktemp -d); keep_out=0; fi
 mkdir -p "$out/config/ultty"
 # XDG_CONFIG_HOME is ignored unless it is absolute.
 out=$(cd "$out" && pwd)
@@ -204,4 +205,9 @@ else
 fi
 
 ! grep -q "panicked at" "$out/ultty.log" || fail "Ultty logged a panic"
-echo "agent-transcript: ok ($out)"
+if [ "$keep_out" = 1 ]; then
+    echo "agent-transcript: ok ($out)"
+else
+    rm -rf "$out"
+    echo "agent-transcript: ok"
+fi

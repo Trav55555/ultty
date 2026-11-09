@@ -2,10 +2,10 @@
 """Check that scripts/e2e/agent-transcript.sh's two cards are drawn.
 
 The agent-transcript example opens a tool card (8 rows, background
-TOOL) and, below it, a diff card (6 rows, background DIFF). Given a
+TOOL) and, below it, a diff card (7 rows, background DIFF). Given a
 screenshot with both on the screen, check that the tool card is one band
 of its colour, that the band is a whole number of cell rows (8 of them),
-and that the diff card spans 6 such rows below it. Its +/- lines have
+and that the diff card spans 7 such rows below it. Its +/- lines have
 backgrounds of their own, so only its first and last rows are measured.
 """
 
@@ -19,7 +19,7 @@ from pathlib import Path
 TOOL = (24, 52, 96)
 DIFF = (28, 72, 40)
 TOOL_ROWS = 8
-DIFF_ROWS = 6
+DIFF_ROWS = 7
 TOLERANCE = 16
 # A row of a card is mostly card colour; text glyphs cover some.
 BAND_ROW_SHARE = 0.5
