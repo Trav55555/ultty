@@ -28,7 +28,7 @@ env:
   # RUST_TOOLCHAIN matches it, so bump the image with the file.
   # Minimum supported Rust version declared in the root Cargo.toml; the
   # runner image's RUST_MSRV matches it.
-  RUST_MSRV: 1.89
+  RUST_MSRV: 1.90
   # The nightly the fuzz job runs, baked into the runner image (RUST_NIGHTLY).
   RUST_NIGHTLY: nightly-2026-11-01
   CARGO_INCREMENTAL: "0"
@@ -83,6 +83,9 @@ jobs:
     runs-on: ultty
     steps:
       - uses: actions/checkout@v4
+      # The runner image ships the MSRV toolchain; install it here only if the
+      # image predates an MSRV change (quick no-op otherwise).
+      - run: rustup toolchain install "$RUST_MSRV" --profile minimal
       # RUSTUP_TOOLCHAIN overrides the pinned rust-toolchain.toml so this job
       # really builds with the MSRV.
       - run: scripts/ci-runner-step.sh cargo check --workspace --all-targets

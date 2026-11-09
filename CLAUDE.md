@@ -93,7 +93,7 @@ Same binary works in both modes. Widgets implement both `render_child_native()` 
 - **Error handling**: `thiserror` in library crates, `anyhow` in binaries/examples
 - **Logging**: `tracing` crate only, never `println!`. Exception: CLI binaries write their own output with `println!` (`ulttyctl` command results, `--version`).
 - **Unsafe**: Avoid; if required, add `// SAFETY:` comment
-- **Rust edition**: 2021, MSRV 1.89 (`rust-version` in the root `Cargo.toml`)
+- **Rust edition**: 2021, MSRV 1.90 (`rust-version` in the root `Cargo.toml`)
 - **Commit frequently**: Make small, atomic commits after each logical unit of work
 
 ## Layout Pitfalls

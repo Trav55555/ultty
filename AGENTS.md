@@ -1,7 +1,7 @@
 # Ultty — Agent Guide
 
 GPU-accelerated terminal emulator + TUI framework. Rust workspace, edition 2021,
-MSRV 1.89 (`rust-version` in the root `Cargo.toml`). The toolchain is pinned by
+MSRV 1.90 (`rust-version` in the root `Cargo.toml`). The toolchain is pinned by
 `rust-toolchain.toml`.
 
 [CLAUDE.md](CLAUDE.md) is the authoritative guide for build commands,
@@ -44,7 +44,7 @@ on Gitea (`tea pulls create`), not GitHub.
 
 **CI** (`.gitea/workflows/ci.yml`, Gitea Actions on Linux, `runs-on: ultty`)
 runs nine jobs: `fmt`, `security-audit`, `clippy` (`--all-targets -D
-warnings`), `test`, `msrv` (`cargo check --workspace --all-targets` on 1.89),
+warnings`), `test`, `msrv` (`cargo check --workspace --all-targets` on 1.90),
 `porygon-tui`, `vt-integrity`, `fuzz`, and `gui-smoke` (Ultty under Xvfb with
 software Vulkan). The `ultty` pool's image, defined in the gitea-server
 repository, provides every toolchain and package; jobs install nothing, and a

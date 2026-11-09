@@ -32,13 +32,14 @@ former `RUSTSEC-2026-0097` ignore), and `quick-xml` (via `wayland-scanner` and
 Prefer that path whenever a patched release is inside the parent's range.
 
 On 2026-11-05 three more were resolved by targeted updates that stayed within
-the MSRV of the time, 1.85 (it is now 1.89, see below):
+the MSRV of the time, 1.85 (it is now 1.90, see below):
 - `tokio` 1.51.6 closes `RUSTSEC-2026-0386`, an unsound `AsyncFd::new`.
 - `futures-util` 0.3.34 drops `pin-utils`, closing `RUSTSEC-2026-0441`.
 - `clipboard-win` moves from a yanked release to 5.4.3.
 
 On 2026-11-06 a full `cargo update` followed the renderer and TUI upgrade (the
-MSRV is now 1.89, which `notify-rust` 4.18.2 needs). It cleared
+MSRV was raised to 1.89 for `notify-rust` 4.18.2, and is now 1.90 because
+`wgpu-hal` 30 depends on `ordered-float` 5.5, which needs it). It cleared
 `RUSTSEC-2024-0436` (`paste`), `RUSTSEC-2026-0002` and `RUSTSEC-2026-0253`
 (`lru`), and `RUSTSEC-2026-0206` (`rustybuzz`), so those ignores are gone.
 

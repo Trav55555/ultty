@@ -135,6 +135,10 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Changed
 
+- The minimum supported Rust version is 1.90, raised from 1.89: `wgpu-hal`
+  30 depends on `ordered-float` 5.5, which needs it. The CI MSRV job did not
+  actually build with the MSRV before, so this went unnoticed.
+
 - The glyph atlas starts at 1024x1024 and grows to 2048x2048 only when it
   fills, halving GPU memory for a typical session (22.9 to 11.4 MB under
   lavapipe).
