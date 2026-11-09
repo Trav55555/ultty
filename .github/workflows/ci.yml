@@ -155,6 +155,7 @@ jobs:
           libx11-xcb1 libxcursor1 libxrandr2 libxi6
           xvfb xdotool mesa-vulkan-drivers fonts-dejavu-core
       - run: cargo build --locked -p ultty -p hello-native -p counter-app --bins
+      - run: cargo build --locked -p ultty-client --example inline-surface
       - run: scripts/ci-gui-smoke.sh "$RUNNER_TEMP/gui-smoke"
       - name: Upload smoke artifacts
         if: failure()

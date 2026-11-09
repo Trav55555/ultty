@@ -19,11 +19,11 @@ command -v Xvfb >/dev/null || { echo "Xvfb is required" >&2; exit 2; }
 command -v xdotool >/dev/null || { echo "xdotool is required" >&2; exit 2; }
 
 if [ -z "${ULTTY:-}" ] || [ -z "${ULTTYCTL:-}" ]; then
-    cargo build -q -p ultty --bins
+    cargo build -q --locked -p ultty --bins
     ULTTY=${ULTTY:-target/debug/ultty}
     ULTTYCTL=${ULTTYCTL:-target/debug/ulttyctl}
 fi
-cargo build -q -p ultty-client --example inline-surface
+cargo build -q --locked -p ultty-client --example inline-surface
 client="$PWD/target/debug/examples/inline-surface"
 ULTTY=$(realpath "$ULTTY")
 ULTTYCTL=$(realpath "$ULTTYCTL")
