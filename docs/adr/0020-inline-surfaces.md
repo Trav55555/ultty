@@ -135,9 +135,13 @@ hint and verified against the row's tag on lookup; the row is the truth.
   session ending) is the last rasterisation, if a change is still unwritten,
   plus dropping the scene and tags, so a frozen surface costs
   exactly what `rows` lines of text cost and there is nothing to bound.
-  Live cost is at most `rows × cols` cell writes per changed frame.
-  Rasterising bumps the rows' `content_version`, so a selection over a
-  still-streaming card is dropped when it changes, as over streaming output.
+  Live cost per changed frame is, for each region, at most its visible
+  cells (`rows × cols`) plus its text up to the surface's last row, however
+  large its layout; borders are drawn last, over content, since they take
+  no room in the layout. A row is written only when its cells changed, and
+  a write drops only a selection that covers the row, as streaming output
+  does; a card ticking leaves selections elsewhere, scrolled back or not,
+  alone.
 
 ### 3. Copy, `text`, `last-command`, search
 
