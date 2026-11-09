@@ -9,17 +9,23 @@ use crate::scene::tree::SceneTree;
 pub(super) type ScrollAdjustments = HashMap<RegionId, (f32, f32)>;
 pub(super) type ClipRects = HashMap<RegionId, (f32, f32, f32, f32)>;
 
+/// Rebuild the scroll adjustments and clip rects of the tree under `root`
+/// (the full-scene root or a surface root), laid out from pixel `origin`.
+/// Every clip rect is also held within `bounds` when it is given.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn rebuild_scroll_geometry(
     scene: &SceneTree,
+    root: RegionId,
     scroll_offset: impl Fn(RegionId) -> (f32, f32),
     cell_width: f32,
     cell_height: f32,
-    tab_bar_height: f32,
+    origin: (f32, f32),
+    bounds: Option<(f32, f32, f32, f32)>,
     scroll_adjustments: &mut ScrollAdjustments,
     clip_rects: &mut ClipRects,
 ) {
     scroll_adjustments.clear();
-    for region in scene.iter_depth_first() {
+    for region in scene.iter_tree(root) {
         if region.id == RegionId::ROOT {
             continue;
         }
@@ -31,19 +37,25 @@ pub(super) fn rebuild_scroll_geometry(
     }
 
     clip_rects.clear();
-    for region in scene.iter_depth_first() {
+    for region in scene.iter_tree(root) {
         if region.id == RegionId::ROOT {
             continue;
         }
 
-        let clip = inherited_clip_rect(
+        let mut clip = inherited_clip_rect(
             scene,
             region.id,
             cell_width,
             cell_height,
-            tab_bar_height,
+            origin,
             scroll_adjustments,
         );
+        if let Some(bounds) = bounds {
+            clip.0 = clip.0.max(bounds.0);
+            clip.1 = clip.1.max(bounds.1);
+            clip.2 = clip.2.min(bounds.2);
+            clip.3 = clip.3.min(bounds.3);
+        }
         clip_rects.insert(region.id, clip);
     }
 }
@@ -79,20 +91,14 @@ fn inherited_clip_rect(
     region_id: RegionId,
     cell_width: f32,
     cell_height: f32,
-    tab_bar_height: f32,
+    origin: (f32, f32),
     scroll_adjustments: &ScrollAdjustments,
 ) -> (f32, f32, f32, f32) {
     let Some(region) = scene.get(region_id) else {
         return (0.0, 0.0, 0.0, 0.0);
     };
 
-    let mut clip = region_rect(
-        region,
-        cell_width,
-        cell_height,
-        tab_bar_height,
-        scroll_adjustments,
-    );
+    let mut clip = region_rect(region, cell_width, cell_height, origin, scroll_adjustments);
 
     let mut ancestor_id = region.parent;
     while let Some(id) = ancestor_id {
@@ -114,7 +120,7 @@ fn inherited_clip_rect(
                 ancestor,
                 cell_width,
                 cell_height,
-                tab_bar_height,
+                origin,
                 scroll_adjustments,
             );
             if clips_x {
@@ -137,7 +143,7 @@ fn region_rect(
     region: &crate::scene::region::Region,
     cell_width: f32,
     cell_height: f32,
-    tab_bar_height: f32,
+    (origin_x, origin_y): (f32, f32),
     scroll_adjustments: &ScrollAdjustments,
 ) -> (f32, f32, f32, f32) {
     let layout = &region.computed;
@@ -145,8 +151,8 @@ fn region_rect(
         .get(&region.id)
         .copied()
         .unwrap_or((0.0, 0.0));
-    let x = ((layout.x - scroll_x) * cell_width).round();
-    let y = ((layout.y - scroll_y) * cell_height + tab_bar_height).round();
+    let x = ((layout.x - scroll_x) * cell_width + origin_x).round();
+    let y = ((layout.y - scroll_y) * cell_height + origin_y).round();
     let width = (layout.width * cell_width).round();
     let height = (layout.height * cell_height).round();
 
@@ -220,10 +226,12 @@ mod tests {
 
         rebuild_scroll_geometry(
             &scene,
+            RegionId::ROOT,
             |id| offsets.get(&id).copied().unwrap_or((0.0, 0.0)),
             10.0,
             20.0,
-            5.0,
+            (0.0, 5.0),
+            None,
             &mut scroll_adjustments,
             &mut clip_rects,
         );
@@ -269,10 +277,12 @@ mod tests {
             let mut clip_rects = ClipRects::new();
             rebuild_scroll_geometry(
                 &scene,
+                RegionId::ROOT,
                 |_| (0.0, 0.0),
                 10.0,
                 20.0,
-                5.0,
+                (0.0, 5.0),
+                None,
                 &mut scroll_adjustments,
                 &mut clip_rects,
             );
@@ -285,5 +295,56 @@ mod tests {
         assert!(!clips.contains_key(&RegionId::new(10)));
         assert!(!clips.contains_key(&RegionId::new(11)));
         assert_eq!((drawn, adjustments, clips), build(false));
+    }
+
+    /// A surface's regions are placed from its origin and clipped to the
+    /// bounds it is drawn in, here a surface whose top row is above the
+    /// pane.
+    #[test]
+    fn surface_geometry_is_offset_to_its_origin_and_held_in_bounds() {
+        let mut scene = SceneTree::new();
+        let mut root = Region::new(RegionId::new(10));
+        root.computed = ComputedLayout {
+            width: 8.0,
+            height: 3.0,
+            ..Default::default()
+        };
+        scene.try_insert_surface(root, 3).unwrap();
+        scene.insert(region(
+            RegionId::new(11),
+            RegionId::new(10),
+            ComputedLayout {
+                x: 1.0,
+                y: 0.0,
+                width: 4.0,
+                height: 2.0,
+                ..Default::default()
+            },
+            Overflow::default(),
+        ));
+
+        let mut scroll_adjustments = ScrollAdjustments::new();
+        let mut clip_rects = ClipRects::new();
+        rebuild_scroll_geometry(
+            &scene,
+            RegionId::new(10),
+            |_| (0.0, 0.0),
+            10.0,
+            20.0,
+            (0.0, -15.0),
+            Some((0.0, 5.0, 80.0, 45.0)),
+            &mut scroll_adjustments,
+            &mut clip_rects,
+        );
+
+        assert_eq!(
+            clip_rects.get(&RegionId::new(10)),
+            Some(&(0.0, 5.0, 80.0, 45.0))
+        );
+        assert_eq!(
+            clip_rects.get(&RegionId::new(11)),
+            Some(&(10.0, 5.0, 50.0, 25.0))
+        );
+        assert!(!clip_rects.contains_key(&RegionId::ROOT));
     }
 }

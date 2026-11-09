@@ -269,6 +269,9 @@ pub struct Renderer {
     cached_native_buffers: NativeBufferCache<NativeBufferSet>,
     /// The glyph atlas epoch those buffers' UVs belong to.
     cached_native_atlas_epoch: u64,
+    /// Where those buffers drew inline surfaces; when a surface moves
+    /// (scrolling, new output) they are built again.
+    cached_native_surfaces: Vec<(u64, native_render::SurfaceOrigin)>,
     /// Previous frame vertex/index counts for smarter pre-allocation
     prev_bg_count: (usize, usize),
     prev_text_count: (usize, usize),
@@ -526,6 +529,7 @@ impl Renderer {
             has_animations: false,
             cached_native_buffers: NativeBufferCache::default(),
             cached_native_atlas_epoch: 0,
+            cached_native_surfaces: Vec::new(),
             prev_bg_count: (0, 0),
             prev_text_count: (0, 0),
             scroll_adjustments_cache: std::collections::HashMap::new(),
@@ -657,6 +661,7 @@ impl Renderer {
             has_animations: false,
             cached_native_buffers: NativeBufferCache::default(),
             cached_native_atlas_epoch: 0,
+            cached_native_surfaces: Vec::new(),
             prev_bg_count: (0, 0),
             prev_text_count: (0, 0),
             scroll_adjustments_cache: std::collections::HashMap::new(),
@@ -1416,9 +1421,11 @@ impl Renderer {
         }
 
         let sessions: Vec<_> = sessions.collect();
-        let has_native_sessions = !sessions.is_empty();
+        // A full-scene session hides the grid; inline surfaces are drawn
+        // over it.
+        let full_scene = sessions.iter().any(|session| session.is_full_scene());
 
-        if !has_native_sessions {
+        if !full_scene {
             self.render_images(&mut encoder, view, terminal);
         }
 
@@ -1462,7 +1469,7 @@ impl Renderer {
             render_pass.draw_indexed(0..tab_bar_indices.len() as u32, 0, 0..1);
         }
 
-        if !has_native_sessions {
+        if !full_scene {
             self.text_renderer.render(
                 &mut encoder,
                 view,
@@ -1479,23 +1486,30 @@ impl Renderer {
         }
 
         let any_dirty = sessions.iter().any(|s| s.is_render_dirty());
+        let surfaces = if full_scene {
+            Vec::new()
+        } else {
+            self.visible_surfaces(terminal, &sessions)
+        };
 
         // Cached text quads sample the atlas; after it grows or empties
-        // their UVs point at the wrong glyphs.
+        // their UVs point at the wrong glyphs. Cached surfaces are drawn
+        // where their anchor rows were.
         let atlas_unchanged = self.cached_native_atlas_epoch == self.text_renderer.atlas_epoch();
-        if !any_dirty && atlas_unchanged && self.has_cached_native_buffers() {
+        let surfaces_unmoved = surfaces == self.cached_native_surfaces;
+        if !any_dirty && atlas_unchanged && surfaces_unmoved && self.has_cached_native_buffers() {
             self.draw_cached_native_buffers(&mut encoder, view);
         } else {
             self.clear_cached_native_buffers();
-            for session in &sessions {
-                self.render_native_session(
-                    &mut encoder,
-                    view,
-                    session,
-                    native_search_matches,
-                    native_search_index,
-                );
-            }
+            self.draw_native_scenes(
+                &mut encoder,
+                view,
+                terminal,
+                &sessions,
+                &surfaces,
+                native_search_matches.map(|matches| (matches, native_search_index)),
+            );
+            self.cached_native_surfaces = surfaces;
         }
 
         if let Some(preedit) = overlay.ime_preedit {

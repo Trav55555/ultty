@@ -582,13 +582,24 @@ An inline surface is a region tree anchored to rows of the main screen, `rows` h
 
 Both app messages without `CAP_INLINE_SURFACES` are `Error` 400. Like other region messages they are batched by frames and applied at `EndFrame`, and a frame that creates or closes a surface gets a `LayoutComputed` reply.
 
-**Anchoring.** The place of a surface in the text is set by an APC string the app writes to its stdout, on both transports: `ESC _ u <session_id> ; <surface_id> ; <rows> ESC \` (decimal ASCII, at most 64 bytes, at column 0). The terminal reserves `rows` rows there, and the app then prints exactly `rows` lines of fallback text, which is what a terminal that drops the string shows. A surface is placed (`SurfaceEvent { kind: Placed }`) when its anchor and its `CreateSurface` have both arrived, in either order; the two `rows` must agree. Once placed it is drawn over its rows, `Hidden` and `Shown` report it scrolling off and back onto the screen (once per change), and `Evicted` reports its anchor row leaving scrollback or being erased, which freezes it. Session end freezes every live surface where it stands.
+**Anchoring.** The place of a surface in the text is set by an APC string the app writes to its stdout, on both transports: `ESC _ u <session_id> ; <surface_id> ; <rows> ESC \` (decimal ASCII, at most 64 bytes, at column 0). The terminal reserves `rows` rows there, and the app then prints exactly `rows` lines of fallback text, which is what a terminal that drops the string shows.
 
-While `ROOT` has children the session is full-scene and its surfaces are hidden under it; with none, the grid is drawn and the surfaces over it.
+**Placing.** A surface is placed, and the app gets `SurfaceEvent { kind: Placed }`, when its anchor and its `CreateSurface` have both arrived, in either order. The anchor pairs only with a session of the tab whose PTY carried it, and only while that PTY is the tab's one pane; an anchor from a pane of a split tab is released at once. Then:
+
+- If the anchor's `rows` and the `CreateSurface`'s disagree, the surface is dropped with `Error` 400 and its rows keep the fallback text.
+- A `CreateSurface` whose anchor has not arrived 2 s later is dropped with `Error` 400. An anchor no surface claims within 2 s is released: its rows keep the fallback text and nothing more pairs with it.
+- An anchor the terminal refused (on the alternate screen, no room in the scroll region, or 1024 anchors live) drops its surface with `Error` 400 if the surface is waiting for it; a surface created after the refusal waits out its 2 s.
+- A second anchor for a surface already placed is ignored and released, so another program in the tab cannot move or claim it.
+
+**Drawing.** A placed surface is drawn over its rows, at the pane's left edge and the row its first line shows on, clipped to its own rows and to the pane's grid, with the grid text drawn under it (an opaque root background covers the fallback text). It moves with its rows as output scrolls them and as the viewport scrolls through scrollback. A surface with no row on the screen is not drawn; nor are surfaces while the alternate screen shows, while the tab is hidden, or in a tab with more than one pane. `Hidden` and `Shown` tell the app when a surface stops and starts being drawn for any of these reasons, once per change.
+
+**Evicting and freezing.** When a placed surface's anchor row leaves scrollback or is erased (`ED 2`, `ED 3`, `RIS`, erasing a reserved row), the app gets `Evicted` and the surface is frozen. A surface the app closes is frozen with `Closed`, and when a session ends (disconnect, idle timeout, app gone) its surfaces are frozen without an event. Frozen surfaces lose their region tree and their rows lose the anchor tag. Today the rows keep the fallback text the app printed; rasterising the surface's last frame into them is ADR 0020 slice 4.
+
+While `ROOT` has children the session is full-scene and its surfaces are hidden under it (they are not reported `Hidden`); with none, the grid is drawn and the surfaces over it.
 
 A region in a surface gets no key events: `Subscribe` with `EVENT_KEY` on a surface root or a region under one is `Error` 400. An inline-only app reads keys from its tty.
 
-Ultty does not advertise `CAP_INLINE_SURFACES` yet: it does not pair anchors with surfaces or draw them (ADR 0020, slices 3 and 4), so an app asking for it is not granted it and gets `Error` 400 for the messages above. When it is turned on (for tests today), a surface stays unplaced and only `Closed` is sent. `ulttyctl regions` lists each surface with its rows, its state and its region tree.
+Ultty offers `CAP_INLINE_SURFACES` to every session. `ulttyctl regions` lists each surface with its rows, its state (`unplaced` until its anchor came, `placed` while drawn, `hidden` while placed but not drawn) and, once placed, the line of its first row counted from the oldest line the terminal holds, then its region tree.
 
 ---
 
