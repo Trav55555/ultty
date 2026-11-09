@@ -1570,10 +1570,13 @@ impl Grid {
         }
     }
 
-    /// Record a change to content outside the grid (a scrollback row), so
-    /// the content version moves on without any of the grid's rows.
-    fn note_content_change(&mut self) {
-        self.content_version = self.content_version.wrapping_add(1);
+    /// A row to rewrite in place: it is redrawn, but the content version
+    /// stays (see [`Buffer::replace_row`]). A grapheme printed before can
+    /// no longer be joined.
+    fn row_mut_in_place(&mut self, index: u16) -> Option<&mut Row> {
+        *self.dirty.get_mut(index as usize)? = true;
+        self.last_print = None;
+        self.rows.get_mut(index as usize)
     }
 
     /// Mark all rows as dirty.

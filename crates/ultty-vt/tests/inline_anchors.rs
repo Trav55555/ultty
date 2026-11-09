@@ -874,10 +874,11 @@ fn replacing_a_reserved_row_keeps_its_tag_and_marks() {
 }
 
 /// Replacing a row is a change of its content: a selection over it is
-/// dropped, as over streaming output, and one elsewhere on the screen is
-/// kept. Seen while scrolled back, a scrollback row changing drops it too.
+/// dropped, as over streaming output, and one elsewhere is kept, on the
+/// screen and while scrolled back alike, since a rewrite does not move the
+/// view. Writing what the row already holds changes nothing.
 #[test]
-fn replacing_a_row_drops_a_selection_over_it() {
+fn replacing_a_row_drops_only_a_selection_over_it() {
     use ultty_vt::grid::{SelectionMode, SelectionPoint};
     let mut term = term(10, 4);
     feed(&mut term, b"prose\r\n");
@@ -886,22 +887,33 @@ fn replacing_a_row_drops_a_selection_over_it() {
 
     term.start_selection(SelectionPoint::new(0, 0), SelectionMode::Normal);
     term.update_selection(SelectionPoint::new(3, 0));
-    term.main_buffer_mut().replace_row(1, &card_row(10, "card"));
+    assert!(term.main_buffer_mut().replace_row(1, &card_row(10, "card")));
     assert_eq!(term.selected_text().as_deref(), Some("pros"));
 
     term.start_selection(SelectionPoint::new(0, 1), SelectionMode::Normal);
     term.update_selection(SelectionPoint::new(3, 2));
-    term.main_buffer_mut()
-        .replace_row(1, &card_row(10, "card 2"));
+    assert!(!term.main_buffer_mut().replace_row(1, &card_row(10, "card")));
+    assert_eq!(term.selected_text().as_deref(), Some("card\nmore"));
+    assert!(term
+        .main_buffer_mut()
+        .replace_row(1, &card_row(10, "card 2")));
     assert_eq!(term.selected_text(), None);
 
+    // Scrolled back, with the card in scrollback: the card ticking keeps a
+    // selection of the prose above it and drops one over it.
     feed(&mut term, b"\r\n1\r\n2\r\n3");
     assert_eq!(term.buffer().history_len(), 2);
     term.buffer_mut().scroll_up(2);
     term.start_selection(SelectionPoint::new(0, 0), SelectionMode::Normal);
     term.update_selection(SelectionPoint::new(3, 0));
-    assert_eq!(term.selected_text().as_deref(), Some("pros"));
+    for tick in 0..5 {
+        let text = format!("card {tick}");
+        assert!(term.main_buffer_mut().replace_row(1, &card_row(10, &text)));
+        assert_eq!(term.selected_text().as_deref(), Some("pros"));
+    }
+    term.start_selection(SelectionPoint::new(0, 0), SelectionMode::Normal);
+    term.update_selection(SelectionPoint::new(3, 1));
     term.main_buffer_mut()
-        .replace_row(1, &card_row(10, "card 3"));
+        .replace_row(1, &card_row(10, "card 9"));
     assert_eq!(term.selected_text(), None);
 }
