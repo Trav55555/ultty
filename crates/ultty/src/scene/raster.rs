@@ -205,8 +205,6 @@ impl Canvas {
             Content::None => {}
             Content::Text(text) => {
                 let template = template(style.fg.as_ref(), style);
-                // Only as much of a fill as can show.
-                let fill_cols = max_cols.min(usize::try_from(clip.x1 - cx).unwrap_or(0));
                 let mut line_y = cy;
                 for line in text.text.split('\n') {
                     if line_y >= clip.y1 {
@@ -214,11 +212,10 @@ impl Canvas {
                     }
                     // A line of one character fills the width, as a rule.
                     let mut chars = line.chars();
-                    let fill = match (chars.next(), chars.next()) {
-                        (Some(c), None) if max_cols > 1 => Some(c.to_string().repeat(fill_cols)),
-                        _ => None,
-                    };
-                    let line = fill.as_deref().unwrap_or(line);
+                    if let (Some(c), None, true) = (chars.next(), chars.next(), max_cols > 1) {
+                        line_y = self.put_fill(c, cx, line_y, max_cols, template, clip);
+                        continue;
+                    }
                     if line.is_empty() {
                         line_y += 1;
                         continue;
@@ -296,6 +293,43 @@ impl Canvas {
             }
             Content::Widget(widget) => self.draw_widget(widget, style, rect, clip),
         }
+    }
+
+    /// Draw a fill line, `c` repeated `max_cols` times from `(x, y)` and
+    /// broken into rows as `wrap_line` breaks it (a wide character takes
+    /// two rows, or three for an odd width), without building it: only the
+    /// part of each row inside `clip` is written. Returns the row after it.
+    fn put_fill(
+        &mut self,
+        c: char,
+        x: i32,
+        y: i32,
+        max_cols: usize,
+        template: Cell,
+        clip: Clip,
+    ) -> i32 {
+        let width = UnicodeWidthChar::width(c).unwrap_or(0);
+        let per_row = if width * max_cols <= max_cols {
+            max_cols
+        } else {
+            max_cols / width
+        };
+        let rows = max_cols.div_ceil(per_row);
+        for (row, row_y) in (0..rows).zip(y..) {
+            if row_y >= clip.y1 {
+                break;
+            }
+            if row_y >= clip.y0 {
+                let count = per_row.min(max_cols - row * per_row) as i64;
+                let step = width.max(1) as i64;
+                let from = ((i64::from(clip.x0) - i64::from(x)) / step).clamp(0, count);
+                let to = ((i64::from(clip.x1) - i64::from(x) + step - 1) / step).clamp(from, count);
+                let start = x.saturating_add((from * step) as i32);
+                let piece: String = std::iter::repeat_n(c, (to - from) as usize).collect();
+                self.put_text(start, row_y, &piece, template, clip);
+            }
+        }
+        y.saturating_add(i32::try_from(rows).unwrap_or(i32::MAX))
     }
 
     fn draw_widget(
@@ -1223,6 +1257,50 @@ mod tests {
         let shown: Vec<String> = rows.iter().map(|row| row.text_trimmed()).collect();
         let expected: Vec<String> = (0..8).map(|row| format!("visible 120.{row}")).collect();
         assert_eq!(shown, expected);
+    }
+
+    /// One-character fill lines cost what of them shows: 20 000 of them
+    /// above the surface and a screenful on it, in a region a million
+    /// columns wide that starts a million columns left of the surface.
+    #[test]
+    fn fill_lines_far_left_of_the_clip_cost_what_shows() {
+        const LEFT: f32 = 1.0e6;
+        let mut card = Card::new(8, 4);
+        let lines = format!("{}yz\n-\n你\nz", "x\n".repeat(20_000));
+        let id = card.add(
+            1,
+            SURFACE,
+            cells(2.0 * LEFT + 8.0, 30_000.0),
+            Style::default(),
+            text(&lines),
+        );
+        if let Some(region) = card.scene.get_mut(id) {
+            region.constraints.margin.left = Dimension::Cells(-LEFT);
+            region.constraints.margin.top = Dimension::Cells(-20_000.0);
+        }
+        let rows = rows_within(&mut card, std::time::Duration::from_millis(50));
+        let shown: Vec<String> = rows.iter().map(|row| row.copy_text(0, 7)).collect();
+        // Plain text starts a million columns off; the fills reach in. The
+        // wide fill takes two rows, as the renderer wraps it.
+        assert_eq!(shown, ["        ", "--------", "你你你你", "你你你你"]);
+        assert!(rows[2][0].is_wide() && rows[2][1].is_wide_spacer());
+    }
+
+    /// A fill line's visible part lines up with its characters: a wide
+    /// fill starting at an odd column shows the halves cut by the clip as
+    /// blanks, as the whole line drawn and clipped would.
+    #[test]
+    fn a_clipped_fill_keeps_its_columns() {
+        for left in [0.0f32, 1.0, 3.0] {
+            let mut card = Card::new(6, 2);
+            let id = card.add(1, SURFACE, cells(12.0, 2.0), Style::default(), text("你"));
+            if let Some(region) = card.scene.get_mut(id) {
+                region.constraints.margin.left = Dimension::Cells(-left);
+            }
+            let rows = card.rows();
+            let expected = if left == 0.0 { "你你你" } else { " 你你 " };
+            assert_eq!(rows[0].copy_text(0, 5), expected, "{left} left");
+        }
     }
 
     /// Text just left of its clip starts in the right column, wide
