@@ -112,7 +112,9 @@ impl Screen for SplashScreen {
             .border(BorderStyle::double())
             .border_color(Color::Rgb(255, 93, 110))
             .padding(2.0)
-            .justify_center()
+            // Centred across, with the free rows spread around the parts.
+            .justify_around()
+            .align_center()
             .child(logo)
             .child(RichText::new().span(
                 "Digital Evolution Interface // PORYGON-OS v1.4.2",

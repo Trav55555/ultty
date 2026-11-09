@@ -143,6 +143,13 @@ impl Column {
         self
     }
 
+    /// Free space split evenly around each child: half a share before the
+    /// first and after the last, a whole share between two.
+    pub fn justify_around(mut self) -> Self {
+        self.constraints.justify_content = ultty_protocol::JustifyContent::SpaceAround;
+        self
+    }
+
     pub fn align_center(mut self) -> Self {
         self.constraints.align_items = ultty_protocol::AlignItems::Center;
         self
