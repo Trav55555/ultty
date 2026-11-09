@@ -287,7 +287,12 @@ impl ProtocolServer {
     }
 
     fn remove_session(&mut self, key: usize) {
-        if let Some(session) = self.sessions.remove(&key) {
+        if let Some(mut session) = self.sessions.remove(&key) {
+            // Its surfaces freeze where they stand, with their last cells.
+            session.freeze_surfaces();
+            for pairing in self.pairings.values_mut() {
+                pairing.session_ending(&mut session);
+            }
             if let Some(fd) = session.stream_fd() {
                 let _ = self.poller.delete(fd);
             }

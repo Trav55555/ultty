@@ -18,6 +18,7 @@ use crate::scene::region::Region;
 impl NativeSession {
     /// Apply one decoded app message outside frame batching.
     pub(super) fn apply_message(&mut self, msg: AppMessage) -> io::Result<bool> {
+        self.note_surfaces_touched(&msg);
         match msg {
             AppMessage::ClientHello {
                 version,
@@ -490,9 +491,35 @@ impl NativeSession {
         }
     }
 
-    /// Handle DeleteRegion. On a surface root it closes the surface.
+    /// Note which surfaces `msg` changes what is drawn of, before it is
+    /// applied: a region created under one, or one it edits, scrolls,
+    /// deletes or moves (from or to a surface). Deleting a surface root
+    /// closes it, which is not a change of its scene.
+    fn note_surfaces_touched(&mut self, msg: &AppMessage) {
+        let touched = match msg {
+            AppMessage::CreateRegion { parent, .. } => [Some(*parent), None],
+            AppMessage::DeleteRegion { id } if self.scene.surface(*id).is_some() => [None, None],
+            AppMessage::SetConstraints { id, .. }
+            | AppMessage::SetStyle { id, .. }
+            | AppMessage::SetContent { id, .. }
+            | AppMessage::AppendContent { id, .. }
+            | AppMessage::DeleteRegion { id }
+            | AppMessage::Scroll { id, .. } => [Some(*id), None],
+            AppMessage::ReparentRegion { id, new_parent, .. } => [Some(*id), Some(*new_parent)],
+            _ => [None, None],
+        };
+        for id in touched.into_iter().flatten() {
+            self.note_surface_change(id);
+        }
+    }
+
+    /// Handle DeleteRegion. On a surface root it closes the surface,
+    /// keeping its last rows for its anchor's.
     fn handle_delete_region(&mut self, id: RegionId) -> io::Result<()> {
         let closes_surface = self.scene.surface(id).is_some();
+        if closes_surface {
+            self.freeze_surface(id);
+        }
         if self.remove_tree(id) {
             if closes_surface {
                 self.send_surface_event(id, SurfaceEventKind::Closed)?;

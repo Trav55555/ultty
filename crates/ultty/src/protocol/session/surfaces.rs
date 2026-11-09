@@ -1,17 +1,21 @@
 //! Where a session's inline surfaces stand (ADR 0020): waiting for their
 //! anchor, or placed over rows of the terminal and shown or hidden there.
 //!
-//! The session only keeps the state and tells the app; pairing anchors with
-//! surfaces is [`crate::protocol::pairing`]'s job.
+//! The session keeps the state, tells the app, and rasterises a surface
+//! whose scene changed into the cells its rows should hold; pairing anchors
+//! with surfaces and writing those cells into the rows is
+//! [`crate::protocol::pairing`]'s job.
 
 use std::io;
 use std::time::{Duration, Instant};
 
-use tracing::debug;
+use tracing::{debug, warn};
 use ultty_protocol::{RegionId, SurfaceEventKind};
 
 use super::errors::NativeProtocolError;
 use super::NativeSession;
+use crate::grid::Row;
+use crate::scene::raster;
 
 /// How long a surface waits for its anchor, and an anchor for its surface,
 /// before it is dropped.
@@ -24,6 +28,8 @@ pub(super) struct SurfaceState {
     created_at: Instant,
     /// Set once its anchor arrived.
     placed: Option<Placed>,
+    /// Its scene changed since its rows were last written.
+    changed: bool,
 }
 
 impl SurfaceState {
@@ -31,8 +37,19 @@ impl SurfaceState {
         Self {
             created_at,
             placed: None,
+            changed: true,
         }
     }
+}
+
+/// The last rows of a placed surface that was closed, or whose session
+/// ended, since they were last written: they are written over its anchor's
+/// rows before the anchor is released.
+#[derive(Debug)]
+pub(super) struct FrozenSurface {
+    id: RegionId,
+    tag: u16,
+    rows: Vec<Row>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -128,6 +145,8 @@ impl NativeSession {
             shown: true,
             line: None,
         });
+        // Its rows hold the fallback text until it is first written.
+        state.changed = true;
         debug!("Surface {:?} placed on anchor tag {}", id, tag);
         self.render_dirty = true;
         self.send_surface_event(id, SurfaceEventKind::Placed)
@@ -145,9 +164,8 @@ impl NativeSession {
     }
 
     /// Freeze surface `id`, whose anchor row left scrollback or was erased,
-    /// and tell the app. Until surfaces are rasterised into their rows
-    /// (ADR 0020 slice 4) freezing drops the scene and leaves the fallback
-    /// text the app printed.
+    /// and tell the app. Its rows are gone or cleared, so they keep what
+    /// was last written to them, if anything.
     pub fn evict_surface(&mut self, id: RegionId) -> io::Result<()> {
         if self.remove_tree(id) {
             self.send_surface_event(id, SurfaceEventKind::Evicted)?;
@@ -199,5 +217,101 @@ impl NativeSession {
             SurfaceEventKind::Hidden
         };
         self.send_surface_event(id, kind)
+    }
+
+    /// Note that the scene of the surface region `id` is in (if any)
+    /// changed, so its rows are written again.
+    pub(super) fn note_surface_change(&mut self, id: RegionId) {
+        if let Some(state) = self
+            .scene
+            .surface_of(id)
+            .and_then(|root| self.surface_states.get_mut(&root))
+        {
+            state.changed = true;
+        }
+    }
+
+    /// Note that every surface changed, as a new width lays them all out
+    /// again.
+    pub(super) fn note_all_surfaces_changed(&mut self) {
+        for state in self.surface_states.values_mut() {
+            state.changed = true;
+        }
+    }
+
+    /// The cells placed surface `id`'s rows should hold, `cols` wide, if
+    /// its scene changed since it was last asked; `None` when it did not,
+    /// so an unchanged frame costs nothing.
+    pub fn take_surface_rows(&mut self, id: RegionId, cols: u16) -> Option<Vec<Row>> {
+        let state = self.surface_states.get_mut(&id)?;
+        if state.placed.is_none() || !state.changed {
+            return None;
+        }
+        state.changed = false;
+        self.rasterise_surface(id, cols)
+    }
+
+    /// Surface `id`'s scene as `cols` cells by its rows, laid out first
+    /// if a change is waiting for layout.
+    fn rasterise_surface(&mut self, id: RegionId, cols: u16) -> Option<Vec<Row>> {
+        let rows = self.scene.surface(id)?.rows;
+        if self.scene_dirty {
+            // Laid out quietly: the frame or resize that dirtied the scene
+            // still sends its LayoutComputed.
+            if let Err(e) = self.layout.compute_scene_layout(
+                &mut self.scene,
+                self.viewport_width,
+                self.viewport_height,
+            ) {
+                warn!("Session {} layout error: {}", self.session_id, e);
+            }
+        }
+        Some(raster::rasterise_surface(
+            &self.scene,
+            id,
+            cols,
+            rows,
+            |region| self.scroll_offset(region),
+        ))
+    }
+
+    /// Keep the last rows of placed surface `id`, about to be closed or
+    /// to end with its session, if they were not written yet, for
+    /// [`NativeSession::take_frozen_surface`].
+    pub(super) fn freeze_surface(&mut self, id: RegionId) {
+        let Some(state) = self.surface_states.get_mut(&id) else {
+            return;
+        };
+        let Some(placed) = state.placed.filter(|_| state.changed) else {
+            return;
+        };
+        state.changed = false;
+        let cols = self.viewport_width.clamp(1.0, f32::from(u16::MAX)) as u16;
+        if let Some(rows) = self.rasterise_surface(id, cols) {
+            self.frozen_surfaces.push(FrozenSurface {
+                id,
+                tag: placed.tag,
+                rows,
+            });
+        }
+    }
+
+    /// Freeze every placed surface where it stands: the session is ending.
+    pub fn freeze_surfaces(&mut self) {
+        let ids: Vec<RegionId> = self.scene.surfaces().iter().map(|s| s.id).collect();
+        for id in ids {
+            self.freeze_surface(id);
+        }
+    }
+
+    /// The last rows of surface `id`, placed on anchor `tag`, kept when it
+    /// was closed or its session ended; `None` if its rows already hold
+    /// them.
+    pub fn take_frozen_surface(&mut self, id: RegionId, tag: u16) -> Option<Vec<Row>> {
+        let index = self
+            .frozen_surfaces
+            .iter()
+            .position(|frozen| frozen.id == id && frozen.tag == tag)?;
+        Some(self.frozen_surfaces.swap_remove(index).rows)
     }
 }

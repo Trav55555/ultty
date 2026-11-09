@@ -123,15 +123,17 @@ hint and verified against the row's tag on lookup; the row is the truth.
   its tag, so a live surface stays `rows` rows and its scene is laid out
   again at the new width and re-rasterised. Frozen rows are plain text and
   re-wrap like any text (a wide card wraps like a wide table would).
-- **Rasterisation and memory.** While a surface is live, every drawn frame
-  that changed it writes its scene into its rows as styled cells: text per
+- **Rasterisation and memory.** While a surface is live, the UI loop's
+  pass after any change to it (a frame, a scroll or animation step, a new
+  width) writes its scene into its rows as styled cells: text per
   region with the renderer's line breaking (`wrap_line` moves to a shared
   module so GPU and cells agree), `RichText` spans to cell colours and
   bold/italic/underline/dim, borders as box-drawing characters per
   `BorderStyle` (`Ascii` gives `+-|`), backgrounds as cell `bg`, `Image` as
   blank cells, widgets as their label or value. Rows outside the screen are
-  re-encoded in place (`Buffer::replace_row`). Closing a surface is the last
-  rasterisation plus dropping the scene and tags, so a frozen surface costs
+  re-encoded in place (`Buffer::replace_row`). Closing a surface (or its
+  session ending) is the last rasterisation, if a change is still unwritten,
+  plus dropping the scene and tags, so a frozen surface costs
   exactly what `rows` lines of text cost and there is nothing to bound.
   Live cost is at most `rows × cols` cell writes per changed frame.
   Rasterising bumps the rows' `content_version`, so a selection over a
@@ -281,5 +283,19 @@ output, prose, a diff card, while a loop prints shell output under it.
    close only would be cheaper and make selection over a streaming card
    stable, at the cost of copying stale fallback text while live. The ADR
    picks every frame; measure in slice 4.
+
+   *Resolved in slice 4: every changed frame, no cadence.* Rasterisation
+   runs in the UI loop's pairing pass, so frames an app sends faster than
+   the loop turns are already coalesced into one write, and a pass with no
+   change writes nothing (a per-surface changed flag, set by the messages,
+   scrolls, animations and resizes that touch its tree). Measured with
+   `cargo bench -p ultty --bench layout -- surface_raster` (release, LTO;
+   a bordered 8 × 120 card, title plus five streamed lines of output, a new
+   line each frame): rasterising 10.1 µs, rasterising and writing the eight
+   rows on the screen 10.7 µs, in scrollback (re-encoding compact rows)
+   12.9 µs. Under 0.1 % of a 16 ms frame, so a ≤ 100 ms cadence would buy
+   nothing and would make copy lag what is drawn. Closing, or the session
+   ending, writes the last frame if a pass has not, so the frozen text is
+   never stale; an eviction does not (its rows are gone or erased).
 3. **Multi-pane.** Whether surfaces should wait for pane-mapped sessions or
    the single-pane rule is acceptable for the agent console flagship.

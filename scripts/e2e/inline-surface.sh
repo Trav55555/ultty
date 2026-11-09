@@ -4,7 +4,8 @@
 # `ulttyctl regions` that the card is drawn over its own rows: on the screen
 # when placed, gone when the output scrolled it off, back where its text is
 # after scrolling to the top of scrollback, and moving line for line with
-# that text.
+# that text. `ulttyctl text --scrollback` reads the card's text in its rows,
+# in order with the output around it, live and after the card is closed.
 #
 #   scripts/e2e/inline-surface.sh [artifact-dir]
 #
@@ -32,7 +33,7 @@ out="${1:-$(mktemp -d)}"
 mkdir -p "$out/config/ultty"
 # XDG_CONFIG_HOME is ignored unless it is absolute.
 out=$(cd "$out" && pwd)
-rm -f "$out/go" "$out"/*.png "$out/client.log"
+rm -f "$out/go" "$out/close" "$out"/*.png "$out"/text-*.txt "$out/client.log"
 # Unix socket paths are short (108 bytes), so the runtime dir must be too.
 runtime=$(mktemp -d /tmp/ultty-inline.XXXXXX)
 chmod 700 "$runtime"
@@ -108,16 +109,29 @@ shot() {
 # Five lines first, so the card sits mid-screen. The card waits for `go`
 # before `seq 1 200` prints under it; sh -c keeps job-control chatter and
 # prompts out of the text. The client's stderr goes to a log.
-"$ULTTYCTL" send-text "sh -c 'seq 1 5; $client 60 2>$out/client.log & while [ ! -e $out/go ]; do sleep 0.05; done; seq 1 200; wait'" >/dev/null
+# Once `close` exists the client closes the card and exits.
+"$ULTTYCTL" send-text "sh -c 'seq 1 5; $client 60 $out/close 2>$out/client.log & while [ ! -e $out/go ]; do sleep 0.05; done; seq 1 200; wait'" >/dev/null
 "$ULTTYCTL" send-key enter >/dev/null
 
 wait_for_state "placed at line"
 line=$(surface_line | sed -n 's/.* at line \([0-9]*\))$/\1/p')
 [ -n "$line" ] || fail "no anchor line in: $(surface_line)"
-# The card's rows are the fallback text's rows.
-"$ULTTYCTL" text --scrollback >"$out/text-placed.txt"
-[ "$(sed -n "$((line + 1))p" "$out/text-placed.txt" | sed 's/ *$//')" = "FALLBACK 1" ] ||
-    fail "line $line is not the card's first fallback line"
+# The card's rows hold its text instead of the fallback text, once the
+# first frame is written into them.
+# Line `n` (1-based) of `text --scrollback`, trailing blanks dropped.
+text_line() {
+    sed -n "${2}p" "$1" | sed 's/ *$//'
+}
+card_text() {
+    "$ULTTYCTL" text --scrollback >"$out/text-$1.txt"
+    [ "$(text_line "$out/text-$1.txt" "$line")" = "5" ] &&
+        [ "$(text_line "$out/text-$1.txt" "$((line + 1))")" = "INLINE CARD" ] &&
+        [ -z "$(text_line "$out/text-$1.txt" "$((line + 2))")" ] &&
+        [ -z "$(text_line "$out/text-$1.txt" "$((line + 3))")" ] &&
+        ! grep -q FALLBACK "$out/text-$1.txt"
+}
+for _ in $(seq 50); do card_text placed && break; sleep 0.1; done
+card_text placed || fail "the card's rows do not read its text (see $out/text-placed.txt)"
 shot placed
 
 touch "$out/go"
@@ -143,6 +157,19 @@ shot shifted
 python3 scripts/analyze-inline-surface-screenshots.py \
     "$out/placed.png" "$out/off.png" "$out/top.png" "$out/shifted.png" \
     --rows 3 || fail "the card is not where its text is"
+
+# Close the card: it freezes into its rows as text, between `seq 1 5` and
+# `seq 1 200`.
+touch "$out/close"
+for _ in $(seq 100); do
+    grep -q "surface 9000 Closed" "$out/client.log" && break
+    sleep 0.1
+done
+grep -q "surface 9000 Closed" "$out/client.log" || fail "the app never heard Closed"
+[ -z "$(surface_line)" ] || fail "the surface is still listed: $(surface_line)"
+card_text closed || fail "the closed card's rows do not read its text (see $out/text-closed.txt)"
+[ "$(text_line "$out/text-closed.txt" "$((line + 4))")" = "1" ] ||
+    fail "the output after the card is not where it was"
 
 grep -q "surface 9000 Placed" "$out/client.log" || fail "the app never heard Placed"
 grep -q "surface 9000 Hidden" "$out/client.log" || fail "the app never heard Hidden"

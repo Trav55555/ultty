@@ -16,7 +16,7 @@ use tracing::warn;
 use ultty_protocol::RegionId;
 
 use super::session::{NativeSession, SurfacePlacement, SURFACE_PAIRING_TIMEOUT};
-use crate::grid::{Anchor, AnchorEvent, Buffer, Terminal};
+use crate::grid::{Anchor, AnchorEvent, Buffer, Row, Terminal};
 
 /// The row of the screen, 0 at the top, that `line` (as counted by
 /// [`Buffer::row_at`]) shows on with the buffer's current scrollback
@@ -53,6 +53,15 @@ struct Claimed {
     surface: RegionId,
 }
 
+/// The last rows of a surface placed here whose session ended, until the
+/// next update writes them.
+#[derive(Debug)]
+struct Frozen {
+    tag: u16,
+    serial: u64,
+    rows: Vec<Row>,
+}
+
 /// The pairing state of one terminal's anchors.
 #[derive(Debug, Default)]
 pub struct AnchorPairing {
@@ -60,6 +69,26 @@ pub struct AnchorPairing {
     pending: Vec<PendingAnchor>,
     /// Anchors a surface is placed over.
     claimed: Vec<Claimed>,
+    /// Rows of surfaces whose session ended since the last update.
+    frozen: Vec<Frozen>,
+}
+
+/// Write `rows`, a surface's cells, over the rows tagged `tag` that hold
+/// it, from its first row on. Rows past the reservation, or that lost the
+/// tag, are left alone.
+fn write_rows(buffer: &mut Buffer, tag: u16, rows: &[Row]) {
+    let Some(first) = buffer.anchor_line(tag) else {
+        return;
+    };
+    for (offset, row) in rows.iter().enumerate() {
+        let line = first + offset;
+        if buffer
+            .anchor_at(line)
+            .is_some_and(|anchor| anchor.tag() == tag)
+        {
+            buffer.replace_row(line, row);
+        }
+    }
 }
 
 impl AnchorPairing {
@@ -79,11 +108,34 @@ impl AnchorPairing {
     }
 
     /// The terminal is gone: evict every surface placed on its anchors, so
-    /// none stays placed on a tag nothing holds.
+    /// none stays placed on a tag nothing holds. Rows kept for it have
+    /// nowhere to go.
     pub fn abandon(&mut self, sessions: &mut [&mut NativeSession]) {
         self.pending.clear();
+        self.frozen.clear();
         for claimed in std::mem::take(&mut self.claimed) {
+            if let Some(session) = find(sessions, claimed.session_id) {
+                session.take_frozen_surface(claimed.surface, claimed.tag);
+            }
             self.evict(sessions, claimed);
+        }
+    }
+
+    /// `session` is ending: keep the last rows of each of its surfaces
+    /// placed here (from [`NativeSession::freeze_surfaces`]) for the next
+    /// update to write before it releases their anchors.
+    pub fn session_ending(&mut self, session: &mut NativeSession) {
+        for claimed in &self.claimed {
+            if claimed.session_id != session.session_id() {
+                continue;
+            }
+            if let Some(rows) = session.take_frozen_surface(claimed.surface, claimed.tag) {
+                self.frozen.push(Frozen {
+                    tag: claimed.tag,
+                    serial: claimed.serial,
+                    rows,
+                });
+            }
         }
     }
 
@@ -152,9 +204,11 @@ impl AnchorPairing {
 
     /// Bring the terminal's anchors and the tab's `sessions` up to date as
     /// of `now`: take the terminal's anchor events, place surfaces whose
-    /// halves have both arrived, evict those whose rows are gone, release
-    /// anchors nobody claims and tell each placed surface's app whether it
-    /// is on the screen.
+    /// halves have both arrived, evict those whose rows are gone, write
+    /// the cells of each surface whose scene changed into its rows (and of
+    /// each closed one, before releasing its anchor), release anchors
+    /// nobody claims and tell each placed surface's app whether it is on
+    /// the screen.
     ///
     /// `claimable` says the terminal is its tab's only pane; otherwise new
     /// anchors are released at once. `on_screen` says it is drawn now (its
@@ -227,15 +281,31 @@ impl AnchorPairing {
         }
 
         // A surface closed by its app, or whose session ended, freezes
-        // where it stands: its rows keep their text and lose the tag.
+        // where it stands: its rows get its last cells, if they were not
+        // written yet, and lose the tag.
+        let frozen = &mut self.frozen;
         self.claimed.retain(|claimed| {
-            let live = find(sessions, claimed.session_id)
+            let session = find(sessions, claimed.session_id);
+            let live = session
+                .as_deref()
                 .is_some_and(|session| is_placed_on(session, claimed.surface, claimed.tag));
             if !live {
+                let closed = session
+                    .and_then(|session| session.take_frozen_surface(claimed.surface, claimed.tag));
+                let ended = || {
+                    let index = frozen
+                        .iter()
+                        .position(|f| (f.tag, f.serial) == (claimed.tag, claimed.serial))?;
+                    Some(frozen.swap_remove(index).rows)
+                };
+                if let Some(rows) = closed.or_else(ended) {
+                    write_rows(terminal.main_buffer_mut(), claimed.tag, &rows);
+                }
                 terminal.release_anchor(claimed.tag);
             }
             live
         });
+        self.frozen.clear();
 
         self.pending.retain(|pending| {
             let fresh = now.saturating_duration_since(pending.seen_at) < SURFACE_PAIRING_TIMEOUT;
@@ -277,6 +347,21 @@ impl AnchorPairing {
                         session_id: pending.anchor.session_id,
                         surface: id,
                     });
+                }
+            }
+        }
+
+        // Surfaces whose scene changed are written into their rows, so
+        // copy and search read what is drawn. Not while the alternate
+        // screen hides them: they are written when it goes.
+        if !terminal.is_alternate_screen() {
+            let buffer = terminal.main_buffer_mut();
+            let cols = buffer.dimensions().cols;
+            for claimed in &self.claimed {
+                let rows = find(sessions, claimed.session_id)
+                    .and_then(|session| session.take_surface_rows(claimed.surface, cols));
+                if let Some(rows) = rows {
+                    write_rows(buffer, claimed.tag, &rows);
                 }
             }
         }
@@ -329,8 +414,8 @@ mod tests {
     use std::time::Duration;
 
     use ultty_protocol::{
-        AppMessage, Constraints, FrameId, Style, SurfaceEventKind, TerminalMessage,
-        CAP_INLINE_SURFACES, PROTOCOL_VERSION,
+        AppMessage, Constraints, Content, FrameId, Style, SurfaceEventKind, TerminalMessage,
+        TextContent, CAP_INLINE_SURFACES, PROTOCOL_VERSION,
     };
     use ultty_vt::ansi::AnsiParser;
     use ultty_vt::grid::{Dimensions, TerminalHandler, MAX_ANCHORS};
@@ -425,7 +510,8 @@ mod tests {
 
     impl Rig {
         fn new() -> Self {
-            let (session, peer) = session(SESSION);
+            let (mut session, peer) = session(SESSION);
+            session.set_viewport(20.0, 6.0);
             Self {
                 term: term(20, 6),
                 session,
@@ -433,6 +519,32 @@ mod tests {
                 pairing: AnchorPairing::default(),
                 now: Instant::now(),
             }
+        }
+
+        /// Apply `ops` as one frame.
+        fn frame(&mut self, ops: Vec<AppMessage>) {
+            let frame_id = FrameId(9000);
+            self.session
+                .handle_message_for_test(AppMessage::BeginFrame { frame_id })
+                .unwrap();
+            for op in ops {
+                self.session.handle_message_for_test(op).unwrap();
+            }
+            self.session
+                .handle_message_for_test(AppMessage::EndFrame { frame_id })
+                .unwrap();
+        }
+
+        /// Set region `id`'s content to plain `text`.
+        fn set_text(&mut self, id: u32, text: &str) {
+            self.frame(vec![set_text(id, text)]);
+        }
+
+        /// The terminal's text, scrollback and screen, as `ulttyctl text
+        /// --scrollback` and copy read it.
+        fn text(&self) -> String {
+            let buffer = self.term.main_buffer();
+            buffer.text_of_rows(0, buffer.total_lines(), 0)
         }
 
         fn update(&mut self) {
@@ -456,6 +568,13 @@ mod tests {
 
         fn placement(&self, id: u32) -> Option<SurfacePlacement> {
             self.session.surface_placement(RegionId::new(id))
+        }
+    }
+
+    fn set_text(id: u32, text: &str) -> AppMessage {
+        AppMessage::SetContent {
+            id: RegionId::new(id),
+            content: Content::Text(TextContent::new(text)),
         }
     }
 
@@ -640,9 +759,11 @@ mod tests {
         let mut rig = Rig::new();
         create_surface(&mut rig.session, 5, 1);
         anchor(&mut rig.term, SESSION, 5, 1);
-        feed(&mut rig.term, b"card");
+        feed(&mut rig.term, b"fallback");
         rig.update();
         rig.sent();
+        rig.set_text(5, "card");
+        rig.update();
 
         rig.session
             .handle_message_for_test(AppMessage::CloseSurface {
@@ -867,6 +988,196 @@ mod tests {
         assert_eq!(rig.sent(), (vec![(5, SurfaceEventKind::Evicted)], vec![]));
         assert_eq!(rig.placement(5), None);
         assert_eq!(rig.session.placed_surfaces().count(), 0);
+    }
+
+    /// What [`transcript`] leaves in the terminal, as text.
+    const TRANSCRIPT: &str = "prose 1\ncard line 1\ncard line 2\nprose 2";
+
+    /// Prose, a two-row card (surface 5) with its fallback text, prose:
+    /// the shape of an agent's transcript. The card is placed and written.
+    fn transcript(rig: &mut Rig) {
+        feed(&mut rig.term, b"prose 1\r\n");
+        create_surface(&mut rig.session, 5, 2);
+        anchor(&mut rig.term, SESSION, 5, 2);
+        feed(&mut rig.term, b"fallback 1\r\nfallback 2\r\nprose 2\r\n");
+        rig.set_text(5, "card line 1\ncard line 2");
+        rig.update();
+        assert_eq!(rig.sent(), placed(5));
+    }
+
+    fn close_surface(rig: &mut Rig, id: u32) {
+        rig.frame(vec![AppMessage::CloseSurface {
+            id: RegionId::new(id),
+        }]);
+    }
+
+    /// `text --scrollback`, copy and search read the card's rows: its text
+    /// in order with the shell's, the same once the card is closed.
+    #[test]
+    fn a_card_reads_in_order_with_the_shell_output_live_and_closed() {
+        let mut rig = Rig::new();
+        transcript(&mut rig);
+        assert_eq!(rig.text(), TRANSCRIPT);
+        assert!(tags(&rig.term)[1..3].iter().all(|&tag| tag != 0));
+
+        close_surface(&mut rig, 5);
+        rig.update();
+        assert_eq!(rig.sent(), (vec![(5, SurfaceEventKind::Closed)], vec![]));
+        assert_eq!(rig.text(), TRANSCRIPT);
+        assert!(tags(&rig.term).iter().all(|&tag| tag == 0));
+        assert!(rig.pairing.is_idle());
+    }
+
+    /// A frame that changes the card and closes it in one go, before any
+    /// pass ran: the rows get its last cells all the same.
+    #[test]
+    fn the_last_frame_before_close_is_written() {
+        let mut rig = Rig::new();
+        transcript(&mut rig);
+        rig.frame(vec![
+            set_text(5, "final 1\nfinal 2"),
+            AppMessage::CloseSurface {
+                id: RegionId::new(5),
+            },
+        ]);
+        rig.update();
+        assert_eq!(rig.text(), "prose 1\nfinal 1\nfinal 2\nprose 2");
+        assert!(tags(&rig.term).iter().all(|&tag| tag == 0));
+    }
+
+    /// A session that ends after a frame no pass saw: the card freezes
+    /// with that frame's cells, as the server ends a session.
+    #[test]
+    fn a_session_that_ends_leaves_its_last_frame() {
+        let mut rig = Rig::new();
+        transcript(&mut rig);
+        rig.set_text(5, "last words");
+        rig.session.freeze_surfaces();
+        rig.pairing.session_ending(&mut rig.session);
+        rig.pairing
+            .update(&mut rig.term, &mut [], true, true, rig.now);
+        assert_eq!(rig.text(), "prose 1\nlast words\n\nprose 2");
+        assert!(tags(&rig.term).iter().all(|&tag| tag == 0));
+        assert!(rig.pairing.is_idle());
+    }
+
+    /// Rows are written for frames that changed the card, never for
+    /// passes without one.
+    #[test]
+    fn passes_without_a_change_do_not_write_the_rows() {
+        let mut rig = Rig::new();
+        transcript(&mut rig);
+        let mut scribble = crate::grid::Row::new(20);
+        scribble[0].set_char('#');
+        rig.term.main_buffer_mut().replace_row(1, &scribble);
+        rig.update();
+        feed(&mut rig.term, b"more output\r\n");
+        rig.update();
+        assert!(rig.text().starts_with("prose 1\n#\n"));
+
+        // Metadata does not change what is drawn; content does.
+        rig.frame(vec![AppMessage::SetRegionMetadata {
+            id: RegionId::new(5),
+            metadata: vec![("k".into(), "v".into())],
+        }]);
+        rig.update();
+        assert!(rig.text().starts_with("prose 1\n#\n"));
+        rig.set_text(5, "card line 1\ncard line 2");
+        rig.update();
+        assert!(rig.text().starts_with(TRANSCRIPT));
+    }
+
+    /// The card goes on changing in scrollback, keeps its place as older
+    /// lines are evicted, and freezes there.
+    #[test]
+    fn a_card_in_scrollback_is_rewritten_and_outlives_older_lines() {
+        let mut rig = Rig::new();
+        rig.term.set_scrollback_limit(4);
+        transcript(&mut rig);
+        feed(&mut rig.term, b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7");
+        assert_eq!(rig.term.main_buffer().history_len(), 4);
+        assert_eq!(rig.term.main_buffer().anchor_line(1), Some(0));
+        let after = "card line 2\nprose 2\n1\n2\n3\n4\n5\n6\n7";
+        assert_eq!(rig.text(), format!("card line 1\n{after}"));
+
+        rig.set_text(5, "moved on\ncard line 2");
+        rig.update();
+        assert_eq!(rig.sent(), (vec![(5, SurfaceEventKind::Hidden)], vec![]));
+        assert_eq!(rig.text(), format!("moved on\n{after}"));
+        close_surface(&mut rig, 5);
+        rig.update();
+        assert_eq!(rig.text(), format!("moved on\n{after}"));
+        assert!(tags(&rig.term).iter().all(|&tag| tag == 0));
+    }
+
+    /// A narrower window clips the card's rows instead of wrapping them,
+    /// and the card is laid out and written again at the new width, as
+    /// on widening.
+    #[test]
+    fn a_resize_lays_the_card_out_again_in_its_own_rows() {
+        let mut rig = Rig::new();
+        transcript(&mut rig);
+        rig.set_text(5, "card line 1\n-");
+        rig.update();
+        let resize = |rig: &mut Rig, cols: u16| {
+            rig.term.resize(Dimensions::new(cols, 6));
+            rig.session.set_viewport(f32::from(cols), 6.0);
+            rig.session.relayout_for_resize().unwrap();
+            rig.update();
+        };
+
+        resize(&mut rig, 12);
+        assert_eq!(
+            rig.text(),
+            format!("prose 1\ncard line 1\n{}\nprose 2", "-".repeat(12))
+        );
+        let buffer = rig.term.main_buffer();
+        let first = buffer.anchor_line(1).unwrap();
+        for line in first..first + 2 {
+            let row = buffer.row_at(line).unwrap();
+            assert!(!row.is_wrapped());
+            assert_eq!(row.width(), 12);
+        }
+
+        resize(&mut rig, 30);
+        assert_eq!(
+            rig.text(),
+            format!("prose 1\ncard line 1\n{}\nprose 2", "-".repeat(30))
+        );
+        close_surface(&mut rig, 5);
+        rig.update();
+        assert_eq!(
+            rig.text(),
+            format!("prose 1\ncard line 1\n{}\nprose 2", "-".repeat(30))
+        );
+    }
+
+    /// Selecting from the prose above the card to the prose below copies
+    /// all three in order.
+    #[test]
+    fn a_selection_over_prose_card_and_prose_copies_them_in_order() {
+        use crate::grid::{SelectionMode, SelectionPoint};
+        let mut rig = Rig::new();
+        transcript(&mut rig);
+        rig.term
+            .start_selection(SelectionPoint::new(0, 0), SelectionMode::Line);
+        rig.term.update_selection(SelectionPoint::new(0, 3));
+        assert_eq!(rig.term.selected_text().as_deref(), Some(TRANSCRIPT));
+    }
+
+    /// While the alternate screen shows, the card's rows wait; they are
+    /// written once it is gone.
+    #[test]
+    fn the_alternate_screen_holds_writes_until_it_goes() {
+        let mut rig = Rig::new();
+        transcript(&mut rig);
+        feed(&mut rig.term, b"\x1b[?1049h");
+        rig.set_text(5, "while away");
+        rig.update();
+        assert_eq!(rig.text(), TRANSCRIPT);
+        feed(&mut rig.term, b"\x1b[?1049l");
+        rig.update();
+        assert_eq!(rig.text(), "prose 1\nwhile away\n\nprose 2");
     }
 
     #[test]
