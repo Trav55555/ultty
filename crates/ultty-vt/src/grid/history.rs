@@ -600,11 +600,11 @@ mod tests {
 mod size {
     /// Scrollback keeps up to tens of thousands of these. The shell marks
     /// (ADR 0019) and the anchor tag (ADR 0020) fit in padding; keep it
-    /// that way. Screen rows grew by the anchor tag (ADR 0020) and number
-    /// only a screenful.
+    /// that way. Screen rows are few, but every scroll moves the region's
+    /// rows by value, so the cost of a scroll grows with `Row`.
     #[test]
     fn rows_do_not_grow() {
         assert_eq!(std::mem::size_of::<super::CompactRow>(), 80);
-        assert_eq!(std::mem::size_of::<super::Row>(), 64);
+        assert_eq!(std::mem::size_of::<super::Row>(), 56);
     }
 }
