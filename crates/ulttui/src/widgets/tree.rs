@@ -224,8 +224,8 @@ impl View for Tree {
         })?;
 
         // The row is the tree item, named by its label, with its level,
-        // expanded state and whether it is selected; the texts drawn in it (indent, chevron, icon,
-        // label) are hidden so it is not read twice.
+        // expanded state and whether it is selected; the texts drawn in it
+        // (indent, chevron, icon, label) are hidden so it is not read twice.
         let item = Semantics {
             role: Role::TreeItem,
             label: Some(node.label.to_string()),
