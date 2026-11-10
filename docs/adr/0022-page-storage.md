@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed 2026-11-09, draft. Not accepted until the prototype gate in §Prototype passes; if it fails, this ADR is recorded as Rejected together with the measurements.
+Accepted 2026-11-09, after the prototype gate in §Prototype passed in round 3 (below). The history of the gate follows. Accepting it adopts round 2's style layout: §1's bits 24..64 become one style key, either an inline style or a 24-bit table id, and the per-page style table interns approximately. The sgr-dense wall-clock cost (3.6–4.4% slower in C on the quiet machine, against +0.5% to +1.4% instructions) is explained in the perf note's "sgr-dense wall clock" section. The implementation should apply SGR directly to the style key rather than going through `Style::of`.
+
+Proposed 2026-11-09. Not accepted until the prototype gate in §Prototype passes; if it fails, this ADR is recorded as Rejected together with the measurements.
 
 **Prototype measured 2026-11-09: not GO** ([2026-11-09-page-storage-prototype.md](../perf/2026-11-09-page-storage-prototype.md)). Variant C meets every GO criterion but one:
 - vt/ascii is 18.6–19.4 instructions per byte at 1 and 8 MiB;
@@ -76,7 +78,7 @@ Fit a per-row cost S, a CR/LF dispatch cost P and a per-character cost c to thes
 - **Reflow.** `reflow_all` streams history: decode each `CompactRow` → `ReflowCell`s → `Rewrap::push_row`, which keeps the last screenful as `Row`s and `CompactRow::encode`s older rows. Marks go to the first row of a logical line, and anchors end lines. `resize_height` clones top rows into history or decodes rows pulled back from it.
 - **Budgets.** `crates/ultty/benches/memory.rs` gates live heap at measured +5%: empty 80x24 185 KB; empty 300x75 1.229 MB (two screens of 24-byte cells); typical 10k lines 2.915 / 3.461 / 4.358 MB at 80/120/300 columns; the resize case 3.461 MB live and 4.935 MB peak; sgr-dense 10k 18.98 MB. That works out to about 300 bytes per typical history line and about 1.8 KB per sgr-dense line.
 
-## Decision (proposed)
+## Decision
 
 Store each buffer's screen in one **screen page** and its scrollback in a list of **history pages**, both made of 8-byte packed cells whose styles are interned in a table per page. Rows become slots in a page, not heap objects. Every reader goes through a borrowed `RowView`. The parser's API does not change.
 
