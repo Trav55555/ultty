@@ -525,27 +525,40 @@ Each slice is independently testable and mergeable.
      `EmptyState`, `Table`, containers: the derived default.
    - §1 has no `selected` state, so the active tab, list row and tree row
      are not exposed as selected; only their style shows it. Adding a
-     `selected` flag is a protocol change for a later slice.
-   - `MarkdownView::streaming(true)`: natively the view is then one
-     region whose own text is the whole document (spans keep their
-     styles; a code block loses its left rule until the stream ends), so
-     streamed text reaches it as `AppendContent` and is announced. No
-     cursor is drawn natively while streaming: it would be appended and
-     spoken; `busy` says it instead. Finished, it is block regions again.
-   - A live region's text growth is always sent as `AppendContent`, even
-     when styling changed too (a span turned bold): the new text is
-     appended and a `SetContent` in the same frame sets the styled
-     result. When text in its last line changed (`**bo` became bold),
-     what follows the unchanged part is appended again, so a word can be
-     spoken twice; changes above the last line are set, not announced.
-   - Text that arrives in the frame a region stops being live is still
-     appended, before the semantics change: a streaming markdown view
-     ending with its last chunk becomes block regions, and the text they
-     add past what it held is appended to it first. Without that the last
-     words of every reply were lost (seen over AT-SPI).
-   - The first text a live region is created with is not appended; it
-     names the region if it is one line (§1). An app that wants every
-     word announced shows the streaming view before the first chunk.
+     `selected` flag is a protocol change for a later slice (open
+     questions).
+   - `MarkdownView` is one region per block, streaming or not. While it
+     streams, the block still arriving is live itself (with the view's
+     liveness) and the view is the busy log around it; a finished block
+     stops being live. Streamed text so reaches a live region as
+     `AppendContent`, each region holds one block (the codec's 10,000
+     spans per text and the wire cost stay per block: one more item on a
+     3,500-item list costs under 1 KiB), and a code block keeps its rule.
+     No cursor is drawn natively while streaming: it would be appended
+     and spoken; `busy` says it instead. A first version kept the whole
+     document as one region's text; review found it past the span limit
+     at about 40 KB of markdown and resending the document whenever a
+     block or styled span began.
+   - The backend keeps how much of each live region's text it has
+     appended (announced). What a live region shows past that is
+     appended, then a `SetContent` in the same frame sets the styled
+     result when appending alone does not give it (a span turned bold).
+     A rewrite of announced text (`Title` set as `TITLE`, an earlier
+     line) is set, not spoken again; only text past what was announced
+     is new, cut at a character boundary.
+   - While a region stays live, the end of its last line from the first
+     inline markdown opener still shown as a character (`*`, `_` not in
+     a word, `` ` ``, `[`, `~`) is held back, so `**bo` is not spoken and
+     then `bold` again; an opener 80 bytes back is taken as literal.
+   - A region created live announces its first text the same way, and a
+     region that turns live announces only what it grows by.
+     `SetSemantics` that makes a region live goes before its content in
+     the frame; any other change after, so the text that arrives in the
+     frame a region stops being live (the last chunk, as the stream ends)
+     is still appended and announced, without the hold-back.
+   - App-sent strings are cut, at a character boundary, to what the codec
+     decodes (4 KiB each, 8 KiB together): a long input value or label
+     made the terminal refuse the message.
 8. **AT-SPI smoke test in CI**, or the local script if headless AT-SPI is
    unreliable.
 9. **macOS**: VoiceOver run of the manual script, differences recorded.
@@ -569,3 +582,7 @@ Each slice is independently testable and mergeable.
   0.1 ms); incremental updates stay a later optimisation.
 - Whether the unused `tokio` dependency of `crates/ultty` should go, now
   that a second executor arrives.
+- How should a selected item be exposed? §1 has no `selected` state, so
+  ulttui's active tab, selected list row and selected tree row show it
+  only by style (slice 7). A `selected` flag (AccessKit `set_selected`)
+  is an additive protocol change under ADR 0011; it needs sign-off.

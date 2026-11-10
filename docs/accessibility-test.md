@@ -82,7 +82,9 @@ reply streams word by word into a `MarkdownView::streaming(true)`, a busy
 polite `Log` labelled "Bot reply" until it ends. Expect "Bot reply" once
 when it appears, then the reply, each line once as it completes. Your own
 message is not announced (it is a new region under the log, ADR 0021
-slice 6). `scripts/e2e/accessibility-chat.sh` checks the same over AT-SPI
+slice 6). Then send `markdown`: the reply has bold, inline code, a link,
+a list and a code block; expect each block read once, with no asterisks,
+backticks or brackets spoken. `scripts/e2e/accessibility-chat.sh` checks the same over AT-SPI
 without a screen reader.
 
 ### 6. Tab through a native app

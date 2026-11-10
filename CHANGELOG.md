@@ -21,9 +21,12 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   `TextInput::password` and `Title::level`. In Ultty the native backend
   sends `SetSemantics` only where it adds to what the terminal derives from
   content, and only when it changes. `MarkdownView::streaming(true)` is a
-  busy, polite live log whose streamed text a screen reader announces; while
-  streaming it is one region natively and draws no cursor there. ANSI mode
-  is unchanged.
+  busy, polite live log whose streamed text a screen reader announces, once
+  and without unresolved markdown markers; natively the block still arriving
+  is the live region and no cursor is drawn. Semantics strings are cut to
+  the codec's limits. ANSI mode is unchanged.
+- `MarkdownView` natively is one region per block whether it streams or not,
+  and a fenced code block no longer has its last row cut off.
 - `ultty_protocol::derive_semantics`: the terminal's rule for a region's
   semantics from its content, for apps to compare with.
 - The `chat` example streams its replies into a live transcript;

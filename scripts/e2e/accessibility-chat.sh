@@ -7,6 +7,8 @@
 # streams word by word into a `MarkdownView::streaming(true)`, must reach
 # AT-SPI as `object:announcement` events carrying the reply once, in
 # order, polite, with nothing else announced but the reply's own node.
+# Twice: a short reply, then one with markdown blocks, inline styles, a
+# link and a code block, none of whose markers may be spoken.
 #
 #   scripts/e2e/accessibility-chat.sh [artifact-dir]
 #
@@ -35,15 +37,13 @@ if [ "${1:-}" != "--inner" ]; then
     for tool in Xvfb dbus-run-session gdbus; do
         command -v "$tool" >/dev/null || { echo "$tool is required" >&2; exit 2; }
     done
-    if [ -z "${ULTTY:-}" ]; then
-        cargo build -q -p ultty --bins -p chat
-        ULTTY=$PWD/target/debug/ultty
-        ULTTYCTL=$PWD/target/debug/ulttyctl
-    fi
-    if [ -z "${CHAT:-}" ]; then
-        cargo build -q -p chat
-        CHAT=$PWD/target/debug/chat
-    fi
+    build=()
+    if [ -z "${ULTTY:-}" ]; then build+=(-p ultty --bins); fi
+    if [ -z "${CHAT:-}" ]; then build+=(-p chat); fi
+    if [ ${#build[@]} -gt 0 ]; then cargo build -q "${build[@]}"; fi
+    ULTTY=${ULTTY:-$PWD/target/debug/ultty}
+    ULTTYCTL=${ULTTYCTL:-$(dirname "$ULTTY")/ulttyctl}
+    CHAT=${CHAT:-$PWD/target/debug/chat}
     export ULTTY ULTTYCTL CHAT
     mkdir -p "$out"
     # A session bus of our own: the desktop's AT-SPI state is left alone.
@@ -135,42 +135,52 @@ semantics "role=log,label=Messages,live=polite" "role=input,label=Message" \
     { cat "$out/regions.txt" >&2; fail "chat's regions lack their semantics"; }
 echo "regions: transcript is a polite log, the input is named"
 
-/usr/bin/python3 -I scripts/e2e/atspi_announcements.py "$ultty_pid" "$out/listening" \
-    --quiet 3 --timeout 60 >"$out/announcements.jsonl" 2>"$out/listener.log" &
-listener_pid=$!
-for _ in $(seq 100); do [ -e "$out/listening" ] && break; sleep 0.1; done
-[ -e "$out/listening" ] || fail "the announcement listener did not start"
+# Send `message`, check the streaming reply is a polite log of its own
+# while it streams, and that what AT-SPI announces is `want`: every word
+# once, in order, polite, at most four a second, and nothing else but the
+# reply's own node. Artifacts are named after `name`.
+converse() {
+    local name=$1 message=$2 want=$3
+    /usr/bin/python3 -I scripts/e2e/atspi_announcements.py "$ultty_pid" "$out/$name.listening" \
+        --quiet 3 --timeout 60 >"$out/$name.jsonl" 2>"$out/$name.listener.log" &
+    listener_pid=$!
+    for _ in $(seq 100); do [ -e "$out/$name.listening" ] && break; sleep 0.1; done
+    [ -e "$out/$name.listening" ] || fail "the announcement listener did not start"
 
-# Typed one key at a time, as a person would, through the window (send-text
-# writes to the pty, which a socket app does not read); Enter sends it.
-for key in p i n g; do
-    ctl send-key "$key" >/dev/null || fail "ulttyctl send-key failed"
-done
-ctl send-key enter >/dev/null || fail "ulttyctl send-key failed"
-# While the reply streams, it is a busy log of its own.
-streaming=false
-for _ in $(seq 50); do
-    if semantics "role=log,label=Bot reply,live=polite" >"$out/regions-streaming.txt" 2>&1; then
-        streaming=true
-        break
-    fi
-    sleep 0.05
-done
-$streaming || { cat "$out/regions-streaming.txt" >&2; fail "the streaming reply is not a polite log"; }
+    # Typed one key at a time through the window (send-text writes to the
+    # pty, which a socket app does not read); Enter sends it.
+    local key i
+    for ((i = 0; i < ${#message}; i++)); do
+        key=${message:i:1}
+        ctl send-key "$key" >/dev/null || fail "ulttyctl send-key failed"
+    done
+    ctl send-key enter >/dev/null || fail "ulttyctl send-key failed"
+    # While the reply streams, it is a polite log of its own. Polled as
+    # fast as ulttyctl answers, for at most 10 s (the reply takes 40 ms a
+    # word; the markdown one about 1.5 s).
+    local streaming=false deadline=$((SECONDS + 10))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if semantics "role=log,label=Bot reply,live=polite" >"$out/$name.regions.txt" 2>&1; then
+            streaming=true
+            break
+        fi
+    done
 
-wait "$listener_pid" || fail "no announcements within 60 s: $(cat "$out/listener.log")"
-unset listener_pid
+    wait "$listener_pid" || fail "no announcements within 60 s: $(cat "$out/$name.listener.log")"
+    unset listener_pid
+    $streaming || { cat "$out/$name.regions.txt" >&2; fail "$name: the streaming reply was never a polite log"; }
 
-/usr/bin/python3 -I - "$out/announcements.jsonl" >"$out/verdict.txt" <<'EOF' ||
+    /usr/bin/python3 -I - "$out/$name.jsonl" "$want" >"$out/$name.verdict.txt" <<'EOF' ||
 import json
 import sys
 
 every = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
-# The streamed text comes as label children of the reply's region; the
-# region itself is announced by name ("Bot reply") once, when it appears.
+# The streamed text comes as label children of the reply's block regions;
+# the reply's own region is announced by name ("Bot reply") once, when it
+# appears.
 records = [r for r in every if r["role"] == "label"]
 others = [r for r in every if r["role"] != "label"]
-want = "You said: ping. That is 4 characters, streamed to you word by word."
+want = " ".join(sys.argv[2].split())
 heard = " ".join(" ".join(r["text"] for r in records).split())
 problems = []
 if heard != want:
@@ -184,7 +194,7 @@ if any(r["politeness"] != 1 for r in records):
 print(f"{len(records)} announcements, at most {worst} in a second")
 for r in others:
     print(f"  also: {r['role']} {r['text']!r} announced when added")
-if len(others) > 1 or any(r["text"] != "Bot reply" for r in others):
+if any(r["text"] != "Bot reply" for r in others) or len(others) > 1:
     problems.append("announcements from other objects than the reply")
 for r in records:
     print(f"  {r['t']:6.3f} {r['role']}: {r['text']!r}")
@@ -192,15 +202,23 @@ for p in problems:
     print("PROBLEM: " + p)
 sys.exit(1 if problems else 0)
 EOF
-    { cat "$out/verdict.txt" >&2; fail "the announcements were wrong"; }
-cat "$out/verdict.txt"
+        { cat "$out/$name.verdict.txt" >&2; fail "$name: the announcements were wrong"; }
+    echo "$name:"
+    cat "$out/$name.verdict.txt"
 
-# Finished, the reply is an ordinary message: no live region but the
-# transcript's.
-semantics "role=log,label=Messages,live=polite" >"$out/regions-after.txt" ||
-    fail "the transcript lost its semantics"
-! grep -q "label='Bot reply'" "$out/regions-after.txt" ||
-    fail "the finished reply is still a live log"
+    # Finished, the reply is an ordinary message: no live region but the
+    # transcript's.
+    semantics "role=log,label=Messages,live=polite" >"$out/$name.regions-after.txt" ||
+        fail "the transcript lost its semantics"
+    ! grep -q "label='Bot reply'" "$out/$name.regions-after.txt" ||
+        fail "$name: the finished reply is still a live log"
+}
+
+converse ping ping \
+    "Bot: You said: ping. That is 4 characters, streamed to you word by word."
+converse markdown markdown \
+    "Bot: Here is bold text and inline code. • first item • second item with a link
+     let x = 1; let y = 2; That was markdown, streamed word by word."
 
 ! grep -q "panicked at" "$out/ultty.log" || fail "Ultty logged a panic"
 echo "accessibility-chat: ok"

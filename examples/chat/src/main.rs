@@ -15,6 +15,14 @@ use ultty_protocol::{Live, Role};
 /// How often the streaming reply grows by a word.
 const WORD_INTERVAL: Duration = Duration::from_millis(40);
 
+/// The reply to "markdown": blocks and inline styles, streamed like the
+/// rest (scripts/e2e/accessibility-chat.sh checks what is announced).
+const MARKDOWN_REPLY: &str = "Here is **bold** text and `inline code`.\n\n\
+- first item\n\
+- second item with [a link](https://example.com)\n\n\
+```\nlet x = 1;\nlet y = 2;\n```\n\n\
+That was markdown, streamed word by word.";
+
 struct ChatMessage {
     sender: String,
     text: String,
@@ -57,6 +65,7 @@ impl ChatApp {
             s if s.contains("how are you") => "I'm doing great, thanks for asking!".into(),
             s if s.contains("bye") => "Goodbye! Have a great day!".into(),
             s if s.contains("help") => "I can echo your messages and respond to greetings!".into(),
+            s if s.contains("markdown") => MARKDOWN_REPLY.into(),
             _ => format!(
                 "You said: {user_text}.\n\nThat is {} characters, streamed to you word by word.",
                 user_text.chars().count()
