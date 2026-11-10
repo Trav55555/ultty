@@ -18,6 +18,47 @@ fn command_exists(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// A tmux server of the test's own (`tmux -S <socket>`), so the test never
+/// touches the user's server. Dropping it kills the server and removes the
+/// socket, even when the test fails or its terminal closes before typed
+/// cleanup could run.
+struct TmuxServer {
+    socket: std::path::PathBuf,
+}
+
+impl TmuxServer {
+    fn new(test: &str) -> Self {
+        Self {
+            socket: std::env::temp_dir()
+                .join(format!("ultty-tmux-{test}-{}.sock", std::process::id())),
+        }
+    }
+
+    /// The command line, typed into the test terminal, that starts a
+    /// session on this server and attaches to it. `TMUX` is cleared so
+    /// a run inside tmux does not refuse to nest.
+    fn attach_command(&self) -> String {
+        format!(
+            "unset TMUX; tmux -S '{socket}' new-session -d -s test && tmux -S '{socket}' attach -t test\r",
+            socket = self.socket.display()
+        )
+    }
+}
+
+impl Drop for TmuxServer {
+    fn drop(&mut self) {
+        // Best effort: a server that never started has nothing to clean.
+        let _ = std::process::Command::new("tmux")
+            .arg("-S")
+            .arg(&self.socket)
+            .arg("kill-server")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = std::fs::remove_file(&self.socket);
+    }
+}
+
 // ============================================================================
 // NEOVIM TESTS
 // ============================================================================
@@ -221,18 +262,14 @@ fn test_tmux_launches() {
     let mut term = TestTerminal::with_size(80, 24).expect("Failed to create terminal");
     term.wait_for_output(STARTUP_WAIT).unwrap();
 
-    // Start a new tmux session with a unique name
-    let session_name = format!("ultty_test_{}", std::process::id());
-    term.send(&format!(
-        "tmux new-session -d -s {} && tmux attach -t {}\r",
-        session_name, session_name
-    ))
-    .unwrap();
+    // A session on a server of the test's own
+    let tmux = TmuxServer::new("launches");
+    term.send(&tmux.attach_command()).unwrap();
     term.wait_until_stable(STABLE_WAIT, MAX_WAIT).unwrap();
 
     // Should show tmux status bar
     let content = term.capture_text();
-    let has_status = content.contains(&session_name)
+    let has_status = content.contains("[test]")
         || content.contains("[")
         || content.contains("bash")
         || content.contains("zsh");
@@ -242,11 +279,6 @@ fn test_tmux_launches() {
     term.send_bytes(b"\x02d").unwrap(); // Ctrl+B d
     term.wait_until_stable(STABLE_WAIT, Duration::from_secs(3))
         .unwrap();
-
-    // Kill the session
-    term.send(&format!("tmux kill-session -t {}\r", session_name))
-        .unwrap();
-    term.wait_for_output(Duration::from_millis(500)).unwrap();
 }
 
 #[test]
@@ -259,12 +291,8 @@ fn test_tmux_splits() {
     let mut term = TestTerminal::with_size(120, 40).expect("Failed to create terminal");
     term.wait_for_output(STARTUP_WAIT).unwrap();
 
-    let session_name = format!("ultty_split_{}", std::process::id());
-    term.send(&format!(
-        "tmux new-session -d -s {} && tmux attach -t {}\r",
-        session_name, session_name
-    ))
-    .unwrap();
+    let tmux = TmuxServer::new("splits");
+    term.send(&tmux.attach_command()).unwrap();
     term.wait_until_stable(STABLE_WAIT, MAX_WAIT).unwrap();
 
     // Create vertical split
@@ -285,13 +313,10 @@ fn test_tmux_splits() {
         || content.contains('-');
     println!("tmux pane borders detected: {}", has_borders);
 
-    // Detach and cleanup
+    // Detach; dropping `tmux` kills the server
     term.send_bytes(b"\x02d").unwrap();
     term.wait_until_stable(STABLE_WAIT, Duration::from_secs(2))
         .unwrap();
-    term.send(&format!("tmux kill-session -t {}\r", session_name))
-        .unwrap();
-    term.wait_for_output(Duration::from_millis(500)).unwrap();
 }
 
 // ============================================================================
