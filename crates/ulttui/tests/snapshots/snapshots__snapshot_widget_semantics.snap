@@ -16,13 +16,13 @@ Image: r1 image "A red dot"
 TextInput: r1 input "Message" desc="Type" value_text=""
 Select: r1 list "Letter" expanded=Collapsed value_text="a" pos=1/2
 List: r1 list "Numbers"
-List: r2 list_item pos=1/2
+List: r2 list_item selected pos=1/2
 List: r3 list_item pos=2/2
 Tabs: r1 tab_list
 Tabs: r2 tab "Log" pos=1/2
-Tabs: r3 tab "Diff" pos=2/2
+Tabs: r3 tab "Diff" selected pos=2/2
 Tree: r1 tree "Files"
-Tree: r2 tree_item "src" expanded=Expanded level=1
+Tree: r2 tree_item "src" selected expanded=Expanded level=1
 Tree: r3 auto hidden
 Tree: r4 auto hidden
 Tree: r5 auto hidden
@@ -30,6 +30,7 @@ Tree: r6 tree_item "main.rs" level=2
 Tree: r7 auto hidden
 Tree: r8 auto hidden
 Tree: r9 auto hidden
+Table: r4 auto selected
 Collapsible: r1 tree_item expanded=Collapsed
 Collapsible: r3 auto hidden
 Modal: r1 dialog "Delete?" modal
