@@ -37,6 +37,8 @@ mod palette;
 #[cfg(feature = "page-proto")]
 #[doc(hidden)]
 pub mod proto;
+#[cfg(test)]
+mod reference;
 mod row;
 mod term_handler;
 mod terminal;
