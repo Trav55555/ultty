@@ -707,18 +707,20 @@ fn common_prefix_end(other: &str, text: &str) -> usize {
     end
 }
 
-/// How far back a lone `*` or `_` holds the text after it. Past that it
-/// is taken as a literal character (`2 * 3`), so it delays speech by at
-/// most this many bytes.
+/// How far back a lone `*`, `_` or `` ` `` holds the text after it. Past
+/// that it is taken as a literal character (`2 * 3`), so it delays speech
+/// by at most this many bytes.
 const HOLD_BACK_BYTES: usize = 80;
 
 /// `text` without the end of its last line from the first inline markdown
 /// opener still shown as characters: until it resolves into styling it is
 /// drawn literally, and announcing it would speak `**bo` and then `bold`,
-/// or a link's address. Openers with a closer (`` ` ``, `[`, `**`, `__`,
-/// `~~`) hold until the line ends (for a paragraph, until the block is
-/// finished); a lone `*` or `_` (not inside a word) only within
-/// [`HOLD_BACK_BYTES`] of the end.
+/// or a link's address. `[` holds until the line ends (for a paragraph,
+/// until the block is finished) unless its `]` is already followed by
+/// something that cannot start a link target (`x[i] = 0`); so do `**`,
+/// `__` and `~~`. A lone `*`, `_` (not inside a word) or `` ` `` holds
+/// only within [`HOLD_BACK_BYTES`] of the end: a code span that closed
+/// would no longer show its backticks.
 fn held_back(text: &str) -> &str {
     let line_start = text.rfind('\n').map_or(0, |index| index + 1);
     let window_start = text.len().saturating_sub(HOLD_BACK_BYTES);
@@ -729,7 +731,8 @@ fn held_back(text: &str) -> &str {
         let next = chars.peek().map(|(_, next)| *next);
         let at = line_start + offset;
         let opener = match c {
-            '`' | '[' => true,
+            '[' => !cannot_be_link(&line[offset..]),
+            '`' => at >= window_start,
             '*' | '_' | '~' if next == Some(c) => {
                 c != '_' || !previous.is_some_and(char::is_alphanumeric)
             }
@@ -743,6 +746,18 @@ fn held_back(text: &str) -> &str {
         previous = Some(c);
     }
     text
+}
+
+/// Whether `rest`, which starts with `[`, already shows its `]` followed by
+/// a character that cannot open a link target, so it stays literal.
+fn cannot_be_link(rest: &str) -> bool {
+    let Some(close) = rest.find(']') else {
+        return false;
+    };
+    rest[close + 1..]
+        .chars()
+        .next()
+        .is_some_and(|after| after != '(' && after != '[')
 }
 
 /// Whether the frame said `region` is live.
@@ -1522,6 +1537,18 @@ mod tests {
         }));
         // snake_case is a word, not an opener.
         assert_eq!(super::held_back("a snake_case"), "a snake_case");
+        // A bracket that can no longer become a link does not hold the line.
+        assert_eq!(
+            super::held_back("Use array[0] to get the first"),
+            "Use array[0] to get the first"
+        );
+        assert_eq!(super::held_back("see [1] and [the"), "see [1] and ");
+        assert_eq!(super::held_back("see [the docs]"), "see ");
+        assert_eq!(super::held_back("see [the docs](http"), "see ");
+        // A lone backtick far back is literal; a recent one still holds.
+        let tick = format!("Type ` then {}", "and so on ".repeat(10));
+        assert_eq!(super::held_back(&tick), tick);
+        assert_eq!(super::held_back("run `cargo"), "run ");
         // In the frame the region stops being live, everything goes.
         let first = frame_with_semantics(id, text("A **bo"), live_log());
         let (_, tree) = optimize_frame_messages(&RetainedTree::new(), first, &prose(), ALL);
