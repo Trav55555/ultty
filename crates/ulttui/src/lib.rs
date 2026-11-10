@@ -67,8 +67,8 @@ pub mod prelude {
     pub use crate::widgets::{
         Accent, Badge, BadgeVariant, Body, Button, Card, Collapsible, DiffKind, DiffLine, DiffMode,
         DiffView, Divider, DockLayout, Inset, List, MarkdownView, Modal, Muted, ProgressBar,
-        ScrollView, Section, Spacer, Spinner, Table, Tabs, Text, TextInput, Title, Tree, TreeNode,
-        View,
+        ScrollView, Section, Semantic, Spacer, Spinner, Table, Tabs, Text, TextInput, Title, Tree,
+        TreeNode, View,
     };
 
     // Re-export protocol types

@@ -206,6 +206,10 @@ widgets=$(read_widgets "${buttons[@]}" --timeout 30) ||
     fail "no buttons -1, +1 and Reset on the AT-SPI bus: $widgets"
 echo "$widgets" >"$out/widgets.json"
 echo "native: -1, +1 and Reset are buttons"
+# Slice 7: what `ulttyctl regions` reports agrees.
+ctl --json regions | /usr/bin/python3 -I scripts/e2e/native_semantics.py \
+    "role=button,label=-1" "role=button,label=+1" "role=button,label=Reset" \
+    >"$out/regions.txt" || { cat "$out/regions.txt" >&2; fail "counter-app's regions are not named buttons"; }
 
 focus_moves="not checked (no xdotool)"
 if $focus_checked; then

@@ -85,6 +85,15 @@ impl View for Badge {
         Content::RichText(ProtoRichText::new().span(format!(" {} ", self.text), style))
     }
 
+    /// A status named by its text, without the padding drawn around it.
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            role: ultty_protocol::Role::Status,
+            label: Some(self.text.clone()),
+            ..Default::default()
+        }
+    }
+
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         if area.width == 0 || area.height == 0 {
             return;

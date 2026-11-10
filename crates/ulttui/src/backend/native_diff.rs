@@ -11,10 +11,13 @@
 //! traversal slot. Unkeyed children fall back to positional matching among
 //! the remaining unkeyed siblings of the same parent.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use ultty_protocol::{AppMessage, Constraints, Content, RegionId, RichText, Style};
+use ultty_protocol::{
+    AppMessage, Constraints, Content, Live, RegionId, RichText, Semantics, Style,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct RegionSnapshot {
@@ -24,6 +27,12 @@ pub(super) struct RegionSnapshot {
     pub(super) style: Style,
     pub(super) content: Content,
     pub(super) scroll: Option<(f32, f32, bool)>,
+    /// What the frame sent with `SetSemantics`; `None` leaves the region's
+    /// semantics to the terminal.
+    pub(super) semantics: Option<Semantics>,
+    /// The text of a live region announced so far (sent as
+    /// `AppendContent`), in the form it has now; empty when not live.
+    pub(super) announced: String,
 }
 
 /// Regions the terminal currently retains: stable ids plus sibling order.
@@ -92,28 +101,50 @@ impl RetainedTree {
     }
 }
 
+/// What the view walk says about its regions besides the messages, keyed
+/// by provisional region id.
+#[derive(Debug, Default)]
+pub(crate) struct FrameNotes {
+    /// Native keys ([`crate::widgets::View::native_key`]).
+    pub(crate) keys: HashMap<RegionId, String>,
+    /// Live regions whose text is markdown prose still arriving: an inline
+    /// opener at the end of it may yet turn into styling, so it is not
+    /// announced yet ([`held_back`]).
+    pub(crate) arriving_prose: HashSet<RegionId>,
+}
+
 thread_local! {
-    /// Native keys recorded by the view walk, keyed by provisional region id.
-    /// `None` while no native frame is being collected, so walks done for
-    /// tests or the mock backend record nothing.
-    static KEY_RECORDER: RefCell<Option<HashMap<RegionId, String>>> = const { RefCell::new(None) };
+    /// Notes recorded by the view walk. `None` while no native frame is
+    /// being collected, so walks done for tests or the mock backend record
+    /// nothing.
+    static NOTES_RECORDER: RefCell<Option<FrameNotes>> = const { RefCell::new(None) };
 }
 
 /// Record the native key of a region created during the current frame walk.
 pub(crate) fn record_native_key(id: RegionId, key: &str) {
-    KEY_RECORDER.with(|recorder| {
-        if let Some(keys) = recorder.borrow_mut().as_mut() {
-            keys.insert(id, key.to_string());
+    NOTES_RECORDER.with(|recorder| {
+        if let Some(notes) = recorder.borrow_mut().as_mut() {
+            notes.keys.insert(id, key.to_string());
         }
     });
 }
 
-pub(crate) fn begin_native_key_recording() {
-    KEY_RECORDER.with(|recorder| *recorder.borrow_mut() = Some(HashMap::new()));
+/// Record that region `id` of the current frame walk is markdown prose
+/// still arriving.
+pub(crate) fn record_arriving_prose(id: RegionId) {
+    NOTES_RECORDER.with(|recorder| {
+        if let Some(notes) = recorder.borrow_mut().as_mut() {
+            notes.arriving_prose.insert(id);
+        }
+    });
 }
 
-pub(crate) fn take_native_keys() -> HashMap<RegionId, String> {
-    KEY_RECORDER.with(|recorder| recorder.borrow_mut().take().unwrap_or_default())
+pub(crate) fn begin_frame_notes() {
+    NOTES_RECORDER.with(|recorder| *recorder.borrow_mut() = Some(FrameNotes::default()));
+}
+
+pub(crate) fn take_frame_notes() -> FrameNotes {
+    NOTES_RECORDER.with(|recorder| recorder.borrow_mut().take().unwrap_or_default())
 }
 
 struct ProvisionalNode {
@@ -122,6 +153,17 @@ struct ProvisionalNode {
     style: Style,
     content: Content,
     scroll: Option<(f32, f32, bool)>,
+    semantics: Option<Semantics>,
+}
+
+/// What the terminal agreed to, as far as the diff cares.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FrameCapabilities {
+    /// Text growth may go as `AppendContent` (`CAP_APPEND_CONTENT`).
+    pub(crate) append_content: bool,
+    /// `SetSemantics` may be sent (`CAP_SEMANTICS`); without it the
+    /// frame's semantics are dropped.
+    pub(crate) semantics: bool,
 }
 
 /// Result of matching one frame's provisional regions onto retained ids.
@@ -139,10 +181,10 @@ struct Reconciliation {
 pub(crate) fn optimize_frame_messages(
     previous: &RetainedTree,
     frame_messages: Vec<AppMessage>,
-    native_keys: &HashMap<RegionId, String>,
-    allow_append_content: bool,
+    notes: &FrameNotes,
+    capabilities: FrameCapabilities,
 ) -> (Vec<AppMessage>, RetainedTree) {
-    let (nodes, order) = parse_provisional_tree(&frame_messages, native_keys);
+    let (nodes, order) = parse_provisional_tree(&frame_messages, &notes.keys);
     let mut reconciliation = Reconciliation {
         mapping: HashMap::new(),
         retained: HashSet::new(),
@@ -177,10 +219,13 @@ pub(crate) fn optimize_frame_messages(
         mapping,
         retained,
         reordered,
-        next,
+        mut next,
     } = reconciliation;
 
     let mut outgoing = Vec::new();
+    // Sent after every content change, so text a region gets in the frame
+    // it stops being live is still announced.
+    let mut semantics_changes = Vec::new();
 
     // Deletes go first so every later insert index refers to a sibling list
     // without stale entries.
@@ -236,9 +281,37 @@ pub(crate) fn optimize_frame_messages(
             }
             AppMessage::SetContent { id, content } => {
                 let stable = mapping[&id];
-                match previous.regions.get(&stable) {
+                // Live in this frame or the last: text that arrives in the
+                // frame a region stops being live is still announced.
+                let live_now = is_live(next.regions.get(&stable));
+                let live = live_now || is_live(previous.regions.get(&stable));
+                let prev = previous.regions.get(&stable);
+                match prev {
+                    _ if live && capabilities.append_content && plain_text(&content).is_some() => {
+                        // A region that turns live has said what it shows
+                        // already; only what it grows by is news.
+                        let (before, announced) =
+                            prev.map_or((&Content::None, String::new()), |prev| {
+                                let announced = if is_live(Some(prev)) {
+                                    prev.announced.clone()
+                                } else {
+                                    plain_text(&prev.content).unwrap_or_default().into_owned()
+                                };
+                                (&prev.content, announced)
+                            });
+                        // Held back only while it stays live: the frame it
+                        // stops is the last chance to say it.
+                        let hold = live_now && notes.arriving_prose.contains(&id);
+                        let (messages, announced) =
+                            live_content_update(stable, before, &announced, content, hold);
+                        outgoing.extend(messages);
+                        if let Some(region) = next.regions.get_mut(&stable) {
+                            region.announced = announced;
+                        }
+                    }
                     Some(prev) => {
-                        let delta = allow_append_content
+                        let delta = capabilities
+                            .append_content
                             .then(|| append_delta(&prev.content, &content))
                             .flatten();
                         match delta {
@@ -278,8 +351,53 @@ pub(crate) fn optimize_frame_messages(
                     });
                 }
             }
+            AppMessage::SetSemantics { id, semantics } => {
+                let stable = mapping[&id];
+                let unchanged = previous
+                    .regions
+                    .get(&stable)
+                    .is_some_and(|prev| prev.semantics.as_ref() == Some(&semantics));
+                if capabilities.semantics && !unchanged {
+                    // Turning live goes before the region's content, so
+                    // what it grows by in this frame is announced; any
+                    // other change after, so text that arrives as it stops
+                    // being live still is.
+                    let queue = if semantics.live != Live::Off {
+                        &mut outgoing
+                    } else {
+                        &mut semantics_changes
+                    };
+                    queue.push(AppMessage::SetSemantics {
+                        id: stable,
+                        semantics,
+                    });
+                }
+            }
             other => outgoing.push(other),
         }
+    }
+
+    outgoing.append(&mut semantics_changes);
+    // A region whose view no longer says more than its content goes back
+    // to what the terminal derives.
+    if capabilities.semantics {
+        let mut reset: Vec<RegionId> = next
+            .regions
+            .iter()
+            .filter(|(id, snapshot)| {
+                snapshot.semantics.is_none()
+                    && previous
+                        .regions
+                        .get(id)
+                        .is_some_and(|prev| prev.semantics.is_some())
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        reset.sort_by_key(|id| id.0);
+        outgoing.extend(reset.into_iter().map(|id| AppMessage::SetSemantics {
+            id,
+            semantics: Semantics::default(),
+        }));
     }
 
     let mut cleared: Vec<RegionId> = next
@@ -338,9 +456,15 @@ fn parse_provisional_tree(
                         style: style.clone(),
                         content: Content::None,
                         scroll: None,
+                        semantics: None,
                     },
                 );
                 order.entry(*parent).or_default().push(*id);
+            }
+            AppMessage::SetSemantics { id, semantics } => {
+                if let Some(node) = nodes.get_mut(id) {
+                    node.semantics = Some(semantics.clone());
+                }
             }
             AppMessage::SetContent { id, content } => {
                 if let Some(node) = nodes.get_mut(id) {
@@ -445,6 +569,8 @@ fn reconcile_children(
                 style: node.style.clone(),
                 content: node.content.clone(),
                 scroll: node.scroll,
+                semantics: node.semantics.clone(),
+                announced: String::new(),
             },
         );
         new_order.push(stable);
@@ -469,6 +595,207 @@ fn reconcile_children(
         let stable = out.mapping[provisional];
         reconcile_children(*provisional, stable, nodes, order, previous, out);
     }
+}
+
+/// The messages that take a live region from `previous` to `next`
+/// content, given the text it has `announced` so far (in its current
+/// form); and what it has announced after them.
+///
+/// The terminal announces only text that arrives with `AppendContent`
+/// (ADR 0021 §3), so what the region shows past what it has announced is
+/// appended, then a `SetContent` in the same frame puts the styled result
+/// in place when appending alone does not give it (a span turned bold, a
+/// line rewritten). Where to resume is [`resume_at`]: text is never
+/// skipped, and repeated rather than dropped when it cannot be told apart.
+/// With `hold_back`, the end of the text from an unresolved inline
+/// markdown opener waits ([`held_back`]).
+fn live_content_update(
+    id: RegionId,
+    previous: &Content,
+    announced: &str,
+    next: Content,
+    hold_back: bool,
+) -> (Vec<AppMessage>, String) {
+    let after = plain_text(&next).unwrap_or_default();
+    let speakable = if hold_back { held_back(&after) } else { &after };
+    let start = resume_at(announced, speakable);
+    let mut messages = Vec::new();
+    let mut shown = previous.clone();
+    if start < speakable.len() {
+        let text = speakable[start..].to_string();
+        shown = with_appended(previous, &text);
+        messages.push(AppMessage::AppendContent { id, text });
+    }
+    // Everything up to `start` had been said, in some form, and the rest
+    // just was.
+    let announced = speakable.to_string();
+    if shown != next {
+        messages.push(AppMessage::SetContent { id, content: next });
+    }
+    (messages, announced)
+}
+
+/// Where in `speakable` the text not yet announced starts, given that
+/// `announced` was, in the form it then had.
+///
+/// Growth resumes where `announced` ends. Letter case is ignored, so a
+/// line set in capitals once complete (a `# Title`) is not news. When an
+/// earlier line was rewritten, the announced part of the last announced
+/// line is looked for at the start of the same line now, and resumed
+/// after. Text that only got shorter has nothing new. Otherwise it
+/// resumes at the start of the word where the texts
+/// part, so a word may be spoken twice but none is skipped.
+fn resume_at(announced: &str, speakable: &str) -> usize {
+    if let Some(end) = prefix_end(announced, speakable) {
+        return end;
+    }
+    if prefix_end(speakable, announced).is_some() {
+        // Only shorter: nothing new.
+        return speakable.len();
+    }
+    let line = announced.matches('\n').count();
+    let old_line_start = announced.rfind('\n').map_or(0, |index| index + 1);
+    let same_line_start = if line == 0 {
+        Some(0)
+    } else {
+        speakable
+            .match_indices('\n')
+            .nth(line - 1)
+            .map(|(index, _)| index + 1)
+    };
+    if let Some(start) = same_line_start {
+        if let Some(end) = prefix_end(&announced[old_line_start..], &speakable[start..]) {
+            return start + end;
+        }
+    }
+    let common = common_prefix_end(announced, speakable);
+    speakable[..common]
+        .rfind(char::is_whitespace)
+        .map_or(0, |index| {
+            index + speakable[index..].chars().next().map_or(1, char::len_utf8)
+        })
+}
+
+/// Whether two characters are the same but for letter case.
+fn same_letter(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase())
+}
+
+/// Where `prefix` ends in `text`, if `text` starts with it (ignoring
+/// letter case).
+fn prefix_end(prefix: &str, text: &str) -> Option<usize> {
+    let mut chars = text.char_indices();
+    for a in prefix.chars() {
+        let (_, b) = chars.next()?;
+        if !same_letter(a, b) {
+            return None;
+        }
+    }
+    Some(chars.next().map_or(text.len(), |(index, _)| index))
+}
+
+/// Where in `text` its longest common prefix with `other` ends (ignoring
+/// letter case).
+fn common_prefix_end(other: &str, text: &str) -> usize {
+    let mut end = 0;
+    for (a, (index, b)) in other.chars().zip(text.char_indices()) {
+        if !same_letter(a, b) {
+            return index;
+        }
+        end = index + b.len_utf8();
+    }
+    end
+}
+
+/// How far back a lone `*`, `_` or `` ` `` holds the text after it. Past
+/// that it is taken as a literal character (`2 * 3`), so it delays speech
+/// by at most this many bytes.
+const HOLD_BACK_BYTES: usize = 80;
+
+/// `text` without the end of its last line from the first inline markdown
+/// opener still shown as characters: until it resolves into styling it is
+/// drawn literally, and announcing it would speak `**bo` and then `bold`,
+/// or a link's address. `[` holds until the line ends (for a paragraph,
+/// until the block is finished) unless its `]` is already followed by
+/// something that cannot start a link target (`x[i] = 0`); so do `**`,
+/// `__` and `~~`. A lone `*`, `_` (not inside a word) or `` ` `` holds
+/// only within [`HOLD_BACK_BYTES`] of the end: a code span that closed
+/// would no longer show its backticks.
+fn held_back(text: &str) -> &str {
+    let line_start = text.rfind('\n').map_or(0, |index| index + 1);
+    let window_start = text.len().saturating_sub(HOLD_BACK_BYTES);
+    let line = &text[line_start..];
+    let mut previous: Option<char> = None;
+    let mut chars = line.char_indices().peekable();
+    while let Some((offset, c)) = chars.next() {
+        let next = chars.peek().map(|(_, next)| *next);
+        let at = line_start + offset;
+        let opener = match c {
+            '[' => !cannot_be_link(&line[offset..]),
+            '`' => at >= window_start,
+            '*' | '_' | '~' if next == Some(c) => {
+                c != '_' || !previous.is_some_and(char::is_alphanumeric)
+            }
+            '*' => at >= window_start,
+            '_' => at >= window_start && !previous.is_some_and(char::is_alphanumeric),
+            _ => false,
+        };
+        if opener {
+            return &text[..at];
+        }
+        previous = Some(c);
+    }
+    text
+}
+
+/// Whether `rest`, which starts with `[`, already shows its `]` followed by
+/// a character that cannot open a link target, so it stays literal.
+fn cannot_be_link(rest: &str) -> bool {
+    let Some(close) = rest.find(']') else {
+        return false;
+    };
+    rest[close + 1..]
+        .chars()
+        .next()
+        .is_some_and(|after| after != '(' && after != '[')
+}
+
+/// Whether the frame said `region` is live.
+fn is_live(region: Option<&RegionSnapshot>) -> bool {
+    region
+        .and_then(|region| region.semantics.as_ref())
+        .is_some_and(|semantics| semantics.live != Live::Off)
+}
+
+/// The text of text content, spans joined.
+fn plain_text(content: &Content) -> Option<Cow<'_, str>> {
+    match content {
+        Content::None => Some(Cow::Borrowed("")),
+        Content::Text(text) => Some(Cow::Borrowed(&text.text)),
+        Content::RichText(rich) => Some(Cow::Owned(
+            rich.spans.iter().map(|span| span.text.as_str()).collect(),
+        )),
+        Content::Widget(_) => None,
+    }
+}
+
+/// `content` after the terminal appends `text` to it, as `AppendContent`
+/// does.
+fn with_appended(content: &Content, text: &str) -> Content {
+    let mut content = content.clone();
+    match &mut content {
+        Content::Text(existing) => existing.text.push_str(text),
+        Content::RichText(rich) => match rich.spans.last_mut() {
+            Some(last) => last.text.push_str(text),
+            None => rich.spans.push(ultty_protocol::Span {
+                text: text.to_string(),
+                style: Style::new(),
+            }),
+        },
+        Content::None => content = Content::Text(ultty_protocol::TextContent::new(text)),
+        Content::Widget(_) => {}
+    }
+    content
 }
 
 fn append_delta(previous: &Content, next: &Content) -> Option<String> {
@@ -519,11 +846,12 @@ fn rich_text_append_delta(previous: &RichText, next: &RichText) -> Option<String
 
 #[cfg(test)]
 mod tests {
-    use super::{optimize_frame_messages, RetainedTree};
+    use super::{optimize_frame_messages, FrameCapabilities, FrameNotes, RetainedTree};
     use std::collections::HashMap;
     use ultty_protocol::{
         AppMessage, Constraints, Content, RegionId, RichText, Style, TextContent,
     };
+    use ultty_protocol::{Live, Role, Semantics};
 
     /// One region in a test frame: (provisional id, parent, native key, text).
     type Spec<'a> = (u32, RegionId, Option<&'a str>, Option<&'a str>);
@@ -555,7 +883,15 @@ mod tests {
 
     fn run(previous: &RetainedTree, specs: &[Spec<'_>]) -> (Vec<AppMessage>, RetainedTree) {
         let (messages, keys) = frame(specs);
-        optimize_frame_messages(previous, messages, &keys, false)
+        optimize_frame_messages(
+            previous,
+            messages,
+            &FrameNotes {
+                keys,
+                ..FrameNotes::default()
+            },
+            FrameCapabilities::default(),
+        )
     }
 
     fn count(messages: &[AppMessage], pred: impl Fn(&AppMessage) -> bool) -> usize {
@@ -761,6 +1097,8 @@ mod tests {
                 style: Style::default(),
                 content,
                 scroll: None,
+                semantics: None,
+                announced: String::new(),
             },
         );
         tree.children.insert(ROOT, vec![id]);
@@ -787,7 +1125,8 @@ mod tests {
         let previous = tree_with_text(id, "hello");
         let frame = frame_with_content(id, Content::Text(TextContent::new("hello world")));
 
-        let (outgoing, next) = optimize_frame_messages(&previous, frame, &HashMap::new(), true);
+        let (outgoing, next) =
+            optimize_frame_messages(&previous, frame, &FrameNotes::default(), APPEND_ONLY);
 
         assert_eq!(
             outgoing,
@@ -808,7 +1147,8 @@ mod tests {
         let previous = tree_with_content(id, Content::RichText(RichText::new().text("hello")));
         let frame = frame_with_content(id, Content::RichText(RichText::new().text("hello world")));
 
-        let (outgoing, next) = optimize_frame_messages(&previous, frame, &HashMap::new(), true);
+        let (outgoing, next) =
+            optimize_frame_messages(&previous, frame, &FrameNotes::default(), APPEND_ONLY);
 
         assert_eq!(
             outgoing,
@@ -829,7 +1169,7 @@ mod tests {
         let previous = tree_with_text(removed, "gone");
 
         let (outgoing, next) =
-            optimize_frame_messages(&previous, Vec::new(), &HashMap::new(), true);
+            optimize_frame_messages(&previous, Vec::new(), &FrameNotes::default(), APPEND_ONLY);
 
         assert_eq!(outgoing, vec![AppMessage::DeleteRegion { id: removed }]);
         assert!(next.regions.is_empty());
@@ -847,7 +1187,8 @@ mod tests {
             style: Style::default(),
         }];
 
-        let (outgoing, _next) = optimize_frame_messages(&previous, frame, &HashMap::new(), true);
+        let (outgoing, _next) =
+            optimize_frame_messages(&previous, frame, &FrameNotes::default(), APPEND_ONLY);
 
         assert_eq!(
             outgoing,
@@ -864,7 +1205,12 @@ mod tests {
         let previous = tree_with_text(id, "alpha");
         let frame = frame_with_content(id, Content::Text(TextContent::new("alpha beta")));
 
-        let (outgoing, _next) = optimize_frame_messages(&previous, frame, &HashMap::new(), false);
+        let (outgoing, _next) = optimize_frame_messages(
+            &previous,
+            frame,
+            &FrameNotes::default(),
+            FrameCapabilities::default(),
+        );
 
         assert_eq!(
             outgoing,
@@ -872,6 +1218,510 @@ mod tests {
                 id,
                 content: Content::Text(TextContent::new("alpha beta"))
             }]
+        );
+    }
+
+    const APPEND_ONLY: FrameCapabilities = FrameCapabilities {
+        append_content: true,
+        semantics: false,
+    };
+
+    const ALL: FrameCapabilities = FrameCapabilities {
+        append_content: true,
+        semantics: true,
+    };
+
+    fn frame_with_semantics(
+        id: RegionId,
+        content: Content,
+        semantics: Option<Semantics>,
+    ) -> Vec<AppMessage> {
+        let mut frame = frame_with_content(id, content);
+        if let Some(semantics) = semantics {
+            frame.insert(1, AppMessage::SetSemantics { id, semantics });
+        }
+        frame
+    }
+
+    fn labelled(label: &str) -> Semantics {
+        Semantics {
+            role: Role::Button,
+            label: Some(label.to_string()),
+            ..Semantics::default()
+        }
+    }
+
+    fn semantics_sent(messages: &[AppMessage]) -> Vec<(RegionId, Semantics)> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                AppMessage::SetSemantics { id, semantics } => Some((*id, semantics.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn text(text: &str) -> Content {
+        Content::Text(TextContent::new(text))
+    }
+
+    #[test]
+    fn semantics_are_sent_with_a_new_region_after_it_is_created() {
+        let id = RegionId::new(1);
+        let frame = frame_with_semantics(id, text("x"), Some(labelled("Close")));
+
+        let (outgoing, next) =
+            optimize_frame_messages(&RetainedTree::new(), frame, &FrameNotes::default(), ALL);
+
+        let create = outgoing
+            .iter()
+            .position(|m| matches!(m, AppMessage::CreateRegion { .. }))
+            .unwrap();
+        let set = outgoing
+            .iter()
+            .position(|m| matches!(m, AppMessage::SetSemantics { .. }))
+            .unwrap();
+        assert!(create < set);
+        assert_eq!(semantics_sent(&outgoing), vec![(id, labelled("Close"))]);
+        assert_eq!(next.regions[&id].semantics, Some(labelled("Close")));
+    }
+
+    #[test]
+    fn unchanged_semantics_are_not_sent_again_and_changed_ones_are() {
+        let id = RegionId::new(1);
+        let first = frame_with_semantics(id, text("x"), Some(labelled("Close")));
+        let (_, tree) =
+            optimize_frame_messages(&RetainedTree::new(), first, &FrameNotes::default(), ALL);
+
+        let same = frame_with_semantics(id, text("x"), Some(labelled("Close")));
+        let (outgoing, tree) = optimize_frame_messages(&tree, same, &FrameNotes::default(), ALL);
+        assert_eq!(outgoing, Vec::new(), "an unchanged frame sends nothing");
+
+        let renamed = frame_with_semantics(id, text("x"), Some(labelled("Dismiss")));
+        let (outgoing, tree) = optimize_frame_messages(&tree, renamed, &FrameNotes::default(), ALL);
+        assert_eq!(semantics_sent(&outgoing), vec![(id, labelled("Dismiss"))]);
+
+        // Back to what the content says: the terminal derives it again.
+        let plain = frame_with_semantics(id, text("x"), None);
+        let (outgoing, tree) = optimize_frame_messages(&tree, plain, &FrameNotes::default(), ALL);
+        assert_eq!(semantics_sent(&outgoing), vec![(id, Semantics::default())]);
+        assert_eq!(tree.regions[&id].semantics, None);
+
+        let plain = frame_with_semantics(id, text("x"), None);
+        let (outgoing, _) = optimize_frame_messages(&tree, plain, &FrameNotes::default(), ALL);
+        assert_eq!(outgoing, Vec::new());
+    }
+
+    #[test]
+    fn semantics_are_not_sent_without_the_capability() {
+        let id = RegionId::new(1);
+        let append_only = FrameCapabilities {
+            append_content: true,
+            semantics: false,
+        };
+        let frame = frame_with_semantics(id, text("x"), Some(labelled("Close")));
+        let (outgoing, tree) = optimize_frame_messages(
+            &RetainedTree::new(),
+            frame,
+            &FrameNotes::default(),
+            append_only,
+        );
+        assert_eq!(semantics_sent(&outgoing), Vec::new());
+
+        let plain = frame_with_semantics(id, text("x"), None);
+        let (outgoing, _) =
+            optimize_frame_messages(&tree, plain, &FrameNotes::default(), append_only);
+        assert_eq!(outgoing, Vec::new(), "no reset either");
+    }
+
+    fn live_log() -> Option<Semantics> {
+        Some(Semantics {
+            role: Role::Log,
+            live: Live::Polite,
+            ..Semantics::default()
+        })
+    }
+
+    fn live_step(previous: Content, next: Content) -> Vec<AppMessage> {
+        let id = RegionId::new(1);
+        let first = frame_with_semantics(id, previous, live_log());
+        let (_, tree) =
+            optimize_frame_messages(&RetainedTree::new(), first, &FrameNotes::default(), ALL);
+        let frame = frame_with_semantics(id, next, live_log());
+        optimize_frame_messages(&tree, frame, &FrameNotes::default(), ALL).0
+    }
+
+    #[test]
+    fn a_live_region_appends_new_text_even_when_its_styling_changes() {
+        let id = RegionId::new(1);
+        let bold = Style::new().bold();
+        let before = Content::RichText(RichText::new().text("Hello "));
+        let after = Content::RichText(RichText::new().text("Hello ").span("world", bold));
+
+        assert_eq!(
+            live_step(before, after.clone()),
+            vec![
+                AppMessage::AppendContent {
+                    id,
+                    text: "world".to_string()
+                },
+                AppMessage::SetContent { id, content: after }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_marker_held_back_on_the_last_line_is_spoken_once_resolved() {
+        let id = RegionId::new(1);
+        let bold = Style::new().bold();
+        let before = Content::RichText(RichText::new().text("Done.\nA **bo"));
+        let after = Content::RichText(
+            RichText::new()
+                .text("Done.\nA ")
+                .span("bold", bold)
+                .text(" word"),
+        );
+
+        assert_eq!(
+            live_step(before, after.clone()),
+            vec![
+                AppMessage::AppendContent {
+                    id,
+                    text: "bold word".to_string()
+                },
+                AppMessage::SetContent { id, content: after }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rewrite_is_set_once_and_only_text_past_what_was_announced_is_appended() {
+        let id = RegionId::new(1);
+        // An earlier line rewritten while new text arrives: the new text
+        // past the old length is still announced.
+        let after = text("Changed\nsecond and more");
+        assert_eq!(
+            live_step(text("First\nsecond"), after.clone()),
+            vec![
+                AppMessage::AppendContent {
+                    id,
+                    text: " and more".to_string()
+                },
+                AppMessage::SetContent { id, content: after }
+            ]
+        );
+        // A one-line restyle (setext heading, `Title` set as `TITLE`) is
+        // not announced again.
+        let upper = text("TITLE");
+        assert_eq!(
+            live_step(text("Title"), upper.clone()),
+            vec![AppMessage::SetContent { id, content: upper }]
+        );
+        let shrunk = text("First\nsec");
+        assert_eq!(
+            live_step(text("First\nsecond"), shrunk.clone()),
+            vec![AppMessage::SetContent {
+                id,
+                content: shrunk
+            }]
+        );
+        assert_eq!(live_step(text("same"), text("same")), Vec::new());
+        // Nothing in common: all of it, repeated rather than dropped.
+        assert_eq!(
+            live_step(text("aé"), text("ééé")),
+            vec![
+                AppMessage::AppendContent {
+                    id,
+                    text: "ééé".to_string()
+                },
+                AppMessage::SetContent {
+                    id,
+                    content: text("ééé")
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_region_created_live_announces_its_first_text_after_turning_live() {
+        let id = RegionId::new(1);
+        let frame = frame_with_semantics(id, text("Thinking about it"), live_log());
+        let (outgoing, tree) =
+            optimize_frame_messages(&RetainedTree::new(), frame, &FrameNotes::default(), ALL);
+        assert!(matches!(outgoing[0], AppMessage::CreateRegion { .. }));
+        assert!(matches!(outgoing[1], AppMessage::SetSemantics { .. }));
+        assert_eq!(
+            outgoing[2..],
+            [AppMessage::AppendContent {
+                id,
+                text: "Thinking about it".to_string()
+            }]
+        );
+        assert_eq!(tree.regions[&id].announced, "Thinking about it");
+    }
+
+    #[test]
+    fn unresolved_inline_markdown_is_held_back_until_it_resolves() {
+        let id = RegionId::new(1);
+        let bold = Style::new().bold();
+        for (open, resolved) in [
+            (
+                "A **bo",
+                RichText::new()
+                    .text("A ")
+                    .span("bold", bold.clone())
+                    .text(" move"),
+            ),
+            (
+                "Run `fo",
+                RichText::new()
+                    .text("Run ")
+                    .span("foo", bold.clone())
+                    .text(" now"),
+            ),
+            (
+                "See [the docs](http://exa",
+                RichText::new()
+                    .text("See ")
+                    .span("the docs", bold.clone())
+                    .text(" now"),
+            ),
+        ] {
+            let first = frame_with_semantics(id, text(open), live_log());
+            let (outgoing, tree) =
+                optimize_frame_messages(&RetainedTree::new(), first, &prose(), ALL);
+            let spoken: Vec<&AppMessage> = outgoing
+                .iter()
+                .filter(|m| matches!(m, AppMessage::AppendContent { .. }))
+                .collect();
+            let prefix = &open[..open.find(['*', '`', '[']).unwrap()];
+            assert_eq!(
+                spoken,
+                [&AppMessage::AppendContent {
+                    id,
+                    text: prefix.to_string()
+                }],
+                "{open:?}"
+            );
+
+            let resolved = Content::RichText(resolved);
+            let second = frame_with_semantics(id, resolved.clone(), live_log());
+            let (outgoing, _) = optimize_frame_messages(&tree, second, &prose(), ALL);
+            let whole = plain_text_of(&resolved);
+            assert_eq!(
+                outgoing,
+                vec![
+                    AppMessage::AppendContent {
+                        id,
+                        text: whole[prefix.len()..].to_string()
+                    },
+                    AppMessage::SetContent {
+                        id,
+                        content: resolved
+                    }
+                ],
+                "{open:?}: nothing is spoken twice"
+            );
+        }
+        // A literal opener long past is not held back.
+        let literal = format!("2 * 3 is six, {}", "and so on ".repeat(10));
+        let (outgoing, _) = optimize_frame_messages(
+            &RetainedTree::new(),
+            frame_with_semantics(id, text(&literal), live_log()),
+            &prose(),
+            ALL,
+        );
+        assert!(outgoing.contains(&AppMessage::AppendContent {
+            id,
+            text: literal.clone()
+        }));
+        // snake_case is a word, not an opener.
+        assert_eq!(super::held_back("a snake_case"), "a snake_case");
+        // A bracket that can no longer become a link does not hold the line.
+        assert_eq!(
+            super::held_back("Use array[0] to get the first"),
+            "Use array[0] to get the first"
+        );
+        assert_eq!(super::held_back("see [1] and [the"), "see [1] and ");
+        assert_eq!(super::held_back("see [the docs]"), "see ");
+        assert_eq!(super::held_back("see [the docs](http"), "see ");
+        // A lone backtick far back is literal; a recent one still holds.
+        let tick = format!("Type ` then {}", "and so on ".repeat(10));
+        assert_eq!(super::held_back(&tick), tick);
+        assert_eq!(super::held_back("run `cargo"), "run ");
+        // In the frame the region stops being live, everything goes.
+        let first = frame_with_semantics(id, text("A **bo"), live_log());
+        let (_, tree) = optimize_frame_messages(&RetainedTree::new(), first, &prose(), ALL);
+        let last = frame_with_semantics(id, text("A **bo"), None);
+        let (outgoing, _) = optimize_frame_messages(&tree, last, &prose(), ALL);
+        assert_eq!(
+            outgoing[0],
+            AppMessage::AppendContent {
+                id,
+                text: "**bo".to_string()
+            }
+        );
+    }
+
+    fn plain_text_of(content: &Content) -> String {
+        super::plain_text(content).unwrap().into_owned()
+    }
+
+    /// Notes for a frame whose region 1 is markdown prose still arriving.
+    fn prose() -> FrameNotes {
+        FrameNotes {
+            arriving_prose: [RegionId::new(1)].into(),
+            ..FrameNotes::default()
+        }
+    }
+
+    #[test]
+    fn only_arriving_markdown_prose_is_held_back() {
+        let id = RegionId::new(1);
+        // A plain live log says brackets and stars as they come.
+        let line = "[INFO] a * b `x";
+        let (outgoing, _) = optimize_frame_messages(
+            &RetainedTree::new(),
+            frame_with_semantics(id, text(line), live_log()),
+            &FrameNotes::default(),
+            ALL,
+        );
+        assert!(outgoing.contains(&AppMessage::AppendContent {
+            id,
+            text: line.to_string()
+        }));
+    }
+
+    #[test]
+    fn resuming_never_skips_text() {
+        use super::resume_at;
+        // Growth.
+        assert_eq!(resume_at("Hello", "Hello world"), 5);
+        // Case only (a heading set in capitals): nothing new.
+        assert_eq!(resume_at("Title", "TITLE"), 5);
+        // An earlier line rewritten: resume on the same line.
+        let after = "Changed\nsecond and more";
+        assert_eq!(&after[resume_at("First\nsecond", after)..], " and more");
+        // Announced text that shrank (a literal opener that resolved):
+        // resume at the start of the word where they part.
+        let after = "Start this is bold";
+        assert_eq!(&after[resume_at("Start *", after)..], "this is bold");
+        let after = "See the docs for";
+        assert_eq!(
+            &after[resume_at("See [the docs](https://example.com/a", after)..],
+            "the docs for"
+        );
+        // Never past the end.
+        assert_eq!(resume_at("abcdef", "abc"), 3);
+    }
+
+    #[test]
+    fn a_live_region_growing_plainly_sends_only_the_append() {
+        let id = RegionId::new(1);
+        assert_eq!(
+            live_step(text("Hello"), text("Hello world")),
+            vec![AppMessage::AppendContent {
+                id,
+                text: " world".to_string()
+            }]
+        );
+        assert_eq!(
+            live_step(text("héllo"), text("héllo wörld")),
+            vec![AppMessage::AppendContent {
+                id,
+                text: " wörld".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn text_that_arrives_as_a_region_stops_being_live_is_still_appended_first() {
+        let id = RegionId::new(1);
+        let first = frame_with_semantics(id, text("Hello"), live_log());
+        let (_, tree) =
+            optimize_frame_messages(&RetainedTree::new(), first, &FrameNotes::default(), ALL);
+
+        let last = frame_with_semantics(id, text("Hello world"), None);
+        let (outgoing, _) = optimize_frame_messages(&tree, last, &FrameNotes::default(), ALL);
+        assert_eq!(
+            outgoing,
+            vec![
+                AppMessage::AppendContent {
+                    id,
+                    text: " world".to_string()
+                },
+                AppMessage::SetSemantics {
+                    id,
+                    semantics: Semantics::default()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_live_container_never_gets_its_children_text_appended() {
+        let id = RegionId::new(1);
+        let child = RegionId::new(2);
+        let frame = |line: &str| {
+            vec![
+                AppMessage::CreateRegion {
+                    id,
+                    parent: ROOT,
+                    insert_index: -1,
+                    constraints: Constraints::default(),
+                    style: Style::default(),
+                },
+                AppMessage::SetSemantics {
+                    id,
+                    semantics: live_log().unwrap(),
+                },
+                AppMessage::CreateRegion {
+                    id: child,
+                    parent: id,
+                    insert_index: -1,
+                    constraints: Constraints::default(),
+                    style: Style::default(),
+                },
+                AppMessage::SetContent {
+                    id: child,
+                    content: text(line),
+                },
+            ]
+        };
+        let (_, tree) = optimize_frame_messages(
+            &RetainedTree::new(),
+            frame("Hi"),
+            &FrameNotes::default(),
+            ALL,
+        );
+        let (outgoing, _) =
+            optimize_frame_messages(&tree, frame("Hi there"), &FrameNotes::default(), ALL);
+        assert!(
+            !outgoing.iter().any(
+                |m| matches!(m, AppMessage::AppendContent { id: target, .. } if *target == id)
+            ),
+            "{outgoing:?}"
+        );
+    }
+
+    #[test]
+    fn a_region_that_is_not_live_keeps_the_strict_append_rule() {
+        let id = RegionId::new(1);
+        let previous = tree_with_content(id, Content::RichText(RichText::new().text("Hello ")));
+        let after = Content::RichText(
+            RichText::new()
+                .text("Hello ")
+                .span("world", Style::new().bold()),
+        );
+        let (outgoing, _) = optimize_frame_messages(
+            &previous,
+            frame_with_content(id, after.clone()),
+            &FrameNotes::default(),
+            ALL,
+        );
+        assert_eq!(
+            outgoing,
+            vec![AppMessage::SetContent { id, content: after }]
         );
     }
 }

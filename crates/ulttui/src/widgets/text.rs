@@ -193,6 +193,8 @@ pub struct TextInput {
     vim_state: VimState,
     vim_config: VimConfig,
     key_parser: KeyParser,
+    password: bool,
+    accessible: super::Accessible,
 }
 
 impl Default for TextInput {
@@ -209,6 +211,8 @@ impl Default for TextInput {
             vim_state: VimState::new(),
             vim_config: VimConfig::for_text_input(),
             key_parser: KeyParser::new(),
+            password: false,
+            accessible: super::Accessible::default(),
         }
     }
 }
@@ -240,6 +244,26 @@ impl TextInput {
 
     pub fn multiline(mut self) -> Self {
         self.multiline = true;
+        self
+    }
+
+    /// Mask the value on screen and keep it from assistive technology.
+    pub fn password(mut self) -> Self {
+        self.password = true;
+        self
+    }
+
+    /// The accessible name, such as "Message". An input is never named by
+    /// its value.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.accessible.label = Some(label.into());
+        self
+    }
+
+    /// Longer help text for assistive technology; the placeholder when
+    /// not set.
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.accessible.description = Some(description.into());
         self
     }
 
@@ -584,6 +608,18 @@ impl View for TextInput {
         TextInput::widget_id(self)
     }
 
+    /// An input whose value and placeholder are what was typed and asked
+    /// for, without the focus marker and vim mode drawn before them; a
+    /// password's value is never exposed.
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        self.accessible.apply(ultty_protocol::Semantics {
+            role: ultty_protocol::Role::Input,
+            value_text: (!self.password).then(|| self.value.clone()),
+            description: (!self.placeholder.is_empty()).then(|| self.placeholder.clone()),
+            ..Default::default()
+        })
+    }
+
     fn constraints(&self) -> ultty_protocol::Constraints {
         ultty_protocol::Constraints {
             display: ultty_protocol::Display::Flex,
@@ -611,7 +647,7 @@ impl View for TextInput {
                 },
                 placeholder: format!("{}{}{}", focus_prefix, mode_indicator, self.placeholder),
                 multiline: self.multiline,
-                password: false,
+                password: self.password,
             },
         ))
     }
@@ -624,6 +660,9 @@ impl View for TextInput {
         let is_focused = super::is_widget_focused(self.widget_id());
 
         let theme = Theme::current();
+        let masked = self
+            .password
+            .then(|| "•".repeat(self.value.chars().count()));
         let (display_text, style) = if self.value.is_empty() {
             (
                 self.placeholder.as_str(),
@@ -631,7 +670,7 @@ impl View for TextInput {
             )
         } else {
             (
-                self.value.as_str(),
+                masked.as_deref().unwrap_or(self.value.as_str()),
                 RStyle::default().fg(to_ratatui_color(theme.input.fg)),
             )
         };

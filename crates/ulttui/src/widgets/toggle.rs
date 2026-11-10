@@ -53,6 +53,9 @@ impl View for Toggle {
     fn content(&self) -> ultty_protocol::Content {
         self.0.content()
     }
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        self.0.semantics_as(ultty_protocol::Role::Switch)
+    }
     fn is_focusable(&self) -> bool {
         self.0.is_focusable()
     }
@@ -70,6 +73,16 @@ mod tests {
     use crate::event::{Key, KeyEvent};
     use crate::focus::FocusManager;
     use crate::theme::Theme;
+
+    #[test]
+    fn toggle_is_a_switch_with_its_state() {
+        use ultty_protocol::{Role, Toggled};
+        let semantics = Toggle::new("Dark mode").on(true).semantics();
+        assert_eq!(semantics.role, Role::Switch);
+        assert_eq!(semantics.label.as_deref(), Some("Dark mode"));
+        assert_eq!(semantics.toggled, Toggled::True);
+        assert_eq!(Toggle::new("Dark mode").semantics().toggled, Toggled::False);
+    }
 
     #[test]
     fn new_toggle_is_off() {

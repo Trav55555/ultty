@@ -5,7 +5,9 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
-use ultty_protocol::{Content, ImageScale, ImageWidget as ProtoImageWidget, WidgetContent};
+use ultty_protocol::{
+    Content, ImageScale, ImageWidget as ProtoImageWidget, Role, Semantics, WidgetContent,
+};
 
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
@@ -16,6 +18,7 @@ pub struct Image {
     width: u32,
     height: u32,
     scale: ImageScale,
+    alt: Option<String>,
 }
 
 impl Image {
@@ -26,6 +29,7 @@ impl Image {
             width,
             height,
             scale: ImageScale::Fit,
+            alt: None,
         }
     }
 
@@ -34,9 +38,24 @@ impl Image {
         self.scale = scale;
         self
     }
+
+    /// The alt text: what the image shows, for assistive technology. An
+    /// image without one is unnamed.
+    pub fn label(mut self, alt: impl Into<String>) -> Self {
+        self.alt = Some(alt.into());
+        self
+    }
 }
 
 impl View for Image {
+    fn semantics(&self) -> Semantics {
+        Semantics {
+            role: Role::Image,
+            label: self.alt.clone(),
+            ..Semantics::default()
+        }
+    }
+
     fn content(&self) -> Content {
         Content::Widget(WidgetContent::Image(ProtoImageWidget {
             data: self.data.clone(),

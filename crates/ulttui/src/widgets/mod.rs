@@ -23,6 +23,7 @@ mod progress;
 mod scroll;
 mod scroll_search;
 mod select;
+mod semantic;
 mod spinner;
 mod state;
 mod table;
@@ -48,6 +49,8 @@ pub use primitives::{Card, Inset, Section, Spacer};
 pub use progress::ProgressBar;
 pub use scroll::ScrollView;
 pub use select::Select;
+pub use semantic::Semantic;
+pub(crate) use semantic::{send_semantics, Accessible};
 pub use spinner::Spinner;
 pub use state::{EmptyState, ErrorState, LoadingState};
 pub use table::Table;
@@ -146,6 +149,7 @@ pub(crate) fn render_view_to_native(
     }
 
     let content = child.content();
+    send_semantics(send_message, region_id, child.semantics(), &content)?;
     if content != Content::None {
         send_message(&AppMessage::SetContent {
             id: region_id,
@@ -193,6 +197,16 @@ pub trait View {
 
     fn content(&self) -> ultty_protocol::Content {
         ultty_protocol::Content::None
+    }
+
+    /// What this view is, for assistive technology (ADR 0021 §4).
+    ///
+    /// The native backend sends it to the terminal when it adds to what
+    /// the terminal derives from [`View::content`], and again when it
+    /// changes. The default, role `Auto` and nothing else, leaves it all to
+    /// the terminal. ANSI mode ignores it.
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics::default()
     }
 
     fn children_count(&self) -> usize {
@@ -285,6 +299,10 @@ impl<T: View> View for &T {
 
     fn content(&self) -> ultty_protocol::Content {
         (*self).content()
+    }
+
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        (*self).semantics()
     }
 
     fn children_count(&self) -> usize {

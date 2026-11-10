@@ -509,6 +509,159 @@ fn snapshot_markdown_streaming() {
     insta::assert_snapshot!(output);
 }
 
+// ── Semantics (ADR 0021) ──────────────────────────────────────────────
+
+/// The `SetSemantics` each widget's native render sends, one line per
+/// region that gets one, as `widget: region role label … state`. Regions
+/// that send none are left to what the terminal derives from content.
+#[test]
+fn snapshot_widget_semantics() {
+    use ulttui::widgets::{render_view_messages, Badge, ErrorState, LoadingState, Semantic, Title};
+    use ultty_protocol::{AppMessage, Live, Role};
+
+    let widgets: Vec<(&str, Box<dyn View>)> = vec![
+        ("Text", Box::new(Text::new("plain"))),
+        ("Column", Box::new(Column::new().child(Text::new("a")))),
+        ("Button", Box::new(Button::new("Run"))),
+        (
+            "Button+description",
+            Box::new(Button::new("Run").description("Runs tests")),
+        ),
+        ("Checkbox", Box::new(Checkbox::new("Accept").checked(true))),
+        ("Toggle", Box::new(Toggle::new("Dark mode"))),
+        (
+            "ProgressBar",
+            Box::new(ProgressBar::new(42.0).label("Upload")),
+        ),
+        ("Spinner", Box::new(Spinner::new().label("Working"))),
+        ("LoadingState", Box::new(LoadingState::new("Loading"))),
+        (
+            "ErrorState",
+            Box::new(ErrorState::new("disk full").hint("free space")),
+        ),
+        ("Badge", Box::new(Badge::success("Done"))),
+        ("Title", Box::new(Title::new("Chat"))),
+        (
+            "Section",
+            Box::new(Section::new().title("Files").child(Text::new("a"))),
+        ),
+        ("Divider", Box::new(Divider::horizontal())),
+        ("Spacer", Box::new(Spacer)),
+        (
+            "Image",
+            Box::new(Image::new(vec![0; 4], 1, 1).label("A red dot")),
+        ),
+        (
+            "TextInput",
+            Box::new(TextInput::new().placeholder("Type").label("Message")),
+        ),
+        (
+            "TextInput+password",
+            Box::new(TextInput::new().value("pw").password()),
+        ),
+        (
+            "Select",
+            Box::new(Select::new(vec!["a".into(), "b".into()]).label("Letter")),
+        ),
+        (
+            "List",
+            Box::new(List::new().items(vec!["one", "two"]).label("Numbers")),
+        ),
+        (
+            "Tabs",
+            Box::new(Tabs::new().labels(vec!["Log", "Diff"]).active(1)),
+        ),
+        (
+            "Tree",
+            Box::new(
+                Tree::new(
+                    TreeNode::with_children("src", vec![TreeNode::new("main.rs")]).expanded(true),
+                )
+                .label("Files"),
+            ),
+        ),
+        (
+            "Collapsible",
+            Box::new(Collapsible::new(Text::new("More"), Text::new("body"))),
+        ),
+        (
+            "Modal",
+            Box::new(
+                Modal::new()
+                    .title("Delete?")
+                    .body("Really?")
+                    .buttons(vec!["Yes", "No"]),
+            ),
+        ),
+        ("MarkdownView", Box::new(MarkdownView::new("# Done"))),
+        (
+            "MarkdownView+streaming",
+            Box::new(MarkdownView::new("Partial").streaming(true)),
+        ),
+        (
+            "Semantic",
+            Box::new(
+                Semantic::new(Text::new("Bot: hi"))
+                    .role(Role::Log)
+                    .label("Messages")
+                    .live(Live::Polite),
+            ),
+        ),
+    ];
+
+    let mut out = String::new();
+    for (name, widget) in &widgets {
+        for message in render_view_messages(widget.as_ref()).unwrap() {
+            if let AppMessage::SetSemantics { id, semantics } = message {
+                let mut line = format!("{name}: r{} {}", id.0, semantics.role.as_str());
+                if let Some(label) = &semantics.label {
+                    line.push_str(&format!(" {label:?}"));
+                }
+                if let Some(description) = &semantics.description {
+                    line.push_str(&format!(" desc={description:?}"));
+                }
+                if semantics.live != Live::Off {
+                    line.push_str(&format!(" live={}", semantics.live.as_str()));
+                }
+                for (set, flag) in [
+                    (semantics.busy, "busy"),
+                    (semantics.hidden, "hidden"),
+                    (semantics.modal, "modal"),
+                ] {
+                    if set {
+                        line.push(' ');
+                        line.push_str(flag);
+                    }
+                }
+                if semantics.toggled != Default::default() {
+                    line.push_str(&format!(" toggled={:?}", semantics.toggled));
+                }
+                if semantics.expanded != Default::default() {
+                    line.push_str(&format!(" expanded={:?}", semantics.expanded));
+                }
+                if let Some(value) = semantics.value {
+                    line.push_str(&format!(
+                        " value={}/{}..{}",
+                        value.now, value.min, value.max
+                    ));
+                }
+                if let Some(value_text) = &semantics.value_text {
+                    line.push_str(&format!(" value_text={value_text:?}"));
+                }
+                if let Some(position) = semantics.position {
+                    line.push_str(&format!(" pos={}/{}", position.index, position.size));
+                }
+                if semantics.level > 0 {
+                    line.push_str(&format!(" level={}", semantics.level));
+                }
+                out.push_str(&line);
+                out.push('\n');
+            }
+        }
+    }
+    insta::assert_snapshot!(out);
+}
+
 // ── Image ─────────────────────────────────────────────────────────────
 
 #[test]

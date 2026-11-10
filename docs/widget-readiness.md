@@ -10,6 +10,9 @@ Legend:
 - `N/A`: not meaningful for that widget.
 - `Unknown`: needs audit before claiming readiness.
 
+Every built-in widget declares its accessibility role and label (ADR 0013 as
+amended by ADR 0021); `snapshot_widget_semantics` records what each one sends.
+
 | Widget | Native mode | ANSI mode | Focus/input | Resize/layout | Snapshot/test evidence | Notes |
 |--------|-------------|-----------|-------------|---------------|------------------------|-------|
 | Badge | Unknown | Unknown | N/A | Unknown | Unknown | Audit small display widget coverage. |

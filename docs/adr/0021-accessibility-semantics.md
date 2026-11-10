@@ -488,6 +488,98 @@ Each slice is independently testable and mergeable.
 7. **ulttui**: `View::semantics`, widget defaults, builders, `Semantic`,
    backend diffing, done-bar line. Check: widget snapshots gain semantics;
    `regions --json` on `chat` shows a `Log` with `Polite`.
+   Done 2026-11-10 except the Orca run. `snapshot_widget_semantics`
+   records what each widget sends; `scripts/e2e/accessibility-chat.sh`
+   finds `chat`'s transcript as a polite `Log` in `regions --json`,
+   types a message, and hears the streamed reply over AT-SPI once, in
+   order, polite; `accessibility-atspi.sh` also finds counter-app's
+   buttons named in `regions --json`. Choices made where §4 was open:
+   - The derivation from content moved into `ultty-protocol`
+     (`derive_semantics`), so the app compares with exactly what the
+     terminal derives: a view's semantics are sent only when they derive
+     to something else for its content (taken as never appended to and
+     not streaming). A button, a progress bar, a spinner, plain text and
+     containers send nothing.
+   - `SetSemantics` goes in the same frame as the region's create,
+     after every content change of the frame; with no capability, never.
+     A region whose view falls back to the default gets
+     `Semantics::default()`, so the terminal derives again.
+   - `Semantic` adds no region: it changes the semantics of the view it
+     wraps and forwards everything else. It also takes `hidden`.
+   - Defaults as built: `Button` button named by its label; `Checkbox`
+     checkbox and `Toggle` switch, named by the label without the drawn
+     prefix, `toggled`; `ProgressBar` progress, value 0–1; `Spinner`
+     busy status; `Badge` status; `ErrorState` alert, hint as
+     description; `Title` heading, level 1 (`Title::level`), a
+     `Section`'s title level 2 and the section a group named by it;
+     `Divider`, `Spacer` hidden; `Image` image, `.label()` is the alt
+     text; `TextInput` input with the typed value and placeholder (not
+     the focus and vim markers its content draws), nothing for a
+     `.password()`; `Select` list, collapsed or expanded, the selected
+     option as `value_text` and its position; `List` list, rows list
+     items with position; `Tabs` tab list, tabs named by their labels
+     with position; `Tree` tree, rows tree items with level and
+     expanded, the texts drawn in a row hidden; `Collapsible` tree item,
+     expanded, chevron hidden; `Modal` modal dialog named by its title,
+     hidden while not visible, its buttons buttons. `LoadingState`,
+     `EmptyState`, `Table`, containers: the derived default.
+   - §1 has no `selected` state, so the active tab, list row and tree row
+     are not exposed as selected; only their style shows it. Adding a
+     `selected` flag is a protocol change for a later slice (open
+     questions).
+   - `MarkdownView` is one region per block, streaming or not. While it
+     streams, the block still arriving is live itself (with the view's
+     liveness) and the view is the busy log around it; a finished block
+     stops being live. Streamed text so reaches a live region as
+     `AppendContent`, each region holds one block (the codec's 10,000
+     spans per text and the wire cost stay per block: one more item on a
+     3,500-item list costs under 1 KiB), and a code block keeps its rule.
+     No cursor is drawn natively while streaming: it would be appended
+     and spoken; `busy` says it instead. A first version kept the whole
+     document as one region's text; review found it past the span limit
+     at about 40 KB of markdown and resending the document whenever a
+     block or styled span began.
+     Not done: finished blocks are still rendered and diffed every frame
+     (CPU is O(blocks) per frame, as for any view); caching them is a
+     follow-up. Existing behaviour, also open: a link streamed in small
+     chunks can stay unresolved on screen
+     (`MarkdownView::try_append_chunk_incrementally` appends to the last
+     block without re-parsing it); its text is then announced literally
+     when the block is finished.
+   - The backend keeps the text it has appended to each live region
+     (announced), in the form it has now. What the region shows past
+     that is appended, then a `SetContent` in the same frame sets the
+     styled result when appending alone does not give it (a span turned
+     bold). Where to resume: after the announced text if the new text
+     starts with it (letter case ignored, so `Title` set as `TITLE` is
+     not news); nothing if the text only got shorter; after the
+     announced part of the same line when an earlier line was rewritten;
+     else at the start of the word where the two part. Text is repeated
+     rather than skipped; a first version counted bytes and lost text
+     whenever announced text got shorter (review probes: a long link, a
+     long bold phrase).
+   - Only `MarkdownView`'s arriving prose block (paragraph, heading, list
+     item; not code, not other live regions such as a plain log with
+     `[INFO]`) holds back the end of its last line from the first inline
+     opener still shown as characters, so `**bo` is not spoken before
+     `bold` and a link's address is never spoken while it may resolve.
+     `[`, `**`, `__` and `~~` hold until the line ends, which for a
+     paragraph is when the block is finished, except a `[` whose `]` is
+     already followed by something other than `(` or `[` (`x[i]`, `[1]`),
+     which can no longer become a link. A lone `*`, `_` (not in a word)
+     or `` ` `` holds only within 80 bytes of the end, past which it is
+     taken as literal (`2 * 3`); a closed code span no longer shows its
+     backticks. The walk notes such
+     regions beside the native keys (`FrameNotes`).
+   - A region created live announces its first text the same way, and a
+     region that turns live announces only what it grows by.
+     `SetSemantics` that makes a region live goes before its content in
+     the frame; any other change after, so the text that arrives in the
+     frame a region stops being live (the last chunk, as the stream ends)
+     is still appended and announced, without the hold-back.
+   - App-sent strings are cut, at a character boundary, to what the codec
+     decodes (4 KiB each, 8 KiB together): a long input value or label
+     made the terminal refuse the message.
 8. **AT-SPI smoke test in CI**, or the local script if headless AT-SPI is
    unreliable.
 9. **macOS**: VoiceOver run of the manual script, differences recorded.
@@ -511,3 +603,7 @@ Each slice is independently testable and mergeable.
   0.1 ms); incremental updates stay a later optimisation.
 - Whether the unused `tokio` dependency of `crates/ultty` should go, now
   that a second executor arrives.
+- How should a selected item be exposed? §1 has no `selected` state, so
+  ulttui's active tab, selected list row and selected tree row show it
+  only by style (slice 7). A `selected` flag (AccessKit `set_selected`)
+  is an additive protocol change under ADR 0011; it needs sign-off.

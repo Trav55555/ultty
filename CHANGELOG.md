@@ -9,6 +9,28 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Added
 
+- `ulttui` accessibility (ADR 0021 slice 7): `View::semantics` says what a
+  view is, and every built-in widget reports its role, name and state
+  (checkbox and switch checked, progress value, tree items expanded and
+  level, tabs and list rows position, modal dialogs, heading levels;
+  dividers and spacers hidden). `Semantic` sets the role, label,
+  description, liveness or hidden flag of any view without adding a region.
+  New builders: `.label()` on `TextInput`, `Select`, `List`, `Tree`,
+  `Image` (its alt text) and `MarkdownView`, `.description()` on
+  `TextInput`, `Select` and `Button`, `.live()` on `MarkdownView`,
+  `TextInput::password` and `Title::level`. In Ultty the native backend
+  sends `SetSemantics` only where it adds to what the terminal derives from
+  content, and only when it changes. `MarkdownView::streaming(true)` is a
+  busy, polite live log whose streamed text a screen reader announces, once
+  and without unresolved markdown markers; natively the block still arriving
+  is the live region and no cursor is drawn. Semantics strings are cut to
+  the codec's limits. ANSI mode is unchanged.
+- `MarkdownView` natively is one region per block whether it streams or not,
+  and a fenced code block no longer has its last row cut off.
+- `ultty_protocol::derive_semantics`: the terminal's rule for a region's
+  semantics from its content, for apps to compare with.
+- The `chat` example streams its replies into a live transcript;
+  `scripts/e2e/accessibility-chat.sh` checks what AT-SPI announces.
 - `ulttui-lua` (prototype): write a ulttui app in Luau, run it with
   `ulttui-lua app.luau`, and every save reloads it, keeping its state. The
   script returns an Elm-style app table (`init`, `update`, `view`, named

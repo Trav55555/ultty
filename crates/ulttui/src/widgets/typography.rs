@@ -11,19 +11,38 @@ use crate::theme::{to_ratatui_color, Theme};
 use ultty_protocol::{Constraints, Content, Dimension, Style as ProtoStyle};
 
 /// Large section heading. Uses `text_title` color, bold.
+///
+/// For assistive technology it is a heading, of level 1 unless
+/// [`Title::level`] says otherwise.
 pub struct Title {
     text: String,
+    level: u8,
 }
 
 impl Title {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: expand_tabs(&text.into()).into_owned(),
+            level: 1,
         }
+    }
+
+    /// The heading's depth: 1 for the top, 2 for a section, and so on.
+    pub fn level(mut self, level: u8) -> Self {
+        self.level = level.max(1);
+        self
     }
 }
 
 impl View for Title {
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            role: ultty_protocol::Role::Heading,
+            level: self.level,
+            ..Default::default()
+        }
+    }
+
     fn constraints(&self) -> Constraints {
         Constraints {
             width: Dimension::Cells(self.text.chars().count() as f32),

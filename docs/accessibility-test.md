@@ -60,8 +60,7 @@ with the arrow keys at the prompt.
 
 ### 5. A streaming live region
 
-Until ulttui marks its streaming views live (slice 7), the `chat` example
-is not a live region; use the protocol example that is. Build it with
+First the protocol example. Build it with
 `cargo build -p ultty-client --example live-region`, then in Ultty run
 `target/debug/examples/live-region 12 30` and do nothing. It shows one
 `Log` region labelled "Reply", marked polite and busy while it streams,
@@ -75,8 +74,18 @@ the whole reply line by line. Before Orca 49, politeness is ignored:
 note whether an announcement interrupts speech.
 
 Record: what Orca says while it streams and after; whether "busy" is
-spoken; whether any line is read twice. Repeat with `cargo run -p chat`
-once slice 7 has landed: that is the B4 done criterion.
+spoken; whether any line is read twice.
+
+Then the B4 done criterion: `cargo run -p chat`, type a message and press
+Enter. The transcript is a polite `Log` labelled "Messages"; the bot's
+reply streams word by word into a `MarkdownView::streaming(true)`, a busy
+polite `Log` labelled "Bot reply" until it ends. Expect "Bot reply" once
+when it appears, then the reply, each line once as it completes. Your own
+message is not announced (it is a new region under the log, ADR 0021
+slice 6). Then send `markdown`: the reply has bold, inline code, a link,
+a list and a code block; expect each block read once, with no asterisks,
+backticks or brackets spoken. `scripts/e2e/accessibility-chat.sh` checks the same over AT-SPI
+without a screen reader.
 
 ### 6. Tab through a native app
 

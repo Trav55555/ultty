@@ -9,8 +9,8 @@ use ratatui::Frame;
 use super::{FocusAction, View};
 use crate::theme::{to_ratatui_color, Theme};
 use ultty_protocol::{
-    AppMessage, Color, Constraints, Content, Dimension, Display, FlexDirection, RegionId,
-    Style as ProtoStyle, TextContent,
+    AppMessage, Color, Constraints, Content, Dimension, Display, Expanded, FlexDirection, RegionId,
+    Role, Semantics, Style as ProtoStyle, TextContent,
 };
 
 /// A node in a tree hierarchy.
@@ -67,6 +67,7 @@ pub struct Tree {
     show_root: bool,
     selected: usize,
     id: Option<String>,
+    label: Option<String>,
 }
 
 /// A flattened, visible tree node used during rendering.
@@ -88,6 +89,7 @@ impl Tree {
             show_root: true,
             selected: 0,
             id: None,
+            label: None,
         }
     }
 
@@ -100,6 +102,12 @@ impl Tree {
     /// Set the selected index into the flattened visible list.
     pub fn selected(mut self, selected: usize) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// The tree's accessible name, such as "Project files".
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
         self
     }
 
@@ -150,6 +158,14 @@ impl Tree {
 }
 
 impl View for Tree {
+    fn semantics(&self) -> Semantics {
+        Semantics {
+            role: Role::Tree,
+            label: self.label.clone(),
+            ..Semantics::default()
+        }
+    }
+
     fn constraints(&self) -> Constraints {
         Constraints {
             display: Display::Flex,
@@ -205,6 +221,22 @@ impl View for Tree {
             },
             style: row_style,
         })?;
+
+        // The row is the tree item, named by its label, with its level and
+        // expanded state; the texts drawn in it (indent, chevron, icon,
+        // label) are hidden so it is not read twice.
+        let item = Semantics {
+            role: Role::TreeItem,
+            label: Some(node.label.to_string()),
+            level: u8::try_from(node.depth + 1).unwrap_or(u8::MAX),
+            expanded: match (node.has_children, node.expanded) {
+                (false, _) => Expanded::Unset,
+                (true, true) => Expanded::Expanded,
+                (true, false) => Expanded::Collapsed,
+            },
+            ..Semantics::default()
+        };
+        super::send_semantics(send_message, row_id, item, &Content::None)?;
 
         let _ = node.is_last_sibling;
         let indent = "  ".repeat(node.depth);
@@ -313,9 +345,15 @@ fn create_text_region(
         constraints: Constraints::default(),
         style: ProtoStyle::default(),
     })?;
+    let content = Content::Text(TextContent::new(text.to_owned()));
+    let semantics = Semantics {
+        hidden: true,
+        ..Semantics::default()
+    };
+    super::send_semantics(send_message, region_id, semantics, &content)?;
     send_message(&AppMessage::SetContent {
         id: region_id,
-        content: Content::Text(TextContent::new(text.to_owned())),
+        content,
     })?;
 
     Ok(())

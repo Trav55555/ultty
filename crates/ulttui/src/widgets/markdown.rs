@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthChar;
 use super::View;
 use ultty_protocol::{
     AppMessage, BorderEdges, BorderStyle, BorderType, Color, Constraints, Content, Dimension,
-    Display, NamedColor, RegionId, RichText, Style, TextContent,
+    Display, Live, NamedColor, RegionId, RichText, Role, Semantics, Style, TextContent,
 };
 
 const STREAMING_CURSOR: &str = "|";
@@ -20,6 +20,7 @@ pub struct MarkdownView {
     blocks: Vec<Block>,
     streaming: bool,
     wrap_width_cols: Option<usize>,
+    accessible: super::Accessible,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +99,7 @@ impl MarkdownView {
             blocks,
             streaming: false,
             wrap_width_cols: None,
+            accessible: super::Accessible::default(),
         }
     }
 
@@ -125,10 +127,26 @@ impl MarkdownView {
 
     /// Enable streaming mode.
     ///
-    /// When `true`, a cursor is appended to the rendered output
-    /// to indicate content is still arriving. Toggle off to finalize.
+    /// When `true`, content is still arriving: the view is a busy, polite
+    /// live log for assistive technology, and natively it is one region
+    /// whose text grows by `AppendContent`, so a screen reader announces
+    /// what arrives. In ANSI mode a cursor ends the output. Toggle off to
+    /// finalize.
     pub fn streaming(mut self, streaming: bool) -> Self {
         self.streaming = streaming;
+        self
+    }
+
+    /// The accessible name, such as "Reply".
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.accessible.label = Some(label.into());
+        self
+    }
+
+    /// How text appended while streaming is announced: `Polite` by
+    /// default, `Assertive` to interrupt, `Off` for silence.
+    pub fn live(mut self, live: Live) -> Self {
+        self.accessible.live = Some(live);
         self
     }
 
@@ -479,18 +497,38 @@ impl View for MarkdownView {
         }
     }
 
+    /// While streaming, natively, the whole document is this region's
+    /// own text, so that what arrives is appended to it (and announced,
+    /// the region being a live log); finished, each block is a region of
+    /// its own.
     fn content(&self) -> Content {
         Content::None
     }
 
-    fn children_count(&self) -> usize {
-        if self.streaming && self.blocks.is_empty() {
-            1
+    /// A streaming view is a busy, polite live log (ADR 0021 §4); a
+    /// finished one leaves its blocks to the terminal.
+    fn semantics(&self) -> Semantics {
+        let semantics = if self.streaming {
+            Semantics {
+                role: Role::Log,
+                live: Live::Polite,
+                busy: true,
+                ..Semantics::default()
+            }
         } else {
-            self.blocks.len()
-        }
+            Semantics::default()
+        };
+        self.accessible.apply(semantics)
     }
 
+    fn children_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// One region per block. While streaming, the last block, the one
+    /// still arriving, is live itself: what it grows by reaches it as
+    /// `AppendContent` and is announced, and a block that is finished
+    /// stops being live, so each region stays one block's size.
     fn render_child_native(
         &self,
         index: usize,
@@ -498,54 +536,14 @@ impl View for MarkdownView {
         parent: RegionId,
         next_id: &mut u32,
     ) -> crate::Result<Option<RegionId>> {
-        let blocks = &self.blocks;
-        let is_last = index + 1 == self.children_count();
-        let append_cursor = self.streaming && is_last;
-
-        if blocks.is_empty() && self.streaming && index == 0 {
-            let region_id = RegionId::new(*next_id);
-            *next_id += 1;
-            send_message(&AppMessage::CreateRegion {
-                id: region_id,
-                parent,
-                insert_index: -1,
-                constraints: Constraints {
-                    display: Display::Flex,
-                    width: Dimension::Percent(100.0),
-                    height: Dimension::Cells(1.0),
-                    flex_shrink: 1.0,
-                    ..Default::default()
-                },
-                style: Style::new(),
-            })?;
-            send_message(&AppMessage::SetContent {
-                id: region_id,
-                content: Content::Text(TextContent::new(STREAMING_CURSOR)),
-            })?;
-            return Ok(Some(region_id));
-        }
-
-        let Some(block) = blocks.get(index) else {
+        let Some(block) = self.blocks.get(index) else {
             return Ok(None);
         };
 
         let region_id = RegionId::new(*next_id);
         *next_id += 1;
 
-        let mut style = Style::new();
-        if matches!(block, Block::CodeBlock { .. } | Block::BlockQuote { .. }) {
-            style.dim = true;
-        }
-        if matches!(block, Block::CodeBlock { .. }) {
-            style.border = BorderStyle {
-                style: BorderType::Thin,
-                edges: BorderEdges {
-                    left: true,
-                    ..BorderEdges::NONE
-                },
-                radius: 0,
-            };
-        }
+        let style = block_style(block);
 
         send_message(&AppMessage::CreateRegion {
             id: region_id,
@@ -561,62 +559,26 @@ impl View for MarkdownView {
             style,
         })?;
 
-        let content = match block {
-            Block::Heading { level, spans } => {
-                let mut rich = RichText::new();
-                for span in spans {
-                    let mut span_style = span.style.clone();
-                    span_style.bold = true;
-                    let text = if *level == HeadingLevel::H1 {
-                        span.text.to_uppercase()
-                    } else {
-                        span.text.clone()
-                    };
-                    rich = rich.span(text, span_style);
-                }
-                Content::RichText(rich)
-            }
-            Block::Paragraph { spans } => {
-                let mut rich = RichText::new();
-                for span in spans {
-                    rich = rich.span(span.text.clone(), span.style.clone());
-                }
-                Content::RichText(rich)
-            }
-            Block::CodeBlock { text } => Content::Text(TextContent::new(text.clone())),
-            Block::ListItem {
-                indent,
-                prefix,
-                spans,
-            } => {
-                let mut rich = RichText::new()
-                    .span(format!("{}{}", " ".repeat(*indent), prefix), Style::new());
-                for span in spans {
-                    rich = rich.span(span.text.clone(), span.style.clone());
-                }
-                Content::RichText(rich)
-            }
-            Block::HorizontalRule => Content::Text(TextContent::new("─")),
-            Block::BlockQuote { text } => {
-                let quoted = text
-                    .lines()
-                    .map(|line| format!("│ {}", line))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Content::Text(TextContent::new(if quoted.is_empty() {
-                    "│ ".to_string()
-                } else {
-                    quoted
-                }))
-            }
+        let content = block_content(block);
+        let arriving = self.streaming && index + 1 == self.blocks.len();
+        let block_semantics = Semantics {
+            live: if arriving {
+                self.accessible.live.unwrap_or(Live::Polite)
+            } else {
+                Live::Off
+            },
+            ..Semantics::default()
         };
-
-        let content = if append_cursor {
-            append_cursor_to_content(content)
-        } else {
-            content
-        };
-
+        super::send_semantics(send_message, region_id, block_semantics, &content)?;
+        // Prose may still hold an inline opener that has not turned into
+        // styling yet; code is shown as it comes.
+        let prose = matches!(
+            block,
+            Block::Paragraph { .. } | Block::Heading { .. } | Block::ListItem { .. }
+        );
+        if arriving && prose {
+            crate::backend::native_diff::record_arriving_prose(region_id);
+        }
         send_message(&AppMessage::SetContent {
             id: region_id,
             content,
@@ -624,7 +586,6 @@ impl View for MarkdownView {
 
         Ok(Some(region_id))
     }
-
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         let blocks = &self.blocks;
         let mut lines: Vec<Line<'static>> = Vec::new();
@@ -704,20 +665,79 @@ impl View for MarkdownView {
     }
 }
 
-fn append_cursor_to_content(content: Content) -> Content {
-    match content {
-        Content::Text(mut tc) => {
-            tc.text.push_str(STREAMING_CURSOR);
-            Content::Text(tc)
+/// A block region's style: code and quotes dim, code with a left rule.
+fn block_style(block: &Block) -> Style {
+    let mut style = Style::new();
+    if matches!(block, Block::CodeBlock { .. } | Block::BlockQuote { .. }) {
+        style.dim = true;
+    }
+    if matches!(block, Block::CodeBlock { .. }) {
+        style.border = BorderStyle {
+            style: BorderType::Thin,
+            edges: BorderEdges {
+                left: true,
+                ..BorderEdges::NONE
+            },
+            radius: 0,
+        };
+    }
+    style
+}
+
+/// What a block region shows.
+fn block_content(block: &Block) -> Content {
+    match block {
+        Block::Heading { level, spans } => {
+            let mut rich = RichText::new();
+            for span in spans {
+                let mut span_style = span.style.clone();
+                span_style.bold = true;
+                let text = if *level == HeadingLevel::H1 {
+                    span.text.to_uppercase()
+                } else {
+                    span.text.clone()
+                };
+                rich = rich.span(text, span_style);
+            }
+            Content::RichText(rich)
         }
-        Content::RichText(mut rt) => {
-            rt.spans.push(ultty_protocol::Span {
-                text: STREAMING_CURSOR.to_string(),
-                style: Style::new(),
-            });
-            Content::RichText(rt)
+        Block::Paragraph { spans } => {
+            let mut rich = RichText::new();
+            for span in spans {
+                rich = rich.span(span.text.clone(), span.style.clone());
+            }
+            Content::RichText(rich)
         }
-        other => other,
+        // Without the fence's closing newline, which would be one more row
+        // than the block's height.
+        Block::CodeBlock { text } => {
+            Content::Text(TextContent::new(text.strip_suffix('\n').unwrap_or(text)))
+        }
+        Block::ListItem {
+            indent,
+            prefix,
+            spans,
+        } => {
+            let mut rich =
+                RichText::new().span(format!("{}{}", " ".repeat(*indent), prefix), Style::new());
+            for span in spans {
+                rich = rich.span(span.text.clone(), span.style.clone());
+            }
+            Content::RichText(rich)
+        }
+        Block::HorizontalRule => Content::Text(TextContent::new("─")),
+        Block::BlockQuote { text } => {
+            let quoted = text
+                .lines()
+                .map(|line| format!("│ {}", line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Content::Text(TextContent::new(if quoted.is_empty() {
+                "│ ".to_string()
+            } else {
+                quoted
+            }))
+        }
     }
 }
 
@@ -1111,36 +1131,231 @@ mod tests {
     }
 
     #[test]
-    fn streaming_empty_renders_cursor() {
-        let view = MarkdownView::new("").streaming(true);
-        assert_eq!(view.children_count(), 1);
+    fn streaming_is_a_busy_polite_log_and_finished_is_left_to_the_terminal() {
+        let semantics = MarkdownView::new("hi").streaming(true).semantics();
+        assert_eq!(semantics.role, Role::Log);
+        assert_eq!(semantics.live, Live::Polite);
+        assert!(semantics.busy);
+        assert_eq!(MarkdownView::new("hi").semantics(), Semantics::default());
 
-        let messages = collect_native_messages(&view, 0);
-        match &messages[1] {
-            AppMessage::SetContent {
-                content: Content::Text(tc),
-                ..
-            } => assert_eq!(tc.text, "|"),
-            _ => panic!("expected text content with cursor"),
+        let quiet = MarkdownView::new("hi")
+            .streaming(true)
+            .live(Live::Off)
+            .label("Reply");
+        assert_eq!(quiet.semantics().live, Live::Off);
+        assert_eq!(quiet.semantics().label.as_deref(), Some("Reply"));
+    }
+
+    use crate::backend::native_diff::{
+        begin_frame_notes, optimize_frame_messages, take_frame_notes, FrameCapabilities,
+        FrameNotes, RetainedTree,
+    };
+    use crate::widgets::render_view_messages;
+    use std::collections::HashMap;
+
+    const ALL: FrameCapabilities = FrameCapabilities {
+        append_content: true,
+        semantics: true,
+    };
+
+    /// The view's native frame and what the walk noted, as the backend
+    /// collects them.
+    fn walk(view: &MarkdownView) -> (Vec<AppMessage>, FrameNotes) {
+        begin_frame_notes();
+        let frame = render_view_messages(view);
+        (frame.unwrap(), take_frame_notes())
+    }
+
+    /// Everything a stream of `chunks` announces, ending the stream after
+    /// the last one in the same frame.
+    fn spoken(chunks: &[&str]) -> String {
+        let (view, tree, frames) = stream(chunks);
+        let (frame, notes) = walk(&view.streaming(false));
+        let (last, _) = optimize_frame_messages(&tree, frame, &notes, ALL);
+        frames
+            .iter()
+            .chain(std::iter::once(&last))
+            .flat_map(|frame| appends(frame))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    #[test]
+    fn a_long_link_and_a_long_bold_phrase_are_spoken_once_whole() {
+        let link = "See [the docs](https://github.com/example/project/blob/main/docs/architecture/overview.md";
+        assert_eq!(
+            spoken(&["", link, ") **for** the details", " of it all."]),
+            "See |the docs for the details| of it all."
+        );
+        let phrase =
+            "this is a long bold phrase that goes on for well over eighty bytes before it ends";
+        assert_eq!(
+            spoken(&["", "Start **", phrase, "** and after."]),
+            format!("Start |{phrase} and after.")
+        );
+        // A link that never resolves on screen is said at the end.
+        assert_eq!(
+            spoken(&["", "Go [here", "](http://x"]),
+            "Go |[here](http://x"
+        );
+    }
+
+    #[test]
+    fn code_is_not_held_back() {
+        let said = spoken(&["", "```\n", "let a = [1, 2];\n", "let b = `x`;\n"]);
+        assert_eq!(said.replace('|', ""), "let a = [1, 2];\nlet b = `x`;");
+        assert!(said.starts_with("let a = [1, 2];|"), "{said:?}");
+    }
+
+    /// Stream `chunks` into a view, one frame each, through the backend
+    /// diff; the view, the retained tree and each frame's messages.
+    fn stream(chunks: &[&str]) -> (MarkdownView, RetainedTree, Vec<Vec<AppMessage>>) {
+        let mut tree = RetainedTree::new();
+        let mut frames = Vec::new();
+        let mut view = MarkdownView::new("").streaming(true);
+        for chunk in chunks {
+            view.append_chunk(chunk);
+            let (frame, notes) = walk(&view);
+            let (outgoing, next) = optimize_frame_messages(&tree, frame, &notes, ALL);
+            tree = next;
+            frames.push(outgoing);
+        }
+        (view, tree, frames)
+    }
+
+    fn appends(messages: &[AppMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .filter_map(|m| match m {
+                AppMessage::AppendContent { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn streaming_natively_is_a_region_per_block_and_only_the_last_is_live() {
+        let view = MarkdownView::new("# Title\n\nSome **bold** text\n\n```\ncode\n```\n\nafter")
+            .streaming(true);
+        assert_eq!(view.content(), Content::None);
+        assert_eq!(view.children_count(), 4);
+        let messages = render_view_messages(&view).unwrap();
+        let live: Vec<RegionId> = messages
+            .iter()
+            .filter_map(|m| match m {
+                AppMessage::SetSemantics { id, semantics }
+                    if semantics.live == Live::Polite && semantics.role == Role::Auto =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            live,
+            vec![RegionId::new(5)],
+            "only the block still arriving"
+        );
+
+        // Each block region's text fits the rows it is given.
+        let mut heights = HashMap::new();
+        for message in &messages {
+            match message {
+                AppMessage::CreateRegion {
+                    id, constraints, ..
+                } => {
+                    heights.insert(*id, constraints.height);
+                }
+                AppMessage::SetContent { id, content } => {
+                    let text = match content {
+                        Content::Text(text) => text.text.clone(),
+                        Content::RichText(rich) => {
+                            rich.spans.iter().map(|s| s.text.as_str()).collect()
+                        }
+                        _ => continue,
+                    };
+                    let rows = text.split('\n').count() as f32;
+                    assert!(
+                        Dimension::Cells(rows) == heights[id]
+                            || matches!(heights[id], Dimension::Cells(h) if rows <= h),
+                        "{text:?} in {:?}",
+                        heights[id]
+                    );
+                    assert!(!text.contains(STREAMING_CURSOR));
+                }
+                _ => {}
+            }
         }
     }
 
     #[test]
-    fn streaming_appends_cursor_to_last_block() {
-        let view = MarkdownView::new("hello").streaming(true);
-        assert_eq!(view.children_count(), 1);
+    fn streamed_text_is_appended_to_the_block_arriving_and_spoken_once() {
+        let (mut view, tree, frames) = stream(&[
+            "",
+            "Hello",
+            " world.\n\nA ",
+            "**bo",
+            "ld** move",
+            "\n\n- item",
+        ]);
+        assert!(frames[0].iter().any(|m| matches!(
+            m,
+            AppMessage::SetSemantics { semantics, .. }
+                if semantics.role == Role::Log && semantics.live == Live::Polite && semantics.busy
+        )));
+        let spoken: Vec<String> = frames.iter().flat_map(|frame| appends(frame)).collect();
+        assert_eq!(
+            spoken.concat(),
+            "Hello world.A bold move• item",
+            "{spoken:?}"
+        );
+        assert!(spoken.iter().all(|text| !text.contains('*')), "{spoken:?}");
 
-        let messages = collect_native_messages(&view, 0);
-        match &messages[1] {
-            AppMessage::SetContent {
+        // The last chunk and the end of the stream in one frame: the rest
+        // is still appended, and nothing is created or removed.
+        view.append_chunk(" done.");
+        let finished = view.streaming(false);
+        let (frame, notes) = walk(&finished);
+        let (outgoing, _) = optimize_frame_messages(&tree, frame, &notes, ALL);
+        assert_eq!(
+            appends(&outgoing),
+            vec![" done.".to_string()],
+            "{outgoing:?}"
+        );
+        assert!(!outgoing.iter().any(|m| matches!(
+            m,
+            AppMessage::CreateRegion { .. } | AppMessage::DeleteRegion { .. }
+        )));
+    }
+
+    #[test]
+    fn a_long_streamed_document_stays_within_codec_limits_and_costs_its_growth() {
+        use ultty_protocol::{Decode, Encode};
+
+        let items: Vec<String> = (0..3_500)
+            .map(|n| format!("- item **{n}** of `many`\n"))
+            .collect();
+        let chunks: Vec<String> = items.chunks(100).map(|chunk| chunk.concat()).collect();
+        let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        let (mut view, tree, frames) = stream(&chunk_refs);
+        for message in frames.iter().flatten() {
+            if let AppMessage::SetContent {
                 content: Content::RichText(rich),
                 ..
-            } => {
-                let last = rich.spans.last().expect("should have spans");
-                assert_eq!(last.text, "|");
+            } = message
+            {
+                assert!(rich.spans.len() < 100, "one block per region");
             }
-            _ => panic!("expected rich text with cursor"),
+            let bytes = message.encode_to_bytes();
+            AppMessage::decode(&mut &bytes[..]).expect("the terminal decodes every message");
         }
+
+        // One more item on a 3,500-item document costs that item.
+        view.append_chunk("- one more\n");
+        let (frame, notes) = walk(&view);
+        let (outgoing, _) = optimize_frame_messages(&tree, frame, &notes, ALL);
+        let bytes: usize = outgoing.iter().map(|m| m.encode_to_bytes().len()).sum();
+        assert!(bytes < 1024, "{bytes} bytes for one item: {outgoing:?}");
     }
 
     #[test]

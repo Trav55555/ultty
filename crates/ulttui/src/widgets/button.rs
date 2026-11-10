@@ -9,7 +9,9 @@ use ratatui::Frame;
 use super::{FocusAction, View};
 use crate::event::{Key, KeyEvent};
 use crate::theme::{to_ratatui_color, Theme};
-use ultty_protocol::{ButtonStyle as ProtoButtonStyle, ButtonWidget, Style as ProtoStyle};
+use ultty_protocol::{
+    ButtonStyle as ProtoButtonStyle, ButtonWidget, Role, Semantics, Style as ProtoStyle,
+};
 
 /// Clickable button.
 #[derive(Debug)]
@@ -18,6 +20,7 @@ pub struct Button {
     id: Option<String>,
     style: ButtonStyle,
     flex_grow: f32,
+    description: Option<String>,
 }
 
 /// Button style variant.
@@ -37,7 +40,16 @@ impl Button {
             id: None,
             style: ButtonStyle::default(),
             flex_grow: 0.0,
+            description: None,
         }
+    }
+
+    /// Longer help text for assistive technology. The button's label is
+    /// its accessible name; wrap it in [`super::Semantic`] to name it
+    /// otherwise (an icon button, say).
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
     }
 
     pub fn id(mut self, id: impl Into<String>) -> Self {
@@ -113,6 +125,15 @@ impl View for Button {
         }))
     }
 
+    fn semantics(&self) -> Semantics {
+        Semantics {
+            role: Role::Button,
+            label: Some(self.label.clone()),
+            description: self.description.clone(),
+            ..Semantics::default()
+        }
+    }
+
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         let is_focused = super::is_widget_focused(self.widget_id());
 
@@ -155,6 +176,26 @@ impl View for Button {
 mod tests {
     use super::*;
     use ultty_protocol::Content;
+
+    #[test]
+    fn button_is_a_button_named_by_its_label_which_the_content_already_says() {
+        let semantics = Button::new("Run").semantics();
+        assert_eq!(semantics.role, Role::Button);
+        assert_eq!(semantics.label.as_deref(), Some("Run"));
+        let messages = crate::widgets::render_view_messages(&Button::new("Run")).unwrap();
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, ultty_protocol::AppMessage::SetSemantics { .. })),
+            "the terminal derives the same from the button content"
+        );
+
+        let described = Button::new("Run").description("Runs every test");
+        assert_eq!(
+            described.semantics().description.as_deref(),
+            Some("Runs every test")
+        );
+    }
 
     #[test]
     fn button_label() {

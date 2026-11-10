@@ -179,6 +179,16 @@ impl ErrorState {
 }
 
 impl View for ErrorState {
+    /// An alert, named by the error and described by the hint.
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            role: ultty_protocol::Role::Alert,
+            label: Some(format!("Error: {}", self.message)),
+            description: self.hint.clone(),
+            ..Default::default()
+        }
+    }
+
     fn style(&self) -> ProtoStyle {
         let theme = Theme::current();
         ProtoStyle::new().fg(theme.error).bold()

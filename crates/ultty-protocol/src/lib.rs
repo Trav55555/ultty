@@ -52,7 +52,10 @@ mod semantics;
 mod style;
 mod surface;
 
-pub use codec::{Decode, Encode, MAX_REGION_COUNT};
+pub use codec::{
+    Decode, Encode, MAX_REGION_COUNT, MAX_SEMANTICS_STRING_LEN, MAX_SEMANTICS_TOTAL_BYTES,
+    MAX_SPAN_COUNT,
+};
 pub use content::{
     ButtonStyle, ButtonWidget, CodeWidget, Content, ImageScale, ImageWidget, InputWidget,
     MarkdownWidget, ProgressWidget, RichText, Span, SpinnerStyle, SpinnerWidget, TextAlign,
@@ -70,9 +73,9 @@ pub use layout::{
 };
 pub use messages::{AppMessage, ComputedRegionLayout, FrameId, LayoutTrigger, TerminalMessage};
 pub use semantics::{
-    Expanded, Live, Role, SemanticValue, Semantics, SetPosition, Toggled, SEMANTICS_FLAGS_ALL,
-    SEMANTICS_FLAG_ATOMIC, SEMANTICS_FLAG_BUSY, SEMANTICS_FLAG_DISABLED, SEMANTICS_FLAG_HIDDEN,
-    SEMANTICS_FLAG_MODAL, SEMANTICS_FLAG_READ_ONLY,
+    capped, derive_semantics, Expanded, Live, Role, SemanticValue, Semantics, SetPosition, Toggled,
+    MAX_NAME_CHARS, SEMANTICS_FLAGS_ALL, SEMANTICS_FLAG_ATOMIC, SEMANTICS_FLAG_BUSY,
+    SEMANTICS_FLAG_DISABLED, SEMANTICS_FLAG_HIDDEN, SEMANTICS_FLAG_MODAL, SEMANTICS_FLAG_READ_ONLY,
 };
 pub use style::{
     BorderEdges, BorderStyle, BorderType, Color, Easing, NamedColor, Style, Transition,

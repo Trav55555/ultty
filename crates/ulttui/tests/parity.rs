@@ -16,7 +16,7 @@ use ulttui::widgets::{
     render_view_messages, Button, Column, LoadingState, ScrollView, Section, Table, Text,
     TextInput, View,
 };
-use ultty_protocol::{AppMessage, Constraints, Content, Dimension, RegionId, WidgetContent};
+use ultty_protocol::{AppMessage, Constraints, Content, Dimension, RegionId, Role, WidgetContent};
 
 struct Rendered {
     ansi: Buffer,
@@ -216,4 +216,39 @@ fn loading_state_pinned_frame_matches_in_both_modes() {
     assert_eq!(row_text(&rendered.ansi, 0), "⠸ Loading");
     assert_eq!(rendered.ansi[(0, 0)].fg, to_ratatui_color(theme.primary));
     assert_ne!(rendered.ansi[(0, 0)].fg, RColor::Reset);
+}
+
+#[test]
+fn a_focused_input_exposes_the_value_ansi_draws_not_the_native_decoration() {
+    let field = TextInput::new().id("msg").value("hello").label("Message");
+    let rendered = render_both(&field, 30, 3, Some("msg"));
+
+    // ANSI draws the mode marker and the value inside a focus border.
+    assert!(row_text(&rendered.ansi, 1).contains("hello"));
+
+    // Native: the content carries the focus and mode markers; the
+    // semantics carry the name and the bare value, which differ from what
+    // the terminal would derive, so they are sent.
+    let Some(AppMessage::SetContent {
+        content: Content::Widget(WidgetContent::Input(input)),
+        ..
+    }) = rendered
+        .native
+        .iter()
+        .find(|m| matches!(m, AppMessage::SetContent { .. }))
+    else {
+        panic!("an input region: {:?}", rendered.native);
+    };
+    assert!(input.value.starts_with(">> "), "{:?}", input.value);
+    let semantics = rendered
+        .native
+        .iter()
+        .find_map(|m| match m {
+            AppMessage::SetSemantics { semantics, .. } => Some(semantics),
+            _ => None,
+        })
+        .expect("semantics sent");
+    assert_eq!(semantics.role, Role::Input);
+    assert_eq!(semantics.label.as_deref(), Some("Message"));
+    assert_eq!(semantics.value_text.as_deref(), Some("hello"));
 }
