@@ -230,8 +230,11 @@ macro_rules! row_snapshot {
     }};
 }
 
+// `$own` turns a buffer's row accessor result into an owned row: live
+// buffers hand out `RowView`s (`to_row`), the reference hands out
+// `Cow<Row>`s (`into_owned`).
 macro_rules! buffer_snapshot {
-    ($buffer:expr) => {{
+    ($buffer:expr, $own:ident) => {{
         let buffer = $buffer;
         let screen_rows = buffer.dimensions().rows;
         let total = buffer.history_len() + usize::from(screen_rows);
@@ -240,10 +243,10 @@ macro_rules! buffer_snapshot {
             max_history: buffer.max_history(),
             scroll_offset: buffer.scroll_offset(),
             visible: (0..screen_rows)
-                .map(|r| row_snapshot!(&*buffer.visible_row(r).expect("visible row")))
+                .map(|r| row_snapshot!(&buffer.visible_row(r).expect("visible row").$own()))
                 .collect(),
             rows: (0..total)
-                .map(|i| row_snapshot!(&*buffer.row_at(i).expect("row")))
+                .map(|i| row_snapshot!(&buffer.row_at(i).expect("row").$own()))
                 .collect(),
             heads: (0..total)
                 .map(|i| {
@@ -262,7 +265,7 @@ macro_rules! buffer_snapshot {
 }
 
 macro_rules! terminal_snapshot {
-    ($terminal:expr) => {{
+    ($terminal:expr, $own:ident) => {{
         let terminal = $terminal;
         let anchor_events = format!("{:?}", terminal.take_anchor_events());
         let grid = terminal.grid();
@@ -279,10 +282,10 @@ macro_rules! terminal_snapshot {
             insert_mode: grid.insert_mode(),
             scroll_region: grid.scroll_region().map(|r| (r.top, r.bottom)),
             anchor_events,
-            main: buffer_snapshot!(terminal.main_buffer()),
+            main: buffer_snapshot!(terminal.main_buffer(), $own),
             active: terminal
                 .is_alternate_screen()
-                .then(|| buffer_snapshot!(terminal.buffer())),
+                .then(|| buffer_snapshot!(terminal.buffer(), $own)),
         }
     }};
 }
@@ -360,8 +363,8 @@ fn run(dims: Dimensions, scrollback: usize, ops: &[Op], spans: bool) -> Result<(
             spans
         );
         let (got, want) = (
-            terminal_snapshot!(&mut live),
-            terminal_snapshot!(&mut reference),
+            terminal_snapshot!(&mut live, to_row),
+            terminal_snapshot!(&mut reference, into_owned),
         );
         if got != want {
             return Err(format!(
