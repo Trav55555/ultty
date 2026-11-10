@@ -6,7 +6,7 @@
 //! for it (a finished command, a subscription item, a [`Proxy::send`] from
 //! another thread) queues a message and then writes one byte to the pair.
 
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,9 +38,18 @@ impl Waker {
             // already on its way.
             return;
         }
-        if let Some(mut signal) = self.shared.signal.get() {
-            // Non-blocking; a full buffer already means "wake up".
-            let _ = signal.write(&[1]);
+        if let Some(signal) = self.shared.signal.get() {
+            // Non-blocking (a full buffer already means "wake up"), and no
+            // SIGPIPE if the loop is gone: a host may have SIGPIPE restored.
+            // SAFETY: one valid byte; the socket is open while `signal` lives.
+            unsafe {
+                libc::send(
+                    signal.as_raw_fd(),
+                    [1u8].as_ptr().cast(),
+                    1,
+                    libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
+                )
+            };
         }
     }
 
@@ -118,9 +127,14 @@ impl<M> Proxy<M> {
     }
 }
 
-/// Wait until one of `fds` is readable (or hung up), or `timeout` passes
-/// (`None`: no limit). Returns whether a descriptor is ready; a signal
-/// interrupting the wait counts as not ready.
+/// Wait until one of `fds` is ready to read, or `timeout` passes (`None`: no
+/// limit). Returns whether a descriptor is ready; a signal interrupting the
+/// wait counts as not ready.
+///
+/// A hang-up or error condition counts as ready: the read that follows
+/// sees the end of input or the error and reports it. A descriptor that is
+/// not open (`POLLNVAL`) is an error here, since no read would end the
+/// wait.
 pub(crate) fn poll_readable(fds: &[RawFd], timeout: Option<Duration>) -> io::Result<bool> {
     let mut pollfds: Vec<libc::pollfd> = fds
         .iter()
@@ -153,6 +167,9 @@ pub(crate) fn poll_readable(fds: &[RawFd], timeout: Option<Duration>) -> io::Res
             return Ok(false);
         }
         return Err(err);
+    }
+    if pollfds.iter().any(|p| p.revents & libc::POLLNVAL != 0) {
+        return Err(io::Error::from_raw_os_error(libc::EBADF));
     }
     Ok(rc > 0)
 }
@@ -201,6 +218,48 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(rx.try_recv().unwrap(), 7);
         sender.join().unwrap();
+    }
+
+    #[test]
+    fn a_hang_up_is_ready_and_a_closed_descriptor_is_an_error() {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        drop(writer);
+        assert!(poll_readable(&[reader.as_raw_fd()], Some(Duration::ZERO)).unwrap());
+        // Far above any descriptor this process opens.
+        let never_open = 1 << 20;
+        let err = poll_readable(&[never_open], Some(Duration::ZERO)).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+    }
+
+    const SIGPIPE_CHILD: &str = "ULTTUI_WAKE_SIGPIPE_CHILD";
+
+    /// Run by `waking_after_the_loop_is_gone_does_not_raise_sigpipe` in a
+    /// process of its own, since the signal disposition is process-wide.
+    #[test]
+    fn wake_with_default_sigpipe() {
+        if std::env::var_os(SIGPIPE_CHILD).is_none() {
+            return;
+        }
+        // SAFETY: sets the default disposition, as a host program may.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        let waker = Waker::default();
+        drop(waker.listen().unwrap());
+        waker.wake();
+    }
+
+    #[test]
+    fn waking_after_the_loop_is_gone_does_not_raise_sigpipe() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "wake::tests::wake_with_default_sigpipe"])
+            .env(SIGPIPE_CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "{:?}\n{}",
+            status.status,
+            String::from_utf8_lossy(&status.stdout)
+        );
     }
 
     #[test]
