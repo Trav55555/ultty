@@ -72,6 +72,7 @@ enum Message {
     SelectFirst,
     SelectLast,
     Tick,
+    Quit,
 }
 
 impl Application for DashboardApp {
@@ -98,6 +99,7 @@ impl Application for DashboardApp {
                 Cmd::none()
             }
             Message::Tick => Cmd::none(),
+            Message::Quit => Cmd::Quit,
         }
     }
 
@@ -107,7 +109,12 @@ impl Application for DashboardApp {
 
     fn on_event(&mut self, event: &Event) -> Option<Message> {
         match event {
+            Event::Key(key_event) if key_event.modifiers.ctrl => match key_event.key {
+                Key::Char('c') => Some(Message::Quit),
+                _ => None,
+            },
             Event::Key(key_event) => match key_event.key {
+                Key::Char('q') => Some(Message::Quit),
                 Key::Char('k') | Key::Up => Some(Message::MoveUp),
                 Key::Char('j') | Key::Down => Some(Message::MoveDown),
                 Key::Char('g') | Key::Home => Some(Message::SelectFirst),
@@ -121,18 +128,9 @@ impl Application for DashboardApp {
     fn view(&self) -> impl View {
         let (title, detail) = ITEMS[self.selected];
 
-        // Build navigation list items
-        let nav_items: Vec<String> = ITEMS
-            .iter()
-            .enumerate()
-            .map(|(i, (name, _))| {
-                if i == self.selected {
-                    format!(" > {} ", name)
-                } else {
-                    format!("   {} ", name)
-                }
-            })
-            .collect();
+        // The list draws the selection and tells screen readers which item
+        // it is.
+        let nav_items: Vec<String> = ITEMS.iter().map(|(name, _)| name.to_string()).collect();
 
         Column::new()
             .flex_grow(1.0)
@@ -153,7 +151,7 @@ impl Application for DashboardApp {
                     .child(
                         Column::new()
                             .width(Dimension::Percent(30.0))
-                            .child(List::new().items(nav_items)),
+                            .child(List::new().items(nav_items).selected(self.selected)),
                     )
                     .child(
                         Column::new()
@@ -164,7 +162,7 @@ impl Application for DashboardApp {
                     ),
             )
             .child(Divider::horizontal())
-            .child(Muted::new("j/k navigate · g/G first/last · Ctrl+C quit"))
+            .child(Muted::new("j/k navigate · g/G first/last · q quit"))
     }
 }
 

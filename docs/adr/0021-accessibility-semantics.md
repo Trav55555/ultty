@@ -613,4 +613,8 @@ Each slice is independently testable and mergeable.
   AccessKit `set_selected(true)` (AT-SPI state SELECTED). Semantics had
   not shipped in a release, so it needed no new capability. ulttui sets
   it on the active `Tabs` tab and the selected `List`, `Tree` and
-  `Table` row; a region without it says nothing about selection.
+  `Table` row. A `Tab`, `ListItem` or `TreeItem` without it is
+  selectable but not selected; other roles say nothing about selection.
+  `scripts/e2e/accessibility-atspi.sh` checks over AT-SPI that the
+  `dashboard` example's selected list item is SELECTED, its others
+  SELECTABLE only, and that the selection follows `j`.

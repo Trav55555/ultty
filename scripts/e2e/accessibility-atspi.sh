@@ -3,18 +3,20 @@
 # and 5), on a virtual X display with a private session bus and AT-SPI bus:
 # a `terminal` object whose text is the screen, which follows output (`echo
 # hello`) and whose caret moves with the cursor; then, with the native
-# `counter-app` running in it, a `button` per button, the focused
-# button as the focused object, and Tab moving that focus.
+# `dashboard` running in it, its list's selected item exposed as selected
+# and the others as selectable, the selection following `j`; then, with
+# the native `counter-app`, a `button` per button, the focused button as
+# the focused object, and Tab moving that focus.
 #
 #   scripts/e2e/accessibility-atspi.sh [artifact-dir]
 #
 # Needs Xvfb, dbus-run-session, at-spi-bus-launcher, the system Python with
 # python3-gi and gir1.2-atspi-2.0, and a Vulkan or GL driver (Mesa's
 # lavapipe works without a GPU); xdotool, if present, focuses the window,
-# without which the focus checks are skipped. Uses $ULTTY, $ULTTYCTL and
-# $COUNTER_APP, default target/debug/ultty, ulttyctl and counter-app: all
-# three built first if $ULTTY is unset, counter-app alone if only
-# $COUNTER_APP is. Artifacts go to artifact-dir if given, else to a
+# without which the focus checks are skipped. Uses $ULTTY, $ULTTYCTL,
+# $COUNTER_APP and $DASHBOARD, default target/debug/ultty, ulttyctl,
+# counter-app and dashboard: all built first if $ULTTY is unset, the two
+# examples if theirs is unset. Artifacts go to artifact-dir if given, else to a
 # temporary directory removed on success. A local script, not a CI job:
 # it says nothing about what Orca speaks (docs/accessibility-test.md).
 set -euo pipefail
@@ -26,6 +28,7 @@ if [ "${1:-}" != "--inner" ]; then
     if [ -n "${ULTTY:-}" ]; then ULTTY=$(absolute "$ULTTY"); fi
     if [ -n "${ULTTYCTL:-}" ]; then ULTTYCTL=$(absolute "$ULTTYCTL"); fi
     if [ -n "${COUNTER_APP:-}" ]; then COUNTER_APP=$(absolute "$COUNTER_APP"); fi
+    if [ -n "${DASHBOARD:-}" ]; then DASHBOARD=$(absolute "$DASHBOARD"); fi
     if [ -n "${1:-}" ]; then
         out=$(absolute "$1")
         keep=true
@@ -38,16 +41,21 @@ if [ "${1:-}" != "--inner" ]; then
         command -v "$tool" >/dev/null || { echo "$tool is required" >&2; exit 2; }
     done
     if [ -z "${ULTTY:-}" ]; then
-        cargo build -q -p ultty --bins -p counter-app
+        cargo build -q -p ultty --bins -p counter-app -p dashboard
         ULTTY=$PWD/target/debug/ultty
         ULTTYCTL=$PWD/target/debug/ulttyctl
         COUNTER_APP=$PWD/target/debug/counter-app
+        DASHBOARD=$PWD/target/debug/dashboard
     fi
     if [ -z "${COUNTER_APP:-}" ]; then
         cargo build -q -p counter-app
         COUNTER_APP=$PWD/target/debug/counter-app
     fi
-    export ULTTY ULTTYCTL COUNTER_APP
+    if [ -z "${DASHBOARD:-}" ]; then
+        cargo build -q -p dashboard
+        DASHBOARD=$PWD/target/debug/dashboard
+    fi
+    export ULTTY ULTTYCTL COUNTER_APP DASHBOARD
     mkdir -p "$out"
     # A session bus of our own: the desktop's AT-SPI state is left alone.
     exec dbus-run-session -- "$self" --inner "$out" "$keep"
@@ -58,6 +66,7 @@ out="$2"
 keep="$3"
 ULTTYCTL="${ULTTYCTL:-$PWD/target/debug/ulttyctl}"
 COUNTER_APP="${COUNTER_APP:-$PWD/target/debug/counter-app}"
+DASHBOARD="${DASHBOARD:-$PWD/target/debug/dashboard}"
 launcher=$(ls /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher 2>/dev/null | head -1 || true)
 [ -n "$launcher" ] || { echo "at-spi-bus-launcher is required" >&2; exit 2; }
 mkdir -p "$out/config/ultty"
@@ -199,6 +208,20 @@ read_widgets() { /usr/bin/python3 -I scripts/e2e/atspi_widgets.py "$ultty_pid" "
 native_focus() {
     ctl --json regions | /usr/bin/python3 -I scripts/e2e/native_focus.py
 }
+# Selection (ADR 0021 §1 `selected`): dashboard's list marks the item it
+# has selected, and its other items are selectable but not selected.
+ctl send-text "$(printf %q "$DASHBOARD")"$'\r' >/dev/null || fail "ulttyctl send-text failed"
+widgets=$(read_widgets --selected "System Overview" --unselected "Network" --timeout 30) ||
+    fail "dashboard's first item is not the selected one: $widgets"
+echo "$widgets" >"$out/selected-first.json"
+ctl send-text j >/dev/null || fail "ulttyctl send-text failed"
+widgets=$(read_widgets --selected "Network" --unselected "System Overview" --timeout 15) ||
+    fail "after j the selection did not move to Network: $widgets"
+echo "$widgets" >"$out/selected-second.json"
+echo "native: selection System Overview -> Network"
+ctl send-key c ctrl >/dev/null || fail "ulttyctl send-key failed"
+ctl wait-for --quiet 500 --timeout 30000 >/dev/null || fail "the shell never settled after dashboard"
+
 ctl send-text "exec $(printf %q "$COUNTER_APP")"$'\r' >/dev/null || fail "ulttyctl send-text failed"
 buttons=(--role button --name "-1" --role button --name "+1"
     --role button --name "Reset")
