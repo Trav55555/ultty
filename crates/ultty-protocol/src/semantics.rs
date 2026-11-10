@@ -4,7 +4,9 @@
 //! the rest from the region's content. The role set is closed: adding a
 //! role is additive, removing one is not.
 
-use crate::RegionId;
+use std::borrow::Cow;
+
+use crate::{Content, RegionId, WidgetContent};
 
 /// What a region is, for assistive technology.
 ///
@@ -291,6 +293,176 @@ impl Semantics {
         self.atomic = flags & SEMANTICS_FLAG_ATOMIC != 0;
         self.modal = flags & SEMANTICS_FLAG_MODAL != 0;
     }
+}
+
+// Derivation from content (spec §10.5), shared by the terminal and apps.
+
+/// The most characters of a name, description or value given to
+/// assistive technology; past it the text is cut and ends in "…". Names
+/// are short, and a region's text can be megabytes on one line.
+pub const MAX_NAME_CHARS: usize = 1024;
+
+/// `text`, or its first [`MAX_NAME_CHARS`] characters and "…". Looks at
+/// no more than that many characters and copies only when it cuts.
+pub fn capped(text: &str) -> Cow<'_, str> {
+    match text.char_indices().nth(MAX_NAME_CHARS) {
+        None => Cow::Borrowed(text),
+        Some((cut, _)) => {
+            let mut short = String::with_capacity(cut + '…'.len_utf8());
+            short.push_str(&text[..cut]);
+            short.push('…');
+            Cow::Owned(short)
+        }
+    }
+}
+
+/// The semantics a screen reader should see for a region whose app set
+/// `explicit` and whose content is `content` (spec §10.5). `appended`
+/// says whether the region has received `AppendContent`, `streaming`
+/// whether a stream is open on it.
+///
+/// With role `Auto` (the default before any `SetSemantics`) the role comes
+/// from the content. Whatever the role, fields the app left empty are
+/// filled from the content where it has them; fields the app set win. A
+/// region with no label is named by its text when that is one line,
+/// unless it is live and has been appended to: that text is announced
+/// (ADR 0021 §3), and a live node whose name changes is spoken again. An
+/// input's text is its value, never its name. `live` is never inferred;
+/// `busy` is set while a stream is open on the region.
+///
+/// The terminal uses this for what it exposes; an app can use it to send
+/// `SetSemantics` only when it would change that.
+pub fn derive_semantics(
+    explicit: &Semantics,
+    content: &Content,
+    appended: bool,
+    streaming: bool,
+) -> Semantics {
+    let mut semantics = explicit.clone();
+    if semantics.role == Role::Auto {
+        semantics.role = content_role(content, appended);
+    }
+    let announced = appended && semantics.live != Live::Off;
+    fill_from_content(&mut semantics, content, !announced);
+    semantics.busy |= streaming;
+    semantics
+}
+
+/// The role a region's content implies.
+fn content_role(content: &Content, appended: bool) -> Role {
+    let text_role = if appended { Role::Log } else { Role::Text };
+    match content {
+        Content::None => Role::Group,
+        Content::Text(_) | Content::RichText(_) => text_role,
+        Content::Widget(widget) => match widget {
+            WidgetContent::Markdown(_) | WidgetContent::Code(_) => text_role,
+            WidgetContent::Input(_) => Role::Input,
+            WidgetContent::Button(_) => Role::Button,
+            WidgetContent::Progress(_) => Role::Progress,
+            WidgetContent::Spinner(_) => Role::Status,
+            WidgetContent::Image(_) => Role::Image,
+        },
+    }
+}
+
+/// Fill the fields the app left empty from what the content says; a text
+/// names its region only if `named_by_text`.
+fn fill_from_content(semantics: &mut Semantics, content: &Content, named_by_text: bool) {
+    match content {
+        Content::Widget(WidgetContent::Input(input)) => {
+            if semantics.value_text.is_none() && !input.password {
+                semantics.value_text = Some(input.value.clone());
+            }
+            if semantics.description.is_none() && !input.placeholder.is_empty() {
+                semantics.description = Some(input.placeholder.clone());
+            }
+        }
+        Content::Widget(WidgetContent::Button(button)) => {
+            if semantics.label.is_none() {
+                semantics.label = Some(button.label.clone());
+            }
+        }
+        Content::Widget(WidgetContent::Progress(progress)) => {
+            if progress.indeterminate {
+                semantics.busy = true;
+            } else if semantics.value.is_none() {
+                semantics.value = Some(SemanticValue {
+                    now: progress.value,
+                    min: 0.0,
+                    max: 1.0,
+                });
+            }
+            if semantics.label.is_none() {
+                semantics.label = progress.label.clone();
+            }
+        }
+        Content::Widget(WidgetContent::Spinner(spinner)) => {
+            semantics.busy = true;
+            if semantics.label.is_none() {
+                semantics.label = spinner.label.clone();
+            }
+        }
+        _ => {
+            if semantics.label.is_none() && named_by_text {
+                semantics.label = one_line(content);
+            }
+        }
+    }
+}
+
+/// The content's text when it is a single non-empty line, [`capped`]. A
+/// trailing newline does not count as a second line. Allocates only in
+/// that case, and no more than the capped name.
+fn one_line(content: &Content) -> Option<String> {
+    let text = match content {
+        Content::Text(text) => &text.text,
+        Content::Widget(WidgetContent::Markdown(markdown)) => &markdown.source,
+        Content::Widget(WidgetContent::Code(code)) => &code.source,
+        Content::RichText(rich) => {
+            let last = rich.spans.len().checked_sub(1)?;
+            let several_lines = rich.spans.iter().enumerate().any(|(index, span)| {
+                let text = if index == last {
+                    trim_line_end(&span.text)
+                } else {
+                    &span.text
+                };
+                text.contains('\n')
+            });
+            if several_lines {
+                return None;
+            }
+            let mut name = String::new();
+            let mut chars = 0;
+            for (index, span) in rich.spans.iter().enumerate() {
+                let text = if index == last {
+                    trim_line_end(&span.text)
+                } else {
+                    &span.text
+                };
+                for c in text.chars() {
+                    if chars == MAX_NAME_CHARS {
+                        name.push('…');
+                        return Some(name);
+                    }
+                    name.push(c);
+                    chars += 1;
+                }
+            }
+            return (!name.is_empty()).then_some(name);
+        }
+        _ => return None,
+    };
+    single_line(text).map(|line| capped(line).into_owned())
+}
+
+fn trim_line_end(text: &str) -> &str {
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    text.strip_suffix('\r').unwrap_or(text)
+}
+
+fn single_line(text: &str) -> Option<&str> {
+    let line = trim_line_end(text);
+    (!line.is_empty() && !line.contains('\n')).then_some(line)
 }
 
 #[cfg(test)]
