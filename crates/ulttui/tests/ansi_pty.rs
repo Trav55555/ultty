@@ -3,7 +3,9 @@
 //!
 //! The test binary runs itself again as the app (the `app_on_pty` test,
 //! which does nothing unless `ULTTUI_PTY_APP_OUT` is set), with the pty as
-//! its controlling terminal.
+//! its controlling terminal. Linux only: it reads the app's CPU time and
+//! wakeups from /proc.
+#![cfg(target_os = "linux")]
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -11,6 +13,7 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use ulttui::app::Application;
@@ -114,6 +117,14 @@ fn spawn_on_pty(out: &std::path::Path) -> (Child, File) {
         )
     };
     assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+    // openpty does not set close-on-exec. Without it the app (and any other
+    // child spawned meanwhile) would hold the master open, and would never
+    // see the hang-up if this test process died.
+    for fd in [master, slave] {
+        // SAFETY: `fd` was just opened by openpty.
+        let rc = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        assert_eq!(rc, 0, "fcntl: {}", std::io::Error::last_os_error());
+    }
     // SAFETY: both were just opened and are owned here.
     let (master, slave) = unsafe { (File::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
     let stdio = || Stdio::from(slave.try_clone().unwrap());
@@ -161,16 +172,33 @@ fn a_burst_bigger_than_one_read_is_all_delivered_and_the_loop_then_sleeps() {
     let mut child = KillOnDrop(child);
     let pid = child.0.id();
 
-    // Drain the app's output so its writes never block.
+    // Drain the app's output so its writes never block, and say when it
+    // has switched to the alternate screen: it is up and drawing.
     let mut reader = master.try_clone().unwrap();
+    let (started_tx, started) = mpsc::channel();
     std::thread::spawn(move || {
+        const ALT_SCREEN: &[u8] = b"\x1b[?1049h";
+        let mut seen = Vec::new();
+        let mut announced = false;
         let mut buf = [0u8; 65536];
-        while matches!(reader.read(&mut buf), Ok(n) if n > 0) {}
+        while let Ok(n @ 1..) = reader.read(&mut buf) {
+            if !announced {
+                seen.extend_from_slice(&buf[..n]);
+                if seen.windows(ALT_SCREEN.len()).any(|w| w == ALT_SCREEN) {
+                    announced = true;
+                    let _ = started_tx.send(());
+                }
+            }
+        }
     });
     let mut writer = master;
+    started
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the app never started drawing");
 
-    // Started and idle: no CPU, (almost) no wakeups.
-    std::thread::sleep(Duration::from_millis(1500));
+    // Started and idle: no CPU, (almost) no wakeups. A moment first for the
+    // runtime's threads to park.
+    std::thread::sleep(Duration::from_millis(300));
     let (cpu0, switches0) = usage(pid);
     std::thread::sleep(Duration::from_secs(1));
     let (cpu1, switches1) = usage(pid);
