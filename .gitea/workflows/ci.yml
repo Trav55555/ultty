@@ -133,6 +133,23 @@ jobs:
         working-directory: fuzz
         run: ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run in_band_split -- -max_total_time=60 -max_len=4096
 
+  # Instruction counts (callgrind) of the VT core, this commit against its
+  # merge-base, built and measured in this job so toolchain and libc cancel
+  # out. Fails when a corpus regresses by more than 3%; the per-case table is
+  # in the log. See docs/perf/README.md, "Deterministic gate".
+  vt-icount:
+    name: VT icount
+    runs-on: ultty
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # valgrind is not in the runner image yet; the script apt-installs it.
+      - run: scripts/ci-runner-step.sh scripts/ci-icount.sh "$ICOUNT_BASE"
+        env:
+          ICOUNT_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+
   gui-smoke:
     name: GUI smoke (Xvfb, software Vulkan)
     runs-on: ultty
