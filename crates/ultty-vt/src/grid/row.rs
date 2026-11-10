@@ -87,10 +87,8 @@ impl AnchorTag {
 #[derive(Debug, Clone)]
 pub struct Row {
     cells: Vec<Cell>,
-    /// Track if this row has been modified
-    dirty: bool,
-    /// Whether this row is wrapped (continues on next line due to soft wrap)
-    wrapped: bool,
+    /// Dirty, wrapped and plain; see [`RowFlags`].
+    flags: RowFlags,
     /// Shell integration marks; see [`RowMarks`].
     marks: RowMarks,
     /// Inline surface anchor; see [`AnchorTag`].
@@ -100,12 +98,6 @@ pub struct Row {
     /// that only cares about non-default cells (history encoding, erasing a
     /// row that is already blank) can skip the tail without looking at it.
     used: u16,
-    /// Every cell is ASCII in the default style, with no grapheme data, so
-    /// the row's content is its characters alone. Like `used`, it may
-    /// understate (anything handing out a mutable cell clears it) but never
-    /// overstates, so history can copy such a row's text without checking
-    /// each cell's style.
-    plain: bool,
     /// Codepoints after the base character of a multi-codepoint grapheme
     /// cluster (combining marks, ZWJ sequences, variation selectors), keyed by
     /// column. An entry is only meaningful while the cell at that column has
@@ -114,6 +106,39 @@ pub struct Row {
     /// screen coordinate) keeps them attached through scrolling, history,
     /// and reflow.
     graphemes: GraphemeMap,
+}
+
+/// A row's boolean state in one byte. Rows are moved by value on every
+/// scroll, so `Row` is kept at 56 bytes: three separate `bool`s next to the
+/// anchor tag would round it up to 64.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RowFlags(u8);
+
+impl RowFlags {
+    /// The row has been modified since the flag was last cleared.
+    const DIRTY: u8 = 1 << 0;
+    /// The row is soft-wrapped: it continues on the next line.
+    const WRAPPED: u8 = 1 << 1;
+    /// Every cell is ASCII in the default style, with no grapheme data, so
+    /// the row's content is its characters alone. Like `used`, it may
+    /// understate (anything handing out a mutable cell clears it) but never
+    /// overstates, so history can copy such a row's text without checking
+    /// each cell's style.
+    const PLAIN: u8 = 1 << 2;
+
+    #[inline]
+    fn get(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+
+    #[inline]
+    fn set(&mut self, flag: u8, on: bool) {
+        if on {
+            self.0 |= flag;
+        } else {
+            self.0 &= !flag;
+        }
+    }
 }
 
 /// Extra grapheme codepoints by column, sorted by column.
@@ -224,7 +249,7 @@ impl Row {
     /// grapheme codepoints than `max_extra`.
     pub fn check_integrity(&self, max_extra: usize) -> Result<(), String> {
         let cells = &self.cells;
-        if self.plain {
+        if self.flags.get(RowFlags::PLAIN) {
             if let Some(col) = cells.iter().position(|cell| {
                 let mut style = *cell;
                 style.set_char(' ');
@@ -269,12 +294,10 @@ impl Row {
     pub fn new(width: u16) -> Self {
         Self {
             cells: vec![Cell::default(); width as usize],
-            dirty: true,
-            wrapped: false,
+            flags: RowFlags(RowFlags::DIRTY | RowFlags::PLAIN),
             marks: RowMarks::default(),
             anchor: AnchorTag::NONE,
             used: 0,
-            plain: true,
             graphemes: GraphemeMap::default(),
         }
     }
@@ -287,16 +310,16 @@ impl Row {
         let start = col as usize;
         let end = start + bytes.len();
         self.drop_grapheme_entries(col, end as u16);
-        if self.plain {
+        if self.flags.get(RowFlags::PLAIN) {
             let mut style = template;
             style.set_char(' ');
-            self.plain = style.is_default();
+            self.flags.set(RowFlags::PLAIN, style.is_default());
         }
         for (cell, &byte) in self.cells[start..end].iter_mut().zip(bytes) {
             *cell = template.with_char(byte as char);
         }
         self.mark_used(end);
-        self.dirty = true;
+        self.flags.set(RowFlags::DIRTY, true);
     }
 
     /// Write `c`, taking `width` (1 or 2) columns from `col`, as a copy of
@@ -338,9 +361,9 @@ impl Row {
         }
         cells[0] = written;
         self.drop_grapheme_entries(col, col + 1);
-        self.plain = false;
+        self.flags.set(RowFlags::PLAIN, false);
         self.mark_used(end);
-        self.dirty = true;
+        self.flags.set(RowFlags::DIRTY, true);
         true
     }
 
@@ -348,12 +371,11 @@ impl Row {
     pub fn copy_from(&mut self, other: &Row) {
         self.cells.clone_from(&other.cells);
         self.graphemes.clone_from(&other.graphemes);
-        self.wrapped = other.wrapped;
         self.marks = other.marks;
         self.anchor = other.anchor;
         self.used = other.used;
-        self.plain = other.plain;
-        self.dirty = true;
+        self.flags = other.flags;
+        self.flags.set(RowFlags::DIRTY, true);
     }
 
     /// Whether `other` shows the same: the same width, cells and grapheme
@@ -422,7 +444,7 @@ impl Row {
         let Some(cell) = self.cells.get_mut(col as usize) else {
             return false;
         };
-        self.plain = false;
+        self.flags.set(RowFlags::PLAIN, false);
         let extra = self.graphemes.entry(col);
         if !cell.has_flag(CellFlags::HAS_COMBINING) {
             // Whatever is stored for this column belonged to earlier content.
@@ -434,7 +456,7 @@ impl Row {
         if kept {
             extra.push(c);
         }
-        self.dirty = true;
+        self.flags.set(RowFlags::DIRTY, true);
         kept
     }
 
@@ -447,12 +469,12 @@ impl Row {
             cell.unset_flag(CellFlags::HAS_COMBINING);
             self.graphemes.remove(col);
         } else {
-            self.plain = false;
+            self.flags.set(RowFlags::PLAIN, false);
             cell.set_flag(CellFlags::HAS_COMBINING);
             self.graphemes.insert(col, extra.to_vec());
             self.mark_used(col as usize + 1);
         }
-        self.dirty = true;
+        self.flags.set(RowFlags::DIRTY, true);
     }
 
     /// Drop grapheme data for columns in `start..end` and clear their flags.
@@ -470,7 +492,7 @@ impl Row {
         {
             cell.unset_flag(CellFlags::HAS_COMBINING);
         }
-        self.dirty = true;
+        self.flags.set(RowFlags::DIRTY, true);
     }
 
     /// Remove stored grapheme data for `start..end` without touching cells.
@@ -490,14 +512,14 @@ impl Row {
     /// Check if this row is wrapped (soft-wrapped to next line).
     #[inline]
     pub fn is_wrapped(&self) -> bool {
-        self.wrapped
+        self.flags.get(RowFlags::WRAPPED)
     }
 
     /// Set the wrapped flag.
     #[inline]
     pub fn set_wrapped(&mut self, wrapped: bool) {
-        self.wrapped = wrapped;
-        self.dirty = true;
+        self.flags.set(RowFlags::WRAPPED, wrapped);
+        self.flags.set(RowFlags::DIRTY, true);
     }
 
     /// The row's shell integration marks.
@@ -541,8 +563,8 @@ impl Row {
     /// Get a mutable cell by index.
     #[inline]
     pub fn get_mut(&mut self, index: u16) -> Option<&mut Cell> {
-        self.dirty = true;
-        self.plain = false;
+        self.flags.set(RowFlags::DIRTY, true);
+        self.flags.set(RowFlags::PLAIN, false);
         self.mark_used(index as usize + 1);
         self.cells.get_mut(index as usize)
     }
@@ -557,7 +579,7 @@ impl Row {
     /// Whether every cell is ASCII in the default style with no grapheme
     /// data. `false` does not mean some cell is not.
     pub(crate) fn is_plain(&self) -> bool {
-        self.plain
+        self.flags.get(RowFlags::PLAIN)
     }
 
     /// The cells up to the used mark: every cell after them is default.
@@ -574,21 +596,21 @@ impl Row {
     pub fn erase(&mut self, bg: super::cell::Color) {
         let mut blank = Cell::default();
         blank.set_bg(bg);
-        if blank.is_default() {
+        let plain = if blank.is_default() {
             // Cells past the used mark are already default.
             self.cells[..self.used as usize].fill(blank);
             self.used = 0;
-            self.plain = true;
+            RowFlags::PLAIN
         } else {
             self.cells.fill(blank);
             self.used = self.width();
-            self.plain = false;
-        }
+            0
+        };
         self.graphemes.clear();
-        self.wrapped = false;
         self.marks = RowMarks::default();
         self.anchor = AnchorTag::NONE;
-        self.dirty = true;
+        // Dirty and no longer wrapped, in one store: every scroll erases a row.
+        self.flags = RowFlags(RowFlags::DIRTY | plain);
     }
 
     /// Erase cells `start..end` per ECMA-48: spaces on background `bg`,
@@ -613,9 +635,9 @@ impl Row {
         } else {
             self.cells[start as usize..end as usize].fill(blank);
             self.mark_used(end as usize);
-            self.plain = false;
+            self.flags.set(RowFlags::PLAIN, false);
         }
-        self.dirty = true;
+        self.flags.set(RowFlags::DIRTY, true);
     }
 
     /// Resize the row.
@@ -623,25 +645,25 @@ impl Row {
         self.cells.resize(new_width as usize, Cell::default());
         self.used = self.used.min(new_width);
         self.graphemes.truncate(new_width);
-        self.dirty = true;
+        self.flags.set(RowFlags::DIRTY, true);
     }
 
     /// Check if the row is dirty.
     #[inline]
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        self.flags.get(RowFlags::DIRTY)
     }
 
     /// Clear the dirty flag.
     #[inline]
     pub fn clear_dirty(&mut self) {
-        self.dirty = false;
+        self.flags.set(RowFlags::DIRTY, false);
     }
 
     /// Mark the row as dirty.
     #[inline]
     pub fn mark_dirty(&mut self) {
-        self.dirty = true;
+        self.flags.set(RowFlags::DIRTY, true);
     }
 
     /// Check if the row is blank (all cells are default).
@@ -656,8 +678,8 @@ impl Row {
 
     /// Iterate over cells mutably.
     pub fn cells_mut(&mut self) -> impl Iterator<Item = &mut Cell> {
-        self.dirty = true;
-        self.plain = false;
+        self.flags.set(RowFlags::DIRTY, true);
+        self.flags.set(RowFlags::PLAIN, false);
         self.used = self.width();
         self.cells.iter_mut()
     }
@@ -735,14 +757,14 @@ impl Row {
         }
         self.shift_graphemes(at as u16, count as i32);
         self.used = self.width();
-        self.plain = false;
+        self.flags.set(RowFlags::PLAIN, false);
 
         // Fill inserted cells with background color
         for i in at..(at + count).min(len) {
             self.cells[i].erase(bg);
         }
 
-        self.dirty = true;
+        self.flags.set(RowFlags::DIRTY, true);
     }
 
     /// Delete cells at position, shifting remaining cells left.
@@ -774,7 +796,7 @@ impl Row {
         }
         self.drop_grapheme_entries(at as u16, src_start as u16);
         self.used = self.width();
-        self.plain = false;
+        self.flags.set(RowFlags::PLAIN, false);
         self.shift_graphemes(src_start as u16, -(count as i32));
 
         // Fill vacated cells at end with background color. A count running
@@ -783,7 +805,7 @@ impl Row {
             self.cells[i].erase(bg);
         }
 
-        self.dirty = true;
+        self.flags.set(RowFlags::DIRTY, true);
     }
 
     /// Erase cells from position to end of row.
@@ -793,7 +815,7 @@ impl Row {
         }
         self.used = self.used.min(from);
         self.clear_graphemes(from, self.width());
-        self.dirty = true;
+        self.flags.set(RowFlags::DIRTY, true);
     }
 
     /// Erase cells from start of row to position.
@@ -804,7 +826,7 @@ impl Row {
             }
         }
         self.clear_graphemes(0, to.saturating_add(1));
-        self.dirty = true;
+        self.flags.set(RowFlags::DIRTY, true);
     }
 }
 
@@ -818,8 +840,8 @@ impl Index<u16> for Row {
 
 impl IndexMut<u16> for Row {
     fn index_mut(&mut self, index: u16) -> &mut Self::Output {
-        self.dirty = true;
-        self.plain = false;
+        self.flags.set(RowFlags::DIRTY, true);
+        self.flags.set(RowFlags::PLAIN, false);
         self.mark_used(index as usize + 1);
         &mut self.cells[index as usize]
     }
