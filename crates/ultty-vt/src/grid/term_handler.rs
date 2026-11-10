@@ -51,7 +51,13 @@ impl<'a> TerminalHandler<'a> {
     #[inline]
     pub fn handle(&mut self, action: Action) {
         match action {
-            Action::Print(c) => self.print(c),
+            Action::Print(c) => {
+                self.print(c);
+                // `Action`'s drop glue covers every variant and is not
+                // inlined, so dropping a `Print`, which owns nothing, would
+                // cost a call per character.
+                std::mem::forget(action);
+            }
             action => self.handle_other(action),
         }
     }
