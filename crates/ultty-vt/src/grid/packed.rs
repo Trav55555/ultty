@@ -912,7 +912,13 @@ impl PackedRow {
                 self.flags &= !Self::UNIFORM;
             }
         } else {
-            if self.uniform_key != key || start > self.used {
+            if start == 0 && end >= self.used {
+                // Every used cell is about to be a blank in `key`; the
+                // grapheme entries in range are gone, and no cell past
+                // `end` is used, so no wide or grapheme state remains.
+                self.flags |= Self::UNIFORM;
+                self.uniform_key = key;
+            } else if self.uniform_key != key || start > self.used {
                 self.flags &= !Self::UNIFORM;
             }
             self.cells[usize::from(start)..usize::from(end)].fill(PackedCell::blank(key));
@@ -1396,6 +1402,31 @@ mod tests {
         let expected: String = std::iter::once(' ').chain(long).chain(['x']).collect();
         let got = row.with_grapheme_str(2, Some('x'), str::to_string);
         assert_eq!(got.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn erasing_a_blank_row_from_column_zero_leaves_it_uniform() {
+        let mut table = StyleTable::new(0);
+        let key = table.key(&Style::erased(Color::Indexed(4)));
+        assert!(!key.is_default());
+        for end in [3, 6] {
+            let mut row = PackedRow::new(6);
+            row.erase_range(0, end, key);
+            assert!(row.is_uniform(), "erase to {end}");
+            assert_eq!(row.uniform_key(), key);
+            row.check_integrity(16, &table).unwrap();
+        }
+    }
+
+    #[test]
+    fn erasing_part_of_a_styled_row_is_not_uniform() {
+        let mut table = StyleTable::new(0);
+        let key = table.key(&Style::erased(Color::Indexed(4)));
+        let mut row = PackedRow::new(6);
+        row.set(4, PackedCell::new('x', StyleKey::DEFAULT));
+        row.erase_range(0, 2, key);
+        row.check_integrity(16, &table).unwrap();
+        assert!(!row.is_uniform());
     }
 
     #[test]
