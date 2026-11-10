@@ -350,17 +350,39 @@ impl ScreenPage {
     /// Move rows `top..=bottom` up by `n` (less than the range's height):
     /// the top `n` leave, and the bottom `n` come in erased in style `key`.
     pub(super) fn rotate_up(&mut self, top: u16, bottom: u16, n: u16, key: StyleKey) {
-        let range = usize::from(top)..usize::from(bottom) + 1;
-        self.slots[range].rotate_left(usize::from(n));
-        self.erase_rows(bottom + 1 - n..bottom + 1, key);
+        let slots = &mut self.slots[usize::from(top)..usize::from(bottom) + 1];
+        if n == 1 {
+            // A line feed on the bottom margin. `rotate_left` costs about a
+            // hundred instructions on a screen's worth of slots; this is a
+            // short `memmove`.
+            let first = slots[0];
+            slots.copy_within(1.., 0);
+            slots[slots.len() - 1] = first;
+            if let Some(mut row) = self.row_mut(bottom) {
+                row.erase(key);
+            }
+        } else {
+            slots.rotate_left(usize::from(n));
+            self.erase_rows(bottom + 1 - n..bottom + 1, key);
+        }
     }
 
     /// Move rows `top..=bottom` down by `n` (less than the range's height):
     /// the bottom `n` leave, and the top `n` come in erased in style `key`.
     pub(super) fn rotate_down(&mut self, top: u16, bottom: u16, n: u16, key: StyleKey) {
-        let range = usize::from(top)..usize::from(bottom) + 1;
-        self.slots[range].rotate_right(usize::from(n));
-        self.erase_rows(top..top + n, key);
+        let slots = &mut self.slots[usize::from(top)..usize::from(bottom) + 1];
+        if n == 1 {
+            // A reverse index on the top margin, or one inserted line.
+            let last = slots[slots.len() - 1];
+            slots.copy_within(..slots.len() - 1, 1);
+            slots[0] = last;
+            if let Some(mut row) = self.row_mut(top) {
+                row.erase(key);
+            }
+        } else {
+            slots.rotate_right(usize::from(n));
+            self.erase_rows(top..top + n, key);
+        }
     }
 
     /// The page at `cols` by `rows`: each row cut or padded with blanks
