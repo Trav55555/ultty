@@ -14,8 +14,14 @@
 //! clusters at the margins, SGR churn, shell marks, bursts of lines that
 //! fill and evict a small scrollback, and resizes.
 //!
-//! 1024 cases by default, about 2 s; set `ULTTY_ORACLE_CASES` for a longer
-//! run (100000 takes a few minutes).
+//! The live terminal's own invariants (`Terminal::check_integrity`) are
+//! checked after every step too. A second test runs the same streams with
+//! the live style tables collected after every few new styles (ADR 0022,
+//! Risks: collection must keep the cached cursor key and `LastPrint`
+//! consistent), which a stream otherwise reaches only after thousands.
+//!
+//! 1024 cases each by default, a few seconds; set `ULTTY_ORACLE_CASES` for a
+//! longer run (100000 takes a few minutes).
 
 use proptest::prelude::*;
 
@@ -362,6 +368,8 @@ fn run(dims: Dimensions, scrollback: usize, ops: &[Op], spans: bool) -> Result<(
             op,
             spans
         );
+        live.check_integrity()
+            .map_err(|e| format!("after step {index} ({op:?}): live: {e}"))?;
         let (got, want) = (
             terminal_snapshot!(&mut live, to_row),
             terminal_snapshot!(&mut reference, into_owned),
@@ -435,6 +443,22 @@ proptest! {
         for spans in [false, true] {
             if let Err(difference) = run(Dimensions::new(cols, rows), scrollback, &ops, spans) {
                 prop_assert!(false, "spans {}: {}", spans, difference);
+            }
+        }
+    }
+
+    #[test]
+    fn live_storage_matches_reference_under_constant_collection(
+        every in 1usize..=8,
+        cols in 1u16..=40,
+        rows in 1u16..=12,
+        scrollback in 0usize..=40,
+        ops in prop::collection::vec(op(), 1..64),
+    ) {
+        let _collect = crate::grid::packed::test_support::collect_every(every);
+        for spans in [false, true] {
+            if let Err(difference) = run(Dimensions::new(cols, rows), scrollback, &ops, spans) {
+                prop_assert!(false, "every {}, spans {}: {}", every, spans, difference);
             }
         }
     }
