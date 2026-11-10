@@ -225,6 +225,9 @@ fn tilde_key(n: u16) -> Option<Key> {
         11..=15 => Key::F((n - 10) as u8),
         17..=21 => Key::F((n - 11) as u8),
         23..=26 => Key::F((n - 12) as u8),
+        // As crossterm numbers them (29 and 31 are both F14).
+        28..=29 => Key::F((n - 15) as u8),
+        31..=34 => Key::F((n - 17) as u8),
         _ => return None,
     })
 }
@@ -241,6 +244,16 @@ fn key_modifiers(param: u16) -> Modifiers {
 }
 
 fn parse_csi(buf: &[u8]) -> Step {
+    // The Linux console's F1-F5: CSI [ A..E.
+    if buf.get(2) == Some(&b'[') {
+        return match buf.get(3) {
+            None => Step::Incomplete,
+            Some(&last @ b'A'..=b'E') => {
+                Step::Done(4, Some(key(Key::F(1 + last - b'A'), Modifiers::default())))
+            }
+            Some(_) => Step::Done(4, None),
+        };
+    }
     // X10 mouse: CSI M and three raw bytes, which may be anything.
     if buf.get(2) == Some(&b'M') {
         if buf.len() < 6 {
@@ -282,6 +295,9 @@ fn parse_csi(buf: &[u8]) -> Step {
             },
         )),
         b'~' => tilde_key(param(0)).map(|k| key(k, key_modifiers(param(1)))),
+        // A cursor position report (CSI row;col R), never F3: crossterm
+        // reads every CSI .. R as one too. F3 arrives as ESC O R.
+        b'R' => None,
         // Focus reports and anything else the backend does not use.
         _ => legacy_key(final_byte).map(|k| key(k, key_modifiers(param(1)))),
     };
@@ -290,6 +306,10 @@ fn parse_csi(buf: &[u8]) -> Step {
 
 /// A mouse report: `code` is the button and flags, `x`/`y` 1-based cells.
 fn mouse(code: u16, x: u16, y: u16, released: bool) -> Option<Event> {
+    // Buttons 8 and up (back, forward, ...): not reported, as in crossterm.
+    if code >= 128 {
+        return None;
+    }
     let modifiers = Modifiers {
         shift: code & 4 != 0,
         alt: code & 8 != 0,
@@ -302,7 +322,10 @@ fn mouse(code: u16, x: u16, y: u16, released: bool) -> Option<Event> {
         2 => Some(MouseButton::Right),
         _ => None,
     };
-    let kind = if code & 64 != 0 {
+    let kind = if code & 64 != 0 && code & 32 != 0 {
+        // Motion with a wheel "button" held.
+        MouseEventKind::Moved
+    } else if code & 64 != 0 {
         match code & 3 {
             0 => MouseEventKind::ScrollUp,
             1 => MouseEventKind::ScrollDown,
@@ -480,6 +503,43 @@ mod tests {
                 (MouseEventKind::Down(MouseButton::Left), 0, 0),
             ]
         );
+    }
+
+    #[test]
+    fn linux_console_and_high_function_keys() {
+        assert_eq!(
+            keys(b"\x1b[[A\x1b[[E\x1b[28~\x1b[29~\x1b[31~\x1b[34~q"),
+            vec![
+                plain(Key::F(1)),
+                plain(Key::F(5)),
+                plain(Key::F(13)),
+                plain(Key::F(14)),
+                plain(Key::F(14)),
+                plain(Key::F(17)),
+                plain(Key::Char('q')),
+            ]
+        );
+        // Not stray letters: an unknown CSI [ x is dropped whole.
+        assert_eq!(keys(b"\x1b[[Zq"), vec![plain(Key::Char('q'))]);
+    }
+
+    #[test]
+    fn reports_the_backend_does_not_use_are_dropped() {
+        // A cursor position report, not F3 with modifiers; F3 is ESC O R.
+        assert_eq!(
+            keys(b"\x1b[12;40R\x1bORq"),
+            vec![plain(Key::F(3)), plain(Key::Char('q'))]
+        );
+        // Back/forward buttons (128+) and horizontal wheel: no event.
+        assert!(decode(b"\x1b[<128;1;1M\x1b[<129;1;1m\x1b[<66;1;1M").is_empty());
+        // Wheel held while moving is motion.
+        assert!(matches!(
+            decode(b"\x1b[<96;2;2M")[..],
+            [Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                ..
+            })]
+        ));
     }
 
     #[test]
