@@ -44,6 +44,19 @@ impl View for ProgressBar {
         }))
     }
 
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            role: ultty_protocol::Role::Progress,
+            label: self.label.clone(),
+            value: Some(ultty_protocol::SemanticValue {
+                now: self.value / 100.0,
+                min: 0.0,
+                max: 1.0,
+            }),
+            ..Default::default()
+        }
+    }
+
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         if area.width == 0 || area.height == 0 {
             return;

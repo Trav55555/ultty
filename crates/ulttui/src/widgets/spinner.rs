@@ -63,6 +63,15 @@ impl View for Spinner {
         }))
     }
 
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            role: ultty_protocol::Role::Status,
+            label: self.label.clone(),
+            busy: true,
+            ..Default::default()
+        }
+    }
+
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         if area.width == 0 || area.height == 0 {
             return;

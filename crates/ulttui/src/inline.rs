@@ -79,11 +79,12 @@ use ratatui::Terminal;
 use ultty_client::UlttyClient;
 use ultty_protocol::{
     AppMessage, Constraints, Dimension, RegionId, Style, TerminalMessage, CAP_APPEND_CONTENT,
-    CAP_INLINE_SURFACES, MAX_SURFACE_ROWS, MIN_SURFACE_ROWS,
+    CAP_INLINE_SURFACES, CAP_SEMANTICS, MAX_SURFACE_ROWS, MIN_SURFACE_ROWS,
 };
 
 use crate::backend::native_diff::{
-    begin_native_key_recording, optimize_frame_messages, take_native_keys, RetainedTree,
+    begin_native_key_recording, optimize_frame_messages, take_native_keys, FrameCapabilities,
+    RetainedTree,
 };
 use crate::widgets::{render_view_to_native, View};
 
@@ -446,7 +447,7 @@ impl Console {
                     id,
                     view,
                     &mut tree,
-                    session.client.supports_capability(CAP_APPEND_CONTENT),
+                    frame_capabilities(&session.client),
                 )?;
                 let opened = session.client.open_surface(
                     id,
@@ -502,11 +503,12 @@ impl Console {
         match &mut self.link {
             Link::Native(native) => {
                 let mut session = native.session();
-                let append = session.client.supports_capability(CAP_APPEND_CONTENT);
+                let capabilities = frame_capabilities(&session.client);
                 let Some(tree) = session.cards.get_mut(&card.id) else {
                     return Ok(());
                 };
-                let messages = surface_messages(&mut self.next_id, card.id, view, tree, append)?;
+                let messages =
+                    surface_messages(&mut self.next_id, card.id, view, tree, capabilities)?;
                 if messages.is_empty() {
                     return Ok(());
                 }
@@ -669,6 +671,14 @@ impl Drop for Console {
     }
 }
 
+/// What the card diff may send to the terminal `client` is connected to.
+fn frame_capabilities(client: &UlttyClient) -> FrameCapabilities {
+    FrameCapabilities {
+        append_content: client.supports_capability(CAP_APPEND_CONTENT),
+        semantics: client.supports_capability(CAP_SEMANTICS),
+    }
+}
+
 /// Send `messages` as one frame and wait for its layout.
 fn send_frame(
     client: &mut UlttyClient,
@@ -689,7 +699,7 @@ fn surface_messages(
     surface: RegionId,
     view: &impl View,
     tree: &mut RetainedTree,
-    allow_append_content: bool,
+    capabilities: FrameCapabilities,
 ) -> crate::Result<Vec<AppMessage>> {
     tree.reserve(RegionId::new(next_id.saturating_sub(1)));
     let mut constraints = view.constraints();
@@ -712,7 +722,7 @@ fn surface_messages(
     );
     let keys = take_native_keys();
     walked?;
-    let (outgoing, next) = optimize_frame_messages(tree, messages, &keys, allow_append_content);
+    let (outgoing, next) = optimize_frame_messages(tree, messages, &keys, capabilities);
     *next_id = (*next_id).max(next.next_id());
     *tree = next;
     Ok(outgoing)

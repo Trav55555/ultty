@@ -53,6 +53,9 @@ impl View for Checkbox {
     fn content(&self) -> ultty_protocol::Content {
         self.0.content()
     }
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        self.0.semantics_as(ultty_protocol::Role::Checkbox)
+    }
     fn is_focusable(&self) -> bool {
         self.0.is_focusable()
     }
@@ -70,6 +73,18 @@ mod tests {
     use crate::event::{Key, KeyEvent};
     use crate::focus::FocusManager;
     use crate::theme::Theme;
+
+    #[test]
+    fn checkbox_is_a_checkbox_named_by_its_label_with_its_state() {
+        use ultty_protocol::{Role, Toggled};
+        let semantics = Checkbox::new("Accept terms").semantics();
+        assert_eq!(semantics.role, Role::Checkbox);
+        assert_eq!(semantics.label.as_deref(), Some("Accept terms"));
+        assert_eq!(semantics.toggled, Toggled::False);
+        let mut checked = Checkbox::new("Accept terms");
+        checked.toggle();
+        assert_eq!(checked.semantics().toggled, Toggled::True);
+    }
 
     #[test]
     fn new_checkbox_is_unchecked() {

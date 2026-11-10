@@ -21,6 +21,7 @@ pub struct Select {
     expanded: bool,
     cursor: usize,
     id: Option<String>,
+    accessible: super::Accessible,
 }
 
 impl Select {
@@ -32,6 +33,7 @@ impl Select {
             expanded: false,
             options,
             id: None,
+            accessible: super::Accessible::default(),
         }
     }
 
@@ -46,6 +48,18 @@ impl Select {
 
     pub fn id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
+        self
+    }
+
+    /// The accessible name, such as "Theme".
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.accessible.label = Some(label.into());
+        self
+    }
+
+    /// Longer help text for assistive technology.
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.accessible.description = Some(description.into());
         self
     }
 
@@ -73,6 +87,26 @@ impl Select {
 }
 
 impl View for Select {
+    /// A list, collapsed or expanded, whose value is the selected option
+    /// and its place among the options.
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        let position = (!self.options.is_empty()).then(|| ultty_protocol::SetPosition {
+            index: self.selected as u32 + 1,
+            size: self.options.len() as u32,
+        });
+        self.accessible.apply(ultty_protocol::Semantics {
+            role: ultty_protocol::Role::List,
+            expanded: if self.expanded {
+                ultty_protocol::Expanded::Expanded
+            } else {
+                ultty_protocol::Expanded::Collapsed
+            },
+            value_text: Some(self.selected_value().to_string()),
+            position,
+            ..Default::default()
+        })
+    }
+
     fn widget_id(&self) -> Option<&str> {
         Select::widget_id(self)
     }

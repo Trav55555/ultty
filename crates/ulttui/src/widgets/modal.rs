@@ -124,6 +124,17 @@ impl Modal {
 }
 
 impl View for Modal {
+    /// A modal dialog named by its title; left out while not visible.
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            role: ultty_protocol::Role::Dialog,
+            label: (!self.title.is_empty()).then(|| self.title.clone()),
+            modal: true,
+            hidden: !self.visible,
+            ..Default::default()
+        }
+    }
+
     fn constraints(&self) -> Constraints {
         if !self.visible {
             return Constraints {
@@ -241,12 +252,17 @@ impl View for Modal {
                         constraints: Constraints::default(),
                         style: btn_style,
                     })?;
+                    let content =
+                        ultty_protocol::Content::Text(TextContent::new(format!("[ {} ]", label)));
+                    let button = ultty_protocol::Semantics {
+                        role: ultty_protocol::Role::Button,
+                        label: Some(label.clone()),
+                        ..Default::default()
+                    };
+                    super::send_semantics(send_message, btn_id, button, &content)?;
                     send_message(&AppMessage::SetContent {
                         id: btn_id,
-                        content: ultty_protocol::Content::Text(TextContent::new(format!(
-                            "[ {} ]",
-                            label
-                        ))),
+                        content,
                     })?;
                 }
             }

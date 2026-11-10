@@ -43,6 +43,10 @@ impl View for OverlayView<'_> {
         self.base.content()
     }
 
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        self.base.semantics()
+    }
+
     fn children_count(&self) -> usize {
         self.base.children_count() + usize::from(self.overlay.is_some())
     }

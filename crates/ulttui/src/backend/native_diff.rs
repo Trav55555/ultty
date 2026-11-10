@@ -11,10 +11,13 @@
 //! traversal slot. Unkeyed children fall back to positional matching among
 //! the remaining unkeyed siblings of the same parent.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use ultty_protocol::{AppMessage, Constraints, Content, RegionId, RichText, Style};
+use ultty_protocol::{
+    AppMessage, Constraints, Content, Live, RegionId, RichText, Semantics, Style,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct RegionSnapshot {
@@ -24,6 +27,9 @@ pub(super) struct RegionSnapshot {
     pub(super) style: Style,
     pub(super) content: Content,
     pub(super) scroll: Option<(f32, f32, bool)>,
+    /// What the frame sent with `SetSemantics`; `None` leaves the region's
+    /// semantics to the terminal.
+    pub(super) semantics: Option<Semantics>,
 }
 
 /// Regions the terminal currently retains: stable ids plus sibling order.
@@ -122,6 +128,17 @@ struct ProvisionalNode {
     style: Style,
     content: Content,
     scroll: Option<(f32, f32, bool)>,
+    semantics: Option<Semantics>,
+}
+
+/// What the terminal agreed to, as far as the diff cares.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FrameCapabilities {
+    /// Text growth may go as `AppendContent` (`CAP_APPEND_CONTENT`).
+    pub(crate) append_content: bool,
+    /// `SetSemantics` may be sent (`CAP_SEMANTICS`); without it the
+    /// frame's semantics are dropped.
+    pub(crate) semantics: bool,
 }
 
 /// Result of matching one frame's provisional regions onto retained ids.
@@ -140,7 +157,7 @@ pub(crate) fn optimize_frame_messages(
     previous: &RetainedTree,
     frame_messages: Vec<AppMessage>,
     native_keys: &HashMap<RegionId, String>,
-    allow_append_content: bool,
+    capabilities: FrameCapabilities,
 ) -> (Vec<AppMessage>, RetainedTree) {
     let (nodes, order) = parse_provisional_tree(&frame_messages, native_keys);
     let mut reconciliation = Reconciliation {
@@ -236,9 +253,19 @@ pub(crate) fn optimize_frame_messages(
             }
             AppMessage::SetContent { id, content } => {
                 let stable = mapping[&id];
+                let live = next.regions.get(&stable).is_some_and(|region| {
+                    region
+                        .semantics
+                        .as_ref()
+                        .is_some_and(|semantics| semantics.live != Live::Off)
+                });
                 match previous.regions.get(&stable) {
+                    Some(prev) if live && capabilities.append_content => {
+                        outgoing.extend(live_content_update(stable, &prev.content, content));
+                    }
                     Some(prev) => {
-                        let delta = allow_append_content
+                        let delta = capabilities
+                            .append_content
                             .then(|| append_delta(&prev.content, &content))
                             .flatten();
                         match delta {
@@ -278,8 +305,43 @@ pub(crate) fn optimize_frame_messages(
                     });
                 }
             }
+            AppMessage::SetSemantics { id, semantics } => {
+                let stable = mapping[&id];
+                let unchanged = previous
+                    .regions
+                    .get(&stable)
+                    .is_some_and(|prev| prev.semantics.as_ref() == Some(&semantics));
+                if capabilities.semantics && !unchanged {
+                    outgoing.push(AppMessage::SetSemantics {
+                        id: stable,
+                        semantics,
+                    });
+                }
+            }
             other => outgoing.push(other),
         }
+    }
+
+    // A region whose view no longer says more than its content goes back
+    // to what the terminal derives.
+    if capabilities.semantics {
+        let mut reset: Vec<RegionId> = next
+            .regions
+            .iter()
+            .filter(|(id, snapshot)| {
+                snapshot.semantics.is_none()
+                    && previous
+                        .regions
+                        .get(id)
+                        .is_some_and(|prev| prev.semantics.is_some())
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        reset.sort_by_key(|id| id.0);
+        outgoing.extend(reset.into_iter().map(|id| AppMessage::SetSemantics {
+            id,
+            semantics: Semantics::default(),
+        }));
     }
 
     let mut cleared: Vec<RegionId> = next
@@ -338,9 +400,15 @@ fn parse_provisional_tree(
                         style: style.clone(),
                         content: Content::None,
                         scroll: None,
+                        semantics: None,
                     },
                 );
                 order.entry(*parent).or_default().push(*id);
+            }
+            AppMessage::SetSemantics { id, semantics } => {
+                if let Some(node) = nodes.get_mut(id) {
+                    node.semantics = Some(semantics.clone());
+                }
             }
             AppMessage::SetContent { id, content } => {
                 if let Some(node) = nodes.get_mut(id) {
@@ -445,6 +513,7 @@ fn reconcile_children(
                 style: node.style.clone(),
                 content: node.content.clone(),
                 scroll: node.scroll,
+                semantics: node.semantics.clone(),
             },
         );
         new_order.push(stable);
@@ -469,6 +538,76 @@ fn reconcile_children(
         let stable = out.mapping[provisional];
         reconcile_children(*provisional, stable, nodes, order, previous, out);
     }
+}
+
+/// The messages that take a live region from `previous` to `next`
+/// content.
+///
+/// The terminal announces only text that arrives with `AppendContent`
+/// (ADR 0021 §3), so text a live region grows by is always appended, even
+/// when its styling changed too, as when a streamed markdown span turns
+/// bold: the new text is appended, then a `SetContent` in the same frame
+/// puts the styled result in place. When text in the last line changed as
+/// well (a markdown marker that became styling), what follows the
+/// unchanged part is appended again; a change before the last line is
+/// set, not announced.
+fn live_content_update(id: RegionId, previous: &Content, next: Content) -> Vec<AppMessage> {
+    if *previous == next {
+        return Vec::new();
+    }
+    let (Some(before), Some(after)) = (plain_text(previous), plain_text(&next)) else {
+        return vec![AppMessage::SetContent { id, content: next }];
+    };
+    let kept = common_prefix_len(&before, &after);
+    if before[kept..].contains('\n') || kept == after.len() {
+        return vec![AppMessage::SetContent { id, content: next }];
+    }
+    let text = after[kept..].to_string();
+    let appended = with_appended(previous, &text);
+    let mut messages = vec![AppMessage::AppendContent { id, text }];
+    if appended != next {
+        messages.push(AppMessage::SetContent { id, content: next });
+    }
+    messages
+}
+
+/// The text of text content, spans joined.
+fn plain_text(content: &Content) -> Option<Cow<'_, str>> {
+    match content {
+        Content::None => Some(Cow::Borrowed("")),
+        Content::Text(text) => Some(Cow::Borrowed(&text.text)),
+        Content::RichText(rich) => Some(Cow::Owned(
+            rich.spans.iter().map(|span| span.text.as_str()).collect(),
+        )),
+        Content::Widget(_) => None,
+    }
+}
+
+/// Length in bytes of the longest common prefix of `a` and `b`.
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    a.char_indices()
+        .zip(b.chars())
+        .find(|((_, x), y)| x != y)
+        .map_or(a.len().min(b.len()), |((index, _), _)| index)
+}
+
+/// `content` after the terminal appends `text` to it, as `AppendContent`
+/// does.
+fn with_appended(content: &Content, text: &str) -> Content {
+    let mut content = content.clone();
+    match &mut content {
+        Content::Text(existing) => existing.text.push_str(text),
+        Content::RichText(rich) => match rich.spans.last_mut() {
+            Some(last) => last.text.push_str(text),
+            None => rich.spans.push(ultty_protocol::Span {
+                text: text.to_string(),
+                style: Style::new(),
+            }),
+        },
+        Content::None => content = Content::Text(ultty_protocol::TextContent::new(text)),
+        Content::Widget(_) => {}
+    }
+    content
 }
 
 fn append_delta(previous: &Content, next: &Content) -> Option<String> {
@@ -519,11 +658,12 @@ fn rich_text_append_delta(previous: &RichText, next: &RichText) -> Option<String
 
 #[cfg(test)]
 mod tests {
-    use super::{optimize_frame_messages, RetainedTree};
+    use super::{optimize_frame_messages, FrameCapabilities, RetainedTree};
     use std::collections::HashMap;
     use ultty_protocol::{
         AppMessage, Constraints, Content, RegionId, RichText, Style, TextContent,
     };
+    use ultty_protocol::{Live, Role, Semantics};
 
     /// One region in a test frame: (provisional id, parent, native key, text).
     type Spec<'a> = (u32, RegionId, Option<&'a str>, Option<&'a str>);
@@ -555,7 +695,7 @@ mod tests {
 
     fn run(previous: &RetainedTree, specs: &[Spec<'_>]) -> (Vec<AppMessage>, RetainedTree) {
         let (messages, keys) = frame(specs);
-        optimize_frame_messages(previous, messages, &keys, false)
+        optimize_frame_messages(previous, messages, &keys, FrameCapabilities::default())
     }
 
     fn count(messages: &[AppMessage], pred: impl Fn(&AppMessage) -> bool) -> usize {
@@ -761,6 +901,7 @@ mod tests {
                 style: Style::default(),
                 content,
                 scroll: None,
+                semantics: None,
             },
         );
         tree.children.insert(ROOT, vec![id]);
@@ -787,7 +928,8 @@ mod tests {
         let previous = tree_with_text(id, "hello");
         let frame = frame_with_content(id, Content::Text(TextContent::new("hello world")));
 
-        let (outgoing, next) = optimize_frame_messages(&previous, frame, &HashMap::new(), true);
+        let (outgoing, next) =
+            optimize_frame_messages(&previous, frame, &HashMap::new(), APPEND_ONLY);
 
         assert_eq!(
             outgoing,
@@ -808,7 +950,8 @@ mod tests {
         let previous = tree_with_content(id, Content::RichText(RichText::new().text("hello")));
         let frame = frame_with_content(id, Content::RichText(RichText::new().text("hello world")));
 
-        let (outgoing, next) = optimize_frame_messages(&previous, frame, &HashMap::new(), true);
+        let (outgoing, next) =
+            optimize_frame_messages(&previous, frame, &HashMap::new(), APPEND_ONLY);
 
         assert_eq!(
             outgoing,
@@ -829,7 +972,7 @@ mod tests {
         let previous = tree_with_text(removed, "gone");
 
         let (outgoing, next) =
-            optimize_frame_messages(&previous, Vec::new(), &HashMap::new(), true);
+            optimize_frame_messages(&previous, Vec::new(), &HashMap::new(), APPEND_ONLY);
 
         assert_eq!(outgoing, vec![AppMessage::DeleteRegion { id: removed }]);
         assert!(next.regions.is_empty());
@@ -847,7 +990,8 @@ mod tests {
             style: Style::default(),
         }];
 
-        let (outgoing, _next) = optimize_frame_messages(&previous, frame, &HashMap::new(), true);
+        let (outgoing, _next) =
+            optimize_frame_messages(&previous, frame, &HashMap::new(), APPEND_ONLY);
 
         assert_eq!(
             outgoing,
@@ -864,7 +1008,12 @@ mod tests {
         let previous = tree_with_text(id, "alpha");
         let frame = frame_with_content(id, Content::Text(TextContent::new("alpha beta")));
 
-        let (outgoing, _next) = optimize_frame_messages(&previous, frame, &HashMap::new(), false);
+        let (outgoing, _next) = optimize_frame_messages(
+            &previous,
+            frame,
+            &HashMap::new(),
+            FrameCapabilities::default(),
+        );
 
         assert_eq!(
             outgoing,
@@ -872,6 +1021,231 @@ mod tests {
                 id,
                 content: Content::Text(TextContent::new("alpha beta"))
             }]
+        );
+    }
+
+    const APPEND_ONLY: FrameCapabilities = FrameCapabilities {
+        append_content: true,
+        semantics: false,
+    };
+
+    const ALL: FrameCapabilities = FrameCapabilities {
+        append_content: true,
+        semantics: true,
+    };
+
+    fn frame_with_semantics(
+        id: RegionId,
+        content: Content,
+        semantics: Option<Semantics>,
+    ) -> Vec<AppMessage> {
+        let mut frame = frame_with_content(id, content);
+        if let Some(semantics) = semantics {
+            frame.insert(1, AppMessage::SetSemantics { id, semantics });
+        }
+        frame
+    }
+
+    fn labelled(label: &str) -> Semantics {
+        Semantics {
+            role: Role::Button,
+            label: Some(label.to_string()),
+            ..Semantics::default()
+        }
+    }
+
+    fn semantics_sent(messages: &[AppMessage]) -> Vec<(RegionId, Semantics)> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                AppMessage::SetSemantics { id, semantics } => Some((*id, semantics.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn text(text: &str) -> Content {
+        Content::Text(TextContent::new(text))
+    }
+
+    #[test]
+    fn semantics_are_sent_with_a_new_region_after_it_is_created() {
+        let id = RegionId::new(1);
+        let frame = frame_with_semantics(id, text("x"), Some(labelled("Close")));
+
+        let (outgoing, next) =
+            optimize_frame_messages(&RetainedTree::new(), frame, &HashMap::new(), ALL);
+
+        let create = outgoing
+            .iter()
+            .position(|m| matches!(m, AppMessage::CreateRegion { .. }))
+            .unwrap();
+        let set = outgoing
+            .iter()
+            .position(|m| matches!(m, AppMessage::SetSemantics { .. }))
+            .unwrap();
+        assert!(create < set);
+        assert_eq!(semantics_sent(&outgoing), vec![(id, labelled("Close"))]);
+        assert_eq!(next.regions[&id].semantics, Some(labelled("Close")));
+    }
+
+    #[test]
+    fn unchanged_semantics_are_not_sent_again_and_changed_ones_are() {
+        let id = RegionId::new(1);
+        let first = frame_with_semantics(id, text("x"), Some(labelled("Close")));
+        let (_, tree) = optimize_frame_messages(&RetainedTree::new(), first, &HashMap::new(), ALL);
+
+        let same = frame_with_semantics(id, text("x"), Some(labelled("Close")));
+        let (outgoing, tree) = optimize_frame_messages(&tree, same, &HashMap::new(), ALL);
+        assert_eq!(outgoing, Vec::new(), "an unchanged frame sends nothing");
+
+        let renamed = frame_with_semantics(id, text("x"), Some(labelled("Dismiss")));
+        let (outgoing, tree) = optimize_frame_messages(&tree, renamed, &HashMap::new(), ALL);
+        assert_eq!(semantics_sent(&outgoing), vec![(id, labelled("Dismiss"))]);
+
+        // Back to what the content says: the terminal derives it again.
+        let plain = frame_with_semantics(id, text("x"), None);
+        let (outgoing, tree) = optimize_frame_messages(&tree, plain, &HashMap::new(), ALL);
+        assert_eq!(semantics_sent(&outgoing), vec![(id, Semantics::default())]);
+        assert_eq!(tree.regions[&id].semantics, None);
+
+        let plain = frame_with_semantics(id, text("x"), None);
+        let (outgoing, _) = optimize_frame_messages(&tree, plain, &HashMap::new(), ALL);
+        assert_eq!(outgoing, Vec::new());
+    }
+
+    #[test]
+    fn semantics_are_not_sent_without_the_capability() {
+        let id = RegionId::new(1);
+        let append_only = FrameCapabilities {
+            append_content: true,
+            semantics: false,
+        };
+        let frame = frame_with_semantics(id, text("x"), Some(labelled("Close")));
+        let (outgoing, tree) =
+            optimize_frame_messages(&RetainedTree::new(), frame, &HashMap::new(), append_only);
+        assert_eq!(semantics_sent(&outgoing), Vec::new());
+
+        let plain = frame_with_semantics(id, text("x"), None);
+        let (outgoing, _) = optimize_frame_messages(&tree, plain, &HashMap::new(), append_only);
+        assert_eq!(outgoing, Vec::new(), "no reset either");
+    }
+
+    fn live_log() -> Option<Semantics> {
+        Some(Semantics {
+            role: Role::Log,
+            live: Live::Polite,
+            ..Semantics::default()
+        })
+    }
+
+    fn live_step(previous: Content, next: Content) -> Vec<AppMessage> {
+        let id = RegionId::new(1);
+        let first = frame_with_semantics(id, previous, live_log());
+        let (_, tree) = optimize_frame_messages(&RetainedTree::new(), first, &HashMap::new(), ALL);
+        let frame = frame_with_semantics(id, next, live_log());
+        optimize_frame_messages(&tree, frame, &HashMap::new(), ALL).0
+    }
+
+    #[test]
+    fn a_live_region_appends_new_text_even_when_its_styling_changes() {
+        let id = RegionId::new(1);
+        let bold = Style::new().bold();
+        let before = Content::RichText(RichText::new().text("Hello "));
+        let after = Content::RichText(RichText::new().text("Hello ").span("world", bold));
+
+        assert_eq!(
+            live_step(before, after.clone()),
+            vec![
+                AppMessage::AppendContent {
+                    id,
+                    text: "world".to_string()
+                },
+                AppMessage::SetContent { id, content: after }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_live_region_reappends_a_last_line_that_changed() {
+        let id = RegionId::new(1);
+        let bold = Style::new().bold();
+        let before = Content::RichText(RichText::new().text("Done.\nA **bo"));
+        let after = Content::RichText(
+            RichText::new()
+                .text("Done.\nA ")
+                .span("bold", bold)
+                .text(" word"),
+        );
+
+        assert_eq!(
+            live_step(before, after.clone()),
+            vec![
+                AppMessage::AppendContent {
+                    id,
+                    text: "bold word".to_string()
+                },
+                AppMessage::SetContent { id, content: after }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_live_region_does_not_reannounce_rewritten_earlier_lines() {
+        let id = RegionId::new(1);
+        let after = text("Changed\nsecond and more");
+        assert_eq!(
+            live_step(text("First\nsecond"), after.clone()),
+            vec![AppMessage::SetContent { id, content: after }]
+        );
+        let shrunk = text("First\nsec");
+        assert_eq!(
+            live_step(text("First\nsecond"), shrunk.clone()),
+            vec![AppMessage::SetContent {
+                id,
+                content: shrunk
+            }]
+        );
+        assert_eq!(live_step(text("same"), text("same")), Vec::new());
+    }
+
+    #[test]
+    fn a_live_region_growing_plainly_sends_only_the_append() {
+        let id = RegionId::new(1);
+        assert_eq!(
+            live_step(text("Hello"), text("Hello world")),
+            vec![AppMessage::AppendContent {
+                id,
+                text: " world".to_string()
+            }]
+        );
+        assert_eq!(
+            live_step(text("héllo"), text("héllo wörld")),
+            vec![AppMessage::AppendContent {
+                id,
+                text: " wörld".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_region_that_is_not_live_keeps_the_strict_append_rule() {
+        let id = RegionId::new(1);
+        let previous = tree_with_content(id, Content::RichText(RichText::new().text("Hello ")));
+        let after = Content::RichText(
+            RichText::new()
+                .text("Hello ")
+                .span("world", Style::new().bold()),
+        );
+        let (outgoing, _) = optimize_frame_messages(
+            &previous,
+            frame_with_content(id, after.clone()),
+            &HashMap::new(),
+            ALL,
+        );
+        assert_eq!(
+            outgoing,
+            vec![AppMessage::SetContent { id, content: after }]
         );
     }
 }

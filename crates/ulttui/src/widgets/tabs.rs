@@ -9,8 +9,8 @@ use ratatui::Frame;
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
 use ultty_protocol::{
-    AppMessage, Constraints, Dimension, Display, FlexDirection, RegionId, Style as ProtoStyle,
-    TextContent,
+    AppMessage, Constraints, Dimension, Display, FlexDirection, RegionId, Role, Semantics,
+    SetPosition, Style as ProtoStyle, TextContent,
 };
 
 /// A tab bar widget.
@@ -94,6 +94,13 @@ impl View for Tabs {
         }
     }
 
+    fn semantics(&self) -> Semantics {
+        Semantics {
+            role: Role::TabList,
+            ..Semantics::default()
+        }
+    }
+
     fn children_count(&self) -> usize {
         self.labels.len()
     }
@@ -133,10 +140,22 @@ impl View for Tabs {
         })?;
 
         let display_text = format!(" {} ", label);
-
+        let content = ultty_protocol::Content::Text(TextContent::new(display_text));
+        // The protocol has no "selected" state (ADR 0021 §1); the active
+        // tab shows only by its style.
+        let tab = Semantics {
+            role: Role::Tab,
+            label: Some(label.clone()),
+            position: Some(SetPosition {
+                index: index as u32 + 1,
+                size: self.labels.len() as u32,
+            }),
+            ..Semantics::default()
+        };
+        super::send_semantics(send_message, region_id, tab, &content)?;
         send_message(&AppMessage::SetContent {
             id: region_id,
-            content: ultty_protocol::Content::Text(TextContent::new(display_text)),
+            content,
         })?;
 
         Ok(Some(region_id))

@@ -39,6 +39,21 @@ impl BinaryToggle {
         self.state = !self.state;
     }
 
+    /// A control with `role` (checkbox or switch), named by its label,
+    /// with its state; the `[x] ` drawn before the label is not its name.
+    pub fn semantics_as(&self, role: ultty_protocol::Role) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            role,
+            label: Some(self.label.clone()),
+            toggled: if self.state {
+                ultty_protocol::Toggled::True
+            } else {
+                ultty_protocol::Toggled::False
+            },
+            ..Default::default()
+        }
+    }
+
     fn prefix(&self) -> &'static str {
         if self.state {
             self.prefix_on

@@ -9,7 +9,7 @@ use std::time::Duration;
 use bytes::BytesMut;
 use ultty_protocol::{
     AppMessage, ComputedRegionLayout, Content, FrameId, InputEvent, InputType, Key, Modifiers,
-    RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_REGION_METADATA,
+    RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_REGION_METADATA, CAP_SEMANTICS,
     CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL, MIN_PROTOCOL_VERSION,
     PROTOCOL_VERSION,
 };
@@ -19,7 +19,7 @@ use crate::widgets::View;
 
 use super::native_diff::{
     begin_native_key_recording, optimize_frame_messages, record_native_key, take_native_keys,
-    RetainedTree,
+    FrameCapabilities, RetainedTree,
 };
 use transport::{FrameError, ReadOutcome};
 use ultty_client::{detect, in_band};
@@ -213,7 +213,10 @@ impl NativeBackend {
             &self.retained,
             frame_messages,
             &native_keys,
-            self.supports_capability(CAP_APPEND_CONTENT),
+            FrameCapabilities {
+                append_content: self.supports_capability(CAP_APPEND_CONTENT),
+                semantics: self.supports_capability(CAP_SEMANTICS),
+            },
         );
         if self.supports_capability(CAP_REGION_METADATA) {
             name_new_regions(&mut optimized_messages, &next_tree);
@@ -298,6 +301,15 @@ impl NativeBackend {
         }
 
         let content = view.content();
+        crate::widgets::send_semantics(
+            &mut |message| {
+                messages.push(message.clone());
+                Ok(())
+            },
+            region_id,
+            view.semantics(),
+            &content,
+        )?;
         if content != Content::None {
             messages.push(AppMessage::SetContent {
                 id: region_id,
@@ -755,6 +767,58 @@ mod tests {
             names(&second),
             vec![(button_labels(&second)[0].0, "c".to_string())]
         );
+    }
+
+    fn semantics_sent(messages: &[AppMessage]) -> Vec<ultty_protocol::Semantics> {
+        messages
+            .iter()
+            .filter_map(|m| match m {
+                AppMessage::SetSemantics { semantics, .. } => Some(semantics.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn checkbox(checked: bool) -> Column {
+        Column::new().child(crate::widgets::Checkbox::new("Accept").checked(checked))
+    }
+
+    #[test]
+    fn semantics_go_once_when_negotiated_again_on_change_and_never_for_the_default() {
+        use ultty_protocol::{Role, Toggled};
+
+        let (mut backend, mut reader) = backend_over_pair();
+        backend.render(&checkbox(false)).unwrap();
+        assert!(
+            semantics_sent(&drain_messages(&mut reader)).is_empty(),
+            "not negotiated"
+        );
+
+        let (mut backend, mut reader) = backend_over_pair();
+        backend.negotiated_capabilities = ultty_protocol::CAP_SEMANTICS;
+        backend.render(&checkbox(false)).unwrap();
+        let first = semantics_sent(&drain_messages(&mut reader));
+        assert_eq!(
+            first.len(),
+            1,
+            "the column is a group, as derived: {first:?}"
+        );
+        assert_eq!(first[0].role, Role::Checkbox);
+        assert_eq!(first[0].toggled, Toggled::False);
+
+        backend.render(&checkbox(false)).unwrap();
+        assert!(drain_messages(&mut reader).is_empty());
+
+        backend.render(&checkbox(true)).unwrap();
+        let changed = semantics_sent(&drain_messages(&mut reader));
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].toggled, Toggled::True);
+
+        // A button says nothing its content does not: nothing is sent.
+        let (mut backend, mut reader) = backend_over_pair();
+        backend.negotiated_capabilities = ultty_protocol::CAP_SEMANTICS;
+        backend.render(&buttons(&["a", "b"])).unwrap();
+        assert!(semantics_sent(&drain_messages(&mut reader)).is_empty());
     }
 
     #[test]

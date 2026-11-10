@@ -88,6 +88,14 @@ impl View for Spacer {
             ..Default::default()
         }
     }
+
+    /// Empty space: left out of the accessibility tree.
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            hidden: true,
+            ..Default::default()
+        }
+    }
 }
 
 /// Grouped content section with optional title and surface background.
@@ -122,6 +130,15 @@ impl Default for Section {
 }
 
 impl View for Section {
+    /// A group named by its title, which is shown as a level 2 heading.
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            role: ultty_protocol::Role::Group,
+            label: self.title.clone(),
+            ..Default::default()
+        }
+    }
+
     fn constraints(&self) -> Constraints {
         let theme = Theme::current();
         Constraints {
@@ -156,7 +173,7 @@ impl View for Section {
     ) -> crate::Result<Option<RegionId>> {
         if let Some(title_text) = &self.title {
             if index == 0 {
-                let title = Title::new(title_text.clone());
+                let title = Title::new(title_text.clone()).level(2);
                 return Ok(Some(render_view_to_native(
                     &title,
                     send_message,

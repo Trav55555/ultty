@@ -49,6 +49,19 @@ impl std::fmt::Debug for Collapsible {
 }
 
 impl View for Collapsible {
+    /// A tree item, expanded or collapsed, holding its header and body.
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            role: ultty_protocol::Role::TreeItem,
+            expanded: if self.expanded {
+                ultty_protocol::Expanded::Expanded
+            } else {
+                ultty_protocol::Expanded::Collapsed
+            },
+            ..Default::default()
+        }
+    }
+
     fn constraints(&self) -> Constraints {
         Constraints {
             display: Display::Flex,
@@ -105,9 +118,16 @@ impl View for Collapsible {
                     constraints: Constraints::default(),
                     style: ProtoStyle::default(),
                 })?;
+                let content = ultty_protocol::Content::Text(TextContent::new(chevron));
+                // The chevron is what `expanded` already says.
+                let decoration = ultty_protocol::Semantics {
+                    hidden: true,
+                    ..Default::default()
+                };
+                super::send_semantics(send_message, chevron_id, decoration, &content)?;
                 send_message(&AppMessage::SetContent {
                     id: chevron_id,
-                    content: ultty_protocol::Content::Text(TextContent::new(chevron)),
+                    content,
                 })?;
 
                 for i in 0..self.header.children_count() {

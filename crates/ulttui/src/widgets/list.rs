@@ -26,6 +26,7 @@ pub struct List<T> {
     key_parser: KeyParser,
     filter_query: Option<String>,
     filtered_indices: Vec<usize>,
+    label: Option<String>,
 }
 
 impl<T> Default for List<T> {
@@ -38,6 +39,7 @@ impl<T> Default for List<T> {
             key_parser: KeyParser::new(),
             filter_query: None,
             filtered_indices: Vec::new(),
+            label: None,
         }
     }
 }
@@ -51,6 +53,12 @@ impl<T> List<T> {
         let len = items.len();
         self.items = items;
         self.filtered_indices = (0..len).collect();
+        self
+    }
+
+    /// The list's accessible name, such as "Files".
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
         self
     }
 
@@ -186,6 +194,14 @@ impl<T: std::fmt::Display> View for List<T> {
         ultty_protocol::Content::None
     }
 
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            role: ultty_protocol::Role::List,
+            label: self.label.clone(),
+            ..Default::default()
+        }
+    }
+
     fn children_count(&self) -> usize {
         self.filtered_indices.len()
     }
@@ -233,9 +249,20 @@ impl<T: std::fmt::Display> View for List<T> {
             style,
         })?;
 
+        let content = ultty_protocol::Content::Text(TextContent::new(text));
+        // Each row is an item with its place among the visible ones.
+        let row = ultty_protocol::Semantics {
+            role: ultty_protocol::Role::ListItem,
+            position: Some(ultty_protocol::SetPosition {
+                index: index as u32 + 1,
+                size: self.filtered_indices.len() as u32,
+            }),
+            ..Default::default()
+        };
+        super::send_semantics(send_message, region_id, row, &content)?;
         send_message(&AppMessage::SetContent {
             id: region_id,
-            content: ultty_protocol::Content::Text(TextContent::new(text)),
+            content,
         })?;
 
         Ok(Some(region_id))

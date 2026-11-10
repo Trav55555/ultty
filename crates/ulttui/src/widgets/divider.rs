@@ -62,6 +62,14 @@ impl View for Divider {
         Content::Text(TextContent::new(self.ch.to_string()))
     }
 
+    /// Decoration: left out of the accessibility tree.
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            hidden: true,
+            ..Default::default()
+        }
+    }
+
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         if area.width == 0 || area.height == 0 {
             return;
