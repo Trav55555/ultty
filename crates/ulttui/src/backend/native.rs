@@ -182,13 +182,23 @@ impl NativeBackend {
         self.prefer_in_band
     }
 
+    /// Say goodbye and drop the link. A terminal that has already gone
+    /// (it closed the socket, or the tty hung up) is not an error: there is
+    /// nobody left to tell.
     pub fn shutdown(&mut self) -> crate::Result<()> {
-        if self.is_connected() {
-            self.send_message(&AppMessage::Disconnect)?;
-            self.stream = None;
-            self.in_band = None;
+        if !self.is_connected() {
+            return Ok(());
         }
-        Ok(())
+        let sent = self.send_message(&AppMessage::Disconnect);
+        self.stream = None;
+        self.in_band = None;
+        match sent {
+            Err(crate::Error::Io(err)) if terminal_gone(&err) => {
+                tracing::debug!("the terminal left before the disconnect: {err}");
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     /// Append text to an existing native region without rebuilding a full frame.
@@ -579,6 +589,16 @@ impl NativeBackend {
     }
 }
 
+/// Whether a write failed because the terminal's end is closed.
+fn terminal_gone(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NotConnected
+    ) || err.raw_os_error() == Some(libc::EIO)
+}
+
 impl Default for NativeBackend {
     fn default() -> Self {
         Self::new()
@@ -708,6 +728,14 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "handshake took {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn shutting_down_after_the_terminal_left_is_not_an_error() {
+        let (mut backend, terminal) = backend_over_pair();
+        drop(terminal);
+        backend.shutdown().unwrap();
+        assert!(backend.wait_fd().is_none());
     }
 
     #[test]

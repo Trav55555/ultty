@@ -2077,10 +2077,11 @@ mod async_tests {
             }
             assert!(proxy.send(true).is_ok());
             latencies.sort();
-            latencies[latencies.len() / 2]
+            // The terminal stays open until the app has said goodbye.
+            (latencies[latencies.len() / 2], terminal)
         });
         runner.run().unwrap();
-        let median = driver.join().unwrap();
+        let (median, _terminal) = driver.join().unwrap();
         // Waiting for the reply cost a 16 ms poll timeout per frame.
         assert!(
             median < Duration::from_millis(8),
