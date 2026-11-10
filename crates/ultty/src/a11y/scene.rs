@@ -587,6 +587,9 @@ fn set_state(node: &mut Node, semantics: &Semantics) {
     if semantics.modal {
         node.set_modal();
     }
+    if semantics.selected {
+        node.set_selected(true);
+    }
     match semantics.live {
         Live::Off => {}
         Live::Polite => node.set_live(AkLive::Polite),
@@ -1009,6 +1012,7 @@ mod tests {
             expanded: Expanded::Collapsed,
             level: 3,
             position: Some(SetPosition { index: 2, size: 5 }),
+            selected: true,
             ..semantics(Role::TreeItem)
         });
         scene.add(4, 0, Content::None).set_semantics(Semantics {
@@ -1047,7 +1051,14 @@ mod tests {
             (item.position_in_set(), item.size_of_set()),
             (Some(2), Some(5))
         );
-        assert_eq!(region(&update, 4).is_expanded(), Some(true));
+        assert_eq!(item.is_selected(), Some(true));
+        let sibling = region(&update, 4);
+        assert_eq!(sibling.is_expanded(), Some(true));
+        assert_eq!(
+            sibling.is_selected(),
+            None,
+            "only the selected item says so"
+        );
         let dialog = region(&update, 5);
         assert!(dialog.is_modal());
         assert_eq!(dialog.description(), Some("Unsaved changes"));
