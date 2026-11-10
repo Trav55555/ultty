@@ -488,6 +488,64 @@ Each slice is independently testable and mergeable.
 7. **ulttui**: `View::semantics`, widget defaults, builders, `Semantic`,
    backend diffing, done-bar line. Check: widget snapshots gain semantics;
    `regions --json` on `chat` shows a `Log` with `Polite`.
+   Done 2026-11-10 except the Orca run. `snapshot_widget_semantics`
+   records what each widget sends; `scripts/e2e/accessibility-chat.sh`
+   finds `chat`'s transcript as a polite `Log` in `regions --json`,
+   types a message, and hears the streamed reply over AT-SPI once, in
+   order, polite; `accessibility-atspi.sh` also finds counter-app's
+   buttons named in `regions --json`. Choices made where §4 was open:
+   - The derivation from content moved into `ultty-protocol`
+     (`derive_semantics`), so the app compares with exactly what the
+     terminal derives: a view's semantics are sent only when they derive
+     to something else for its content (taken as never appended to and
+     not streaming). A button, a progress bar, a spinner, plain text and
+     containers send nothing.
+   - `SetSemantics` goes in the same frame as the region's create,
+     after every content change of the frame; with no capability, never.
+     A region whose view falls back to the default gets
+     `Semantics::default()`, so the terminal derives again.
+   - `Semantic` adds no region: it changes the semantics of the view it
+     wraps and forwards everything else. It also takes `hidden`.
+   - Defaults as built: `Button` button named by its label; `Checkbox`
+     checkbox and `Toggle` switch, named by the label without the drawn
+     prefix, `toggled`; `ProgressBar` progress, value 0–1; `Spinner`
+     busy status; `Badge` status; `ErrorState` alert, hint as
+     description; `Title` heading, level 1 (`Title::level`), a
+     `Section`'s title level 2 and the section a group named by it;
+     `Divider`, `Spacer` hidden; `Image` image, `.label()` is the alt
+     text; `TextInput` input with the typed value and placeholder (not
+     the focus and vim markers its content draws), nothing for a
+     `.password()`; `Select` list, collapsed or expanded, the selected
+     option as `value_text` and its position; `List` list, rows list
+     items with position; `Tabs` tab list, tabs named by their labels
+     with position; `Tree` tree, rows tree items with level and
+     expanded, the texts drawn in a row hidden; `Collapsible` tree item,
+     expanded, chevron hidden; `Modal` modal dialog named by its title,
+     hidden while not visible, its buttons buttons. `LoadingState`,
+     `EmptyState`, `Table`, containers: the derived default.
+   - §1 has no `selected` state, so the active tab, list row and tree row
+     are not exposed as selected; only their style shows it. Adding a
+     `selected` flag is a protocol change for a later slice.
+   - `MarkdownView::streaming(true)`: natively the view is then one
+     region whose own text is the whole document (spans keep their
+     styles; a code block loses its left rule until the stream ends), so
+     streamed text reaches it as `AppendContent` and is announced. No
+     cursor is drawn natively while streaming: it would be appended and
+     spoken; `busy` says it instead. Finished, it is block regions again.
+   - A live region's text growth is always sent as `AppendContent`, even
+     when styling changed too (a span turned bold): the new text is
+     appended and a `SetContent` in the same frame sets the styled
+     result. When text in its last line changed (`**bo` became bold),
+     what follows the unchanged part is appended again, so a word can be
+     spoken twice; changes above the last line are set, not announced.
+   - Text that arrives in the frame a region stops being live is still
+     appended, before the semantics change: a streaming markdown view
+     ending with its last chunk becomes block regions, and the text they
+     add past what it held is appended to it first. Without that the last
+     words of every reply were lost (seen over AT-SPI).
+   - The first text a live region is created with is not appended; it
+     names the region if it is one line (§1). An app that wants every
+     word announced shows the streaming view before the first chunk.
 8. **AT-SPI smoke test in CI**, or the local script if headless AT-SPI is
    unreliable.
 9. **macOS**: VoiceOver run of the manual script, differences recorded.
