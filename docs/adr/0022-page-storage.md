@@ -90,15 +90,16 @@ PackedCell(u64)
   bits 21..23  width: 0 narrow, 1 wide, 2 spacer, 3 wide+spacer (never written; kept so
                any Cell round-trips)
   bit  23      grapheme: the page holds extra codepoints for this cell (HAS_COMBINING)
-  bits 24..48  style id (24 bits; 0 is the default style)
-  bits 48..64  reserved, zero
+  bits 24..64  style key (40 bits): with bit 39 set, an inline style (fg and bg as a
+               2-bit kind plus an 8-bit value each, then 16 flag bits); otherwise a
+               24-bit table id, 0 being the default style
 ```
 
-`Style` is today's `history::Style`: fg, bg, underline color (packed u32 each), the `CellFlags` other than the three structural ones, and the hyperlink id, about 20 bytes. Each page owns a `StyleTable { styles: Vec<Style>, index: HashMap<Style, u32> }` (foldhash, as the render caches use), with id 0 always the default.
+`Style` is today's `history::Style`: fg, bg, underline color (packed u32 each), the `CellFlags` other than the three structural ones, and the hyperlink id, about 20 bytes. A style that fits inline is always stored inline. The rest go in the grid's `StyleTable`, with id 0 always the default. The table interns approximately, through a 256-slot cache of recent styles, so equal keys mean equal styles but unequal keys may still name equal styles.
 
 The public `Cell` stays as the unpacked value type: readers get `Cell` by value, built from the packed cell and the page's table. Packing is lossless for every `Cell`, including the flag combinations that only direct edits create. This keeps the history round-trip property exact.
 
-Why 24 bits and not Ghostty's 16: the screen page's table is collected in place (below), and a 300x220 window holds 66k cells. With 24 bits the live set can never exceed the id space, so there is no overflow path to test.
+Why a 40-bit key and not Ghostty's 16-bit id: the screen page's table is collected in place (below), and a 300x220 window holds 66k cells. With 24 bits of table id the live set can never exceed the id space, so there is no overflow path to test. The inline form keeps the common styles (named or indexed colors and flags) out of the table, so most cells never intern.
 
 ### 2. The screen page
 
@@ -309,7 +310,7 @@ Every slice is one or more small commits. After each one, all of these pass:
 3. Should the renderer cache gain a (page uid, slot, row version) fast path ahead of the content comparison, and is that safe for panes and the alternate screen?
 4. History page size: 256 rows, or a byte cap? How large should the free list be, and should `clear_history` return memory to the allocator?
 5. Should the write loop use explicit SIMD if autovectorisation does not happen, or is the scalar loop enough?
-6. Are the 16 reserved bits in the cell worth spending (for example on DECSCA protection), or should they be kept free?
+6. ~~Are the 16 reserved bits in the cell worth spending?~~ Answered: they were spent on the inline style key (§1). Anything else, such as DECSCA protection, now needs a new bit.
 7. Could cell-form history rows go to a compact UTF-8 form during idle periods to save memory, without touching the I/O thread during floods? Not planned; it depends on question 1.
 
 ## Consequences
