@@ -518,7 +518,7 @@ An unknown `role`, `live`, `toggled` or `expanded` value, a flag bit outside `0x
 
 Out-of-range numbers are accepted and clamped when the tree is exposed: a `position` index is clamped to `1..=size`, a `value` with `min > max` is treated as having no known range, and otherwise `now` is clamped into `[min, max]`. Relationship targets are not checked: apps create regions in any order inside a frame, and a target that does not exist is ignored when the tree is exposed.
 
-`busy` marks work in progress; `hidden` leaves the region and its subtree out of the accessibility tree (decorative dividers, spacers); `atomic` asks for the whole region to be announced when part of it changes; `modal` marks a `Dialog` that blocks the rest of the app; `selected` marks the chosen item of a set (the active `Tab`, the selected `ListItem`, `TreeItem` or table row).
+`busy` marks work in progress; `hidden` leaves the region and its subtree out of the accessibility tree (decorative dividers, spacers); `atomic` asks for the whole region to be announced when part of it changes; `modal` marks a `Dialog` that blocks the rest of the app; `selected` marks the chosen item of a set (the active `Tab`, the selected `ListItem`, `TreeItem` or table row). A `Tab`, `ListItem` or `TreeItem` without it is exposed as selectable but not selected; other roles expose no selection state unless it is set.
 
 Roles form a closed set. Each maps to an AccessKit role when the terminal exposes the tree:
 

@@ -587,8 +587,13 @@ fn set_state(node: &mut Node, semantics: &Semantics) {
     if semantics.modal {
         node.set_modal();
     }
+    // Tabs, list items and tree items are selectable by role (as in
+    // ARIA), so one without the flag is "not selected" rather than
+    // unknown; other roles say nothing unless the flag is set.
     if semantics.selected {
         node.set_selected(true);
+    } else if matches!(semantics.role, Role::Tab | Role::ListItem | Role::TreeItem) {
+        node.set_selected(false);
     }
     match semantics.live {
         Live::Off => {}
@@ -1056,11 +1061,12 @@ mod tests {
         assert_eq!(sibling.is_expanded(), Some(true));
         assert_eq!(
             sibling.is_selected(),
-            None,
-            "only the selected item says so"
+            Some(false),
+            "an item is selectable, so its sibling is not selected"
         );
         let dialog = region(&update, 5);
         assert!(dialog.is_modal());
+        assert_eq!(dialog.is_selected(), None, "other roles say nothing");
         assert_eq!(dialog.description(), Some("Unsaved changes"));
         let log = region(&update, 6);
         assert_eq!(log.live(), Some(AkLive::Polite));

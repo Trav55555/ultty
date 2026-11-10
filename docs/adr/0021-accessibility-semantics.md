@@ -526,8 +526,12 @@ Each slice is independently testable and mergeable.
    - The active tab, the selected `List` row, the selected `Tree` row
      and the selected `Table` row carry the `selected` flag (bit 64,
      added after this slice; see open questions), and only that one
-     item does. `Select` is one region, so its selected option stays its
-     `value_text` and position.
+     item does. The terminal exposes any `Tab`, `ListItem` or `TreeItem`
+     without the flag as selectable but not selected, as ARIA does for
+     those roles, so one bit is enough. A table row has no row role and
+     is a `Group` with the flag, which AccessKit's selection interface
+     does not count as an item. `Select` is one region, so its selected
+     option stays its `value_text` and position.
    - `MarkdownView` is one region per block, streaming or not. While it
      streams, the block still arriving is live itself (with the view's
      liveness) and the view is the busy log around it; a finished block
