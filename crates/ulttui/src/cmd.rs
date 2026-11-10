@@ -159,6 +159,10 @@ pub enum Sub<M> {
     None,
     /// Tick at a regular interval.
     ///
+    /// Intervals shorter than
+    /// [`MIN_TIMER_INTERVAL`](crate::app::MIN_TIMER_INTERVAL) (16 ms, zero
+    /// included) tick at that rate.
+    ///
     /// Timer state (the last tick) is tracked per timer identity across
     /// frames. With an explicit `id` the identity is that id; without one it
     /// is the interval plus the timer's position among unkeyed timers with

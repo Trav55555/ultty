@@ -186,15 +186,15 @@ struct TimerState {
 }
 
 impl TimerState {
-    /// When the event loop must wake for this timer. A zero interval fires on
-    /// every pass of the loop but never wakes it by itself.
+    /// When the event loop must wake for this timer.
     fn deadline(&self) -> Option<Instant> {
-        if self.interval.is_zero() {
-            return None;
-        }
         self.last_tick.checked_add(self.interval)
     }
 }
+
+/// The shortest `Sub::every` interval; shorter ones (zero included) tick at
+/// this rate, about once a frame.
+pub const MIN_TIMER_INTERVAL: Duration = Duration::from_millis(16);
 
 /// A running `Cmd::spawn*` / `Cmd::after` task.
 struct SpawnedTask {
@@ -896,9 +896,12 @@ fn collect_subscriptions<M>(sub: Sub<M>, ctx: &mut SubCollectCtx<'_, M>) {
     match sub {
         Sub::None => {}
         Sub::Every { id, interval, f } => {
+            // Identity uses the interval asked for, the schedule the clamped one.
+            let asked = interval;
+            let interval = interval.max(MIN_TIMER_INTERVAL);
             let key = match id {
                 Some(id) => id,
-                None => unkeyed_timer_key(interval, ctx.unkeyed_timer_counts),
+                None => unkeyed_timer_key(asked, ctx.unkeyed_timer_counts),
             };
             if ctx.new_timers.contains_key(&key) {
                 tracing::warn!(

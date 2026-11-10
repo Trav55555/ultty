@@ -322,6 +322,15 @@ fn a_timer_deadline_wakes_the_loop() {
 }
 
 #[test]
+fn a_zero_interval_timer_ticks_at_the_minimum_interval() {
+    let (elapsed, passes) = run_idle(probe(Some(Duration::ZERO), 5), |_| {});
+    let min = ulttui::app::MIN_TIMER_INTERVAL * 5;
+    assert!(elapsed >= min, "{elapsed:?} for 5 ticks");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    assert!(passes <= 12, "{passes} passes for 5 ticks");
+}
+
+#[test]
 fn a_finished_command_wakes_the_loop() {
     let mut app = probe(None, 1);
     app.init_cmd = Some(Cmd::spawn(async {
