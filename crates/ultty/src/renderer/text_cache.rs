@@ -13,7 +13,7 @@
 //! alternate screen, and panes that share one renderer.
 
 use super::{ColorScheme, Vertex};
-use crate::grid::{CellFlags, Row};
+use crate::grid::{Row, RowView};
 
 /// Everything outside a row's own content that its vertices depend on.
 /// When any of it changes, every cached row of the draw is stale.
@@ -46,20 +46,12 @@ struct CachedRow {
 }
 
 impl CachedRow {
-    fn is_built_from(&self, row: &Row, cursor_col: Option<u16>) -> bool {
-        let Some(content) = &self.content else {
-            return false;
-        };
+    fn is_built_from(&self, row: &RowView<'_>, cursor_col: Option<u16>) -> bool {
         self.cursor_col == cursor_col
-            && content.width() == row.width()
-            && content.cells().eq(row.cells())
-            && row
-                .cells()
-                .enumerate()
-                .filter(|(_, cell)| cell.has_flag(CellFlags::HAS_COMBINING))
-                .all(|(col, _)| {
-                    content.grapheme_extra(col as u16) == row.grapheme_extra(col as u16)
-                })
+            && self
+                .content
+                .as_ref()
+                .is_some_and(|content| row.eq_row(content))
     }
 }
 
@@ -82,7 +74,7 @@ impl GridTextCache {
 
     /// Whether row `index`'s cached vertices were built from `row` with the
     /// block cursor at `cursor_col`.
-    pub fn is_current(&self, index: u16, row: &Row, cursor_col: Option<u16>) -> bool {
+    pub fn is_current(&self, index: u16, row: &RowView<'_>, cursor_col: Option<u16>) -> bool {
         self.rows
             .get(index as usize)
             .is_some_and(|cached| cached.is_built_from(row, cursor_col))
@@ -101,13 +93,19 @@ impl GridTextCache {
     }
 
     /// Record that `vertices` were built for row `index` from `row`.
-    pub fn store(&mut self, index: u16, row: &Row, cursor_col: Option<u16>, vertices: Vec<Vertex>) {
+    pub fn store(
+        &mut self,
+        index: u16,
+        row: &RowView<'_>,
+        cursor_col: Option<u16>,
+        vertices: Vec<Vertex>,
+    ) {
         let Some(cached) = self.rows.get_mut(index as usize) else {
             return;
         };
         match &mut cached.content {
-            Some(content) => content.copy_from(row),
-            None => cached.content = Some(row.clone()),
+            Some(content) => row.copy_into(content),
+            None => cached.content = Some(row.to_row()),
         }
         cached.cursor_col = cursor_col;
         cached.vertices = vertices;
@@ -161,7 +159,7 @@ mod tests {
     fn cache_with(row: &Row) -> GridTextCache {
         let mut cache = GridTextCache::default();
         cache.begin(key(), 2);
-        cache.store(0, row, None, vec![vertex()]);
+        cache.store(0, &RowView::from(row), None, vec![vertex()]);
         cache
     }
 
@@ -170,7 +168,7 @@ mod tests {
         let row = row_of("ls -la");
         let mut cache = cache_with(&row);
         cache.begin(key(), 2);
-        assert!(cache.is_current(0, &row, None));
+        assert!(cache.is_current(0, &RowView::from(&row), None));
         let rows: Vec<usize> = cache.vertices().map(<[Vertex]>::len).collect();
         assert_eq!(rows, [1, 0]);
     }
@@ -179,8 +177,8 @@ mod tests {
     fn rows_never_built_are_not_current() {
         let row = row_of("ls");
         let cache = cache_with(&row);
-        assert!(!cache.is_current(1, &row, None));
-        assert!(!cache.is_current(5, &row, None));
+        assert!(!cache.is_current(1, &RowView::from(&row), None));
+        assert!(!cache.is_current(5, &RowView::from(&row), None));
     }
 
     #[test]
@@ -188,11 +186,11 @@ mod tests {
         let row = row_of("ls -la");
         let cache = cache_with(&row);
 
-        assert!(!cache.is_current(0, &row_of("ls -lb"), None));
+        assert!(!cache.is_current(0, &RowView::from(&row_of("ls -lb")), None));
 
         let mut recolored = row.clone();
         recolored.get_mut(1).unwrap().set_fg(Color::RED);
-        assert!(!cache.is_current(0, &recolored, None));
+        assert!(!cache.is_current(0, &RowView::from(&recolored), None));
     }
 
     #[test]
@@ -200,25 +198,25 @@ mod tests {
         let mut row = row_of("e");
         row.set_grapheme_extra(0, &['\u{301}']);
         let cache = cache_with(&row);
-        assert!(cache.is_current(0, &row, None));
+        assert!(cache.is_current(0, &RowView::from(&row), None));
 
         let mut other = row_of("e");
         other.set_grapheme_extra(0, &['\u{300}']);
-        assert!(!cache.is_current(0, &other, None));
+        assert!(!cache.is_current(0, &RowView::from(&other), None));
     }
 
     #[test]
     fn the_block_cursor_entering_or_leaving_rebuilds_the_row() {
         let row = row_of("ls");
         let cache = cache_with(&row);
-        assert!(!cache.is_current(0, &row, Some(1)));
+        assert!(!cache.is_current(0, &RowView::from(&row), Some(1)));
 
         let mut cache = GridTextCache::default();
         cache.begin(key(), 1);
-        cache.store(0, &row, Some(1), Vec::new());
-        assert!(!cache.is_current(0, &row, None));
-        assert!(!cache.is_current(0, &row, Some(2)));
-        assert!(cache.is_current(0, &row, Some(1)));
+        cache.store(0, &RowView::from(&row), Some(1), Vec::new());
+        assert!(!cache.is_current(0, &RowView::from(&row), None));
+        assert!(!cache.is_current(0, &RowView::from(&row), Some(2)));
+        assert!(cache.is_current(0, &RowView::from(&row), Some(1)));
     }
 
     #[test]
@@ -236,7 +234,7 @@ mod tests {
             let mut changed = key();
             change(&mut changed);
             cache.begin(changed, 2);
-            assert!(!cache.is_current(0, &row, None));
+            assert!(!cache.is_current(0, &RowView::from(&row), None));
         }
     }
 
@@ -253,7 +251,7 @@ mod tests {
         let row = row_of("ls");
         let mut cache = cache_with(&row);
         cache.store_empty(0);
-        assert!(!cache.is_current(0, &row, None));
+        assert!(!cache.is_current(0, &RowView::from(&row), None));
         assert!(cache.vertices().all(<[Vertex]>::is_empty));
     }
 }

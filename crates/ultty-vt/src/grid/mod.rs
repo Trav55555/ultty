@@ -34,7 +34,13 @@ mod cluster;
 mod history;
 mod image;
 mod palette;
+#[cfg(feature = "page-proto")]
+#[doc(hidden)]
+pub mod proto;
+#[cfg(test)]
+mod reference;
 mod row;
+mod row_view;
 mod term_handler;
 mod terminal;
 
@@ -43,6 +49,7 @@ pub use cell::{Cell, CellFlags, Color, UnderlineStyle};
 pub use image::{decode_sixel, ImageId, ImageStore, TerminalImage};
 pub use palette::{format_color_spec, Palette, Rgb, ThemeColors};
 pub use row::{AnchorTag, Row, RowMarks};
+pub use row_view::RowView;
 pub use term_handler::TerminalHandler;
 pub use terminal::{
     AnchorEvent, LastCommand, MouseButton, MouseEncoding, MouseMode, MouseModifiers, Selection,

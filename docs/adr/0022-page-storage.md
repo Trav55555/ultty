@@ -2,7 +2,34 @@
 
 ## Status
 
-Proposed 2026-11-09, draft. Not accepted until the prototype gate in §Prototype passes; if it fails, this ADR is recorded as Rejected together with the measurements.
+Accepted 2026-11-09, after the prototype gate in §Prototype passed in round 3 (below). The history of the gate follows. Accepting it adopts round 2's style layout: §1's bits 24..64 become one style key, either an inline style or a 24-bit table id, and the per-page style table interns approximately. The sgr-dense wall-clock cost (3.6–4.4% slower in C on the quiet machine, against +0.5% to +1.4% instructions) is explained in the perf note's "sgr-dense wall clock" section. The implementation should apply SGR directly to the style key rather than going through `Style::of`.
+
+Proposed 2026-11-09. Not accepted until the prototype gate in §Prototype passes; if it fails, this ADR is recorded as Rejected together with the measurements.
+
+**Prototype measured 2026-11-09: not GO** ([2026-11-09-page-storage-prototype.md](../perf/2026-11-09-page-storage-prototype.md)). Variant C meets every GO criterion but one:
+- vt/ascii is 18.6–19.4 instructions per byte at 1 and 8 MiB;
+- scroll is −35% to −44% and wide-wrap −46% to −56%;
+- cjk is −33% to −40%;
+- the PTY harness runs ascii +45.5% at 120x40 and +49.9% at 300x75 (paired medians, 120 rounds; per-arm IQR 4–7.6% of the median);
+- live heap is about a third of the reference's.
+
+The failure is sgr-dense, at +16% to +23% instructions and −12% to −16% wall clock against a limit of +3%. The cost is interning styles that are mostly new, which A pays as well. "A only" does not qualify: A carries 38–81% of C's instruction cut and 61–71% of its wall-clock gain, below two thirds. The NO-GO kill rule does not fire. Not accepted as written. Accepting it would need either a measured fix for sgr-dense interning or a decision to change that criterion.
+
+**Prototype round 2, 2026-11-09: GO on every criterion but the wall-clock spread** (same note, "Second round"). The prototype's style handling changed in four ways:
+- styles with no truecolor, underline color or hyperlink are stored inline in the cell's top 40 bits (a tag bit, fg and bg as kind plus index, and the flags), so they never touch the table;
+- the table interns approximately, through a 256-slot cache of recent styles, and a miss appends a new id instead of a hash lookup and insert;
+- collection waits for max(4096, 2 × screen cells) new styles;
+- the history cell copy is tighter.
+
+Results for C:
+- sgr-dense is +0.5% to +1.4% instructions (was +16% to +23%) and level with the reference on the wall clock;
+- every other instruction criterion still passes (ascii 18.7–19.5 per byte, scroll −35% to −43%, wide-wrap −46% to −56%, cjk −36% to −43%);
+- the PTY harness gives ascii +42.4% and +49.2% (95% CI ±1.5–3%);
+- live heap is 1.20 / 1.34 / 9.99 MB.
+
+The clause not met is "spread under 5%": per-arm IQR/median is 8–10% on the shared workstation, pinned or not. "A only" still does not qualify (A carries 55–66% of C's wall-clock gain), and NO-GO does not fire. If accepted, §1 changes: bits 24..64 become one style key, either an inline style or a 24-bit table id, which spends the reserved bits of open question 6, and the "interned per page" table becomes approximate. Accepting the ADR on these numbers, or after a wall-clock rerun on a quiet machine, is the owners' decision.
+
+**Prototype round 3, 2026-11-09: GO** (same note, "Third round: quiet machine"). The round-2 wall clock, rerun unchanged on an idle AWS c7a.2xlarge, gives per-arm IQR/median 0.3–2.6% (C 0.3–0.7%), so the spread clause is met and the gate passes as written. C runs ascii +44.8% and +50.9% (95% CI ±0.2%) and cjk +52% to +54%. "A only" still does not qualify (60% and 49% of C's gain), and NO-GO does not fire. The quiet machine also shows sgr-dense 3.6–4.4% slower in C on the wall clock, where round 2 read it as level; the sgr-dense criterion is measured in instructions (+0.5% to +1.4%), so this does not fail the gate, but it is outside +3% if read as time. Acceptance remains the owners' decision.
 
 ## Context
 
@@ -51,7 +78,7 @@ Fit a per-row cost S, a CR/LF dispatch cost P and a per-character cost c to thes
 - **Reflow.** `reflow_all` streams history: decode each `CompactRow` → `ReflowCell`s → `Rewrap::push_row`, which keeps the last screenful as `Row`s and `CompactRow::encode`s older rows. Marks go to the first row of a logical line, and anchors end lines. `resize_height` clones top rows into history or decodes rows pulled back from it.
 - **Budgets.** `crates/ultty/benches/memory.rs` gates live heap at measured +5%: empty 80x24 185 KB; empty 300x75 1.229 MB (two screens of 24-byte cells); typical 10k lines 2.915 / 3.461 / 4.358 MB at 80/120/300 columns; the resize case 3.461 MB live and 4.935 MB peak; sgr-dense 10k 18.98 MB. That works out to about 300 bytes per typical history line and about 1.8 KB per sgr-dense line.
 
-## Decision (proposed)
+## Decision
 
 Store each buffer's screen in one **screen page** and its scrollback in a list of **history pages**, both made of 8-byte packed cells whose styles are interned in a table per page. Rows become slots in a page, not heap objects. Every reader goes through a borrowed `RowView`. The parser's API does not change.
 
