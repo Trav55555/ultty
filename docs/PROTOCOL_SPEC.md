@@ -503,7 +503,7 @@ The payload after `id: u32`, in encoding order:
 | `label` | `Option<string>` | Accessible name |
 | `description` | `Option<string>` | Longer help text |
 | `live` | `u8` | `Off=0`, `Polite=1`, `Assertive=2` |
-| `flags` | `u8` | `busy=1`, `hidden=2`, `read_only=4`, `disabled=8`, `atomic=16`, `modal=32` |
+| `flags` | `u8` | `busy=1`, `hidden=2`, `read_only=4`, `disabled=8`, `atomic=16`, `modal=32`, `selected=64` |
 | `toggled` | `u8` | `Unset=0`, `False=1`, `True=2`, `Mixed=3` |
 | `expanded` | `u8` | `Unset=0`, `Collapsed=1`, `Expanded=2` |
 | `value` | `Option<(f32 now, f32 min, f32 max)>` | Numeric value and range |
@@ -514,11 +514,11 @@ The payload after `id: u32`, in encoding order:
 | `described_by` | `Option<u32>` | Region whose text describes this one |
 | `controls` | `Option<u32>` | Region this one controls |
 
-An unknown `role`, `live`, `toggled` or `expanded` value, a flag bit outside `0x3F`, a NaN or infinite `value` float, a `label`, `description` or `value_text` longer than 4 KiB (`MAX_SEMANTICS_STRING_LEN`), and more than 8 KiB across those three (`MAX_SEMANTICS_TOTAL_BYTES`) are decode errors (`Error` 400). Accessible names are short, and the limits bound what semantics can add to a session's memory.
+An unknown `role`, `live`, `toggled` or `expanded` value, a flag bit outside `0x7F`, a NaN or infinite `value` float, a `label`, `description` or `value_text` longer than 4 KiB (`MAX_SEMANTICS_STRING_LEN`), and more than 8 KiB across those three (`MAX_SEMANTICS_TOTAL_BYTES`) are decode errors (`Error` 400). Accessible names are short, and the limits bound what semantics can add to a session's memory.
 
 Out-of-range numbers are accepted and clamped when the tree is exposed: a `position` index is clamped to `1..=size`, a `value` with `min > max` is treated as having no known range, and otherwise `now` is clamped into `[min, max]`. Relationship targets are not checked: apps create regions in any order inside a frame, and a target that does not exist is ignored when the tree is exposed.
 
-`busy` marks work in progress; `hidden` leaves the region and its subtree out of the accessibility tree (decorative dividers, spacers); `atomic` asks for the whole region to be announced when part of it changes; `modal` marks a `Dialog` that blocks the rest of the app.
+`busy` marks work in progress; `hidden` leaves the region and its subtree out of the accessibility tree (decorative dividers, spacers); `atomic` asks for the whole region to be announced when part of it changes; `modal` marks a `Dialog` that blocks the rest of the app; `selected` marks the chosen item of a set (the active `Tab`, the selected `ListItem`, `TreeItem` or table row).
 
 Roles form a closed set. Each maps to an AccessKit role when the terminal exposes the tree:
 
@@ -538,11 +538,11 @@ Roles form a closed set. Each maps to an AccessKit role when the terminal expose
 | 11 | `Switch` | `Switch`, with `toggled` |
 | 12 | `Progress` | `ProgressIndicator`, with `value` |
 | 13 | `List` | `List` |
-| 14 | `ListItem` | `ListItem`, with `position` |
+| 14 | `ListItem` | `ListItem`, with `position` and `selected` |
 | 15 | `TabList` | `TabList` |
-| 16 | `Tab` | `Tab`, with `position` |
+| 16 | `Tab` | `Tab`, with `position` and `selected` |
 | 17 | `Tree` | `Tree` |
-| 18 | `TreeItem` | `TreeItem`, with `expanded` and `level` |
+| 18 | `TreeItem` | `TreeItem`, with `expanded`, `level` and `selected` |
 | 19 | `Image` | `Image`; the label is the alt text |
 | 20 | `Link` | `Link` |
 

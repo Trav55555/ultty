@@ -241,6 +241,9 @@ pub struct Semantics {
     pub atomic: bool,
     /// A dialog that blocks the rest of the app.
     pub modal: bool,
+    /// The chosen item of its set: the active tab, the selected list,
+    /// tree or table row, the selected option.
+    pub selected: bool,
     pub toggled: Toggled,
     pub expanded: Expanded,
     pub value: Option<SemanticValue>,
@@ -264,13 +267,15 @@ pub const SEMANTICS_FLAG_READ_ONLY: u8 = 4;
 pub const SEMANTICS_FLAG_DISABLED: u8 = 8;
 pub const SEMANTICS_FLAG_ATOMIC: u8 = 16;
 pub const SEMANTICS_FLAG_MODAL: u8 = 32;
+pub const SEMANTICS_FLAG_SELECTED: u8 = 64;
 /// Every defined flag bit; any other bit is a decode error.
 pub const SEMANTICS_FLAGS_ALL: u8 = SEMANTICS_FLAG_BUSY
     | SEMANTICS_FLAG_HIDDEN
     | SEMANTICS_FLAG_READ_ONLY
     | SEMANTICS_FLAG_DISABLED
     | SEMANTICS_FLAG_ATOMIC
-    | SEMANTICS_FLAG_MODAL;
+    | SEMANTICS_FLAG_MODAL
+    | SEMANTICS_FLAG_SELECTED;
 
 impl Semantics {
     /// The flag bits of this value, as encoded on the wire.
@@ -282,6 +287,7 @@ impl Semantics {
             | bit(self.disabled, SEMANTICS_FLAG_DISABLED)
             | bit(self.atomic, SEMANTICS_FLAG_ATOMIC)
             | bit(self.modal, SEMANTICS_FLAG_MODAL)
+            | bit(self.selected, SEMANTICS_FLAG_SELECTED)
     }
 
     /// Set the flag fields from wire bits. The caller rejects unknown bits.
@@ -292,6 +298,7 @@ impl Semantics {
         self.disabled = flags & SEMANTICS_FLAG_DISABLED != 0;
         self.atomic = flags & SEMANTICS_FLAG_ATOMIC != 0;
         self.modal = flags & SEMANTICS_FLAG_MODAL != 0;
+        self.selected = flags & SEMANTICS_FLAG_SELECTED != 0;
     }
 }
 
