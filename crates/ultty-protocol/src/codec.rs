@@ -64,7 +64,7 @@ const MAX_IMAGE_DIMENSION: u32 = 16_384;
 const _: () = assert!(MAX_IMAGE_DATA_LEN <= MAX_PAYLOAD_LEN);
 
 /// Maximum allowed RichText span count to prevent OOM attacks.
-const MAX_SPAN_COUNT: usize = 10_000;
+pub const MAX_SPAN_COUNT: usize = 10_000;
 
 /// Maximum allowed metadata key/value pair count to prevent OOM attacks.
 const MAX_METADATA_PAIRS: usize = 1024;
@@ -75,10 +75,10 @@ const MAX_METADATA_TOTAL_BYTES: usize = 1024 * 1024;
 /// Maximum bytes of one `Semantics` string (label, description,
 /// value_text). Accessible names are short; the session does not charge
 /// semantics against its text budget, so the codec bounds them.
-const MAX_SEMANTICS_STRING_LEN: usize = 4 * 1024;
+pub const MAX_SEMANTICS_STRING_LEN: usize = 4 * 1024;
 
 /// Maximum bytes across all strings of one `Semantics`.
-const MAX_SEMANTICS_TOTAL_BYTES: usize = 8 * 1024;
+pub const MAX_SEMANTICS_TOTAL_BYTES: usize = 8 * 1024;
 
 // ============================================================================
 // Validation helpers

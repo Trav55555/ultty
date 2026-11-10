@@ -24,9 +24,46 @@ pub(crate) fn semantics_to_send(semantics: Semantics, content: &Content) -> Opti
     if semantics == Semantics::default() {
         return None;
     }
+    let semantics = within_codec_limits(semantics);
     let derived = ultty_protocol::derive_semantics(&Semantics::default(), content, false, false);
     let declared = ultty_protocol::derive_semantics(&semantics, content, false, false);
     (declared != derived).then_some(semantics)
+}
+
+/// Most bytes of a label or description sent: the two together with a
+/// full `value_text` stay within the codec's total.
+const MAX_NAME_BYTES: usize =
+    (ultty_protocol::MAX_SEMANTICS_TOTAL_BYTES - ultty_protocol::MAX_SEMANTICS_STRING_LEN) / 2;
+
+/// `semantics` with its strings cut, at a character boundary and ending
+/// in "…", to what the terminal decodes: a long input value or label
+/// would otherwise make it refuse the whole message.
+fn within_codec_limits(mut semantics: Semantics) -> Semantics {
+    for (text, limit) in [
+        (&mut semantics.label, MAX_NAME_BYTES),
+        (&mut semantics.description, MAX_NAME_BYTES),
+        (
+            &mut semantics.value_text,
+            ultty_protocol::MAX_SEMANTICS_STRING_LEN,
+        ),
+    ] {
+        if let Some(text) = text {
+            cut_to_bytes(text, limit);
+        }
+    }
+    semantics
+}
+
+fn cut_to_bytes(text: &mut String, limit: usize) {
+    if text.len() <= limit {
+        return;
+    }
+    let mut cut = limit - '…'.len_utf8();
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text.truncate(cut);
+    text.push('…');
 }
 
 /// Send `SetSemantics` for region `id` when `semantics` adds to what its
@@ -499,6 +536,31 @@ mod tests {
             .collect();
         assert_eq!(buttons, vec!["Yes", "No"]);
         assert!(Modal::new().visible(false).semantics().hidden);
+    }
+
+    #[test]
+    fn long_strings_are_cut_to_what_the_terminal_decodes() {
+        use crate::widgets::TextInput;
+        use ultty_protocol::{Decode, Encode};
+
+        let huge = "é".repeat(10_000);
+        let input = TextInput::new()
+            .value(huge.clone())
+            .label(huge.clone())
+            .description(huge);
+        let mut checked = 0;
+        for message in render_view_messages(&input).unwrap() {
+            let bytes = message.encode_to_bytes();
+            let decoded = AppMessage::decode(&mut &bytes[..]).expect("decodes");
+            if let AppMessage::SetSemantics { semantics, .. } = decoded {
+                let value = semantics.value_text.unwrap();
+                assert!(value.len() <= ultty_protocol::MAX_SEMANTICS_STRING_LEN);
+                assert!(value.ends_with('…') && value.starts_with('é'));
+                assert!(semantics.label.unwrap().len() <= MAX_NAME_BYTES);
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 1);
     }
 
     #[test]

@@ -52,7 +52,10 @@ mod semantics;
 mod style;
 mod surface;
 
-pub use codec::{Decode, Encode, MAX_REGION_COUNT};
+pub use codec::{
+    Decode, Encode, MAX_REGION_COUNT, MAX_SEMANTICS_STRING_LEN, MAX_SEMANTICS_TOTAL_BYTES,
+    MAX_SPAN_COUNT,
+};
 pub use content::{
     ButtonStyle, ButtonWidget, CodeWidget, Content, ImageScale, ImageWidget, InputWidget,
     MarkdownWidget, ProgressWidget, RichText, Span, SpinnerStyle, SpinnerWidget, TextAlign,
