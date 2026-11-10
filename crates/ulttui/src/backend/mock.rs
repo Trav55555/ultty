@@ -1,6 +1,8 @@
 //! Mock backend for testing.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use crate::event::Event;
 use crate::widgets::{render_view_messages, View};
@@ -9,7 +11,9 @@ use ultty_protocol::AppMessage;
 /// A mock backend that replays pre-programmed events and captures render calls.
 ///
 /// - `poll_event` never sleeps; it calls `std::thread::yield_now()` so spawned
-///   tokio tasks get a chance to run between ticks without wall-clock delays
+///   tokio tasks get a chance to run between ticks without wall-clock delays.
+///   The event loop never sleeps either, unless the backend is
+///   [`MockBackend::blocking_when_exhausted`]
 /// - Captures the full native message tree of every render for verification
 /// - Supports error injection via `inject_error()`
 /// - Tracks all events dispatched for assertion
@@ -30,6 +34,12 @@ pub struct MockBackend {
     idle_when_exhausted: bool,
     /// Idle polls returned since the event list ran out.
     idle_polls: usize,
+    /// Once the events run out, report no input, so the event loop sleeps
+    /// until a timer or a wake.
+    blocking: bool,
+    /// Every `poll_event` call, shared so a test can read it while the app
+    /// runs.
+    polls: Arc<AtomicUsize>,
     /// Events that were actually dispatched (for assertion).
     pub dispatched_events: Vec<Event>,
 }
@@ -46,7 +56,29 @@ impl MockBackend {
             dispatched_events: Vec::new(),
             idle_when_exhausted: false,
             idle_polls: 0,
+            blocking: false,
+            polls: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Once the scripted events run out, behave like an idle terminal: no
+    /// events and nothing to wake the event loop, which then sleeps until a
+    /// timer is due or something wakes it. The test ends the run (a
+    /// `Cmd::Quit` from the app, perhaps sent through a `Proxy`).
+    pub fn blocking_when_exhausted(mut self) -> Self {
+        self.blocking = true;
+        self
+    }
+
+    /// The number of `poll_event` calls so far, readable while the app runs:
+    /// one per pass of the event loop.
+    pub fn poll_count(&self) -> Arc<AtomicUsize> {
+        self.polls.clone()
+    }
+
+    /// Whether the event loop should poll again without sleeping.
+    pub fn has_pending_events(&self) -> bool {
+        !self.blocking || !self.events.is_empty() || self.pending_error.is_some()
     }
 
     /// Keep polling `None` after the scripted events run out instead of
@@ -79,6 +111,7 @@ impl MockBackend {
     }
 
     pub fn poll_event(&mut self) -> crate::Result<Option<Event>> {
+        self.polls.fetch_add(1, Ordering::SeqCst);
         // Check for injected error
         if let Some(err) = self.pending_error.take() {
             return Err(crate::Error::Mock(err));
@@ -89,6 +122,7 @@ impl MockBackend {
 
         let event = match self.events.pop_front() {
             Some(event) => event,
+            None if self.blocking => None,
             None if self.idle_when_exhausted && self.idle_polls < Self::MAX_IDLE_POLLS => {
                 self.idle_polls += 1;
                 None

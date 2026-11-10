@@ -121,6 +121,17 @@ impl InBandTty {
         self.last_sent.elapsed() >= HEARTBEAT_INTERVAL
     }
 
+    /// When the app will owe a heartbeat if it sends nothing before then.
+    pub fn heartbeat_at(&self) -> Instant {
+        self.last_sent + HEARTBEAT_INTERVAL
+    }
+
+    /// The descriptor input arrives on; readable when [`InBandTty::read`]
+    /// has something to read.
+    pub fn input_fd(&self) -> RawFd {
+        self.fd_in
+    }
+
     /// Wait up to `timeout` for input, then read everything available.
     /// Decoded frame bytes go to `on_frames`; everything else on stdin
     /// (replies such as DA1, stray keystrokes) goes to `on_other`, in order.

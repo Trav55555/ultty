@@ -6,6 +6,9 @@ pub mod mock;
 mod native;
 pub(crate) mod native_diff;
 
+use std::os::fd::RawFd;
+use std::time::Instant;
+
 use ultty_client::detect;
 
 use crate::event::Event;
@@ -105,7 +108,40 @@ impl Backend {
         }
     }
 
-    /// Poll for events.
+    /// The descriptor that becomes readable when the terminal has input for
+    /// [`Backend::poll_event`]; the event loop sleeps on it.
+    pub fn wait_fd(&self) -> Option<RawFd> {
+        match self {
+            Backend::Native(b) => b.wait_fd(),
+            Backend::Ansi(b) => b.wait_fd(),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(_) => None,
+        }
+    }
+
+    /// Whether [`Backend::poll_event`] has an event without the terminal
+    /// sending more (it read ahead), so the event loop must not sleep.
+    pub fn has_pending_events(&mut self) -> crate::Result<bool> {
+        match self {
+            Backend::Native(b) => Ok(b.has_pending_events()),
+            Backend::Ansi(b) => b.has_pending_events(),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(b) => Ok(b.has_pending_events()),
+        }
+    }
+
+    /// When the backend next needs [`Backend::poll_event`] called even
+    /// without input (the in-band heartbeat).
+    pub fn deadline(&self) -> Option<Instant> {
+        match self {
+            Backend::Native(b) => b.deadline(),
+            Backend::Ansi(_) => None,
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(_) => None,
+        }
+    }
+
+    /// Poll for events. Never waits for the terminal.
     pub fn poll_event(&mut self) -> crate::Result<Option<Event>> {
         match self {
             Backend::Native(b) => b.poll_event(),

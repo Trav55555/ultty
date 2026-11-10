@@ -3,8 +3,9 @@
 mod transport;
 
 use std::collections::{HashMap, VecDeque};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use ultty_protocol::{
@@ -46,9 +47,6 @@ fn name_new_regions(messages: &mut Vec<AppMessage>, tree: &RetainedTree) {
         .collect();
     messages.extend(names);
 }
-
-/// How long one event poll waits for terminal messages.
-const POLL_TIMEOUT: Duration = Duration::from_millis(16);
 
 /// How long the terminal has to answer `ClientHello` with `SessionReady`.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -107,6 +105,9 @@ impl NativeBackend {
     }
 
     pub fn init(&mut self) -> crate::Result<()> {
+        if self.is_connected() {
+            return Ok(());
+        }
         if self.prefer_in_band {
             return self.init_in_band();
         }
@@ -117,13 +118,10 @@ impl NativeBackend {
     }
 
     /// Run the handshake over a connected socket and start the session.
-    fn connect_socket(&mut self, stream: UnixStream) -> crate::Result<()> {
-        // Blocking writes; reads wait at most one poll interval, so the
-        // handshake finishes as soon as SessionReady arrives. A longer read
-        // timeout here made every read wait out that timeout once the
-        // terminal had answered, delaying startup by its full length.
+    pub(crate) fn connect_socket(&mut self, stream: UnixStream) -> crate::Result<()> {
+        // Blocking writes. Reads only happen once poll(2) says the socket
+        // is readable, so they never wait.
         stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(POLL_TIMEOUT))?;
         self.stream = Some(stream);
 
         self.send_client_hello()?;
@@ -184,13 +182,23 @@ impl NativeBackend {
         self.prefer_in_band
     }
 
+    /// Say goodbye and drop the link. A terminal that has already gone
+    /// (it closed the socket, or the tty hung up) is not an error: there is
+    /// nobody left to tell.
     pub fn shutdown(&mut self) -> crate::Result<()> {
-        if self.is_connected() {
-            self.send_message(&AppMessage::Disconnect)?;
-            self.stream = None;
-            self.in_band = None;
+        if !self.is_connected() {
+            return Ok(());
         }
-        Ok(())
+        let sent = self.send_message(&AppMessage::Disconnect);
+        self.stream = None;
+        self.in_band = None;
+        match sent {
+            Err(crate::Error::Io(err)) if terminal_gone(&err) => {
+                tracing::debug!("the terminal left before the disconnect: {err}");
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     /// Append text to an existing native region without rebuilding a full frame.
@@ -206,7 +214,9 @@ impl NativeBackend {
     }
 
     /// Send the changes between the last frame and `view`. A view that
-    /// renders the same as the last frame sends nothing at all.
+    /// renders the same as the last frame sends nothing at all. The
+    /// terminal's reply (its layout) is read when it arrives, through the
+    /// event loop's wait; sending a frame never waits for it.
     pub fn render(&mut self, view: &impl View) -> crate::Result<()> {
         let (frame_messages, native_keys) = self.collect_frame(view)?;
         let (mut optimized_messages, next_tree) = optimize_frame_messages(
@@ -229,8 +239,6 @@ impl NativeBackend {
             }
             self.send_message(&AppMessage::EndFrame { frame_id })?;
         }
-
-        self.process_pending_messages()?;
 
         Ok(())
     }
@@ -329,6 +337,27 @@ impl NativeBackend {
         self.negotiated_capabilities & capability != 0
     }
 
+    /// The socket or terminal the terminal's messages arrive on.
+    pub fn wait_fd(&self) -> Option<RawFd> {
+        match (&self.stream, &self.in_band) {
+            (_, Some(tty)) => Some(tty.input_fd()),
+            (Some(stream), None) => Some(stream.as_raw_fd()),
+            (None, None) => None,
+        }
+    }
+
+    /// Whether events were read ahead (with a message that carried several,
+    /// or an earlier read).
+    pub fn has_pending_events(&self) -> bool {
+        !self.pending_events.is_empty()
+    }
+
+    /// When the next in-band heartbeat is due.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.in_band.as_ref().map(|tty| tty.heartbeat_at())
+    }
+
+    /// The next event, from what the terminal has sent so far. Never waits.
     pub fn poll_event(&mut self) -> crate::Result<Option<Event>> {
         if self.in_band.as_ref().is_some_and(|tty| tty.heartbeat_due()) {
             // An unsolicited Pong tells the terminal an idle app is alive.
@@ -352,14 +381,10 @@ impl NativeBackend {
     }
 
     fn wait_for_session_ready(&mut self) -> crate::Result<()> {
-        let deadline = std::time::Instant::now() + HANDSHAKE_TIMEOUT;
-        while std::time::Instant::now() < deadline {
-            if self.read_available()? == ReadOutcome::Closed {
-                return Err(crate::Error::Handshake(
-                    "the terminal closed the connection".to_string(),
-                ));
-            }
-
+        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+        loop {
+            // What is already buffered first: the in-band probe may have
+            // read the whole answer.
             while let Some(msg) = self.next_decoded_message()? {
                 match msg {
                     TerminalMessage::ServerHello {
@@ -389,11 +414,17 @@ impl NativeBackend {
                     _ => {}
                 }
             }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Err(crate::Error::Handshake(
+                    "timed out waiting for SessionReady".to_string(),
+                ));
+            };
+            if self.read_available(remaining)? == ReadOutcome::Closed {
+                return Err(crate::Error::Handshake(
+                    "the terminal closed the connection".to_string(),
+                ));
+            }
         }
-
-        Err(crate::Error::Handshake(
-            "timed out waiting for SessionReady".to_string(),
-        ))
     }
 
     /// Next well-formed buffered message, skipping (and logging) malformed
@@ -415,7 +446,7 @@ impl NativeBackend {
             return Ok(());
         }
 
-        let outcome = self.read_available()?;
+        let outcome = self.read_available(Duration::ZERO)?;
 
         while let Some(msg) = self.next_decoded_message()? {
             match msg {
@@ -558,6 +589,16 @@ impl NativeBackend {
     }
 }
 
+/// Whether a write failed because the terminal's end is closed.
+fn terminal_gone(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NotConnected
+    ) || err.raw_os_error() == Some(libc::EIO)
+}
+
 impl Default for NativeBackend {
     fn default() -> Self {
         Self::new()
@@ -658,6 +699,43 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "handshake took {elapsed:?}"
         );
+    }
+
+    /// The in-band probe can read the terminal's whole answer before the
+    /// handshake looks for it; it must not then wait for more.
+    #[test]
+    fn a_session_ready_already_read_ends_the_handshake_at_once() {
+        use ultty_protocol::Encode;
+        let (mut backend, _terminal) = backend_over_pair();
+        for msg in [
+            TerminalMessage::ServerHello {
+                version: ultty_protocol::PROTOCOL_VERSION,
+                capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
+            },
+            TerminalMessage::SessionReady {
+                session_id: 1,
+                root_region: RegionId::ROOT,
+                width: 80,
+                height: 24,
+            },
+        ] {
+            backend.read_buf.extend_from_slice(&msg.encode_to_bytes());
+        }
+        let started = std::time::Instant::now();
+        backend.wait_for_session_ready().unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "handshake took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn shutting_down_after_the_terminal_left_is_not_an_error() {
+        let (mut backend, terminal) = backend_over_pair();
+        drop(terminal);
+        backend.shutdown().unwrap();
+        assert!(backend.wait_fd().is_none());
     }
 
     #[test]

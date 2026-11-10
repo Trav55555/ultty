@@ -1,6 +1,8 @@
 //! Native backend I/O (socket or in-band) and terminal-message framing.
 
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::time::Duration;
 
 use bytes::Buf;
 use ultty_protocol::{AppMessage, Decode, Encode, TerminalMessage, FRAME_MAGIC};
@@ -52,14 +54,14 @@ impl NativeBackend {
         self.stream.is_some() || self.in_band.is_some()
     }
 
-    /// Read everything currently available without blocking past the socket's
-    /// read timeout. Returns `Closed` on EOF instead of an error so callers can
-    /// turn a disconnect into an orderly quit.
-    pub(super) fn read_available(&mut self) -> crate::Result<ReadOutcome> {
+    /// Wait up to `timeout` for input, then read everything available.
+    /// Returns `Closed` on EOF instead of an error so callers can turn a
+    /// disconnect into an orderly quit.
+    pub(super) fn read_available(&mut self, timeout: Duration) -> crate::Result<ReadOutcome> {
         if let Some(tty) = self.in_band.as_mut() {
             let read_buf = &mut self.read_buf;
             let status = tty.read(
-                super::POLL_TIMEOUT,
+                timeout,
                 |frames| read_buf.extend_from_slice(frames),
                 |other| tracing::trace!("ignoring {} non-protocol bytes on stdin", other.len()),
             )?;
@@ -71,7 +73,13 @@ impl NativeBackend {
         let stream = self.stream.as_mut().ok_or(crate::Error::NotConnected)?;
 
         let mut buf = [0u8; 4096];
+        let mut wait = timeout;
         loop {
+            // The socket blocks (for writes); read only what has arrived.
+            if !crate::wake::poll_readable(&[stream.as_raw_fd()], Some(wait))? {
+                break;
+            }
+            wait = Duration::ZERO;
             match stream.read(&mut buf) {
                 Ok(0) => return Ok(ReadOutcome::Closed),
                 Ok(n) => {
@@ -239,7 +247,10 @@ mod tests {
         backend.stream = Some(reader);
         drop(writer);
 
-        assert_eq!(backend.read_available().unwrap(), ReadOutcome::Closed);
+        assert_eq!(
+            backend.read_available(std::time::Duration::ZERO).unwrap(),
+            ReadOutcome::Closed
+        );
     }
 
     #[test]
@@ -271,7 +282,10 @@ mod tests {
             .write_all(&TerminalMessage::Ping.encode_to_bytes())
             .unwrap();
 
-        assert_eq!(backend.read_available().unwrap(), ReadOutcome::Open);
+        assert_eq!(
+            backend.read_available(std::time::Duration::ZERO).unwrap(),
+            ReadOutcome::Open
+        );
 
         assert!(matches!(
             backend.try_decode_message().unwrap(),

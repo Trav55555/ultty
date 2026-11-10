@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use ulttui::app::Application;
+use ulttui::app::App;
+use ulttui_lua::runner::watch_file;
 use ulttui_lua::{LuaApp, ScriptOptions};
 
 const USAGE: &str = "usage: ulttui-lua [--allow-exec] [--log FILE] SCRIPT.luau
@@ -72,7 +73,14 @@ fn main() -> anyhow::Result<()> {
             ..ScriptOptions::default()
         },
     )?;
-    app.run()?;
+    let runner = App::new(app);
+    let proxy = runner.proxy();
+    // Each change goes straight to the event loop, waking it.
+    let _watch = watch_file(&args.script, move |msg| {
+        // Fails only once the app has quit.
+        let _ = proxy.send(msg);
+    })?;
+    runner.run()?;
     Ok(())
 }
 

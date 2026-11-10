@@ -15,8 +15,8 @@ outside Ultty (ANSI mode). Without it, ulttui-lua must already be running
 on FILE with --log LOG (the native e2e starts it inside Ultty).
 
 Prints one line per reload and the median, p90 and max, and the medians of
-the parts the log reports: wait (change seen -> reload starts: the settle
-delay and the event loop's next tick), reload (compile, init and trial
+the parts the log reports: wait (change seen -> reload starts: waking the
+event loop, plus the settle delay for a change that may be partial), reload (compile, init and trial
 view) and render (building and drawing the frame).
 """
 

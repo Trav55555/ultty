@@ -14,9 +14,12 @@ use crate::focus::FocusManager;
 use crate::screen::{Screen, ScreenAction};
 use crate::theme::Theme;
 use crate::toast::{Toast, ToastSeverity};
+use crate::wake::{self, WakeListener, Waker};
 use crate::widgets::{render_view_to_native, Badge, BadgeVariant, Column, Spacer, View};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
+
+pub use crate::wake::Proxy;
 use ultty_protocol::{AppMessage, RegionId};
 
 struct OverlayView<'a> {
@@ -96,6 +99,13 @@ pub trait Application: Sized {
     /// Message type for state updates.
     type Message: Send + 'static;
 
+    /// Called once when the app starts, before the first `view`. Its
+    /// command runs like one `update` returns: start the first loads,
+    /// subscriptions and so on here.
+    fn init(&mut self) -> Cmd<Self::Message> {
+        Cmd::none()
+    }
+
     /// Update state based on a message.
     fn update(&mut self, _msg: Self::Message) -> Cmd<Self::Message> {
         Cmd::none()
@@ -144,14 +154,20 @@ pub struct App<A: Application> {
     theme: Theme,
     /// `Sub::every` timer state keyed by timer identity (see `Sub::Every`).
     timers: HashMap<String, TimerState>,
-    /// Spawned tasks (`Cmd::spawn*` / `Cmd::after`) with their optional
-    /// cancellation id. Finished handles are pruned every tick.
-    spawn_handles: Vec<(Option<String>, tokio::task::JoinHandle<A::Message>)>,
+    /// Spawned tasks (`Cmd::spawn*` / `Cmd::after`) that have not delivered
+    /// their message yet.
+    spawn_handles: Vec<SpawnedTask>,
+    /// Messages of finished spawned tasks.
+    task_tx: mpsc::UnboundedSender<TaskDone<A::Message>>,
+    task_rx: mpsc::UnboundedReceiver<TaskDone<A::Message>>,
     cmd_subscription_handles: HashMap<String, tokio::task::JoinHandle<()>>,
     stream_subscription_handles: HashMap<String, tokio::task::JoinHandle<()>>,
     stream_subscription_urls: HashMap<String, String>,
     stream_backoff: HashMap<String, StreamBackoff>,
-    subscription_tx: mpsc::UnboundedSender<A::Message>,
+    /// Wakes the event loop's wait when there is work for it.
+    waker: Waker,
+    /// Delivers subscription items (and [`Proxy::send`]) to `subscription_rx`.
+    proxy: Proxy<A::Message>,
     subscription_rx: mpsc::UnboundedReceiver<A::Message>,
     msg_queue: VecDeque<A::Message>,
     screen_stack: Vec<Box<dyn Screen>>,
@@ -166,6 +182,34 @@ pub struct App<A: Application> {
 struct TimerState {
     /// The reference tick the next firing is scheduled from.
     last_tick: Instant,
+    interval: Duration,
+}
+
+impl TimerState {
+    /// When the event loop must wake for this timer.
+    fn deadline(&self) -> Option<Instant> {
+        self.last_tick.checked_add(self.interval)
+    }
+}
+
+/// The shortest `Sub::every` interval; shorter ones (zero included) tick at
+/// this rate, about once a frame.
+pub const MIN_TIMER_INTERVAL: Duration = Duration::from_millis(16);
+
+/// A running `Cmd::spawn*` / `Cmd::after` task.
+struct SpawnedTask {
+    /// The id given to `Cmd::spawn_with_id`, for cancelling it.
+    id: Option<String>,
+    handle: tokio::task::JoinHandle<()>,
+    /// Set when the task is cancelled, so a message it already sent is
+    /// dropped instead of delivered.
+    cancelled: Arc<AtomicBool>,
+}
+
+/// The message a spawned task produced.
+struct TaskDone<M> {
+    cancelled: Arc<AtomicBool>,
+    msg: M,
 }
 
 const STREAM_BACKOFF_BASE: Duration = Duration::from_millis(250);
@@ -180,6 +224,9 @@ struct StreamBackoff {
     retry_at: Option<Instant>,
     /// Set by the task once the WebSocket handshake succeeded.
     connected: Arc<AtomicBool>,
+    /// Set by the task as it ends, just before it wakes the loop (whose
+    /// join handle may not report the end yet).
+    ended: Arc<AtomicBool>,
 }
 
 struct StreamSubSpec<M> {
@@ -198,6 +245,8 @@ enum StreamSubscriptionAction {
 
 struct SubCollectCtx<'a, M> {
     now: Instant,
+    /// Fire due timers; otherwise only record them.
+    fire: bool,
     old_timers: &'a HashMap<String, TimerState>,
     new_timers: &'a mut HashMap<String, TimerState>,
     /// Ordinal counters for unkeyed timers, per interval, within one frame.
@@ -209,20 +258,29 @@ struct SubCollectCtx<'a, M> {
 impl<A: Application> App<A> {
     /// Create a new app runner.
     pub fn new(app: A) -> Self {
+        Self::with_backend(app, Backend::detect())
+    }
+
+    fn with_backend(app: A, backend: Backend) -> Self {
         let (subscription_tx, subscription_rx) = mpsc::unbounded_channel();
+        let (task_tx, task_rx) = mpsc::unbounded_channel();
+        let waker = Waker::default();
         Self {
             app,
-            backend: Backend::detect(),
+            backend,
             focus: FocusManager::new(),
             focus_initialized: false,
             theme: Theme::dark(),
             timers: HashMap::new(),
             spawn_handles: Vec::new(),
+            task_tx,
+            task_rx,
             cmd_subscription_handles: HashMap::new(),
             stream_subscription_handles: HashMap::new(),
             stream_subscription_urls: HashMap::new(),
             stream_backoff: HashMap::new(),
-            subscription_tx,
+            proxy: Proxy::new(subscription_tx, waker.clone()),
+            waker,
             subscription_rx,
             msg_queue: VecDeque::new(),
             screen_stack: Vec::new(),
@@ -234,6 +292,12 @@ impl<A: Application> App<A> {
         }
     }
 
+    /// A handle for sending the app messages from other threads while it
+    /// runs (a file watch, a worker thread). Each send wakes the event loop.
+    pub fn proxy(&self) -> Proxy<A::Message> {
+        self.proxy.clone()
+    }
+
     pub fn new_with_theme(app: A, theme: Theme) -> Self {
         let mut runner = Self::new(app);
         runner.theme = theme;
@@ -242,7 +306,8 @@ impl<A: Application> App<A> {
 
     /// Run the application event loop.
     ///
-    /// Event loop contract (Bubble Tea parity):
+    /// `Application::init` runs once, before the first frame. Then each pass
+    /// of the loop (Bubble Tea parity):
     /// 1. Poll backend for events
     /// 2. Normalize events → messages via on_event()
     /// 3. Drain message queue (update → Cmd scheduling)
@@ -250,23 +315,89 @@ impl<A: Application> App<A> {
     /// 5. Poll spawned tasks → enqueue messages
     /// 6. Drain message queue again (from subs/spawns)
     /// 7. Render view
+    ///
+    /// Between passes the loop sleeps until there is something to do: input
+    /// from the terminal, a timer, toast or reconnect deadline, a finished
+    /// command, a subscription item or a [`Proxy::send`]. An idle app does
+    /// not wake at all.
     pub fn run(mut self) -> crate::Result<()> {
         let rt = Runtime::new()?;
+        let wake = self.waker.listen()?;
         self.backend.init()?;
         self.backend_initialized = true;
+        if matches!(self.backend, Backend::Ansi(_)) {
+            // The terminal reports a resize only as SIGWINCH, which need not
+            // interrupt this thread's wait.
+            Self::wake_on_resize(&rt, self.waker.clone());
+        }
 
-        // Initial render so UI appears immediately before first poll.
-        self.render()?;
+        let init = self.app.init();
+        self.process_cmd(init, &rt);
 
-        loop {
-            if !self.run_tick(&rt)? {
-                break;
+        if !self.quit_requested {
+            // Initial render so UI appears immediately before first poll.
+            self.render()?;
+            while self.run_tick(&rt)? {
+                self.wait_for_work(&wake)?;
             }
         }
 
         self.cleanup_runtime_resources();
         self.shutdown_backend()?;
         Ok(())
+    }
+
+    fn wake_on_resize(rt: &Runtime, waker: Waker) {
+        rt.spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut resizes = match signal(SignalKind::window_change()) {
+                Ok(resizes) => resizes,
+                Err(err) => {
+                    tracing::warn!("cannot watch for terminal resizes: {err}");
+                    return;
+                }
+            };
+            while resizes.recv().await.is_some() {
+                waker.wake();
+            }
+        });
+    }
+
+    /// Sleep until there may be work: terminal input, a wake, or the next
+    /// deadline. Returns at once when work is already waiting.
+    fn wait_for_work(&mut self, wake: &WakeListener) -> crate::Result<()> {
+        if !self.msg_queue.is_empty()
+            || self.waker.take_pending()
+            || self.backend.has_pending_events()?
+        {
+            return Ok(());
+        }
+        let timeout = self
+            .next_deadline()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let mut fds = vec![wake.fd()];
+        fds.extend(self.backend.wait_fd());
+        wake::poll_readable(&fds, timeout)?;
+        wake.drain();
+        // Whatever woke us is handled by the next pass.
+        self.waker.take_pending();
+        Ok(())
+    }
+
+    /// The earliest time the loop has to run without being woken: a timer, a
+    /// toast expiring, a stream reconnect, or the backend's own deadline.
+    fn next_deadline(&self) -> Option<Instant> {
+        let timers = self.timers.values().filter_map(TimerState::deadline);
+        let toasts = self
+            .active_toasts
+            .iter()
+            .filter_map(|(toast, created)| created.checked_add(toast.duration));
+        let retries = self.stream_backoff.values().filter_map(|b| b.retry_at);
+        timers
+            .chain(toasts)
+            .chain(retries)
+            .chain(self.backend.deadline())
+            .min()
     }
 
     /// Run one pass of the application event loop.
@@ -364,6 +495,10 @@ impl<A: Application> App<A> {
         // 6. Drain message queue again (from subs/spawns)
         if self.drain_messages(rt) {
             self.needs_render = true;
+            // Those messages may have changed the subscriptions; register
+            // new timers now so the wait knows their deadlines. Due timers
+            // fire on the next pass.
+            self.refresh_subscriptions(rt, false);
         }
 
         let old_toast_count = self.active_toasts.len();
@@ -389,8 +524,8 @@ impl<A: Application> App<A> {
         for (_, handle) in self.stream_subscription_handles.drain() {
             handle.abort();
         }
-        for (_, handle) in self.spawn_handles.drain(..) {
-            handle.abort();
+        for task in self.spawn_handles.drain(..) {
+            task.handle.abort();
         }
     }
 
@@ -524,6 +659,13 @@ impl<A: Application> App<A> {
     }
 
     fn process_subscriptions(&mut self, rt: &Runtime) -> bool {
+        self.refresh_subscriptions(rt, true)
+    }
+
+    /// Re-read the app's subscriptions: keep timer phases, start and stop
+    /// streams. With `fire`, timers that are due fire (and their messages
+    /// are queued); without, they stay due.
+    fn refresh_subscriptions(&mut self, rt: &Runtime, fire: bool) -> bool {
         let now = Instant::now();
         let old_timers = std::mem::take(&mut self.timers);
         let mut new_timers = HashMap::new();
@@ -533,6 +675,7 @@ impl<A: Application> App<A> {
 
         let mut ctx = SubCollectCtx {
             now,
+            fire,
             old_timers: &old_timers,
             new_timers: &mut new_timers,
             unkeyed_timer_counts: &mut unkeyed_timer_counts,
@@ -567,7 +710,13 @@ impl<A: Application> App<A> {
         let running_by_id = self
             .stream_subscription_handles
             .iter()
-            .map(|(id, handle)| (id.clone(), !handle.is_finished()))
+            .map(|(id, handle)| {
+                let ended = self
+                    .stream_backoff
+                    .get(id)
+                    .is_some_and(|backoff| backoff.ended.load(Ordering::SeqCst));
+                (id.clone(), !ended && !handle.is_finished())
+            })
             .collect::<HashMap<_, _>>();
         let desired_urls = desired_by_id
             .iter()
@@ -637,14 +786,21 @@ impl<A: Application> App<A> {
             handle.abort();
         }
         let connected = Arc::new(AtomicBool::new(false));
-        let handle = Self::spawn_stream_subscription(
-            rt,
-            self.subscription_tx.clone(),
+        let ended = Arc::new(AtomicBool::new(false));
+        let task = stream_subscription_task(
+            self.proxy.clone(),
             spec.id.clone(),
             spec.url.clone(),
             spec.on_message,
             connected.clone(),
         );
+        let (waker, task_ended) = (self.waker.clone(), ended.clone());
+        let handle = rt.spawn(async move {
+            task.await;
+            // The loop reconnects (after a backoff) once it sees the end.
+            task_ended.store(true, Ordering::SeqCst);
+            waker.wake();
+        });
 
         self.stream_subscription_handles
             .insert(spec.id.clone(), handle);
@@ -656,63 +812,9 @@ impl<A: Application> App<A> {
                 failures,
                 retry_at: None,
                 connected,
+                ended,
             },
         );
-    }
-
-    fn spawn_stream_subscription(
-        rt: &Runtime,
-        tx: mpsc::UnboundedSender<A::Message>,
-        id: String,
-        url: String,
-        on_message: Box<dyn Fn(String) -> A::Message + Send + 'static>,
-        connected: Arc<AtomicBool>,
-    ) -> tokio::task::JoinHandle<()> {
-        rt.spawn(async move {
-            use futures_util::StreamExt;
-            use tokio_tungstenite::tungstenite::Message as WsMessage;
-
-            let ws = tokio_tungstenite::connect_async(url.as_str()).await;
-            let (mut socket, _) = match ws {
-                Ok(parts) => parts,
-                Err(err) => {
-                    tracing::warn!("stream subscription {} connect failed: {}", id, err);
-                    return;
-                }
-            };
-            connected.store(true, Ordering::SeqCst);
-
-            while let Some(item) = socket.next().await {
-                match item {
-                    Ok(WsMessage::Text(text)) => {
-                        if tx.send(on_message(text.to_string())).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(WsMessage::Binary(bytes)) => match String::from_utf8(bytes.to_vec()) {
-                        Ok(text) => {
-                            if tx.send(on_message(text)).is_err() {
-                                break;
-                            }
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                "stream subscription {} dropped non-utf8 frame: {}",
-                                id,
-                                err
-                            );
-                        }
-                    },
-                    Ok(WsMessage::Close(_)) => break,
-                    Ok(WsMessage::Ping(_)) | Ok(WsMessage::Pong(_)) => {}
-                    Ok(WsMessage::Frame(_)) => {}
-                    Err(err) => {
-                        tracing::warn!("stream subscription {} recv failed: {}", id, err);
-                        break;
-                    }
-                }
-            }
-        })
     }
 
     /// Poll subscription channels for incoming messages.
@@ -741,13 +843,65 @@ impl<A: Application> App<A> {
     }
 }
 
+/// Forward a WebSocket's messages to the app until it closes.
+async fn stream_subscription_task<M: Send + 'static>(
+    tx: Proxy<M>,
+    id: String,
+    url: String,
+    on_message: Box<dyn Fn(String) -> M + Send + 'static>,
+    connected: Arc<AtomicBool>,
+) {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let ws = tokio_tungstenite::connect_async(url.as_str()).await;
+    let (mut socket, _) = match ws {
+        Ok(parts) => parts,
+        Err(err) => {
+            tracing::warn!("stream subscription {} connect failed: {}", id, err);
+            return;
+        }
+    };
+    connected.store(true, Ordering::SeqCst);
+
+    while let Some(item) = socket.next().await {
+        match item {
+            Ok(WsMessage::Text(text)) => {
+                if tx.send(on_message(text.to_string())).is_err() {
+                    break;
+                }
+            }
+            Ok(WsMessage::Binary(bytes)) => match String::from_utf8(bytes.to_vec()) {
+                Ok(text) => {
+                    if tx.send(on_message(text)).is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("stream subscription {} dropped non-utf8 frame: {}", id, err);
+                }
+            },
+            Ok(WsMessage::Close(_)) => break,
+            Ok(WsMessage::Ping(_)) | Ok(WsMessage::Pong(_)) => {}
+            Ok(WsMessage::Frame(_)) => {}
+            Err(err) => {
+                tracing::warn!("stream subscription {} recv failed: {}", id, err);
+                break;
+            }
+        }
+    }
+}
+
 fn collect_subscriptions<M>(sub: Sub<M>, ctx: &mut SubCollectCtx<'_, M>) {
     match sub {
         Sub::None => {}
         Sub::Every { id, interval, f } => {
+            // Identity uses the interval asked for, the schedule the clamped one.
+            let asked = interval;
+            let interval = interval.max(MIN_TIMER_INTERVAL);
             let key = match id {
                 Some(id) => id,
-                None => unkeyed_timer_key(interval, ctx.unkeyed_timer_counts),
+                None => unkeyed_timer_key(asked, ctx.unkeyed_timer_counts),
             };
             if ctx.new_timers.contains_key(&key) {
                 tracing::warn!(
@@ -760,14 +914,19 @@ fn collect_subscriptions<M>(sub: Sub<M>, ctx: &mut SubCollectCtx<'_, M>) {
                 .get(&key)
                 .map(|state| state.last_tick)
                 .unwrap_or(ctx.now);
-            let (fired, next_tick) = advance_timer(last_tick, interval, ctx.now);
-            if fired {
-                ctx.messages.push(f());
+            let mut next_tick = last_tick;
+            if ctx.fire {
+                let (fired, next) = advance_timer(last_tick, interval, ctx.now);
+                if fired {
+                    ctx.messages.push(f());
+                }
+                next_tick = next;
             }
             ctx.new_timers.insert(
                 key,
                 TimerState {
                     last_tick: next_tick,
+                    interval,
                 },
             );
         }
@@ -881,29 +1040,7 @@ impl<A: Application> Drop for App<A> {
 impl<A: Application> App<A> {
     /// Create an app with a specific backend (for testing).
     pub fn new_with_backend(app: A, backend: Backend) -> Self {
-        let (subscription_tx, subscription_rx) = mpsc::unbounded_channel();
-        Self {
-            app,
-            backend,
-            focus: FocusManager::new(),
-            focus_initialized: false,
-            theme: Theme::dark(),
-            timers: HashMap::new(),
-            spawn_handles: Vec::new(),
-            cmd_subscription_handles: HashMap::new(),
-            stream_subscription_handles: HashMap::new(),
-            stream_subscription_urls: HashMap::new(),
-            stream_backoff: HashMap::new(),
-            subscription_tx,
-            subscription_rx,
-            msg_queue: VecDeque::new(),
-            screen_stack: Vec::new(),
-            active_toasts: Vec::new(),
-            quit_requested: false,
-            backend_initialized: false,
-            backend_shutdown: false,
-            needs_render: true,
-        }
+        Self::with_backend(app, backend)
     }
 }
 
@@ -1445,6 +1582,7 @@ mod async_tests {
             "poll".to_string(),
             TimerState {
                 last_tick: Instant::now() - Duration::from_secs(1),
+                interval: Duration::from_secs(60),
             },
         );
         let old_tick = runner.timers["poll"].last_tick;
@@ -1455,6 +1593,7 @@ mod async_tests {
         let mut messages = Vec::new();
         let mut ctx = SubCollectCtx {
             now: Instant::now(),
+            fire: true,
             old_timers: &runner.timers,
             new_timers: &mut ctx_timers,
             unkeyed_timer_counts: &mut counts,
@@ -1848,5 +1987,108 @@ mod async_tests {
         assert!(runner.run_tick(&rt).unwrap());
         assert!(runner.active_toasts.is_empty());
         assert_eq!(mock_render_count(&runner), 1);
+    }
+
+    /// A native-mode app driven over a socket pair by a fake terminal that
+    /// answers every frame late: the app must handle the next message at
+    /// once, not after waiting for (or a poll timeout on) that answer.
+    #[test]
+    fn a_late_terminal_reply_does_not_delay_the_next_message() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+        use ultty_protocol::{Decode, Encode, FrameId, LayoutTrigger, TerminalMessage};
+
+        struct Bumps(u32);
+        impl Application for Bumps {
+            type Message = bool;
+            fn update(&mut self, quit: bool) -> Cmd<bool> {
+                if quit {
+                    return Cmd::Quit;
+                }
+                self.0 += 1;
+                Cmd::none()
+            }
+            fn view(&self) -> impl View {
+                Text::new(format!("bumps {}", self.0))
+            }
+        }
+
+        fn next_message(terminal: &mut UnixStream) -> AppMessage {
+            let mut header = [0u8; 8];
+            terminal.read_exact(&mut header).unwrap();
+            let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+            let mut frame = header.to_vec();
+            frame.resize(8 + len, 0);
+            terminal.read_exact(&mut frame[8..]).unwrap();
+            AppMessage::decode(&mut &frame[..]).unwrap()
+        }
+        fn next_frame_end(terminal: &mut UnixStream) -> FrameId {
+            loop {
+                if let AppMessage::EndFrame { frame_id } = next_message(terminal) {
+                    return frame_id;
+                }
+            }
+        }
+        fn reply(terminal: &mut UnixStream, frame_id: FrameId) {
+            let layout = TerminalMessage::LayoutComputed {
+                frame_id: Some(frame_id),
+                trigger: LayoutTrigger::ContentChange,
+                regions: Vec::new(),
+            };
+            terminal.write_all(&layout.encode_to_bytes()).unwrap();
+        }
+
+        let (app_side, mut terminal) = UnixStream::pair().unwrap();
+        let handshake = std::thread::spawn(move || {
+            let mut hello = [0u8; 14];
+            terminal.read_exact(&mut hello).unwrap();
+            for msg in [
+                TerminalMessage::ServerHello {
+                    version: ultty_protocol::PROTOCOL_VERSION,
+                    capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
+                },
+                TerminalMessage::SessionReady {
+                    session_id: 1,
+                    root_region: RegionId::ROOT,
+                    width: 40,
+                    height: 10,
+                },
+            ] {
+                terminal.write_all(&msg.encode_to_bytes()).unwrap();
+            }
+            terminal
+        });
+        let mut backend = crate::backend::NativeBackend::new();
+        backend.connect_socket(app_side).unwrap();
+        let mut terminal = handshake.join().unwrap();
+
+        let runner = App::new_with_backend(Bumps(0), Backend::Native(backend));
+        let proxy = runner.proxy();
+        let driver = std::thread::spawn(move || {
+            let mut unanswered = vec![next_frame_end(&mut terminal)];
+            let mut latencies = Vec::new();
+            for _ in 0..10 {
+                // Sent right after the last frame, whose reply is still owed.
+                let sent = Instant::now();
+                assert!(proxy.send(false).is_ok());
+                unanswered.push(next_frame_end(&mut terminal));
+                latencies.push(sent.elapsed());
+            }
+            // The replies come only now.
+            for frame in unanswered {
+                reply(&mut terminal, frame);
+            }
+            assert!(proxy.send(true).is_ok());
+            latencies.sort();
+            // The terminal stays open until the app has said goodbye.
+            (latencies[latencies.len() / 2], terminal)
+        });
+        runner.run().unwrap();
+        let (median, _terminal) = driver.join().unwrap();
+        // Waiting for the reply cost a 16 ms poll timeout per frame.
+        assert!(
+            median < Duration::from_millis(8),
+            "message to frame took {median:?} (median)"
+        );
     }
 }
