@@ -143,8 +143,12 @@ can overrun it. The VM is capped at 256 MiB.
 
 `ulttui-lua` watches the script's file (through its directory, so editors
 that save by renaming a new file over the old one are seen) and nothing
-else. On a change it waits for 10 ms of quiet, reads the file and, if the
-bytes differ, loads it: the new chunk must return an app table, its
+else. A change that says the file is complete (it was written and closed,
+or renamed into place) reloads at once; any other change (a create, a
+truncate, one write of several, which is all some platforms report) reloads
+after 10 ms with no further change. The watch hands each change straight to
+the event loop, waking it. A reload reads the file and, if the bytes differ,
+loads it: the new chunk must return an app table, its
 `init(prev)` must return a state, and its `view` must build a view. If all of
 that works, the new version replaces the old one, keeping the state that
 `init` returned. If anything fails, the last good version keeps running with
@@ -159,24 +163,24 @@ place stay; its banner clears on the next `update` that works. A failing
 
 With `--log FILE`, each frame drawn after a reload logs `seen_to_frame_us`
 (from the watch seeing the change to the backend returning from drawing the
-frame), split into `wait_us` (the settle delay plus the wait for the event
-loop's next tick), `reload_us` (compile, `init` and the trial `view`) and
-`render_us`, and `frame_unix_us` (wall clock, to compare with the time the
-file was written).
+frame), split into `wait_us` (until the event loop starts the reload,
+including any settle delay), `reload_us` (compile, `init` and the trial
+`view`) and `render_us`, and `frame_unix_us` (wall clock, to compare with
+the time the file was written).
 
 Measured with `scripts/e2e/lua_reload_latency.py` on `hello.luau` (debug
-build, 20 saves, file write to frame):
+build, 20 saves by rename, file write to frame), 2026-11-10:
 
 | Mode | Median | p90 | Max | Where the time goes (medians) |
 |------|--------|-----|-----|-------------------------------|
-| ANSI (pty) | 24.4 ms | 25.9 ms | 26.5 ms | wait 23.9, reload 0.3, render 0.1 |
-| Native (headless Ultty) | 40.7 ms | 43.5 ms | 45.0 ms | wait 22.9, reload 0.3, render 17.7 |
+| ANSI (pty) | 0.8 ms | 1.1 ms | 3.3 ms | wait 0.0, reload 0.3, render 0.2 |
+| Native (headless Ultty) | 1.2 ms | 7.1 ms | 10.9 ms | wait 0.0, reload 0.3, render 0.3 |
 
-Compiling and running the script is negligible. The wait is the 10 ms settle
-delay plus up to one 16 ms event-loop poll. In native mode `render` includes
-the backend's read of the terminal's reply after it has sent the frame,
-which waits out the same 16 ms poll timeout, so the frame reaches the
-terminal about 17 ms before the logged time.
+Before the event loop slept on wakes (it polled every 16 ms, waited 10 ms
+after every change, and waited out a 16 ms read for the terminal's reply
+after each native frame) the same runs took 23.4 ms (ANSI) and 38.1 ms
+(native) at the median. The native tail is the occasional frame whose
+socket write waits for a busy terminal.
 
 ## Example: a counter
 
