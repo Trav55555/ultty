@@ -932,11 +932,7 @@ impl Terminal {
 
     fn update_cursor_row_marks(&mut self, update: impl FnOnce(&mut RowMarks)) {
         let row = self.grid().cursor().position.row;
-        if let Some(row) = self.grid_mut().row_mut(row) {
-            let mut marks = row.marks();
-            update(&mut marks);
-            row.set_marks(marks);
-        }
+        self.grid_mut().update_row_marks(row, update);
     }
 
     /// The command line typed after the prompt: from the row marked as

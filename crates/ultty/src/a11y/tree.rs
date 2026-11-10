@@ -37,7 +37,7 @@ use accesskit::{
 
 use super::live::LiveRegions;
 use super::scene::{Emitter, SceneSnapshot, MAX_PANE_NODES};
-use crate::grid::{CellFlags, Grid, Row};
+use crate::grid::{CellFlags, Grid, RowView};
 
 /// The window's node, the root of the tree.
 pub const WINDOW_ID: NodeId = NodeId(0);
@@ -157,11 +157,11 @@ impl GridSnapshot {
             let text = if index == cursor.position.row {
                 // Keep the blanks before the cursor, so the caret after a
                 // prompt's trailing space lands after it.
-                let text = RowText::capture(row, cursor_col, line_break, start);
+                let text = RowText::capture(&row, cursor_col, line_break, start);
                 caret = Some((usize::from(index), text.char_index_at(cursor_col)));
                 text
             } else {
-                RowText::capture(row, 0, line_break, start)
+                RowText::capture(&row, 0, line_break, start)
             };
             start = if row.is_wrapped() {
                 RowStart::After {
@@ -190,9 +190,9 @@ impl RowText {
     /// A wide character that did not fit at the end of a wrapping row
     /// leaves its last column as an ordinary blank cell (the grid does not
     /// mark it), so that blank is read as a space, as copying does.
-    fn capture(row: &Row, keep_columns: u16, line_break: bool, start: RowStart) -> Self {
+    fn capture(row: &RowView<'_>, keep_columns: u16, line_break: bool, start: RowStart) -> Self {
         let shows = |col: u16| {
-            row.get(col).is_some_and(|cell| {
+            row.cell(col).is_some_and(|cell| {
                 !cell.has_flag(CellFlags::HIDDEN)
                     && (cell.is_wide_spacer() || cell.char() != ' ' || cell.is_wide())
             })
@@ -218,7 +218,7 @@ impl RowText {
             RowStart::After { blank } => Some(blank),
         };
         for col in 0..end {
-            let Some(cell) = row.get(col) else { break };
+            let Some(cell) = row.cell(col) else { break };
             if cell.is_wide_spacer() {
                 continue;
             }

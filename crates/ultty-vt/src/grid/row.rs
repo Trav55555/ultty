@@ -87,7 +87,7 @@ impl AnchorTag {
 #[derive(Debug, Clone)]
 pub struct Row {
     cells: Vec<Cell>,
-    /// Dirty, wrapped and plain; see [`RowFlags`].
+    /// Dirty and wrapped; see [`RowFlags`].
     flags: RowFlags,
     /// Shell integration marks; see [`RowMarks`].
     marks: RowMarks,
@@ -108,9 +108,7 @@ pub struct Row {
     graphemes: GraphemeMap,
 }
 
-/// A row's boolean state in one byte. Rows are moved by value on every
-/// scroll, so `Row` is kept at 56 bytes: three separate `bool`s next to the
-/// anchor tag would round it up to 64.
+/// A row's boolean state in one byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RowFlags(u8);
 
@@ -119,12 +117,6 @@ impl RowFlags {
     const DIRTY: u8 = 1 << 0;
     /// The row is soft-wrapped: it continues on the next line.
     const WRAPPED: u8 = 1 << 1;
-    /// Every cell is ASCII in the default style, with no grapheme data, so
-    /// the row's content is its characters alone. Like `used`, it may
-    /// understate (anything handing out a mutable cell clears it) but never
-    /// overstates, so history can copy such a row's text without checking
-    /// each cell's style.
-    const PLAIN: u8 = 1 << 2;
 
     #[inline]
     fn get(self, flag: u8) -> bool {
@@ -146,10 +138,17 @@ impl RowFlags {
 /// Output is written left to right, so the cluster being built is nearly
 /// always the last entry and a write lands after all of them; lookups and
 /// inserts check the end before searching.
+///
+/// Most rows never hold a cluster, and screen rows are moved on every
+/// scroll, so the entries sit behind one pointer that stays empty until
+/// the first cluster.
 #[derive(Debug, Default)]
-struct GraphemeMap {
-    entries: Vec<(u16, Vec<char>)>,
+pub(super) struct GraphemeMap {
+    entries: Option<Box<Entries>>,
 }
+
+/// Columns and their extra codepoints.
+type Entries = Vec<(u16, Vec<char>)>;
 
 impl Clone for GraphemeMap {
     fn clone(&self) -> Self {
@@ -159,72 +158,98 @@ impl Clone for GraphemeMap {
     }
 
     fn clone_from(&mut self, source: &Self) {
-        self.entries.clone_from(&source.entries);
+        match (&mut self.entries, &source.entries) {
+            (Some(entries), Some(source)) => entries.clone_from(source),
+            (Some(entries), None) => entries.clear(),
+            (None, source) => self.entries.clone_from(source),
+        }
     }
 }
 
 impl GraphemeMap {
+    #[inline]
+    fn entries(&self) -> &[(u16, Vec<char>)] {
+        self.entries.as_deref().map_or(&[], Vec::as_slice)
+    }
+
+    fn entries_mut(&mut self) -> &mut Entries {
+        self.entries.get_or_insert_with(Box::default)
+    }
+
     /// The index of `col`'s entry, or where it would be inserted.
     fn find(&self, col: u16) -> Result<usize, usize> {
-        match self.entries.last() {
+        let entries = self.entries();
+        match entries.last() {
             None => Err(0),
-            Some(&(last, _)) if last < col => Err(self.entries.len()),
-            Some(&(last, _)) if last == col => Ok(self.entries.len() - 1),
-            Some(_) => self.entries.binary_search_by_key(&col, |&(c, _)| c),
+            Some(&(last, _)) if last < col => Err(entries.len()),
+            Some(&(last, _)) if last == col => Ok(entries.len() - 1),
+            Some(_) => entries.binary_search_by_key(&col, |&(c, _)| c),
         }
     }
 
-    fn get(&self, col: u16) -> Option<&[char]> {
+    pub(super) fn get(&self, col: u16) -> Option<&[char]> {
         let index = self.find(col).ok()?;
-        Some(&self.entries[index].1)
+        Some(&self.entries()[index].1)
     }
 
     /// `col`'s codepoints, inserting an empty entry if it has none.
-    fn entry(&mut self, col: u16) -> &mut Vec<char> {
-        let index = self.find(col).unwrap_or_else(|index| {
-            self.entries.insert(index, (col, Vec::new()));
+    pub(super) fn entry(&mut self, col: u16) -> &mut Vec<char> {
+        let found = self.find(col);
+        let entries = self.entries_mut();
+        let index = found.unwrap_or_else(|index| {
+            entries.insert(index, (col, Vec::new()));
             index
         });
-        &mut self.entries[index].1
+        &mut entries[index].1
     }
 
-    fn insert(&mut self, col: u16, extra: Vec<char>) {
-        match self.find(col) {
-            Ok(index) => self.entries[index].1 = extra,
-            Err(index) => self.entries.insert(index, (col, extra)),
+    pub(super) fn insert(&mut self, col: u16, extra: Vec<char>) {
+        let found = self.find(col);
+        let entries = self.entries_mut();
+        match found {
+            Ok(index) => entries[index].1 = extra,
+            Err(index) => entries.insert(index, (col, extra)),
         }
     }
 
-    fn remove(&mut self, col: u16) {
-        if let Ok(index) = self.find(col) {
-            self.entries.remove(index);
+    pub(super) fn remove(&mut self, col: u16) {
+        if let (Ok(index), Some(entries)) = (self.find(col), self.entries.as_mut()) {
+            entries.remove(index);
         }
     }
 
     /// Whether any entry is in `start..end`.
-    fn any_in(&self, start: u16, end: u16) -> bool {
+    #[inline]
+    pub(super) fn any_in(&self, start: u16, end: u16) -> bool {
+        let entries = self.entries();
         // Writes usually land after every cluster on the row.
-        if self.entries.last().is_none_or(|&(c, _)| c < start) {
+        if entries.last().is_none_or(|&(c, _)| c < start) {
             return false;
         }
-        let first = self.entries.partition_point(|&(c, _)| c < start);
-        self.entries.get(first).is_some_and(|&(c, _)| c < end)
+        let first = entries.partition_point(|&(c, _)| c < start);
+        entries.get(first).is_some_and(|&(c, _)| c < end)
     }
 
-    fn remove_range(&mut self, start: u16, end: u16) {
-        let first = self.entries.partition_point(|&(c, _)| c < start);
-        let past = self.entries.partition_point(|&(c, _)| c < end);
-        self.entries.drain(first..past);
+    pub(super) fn remove_range(&mut self, start: u16, end: u16) {
+        let Some(entries) = self.entries.as_mut() else {
+            return;
+        };
+        let first = entries.partition_point(|&(c, _)| c < start);
+        let past = entries.partition_point(|&(c, _)| c < end);
+        entries.drain(first..past);
     }
 
     /// Move entries at `from..` by `delta`, dropping any that land outside
     /// `0..width`. A moved entry replaces one already at its new column.
-    fn shift(&mut self, from: u16, delta: i32, width: u16) {
-        let first = self.entries.partition_point(|&(c, _)| c < from);
-        if first == self.entries.len() {
+    pub(super) fn shift(&mut self, from: u16, delta: i32, width: u16) {
+        let Some(entries) = self.entries.as_mut() else {
+            return;
+        };
+        let first = entries.partition_point(|&(c, _)| c < from);
+        if first == entries.len() {
             return;
         }
-        let moved: Vec<_> = self.entries.drain(first..).collect();
+        let moved: Vec<_> = entries.drain(first..).collect();
         for (col, extra) in moved {
             let dest = i32::from(col) + delta;
             if (0..i32::from(width)).contains(&dest) {
@@ -233,13 +258,18 @@ impl GraphemeMap {
         }
     }
 
-    fn truncate(&mut self, width: u16) {
-        let keep = self.entries.partition_point(|&(c, _)| c < width);
-        self.entries.truncate(keep);
+    pub(super) fn truncate(&mut self, width: u16) {
+        if let Some(entries) = self.entries.as_mut() {
+            let keep = entries.partition_point(|&(c, _)| c < width);
+            entries.truncate(keep);
+        }
     }
 
-    fn clear(&mut self) {
-        self.entries.clear();
+    #[inline]
+    pub(super) fn clear(&mut self) {
+        if let Some(entries) = self.entries.as_mut() {
+            entries.clear();
+        }
     }
 }
 
@@ -249,15 +279,6 @@ impl Row {
     /// grapheme codepoints than `max_extra`.
     pub fn check_integrity(&self, max_extra: usize) -> Result<(), String> {
         let cells = &self.cells;
-        if self.flags.get(RowFlags::PLAIN) {
-            if let Some(col) = cells.iter().position(|cell| {
-                let mut style = *cell;
-                style.set_char(' ');
-                !cell.char().is_ascii() || !style.is_default()
-            }) {
-                return Err(format!("row is marked plain but cell at col {col} is not"));
-            }
-        }
         if let Some(col) = cells[(self.used as usize).min(cells.len())..]
             .iter()
             .position(|cell| !cell.is_default())
@@ -294,7 +315,7 @@ impl Row {
     pub fn new(width: u16) -> Self {
         Self {
             cells: vec![Cell::default(); width as usize],
-            flags: RowFlags(RowFlags::DIRTY | RowFlags::PLAIN),
+            flags: RowFlags(RowFlags::DIRTY),
             marks: RowMarks::default(),
             anchor: AnchorTag::NONE,
             used: 0,
@@ -310,61 +331,11 @@ impl Row {
         let start = col as usize;
         let end = start + bytes.len();
         self.drop_grapheme_entries(col, end as u16);
-        if self.flags.get(RowFlags::PLAIN) {
-            let mut style = template;
-            style.set_char(' ');
-            self.flags.set(RowFlags::PLAIN, style.is_default());
-        }
         for (cell, &byte) in self.cells[start..end].iter_mut().zip(bytes) {
             *cell = template.with_char(byte as char);
         }
         self.mark_used(end);
         self.flags.set(RowFlags::DIRTY, true);
-    }
-
-    /// Write `c`, taking `width` (1 or 2) columns from `col`, as a copy of
-    /// `template` (and a spacer after a wide character), if those columns
-    /// hold no part of a wide character and fit on the row. Returns
-    /// `false`, having changed nothing, otherwise.
-    #[inline]
-    pub(crate) fn write_char_in_place(
-        &mut self,
-        col: u16,
-        c: char,
-        width: u16,
-        template: Cell,
-    ) -> bool {
-        let start = col as usize;
-        let end = start + width as usize;
-        let Some(cells) = self.cells.get_mut(start..end) else {
-            return false;
-        };
-        if cells
-            .iter()
-            .any(|cell| cell.is_wide() || cell.is_wide_spacer())
-        {
-            return false;
-        }
-        let mut written = template;
-        written.set_char(c);
-        written.unset_flag(CellFlags::HAS_COMBINING);
-        written.unset_flag(CellFlags::WIDE_CHAR_SPACER);
-        if width > 1 {
-            written.set_flag(CellFlags::WIDE_CHAR);
-            let mut spacer = template;
-            spacer.set_char(' ');
-            spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
-            spacer.unset_flag(CellFlags::WIDE_CHAR);
-            cells[1] = spacer;
-        } else {
-            written.unset_flag(CellFlags::WIDE_CHAR);
-        }
-        cells[0] = written;
-        self.drop_grapheme_entries(col, col + 1);
-        self.flags.set(RowFlags::PLAIN, false);
-        self.mark_used(end);
-        self.flags.set(RowFlags::DIRTY, true);
-        true
     }
 
     /// Make this row a copy of `other`, reusing this row's allocations.
@@ -376,6 +347,38 @@ impl Row {
         self.used = other.used;
         self.flags = other.flags;
         self.flags.set(RowFlags::DIRTY, true);
+    }
+
+    /// Make this row hold `cells`, the grapheme `extras` (by column) and the
+    /// given wrap, marks and anchor, reusing its allocations.
+    pub(super) fn assign<'e>(
+        &mut self,
+        cells: impl Iterator<Item = Cell>,
+        extras: impl Iterator<Item = (u16, &'e [char])>,
+        wrapped: bool,
+        marks: RowMarks,
+        anchor: AnchorTag,
+    ) {
+        self.cells.clear();
+        self.cells.extend(cells);
+        self.graphemes.clear();
+        for (col, extra) in extras {
+            self.graphemes.insert(col, extra.to_vec());
+        }
+        self.used = self
+            .cells
+            .iter()
+            .rposition(|cell| !cell.is_default())
+            .map_or(0, |last| last as u16 + 1);
+        self.marks = marks;
+        self.anchor = anchor;
+        self.flags = RowFlags(RowFlags::DIRTY);
+        self.flags.set(RowFlags::WRAPPED, wrapped);
+    }
+
+    /// The cells, as a slice.
+    pub(super) fn cells_slice(&self) -> &[Cell] {
+        &self.cells
     }
 
     /// Whether `other` shows the same: the same width, cells and grapheme
@@ -406,35 +409,6 @@ impl Row {
         Some(s)
     }
 
-    /// Run `f` on the grapheme at `col` followed by `then`, as one string.
-    /// Clusters of the length a cell can hold are assembled on the stack,
-    /// so asking about the cluster under the cursor does not allocate.
-    pub(crate) fn with_grapheme_str<R>(
-        &self,
-        col: u16,
-        then: Option<char>,
-        f: impl FnOnce(&str) -> R,
-    ) -> Option<R> {
-        let cell = self.cells.get(col as usize)?;
-        let extra = self.grapheme_extra(col).unwrap_or(&[]);
-        let chars = std::iter::once(cell.char())
-            .chain(extra.iter().copied())
-            .chain(then);
-        let mut buf = [0u8; 4 * 20];
-        let mut len = 0;
-        for c in chars.clone() {
-            if len + c.len_utf8() > buf.len() {
-                return Some(f(&chars.collect::<String>()));
-            }
-            len += c.encode_utf8(&mut buf[len..]).len();
-        }
-        Some(match std::str::from_utf8(&buf[..len]) {
-            Ok(s) => f(s),
-            // Whole characters were encoded, so this does not happen.
-            Err(_) => f(&chars.collect::<String>()),
-        })
-    }
-
     /// Append a codepoint to the grapheme cluster at `col`.
     ///
     /// At most `cap` extra codepoints are kept per cell; the rest are dropped
@@ -444,7 +418,6 @@ impl Row {
         let Some(cell) = self.cells.get_mut(col as usize) else {
             return false;
         };
-        self.flags.set(RowFlags::PLAIN, false);
         let extra = self.graphemes.entry(col);
         if !cell.has_flag(CellFlags::HAS_COMBINING) {
             // Whatever is stored for this column belonged to earlier content.
@@ -469,7 +442,6 @@ impl Row {
             cell.unset_flag(CellFlags::HAS_COMBINING);
             self.graphemes.remove(col);
         } else {
-            self.flags.set(RowFlags::PLAIN, false);
             cell.set_flag(CellFlags::HAS_COMBINING);
             self.graphemes.insert(col, extra.to_vec());
             self.mark_used(col as usize + 1);
@@ -564,7 +536,6 @@ impl Row {
     #[inline]
     pub fn get_mut(&mut self, index: u16) -> Option<&mut Cell> {
         self.flags.set(RowFlags::DIRTY, true);
-        self.flags.set(RowFlags::PLAIN, false);
         self.mark_used(index as usize + 1);
         self.cells.get_mut(index as usize)
     }
@@ -576,17 +547,6 @@ impl Row {
         self.used = self.used.max(end);
     }
 
-    /// Whether every cell is ASCII in the default style with no grapheme
-    /// data. `false` does not mean some cell is not.
-    pub(crate) fn is_plain(&self) -> bool {
-        self.flags.get(RowFlags::PLAIN)
-    }
-
-    /// The cells up to the used mark: every cell after them is default.
-    pub(crate) fn used_cells(&self) -> &[Cell] {
-        &self.cells[..self.used as usize]
-    }
-
     /// Clear all cells in the row.
     pub fn clear(&mut self) {
         self.erase(super::cell::Color::Default);
@@ -596,21 +556,19 @@ impl Row {
     pub fn erase(&mut self, bg: super::cell::Color) {
         let mut blank = Cell::default();
         blank.set_bg(bg);
-        let plain = if blank.is_default() {
+        if blank.is_default() {
             // Cells past the used mark are already default.
             self.cells[..self.used as usize].fill(blank);
             self.used = 0;
-            RowFlags::PLAIN
         } else {
             self.cells.fill(blank);
             self.used = self.width();
-            0
-        };
+        }
         self.graphemes.clear();
         self.marks = RowMarks::default();
         self.anchor = AnchorTag::NONE;
-        // Dirty and no longer wrapped, in one store: every scroll erases a row.
-        self.flags = RowFlags(RowFlags::DIRTY | plain);
+        // Dirty and no longer wrapped, in one store.
+        self.flags = RowFlags(RowFlags::DIRTY);
     }
 
     /// Erase cells `start..end` per ECMA-48: spaces on background `bg`,
@@ -635,7 +593,6 @@ impl Row {
         } else {
             self.cells[start as usize..end as usize].fill(blank);
             self.mark_used(end as usize);
-            self.flags.set(RowFlags::PLAIN, false);
         }
         self.flags.set(RowFlags::DIRTY, true);
     }
@@ -679,7 +636,6 @@ impl Row {
     /// Iterate over cells mutably.
     pub fn cells_mut(&mut self) -> impl Iterator<Item = &mut Cell> {
         self.flags.set(RowFlags::DIRTY, true);
-        self.flags.set(RowFlags::PLAIN, false);
         self.used = self.width();
         self.cells.iter_mut()
     }
@@ -757,7 +713,6 @@ impl Row {
         }
         self.shift_graphemes(at as u16, count as i32);
         self.used = self.width();
-        self.flags.set(RowFlags::PLAIN, false);
 
         // Fill inserted cells with background color
         for i in at..(at + count).min(len) {
@@ -796,7 +751,6 @@ impl Row {
         }
         self.drop_grapheme_entries(at as u16, src_start as u16);
         self.used = self.width();
-        self.flags.set(RowFlags::PLAIN, false);
         self.shift_graphemes(src_start as u16, -(count as i32));
 
         // Fill vacated cells at end with background color. A count running
@@ -841,7 +795,6 @@ impl Index<u16> for Row {
 impl IndexMut<u16> for Row {
     fn index_mut(&mut self, index: u16) -> &mut Self::Output {
         self.flags.set(RowFlags::DIRTY, true);
-        self.flags.set(RowFlags::PLAIN, false);
         self.mark_used(index as usize + 1);
         &mut self.cells[index as usize]
     }
@@ -850,7 +803,6 @@ impl IndexMut<u16> for Row {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::cell::Color;
 
     #[test]
     fn new_row_is_blank() {
@@ -1053,33 +1005,12 @@ mod tests {
                     }
                 }
                 let expected: Vec<(u16, Vec<char>)> = model.clone().into_iter().collect();
-                proptest::prop_assert_eq!(&map.entries, &expected);
+                proptest::prop_assert_eq!(map.entries(), expected.as_slice());
                 for col in 0..24 {
                     proptest::prop_assert_eq!(map.get(col), model.get(&col).map(Vec::as_slice));
                 }
             }
         }
-    }
-
-    #[test]
-    fn grapheme_str_is_the_cluster_then_the_extra_char() {
-        let mut row = Row::new(4);
-        row[1].set_char('e');
-        row.set_grapheme_extra(1, &['\u{301}']);
-        let got = row.with_grapheme_str(1, Some('\u{302}'), str::to_string);
-        assert_eq!(got.as_deref(), Some("e\u{301}\u{302}"));
-        assert_eq!(
-            row.with_grapheme_str(0, None, str::to_string).as_deref(),
-            Some(" ")
-        );
-        assert_eq!(row.with_grapheme_str(4, None, str::to_string), None);
-
-        // Longer than the stack buffer.
-        let long = ['\u{1F600}'; 30];
-        row.set_grapheme_extra(2, &long);
-        let expected: String = std::iter::once(' ').chain(long).chain(['x']).collect();
-        let got = row.with_grapheme_str(2, Some('x'), str::to_string);
-        assert_eq!(got.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
@@ -1103,34 +1034,6 @@ mod tests {
         assert!((6..8).all(|col| row[col].bg() == Color::Indexed(4)));
         assert_eq!(row[8].bg(), Color::Default);
         assert_eq!(row.check_integrity(16), Ok(()));
-    }
-
-    #[test]
-    fn a_row_is_plain_until_something_other_than_default_ascii_lands() {
-        let mut row = Row::new(10);
-        assert!(row.is_plain());
-        row.write_ascii(0, b"abc", Cell::default());
-        assert!(row.is_plain());
-        row.write_ascii(
-            3,
-            b"d",
-            Cell::with_attrs(' ', Color::Default, Color::Named(1), CellFlags::NONE),
-        );
-        assert!(!row.is_plain());
-        row.erase(Color::Default);
-        assert!(row.is_plain());
-        row.erase(Color::Named(4));
-        assert!(!row.is_plain(), "a colored blank is not plain");
-        row.clear();
-        let _ = row.get_mut(2);
-        assert!(!row.is_plain());
-        row.clear();
-        row.push_grapheme_char(0, '\u{301}', 4);
-        assert!(!row.is_plain());
-        row.clear();
-        row.erase_range(2, 4, Color::Named(2));
-        assert!(!row.is_plain());
-        row.check_integrity(4).unwrap();
     }
 
     #[test]

@@ -33,6 +33,7 @@ mod char_class;
 mod cluster;
 mod history;
 mod image;
+mod packed;
 mod palette;
 #[cfg(feature = "page-proto")]
 #[doc(hidden)]
@@ -49,7 +50,7 @@ pub use cell::{Cell, CellFlags, Color, UnderlineStyle};
 pub use image::{decode_sixel, ImageId, ImageStore, TerminalImage};
 pub use palette::{format_color_spec, Palette, Rgb, ThemeColors};
 pub use row::{AnchorTag, Row, RowMarks};
-pub use row_view::RowView;
+pub use row_view::{RowMut, RowView};
 pub use term_handler::TerminalHandler;
 pub use terminal::{
     AnchorEvent, LastCommand, MouseButton, MouseEncoding, MouseMode, MouseModifiers, Selection,
@@ -57,13 +58,16 @@ pub use terminal::{
     DEFAULT_TERMINAL_NAME, MAX_ANCHOR_EVENTS, MAX_QUEUED_REFUSALS,
 };
 
-use std::ops::{Index, IndexMut};
+use packed::{PackedCell, PackedRow, Style, StyleKey, StyleTable};
 
 /// Maximum number of combining marks stored for a single cell.
 ///
 /// PTY output can attach an unbounded run of zero-width marks to one cell;
 /// anything beyond this many is dropped.
 pub const MAX_COMBINING_PER_CELL: usize = 16;
+
+/// A generation no style table reaches: marks a cached key as stale.
+const NO_GENERATION: u64 = u64::MAX;
 
 /// Terminal grid dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,11 +197,17 @@ impl ScrollRegion {
 /// Use [`Buffer`] for a grid with scrollback history.
 #[derive(Debug, Clone)]
 pub struct Grid {
-    rows: Vec<Row>,
+    /// Screen rows of packed cells, whose style ids are in `styles`.
+    rows: Vec<PackedRow>,
+    /// The styles `rows` use that do not fit in a cell (ADR 0022 §1).
+    styles: StyleTable,
     dims: Dimensions,
     cursor: Cursor,
     /// Current text attributes for new characters
     attrs: Cell,
+    /// `attrs`' style key and the table generation it was made in; stale
+    /// once either changes (see [`Grid::template_key`]).
+    attrs_key: (StyleKey, u64),
     /// Dirty rows that need redrawing (bitset would be more efficient)
     dirty: Vec<bool>,
     /// The `content_version` at which each row last changed. Unlike `dirty`,
@@ -247,16 +257,18 @@ struct LastPrint {
 impl Grid {
     /// Create a new grid with the given dimensions.
     pub fn new(dims: Dimensions) -> Self {
-        let rows = (0..dims.rows).map(|_| Row::new(dims.cols)).collect();
+        let rows = (0..dims.rows).map(|_| PackedRow::new(dims.cols)).collect();
         let dirty = vec![true; dims.rows as usize];
 
         let tab_stops: std::collections::BTreeSet<u16> = (0..dims.cols).step_by(8).collect();
 
         Self {
             rows,
+            styles: StyleTable::new(dims.area()),
             dims,
             cursor: Cursor::default(),
             attrs: Cell::default(),
+            attrs_key: (StyleKey::DEFAULT, NO_GENERATION),
             dirty,
             row_versions: vec![0; dims.rows as usize],
             scroll_region: None,
@@ -334,7 +346,7 @@ impl Grid {
                 state.position.row.min(self.dims.rows.saturating_sub(1)),
             );
             self.cursor.wrap_pending = false;
-            self.attrs = state.attrs;
+            self.set_attrs(state.attrs);
             self.auto_wrap = state.auto_wrap;
             Some(state.origin_mode)
         } else {
@@ -364,18 +376,12 @@ impl Grid {
 
     /// Fill entire grid with a character (used by DECALN — ESC # 8).
     pub fn fill_with_char(&mut self, c: char) {
-        let cols = self.dims.cols;
-        let rows = self.dims.rows;
-        for row_idx in 0..rows {
-            if let Some(row) = self.row_mut(row_idx) {
-                // Start from blank cells so no wide-char, spacer, grapheme,
-                // or style flags from earlier content survive the fill.
-                row.clear();
-                for col in 0..cols {
-                    row[col].set_char(c);
-                }
-            }
+        // Every cell starts from a blank, so no wide-char, spacer, grapheme
+        // or style from earlier content survives the fill.
+        for row in &mut self.rows {
+            row.fill_with_char(c);
         }
+        self.mark_all_dirty();
     }
 
     /// Get current text attributes.
@@ -386,21 +392,79 @@ impl Grid {
     /// Set current text attributes.
     pub fn set_attrs(&mut self, attrs: Cell) {
         self.attrs = attrs;
+        self.attrs_key.1 = NO_GENERATION;
     }
 
     /// Reset attributes to default.
     pub fn reset_attrs(&mut self) {
-        self.attrs = Cell::default();
+        self.set_attrs(Cell::default());
     }
 
     /// Get mutable access to current text attributes.
     pub fn attrs_mut(&mut self) -> &mut Cell {
+        self.attrs_key.1 = NO_GENERATION;
         &mut self.attrs
     }
 
     /// Set the current hyperlink ID for new characters.
     pub fn set_hyperlink_id(&mut self, id: u32) {
-        self.attrs.set_hyperlink_id(id);
+        self.attrs_mut().set_hyperlink_id(id);
+    }
+
+    // === Style keys (ADR 0022 §1) ===
+    //
+    // A collection renumbers style ids, so it may only run where no id is
+    // held outside the rows: at the start of an operation, before it makes
+    // any key. Two functions collect, `template_key` (when it has to make
+    // the key) and `erase_key`; every operation calls at most one of them
+    // before writing, and makes any other key it needs with the table's
+    // `key`, which never collects. A key is written before the next
+    // collecting call, and the cached template key carries the generation
+    // it was made in.
+
+    /// Collect the style table if enough new styles were added.
+    #[inline]
+    fn collect_styles_if_due(&mut self) {
+        if self.styles.is_due() {
+            self.styles.collect(&mut self.rows);
+        }
+    }
+
+    /// The style key of the current attributes, which printed cells take.
+    /// Made once per attribute change (or collection), and may collect
+    /// first.
+    #[inline]
+    fn template_key(&mut self) -> StyleKey {
+        if self.attrs_key.1 == self.styles.generation() {
+            self.attrs_key.0
+        } else {
+            self.make_template_key()
+        }
+    }
+
+    #[inline(never)]
+    fn make_template_key(&mut self) -> StyleKey {
+        self.collect_styles_if_due();
+        let key = self.styles.key(&Style::of(&self.attrs));
+        self.attrs_key = (key, self.styles.generation());
+        key
+    }
+
+    /// The style key of the blanks erasing leaves: the current background
+    /// and nothing else. May collect first.
+    #[inline]
+    fn erase_key(&mut self) -> StyleKey {
+        if self.attrs.packed_bg() == cell::PackedColor::DEFAULT {
+            return StyleKey::DEFAULT;
+        }
+        self.collect_styles_if_due();
+        self.styles.key(&Style::erased(self.attrs.bg()))
+    }
+
+    /// The cell `cell` stands for.
+    #[inline]
+    fn unpack(&self, cell: PackedCell) -> Cell {
+        self.styles.unpack(cell)
     }
 
     // === Combining characters (grapheme clusters) ===
@@ -421,14 +485,6 @@ impl Grid {
     /// Get the full grapheme for a cell (base char + combining chars).
     pub fn grapheme(&self, row: u16, col: u16) -> Option<String> {
         self.rows.get(row as usize)?.grapheme(col)
-    }
-
-    /// Clear combining characters for a range of cells in one row.
-    fn clear_combining_range(&mut self, row: u16, start_col: u16, end_col: u16) {
-        if let Some(r) = self.rows.get_mut(row as usize) {
-            r.clear_graphemes(start_col, end_col);
-        }
-        self.mark_dirty(row);
     }
 
     /// Check the grid's structural invariants: row count and widths match
@@ -473,32 +529,90 @@ impl Grid {
                     row.width()
                 ));
             }
-            row.check_integrity(MAX_COMBINING_PER_CELL)
+            row.check_integrity(MAX_COMBINING_PER_CELL, &self.styles)
                 .map_err(|e| format!("row {index}: {e}"))?;
+        }
+        // The cached template key, if current, names the attributes' style.
+        let (key, generation) = self.attrs_key;
+        if generation == self.styles.generation() {
+            self.styles
+                .check_key(key)
+                .map_err(|e| format!("cursor template: {e}"))?;
+            if self.styles.style(key) != Style::of(&self.attrs) {
+                return Err(format!(
+                    "cursor template key {key:?} names {:?}, attributes are {:?}",
+                    self.styles.style(key),
+                    self.attrs
+                ));
+            }
         }
         Ok(())
     }
 
     /// Get a row by index.
-    pub fn row(&self, index: u16) -> Option<&Row> {
-        self.rows.get(index as usize)
+    pub fn row(&self, index: u16) -> Option<RowView<'_>> {
+        let row = self.rows.get(index as usize)?;
+        Some(RowView::screen(row, &self.styles))
     }
 
-    /// Get a mutable row by index.
-    pub fn row_mut(&mut self, index: u16) -> Option<&mut Row> {
+    /// A row to change: marked dirty, and edited through [`RowMut`].
+    pub fn row_mut(&mut self, index: u16) -> Option<RowMut<'_>> {
         self.mark_dirty(index);
-        self.rows.get_mut(index as usize)
+        // The handle interns styles without collecting.
+        self.collect_styles_if_due();
+        let row = self.rows.get_mut(index as usize)?;
+        Some(RowMut::new(row, &mut self.styles))
+    }
+
+    /// Insert `n` blank cells at the cursor (ICH), on the current
+    /// background, shifting the rest of the row right.
+    pub fn insert_chars(&mut self, n: u16) {
+        let CursorPosition { col, row } = self.cursor.position;
+        let bg = self.attrs.bg();
+        if let Some(mut row) = self.row_mut(row) {
+            row.insert_cells(col, n, bg);
+        }
+    }
+
+    /// Delete `n` cells at the cursor (DCH), shifting the rest of the row
+    /// left and filling its end with blanks on the current background.
+    pub fn delete_chars(&mut self, n: u16) {
+        let CursorPosition { col, row } = self.cursor.position;
+        let bg = self.attrs.bg();
+        if let Some(mut row) = self.row_mut(row) {
+            row.delete_cells(col, n, bg);
+        }
+    }
+
+    /// Change row `index`'s shell integration marks with `update`.
+    pub fn update_row_marks(&mut self, index: u16, update: impl FnOnce(&mut RowMarks)) {
+        if let Some(mut row) = self.row_mut(index) {
+            let mut marks = row.marks();
+            update(&mut marks);
+            row.set_marks(marks);
+        }
     }
 
     /// Get a cell at the given position.
-    pub fn cell(&self, col: u16, row: u16) -> Option<&Cell> {
-        self.rows.get(row as usize)?.get(col)
+    pub fn cell(&self, col: u16, row: u16) -> Option<Cell> {
+        let cell = self.rows.get(row as usize)?.get(col)?;
+        Some(self.unpack(cell))
     }
 
-    /// Get a mutable cell at the given position.
-    pub fn cell_mut(&mut self, col: u16, row: u16) -> Option<&mut Cell> {
-        self.mark_dirty(row);
-        self.rows.get_mut(row as usize)?.get_mut(col)
+    /// Set the cell at the given position, as a direct edit: nothing about
+    /// the row around it changes. Returns whether there is such a cell.
+    pub fn set_cell(&mut self, col: u16, row: u16, cell: Cell) -> bool {
+        self.update_cell(col, row, |old| *old = cell)
+    }
+
+    /// Change the cell at the given position in place with `f`, as a
+    /// direct edit (see [`Grid::set_cell`]). Returns whether there is such
+    /// a cell.
+    pub fn update_cell(&mut self, col: u16, row: u16, f: impl FnOnce(&mut Cell)) -> bool {
+        match self.row_mut(row) {
+            Some(mut r) => r.update(col, f),
+            None => false,
+        }
     }
 
     /// Whether grapheme cluster processing (mode 2027) is enabled.
@@ -596,6 +710,8 @@ impl Grid {
         let old_tail = self
             .last_print
             .map_or(cluster::Tail::Other, |last| last.tail);
+        let room = col.saturating_add(1) < self.dims.cols;
+        let at_cursor = !self.cursor.wrap_pending && self.cursor.position.col == col + 1;
         let Some(r) = self.rows.get_mut(row as usize) else {
             return;
         };
@@ -604,41 +720,26 @@ impl Grid {
         } else {
             old_tail
         };
-        let was_wide = r.get(col).is_some_and(|cell| cell.is_wide());
-        let room = col.saturating_add(1) < self.dims.cols;
-        let at_cursor = !self.cursor.wrap_pending && self.cursor.position.col == col + 1;
-        let widens = !was_wide
-            && room
+        let widens = room
             && at_cursor
             && r.get(col).is_some_and(|cell| {
                 let extra = r.grapheme_extra(col).unwrap_or_default();
                 let cluster = std::iter::once(cell.char()).chain(extra.iter().copied());
-                unicode_width::char_iter_width(cluster) >= 2
+                !cell.is_wide() && unicode_width::char_iter_width(cluster) >= 2
             });
 
         if widens {
             let next = col + 1;
             // The spacer overwrites whatever was at `next`; a wide char there
             // would leave its own spacer orphaned.
-            if self.cell(next, row).is_some_and(|cell| cell.is_wide()) {
-                if let Some(orphan) = self.cell_mut(next + 1, row) {
-                    orphan.clear();
-                }
+            if r.get(next).is_some_and(PackedCell::is_wide) {
+                r.set(next + 1, PackedCell::BLANK);
             }
-            self.clear_combining_range(row, next, next + 1);
-            let base = self.cell(col, row).copied();
-            if let Some(mut base) = base {
-                base.set_flag(CellFlags::WIDE_CHAR);
-                if let Some(cell) = self.cell_mut(col, row) {
-                    *cell = base;
-                }
-                if let Some(spacer) = self.cell_mut(next, row) {
-                    spacer.set_char(' ');
-                    spacer.copy_attrs_from(&base);
-                    spacer.unset_flag(CellFlags::WIDE_CHAR);
-                    spacer.unset_flag(CellFlags::HAS_COMBINING);
-                    spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
-                }
+            r.clear_graphemes(next, next + 1);
+            if let Some(base) = r.get(col) {
+                r.set(col, base.widened());
+                // The spacer takes the base's style, whatever its own was.
+                r.set(next, PackedCell::spacer(base.key()));
             }
             self.advance_cursor(1);
         }
@@ -689,10 +790,11 @@ impl Grid {
         if self.cursor.wrap_pending || self.insert_mode || col + width > self.dims.cols {
             return false;
         }
+        let key = self.template_key();
         let Some(r) = self.rows.get_mut(row as usize) else {
             return false;
         };
-        if !r.write_char_in_place(col, c, width, self.attrs) {
+        if !r.write_char_in_place(col, c, width, key) {
             return false;
         }
         self.mark_dirty(row);
@@ -747,8 +849,11 @@ impl Grid {
         // Wide character can never fit in a terminal narrower than its width
         if width > 1 && self.dims.cols < width {
             // Replace with a space to avoid infinite scroll loop
-            if let Some(cell) = self.cell_mut(col, row) {
-                cell.set_char(' ');
+            self.mark_dirty(row);
+            if let Some(r) = self.rows.get_mut(row as usize) {
+                if let Some(cell) = r.get(col) {
+                    r.set(col, cell.with_char(' '));
+                }
             }
             self.last_char = ' ';
             self.advance_cursor(1);
@@ -768,9 +873,16 @@ impl Grid {
         let col = self.cursor.position.col;
         let row = self.cursor.position.row;
 
-        let attrs = self.attrs;
         let cols = self.dims.cols;
         let insert_mode = self.insert_mode;
+        // The template key may collect, so it comes first; the insert's
+        // blanks are interned without collecting (see `template_key`).
+        let key = self.template_key();
+        let blank = if insert_mode {
+            self.styles.key(&Style::erased(self.attrs.bg()))
+        } else {
+            StyleKey::DEFAULT
+        };
         // Everything below touches only this row, so it is marked dirty once.
         self.mark_dirty(row);
         let Some(r) = self.rows.get_mut(row as usize) else {
@@ -782,53 +894,32 @@ impl Grid {
 
         // Insert mode (IRM): shift existing cells right before writing
         if insert_mode {
-            r.insert_cells(col, width, attrs.bg());
+            r.insert_cells(col, width, blank);
         }
 
         // Clean up orphaned wide-char parts before overwriting
-        let is_wide = r.get(col).is_some_and(|c| c.is_wide());
-        let is_spacer = r.get(col).is_some_and(|c| c.is_wide_spacer());
+        let is_wide = r.get(col).is_some_and(PackedCell::is_wide);
+        let is_spacer = r.get(col).is_some_and(PackedCell::is_spacer);
         if is_wide && col + 1 < cols {
-            if let Some(spacer) = r.get_mut(col + 1) {
-                spacer.clear();
-            }
+            r.set(col + 1, PackedCell::BLANK);
         }
         if is_spacer && col > 0 {
-            if let Some(primary) = r.get_mut(col - 1) {
-                primary.clear();
-            }
+            r.set(col - 1, PackedCell::BLANK);
         }
         // A wide char's spacer overwrites the next cell; if that cell starts
         // another wide char, that char's own spacer would be orphaned.
-        if width > 1 && col + 2 < cols && r.get(col + 1).is_some_and(|c| c.is_wide()) {
-            if let Some(orphan) = r.get_mut(col + 2) {
-                orphan.clear();
-            }
+        if width > 1 && col + 2 < cols && r.get(col + 1).is_some_and(PackedCell::is_wide) {
+            r.set(col + 2, PackedCell::BLANK);
         }
 
-        // Write the character
-        if let Some(cell) = r.get_mut(col) {
-            let mut written = attrs;
-            written.set_char(c);
-            written.unset_flag(CellFlags::HAS_COMBINING);
-            if width > 1 {
-                written.set_flag(CellFlags::WIDE_CHAR);
-            } else {
-                written.unset_flag(CellFlags::WIDE_CHAR);
+        // Write the character, and a spacer after a wide one.
+        if width > 1 {
+            r.set(col, PackedCell::wide(c, key));
+            if col + 1 < cols {
+                r.set(col + 1, PackedCell::spacer(key));
             }
-            written.unset_flag(CellFlags::WIDE_CHAR_SPACER);
-            *cell = written;
-        }
-
-        // If wide character, put spacer in next cell
-        if width > 1 && col + 1 < cols {
-            if let Some(spacer) = r.get_mut(col + 1) {
-                let mut written = attrs;
-                written.set_char(' ');
-                written.set_flag(CellFlags::WIDE_CHAR_SPACER);
-                written.unset_flag(CellFlags::WIDE_CHAR);
-                *spacer = written;
-            }
+        } else {
+            r.set(col, PackedCell::new(c, key));
         }
 
         // Track last printed char for REP (CSI b)
@@ -883,14 +974,10 @@ impl Grid {
             let available = self.dims.cols.saturating_sub(col).max(1) as usize;
             let write_len = available.min(remaining.len());
             let end_col = col + write_len as u16;
-            let mut template = self.attrs;
-            template.unset_flag(CellFlags::HAS_COMBINING);
-            template.unset_flag(CellFlags::WIDE_CHAR);
-            template.unset_flag(CellFlags::WIDE_CHAR_SPACER);
-
-            self.clear_wide_orphans_for_ascii_span(row, col, end_col);
-            if let Some(row_cells) = self.rows.get_mut(row as usize) {
-                row_cells.write_ascii(col, &remaining[..write_len], template);
+            let key = self.template_key();
+            if let Some(r) = self.rows.get_mut(row as usize) {
+                r.clear_ascii_edges(col, end_col);
+                r.write_ascii(col, &remaining[..write_len], key);
             }
             self.mark_dirty(row);
 
@@ -936,31 +1023,6 @@ impl Grid {
         } else {
             self.cursor.position.row = (row + 1).min(self.dims.rows.saturating_sub(1));
         }
-    }
-
-    fn clear_wide_orphans_for_ascii_span(&mut self, row: u16, start_col: u16, end_col: u16) {
-        if start_col > 0
-            && self
-                .cell(start_col, row)
-                .is_some_and(|cell| cell.is_wide_spacer())
-        {
-            if let Some(primary) = self.cell_mut(start_col - 1, row) {
-                primary.clear();
-            }
-        }
-
-        if end_col < self.dims.cols
-            && self
-                .cell(end_col, row)
-                .is_some_and(|cell| cell.is_wide_spacer())
-        {
-            if let Some(spacer) = self.cell_mut(end_col, row) {
-                spacer.clear();
-            }
-        }
-
-        // Every cell in start_col..end_col is overwritten, so a wide char
-        // can only be split at the two edges handled above.
     }
 
     /// Move cursor up, stopping at scroll region top if inside region.
@@ -1173,7 +1235,7 @@ impl Grid {
     /// Scroll the grid up by n lines (within scroll region).
     pub fn scroll_up(&mut self, n: u16) {
         let region = self.effective_scroll_region();
-        let bg = self.attrs.bg();
+        let blank = self.erase_key();
         let n = n as usize;
         let region_height = (region.bottom.saturating_sub(region.top) + 1) as usize;
 
@@ -1181,7 +1243,7 @@ impl Grid {
             // Clear the entire scroll region
             for row_idx in region.top..=region.bottom {
                 if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                    row.erase(bg);
+                    row.erase(blank);
                 }
                 self.mark_dirty(row_idx);
             }
@@ -1195,7 +1257,7 @@ impl Grid {
         // Erase the bottom n rows of the region with current bg
         for i in 0..n {
             let row_idx = region.bottom as usize - i;
-            self.rows[row_idx].erase(bg);
+            self.rows[row_idx].erase(blank);
         }
 
         self.mark_rows_dirty(region.top..=region.bottom);
@@ -1204,7 +1266,7 @@ impl Grid {
     /// Scroll the grid down by n lines (within scroll region).
     pub fn scroll_down(&mut self, n: u16) {
         let region = self.effective_scroll_region();
-        let bg = self.attrs.bg();
+        let blank = self.erase_key();
         let n = n as usize;
         let region_height = (region.bottom.saturating_sub(region.top) + 1) as usize;
 
@@ -1212,7 +1274,7 @@ impl Grid {
             // Clear the entire scroll region
             for row_idx in region.top..=region.bottom {
                 if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                    row.erase(bg);
+                    row.erase(blank);
                 }
                 self.mark_dirty(row_idx);
             }
@@ -1226,7 +1288,7 @@ impl Grid {
         // Erase the top n rows of the region with current bg
         for i in 0..n {
             let row_idx = region.top as usize + i;
-            self.rows[row_idx].erase(bg);
+            self.rows[row_idx].erase(blank);
         }
 
         self.mark_rows_dirty(region.top..=region.bottom);
@@ -1237,7 +1299,7 @@ impl Grid {
     pub fn insert_lines(&mut self, n: u16) {
         self.cursor.wrap_pending = false;
         let region = self.effective_scroll_region();
-        let bg = self.attrs.bg();
+        let blank = self.erase_key();
         let cursor_row = self.cursor.position.row;
 
         // Only operate if cursor is within scroll region
@@ -1252,7 +1314,7 @@ impl Grid {
             // Clear from cursor to bottom of region
             for row_idx in cursor_row..=region.bottom {
                 if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                    row.erase(bg);
+                    row.erase(blank);
                 }
                 self.mark_dirty(row_idx);
             }
@@ -1274,8 +1336,8 @@ impl Grid {
         for i in 0..n {
             let row_idx = cursor_row as usize + i;
             if row_idx <= region.bottom as usize {
-                let mut row = Row::new(self.dims.cols);
-                row.erase(bg);
+                let mut row = PackedRow::new(self.dims.cols);
+                row.erase(blank);
                 self.rows[row_idx] = row;
             }
         }
@@ -1288,7 +1350,7 @@ impl Grid {
     pub fn delete_lines(&mut self, n: u16) {
         self.cursor.wrap_pending = false;
         let region = self.effective_scroll_region();
-        let bg = self.attrs.bg();
+        let blank = self.erase_key();
         let cursor_row = self.cursor.position.row;
 
         // Only operate if cursor is within scroll region
@@ -1303,7 +1365,7 @@ impl Grid {
             // Clear from cursor to bottom of region
             for row_idx in cursor_row..=region.bottom {
                 if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                    row.erase(bg);
+                    row.erase(blank);
                 }
                 self.mark_dirty(row_idx);
             }
@@ -1325,8 +1387,8 @@ impl Grid {
         for i in 0..n {
             let row_idx = region.bottom as usize - i;
             if row_idx >= cursor_row as usize {
-                let mut row = Row::new(self.dims.cols);
-                row.erase(bg);
+                let mut row = PackedRow::new(self.dims.cols);
+                row.erase(blank);
                 self.rows[row_idx] = row;
             }
         }
@@ -1337,13 +1399,13 @@ impl Grid {
     /// Erase from cursor to end of display.
     pub fn erase_below(&mut self) {
         let r = self.cursor.position.row;
-        let bg = self.attrs.bg();
         self.erase_cells(r, self.cursor.position.col, self.dims.cols);
+        let blank = self.erase_key();
 
         // Erase all lines below cursor
         for row_idx in (r + 1)..self.dims.rows {
             if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                row.erase(bg);
+                row.erase(blank);
             }
             self.mark_dirty(row_idx);
         }
@@ -1352,12 +1414,12 @@ impl Grid {
     /// Erase from start of display to cursor.
     pub fn erase_above(&mut self) {
         let r = self.cursor.position.row;
-        let bg = self.attrs.bg();
+        let blank = self.erase_key();
 
         // Erase all lines above cursor
         for row_idx in 0..r {
             if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                row.erase(bg);
+                row.erase(blank);
             }
             self.mark_dirty(row_idx);
         }
@@ -1376,26 +1438,28 @@ impl Grid {
         if start >= end {
             return;
         }
+        let blank = self.erase_key();
+        let Some(r) = self.rows.get_mut(row as usize) else {
+            self.mark_dirty(row);
+            return;
+        };
         let mut start = start;
         let mut end = end;
-        if start > 0 && self.cell(start, row).is_some_and(|c| c.is_wide_spacer()) {
+        if start > 0 && r.get(start).is_some_and(PackedCell::is_spacer) {
             start -= 1;
         }
-        if end < cols && self.cell(end - 1, row).is_some_and(|c| c.is_wide()) {
+        if end < cols && r.get(end - 1).is_some_and(PackedCell::is_wide) {
             end += 1;
         }
-        let bg = self.attrs.bg();
-        if let Some(r) = self.rows.get_mut(row as usize) {
-            r.erase_range(start, end, bg);
-        }
+        r.erase_range(start, end, blank);
         self.mark_dirty(row);
     }
 
     /// Erase entire display.
     pub fn clear(&mut self) {
-        let bg = self.attrs.bg();
+        let blank = self.erase_key();
         for row in &mut self.rows {
-            row.erase(bg);
+            row.erase(blank);
         }
         self.mark_all_dirty();
     }
@@ -1423,9 +1487,9 @@ impl Grid {
     /// Erase entire current line.
     pub fn erase_line(&mut self) {
         let r = self.cursor.position.row;
-        let bg = self.attrs.bg();
+        let blank = self.erase_key();
         if let Some(row) = self.rows.get_mut(r as usize) {
-            row.erase(bg);
+            row.erase(blank);
         }
         self.mark_dirty(r);
     }
@@ -1450,7 +1514,7 @@ impl Grid {
 
         // Add or remove rows
         while self.rows.len() < new_dims.rows as usize {
-            self.rows.push(Row::new(new_cols));
+            self.rows.push(PackedRow::new(new_cols));
         }
         self.rows.truncate(new_dims.rows as usize);
 
@@ -1478,7 +1542,17 @@ impl Grid {
 
     /// Set rows directly (used by Buffer during reflow).
     pub fn set_rows(&mut self, rows: Vec<Row>, new_dims: Dimensions) {
-        self.rows = rows;
+        // Every row is replaced, so no style id survives.
+        self.styles.reset(new_dims.area());
+        self.rows = rows
+            .iter()
+            .take(new_dims.rows as usize)
+            .map(|row| {
+                let mut packed = PackedRow::new(0);
+                packed.assign_row(row, &mut self.styles);
+                packed
+            })
+            .collect();
         self.resize_tab_stops(new_dims.cols);
         self.dims = new_dims;
 
@@ -1488,9 +1562,8 @@ impl Grid {
 
         // Ensure correct number of rows
         while self.rows.len() < new_dims.rows as usize {
-            self.rows.push(Row::new(new_dims.cols));
+            self.rows.push(PackedRow::new(new_dims.cols));
         }
-        self.rows.truncate(new_dims.rows as usize);
 
         // Clamp cursor position
         self.cursor.position.col = self
@@ -1517,10 +1590,18 @@ impl Grid {
             return;
         }
 
-        // Insert at beginning, then truncate from end
-        for row in rows.into_iter().rev() {
-            self.rows.insert(0, row);
-        }
+        // Insert at beginning, then truncate from end. The rows' styles are
+        // interned without collecting, so collect first.
+        self.collect_styles_if_due();
+        let packed: Vec<PackedRow> = rows
+            .iter()
+            .map(|row| {
+                let mut packed = PackedRow::new(0);
+                packed.assign_row(row, &mut self.styles);
+                packed
+            })
+            .collect();
+        self.rows.splice(0..0, packed);
         self.rows.truncate(self.dims.rows as usize);
 
         // Adjust cursor position down by the number of inserted rows
@@ -1580,10 +1661,12 @@ impl Grid {
     /// A row to rewrite in place: it is redrawn, but the content version
     /// stays (see [`Buffer::replace_row`]). A grapheme printed before can
     /// no longer be joined.
-    fn row_mut_in_place(&mut self, index: u16) -> Option<&mut Row> {
+    fn row_mut_in_place(&mut self, index: u16) -> Option<RowMut<'_>> {
         *self.dirty.get_mut(index as usize)? = true;
         self.last_print = None;
-        self.rows.get_mut(index as usize)
+        self.collect_styles_if_due();
+        let row = self.rows.get_mut(index as usize)?;
+        Some(RowMut::new(row, &mut self.styles))
     }
 
     /// Mark all rows as dirty.
@@ -1617,23 +1700,10 @@ impl Grid {
     }
 
     /// Iterate over all rows.
-    pub fn rows(&self) -> impl Iterator<Item = &Row> {
-        self.rows.iter()
-    }
-}
-
-impl Index<u16> for Grid {
-    type Output = Row;
-
-    fn index(&self, index: u16) -> &Self::Output {
-        &self.rows[index as usize]
-    }
-}
-
-impl IndexMut<u16> for Grid {
-    fn index_mut(&mut self, index: u16) -> &mut Self::Output {
-        self.mark_dirty(index);
-        &mut self.rows[index as usize]
+    pub fn rows(&self) -> impl Iterator<Item = RowView<'_>> {
+        self.rows
+            .iter()
+            .map(|row| RowView::screen(row, &self.styles))
     }
 }
 
@@ -2051,8 +2121,8 @@ mod tests {
         grid.clear_dirty();
         assert!(!grid.has_dirty());
 
-        // Accessing a cell mutably marks row dirty
-        let _ = grid.cell_mut(5, 2);
+        // Editing a cell marks its row dirty
+        grid.update_cell(5, 2, |_| {});
         assert!(grid.is_dirty(2));
         assert!(!grid.is_dirty(0));
     }
@@ -2063,8 +2133,8 @@ mod tests {
         grid.clear_dirty();
 
         // Mark specific rows
-        let _ = grid.cell_mut(0, 1);
-        let _ = grid.cell_mut(0, 3);
+        grid.update_cell(0, 1, |_| {});
+        grid.update_cell(0, 3, |_| {});
 
         let dirty: Vec<u16> = grid.dirty_rows().collect();
         assert_eq!(dirty, vec![1, 3]);
@@ -2531,6 +2601,50 @@ mod tests {
         InsertMode(bool),
         AutoWrap(bool),
         Bold(bool),
+    }
+
+    /// Collection renumbers style ids while text is being printed in a
+    /// style that is not on screen yet; the screen and the cursor's
+    /// template key come through it as if nothing happened.
+    #[test]
+    fn style_collection_keeps_the_screen_and_the_cursor_template() {
+        let print = |grid: &mut Grid| {
+            for i in 0..200u32 {
+                grid.attrs_mut()
+                    .set_fg(Color::rgb((i % 7) as u8, (i % 11) as u8, (i / 3) as u8));
+                if i % 5 == 0 {
+                    grid.attrs_mut().set_bg(Color::rgb(0, 0, (i % 4) as u8));
+                    grid.erase_line_right();
+                }
+                grid.write_ascii_span(b"ab");
+                grid.write_char('\u{4e2d}');
+                if i % 9 == 0 {
+                    grid.write_char('\r');
+                    grid.newline();
+                }
+            }
+        };
+        let mut plain = Grid::new(Dimensions::new(12, 4));
+        print(&mut plain);
+        let _every = packed::test_support::collect_every(3);
+        let mut collected = Grid::new(Dimensions::new(12, 4));
+        print(&mut collected);
+
+        assert_eq!(
+            plain.styles.generation(),
+            0,
+            "the default interval is not reached"
+        );
+        assert!(
+            collected.styles.generation() > 10,
+            "collected along the way"
+        );
+        assert!(collected.styles.len() < plain.styles.len());
+        collected.check_integrity().unwrap();
+        for (a, b) in plain.rows().zip(collected.rows()) {
+            assert!(a.cells().eq(b.cells()));
+        }
+        assert_eq!(plain.last_print, collected.last_print);
     }
 
     fn print_op() -> impl proptest::strategy::Strategy<Value = PrintOp> {

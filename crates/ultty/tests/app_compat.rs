@@ -203,7 +203,7 @@ impl AppTester {
         for row_idx in 0..dims.rows {
             if let Some(row) = grid.row(row_idx) {
                 for col_idx in 0..dims.cols {
-                    if let Some(cell) = row.get(col_idx) {
+                    if let Some(cell) = row.cell(col_idx) {
                         let ch = cell.char();
                         output.push(ch);
                     }

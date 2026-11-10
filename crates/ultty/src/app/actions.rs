@@ -432,7 +432,7 @@ impl App {
             output.push_str(&format!("{:3}|", row_idx));
             if let Some(row) = grid.row(row_idx) {
                 for col_idx in 0..dims.cols {
-                    if let Some(cell) = row.get(col_idx) {
+                    if let Some(cell) = row.cell(col_idx) {
                         let ch = cell.char();
                         // Replace control characters with visible representation
                         let display_char = if ch.is_control() || ch == '\0' {

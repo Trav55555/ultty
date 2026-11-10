@@ -252,7 +252,7 @@ impl TestTerminal {
         for row_idx in 0..dims.rows {
             if let Some(row) = grid.row(row_idx) {
                 for col_idx in 0..dims.cols {
-                    if let Some(cell) = row.get(col_idx) {
+                    if let Some(cell) = row.cell(col_idx) {
                         output.push(cell.char());
                     }
                 }
@@ -273,7 +273,7 @@ impl TestTerminal {
             let mut line = String::new();
             if let Some(row) = grid.row(row_idx) {
                 for col_idx in 0..dims.cols {
-                    if let Some(cell) = row.get(col_idx) {
+                    if let Some(cell) = row.cell(col_idx) {
                         line.push(cell.char());
                     }
                 }
@@ -295,7 +295,7 @@ impl TestTerminal {
         if let Some(r) = grid.row(row) {
             let mut line = String::new();
             for col in 0..grid.dimensions().cols {
-                if let Some(cell) = r.get(col) {
+                if let Some(cell) = r.cell(col) {
                     line.push(cell.char());
                 }
             }
