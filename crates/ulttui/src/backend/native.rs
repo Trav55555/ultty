@@ -372,13 +372,9 @@ impl NativeBackend {
 
     fn wait_for_session_ready(&mut self) -> crate::Result<()> {
         let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-            if self.read_available(remaining)? == ReadOutcome::Closed {
-                return Err(crate::Error::Handshake(
-                    "the terminal closed the connection".to_string(),
-                ));
-            }
-
+        loop {
+            // What is already buffered first: the in-band probe may have
+            // read the whole answer.
             while let Some(msg) = self.next_decoded_message()? {
                 match msg {
                     TerminalMessage::ServerHello {
@@ -408,11 +404,17 @@ impl NativeBackend {
                     _ => {}
                 }
             }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Err(crate::Error::Handshake(
+                    "timed out waiting for SessionReady".to_string(),
+                ));
+            };
+            if self.read_available(remaining)? == ReadOutcome::Closed {
+                return Err(crate::Error::Handshake(
+                    "the terminal closed the connection".to_string(),
+                ));
+            }
         }
-
-        Err(crate::Error::Handshake(
-            "timed out waiting for SessionReady".to_string(),
-        ))
     }
 
     /// Next well-formed buffered message, skipping (and logging) malformed
@@ -673,6 +675,35 @@ mod tests {
         backend.connect_socket(app_side).unwrap();
         let elapsed = started.elapsed();
         let _terminal = fake.join().unwrap();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "handshake took {elapsed:?}"
+        );
+    }
+
+    /// The in-band probe can read the terminal's whole answer before the
+    /// handshake looks for it; it must not then wait for more.
+    #[test]
+    fn a_session_ready_already_read_ends_the_handshake_at_once() {
+        use ultty_protocol::Encode;
+        let (mut backend, _terminal) = backend_over_pair();
+        for msg in [
+            TerminalMessage::ServerHello {
+                version: ultty_protocol::PROTOCOL_VERSION,
+                capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
+            },
+            TerminalMessage::SessionReady {
+                session_id: 1,
+                root_region: RegionId::ROOT,
+                width: 80,
+                height: 24,
+            },
+        ] {
+            backend.read_buf.extend_from_slice(&msg.encode_to_bytes());
+        }
+        let started = std::time::Instant::now();
+        backend.wait_for_session_ready().unwrap();
+        let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_millis(500),
             "handshake took {elapsed:?}"
