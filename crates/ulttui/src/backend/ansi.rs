@@ -1,6 +1,8 @@
 //! ANSI fallback backend using Ratatui.
 
+use std::fs::File;
 use std::io::{self, Stdout};
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Once;
 use std::time::Duration;
 
@@ -18,14 +20,32 @@ type RatatuiTerminal = Terminal<CrosstermBackend<Stdout>>;
 
 pub struct AnsiBackend {
     terminal: Option<RatatuiTerminal>,
+    /// Where crossterm reads input: stdin, or `/dev/tty` (opened here only
+    /// to wait on) when stdin is not a terminal.
+    input: Option<Input>,
+}
+
+enum Input {
+    Stdin,
+    DevTty(File),
 }
 
 impl AnsiBackend {
     pub fn new() -> Self {
-        Self { terminal: None }
+        Self {
+            terminal: None,
+            input: None,
+        }
     }
 
     pub fn init(&mut self) -> crate::Result<()> {
+        // The same choice crossterm makes for its reads.
+        // SAFETY: isatty only inspects the descriptor.
+        self.input = Some(if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
+            Input::Stdin
+        } else {
+            Input::DevTty(File::open("/dev/tty")?)
+        });
         install_panic_hook();
         terminal::enable_raw_mode()?;
         io::stdout().execute(EnterAlternateScreen)?;
@@ -56,8 +76,22 @@ impl AnsiBackend {
         Ok(())
     }
 
+    /// The terminal's input, readable when a key (or other input) arrives.
+    pub fn wait_fd(&self) -> Option<RawFd> {
+        match self.input.as_ref()? {
+            Input::Stdin => Some(libc::STDIN_FILENO),
+            Input::DevTty(tty) => Some(tty.as_raw_fd()),
+        }
+    }
+
+    /// Whether crossterm already holds an event (it reads all the input
+    /// that is available, which can be several events).
+    pub fn has_pending_events(&mut self) -> crate::Result<bool> {
+        Ok(event::poll(Duration::ZERO)?)
+    }
+
     pub fn poll_event(&mut self) -> crate::Result<Option<Event>> {
-        if event::poll(Duration::from_millis(16))? {
+        if event::poll(Duration::ZERO)? {
             let crossterm_event = event::read()?;
             Ok(convert_event(crossterm_event))
         } else {
