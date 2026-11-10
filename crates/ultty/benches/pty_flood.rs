@@ -89,7 +89,7 @@ fn flood(path: &str, rows: &mut Vec<Row>) -> Duration {
             rows.resize_with(usize::from(ROWS), || Row::new(COLS));
             for (index, row) in rows.iter_mut().enumerate() {
                 if let Some(visible) = buffer.visible_row(index as u16) {
-                    row.copy_from(&visible);
+                    visible.copy_into(row);
                 }
             }
             last_frame = Instant::now();

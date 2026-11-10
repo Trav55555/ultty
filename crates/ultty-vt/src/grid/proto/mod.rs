@@ -803,7 +803,7 @@ fn collect_threshold(live: usize, cells: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{Row, TerminalHandler};
+    use crate::grid::{RowView, TerminalHandler};
 
     fn reference(cols: u16, rows: u16, input: &[u8]) -> Terminal {
         let mut terminal = Terminal::new(Dimensions::new(cols, rows));
@@ -816,8 +816,8 @@ mod tests {
         terminal
     }
 
-    fn row_cells(row: &Row) -> Vec<Cell> {
-        row.cells().copied().collect()
+    fn row_cells(row: &RowView<'_>) -> Vec<Cell> {
+        row.cells().collect()
     }
 
     fn check<S: Storage>(cols: u16, rows: u16, input: &[u8]) {

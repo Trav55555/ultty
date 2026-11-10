@@ -1770,7 +1770,7 @@ impl Renderer {
             let selection_bg = scheme.selection_background();
 
             for col_idx in 0..dims.cols {
-                let cell = match row.get(col_idx) {
+                let cell = match row.cell(col_idx) {
                     Some(c) => c,
                     None => continue,
                 };
@@ -1835,7 +1835,7 @@ impl Renderer {
                 None => continue,
             };
             for col_idx in 0..dims.cols {
-                let cell = match row.get(col_idx) {
+                let cell = match row.cell(col_idx) {
                     Some(c) => c,
                     None => continue,
                 };
@@ -1904,7 +1904,7 @@ impl Renderer {
                 None => continue,
             };
             for col_idx in 0..dims.cols {
-                let cell = match row.get(col_idx) {
+                let cell = match row.cell(col_idx) {
                     Some(c) => c,
                     None => continue,
                 };

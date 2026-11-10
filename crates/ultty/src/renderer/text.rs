@@ -8,7 +8,7 @@ use super::powerline::is_powerline_triangle;
 use super::text_cache::{GridTextCache, GridTextKey};
 use super::{ColorScheme, Rgba, Vertex};
 use crate::config::FontConfig;
-use crate::grid::{Cell, CellFlags, Color, CursorShape, Row, Terminal, UnderlineStyle};
+use crate::grid::{Cell, CellFlags, Color, CursorShape, RowView, Terminal, UnderlineStyle};
 use cosmic_text::{
     Attrs, Buffer, CacheKey, CacheKeyFlags, Family, FontSystem, Metrics, Shaping, Style, Weight,
 };
@@ -136,16 +136,16 @@ fn ligature_key(cell: &crate::grid::Cell) -> (bool, bool, crate::grid::Color, bo
 
 /// The end (exclusive) of the ligature run starting at `start`: consecutive
 /// cells that join runs, with the same face and foreground.
-fn ligature_run_end(row: &crate::grid::Row, start: u16, cols: u16) -> u16 {
-    let Some(first) = row.get(start).filter(|c| joins_ligature_run(c)) else {
+fn ligature_run_end(row: &RowView<'_>, start: u16, cols: u16) -> u16 {
+    let Some(first) = row.cell(start).filter(joins_ligature_run) else {
         return start;
     };
-    let key = ligature_key(first);
+    let key = ligature_key(&first);
     let mut end = start + 1;
     while end < cols {
         let joins = row
-            .get(end)
-            .is_some_and(|cell| joins_ligature_run(cell) && ligature_key(cell) == key);
+            .cell(end)
+            .is_some_and(|cell| joins_ligature_run(&cell) && ligature_key(&cell) == key);
         if !joins {
             break;
         }
@@ -1205,7 +1205,7 @@ impl TextRenderer {
         vertices: &mut Vec<Vertex>,
         buffer: &mut Buffer,
         run_buffer: &mut Buffer,
-        row: &Row,
+        row: &RowView<'_>,
         row_idx: u16,
         cursor_col: Option<u16>,
         color_scheme: &ColorScheme,
@@ -1222,7 +1222,7 @@ impl TextRenderer {
         let mut run_drawn_until = 0u16;
 
         for col_idx in 0..cols {
-            let cell = match row.get(col_idx) {
+            let cell = match row.cell(col_idx) {
                 Some(c) => c,
                 None => continue,
             };
@@ -1234,9 +1234,9 @@ impl TextRenderer {
             let style = CellStyle::from_flags(cell.flags());
             let under_block_cursor = block_cursor == Some((col_idx, row_idx));
             let base_color = if under_block_cursor {
-                cursor_glyph_color(cell, color_scheme)
+                cursor_glyph_color(&cell, color_scheme)
             } else {
-                cell_foreground(cell, color_scheme)
+                cell_foreground(&cell, color_scheme)
             };
 
             // Decorations apply to blank cells and wide-char spacers too,
@@ -1252,7 +1252,7 @@ impl TextRenderer {
                 );
                 quads.clear();
                 underline_quads(underline, cell_rect, self.decoration, &mut quads);
-                let line_color = underline_color(cell, base_color, color_scheme);
+                let line_color = underline_color(&cell, base_color, color_scheme);
                 for quad in &quads {
                     Self::emit_solid_quad(vertices, quad, line_color, solid_uv);
                 }
@@ -1295,21 +1295,21 @@ impl TextRenderer {
                 if end - col_idx >= 2 {
                     self.run_text.clear();
                     self.run_text.extend(
-                        (col_idx..end).filter_map(|col| row.get(col).map(|cell| cell.char())),
+                        (col_idx..end).filter_map(|col| row.cell(col).map(|cell| cell.char())),
                     );
                     if could_ligate(&self.run_text) {
                         self.load_run_glyphs(run_buffer, style);
                         let glyphs = std::mem::take(&mut self.run_glyphs);
                         for &(offset, shaped) in &glyphs {
                             let col = col_idx + offset;
-                            let Some(glyph_cell) = row.get(col) else {
+                            let Some(glyph_cell) = row.cell(col) else {
                                 continue;
                             };
                             let under_cursor = block_cursor == Some((col, row_idx));
                             let color = if under_cursor {
-                                cursor_glyph_color(glyph_cell, color_scheme)
+                                cursor_glyph_color(&glyph_cell, color_scheme)
                             } else {
-                                cell_foreground(glyph_cell, color_scheme)
+                                cell_foreground(&glyph_cell, color_scheme)
                             };
                             self.push_glyph(
                                 vertices,
@@ -2229,12 +2229,12 @@ mod tests {
     fn ligature_runs_stop_at_spaces_wide_chars_and_face_changes() {
         let row = row_of("a=>b c");
         assert_eq!(
-            ligature_run_end(&row, 0, row.width()),
+            ligature_run_end(&RowView::from(&row), 0, row.width()),
             4,
             "stops at the space"
         );
         assert_eq!(
-            ligature_run_end(&row, 4, row.width()),
+            ligature_run_end(&RowView::from(&row), 4, row.width()),
             4,
             "a space starts no run"
         );
@@ -2242,7 +2242,7 @@ mod tests {
         let mut row = row_of("x!=y");
         row[2].set_flag(CellFlags::BOLD);
         assert_eq!(
-            ligature_run_end(&row, 0, row.width()),
+            ligature_run_end(&RowView::from(&row), 0, row.width()),
             2,
             "bold changes the face"
         );
@@ -2250,7 +2250,7 @@ mod tests {
         let mut row = row_of("->中");
         row[2].set_flag(CellFlags::WIDE_CHAR);
         assert_eq!(
-            ligature_run_end(&row, 0, row.width()),
+            ligature_run_end(&RowView::from(&row), 0, row.width()),
             2,
             "non-ASCII ends the run"
         );
@@ -2259,10 +2259,10 @@ mod tests {
         // cells the program colored differently. Background does not.
         let mut row = row_of("==>");
         row[1].set_fg(crate::grid::Color::Named(2));
-        assert_eq!(ligature_run_end(&row, 0, row.width()), 1);
+        assert_eq!(ligature_run_end(&RowView::from(&row), 0, row.width()), 1);
         let mut row = row_of("==>");
         row[1].set_bg(crate::grid::Color::Named(2));
-        assert_eq!(ligature_run_end(&row, 0, row.width()), 3);
+        assert_eq!(ligature_run_end(&RowView::from(&row), 0, row.width()), 3);
     }
 
     #[test]
