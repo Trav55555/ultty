@@ -56,7 +56,7 @@ pub enum Key {
 }
 
 /// Modifier keys.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Modifiers {
     pub shift: bool,
     pub ctrl: bool,
@@ -74,7 +74,7 @@ pub struct MouseEvent {
 }
 
 /// Mouse event kind.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseEventKind {
     Down(MouseButton),
     Up(MouseButton),
@@ -85,7 +85,7 @@ pub enum MouseEventKind {
 }
 
 /// Mouse button.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
     Left,
     Right,

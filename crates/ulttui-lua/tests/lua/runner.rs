@@ -3,12 +3,11 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use futures_util::StreamExt;
 use ulttui::app::Application;
 use ulttui::cmd::Cmd;
 use ulttui::event::{Event, Key, KeyEvent, Modifiers};
 use ulttui::widgets::{render_view_messages, View};
-use ulttui_lua::runner::Msg;
+use ulttui_lua::runner::{watch_file, Msg, SETTLE};
 use ulttui_lua::{LuaApp, ScriptMsg, ScriptOptions};
 use ultty_protocol::AppMessage;
 
@@ -71,7 +70,7 @@ fn keys_and_clicks_become_script_messages_but_tab_stays_with_focus() {
         "events",
         "return app { view = function() return text('x') end }",
     );
-    let mut app = LuaApp::without_watch(path, ScriptOptions::default()).unwrap();
+    let mut app = LuaApp::new(path, ScriptOptions::default()).unwrap();
     assert!(app.on_event(&key_event(Key::Tab)).is_none());
     assert!(app
         .on_event(&Event::Resize {
@@ -109,9 +108,9 @@ fn processes_run_on_boot_and_their_output_comes_back() {
   view = function(s) return text(s.out) end }"#,
     );
     let rt = runtime();
-    let mut app = LuaApp::without_watch(path, exec()).unwrap();
+    let mut app = LuaApp::new(path, exec()).unwrap();
     assert_eq!(frame_texts(&app), ["none"]);
-    let done = run_spawns(&rt, app.update(Msg::Boot));
+    let done = run_spawns(&rt, app.init());
     assert_eq!(done.len(), 1);
     for msg in done {
         app.update(msg);
@@ -129,8 +128,8 @@ fn a_program_that_cannot_start_reports_why() {
   view = function(s) return text(s.out) end }"#,
     );
     let rt = runtime();
-    let mut app = LuaApp::without_watch(path, exec()).unwrap();
-    for msg in run_spawns(&rt, app.update(Msg::Boot)) {
+    let mut app = LuaApp::new(path, exec()).unwrap();
+    for msg in run_spawns(&rt, app.init()) {
         app.update(msg);
     }
     let out = frame_texts(&app).join("");
@@ -146,48 +145,53 @@ fn saving_the_file_reloads_it_through_the_watch() {
   update = function(s) s.n += 1; return s end,
   view = function(s) return text("v1 " .. s.n) end }"#,
     );
-    let rt = runtime();
     let mut app = LuaApp::new(&path, ScriptOptions::default()).unwrap();
     app.update(Msg::Script(ScriptMsg::Tick { name: "x".into() }));
 
-    let mut stream = flatten(app.update(Msg::Boot))
-        .into_iter()
-        .find_map(|cmd| match cmd {
-            Cmd::Subscribe { stream, .. } => Some(stream),
-            _ => None,
-        })
-        .expect("boot subscribes to the file watch");
-
-    let next_change = |stream: &mut _| {
-        rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), StreamExt::next(stream))
-                .await
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _watch = watch_file(&path, move |msg| {
+        let _ = tx.send(msg);
+    })
+    .unwrap();
+    // The changes the watch reports for one save, up to the one that says
+    // the file is complete.
+    let save = || {
+        let mut partial = 0;
+        loop {
+            match rx
+                .recv_timeout(Duration::from_secs(5))
                 .expect("a change within 5 s")
-                .expect("the watch stream stays open")
-        })
+            {
+                Msg::FileTouched(_) => partial += 1,
+                complete @ Msg::FileChanged(_) => return (partial, complete),
+                other => panic!("{other:?}"),
+            }
+        }
     };
 
+    // Written in place: the truncate and the write may be partial; the
+    // close says it is done, and that reloads.
     let before = Instant::now();
     std::fs::write(
         &path,
         std::fs::read_to_string(&path).unwrap().replace("v1", "v2"),
     )
     .unwrap();
-    let msg = next_change(&mut stream);
+    let (_, msg) = save();
     assert!(matches!(msg, Msg::FileChanged(seen) if seen >= before));
     app.update(msg);
     assert_eq!(frame_texts(&app), ["v2 1"]);
 
     // A broken save shows the error over the last good view...
     std::fs::write(&path, "return app {").unwrap();
-    let msg = next_change(&mut stream);
+    let (_, msg) = save();
     app.update(msg);
     let shown = frame_texts(&app);
     assert!(shown[0].starts_with("error: "), "{shown:?}");
     assert_eq!(shown.last().unwrap(), "v2 1");
 
     // ...until the fix is saved. Editors that save by renaming a new file
-    // over the old one are covered too.
+    // over the old one are covered too, and the rename alone is complete.
     let tmp = path.with_extension("swp");
     std::fs::write(
         &tmp,
@@ -197,9 +201,45 @@ fn saving_the_file_reloads_it_through_the_watch() {
     )
     .unwrap();
     std::fs::rename(&tmp, &path).unwrap();
-    let msg = next_change(&mut stream);
+    let (partial, msg) = save();
+    assert_eq!(partial, 0, "a rename is reported as complete at once");
     app.update(msg);
     assert_eq!(frame_texts(&app), ["v3 1"]);
+}
+
+#[test]
+fn a_change_that_may_be_partial_reloads_after_the_settle_time() {
+    let path = write(
+        "settle",
+        "return app { view = function() return text('before') end }",
+    );
+    let rt = runtime();
+    let mut app = LuaApp::new(&path, ScriptOptions::default()).unwrap();
+    std::fs::write(
+        &path,
+        "return app { view = function() return text('after') end }",
+    )
+    .unwrap();
+
+    // A touch does not reload by itself; it schedules a reload.
+    let touched = app.update(Msg::FileTouched(Instant::now()));
+    assert_eq!(frame_texts(&app), ["before"]);
+    let started = Instant::now();
+    let msgs = run_spawns(&rt, touched);
+    assert!(started.elapsed() >= SETTLE);
+    assert!(matches!(msgs[..], [Msg::FileChanged(_)]), "{msgs:?}");
+    for msg in msgs {
+        app.update(msg);
+    }
+    assert_eq!(frame_texts(&app), ["after"]);
+
+    // A complete change cancels a settle still waiting.
+    let cmds = flatten(app.update(Msg::FileChanged(Instant::now())));
+    assert!(
+        cmds.iter()
+            .any(|cmd| matches!(cmd, Cmd::CancelSpawn { id } if id == "ulttui-lua/settle")),
+        "{cmds:?}"
+    );
 }
 
 #[test]
@@ -208,7 +248,7 @@ fn the_error_banner_sits_above_the_view_and_is_named() {
         "banner",
         "return app { init = function() return {} end, update = function() error('bad key') end,\n view = function() return text('body') end }",
     );
-    let mut app = LuaApp::without_watch(path, ScriptOptions::default()).unwrap();
+    let mut app = LuaApp::new(path, ScriptOptions::default()).unwrap();
     let msg = app.on_event(&key_event(Key::Char('a'))).unwrap();
     app.update(msg);
     let frame = app.frame();
@@ -234,7 +274,7 @@ fn the_error_banner_sits_above_the_view_and_is_named() {
 
 #[test]
 fn hello_example_counts() {
-    let mut app = LuaApp::without_watch(example("hello.luau"), ScriptOptions::default()).unwrap();
+    let mut app = LuaApp::new(example("hello.luau"), ScriptOptions::default()).unwrap();
     assert_eq!(app.script().error(), None);
     assert!(frame_texts(&app).contains(&"Count: 0".to_string()));
     for key in [Key::Char('+'), Key::Up, Key::Enter] {
@@ -249,7 +289,7 @@ fn hello_example_counts() {
 
 #[test]
 fn panes_example_lists_each_pane_and_moves_the_selection() {
-    let mut app = LuaApp::without_watch(example("panes.luau"), exec()).unwrap();
+    let mut app = LuaApp::new(example("panes.luau"), exec()).unwrap();
     assert_eq!(app.script().error(), None);
     let reply = r#"{"status":"data","type":"panes","panes":[
         {"id":1,"tab_index":0,"active":true,"focused":true,"title":"","foreground":"zsh",
@@ -291,7 +331,7 @@ fn panes_example_lists_each_pane_and_moves_the_selection() {
 
 #[test]
 fn panes_example_without_allow_exec_explains_the_flag() {
-    let app = LuaApp::without_watch(example("panes.luau"), ScriptOptions::default()).unwrap();
+    let app = LuaApp::new(example("panes.luau"), ScriptOptions::default()).unwrap();
     let error = app.script().error().unwrap();
     assert!(
         error.contains("start ulttui-lua with --allow-exec"),

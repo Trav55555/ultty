@@ -4845,7 +4845,6 @@ name = "ulttui-lua"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "futures-util",
  "mlua",
  "notify",
  "ratatui",

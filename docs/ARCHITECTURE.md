@@ -110,6 +110,15 @@ Grid Changes ──► Layout Pass ──► Render Pass ──► GPU Submit
 └─────────┘      └─────────┘      └─────────┘
 ```
 
+`Application::init` runs once before the first frame. Between passes the
+runner (`crates/ulttui/src/app.rs`) sleeps in `poll(2)` on the terminal's
+input and a wake socket, with a timeout at the next deadline (a `Sub::every`
+timer, a toast expiring, a stream reconnect, the in-band heartbeat). A
+finished command, a subscription item or `Proxy::send` from another thread
+writes to the wake socket. An idle app does not wake. The native backend
+never waits for the terminal's reply to a frame; the reply wakes the loop
+when it arrives.
+
 ### Backend Selection
 
 ```rust

@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use notify::event::{AccessKind, AccessMode, ModifyKind, RenameMode};
 use notify::{EventKind, RecursiveMode, Watcher};
 use ratatui::layout::Rect;
 use ratatui::Frame;
-use tokio::sync::mpsc;
 use ulttui::event::{Event, Key, KeyEvent};
 use ulttui::prelude::*;
 use ultty_protocol::{AppMessage, Content, RegionId};
@@ -21,24 +21,22 @@ use crate::script::{Command, Reload, Script, ScriptError, ScriptMsg, ScriptOptio
 /// Messages of the host app.
 #[derive(Debug)]
 pub enum Msg {
-    /// First tick of the event loop: start the file watch and the first
-    /// load's commands.
-    Boot,
     /// Something for the script's `update`.
     Script(ScriptMsg),
-    /// The script file changed; the instant is when the change was seen.
+    /// The script file was written and closed, or renamed into place: it
+    /// is complete, so reload now. The instant is when the change was seen.
     FileChanged(Instant),
+    /// The script file changed in a way that may be the middle of a write
+    /// (a truncate, one write of several): reload once it has been quiet for
+    /// [`SETTLE`], unless a [`Msg::FileChanged`] comes first.
+    FileTouched(Instant),
 }
 
 /// A Luau script running as a ulttui app.
 pub struct LuaApp {
     script: Script,
-    /// Commands from the first load, issued once the event loop runs.
+    /// Commands from the first load, issued by `init`.
     pending: Vec<Command>,
-    watch_rx: Option<mpsc::UnboundedReceiver<Instant>>,
-    /// Kept alive for as long as the app runs.
-    _watcher: Option<notify::RecommendedWatcher>,
-    booted: bool,
     /// Set by a reload; the next frame logs how long the change took to show.
     reload_mark: Cell<Option<ReloadMark>>,
 }
@@ -48,33 +46,25 @@ pub struct LuaApp {
 struct ReloadMark {
     /// The watch saw the file change.
     seen: Instant,
-    /// The app started reloading (after the settle delay and the event
-    /// loop's next tick).
+    /// The app started reloading (after the event loop woke, and any
+    /// settle delay).
     started: Instant,
     /// Compile, `init` and the trial `view` were done.
     loaded: Instant,
 }
 
-const BOOT_TIMER: &str = "ulttui-lua/boot";
-const WATCH_SUBSCRIPTION: &str = "ulttui-lua/watch";
-/// After a change, wait this long for more writes before reloading, so an
-/// editor's truncate-then-write does not show a half-written file.
-const SETTLE: Duration = Duration::from_millis(10);
+/// The task that reloads after a [`Msg::FileTouched`].
+const SETTLE_TASK: &str = "ulttui-lua/settle";
+/// After a change that may be partial, wait this long for more writes before
+/// reloading, so a truncate-then-write does not show a half-written file.
+/// Only a fallback: on Linux the close after the write (or the rename into
+/// place) reloads at once.
+pub const SETTLE: Duration = Duration::from_millis(10);
 
 impl LuaApp {
-    /// Load the script at `path` and watch it for changes.
+    /// Load the script at `path`. [`watch_file`] reports its changes.
     pub fn new(path: impl Into<PathBuf>, options: ScriptOptions) -> Result<Self, ScriptError> {
-        let path = path.into();
-        let (watcher, rx) = watch_file(&path)?;
-        let mut app = Self::without_watch(path, options)?;
-        app._watcher = Some(watcher);
-        app.watch_rx = Some(rx);
-        Ok(app)
-    }
-
-    /// Load the script without watching it (tests drive reloads directly).
-    pub fn without_watch(path: PathBuf, options: ScriptOptions) -> Result<Self, ScriptError> {
-        let mut script = Script::new(path, options)?;
+        let mut script = Script::new(path.into(), options)?;
         let pending = match script.reload() {
             Reload::Loaded(commands) => commands,
             Reload::Unchanged | Reload::Failed => Vec::new(),
@@ -82,9 +72,6 @@ impl LuaApp {
         Ok(Self {
             script,
             pending,
-            watch_rx: None,
-            _watcher: None,
-            booted: false,
             reload_mark: Cell::new(None),
         })
     }
@@ -166,13 +153,22 @@ fn error_banner(error: &str, still_running: bool) -> Node {
     }
 }
 
-/// Watch the directory holding `path` and report changes to that one file.
+/// A running watch on the script's file; dropping it stops the watch.
+pub struct FileWatch {
+    _watcher: notify::RecommendedWatcher,
+}
+
+/// Watch the directory holding `path` and hand each change to that one file
+/// to `on_change`, on the watcher's thread, as [`Msg::FileChanged`] or
+/// [`Msg::FileTouched`]. Pass it to the running app with a
+/// [`Proxy`](ulttui::app::Proxy), which wakes the event loop.
 ///
 /// The directory, not the file, is watched because editors save by writing a
 /// new file and renaming it over the old one, which ends a watch on the file.
-fn watch_file(
+pub fn watch_file(
     path: &Path,
-) -> Result<(notify::RecommendedWatcher, mpsc::UnboundedReceiver<Instant>), ScriptError> {
+    on_change: impl Fn(Msg) + Send + 'static,
+) -> Result<FileWatch, ScriptError> {
     let path = std::fs::canonicalize(path).map_err(|source| ScriptError::Io {
         path: path.to_path_buf(),
         source,
@@ -183,32 +179,49 @@ fn watch_file(
         path: path.clone(),
         source,
     };
-    let (tx, rx) = mpsc::unbounded_channel();
     let target = path.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let Ok(event) = event else { return };
-        let relevant = matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_))
-            && event.paths.iter().any(|p| p == &target);
-        if relevant {
-            let _ = tx.send(Instant::now());
+        if !event.paths.iter().any(|p| p == &target) {
+            return;
+        }
+        let seen = Instant::now();
+        match change_kind(&event.kind) {
+            Some(Change::Complete) => on_change(Msg::FileChanged(seen)),
+            Some(Change::Partial) => on_change(Msg::FileTouched(seen)),
+            None => {}
         }
     })
     .map_err(watch_error)?;
     watcher
         .watch(&dir, RecursiveMode::NonRecursive)
         .map_err(watch_error)?;
-    Ok((watcher, rx))
+    Ok(FileWatch { _watcher: watcher })
 }
 
-/// A stream of `FileChanged` messages, one per burst of writes.
-fn change_stream(
-    rx: mpsc::UnboundedReceiver<Instant>,
-) -> impl futures_util::Stream<Item = Msg> + Send + 'static {
-    futures_util::stream::unfold(rx, |mut rx| async move {
-        let first = rx.recv().await?;
-        while let Ok(Some(_)) = tokio::time::timeout(SETTLE, rx.recv()).await {}
-        Some((Msg::FileChanged(first), rx))
-    })
+#[derive(Debug, PartialEq)]
+enum Change {
+    /// The file's new contents are all there.
+    Complete,
+    /// More writes may follow.
+    Partial,
+}
+
+fn change_kind(kind: &EventKind) -> Option<Change> {
+    match kind {
+        // Written and closed (inotify's IN_CLOSE_WRITE), or renamed into
+        // place by an editor's save.
+        EventKind::Access(AccessKind::Close(AccessMode::Write))
+        | EventKind::Modify(ModifyKind::Name(
+            RenameMode::To | RenameMode::Both | RenameMode::Any,
+        )) => Some(Change::Complete),
+        // Renamed away: nothing to load until something takes its place.
+        EventKind::Modify(ModifyKind::Name(_)) => None,
+        // A create is followed by its writes; a modify may be one of
+        // several. Platforms without close events only ever send these.
+        EventKind::Create(_) | EventKind::Modify(_) => Some(Change::Partial),
+        _ => None,
+    }
 }
 
 fn to_cmd(commands: Vec<Command>) -> Cmd<Msg> {
@@ -291,38 +304,39 @@ fn key_msg(event: &KeyEvent) -> ScriptMsg {
 impl Application for LuaApp {
     type Message = Msg;
 
+    fn init(&mut self) -> Cmd<Msg> {
+        to_cmd(std::mem::take(&mut self.pending))
+    }
+
     fn update(&mut self, msg: Msg) -> Cmd<Msg> {
         match msg {
-            Msg::Boot => {
-                self.booted = true;
-                let mut cmds = vec![to_cmd(std::mem::take(&mut self.pending))];
-                if let Some(rx) = self.watch_rx.take() {
-                    cmds.push(Cmd::subscribe(WATCH_SUBSCRIPTION, change_stream(rx)));
-                }
-                Cmd::batch(cmds)
-            }
             Msg::Script(msg) => to_cmd(self.script.update(&msg)),
-            Msg::FileChanged(seen) => to_cmd(self.reload(seen)),
+            Msg::FileChanged(seen) => {
+                // A settle still pending would only find the file unchanged.
+                Cmd::batch(vec![Cmd::cancel(SETTLE_TASK), to_cmd(self.reload(seen))])
+            }
+            Msg::FileTouched(seen) => {
+                // A later touch replaces this task, restarting the quiet time.
+                Cmd::spawn_with_id(SETTLE_TASK, async move {
+                    tokio::time::sleep(SETTLE).await;
+                    Msg::FileChanged(seen)
+                })
+            }
         }
     }
 
     fn subscriptions(&self) -> Sub<Msg> {
-        let mut subs: Vec<Sub<Msg>> = self
-            .script
-            .timers()
-            .into_iter()
-            .map(|(name, interval)| {
-                Sub::every_with_id(format!("timer:{name}"), interval, move || {
-                    Msg::Script(ScriptMsg::Tick { name: name.clone() })
+        Sub::batch(
+            self.script
+                .timers()
+                .into_iter()
+                .map(|(name, interval)| {
+                    Sub::every_with_id(format!("timer:{name}"), interval, move || {
+                        Msg::Script(ScriptMsg::Tick { name: name.clone() })
+                    })
                 })
-            })
-            .collect();
-        if !self.booted {
-            // ulttui has no init hook; a zero-interval timer fires on the
-            // first tick and is dropped once `Boot` is handled.
-            subs.push(Sub::every_with_id(BOOT_TIMER, Duration::ZERO, || Msg::Boot));
-        }
-        Sub::batch(subs)
+                .collect(),
+        )
     }
 
     fn on_event(&mut self, event: &Event) -> Option<Msg> {
@@ -402,5 +416,42 @@ impl View for FrameView {
 
     fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
         self.root.for_each_child(visit)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use notify::event::{CreateKind, DataChange, MetadataKind, RemoveKind};
+
+    use super::*;
+
+    #[test]
+    fn closes_and_renames_into_place_are_complete_other_writes_are_not() {
+        let complete = [
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+        ];
+        for kind in complete {
+            assert_eq!(change_kind(&kind), Some(Change::Complete), "{kind:?}");
+        }
+        let partial = [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+            EventKind::Modify(ModifyKind::Any),
+        ];
+        for kind in partial {
+            assert_eq!(change_kind(&kind), Some(Change::Partial), "{kind:?}");
+        }
+        let ignored = [
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Remove(RemoveKind::File),
+        ];
+        for kind in ignored {
+            assert_eq!(change_kind(&kind), None, "{kind:?}");
+        }
     }
 }

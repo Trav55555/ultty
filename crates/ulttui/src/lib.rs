@@ -47,6 +47,7 @@ pub mod screen;
 pub mod theme;
 pub mod toast;
 pub mod vim;
+mod wake;
 pub mod widgets;
 
 mod error;
@@ -54,7 +55,7 @@ pub use error::{Error, Result};
 
 /// Prelude for convenient imports.
 pub mod prelude {
-    pub use crate::app::{App, Application};
+    pub use crate::app::{App, Application, Proxy};
     pub use crate::cmd::{Cmd, Sub};
     pub use crate::event::Event;
     pub use crate::focus::FocusManager;
