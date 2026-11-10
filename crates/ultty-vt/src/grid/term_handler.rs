@@ -44,15 +44,41 @@ impl<'a> TerminalHandler<'a> {
     }
 
     /// Handle a single parser action.
+    ///
+    /// Printing is nearly every action on text output, so it is decided
+    /// here, inlined into the caller, and only the rest goes through the
+    /// large match (whose frame is costly to enter for one character).
+    #[inline]
     pub fn handle(&mut self, action: Action) {
         match action {
             Action::Print(c) => {
-                if !self.terminal.is_alternate_screen() {
-                    self.terminal.buffer_mut().write_char(c);
-                } else {
-                    self.terminal.grid_mut().write_char(c);
-                }
+                self.print(c);
+                // `Action`'s drop glue covers every variant and is not
+                // inlined, so dropping a `Print`, which owns nothing, would
+                // cost a call per character.
+                std::mem::forget(action);
             }
+            action => self.handle_other(action),
+        }
+    }
+
+    /// Print `c` on the active screen. Out of line, so that the parser
+    /// loop that calls [`Self::handle`] stays small enough to inline its
+    /// callback.
+    #[inline(never)]
+    fn print(&mut self, c: char) {
+        if !self.terminal.is_alternate_screen() {
+            self.terminal.buffer_mut().write_char(c);
+        } else {
+            self.terminal.grid_mut().write_char(c);
+        }
+    }
+
+    /// [`Self::handle`] for everything but printing.
+    #[inline(never)]
+    fn handle_other(&mut self, action: Action) {
+        match action {
+            Action::Print(c) => self.print(c),
 
             Action::Execute(_code) => {
                 // C0 controls handled separately

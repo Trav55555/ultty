@@ -157,7 +157,13 @@ impl Tail {
     /// The end of a cluster that starts with `c`.
     #[inline]
     pub(super) fn start(c: char) -> Self {
-        match CharProps::of(c).class() {
+        Self::start_with(c, CharProps::of(c))
+    }
+
+    /// [`Tail::start`] for `c` with properties `props`.
+    #[inline]
+    pub(super) fn start_with(c: char, props: CharProps) -> Self {
+        match props.class() {
             JoinClass::Joiner if c == ZWJ => Self::Zwj,
             JoinClass::Plain | JoinClass::Joiner | JoinClass::Linker | JoinClass::SpacingMark => {
                 Self::Settled
