@@ -198,6 +198,9 @@ pub(crate) fn optimize_frame_messages(
     } = reconciliation;
 
     let mut outgoing = Vec::new();
+    // Sent after every content change, so text a region gets in the frame
+    // it stops being live is still announced.
+    let mut semantics_changes = Vec::new();
 
     // Deletes go first so every later insert index refers to a sibling list
     // without stale entries.
@@ -253,12 +256,10 @@ pub(crate) fn optimize_frame_messages(
             }
             AppMessage::SetContent { id, content } => {
                 let stable = mapping[&id];
-                let live = next.regions.get(&stable).is_some_and(|region| {
-                    region
-                        .semantics
-                        .as_ref()
-                        .is_some_and(|semantics| semantics.live != Live::Off)
-                });
+                // Live in this frame or the last: text that arrives in the
+                // frame a region stops being live is still announced.
+                let live =
+                    is_live(next.regions.get(&stable)) || is_live(previous.regions.get(&stable));
                 match previous.regions.get(&stable) {
                     Some(prev) if live && capabilities.append_content => {
                         outgoing.extend(live_content_update(stable, &prev.content, content));
@@ -312,7 +313,7 @@ pub(crate) fn optimize_frame_messages(
                     .get(&stable)
                     .is_some_and(|prev| prev.semantics.as_ref() == Some(&semantics));
                 if capabilities.semantics && !unchanged {
-                    outgoing.push(AppMessage::SetSemantics {
+                    semantics_changes.push(AppMessage::SetSemantics {
                         id: stable,
                         semantics,
                     });
@@ -322,6 +323,37 @@ pub(crate) fn optimize_frame_messages(
         }
     }
 
+    // A live region whose text became regions of its own (a markdown view
+    // that finished streaming) still announces what arrived with it,
+    // before it stops being live below.
+    if capabilities.append_content {
+        let mut finished: Vec<(RegionId, RegionId)> = mapping
+            .iter()
+            .filter(|(_, stable)| {
+                let previous = previous.regions.get(stable);
+                // It had text of its own: a live container stays one.
+                is_live(previous)
+                    && previous.is_some_and(|region| region.content != Content::None)
+                    && next
+                        .regions
+                        .get(stable)
+                        .is_some_and(|region| region.content == Content::None)
+            })
+            .map(|(provisional, stable)| (*stable, *provisional))
+            .collect();
+        finished.sort_by_key(|(stable, _)| stable.0);
+        for (stable, provisional) in finished {
+            let Some(before) = plain_text(&previous.regions[&stable].content) else {
+                continue;
+            };
+            let after = subtree_text(provisional, &nodes, &order);
+            if let Some(text) = text_to_announce(&before, &after) {
+                outgoing.push(AppMessage::AppendContent { id: stable, text });
+            }
+        }
+    }
+
+    outgoing.append(&mut semantics_changes);
     // A region whose view no longer says more than its content goes back
     // to what the terminal derives.
     if capabilities.semantics {
@@ -558,17 +590,59 @@ fn live_content_update(id: RegionId, previous: &Content, next: Content) -> Vec<A
     let (Some(before), Some(after)) = (plain_text(previous), plain_text(&next)) else {
         return vec![AppMessage::SetContent { id, content: next }];
     };
-    let kept = common_prefix_len(&before, &after);
-    if before[kept..].contains('\n') || kept == after.len() {
+    let Some(text) = text_to_announce(&before, &after) else {
         return vec![AppMessage::SetContent { id, content: next }];
-    }
-    let text = after[kept..].to_string();
+    };
     let appended = with_appended(previous, &text);
     let mut messages = vec![AppMessage::AppendContent { id, text }];
     if appended != next {
         messages.push(AppMessage::SetContent { id, content: next });
     }
     messages
+}
+
+/// Whether the frame said `region` is live.
+fn is_live(region: Option<&RegionSnapshot>) -> bool {
+    region
+        .and_then(|region| region.semantics.as_ref())
+        .is_some_and(|semantics| semantics.live != Live::Off)
+}
+
+/// What a live region whose text went from `before` to `after` should
+/// append: what follows the part that stayed, unless that part ends
+/// before the last line of `before` or nothing follows it.
+fn text_to_announce(before: &str, after: &str) -> Option<String> {
+    let kept = common_prefix_len(before, after);
+    (!before[kept..].contains('\n') && kept < after.len()).then(|| after[kept..].to_string())
+}
+
+/// The text a region's subtree shows in this frame: each region's text,
+/// depth first, one per line. How a [`crate::widgets::MarkdownView`] that
+/// finished streaming lays out the document it streamed as one text.
+fn subtree_text(
+    provisional: RegionId,
+    nodes: &HashMap<RegionId, ProvisionalNode>,
+    order: &ProvisionalOrder,
+) -> String {
+    let mut parts = Vec::new();
+    collect_subtree_text(provisional, nodes, order, &mut parts);
+    parts.join("\n")
+}
+
+fn collect_subtree_text(
+    id: RegionId,
+    nodes: &HashMap<RegionId, ProvisionalNode>,
+    order: &ProvisionalOrder,
+    parts: &mut Vec<String>,
+) {
+    if let Some(text) = nodes.get(&id).and_then(|node| plain_text(&node.content)) {
+        if !text.is_empty() {
+            parts.push(text.into_owned());
+        }
+    }
+    for child in order.get(&id).into_iter().flatten() {
+        collect_subtree_text(*child, nodes, order, parts);
+    }
 }
 
 /// The text of text content, spans joined.
@@ -1225,6 +1299,125 @@ mod tests {
                 id,
                 text: " wörld".to_string()
             }]
+        );
+    }
+
+    #[test]
+    fn text_that_arrives_as_a_region_stops_being_live_is_still_appended_first() {
+        let id = RegionId::new(1);
+        let first = frame_with_semantics(id, text("Hello"), live_log());
+        let (_, tree) = optimize_frame_messages(&RetainedTree::new(), first, &HashMap::new(), ALL);
+
+        let last = frame_with_semantics(id, text("Hello world"), None);
+        let (outgoing, _) = optimize_frame_messages(&tree, last, &HashMap::new(), ALL);
+        assert_eq!(
+            outgoing,
+            vec![
+                AppMessage::AppendContent {
+                    id,
+                    text: " world".to_string()
+                },
+                AppMessage::SetSemantics {
+                    id,
+                    semantics: Semantics::default()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_live_region_whose_text_becomes_child_regions_announces_the_rest() {
+        let id = RegionId::new(1);
+        let first = frame_with_semantics(id, text("Hello\nwor"), live_log());
+        let (_, tree) = optimize_frame_messages(&RetainedTree::new(), first, &HashMap::new(), ALL);
+
+        // Finished: the region holds two block regions instead of text.
+        let mut last = vec![AppMessage::CreateRegion {
+            id,
+            parent: ROOT,
+            insert_index: -1,
+            constraints: Constraints::default(),
+            style: Style::default(),
+        }];
+        for (block, line) in [(2, "Hello"), (3, "world.")] {
+            let block = RegionId::new(block);
+            last.push(AppMessage::CreateRegion {
+                id: block,
+                parent: id,
+                insert_index: -1,
+                constraints: Constraints::default(),
+                style: Style::default(),
+            });
+            last.push(AppMessage::SetContent {
+                id: block,
+                content: text(line),
+            });
+        }
+        let (outgoing, _) = optimize_frame_messages(&tree, last, &HashMap::new(), ALL);
+
+        let append = outgoing
+            .iter()
+            .position(|m| {
+                *m == AppMessage::AppendContent {
+                    id,
+                    text: "ld.".to_string(),
+                }
+            })
+            .expect("the rest appended");
+        let reset = outgoing
+            .iter()
+            .position(|m| matches!(m, AppMessage::SetSemantics { id: target, .. } if *target == id))
+            .expect("semantics reset");
+        let cleared = outgoing
+            .iter()
+            .position(|m| {
+                *m == AppMessage::SetContent {
+                    id,
+                    content: Content::None,
+                }
+            })
+            .expect("content cleared");
+        assert!(append < reset && append < cleared, "{outgoing:?}");
+    }
+
+    #[test]
+    fn a_live_container_never_gets_its_children_text_appended() {
+        let id = RegionId::new(1);
+        let child = RegionId::new(2);
+        let frame = |line: &str| {
+            vec![
+                AppMessage::CreateRegion {
+                    id,
+                    parent: ROOT,
+                    insert_index: -1,
+                    constraints: Constraints::default(),
+                    style: Style::default(),
+                },
+                AppMessage::SetSemantics {
+                    id,
+                    semantics: live_log().unwrap(),
+                },
+                AppMessage::CreateRegion {
+                    id: child,
+                    parent: id,
+                    insert_index: -1,
+                    constraints: Constraints::default(),
+                    style: Style::default(),
+                },
+                AppMessage::SetContent {
+                    id: child,
+                    content: text(line),
+                },
+            ]
+        };
+        let (_, tree) =
+            optimize_frame_messages(&RetainedTree::new(), frame("Hi"), &HashMap::new(), ALL);
+        let (outgoing, _) = optimize_frame_messages(&tree, frame("Hi there"), &HashMap::new(), ALL);
+        assert!(
+            !outgoing.iter().any(
+                |m| matches!(m, AppMessage::AppendContent { id: target, .. } if *target == id)
+            ),
+            "{outgoing:?}"
         );
     }
 

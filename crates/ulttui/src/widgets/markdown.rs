@@ -1218,6 +1218,20 @@ mod tests {
             })
             .collect();
         assert_eq!(appended, "Hello world.\nA **bobold move\n• item");
+
+        // The last chunk and the end of the stream in one frame: the rest
+        // is still appended before the view becomes block regions.
+        view.append_chunk(" done.");
+        let finished = view.streaming(false);
+        let frame = render_view_messages(&finished).unwrap();
+        let (outgoing, _) = optimize_frame_messages(&tree, frame, &HashMap::new(), all);
+        assert!(
+            outgoing.contains(&AppMessage::AppendContent {
+                id: RegionId::new(1),
+                text: " done.".to_string()
+            }),
+            "{outgoing:?}"
+        );
     }
 
     #[test]
