@@ -546,7 +546,7 @@ impl Canvas {
         let last = visible_end.min(i64::from(written));
         if let Some(line) = pen.row(0) {
             for p in first_visible..last {
-                let Some(cell) = line.get(p as u16).copied() else {
+                let Some(cell) = line.cell(p as u16) else {
                     break;
                 };
                 let col = x.saturating_add((skipped + p) as i32);

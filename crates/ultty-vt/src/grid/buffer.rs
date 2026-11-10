@@ -2,7 +2,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use super::history::CompactRow;
+use super::history::{CompactRow, RowPacker};
+use super::packed::PackedRow;
 use super::{AnchorTag, Cell, CellFlags, Dimensions, Grid, Row, RowMarks, RowView};
 
 /// Default scrollback buffer size (lines).
@@ -106,6 +107,8 @@ struct Rewrap {
     max_history: usize,
     history: VecDeque<CompactRow>,
     screen: VecDeque<Row>,
+    /// Encodes the rows that go to history.
+    packer: RowPacker,
     /// Rows made so far, including those dropped past the history limit.
     total: usize,
     /// Logical lines finished so far (empty ones still pending included).
@@ -126,6 +129,7 @@ impl Rewrap {
             max_history,
             history: VecDeque::with_capacity(max_history.min(1000)),
             screen: VecDeque::with_capacity(screen_rows + 1),
+            packer: RowPacker::new(),
             total: 0,
             lines: 0,
             cursor: None,
@@ -150,10 +154,13 @@ impl Rewrap {
                 return;
             };
             if self.max_history > 0 {
-                self.history.push_back(CompactRow::encode(&old));
-                if self.history.len() > self.max_history {
-                    self.history.pop_front();
-                }
+                let mut compact = if self.history.len() >= self.max_history {
+                    self.history.pop_front().unwrap_or_default()
+                } else {
+                    CompactRow::default()
+                };
+                self.packer.encode(&old, &mut compact);
+                self.history.push_back(compact);
             }
         }
     }
@@ -502,7 +509,7 @@ impl Buffer {
             return;
         }
         for index in 0..n.min(self.grid.dimensions().rows as usize) {
-            let Some(anchor) = self.grid.row(index as u16).map(Row::anchor) else {
+            let Some(anchor) = self.grid.rows.get(index).map(PackedRow::anchor) else {
                 break;
             };
             let mut row = if self.history.len() >= self.max_history {
@@ -512,9 +519,7 @@ impl Buffer {
                 CompactRow::default()
             };
             self.note_row_to_history(anchor);
-            if let Some(source) = self.grid.row(index as u16) {
-                row.encode_from(source);
-            }
+            row.encode_from(&self.grid.rows[index], &self.grid.styles);
             self.history.push_back(row);
         }
     }
@@ -524,13 +529,17 @@ impl Buffer {
         if self.max_history == 0 {
             return; // No history storage configured (e.g., alternate screen)
         }
+        let mut packer = RowPacker::new();
         for row in rows {
-            if self.history.len() >= self.max_history {
+            let mut compact = if self.history.len() >= self.max_history {
                 self.evicted += 1;
-                self.history.pop_front();
-            }
+                self.history.pop_front().unwrap_or_default()
+            } else {
+                CompactRow::default()
+            };
             self.note_row_to_history(row.anchor());
-            self.history.push_back(CompactRow::encode(&row));
+            packer.encode(&row, &mut compact);
+            self.history.push_back(compact);
         }
     }
 
@@ -558,14 +567,14 @@ impl Buffer {
                 // This row is in the visible grid
                 let grid_index = absolute_index - total_history;
                 if grid_index < visible_rows {
-                    self.grid.row(grid_index as u16).map(RowView::from)
+                    self.grid.row(grid_index as u16)
                 } else {
                     None
                 }
             }
         } else {
             // Not scrolled, show grid directly
-            self.grid.row(visual_index).map(RowView::from)
+            self.grid.row(visual_index)
         }
     }
 
@@ -582,7 +591,7 @@ impl Buffer {
                 .map(|row| RowView::owned(row.decode()))
         } else {
             let grid_index = absolute_index - history_len;
-            self.grid.row(grid_index as u16).map(RowView::from)
+            self.grid.row(grid_index as u16)
         }
     }
 
@@ -593,8 +602,8 @@ impl Buffer {
         if absolute_index < history_len {
             self.history.get(absolute_index).map(CompactRow::marks)
         } else {
-            let grid_index = u16::try_from(absolute_index - history_len).ok()?;
-            self.grid.row(grid_index).map(Row::marks)
+            let grid_index = absolute_index - history_len;
+            self.grid.rows.get(grid_index).map(PackedRow::marks)
         }
     }
 
@@ -625,20 +634,20 @@ impl Buffer {
             if old.same_content(&replaced) && !old.is_wrapped() {
                 return false;
             }
-            compact.encode_from(&replaced);
+            RowPacker::new().encode(&replaced, compact);
         } else {
             let Ok(index) = u16::try_from(absolute_index - history_len) else {
                 return false;
             };
-            let Some(target) = self.grid.row_mut_in_place(index) else {
+            let Some(mut target) = self.grid.row_mut_in_place(index) else {
                 return false;
             };
-            if target.same_content(&replaced) && !target.is_wrapped() {
+            if target.view().eq_row(&replaced) && !target.is_wrapped() {
                 return false;
             }
             replaced.set_marks(target.marks());
             replaced.set_anchor(target.anchor());
-            target.copy_from(&replaced);
+            target.assign(&replaced);
         }
         self.note_rewrite(self.evicted + absolute_index);
         true
@@ -690,8 +699,8 @@ impl Buffer {
         if absolute_index < history_len {
             self.history.get(absolute_index).map(CompactRow::anchor)
         } else {
-            let grid_index = u16::try_from(absolute_index - history_len).ok()?;
-            self.grid.row(grid_index).map(Row::anchor)
+            let grid_index = absolute_index - history_len;
+            self.grid.rows.get(grid_index).map(PackedRow::anchor)
         }
     }
 
@@ -725,7 +734,7 @@ impl Buffer {
         let last = self.grid.cursor().position.row;
         let first = last + 1 - anchor.rows;
         for row in first..=last {
-            if let Some(row_ref) = self.grid.row_mut(row) {
+            if let Some(mut row_ref) = self.grid.row_mut(row) {
                 row_ref.set_anchor(AnchorTag::new(tag, row == first));
             }
         }
@@ -910,7 +919,7 @@ impl Buffer {
                 .row(index)
                 .is_some_and(|row| !row.anchor().is_none() && drop(row.anchor().tag()));
             if picked {
-                if let Some(row) = self.grid.row_mut(index) {
+                if let Some(mut row) = self.grid.row_mut(index) {
                     row.set_anchor(AnchorTag::NONE);
                 }
             }
@@ -1063,8 +1072,7 @@ impl Buffer {
                 })
                 .count();
             let rows_to_move = (old_rows - new_rows).saturating_sub(blank_below);
-            let grid_rows: Vec<Row> = self.grid.rows().take(rows_to_move).cloned().collect();
-            self.push_to_history(grid_rows);
+            self.save_top_rows(rows_to_move);
             // Remove those rows from the grid (shift everything up)
             self.grid.remove_top_rows(rows_to_move);
         }
@@ -1147,7 +1155,7 @@ impl Buffer {
         // marks (output that has not started yet) or an anchor tag (a
         // reservation not yet printed) counts as content; a stale tag does
         // not.
-        let grid_rows: Vec<Row> = self.grid.rows().cloned().collect();
+        let grid_rows: Vec<Row> = self.grid.rows().map(|row| row.to_row()).collect();
         let kept: Vec<bool> = grid_rows
             .iter()
             .map(|row| runs.keep(row.anchor()))
@@ -1437,8 +1445,14 @@ mod tests {
     #[test]
     fn write_ascii_span_saves_to_history_on_scroll() {
         let mut buf = Buffer::new(Dimensions::new(5, 2));
-        buf.grid_mut().row_mut(0).unwrap()[0].set_char('A');
-        buf.grid_mut().row_mut(1).unwrap()[0].set_char('B');
+        buf.grid_mut()
+            .row_mut(0)
+            .unwrap()
+            .update(0, |cell| cell.set_char('A'));
+        buf.grid_mut()
+            .row_mut(1)
+            .unwrap()
+            .update(0, |cell| cell.set_char('B'));
         buf.grid_mut().set_cursor_position(2, 1);
 
         buf.write_ascii_span(b"abcdef");
@@ -1475,7 +1489,7 @@ mod tests {
                 buf.grid()
                     .row(buf.grid().cursor().position.row)
                     .unwrap()
-                    .clone(),
+                    .to_row(),
             );
             buf.grid_mut().carriage_return();
             buf.newline();
@@ -1755,11 +1769,21 @@ mod tests {
         // Directly set cells in each row using a single borrow
         {
             let grid = buf.grid_mut();
-            grid.row_mut(0).unwrap()[0].set_char('A');
-            grid.row_mut(1).unwrap()[0].set_char('B');
-            grid.row_mut(2).unwrap()[0].set_char('C');
-            grid.row_mut(3).unwrap()[0].set_char('D');
-            grid.row_mut(4).unwrap()[0].set_char('E');
+            grid.row_mut(0)
+                .unwrap()
+                .update(0, |cell| cell.set_char('A'));
+            grid.row_mut(1)
+                .unwrap()
+                .update(0, |cell| cell.set_char('B'));
+            grid.row_mut(2)
+                .unwrap()
+                .update(0, |cell| cell.set_char('C'));
+            grid.row_mut(3)
+                .unwrap()
+                .update(0, |cell| cell.set_char('D'));
+            grid.row_mut(4)
+                .unwrap()
+                .update(0, |cell| cell.set_char('E'));
         }
 
         // Verify initial state - cell() takes (col, row)
@@ -1843,8 +1867,12 @@ mod tests {
         // Directly set cells in grid
         {
             let grid = buf.grid_mut();
-            grid.row_mut(0).unwrap()[0].set_char('C');
-            grid.row_mut(1).unwrap()[0].set_char('D');
+            grid.row_mut(0)
+                .unwrap()
+                .update(0, |cell| cell.set_char('C'));
+            grid.row_mut(1)
+                .unwrap()
+                .update(0, |cell| cell.set_char('D'));
         }
 
         // Verify state: 2 in history (A, B), grid has C, D, empty - cell() takes (col, row)
@@ -1868,11 +1896,14 @@ mod tests {
         let mut buf = Buffer::new(Dimensions::new(10, 5));
 
         for i in 0..5u16 {
-            buf.grid_mut().row_mut(i).unwrap()[0].set_char((b'0' + i as u8) as char);
+            buf.grid_mut()
+                .row_mut(i)
+                .unwrap()
+                .update(0, |cell| cell.set_char((b'0' + i as u8) as char));
         }
 
-        assert_eq!(buf.grid().row(0).unwrap()[0].char(), '0');
-        assert_eq!(buf.grid().row(4).unwrap()[0].char(), '4');
+        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), '0');
+        assert_eq!(buf.grid().cell(0, 4).unwrap().char(), '4');
         assert_eq!(buf.history_len(), 0);
 
         // Fill last row completely, then write one more char to trigger scroll
@@ -1886,7 +1917,7 @@ mod tests {
 
         assert_eq!(buf.history_len(), 1);
         assert_eq!(buf.history[0].decode()[0].char(), '0');
-        assert_eq!(buf.grid().row(0).unwrap()[0].char(), '1');
+        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), '1');
     }
 
     #[test]

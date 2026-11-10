@@ -165,22 +165,8 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.grid_mut().delete_lines(n);
                 self.terminal.grid_mut().carriage_return();
             }
-            Action::DeleteCharacters(n) => {
-                let row_idx = self.terminal.grid().cursor().position.row;
-                let col = self.terminal.grid().cursor().position.col;
-                let bg = self.terminal.grid().attrs().bg();
-                if let Some(row) = self.terminal.grid_mut().row_mut(row_idx) {
-                    row.delete_cells(col, n, bg);
-                }
-            }
-            Action::InsertCharacters(n) => {
-                let row_idx = self.terminal.grid().cursor().position.row;
-                let col = self.terminal.grid().cursor().position.col;
-                let bg = self.terminal.grid().attrs().bg();
-                if let Some(row) = self.terminal.grid_mut().row_mut(row_idx) {
-                    row.insert_cells(col, n, bg);
-                }
-            }
+            Action::DeleteCharacters(n) => self.terminal.grid_mut().delete_chars(n),
+            Action::InsertCharacters(n) => self.terminal.grid_mut().insert_chars(n),
 
             // Scrolling (use buffer for scrollback on main screen)
             Action::ScrollUp(n) => {

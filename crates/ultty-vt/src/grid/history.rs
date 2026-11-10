@@ -1,75 +1,39 @@
 //! Compact storage for scrollback rows.
 //!
-//! A screen row is a `Vec<Cell>` of 24 bytes per column. Scrollback held
-//! 10,000 of those, far more than fits in L2, and every new line was
-//! written into the oldest one, so saving history stalled on memory and
-//! halved VT throughput (docs/perf/2026-11-06-scrollback-cost.md). A
-//! [`CompactRow`] keeps the same content as one UTF-8 character per cell
-//! plus runs of identical style, without trailing blank cells: about 100
-//! bytes for a typical output line instead of one cell per column.
+//! A screen row holds one 8-byte packed cell per column. Scrollback holds
+//! 10,000 rows or more, and every new line was once written into the
+//! oldest of them, so saving history stalled on memory
+//! (docs/perf/2026-11-06-scrollback-cost.md). A [`CompactRow`] keeps the
+//! same content as one UTF-8 character per cell plus runs of identical
+//! style, without trailing blank cells: about 100 bytes for a typical
+//! output line instead of one cell per column.
 //!
 //! Rows are encoded when they scroll into history and decoded when
 //! something reads them, which is at most a screenful while scrolled back.
 
-use super::cell::{Cell, CellFlags, PackedColor};
+use super::cell::CellFlags;
+use super::packed::{PackedCell, PackedRow, Style, StyleTable};
 use super::row::{AnchorTag, Row, RowMarks};
 
-/// Everything about a cell except its character. Colors stay packed so
-/// comparing styles, done for every cell, is integer comparison.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Style {
-    fg: PackedColor,
-    bg: PackedColor,
-    underline_color: PackedColor,
-    flags: CellFlags,
-    hyperlink_id: u32,
-}
-
-impl Style {
-    /// `cell`'s style without the flags in `implied`.
-    fn of(cell: &Cell, implied: CellFlags) -> Self {
-        let mut flags = cell.flags();
-        flags.unset(implied);
-        Self {
-            fg: cell.packed_fg(),
-            bg: cell.packed_bg(),
-            underline_color: cell.packed_underline_color(),
-            flags,
-            hyperlink_id: cell.hyperlink_id(),
-        }
-    }
-
-    fn cell(self, c: char) -> Cell {
-        Cell::from_packed(
-            c,
-            self.fg,
-            self.bg,
-            self.underline_color,
-            self.flags,
-            self.hyperlink_id,
-        )
-    }
-}
-
 /// The number of cells up to and including the last one that is not
-/// [`Cell::default`].
+/// blank in the default style.
 ///
 /// Most rows end in a long blank tail (a short line on a wide screen), so
-/// this checks whole blocks of cells from the end with a branch-free test
-/// and only looks at single cells inside the last block that is not blank.
-fn used_len(cells: &[Cell]) -> usize {
+/// this checks whole blocks of cells from the end and only looks at single
+/// cells inside the last block that is not blank.
+fn used_len(cells: &[PackedCell]) -> usize {
     const BLOCK: usize = 8;
     let mut end = cells.len();
     while end >= BLOCK
         && cells[end - BLOCK..end]
             .iter()
-            .fold(true, |blank, cell| blank & cell.is_default())
+            .fold(true, |blank, &cell| blank & (cell == PackedCell::BLANK))
     {
         end -= BLOCK;
     }
     cells[..end]
         .iter()
-        .rposition(|cell| !cell.is_default())
+        .rposition(|&cell| cell != PackedCell::BLANK)
         .map_or(0, |last| last + 1)
 }
 
@@ -95,34 +59,53 @@ pub(super) struct CompactRow {
     text: Vec<u8>,
     /// Style runs covering the stored cells in order.
     runs: Vec<Run>,
-    /// The columns whose cells are wide or have extra grapheme codepoints,
-    /// in order, each with a [`Mark`]. Keeping the codepoints in `text`
-    /// saves an allocation per cluster.
+    /// The columns whose cells are wide, spacers or graphemes, in order,
+    /// each with a [`Mark`]. Keeping the codepoints in `text` saves an
+    /// allocation per cluster.
     marks: Vec<(u16, Mark)>,
 }
 
-/// The flags a row's structure implies: a wide cell is followed by its
-/// spacer and a cell has `HAS_COMBINING` when it has extra codepoints.
-/// Leaving them out of the styles keeps a wide character, its spacer and
-/// a combining sequence in the run around them; [`Mark`]s restore them.
-const IMPLIED: CellFlags = CellFlags::WIDE_CHAR
-    .union(CellFlags::WIDE_CHAR_SPACER)
-    .union(CellFlags::HAS_COMBINING);
-
-/// What a row stores about one cell besides its character and style: how
-/// many extra grapheme codepoints follow the character in the text, and
-/// whether it is a wide character whose spacer is the next cell.
+/// A cell's structure, which styles leave out: how many extra grapheme
+/// codepoints follow its character in the text, and its width bits.
+///
+/// A wide character followed by its spacer, the way the writers leave
+/// them, is [`WIDE_MARK`] on the wide cell alone. Width bits that do not
+/// come in such a pair (only direct edits leave them) are stored as they
+/// are, and so is a grapheme bit with no codepoints, so encoding is exact
+/// for any row.
 type Mark = u16;
 
-/// The [`Mark`] bit for a wide character; the rest is the codepoint count.
+/// A wide character; the next cell is its spacer.
 const WIDE_MARK: Mark = 1 << 15;
+/// The width bits are [`RAW_WIDE`] and [`RAW_SPACER`], not implied.
+const RAW_MARK: Mark = 1 << 14;
+const RAW_WIDE: Mark = 1 << 13;
+const RAW_SPACER: Mark = 1 << 12;
+/// The grapheme bit with no extra codepoints.
+const BARE_GRAPHEME: Mark = 1 << 11;
+/// The count of extra codepoints.
+const EXTRA_COUNT: Mark = BARE_GRAPHEME - 1;
+
+/// Whether `cells[col]` and `cells[col + 1]` are a wide character and its
+/// spacer, with no other width bits.
+#[inline]
+fn is_pair(cells: &[PackedCell], col: usize) -> bool {
+    let wide = cells[col];
+    wide.is_wide()
+        && !wide.is_spacer()
+        && cells
+            .get(col + 1)
+            .is_some_and(|spacer| spacer.is_spacer() && !spacer.is_wide())
+}
 
 impl CompactRow {
-    /// Encode `row`, reusing this value's allocations.
+    /// Encode `row`, whose styles are in `styles`, reusing this value's
+    /// allocations.
     ///
     /// This runs for every line that scrolls off the screen, so it is one
-    /// pass over the used cells with an inner loop per style run.
-    pub(super) fn encode_from(&mut self, row: &Row) {
+    /// pass over the used cells, finding style runs by comparing keys and
+    /// looking each run's style up once.
+    pub(super) fn encode_from(&mut self, row: &PackedRow, styles: &StyleTable) {
         self.width = row.width();
         self.wrapped = row.is_wrapped();
         self.row_marks = row.marks();
@@ -131,22 +114,27 @@ impl CompactRow {
         self.runs.clear();
         self.marks.clear();
 
-        // Plain output in the default style, which the row has kept track
-        // of: its text is the whole row, and a cell is default exactly when
-        // it holds a space, so trimming the text trims the blank tail.
-        if row.is_plain() {
+        // A uniform row is ASCII in one style, which the row has kept track
+        // of: its text is the whole row. In the default style a cell is
+        // blank exactly when it holds a space, so trimming the text trims
+        // the blank tail; in any other style no cell is blank.
+        if row.is_uniform() {
             let cells = row.used_cells();
-            self.text.extend(cells.iter().map(|cell| cell.char() as u8));
-            let len = self
-                .text
-                .iter()
-                .rposition(|&b| b != b' ')
-                .map_or(0, |last| last + 1);
+            self.text.extend(cells.iter().map(|cell| cell.ascii_byte()));
+            let key = row.uniform_key();
+            let len = if key.is_default() {
+                self.text
+                    .iter()
+                    .rposition(|&b| b != b' ')
+                    .map_or(0, |last| last + 1)
+            } else {
+                self.text.len()
+            };
             self.text.truncate(len);
             if len > 0 {
                 self.runs.push(Run {
                     len: len as u16,
-                    style: Style::of(&Cell::default(), CellFlags::NONE),
+                    style: styles.style(key),
                 });
             }
             return;
@@ -155,129 +143,93 @@ impl CompactRow {
         let cells = row.used_cells();
         let cells = &cells[..used_len(cells)];
         self.text.reserve(cells.len());
-
-        // Plain output: one style and only ASCII on the whole row. The text
-        // is then a straight copy, a fraction of the per-cell loop below.
-        // Other rows give up at their first style change or non-ASCII cell.
-        if let Some(first) = cells.first() {
-            let style = Style::of(first, CellFlags::NONE);
-            if !style.flags.contains(CellFlags::HAS_COMBINING)
-                && cells
-                    .iter()
-                    .all(|cell| cell.char().is_ascii() && Style::of(cell, CellFlags::NONE) == style)
-            {
-                self.text.extend(cells.iter().map(|cell| cell.char() as u8));
-                self.runs.push(Run {
-                    len: cells.len() as u16,
-                    style,
-                });
-                return;
-            }
-        }
-
-        // Rows whose wide cells, spacers and combining flags are as the
-        // writer leaves them have those flags implied by their marks. Any
-        // other row (only reachable by editing cells directly) keeps them in
-        // its styles, so encoding stays exact.
-        if !self.encode_cells::<true>(row, cells) {
-            self.text.clear();
-            self.runs.clear();
-            self.marks.clear();
-            self.encode_cells::<false>(row, cells);
-        }
-    }
-
-    /// Encode `cells` cell by cell, leaving the [`IMPLIED`] flags out of
-    /// the styles if `IMPLY`. Returns `false`, with this row half written,
-    /// when a cell's implied flags do not follow from its marks.
-    #[inline(never)]
-    fn encode_cells<const IMPLY: bool>(&mut self, row: &Row, cells: &[Cell]) -> bool {
-        let implied = if IMPLY { IMPLIED } else { CellFlags::NONE };
         let mut col = 0;
         while col < cells.len() {
-            let style = Style::of(&cells[col], implied);
+            let key = cells[col].key();
             let start = col;
-            while col < cells.len() && Style::of(&cells[col], implied) == style {
-                let cell = &cells[col];
-                self.push_char(cell.char());
-                let kind = cell.flags().intersection(IMPLIED);
-                if !kind.is_empty() {
-                    // The common cases inline: a wide character with its
-                    // spacer, and a character with extra codepoints.
-                    if IMPLY && kind == CellFlags::WIDE_CHAR {
-                        if let Some(spacer) = cells.get(col + 1).filter(|next| {
-                            next.flags().intersection(IMPLIED) == CellFlags::WIDE_CHAR_SPACER
-                                && Style::of(next, implied) == style
-                        }) {
-                            self.push_char(spacer.char());
-                            self.marks.push((col as u16, WIDE_MARK));
-                            col += 2;
-                            continue;
-                        }
-                    } else if kind == CellFlags::HAS_COMBINING {
-                        if let Some(extra) = row
-                            .grapheme_extra(col as u16)
-                            .filter(|extra| !extra.is_empty())
-                        {
-                            let mark = self.push_extra(extra);
-                            self.marks.push((col as u16, mark));
-                            col += 1;
-                            continue;
-                        }
-                    }
-                    if !self.mark::<IMPLY>(row, cells, col) {
-                        return false;
-                    }
-                }
-                col += 1;
+            while col < cells.len() && cells[col].key() == key {
+                let cell = cells[col];
+                self.push_cell(cell);
+                col += if cell.has_structure() {
+                    self.mark(row, cells, col)
+                } else {
+                    1
+                };
             }
             self.runs.push(Run {
                 len: (col - start) as u16,
-                style,
+                style: styles.style(key),
             });
         }
-        true
     }
 
-    /// The rest of [`CompactRow::encode_cells`] for the cell at `col`, whose
-    /// character is already in the text: its extra codepoints and, if
-    /// `IMPLY`, whether it is wide. Returns `false` when its implied flags
-    /// do not follow from its marks.
-    #[cold]
-    fn mark<const IMPLY: bool>(&mut self, row: &Row, cells: &[Cell], col: usize) -> bool {
-        let cell = &cells[col];
+    /// The rest of [`CompactRow::encode_from`] for the cell at `col`, which
+    /// has structure bits and whose character is already in the text: its
+    /// extra codepoints and its [`Mark`]. Returns how many cells it took:
+    /// a wide character takes its spacer with it when they share a style.
+    fn mark(&mut self, row: &PackedRow, cells: &[PackedCell], col: usize) -> usize {
+        let cell = cells[col];
         let mut mark: Mark = 0;
-        if cell.has_flag(CellFlags::HAS_COMBINING) {
+        if cell.has_grapheme() {
             match row.grapheme_extra(col as u16) {
                 Some(extra) if !extra.is_empty() => mark = self.push_extra(extra),
-                _ if IMPLY => return false,
-                _ => {}
+                _ => mark = BARE_GRAPHEME,
             }
         }
-        if IMPLY {
-            if cell.is_wide() {
-                if !cells.get(col + 1).is_some_and(Cell::is_wide_spacer) {
-                    return false;
-                }
-                mark |= WIDE_MARK;
+        let mut taken = 1;
+        if is_pair(cells, col) {
+            mark |= WIDE_MARK;
+            let spacer = cells[col + 1];
+            if spacer.key() == cell.key() && !spacer.has_grapheme() {
+                self.push_cell(spacer);
+                taken = 2;
             }
-            if cell.is_wide_spacer() && !(col > 0 && cells[col - 1].is_wide()) {
-                return false;
+        } else if cell.is_wide_part() && !(col > 0 && is_pair(cells, col - 1)) {
+            mark |= RAW_MARK;
+            if cell.is_wide() {
+                mark |= RAW_WIDE;
+            }
+            if cell.is_spacer() {
+                mark |= RAW_SPACER;
             }
         }
         if mark != 0 {
             self.marks.push((col as u16, mark));
         }
-        true
+        taken
     }
 
     /// Append a cell's extra codepoints to the text; their [`Mark`].
     fn push_extra(&mut self, extra: &[char]) -> Mark {
-        let extra = &extra[..extra.len().min(usize::from(!WIDE_MARK))];
+        let extra = &extra[..extra.len().min(usize::from(EXTRA_COUNT))];
         for &c in extra {
             self.push_char(c);
         }
         extra.len() as Mark
+    }
+
+    /// Append a cell's character to the text. The codepoint came from a
+    /// `char`, so it is encoded as it is rather than checked again.
+    #[inline]
+    fn push_cell(&mut self, cell: PackedCell) {
+        let cp = cell.codepoint();
+        match cp {
+            0..0x80 => self.text.push(cp as u8),
+            0x80..0x800 => self
+                .text
+                .extend_from_slice(&[0xC0 | (cp >> 6) as u8, 0x80 | (cp & 0x3F) as u8]),
+            0x800..0x10000 => self.text.extend_from_slice(&[
+                0xE0 | (cp >> 12) as u8,
+                0x80 | (cp >> 6 & 0x3F) as u8,
+                0x80 | (cp & 0x3F) as u8,
+            ]),
+            _ => self.text.extend_from_slice(&[
+                0xF0 | (cp >> 18) as u8,
+                0x80 | (cp >> 12 & 0x3F) as u8,
+                0x80 | (cp >> 6 & 0x3F) as u8,
+                0x80 | (cp & 0x3F) as u8,
+            ]),
+        }
     }
 
     #[inline]
@@ -301,13 +253,13 @@ impl CompactRow {
     }
 
     /// `row` in compact form.
+    #[cfg(test)]
     pub(super) fn encode(row: &Row) -> Self {
         let mut compact = Self::default();
-        compact.encode_from(row);
+        RowPacker::new().encode(row, &mut compact);
         compact
     }
 
-    /// The full row this was encoded from.
     /// The row's shell marks, without decoding it.
     pub(super) fn marks(&self) -> RowMarks {
         self.row_marks
@@ -322,6 +274,7 @@ impl CompactRow {
         self.anchor = anchor;
     }
 
+    /// The full row this was encoded from.
     pub(super) fn decode(&self) -> Row {
         let mut row = Row::new(self.width);
         let text = std::str::from_utf8(&self.text).unwrap_or_default();
@@ -333,19 +286,28 @@ impl CompactRow {
         for run in &self.runs {
             for _ in 0..run.len {
                 let c = chars.next().unwrap_or(' ');
-                let mut cell = run.style.cell(c);
+                let mut structure = CellFlags::NONE;
                 if std::mem::take(&mut spacer) {
-                    cell.set_flag(CellFlags::WIDE_CHAR_SPACER);
+                    structure.set(CellFlags::WIDE_CHAR_SPACER);
                 }
                 let mark = marks.next_if(|&&(at, _)| at == col).map_or(0, |&(_, m)| m);
                 if mark & WIDE_MARK != 0 {
-                    cell.set_flag(CellFlags::WIDE_CHAR);
+                    structure.set(CellFlags::WIDE_CHAR);
                     spacer = true;
                 }
-                if col < self.width {
-                    row[col] = cell;
+                if mark & RAW_WIDE != 0 {
+                    structure.set(CellFlags::WIDE_CHAR);
                 }
-                let len = mark & !WIDE_MARK;
+                if mark & RAW_SPACER != 0 {
+                    structure.set(CellFlags::WIDE_CHAR_SPACER);
+                }
+                let len = mark & EXTRA_COUNT;
+                if len > 0 || mark & BARE_GRAPHEME != 0 {
+                    structure.set(CellFlags::HAS_COMBINING);
+                }
+                if col < self.width {
+                    row[col] = run.style.cell(c, structure);
+                }
                 if len > 0 {
                     extra.clear();
                     extra.extend(chars.by_ref().take(usize::from(len)));
@@ -362,10 +324,39 @@ impl CompactRow {
     }
 }
 
+/// Encodes owned [`Row`]s, which carry no style ids: each is packed into
+/// a scratch row first. Reflow encodes many rows this way, so the scratch
+/// row and its style table are reused.
+pub(super) struct RowPacker {
+    styles: StyleTable,
+    row: PackedRow,
+}
+
+impl RowPacker {
+    pub(super) fn new() -> Self {
+        Self {
+            styles: StyleTable::new(0),
+            row: PackedRow::new(0),
+        }
+    }
+
+    /// Encode `row` into `compact`, reusing its allocations.
+    pub(super) fn encode(&mut self, row: &Row, compact: &mut CompactRow) {
+        // Ids only live for one row's encoding, so the table can be emptied
+        // whenever it grows.
+        if self.styles.is_due() {
+            self.styles.reset(0);
+        }
+        self.row.assign_row(row, &mut self.styles);
+        compact.encode_from(&self.row, &self.styles);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::cell::{Color, UnderlineStyle};
+    use crate::grid::cell::{Cell, Color, UnderlineStyle};
+    use crate::grid::packed::StyleKey;
     use proptest::prelude::*;
 
     /// Two rows hold the same content.
@@ -516,36 +507,49 @@ mod tests {
             prop_assert!(same(&row, &decoded), "{row:?}\n!=\n{decoded:?}");
         }
 
-        /// Rows that keep track of being plain take a shortcut; it must
-        /// give exactly what encoding them cell by cell gives.
+        /// Uniform rows take a shortcut; it must give exactly what
+        /// encoding them cell by cell gives.
         #[test]
-        fn a_plain_row_encodes_like_any_other(
+        fn a_uniform_row_encodes_like_any_other(
             width in 1u16..40,
+            style in 0usize..3,
             writes in prop::collection::vec((0u16..40, "[ a-z]{0,40}", any::<bool>()), 0..6),
         ) {
-            let mut row = Row::new(width);
+            let mut styles = StyleTable::new(0);
+            let mut cell = Cell::default();
+            match style {
+                0 => {}
+                1 => cell.set_fg(Color::GREEN),
+                _ => cell.set_bg(Color::rgb(1, 2, 3)),
+            }
+            let key = styles.pack(&cell).key();
+            let mut row = PackedRow::new(width);
             for (col, text, erase) in writes {
                 let col = col.min(width - 1);
                 if erase {
-                    row.erase_range(col, col + text.len() as u16, Color::Default);
+                    row.erase_range(col, col + text.len() as u16, StyleKey::DEFAULT);
                 } else {
                     let len = text.len().min((width - col) as usize);
-                    row.write_ascii(col, &text.as_bytes()[..len], Cell::default());
+                    row.write_ascii(col, &text.as_bytes()[..len], key);
                 }
             }
-            prop_assert!(row.is_plain());
-            let mut copy = row.clone();
-            copy[0] = row[0];
-            prop_assert!(!copy.is_plain());
-            let compact = CompactRow::encode(&row);
-            prop_assert_eq!(&compact, &CompactRow::encode(&copy));
-            prop_assert!(same(&row, &compact.decode()));
+            prop_assert!(row.is_uniform() || style != 0, "default-style text stays uniform");
+            if row.is_uniform() {
+                let mut copy = row.clone();
+                copy.set(0, row.get(0).unwrap());
+                prop_assert!(!copy.is_uniform());
+                let mut compact = CompactRow::default();
+                compact.encode_from(&row, &styles);
+                let mut general = CompactRow::default();
+                general.encode_from(&copy, &styles);
+                prop_assert_eq!(&compact, &general);
+            }
         }
 
         #[test]
         fn reusing_a_compact_row_leaves_nothing_behind(a in row(), b in row()) {
             let mut compact = CompactRow::encode(&a);
-            compact.encode_from(&b);
+            RowPacker::new().encode(&b, &mut compact);
             prop_assert_eq!(compact, CompactRow::encode(&b));
         }
     }
@@ -559,11 +563,11 @@ mod tests {
         for c in "日本 e\u{301}語 x".chars() {
             grid.write_char(c);
         }
-        let row = grid.row(0).unwrap();
-        let compact = CompactRow::encode(row);
+        let mut compact = CompactRow::default();
+        compact.encode_from(&grid.rows[0], &grid.styles);
         assert_eq!(compact.runs.len(), 1);
-        assert_eq!(compact.marks.len(), 4);
-        assert!(same(row, &compact.decode()));
+        assert_eq!(compact.marks.len(), 4, "{:?}", compact.marks);
+        assert!(same(&grid.row(0).unwrap().to_row(), &compact.decode()));
     }
 
     #[test]
@@ -600,11 +604,10 @@ mod tests {
 mod size {
     /// Scrollback keeps up to tens of thousands of these. The shell marks
     /// (ADR 0019) and the anchor tag (ADR 0020) fit in padding; keep it
-    /// that way. Screen rows are few, but every scroll moves the region's
-    /// rows by value, so the cost of a scroll grows with `Row`.
+    /// that way. (Screen rows are `PackedRow`s, sized in `packed.rs`.)
     #[test]
     fn rows_do_not_grow() {
         assert_eq!(std::mem::size_of::<super::CompactRow>(), 80);
-        assert_eq!(std::mem::size_of::<super::Row>(), 56);
+        assert_eq!(std::mem::size_of::<super::Row>(), 40);
     }
 }

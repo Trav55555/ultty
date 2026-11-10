@@ -55,19 +55,21 @@ impl CellFlags {
         self.0 == 0
     }
 
-    /// The raw bits, for the page-storage prototype's style hashing.
-    #[cfg(feature = "page-proto")]
-    pub(crate) fn bits(self) -> u16 {
+    /// The raw bits, for packed cells' inline styles and style hashing.
+    #[inline]
+    pub(crate) const fn bits(self) -> u16 {
         self.0
     }
 
-    /// Flags from raw bits, for the page-storage prototype's inline styles.
-    #[cfg(feature = "page-proto")]
+    /// Flags from raw bits, for packed cells' inline styles.
+    #[inline]
     pub(crate) const fn from_bits(bits: u16) -> Self {
         Self(bits)
     }
 
-    /// The flags set in both.
+    /// The flags set in both (the reference storage's history encoder
+    /// uses it).
+    #[cfg(test)]
     #[inline]
     pub(crate) fn intersection(self, other: CellFlags) -> CellFlags {
         CellFlags(self.0 & other.0)
@@ -172,14 +174,14 @@ pub(crate) struct PackedColor(u32);
 impl PackedColor {
     pub(crate) const DEFAULT: Self = Self(0);
 
-    /// The packed value, for the page-storage prototype's style hashing.
-    #[cfg(feature = "page-proto")]
-    pub(crate) fn bits(self) -> u32 {
+    /// The packed value, for packed cells' inline styles and style hashing.
+    #[inline]
+    pub(crate) const fn bits(self) -> u32 {
         self.0
     }
 
-    /// A packed value back, for the page-storage prototype's inline styles.
-    #[cfg(feature = "page-proto")]
+    /// A packed value back, for packed cells' inline styles.
+    #[inline]
     pub(crate) const fn from_bits(bits: u32) -> Self {
         Self(bits)
     }

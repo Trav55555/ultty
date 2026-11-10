@@ -16,9 +16,7 @@ fn bench_grid_write(c: &mut Criterion) {
             b.iter(|| {
                 for row in 0..rows {
                     for col in 0..cols {
-                        if let Some(cell) = grid.cell_mut(black_box(col), black_box(row)) {
-                            cell.set_char('A');
-                        }
+                        grid.update_cell(black_box(col), black_box(row), |cell| cell.set_char('A'));
                     }
                 }
             })
@@ -36,9 +34,7 @@ fn bench_grid_read(c: &mut Criterion) {
         // Fill with data
         for row in 0..rows {
             for col in 0..cols {
-                if let Some(cell) = grid.cell_mut(col, row) {
-                    cell.set_char('X');
-                }
+                grid.update_cell(col, row, |cell| cell.set_char('X'));
             }
         }
 
@@ -69,9 +65,7 @@ fn bench_grid_row_access(c: &mut Criterion) {
         let mut grid = create_grid(cols, rows);
         for row in 0..rows {
             for col in 0..cols {
-                if let Some(cell) = grid.cell_mut(col, row) {
-                    cell.set_char('R');
-                }
+                grid.update_cell(col, row, |cell| cell.set_char('R'));
             }
         }
 
@@ -81,7 +75,7 @@ fn bench_grid_row_access(c: &mut Criterion) {
                 for row_idx in 0..rows {
                     if let Some(row) = grid.row(black_box(row_idx)) {
                         for col in 0..cols {
-                            if let Some(cell) = row.get(col) {
+                            if let Some(cell) = row.cell(col) {
                                 if cell.char() != '\0' {
                                     count += 1;
                                 }
@@ -106,9 +100,9 @@ fn bench_grid_scroll(c: &mut Criterion) {
         let mut grid = create_grid(cols, rows);
         for row in 0..rows {
             for col in 0..cols {
-                if let Some(cell) = grid.cell_mut(col, row) {
-                    cell.set_char((b'A' + (row % 26) as u8) as char);
-                }
+                grid.update_cell(col, row, |cell| {
+                    cell.set_char((b'A' + (row % 26) as u8) as char)
+                });
             }
         }
 
@@ -121,9 +115,9 @@ fn bench_grid_scroll(c: &mut Criterion) {
         let mut grid = create_grid(cols, rows);
         for row in 0..rows {
             for col in 0..cols {
-                if let Some(cell) = grid.cell_mut(col, row) {
-                    cell.set_char((b'A' + (row % 26) as u8) as char);
-                }
+                grid.update_cell(col, row, |cell| {
+                    cell.set_char((b'A' + (row % 26) as u8) as char)
+                });
             }
         }
 
@@ -136,9 +130,7 @@ fn bench_grid_scroll(c: &mut Criterion) {
         let mut grid = create_grid(cols, rows);
         for row in 0..rows {
             for col in 0..cols {
-                if let Some(cell) = grid.cell_mut(col, row) {
-                    cell.set_char('S');
-                }
+                grid.update_cell(col, row, |cell| cell.set_char('S'));
             }
         }
 
@@ -159,9 +151,7 @@ fn bench_grid_clear(c: &mut Criterion) {
             // Fill first
             for row in 0..rows {
                 for col in 0..cols {
-                    if let Some(cell) = grid.cell_mut(col, row) {
-                        cell.set_char('C');
-                    }
+                    grid.update_cell(col, row, |cell| cell.set_char('C'));
                 }
             }
 

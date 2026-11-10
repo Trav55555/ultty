@@ -382,6 +382,35 @@ impl Grid {
     }
 
     /// Get a mutable row by index.
+    /// ICH at the cursor, as `term_handler.rs` did it before the live grid
+    /// took it over (ADR 0022 slice 3).
+    pub fn insert_chars(&mut self, n: u16) {
+        let CursorPosition { col, row } = self.cursor.position;
+        let bg = self.attrs.bg();
+        if let Some(row) = self.row_mut(row) {
+            row.insert_cells(col, n, bg);
+        }
+    }
+
+    /// DCH at the cursor, as `term_handler.rs` did it before slice 3.
+    pub fn delete_chars(&mut self, n: u16) {
+        let CursorPosition { col, row } = self.cursor.position;
+        let bg = self.attrs.bg();
+        if let Some(row) = self.row_mut(row) {
+            row.delete_cells(col, n, bg);
+        }
+    }
+
+    /// Change row `index`'s shell marks, as `terminal.rs` did it before
+    /// slice 3.
+    pub fn update_row_marks(&mut self, index: u16, update: impl FnOnce(&mut super::RowMarks)) {
+        if let Some(row) = self.row_mut(index) {
+            let mut marks = row.marks();
+            update(&mut marks);
+            row.set_marks(marks);
+        }
+    }
+
     pub fn row_mut(&mut self, index: u16) -> Option<&mut Row> {
         self.mark_dirty(index);
         self.rows.get_mut(index as usize)

@@ -53,7 +53,7 @@ impl TerminalSnapshot {
 
             if let Some(row) = grid.row(row_idx) {
                 for col_idx in 0..dims.cols {
-                    if let Some(cell) = row.get(col_idx) {
+                    if let Some(cell) = row.cell(col_idx) {
                         row_text.push(cell.char());
                         row_attrs.push(CellAttrs {
                             bold: cell.has_flag(CellFlags::BOLD),

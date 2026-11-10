@@ -662,7 +662,7 @@ impl App {
 
                 // Scan left for word start
                 while start_col > 0 {
-                    if let Some(cell) = grid_row.get(start_col - 1) {
+                    if let Some(cell) = grid_row.cell(start_col - 1) {
                         if is_word_char(cell.char()) {
                             start_col -= 1;
                         } else {
@@ -676,7 +676,7 @@ impl App {
                 // Scan right for word end
                 let cols = grid.dimensions().cols;
                 while end_col < cols - 1 {
-                    if let Some(cell) = grid_row.get(end_col + 1) {
+                    if let Some(cell) = grid_row.cell(end_col + 1) {
                         if is_word_char(cell.char()) {
                             end_col += 1;
                         } else {
