@@ -142,16 +142,10 @@ impl<A: Application> App<A> {
     /// Queue the messages of finished spawned tasks and forget their
     /// handles.
     pub(super) fn poll_spawned_tasks(&mut self, rt: &Runtime) -> bool {
-        let mut produced_messages = false;
-        while let Ok(done) = self.task_rx.try_recv() {
-            self.spawn_handles
-                .retain(|task| !Arc::ptr_eq(&task.cancelled, &done.cancelled));
-            if !done.cancelled.load(Ordering::SeqCst) {
-                self.msg_queue.push_back(done.msg);
-                produced_messages = true;
-            }
-        }
-        // A task that panicked never sends; forget it once it has ended.
+        // Forget finished tasks first. A task sends before it finishes, so
+        // whatever a forgotten task sent is already in the channel and is
+        // taken below; while its handle is still kept, cancelling or
+        // replacing it by id still drops its message.
         let mut index = 0;
         while index < self.spawn_handles.len() {
             if self.spawn_handles[index].handle.is_finished() {
@@ -159,11 +153,21 @@ impl<A: Application> App<A> {
                 // is_finished() == true guarantees block_on returns immediately.
                 if let Err(e) = rt.block_on(task.handle) {
                     if !e.is_cancelled() {
+                        // A task that panicked never sends.
                         tracing::warn!("Spawned task {:?} panicked: {}", task.id, e);
                     }
                 }
             } else {
                 index += 1;
+            }
+        }
+        let mut produced_messages = false;
+        while let Ok(done) = self.task_rx.try_recv() {
+            self.spawn_handles
+                .retain(|task| !Arc::ptr_eq(&task.cancelled, &done.cancelled));
+            if !done.cancelled.load(Ordering::SeqCst) {
+                self.msg_queue.push_back(done.msg);
+                produced_messages = true;
             }
         }
         produced_messages
