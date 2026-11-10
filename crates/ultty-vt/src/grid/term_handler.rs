@@ -56,8 +56,10 @@ impl<'a> TerminalHandler<'a> {
         }
     }
 
-    /// Print `c` on the active screen.
-    #[inline]
+    /// Print `c` on the active screen. Out of line, so that the parser
+    /// loop that calls [`Self::handle`] stays small enough to inline its
+    /// callback.
+    #[inline(never)]
     fn print(&mut self, c: char) {
         if !self.terminal.is_alternate_screen() {
             self.terminal.buffer_mut().write_char(c);

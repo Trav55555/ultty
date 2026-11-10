@@ -749,14 +749,38 @@ impl Grid {
 
     /// Write a character at the cursor position and advance.
     pub fn write_char(&mut self, c: char) {
-        let width = self.print_width(c);
-        self.write_measured_char(c, width);
+        if let Err(width) = self.print_in_row(c) {
+            self.write_measured_char_slow(c, width);
+        }
+    }
+
+    /// Print `c` when that is only writing its cells at the cursor (see
+    /// [`Grid::write_cells_in_row`]). Otherwise change nothing and return
+    /// the columns `c` takes for [`Grid::write_measured_char_slow`]: `None`
+    /// when it joins the previous grapheme cluster, else its width (0 for
+    /// control characters and combining marks that start no cluster).
+    ///
+    /// The one width and class lookup serves the cluster check, the width
+    /// and the recorded cluster end.
+    #[inline]
+    pub(super) fn print_in_row(&mut self, c: char) -> Result<(), Option<u16>> {
+        let props = cluster::CharProps::of(c);
+        if self.continues_cluster_with(c, props) {
+            return Err(None);
+        }
+        let width = props.width();
+        if self.write_cells_in_row(c, width, props) {
+            Ok(())
+        } else {
+            Err(Some(width))
+        }
     }
 
     /// The columns printing `c` takes: `None` when it joins the previous
     /// grapheme cluster, else its width (0 for control characters and
     /// combining marks that start no cluster, 1 normally, 2 for wide).
-    pub(super) fn print_width(&self, c: char) -> Option<u16> {
+    #[cfg(test)]
+    fn print_width(&self, c: char) -> Option<u16> {
         let props = cluster::CharProps::of(c);
         if self.continues_cluster_with(c, props) {
             None
@@ -765,15 +789,7 @@ impl Grid {
         }
     }
 
-    /// [`Grid::write_char`] with `width` from [`Grid::print_width`] for the
-    /// current state, so a caller that needed it first does not pay twice.
-    pub(super) fn write_measured_char(&mut self, c: char, width: Option<u16>) {
-        if !self.write_in_row(c, width) {
-            self.write_measured_char_slow(c, width);
-        }
-    }
-
-    /// Print `c`, `width` columns from [`Grid::print_width`], when that is
+    /// Write `c`, `width` columns with properties `props`, when that is
     /// only writing its cells at the cursor: it starts a cluster of one or
     /// two columns that fit on the row, no wrap is pending, insert mode is
     /// off and it overwrites no part of a wide character. Returns `false`,
@@ -782,10 +798,10 @@ impl Grid {
     /// Most printed characters are this case; the result is what
     /// [`Grid::write_measured_char_slow`] would do.
     #[inline]
-    pub(super) fn write_in_row(&mut self, c: char, width: Option<u16>) -> bool {
-        let Some(width @ 1..=2) = width else {
+    fn write_cells_in_row(&mut self, c: char, width: u16, props: cluster::CharProps) -> bool {
+        if !(1..=2).contains(&width) {
             return false;
-        };
+        }
         let CursorPosition { col, row } = self.cursor.position;
         if self.cursor.wrap_pending || self.insert_mode || col + width > self.dims.cols {
             return false;
@@ -800,11 +816,12 @@ impl Grid {
         self.mark_dirty(row);
         self.last_char = c;
         self.advance_cursor(width);
-        self.record_print(row, col, cluster::Tail::start(c));
+        self.record_print(row, col, cluster::Tail::start_with(c, props));
         true
     }
 
-    /// [`Grid::write_measured_char`] for any character in any state.
+    /// Print `c`, `width` columns from [`Grid::print_in_row`], in any
+    /// character and any state.
     pub(super) fn write_measured_char_slow(&mut self, c: char, width: Option<u16>) {
         let Some(width) = width else {
             if let Some((row, col)) = self.cluster_base() {
@@ -2680,7 +2697,10 @@ mod tests {
                         PrintOp::Print(c) => {
                             let width = grid.print_width(c);
                             if shortcut {
-                                grid.write_measured_char(c, width);
+                                if let Err(left) = grid.print_in_row(c) {
+                                    proptest::prop_assert_eq!(left, width);
+                                    grid.write_measured_char_slow(c, left);
+                                }
                             } else {
                                 grid.write_measured_char_slow(c, width);
                             }

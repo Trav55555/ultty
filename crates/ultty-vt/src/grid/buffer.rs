@@ -1227,18 +1227,24 @@ impl Buffer {
     }
 
     /// Write a character, saving to history if scrolling occurs.
+    #[inline]
     pub fn write_char(&mut self, c: char) {
         self.scroll_offset = 0;
+        // A character that fits on the row with no wrap pending writes only
+        // there, so it cannot scroll.
+        if let Err(width) = self.grid.print_in_row(c) {
+            self.write_char_slow(c, width);
+        }
+    }
 
+    /// [`Buffer::write_char`] for what [`Grid::print_in_row`] left, `width`
+    /// columns as it returned them.
+    #[inline(never)]
+    fn write_char_slow(&mut self, c: char, width: Option<u16>) {
         // A codepoint that joins the previous grapheme cluster takes no new
-        // column, and a character that fits on the row with no wrap pending
-        // writes only there, so neither can scroll.
-        let width = self.grid.print_width(c);
+        // column, so it cannot scroll.
         if width.is_none() {
             self.grid.write_measured_char_slow(c, width);
-            return;
-        }
-        if self.grid.write_in_row(c, width) {
             return;
         }
 
