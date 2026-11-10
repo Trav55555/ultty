@@ -1,28 +1,32 @@
 //! ANSI fallback backend using Ratatui.
 
+mod input;
+
 use std::fs::File;
 use std::io::{self, Stdout};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Once;
-use std::time::Duration;
 
 use crossterm::cursor::Show;
-use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use crate::event::Event;
 use crate::widgets::View;
+use input::InputReader;
 
 type RatatuiTerminal = Terminal<CrosstermBackend<Stdout>>;
 
 pub struct AnsiBackend {
     terminal: Option<RatatuiTerminal>,
-    /// Where crossterm reads input: stdin, or `/dev/tty` (opened here only
-    /// to wait on) when stdin is not a terminal.
+    /// Where input is read: stdin, or `/dev/tty` when stdin is not a
+    /// terminal (the choice crossterm makes too). `None` once it hung up.
     input: Option<Input>,
+    reader: InputReader,
+    /// The size last reported, to notice a resize (SIGWINCH wakes the loop).
+    size: Option<(u16, u16)>,
 }
 
 enum Input {
@@ -35,11 +39,12 @@ impl AnsiBackend {
         Self {
             terminal: None,
             input: None,
+            reader: InputReader::default(),
+            size: None,
         }
     }
 
     pub fn init(&mut self) -> crate::Result<()> {
-        // The same choice crossterm makes for its reads.
         // SAFETY: isatty only inspects the descriptor.
         self.input = Some(if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
             Input::Stdin
@@ -53,6 +58,7 @@ impl AnsiBackend {
 
         let backend = CrosstermBackend::new(io::stdout());
         self.terminal = Some(Terminal::new(backend)?);
+        self.size = self.window_size();
 
         Ok(())
     }
@@ -84,19 +90,42 @@ impl AnsiBackend {
         }
     }
 
-    /// Whether crossterm already holds an event (it reads all the input
-    /// that is available, which can be several events).
+    /// Whether events were decoded that `poll_event` has not returned yet.
     pub fn has_pending_events(&mut self) -> crate::Result<bool> {
-        Ok(event::poll(Duration::ZERO)?)
+        Ok(self.reader.has_events())
     }
 
+    /// The next event: a resize, or decoded input. Reads all the input that
+    /// is waiting, and never waits for more.
     pub fn poll_event(&mut self) -> crate::Result<Option<Event>> {
-        if event::poll(Duration::ZERO)? {
-            let crossterm_event = event::read()?;
-            Ok(convert_event(crossterm_event))
-        } else {
-            Ok(None)
+        let size = self.window_size();
+        if let Some((width, height)) = size.filter(|_| size != self.size) {
+            self.size = size;
+            return Ok(Some(Event::Resize { width, height }));
         }
+        if !self.reader.has_events() {
+            if let Some(fd) = self.wait_fd() {
+                if !self.reader.read_available(fd)? {
+                    tracing::info!("the terminal hung up; quitting");
+                    self.input = None;
+                    return Ok(Some(Event::Quit));
+                }
+            }
+        }
+        Ok(self.reader.next_event())
+    }
+
+    /// The terminal's size in cells, asked of the input side (stdout may be
+    /// redirected).
+    fn window_size(&self) -> Option<(u16, u16)> {
+        let fd = self.wait_fd()?;
+        // SAFETY: `winsize` is plain data that TIOCGWINSZ fills in.
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        // SAFETY: `fd` is open and `ws` is a valid out-pointer.
+        if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) } != 0 || ws.ws_col == 0 {
+            return None;
+        }
+        Some((ws.ws_col, ws.ws_row))
     }
 }
 
@@ -139,95 +168,9 @@ pub fn install_panic_hook() {
     });
 }
 
-fn convert_event(event: CrosstermEvent) -> Option<Event> {
-    match event {
-        CrosstermEvent::Key(key) => {
-            let modifiers = convert_modifiers(key.modifiers);
-
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                return Some(Event::Quit);
-            }
-
-            let key_code = match key.code {
-                KeyCode::Char(c) => Key::Char(c),
-                KeyCode::Enter => Key::Enter,
-                KeyCode::Esc => Key::Escape,
-                KeyCode::Backspace => Key::Backspace,
-                KeyCode::Tab => Key::Tab,
-                KeyCode::Up => Key::Up,
-                KeyCode::Down => Key::Down,
-                KeyCode::Left => Key::Left,
-                KeyCode::Right => Key::Right,
-                KeyCode::Home => Key::Home,
-                KeyCode::End => Key::End,
-                KeyCode::PageUp => Key::PageUp,
-                KeyCode::PageDown => Key::PageDown,
-                KeyCode::Delete => Key::Delete,
-                KeyCode::Insert => Key::Insert,
-                KeyCode::F(n) => Key::F(n),
-                _ => return None,
-            };
-
-            Some(Event::Key(KeyEvent {
-                key: key_code,
-                modifiers,
-                focused_id: None,
-            }))
-        }
-        CrosstermEvent::Mouse(mouse) => {
-            let modifiers = convert_modifiers(mouse.modifiers);
-            let kind = match mouse.kind {
-                event::MouseEventKind::Down(btn) => MouseEventKind::Down(convert_mouse_button(btn)),
-                event::MouseEventKind::Up(btn) => MouseEventKind::Up(convert_mouse_button(btn)),
-                event::MouseEventKind::Drag(btn) => MouseEventKind::Drag(convert_mouse_button(btn)),
-                event::MouseEventKind::Moved => MouseEventKind::Moved,
-                event::MouseEventKind::ScrollUp => MouseEventKind::ScrollUp,
-                event::MouseEventKind::ScrollDown => MouseEventKind::ScrollDown,
-                _ => return None,
-            };
-
-            Some(Event::Mouse(MouseEvent {
-                kind,
-                x: mouse.column,
-                y: mouse.row,
-                modifiers,
-            }))
-        }
-        CrosstermEvent::Resize(width, height) => Some(Event::Resize { width, height }),
-        _ => None,
-    }
-}
-
-fn convert_modifiers(mods: KeyModifiers) -> Modifiers {
-    Modifiers {
-        shift: mods.contains(KeyModifiers::SHIFT),
-        ctrl: mods.contains(KeyModifiers::CONTROL),
-        alt: mods.contains(KeyModifiers::ALT),
-        meta: mods.contains(KeyModifiers::META),
-    }
-}
-
-fn convert_mouse_button(btn: event::MouseButton) -> MouseButton {
-    match btn {
-        event::MouseButton::Left => MouseButton::Left,
-        event::MouseButton::Right => MouseButton::Right,
-        event::MouseButton::Middle => MouseButton::Middle,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent as CtKeyEvent, KeyEventKind, KeyEventState};
-
-    fn make_key_event(code: KeyCode, modifiers: KeyModifiers) -> CrosstermEvent {
-        CrosstermEvent::Key(CtKeyEvent {
-            code,
-            modifiers,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        })
-    }
 
     #[test]
     fn restore_terminal_is_idempotent_without_an_active_session() {
@@ -256,204 +199,5 @@ mod tests {
         // exactly once (the second install was a no-op).
         assert_eq!(previous_calls.load(Ordering::SeqCst), 1);
         let _ = std::panic::take_hook();
-    }
-
-    #[test]
-    fn ctrl_c_produces_quit() {
-        let event = make_key_event(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        let result = convert_event(event);
-        assert!(matches!(result, Some(Event::Quit)));
-    }
-
-    #[test]
-    fn escape_key_converts() {
-        let event = make_key_event(KeyCode::Esc, KeyModifiers::NONE);
-        let result = convert_event(event).unwrap();
-        match result {
-            Event::Key(ke) => assert!(matches!(ke.key, Key::Escape)),
-            _ => panic!("Expected Key event"),
-        }
-    }
-
-    #[test]
-    fn char_key_converts() {
-        let event = make_key_event(KeyCode::Char('a'), KeyModifiers::NONE);
-        let result = convert_event(event).unwrap();
-        match result {
-            Event::Key(ke) => assert!(matches!(ke.key, Key::Char('a'))),
-            _ => panic!("Expected Key event"),
-        }
-    }
-
-    #[test]
-    fn function_keys_convert() {
-        for n in 1..=12 {
-            let event = make_key_event(KeyCode::F(n), KeyModifiers::NONE);
-            let result = convert_event(event).unwrap();
-            match result {
-                Event::Key(ke) => assert!(matches!(ke.key, Key::F(x) if x == n)),
-                _ => panic!("Expected Key event for F{}", n),
-            }
-        }
-    }
-
-    #[test]
-    fn arrow_keys_convert() {
-        let cases = [
-            (KeyCode::Up, Key::Up),
-            (KeyCode::Down, Key::Down),
-            (KeyCode::Left, Key::Left),
-            (KeyCode::Right, Key::Right),
-        ];
-        for (code, expected) in cases {
-            let event = make_key_event(code, KeyModifiers::NONE);
-            let result = convert_event(event).unwrap();
-            match result {
-                Event::Key(ke) => assert_eq!(
-                    std::mem::discriminant(&ke.key),
-                    std::mem::discriminant(&expected)
-                ),
-                _ => panic!("Expected Key event"),
-            }
-        }
-    }
-
-    #[test]
-    fn navigation_keys_convert() {
-        let cases = [
-            (KeyCode::Home, Key::Home),
-            (KeyCode::End, Key::End),
-            (KeyCode::PageUp, Key::PageUp),
-            (KeyCode::PageDown, Key::PageDown),
-            (KeyCode::Insert, Key::Insert),
-            (KeyCode::Delete, Key::Delete),
-        ];
-        for (code, expected) in cases {
-            let event = make_key_event(code, KeyModifiers::NONE);
-            let result = convert_event(event).unwrap();
-            match result {
-                Event::Key(ke) => assert_eq!(
-                    std::mem::discriminant(&ke.key),
-                    std::mem::discriminant(&expected)
-                ),
-                _ => panic!("Expected Key event"),
-            }
-        }
-    }
-
-    #[test]
-    fn modifiers_convert_correctly() {
-        let all_mods =
-            KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::META;
-        let result = convert_modifiers(all_mods);
-        assert!(result.shift);
-        assert!(result.ctrl);
-        assert!(result.alt);
-        assert!(result.meta);
-
-        let no_mods = convert_modifiers(KeyModifiers::NONE);
-        assert!(!no_mods.shift);
-        assert!(!no_mods.ctrl);
-        assert!(!no_mods.alt);
-        assert!(!no_mods.meta);
-    }
-
-    #[test]
-    fn shift_only_modifier() {
-        let result = convert_modifiers(KeyModifiers::SHIFT);
-        assert!(result.shift);
-        assert!(!result.ctrl);
-        assert!(!result.alt);
-        assert!(!result.meta);
-    }
-
-    #[test]
-    fn mouse_buttons_convert() {
-        assert!(matches!(
-            convert_mouse_button(event::MouseButton::Left),
-            MouseButton::Left
-        ));
-        assert!(matches!(
-            convert_mouse_button(event::MouseButton::Right),
-            MouseButton::Right
-        ));
-        assert!(matches!(
-            convert_mouse_button(event::MouseButton::Middle),
-            MouseButton::Middle
-        ));
-    }
-
-    #[test]
-    fn resize_event_converts() {
-        let event = CrosstermEvent::Resize(120, 40);
-        let result = convert_event(event).unwrap();
-        match result {
-            Event::Resize { width, height } => {
-                assert_eq!(width, 120);
-                assert_eq!(height, 40);
-            }
-            _ => panic!("Expected Resize event"),
-        }
-    }
-
-    #[test]
-    fn mouse_down_converts() {
-        let event = CrosstermEvent::Mouse(event::MouseEvent {
-            kind: event::MouseEventKind::Down(event::MouseButton::Left),
-            column: 10,
-            row: 5,
-            modifiers: KeyModifiers::NONE,
-        });
-        let result = convert_event(event).unwrap();
-        match result {
-            Event::Mouse(me) => {
-                assert!(matches!(me.kind, MouseEventKind::Down(MouseButton::Left)));
-                assert_eq!(me.x, 10);
-                assert_eq!(me.y, 5);
-            }
-            _ => panic!("Expected Mouse event"),
-        }
-    }
-
-    #[test]
-    fn mouse_scroll_converts() {
-        let scroll_up = CrosstermEvent::Mouse(event::MouseEvent {
-            kind: event::MouseEventKind::ScrollUp,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        });
-        let result = convert_event(scroll_up).unwrap();
-        match result {
-            Event::Mouse(me) => assert!(matches!(me.kind, MouseEventKind::ScrollUp)),
-            _ => panic!("Expected Mouse event"),
-        }
-
-        let scroll_down = CrosstermEvent::Mouse(event::MouseEvent {
-            kind: event::MouseEventKind::ScrollDown,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        });
-        let result = convert_event(scroll_down).unwrap();
-        match result {
-            Event::Mouse(me) => assert!(matches!(me.kind, MouseEventKind::ScrollDown)),
-            _ => panic!("Expected Mouse event"),
-        }
-    }
-
-    #[test]
-    fn unknown_key_returns_none() {
-        let event = make_key_event(KeyCode::Null, KeyModifiers::NONE);
-        let result = convert_event(event);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn focus_events_return_none() {
-        let focus_gained = CrosstermEvent::FocusGained;
-        let focus_lost = CrosstermEvent::FocusLost;
-        assert!(convert_event(focus_gained).is_none());
-        assert!(convert_event(focus_lost).is_none());
     }
 }
