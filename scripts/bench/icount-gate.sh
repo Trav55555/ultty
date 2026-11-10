@@ -15,6 +15,7 @@
 #   --update            write the baseline instead of comparing
 #   --threshold PCT     instruction regression threshold (default 3)
 #   --bin PATH          use this release ultty-bench instead of building it
+#   --baseline PATH     read (or, with --update, write) this baseline file
 #   --corpus LIST       default: every corpus
 #   --size-mib N        default 1
 #   --skip-memory       do not run the heap-bytes gate
@@ -35,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     --update) UPDATE=1; shift ;;
     --threshold) THRESHOLD="${2:?}"; shift 2 ;;
     --bin) BIN="${2:?}"; shift 2 ;;
+    --baseline) BASELINE="${2:?}"; shift 2 ;;
     --corpus) CORPUS="${2:?}"; shift 2 ;;
     --size-mib) SIZE="${2:?}"; shift 2 ;;
     --skip-memory) MEMORY=0; shift ;;

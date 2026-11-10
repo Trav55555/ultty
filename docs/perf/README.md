@@ -167,10 +167,21 @@ Instruction counts are collected only inside `run_vt_pass` / `run_parse_pass`
 over 1 MiB of each corpus at 120x40; repeated runs give identical parser counts and parse+grid counts within
 0.35% (hash seeding varies). The
 baseline records rustc and valgrind versions and refuses to compare across
-them, so it is per toolchain (the committed one is from the Homebrew rustc on
-the development box; regenerate it where the gate runs). It needs valgrind, so
-it is not in CI; the memory budgets are (`cargo test -p ultty --bench memory`
-in the Gitea test job).
+them, so it is per toolchain: the committed one is from the Homebrew rustc on
+the development box. Regenerate it there, in its own commit with the reason,
+after an intended change (`--update`); `--baseline PATH` reads or writes another file.
+
+CI (the Gitea `VT icount` job, `scripts/ci-icount.sh`) does not use the
+committed file. The runner image has a different rustc build, glibc and
+valgrind, and the same source differed from the committed baseline by up to
+3% in one case there (`vt/combining`), which is the whole threshold. So the job
+builds the merge-base and the PR in the same environment, writes the base's
+counts with `--update --baseline`, and gates the PR against them at +3%. It
+costs two release builds of `ultty-bench` and 44 callgrind runs. It installs
+valgrind with apt when the image lacks it (add `valgrind` to the image to drop
+that). The heap budgets run in the Gitea test job
+(`cargo test -p ultty --bench memory`). To reproduce locally, run
+`scripts/ci-icount.sh <base-commit>`.
 
 ### Criterion micro benches
 
