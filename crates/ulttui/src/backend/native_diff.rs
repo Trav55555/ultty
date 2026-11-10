@@ -30,6 +30,9 @@ pub(super) struct RegionSnapshot {
     /// What the frame sent with `SetSemantics`; `None` leaves the region's
     /// semantics to the terminal.
     pub(super) semantics: Option<Semantics>,
+    /// Bytes of a live region's text sent as `AppendContent`, and so
+    /// announced; 0 for a region that is not live.
+    pub(super) announced: usize,
 }
 
 /// Regions the terminal currently retains: stable ids plus sibling order.
@@ -194,7 +197,7 @@ pub(crate) fn optimize_frame_messages(
         mapping,
         retained,
         reordered,
-        next,
+        mut next,
     } = reconciliation;
 
     let mut outgoing = Vec::new();
@@ -258,11 +261,27 @@ pub(crate) fn optimize_frame_messages(
                 let stable = mapping[&id];
                 // Live in this frame or the last: text that arrives in the
                 // frame a region stops being live is still announced.
-                let live =
-                    is_live(next.regions.get(&stable)) || is_live(previous.regions.get(&stable));
-                match previous.regions.get(&stable) {
-                    Some(prev) if live && capabilities.append_content => {
-                        outgoing.extend(live_content_update(stable, &prev.content, content));
+                let live_now = is_live(next.regions.get(&stable));
+                let live = live_now || is_live(previous.regions.get(&stable));
+                let prev = previous.regions.get(&stable);
+                match prev {
+                    _ if live && capabilities.append_content && plain_text(&content).is_some() => {
+                        // A region that turns live has said what it shows
+                        // already; only what it grows by is news.
+                        let (before, announced) = prev.map_or((&Content::None, 0), |prev| {
+                            let announced = if is_live(Some(prev)) {
+                                prev.announced
+                            } else {
+                                plain_text(&prev.content).map_or(0, |text| text.len())
+                            };
+                            (&prev.content, announced)
+                        });
+                        let (messages, announced) =
+                            live_content_update(stable, before, announced, content, live_now);
+                        outgoing.extend(messages);
+                        if let Some(region) = next.regions.get_mut(&stable) {
+                            region.announced = announced;
+                        }
                     }
                     Some(prev) => {
                         let delta = capabilities
@@ -313,43 +332,22 @@ pub(crate) fn optimize_frame_messages(
                     .get(&stable)
                     .is_some_and(|prev| prev.semantics.as_ref() == Some(&semantics));
                 if capabilities.semantics && !unchanged {
-                    semantics_changes.push(AppMessage::SetSemantics {
+                    // Turning live goes before the region's content, so
+                    // what it grows by in this frame is announced; any
+                    // other change after, so text that arrives as it stops
+                    // being live still is.
+                    let queue = if semantics.live != Live::Off {
+                        &mut outgoing
+                    } else {
+                        &mut semantics_changes
+                    };
+                    queue.push(AppMessage::SetSemantics {
                         id: stable,
                         semantics,
                     });
                 }
             }
             other => outgoing.push(other),
-        }
-    }
-
-    // A live region whose text became regions of its own (a markdown view
-    // that finished streaming) still announces what arrived with it,
-    // before it stops being live below.
-    if capabilities.append_content {
-        let mut finished: Vec<(RegionId, RegionId)> = mapping
-            .iter()
-            .filter(|(_, stable)| {
-                let previous = previous.regions.get(stable);
-                // It had text of its own: a live container stays one.
-                is_live(previous)
-                    && previous.is_some_and(|region| region.content != Content::None)
-                    && next
-                        .regions
-                        .get(stable)
-                        .is_some_and(|region| region.content == Content::None)
-            })
-            .map(|(provisional, stable)| (*stable, *provisional))
-            .collect();
-        finished.sort_by_key(|(stable, _)| stable.0);
-        for (stable, provisional) in finished {
-            let Some(before) = plain_text(&previous.regions[&stable].content) else {
-                continue;
-            };
-            let after = subtree_text(provisional, &nodes, &order);
-            if let Some(text) = text_to_announce(&before, &after) {
-                outgoing.push(AppMessage::AppendContent { id: stable, text });
-            }
         }
     }
 
@@ -546,6 +544,7 @@ fn reconcile_children(
                 content: node.content.clone(),
                 scroll: node.scroll,
                 semantics: node.semantics.clone(),
+                announced: 0,
             },
         );
         new_order.push(stable);
@@ -573,32 +572,81 @@ fn reconcile_children(
 }
 
 /// The messages that take a live region from `previous` to `next`
-/// content.
+/// content, given that `announced` bytes of its text have been appended
+/// so far; and how many have been after them.
 ///
 /// The terminal announces only text that arrives with `AppendContent`
-/// (ADR 0021 §3), so text a live region grows by is always appended, even
-/// when its styling changed too, as when a streamed markdown span turns
-/// bold: the new text is appended, then a `SetContent` in the same frame
-/// puts the styled result in place. When text in the last line changed as
-/// well (a markdown marker that became styling), what follows the
-/// unchanged part is appended again; a change before the last line is
-/// set, not announced.
-fn live_content_update(id: RegionId, previous: &Content, next: Content) -> Vec<AppMessage> {
-    if *previous == next {
-        return Vec::new();
+/// (ADR 0021 §3), so the text a live region shows past what it has
+/// announced is appended, then a `SetContent` in the same frame puts the
+/// styled result in place when appending alone does not give it (a span
+/// turned bold, a line rewritten). A region created live announces its
+/// first text the same way. Text is appended once: a rewrite of what was
+/// announced (`Title` set as `TITLE`) is set, not spoken again, and only
+/// what goes past it is new. While the region stays live, the end of its
+/// last line is held back from the first inline markdown opener that may
+/// still turn into styling ([`held_back`]); in the frame it stops being
+/// live, everything is appended.
+fn live_content_update(
+    id: RegionId,
+    previous: &Content,
+    announced: usize,
+    next: Content,
+    stays_live: bool,
+) -> (Vec<AppMessage>, usize) {
+    let after = plain_text(&next).unwrap_or_default();
+    let speakable = if stays_live {
+        held_back(&after)
+    } else {
+        &after
+    };
+    let mut messages = Vec::new();
+    let mut shown = previous.clone();
+    let mut announced = announced;
+    if speakable.len() > announced {
+        let mut start = announced;
+        while !speakable.is_char_boundary(start) {
+            start += 1;
+        }
+        let text = speakable[start..].to_string();
+        shown = with_appended(previous, &text);
+        messages.push(AppMessage::AppendContent { id, text });
+        announced = speakable.len();
     }
-    let (Some(before), Some(after)) = (plain_text(previous), plain_text(&next)) else {
-        return vec![AppMessage::SetContent { id, content: next }];
-    };
-    let Some(text) = text_to_announce(&before, &after) else {
-        return vec![AppMessage::SetContent { id, content: next }];
-    };
-    let appended = with_appended(previous, &text);
-    let mut messages = vec![AppMessage::AppendContent { id, text }];
-    if appended != next {
+    if shown != next {
         messages.push(AppMessage::SetContent { id, content: next });
     }
-    messages
+    (messages, announced)
+}
+
+/// How far back an unresolved inline opener holds the text after it. Past
+/// that it is taken as a literal character, so a `*` or `[` in prose
+/// delays speech by at most this many bytes.
+const HOLD_BACK_BYTES: usize = 80;
+
+/// `text` without the part of its last line from an inline markdown
+/// opener (`*`, `_` not inside a word, `` ` ``, `[`, `~`) that is still in
+/// the text as a character, within [`HOLD_BACK_BYTES`] of its end: until
+/// it resolves the opener is shown literally, and announcing it would
+/// speak `**bo` and then `bold`.
+fn held_back(text: &str) -> &str {
+    let line_start = text.rfind('\n').map_or(0, |index| index + 1);
+    let mut window_start = text.len().saturating_sub(HOLD_BACK_BYTES).max(line_start);
+    while !text.is_char_boundary(window_start) {
+        window_start += 1;
+    }
+    let mut previous = text[..window_start].chars().next_back();
+    for (offset, c) in text[window_start..].char_indices() {
+        let opener = match c {
+            '*' | '`' | '[' | '~' => true,
+            '_' => !previous.is_some_and(char::is_alphanumeric),
+            _ => false,
+        };
+        if opener {
+            return &text[..window_start + offset];
+        }
+        previous = Some(c);
+    }
+    text
 }
 
 /// Whether the frame said `region` is live.
@@ -606,43 +654,6 @@ fn is_live(region: Option<&RegionSnapshot>) -> bool {
     region
         .and_then(|region| region.semantics.as_ref())
         .is_some_and(|semantics| semantics.live != Live::Off)
-}
-
-/// What a live region whose text went from `before` to `after` should
-/// append: what follows the part that stayed, unless that part ends
-/// before the last line of `before` or nothing follows it.
-fn text_to_announce(before: &str, after: &str) -> Option<String> {
-    let kept = common_prefix_len(before, after);
-    (!before[kept..].contains('\n') && kept < after.len()).then(|| after[kept..].to_string())
-}
-
-/// The text a region's subtree shows in this frame: each region's text,
-/// depth first, one per line. How a [`crate::widgets::MarkdownView`] that
-/// finished streaming lays out the document it streamed as one text.
-fn subtree_text(
-    provisional: RegionId,
-    nodes: &HashMap<RegionId, ProvisionalNode>,
-    order: &ProvisionalOrder,
-) -> String {
-    let mut parts = Vec::new();
-    collect_subtree_text(provisional, nodes, order, &mut parts);
-    parts.join("\n")
-}
-
-fn collect_subtree_text(
-    id: RegionId,
-    nodes: &HashMap<RegionId, ProvisionalNode>,
-    order: &ProvisionalOrder,
-    parts: &mut Vec<String>,
-) {
-    if let Some(text) = nodes.get(&id).and_then(|node| plain_text(&node.content)) {
-        if !text.is_empty() {
-            parts.push(text.into_owned());
-        }
-    }
-    for child in order.get(&id).into_iter().flatten() {
-        collect_subtree_text(*child, nodes, order, parts);
-    }
 }
 
 /// The text of text content, spans joined.
@@ -655,14 +666,6 @@ fn plain_text(content: &Content) -> Option<Cow<'_, str>> {
         )),
         Content::Widget(_) => None,
     }
-}
-
-/// Length in bytes of the longest common prefix of `a` and `b`.
-fn common_prefix_len(a: &str, b: &str) -> usize {
-    a.char_indices()
-        .zip(b.chars())
-        .find(|((_, x), y)| x != y)
-        .map_or(a.len().min(b.len()), |((index, _), _)| index)
 }
 
 /// `content` after the terminal appends `text` to it, as `AppendContent`
@@ -976,6 +979,7 @@ mod tests {
                 content,
                 scroll: None,
                 semantics: None,
+                announced: 0,
             },
         );
         tree.children.insert(ROOT, vec![id]);
@@ -1241,7 +1245,7 @@ mod tests {
     }
 
     #[test]
-    fn a_live_region_reappends_a_last_line_that_changed() {
+    fn a_marker_held_back_on_the_last_line_is_spoken_once_resolved() {
         let id = RegionId::new(1);
         let bold = Style::new().bold();
         let before = Content::RichText(RichText::new().text("Done.\nA **bo"));
@@ -1265,12 +1269,27 @@ mod tests {
     }
 
     #[test]
-    fn a_live_region_does_not_reannounce_rewritten_earlier_lines() {
+    fn a_rewrite_is_set_once_and_only_text_past_what_was_announced_is_appended() {
         let id = RegionId::new(1);
+        // An earlier line rewritten while new text arrives: the new text
+        // past the old length is still announced.
         let after = text("Changed\nsecond and more");
         assert_eq!(
             live_step(text("First\nsecond"), after.clone()),
-            vec![AppMessage::SetContent { id, content: after }]
+            vec![
+                AppMessage::AppendContent {
+                    id,
+                    text: "nd and more".to_string()
+                },
+                AppMessage::SetContent { id, content: after }
+            ]
+        );
+        // A one-line restyle (setext heading, `Title` set as `TITLE`) is
+        // not announced again.
+        let upper = text("TITLE");
+        assert_eq!(
+            live_step(text("Title"), upper.clone()),
+            vec![AppMessage::SetContent { id, content: upper }]
         );
         let shrunk = text("First\nsec");
         assert_eq!(
@@ -1281,6 +1300,133 @@ mod tests {
             }]
         );
         assert_eq!(live_step(text("same"), text("same")), Vec::new());
+        // Past a multibyte character, at a character boundary.
+        assert_eq!(
+            live_step(text("aé"), text("ééé")),
+            vec![
+                AppMessage::AppendContent {
+                    id,
+                    text: "é".to_string()
+                },
+                AppMessage::SetContent {
+                    id,
+                    content: text("ééé")
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_region_created_live_announces_its_first_text_after_turning_live() {
+        let id = RegionId::new(1);
+        let frame = frame_with_semantics(id, text("Thinking about it"), live_log());
+        let (outgoing, tree) =
+            optimize_frame_messages(&RetainedTree::new(), frame, &HashMap::new(), ALL);
+        assert!(matches!(outgoing[0], AppMessage::CreateRegion { .. }));
+        assert!(matches!(outgoing[1], AppMessage::SetSemantics { .. }));
+        assert_eq!(
+            outgoing[2..],
+            [AppMessage::AppendContent {
+                id,
+                text: "Thinking about it".to_string()
+            }]
+        );
+        assert_eq!(tree.regions[&id].announced, "Thinking about it".len());
+    }
+
+    #[test]
+    fn unresolved_inline_markdown_is_held_back_until_it_resolves() {
+        let id = RegionId::new(1);
+        let bold = Style::new().bold();
+        for (open, resolved) in [
+            (
+                "A **bo",
+                RichText::new()
+                    .text("A ")
+                    .span("bold", bold.clone())
+                    .text(" move"),
+            ),
+            (
+                "Run `fo",
+                RichText::new()
+                    .text("Run ")
+                    .span("foo", bold.clone())
+                    .text(" now"),
+            ),
+            (
+                "See [the docs](http://exa",
+                RichText::new()
+                    .text("See ")
+                    .span("the docs", bold.clone())
+                    .text(" now"),
+            ),
+        ] {
+            let first = frame_with_semantics(id, text(open), live_log());
+            let (outgoing, tree) =
+                optimize_frame_messages(&RetainedTree::new(), first, &HashMap::new(), ALL);
+            let spoken: Vec<&AppMessage> = outgoing
+                .iter()
+                .filter(|m| matches!(m, AppMessage::AppendContent { .. }))
+                .collect();
+            let prefix = &open[..open.find(['*', '`', '[']).unwrap()];
+            assert_eq!(
+                spoken,
+                [&AppMessage::AppendContent {
+                    id,
+                    text: prefix.to_string()
+                }],
+                "{open:?}"
+            );
+
+            let resolved = Content::RichText(resolved);
+            let second = frame_with_semantics(id, resolved.clone(), live_log());
+            let (outgoing, _) = optimize_frame_messages(&tree, second, &HashMap::new(), ALL);
+            let whole = plain_text_of(&resolved);
+            assert_eq!(
+                outgoing,
+                vec![
+                    AppMessage::AppendContent {
+                        id,
+                        text: whole[prefix.len()..].to_string()
+                    },
+                    AppMessage::SetContent {
+                        id,
+                        content: resolved
+                    }
+                ],
+                "{open:?}: nothing is spoken twice"
+            );
+        }
+        // A literal opener long past is not held back.
+        let literal = format!("2 * 3 is six, {}", "and so on ".repeat(10));
+        let (outgoing, _) = optimize_frame_messages(
+            &RetainedTree::new(),
+            frame_with_semantics(id, text(&literal), live_log()),
+            &HashMap::new(),
+            ALL,
+        );
+        assert!(outgoing.contains(&AppMessage::AppendContent {
+            id,
+            text: literal.clone()
+        }));
+        // snake_case is a word, not an opener.
+        assert_eq!(super::held_back("a snake_case"), "a snake_case");
+        // In the frame the region stops being live, everything goes.
+        let first = frame_with_semantics(id, text("A **bo"), live_log());
+        let (_, tree) = optimize_frame_messages(&RetainedTree::new(), first, &HashMap::new(), ALL);
+        let last = frame_with_semantics(id, text("A **bo"), None);
+        let (outgoing, _) = optimize_frame_messages(&tree, last, &HashMap::new(), ALL);
+        assert_eq!(
+            outgoing[0],
+            AppMessage::AppendContent {
+                id,
+                text: "**bo".to_string()
+            }
+        );
+    }
+
+    fn plain_text_of(content: &Content) -> String {
+        super::plain_text(content).unwrap().into_owned()
     }
 
     #[test]
@@ -1323,61 +1469,6 @@ mod tests {
                 }
             ]
         );
-    }
-
-    #[test]
-    fn a_live_region_whose_text_becomes_child_regions_announces_the_rest() {
-        let id = RegionId::new(1);
-        let first = frame_with_semantics(id, text("Hello\nwor"), live_log());
-        let (_, tree) = optimize_frame_messages(&RetainedTree::new(), first, &HashMap::new(), ALL);
-
-        // Finished: the region holds two block regions instead of text.
-        let mut last = vec![AppMessage::CreateRegion {
-            id,
-            parent: ROOT,
-            insert_index: -1,
-            constraints: Constraints::default(),
-            style: Style::default(),
-        }];
-        for (block, line) in [(2, "Hello"), (3, "world.")] {
-            let block = RegionId::new(block);
-            last.push(AppMessage::CreateRegion {
-                id: block,
-                parent: id,
-                insert_index: -1,
-                constraints: Constraints::default(),
-                style: Style::default(),
-            });
-            last.push(AppMessage::SetContent {
-                id: block,
-                content: text(line),
-            });
-        }
-        let (outgoing, _) = optimize_frame_messages(&tree, last, &HashMap::new(), ALL);
-
-        let append = outgoing
-            .iter()
-            .position(|m| {
-                *m == AppMessage::AppendContent {
-                    id,
-                    text: "ld.".to_string(),
-                }
-            })
-            .expect("the rest appended");
-        let reset = outgoing
-            .iter()
-            .position(|m| matches!(m, AppMessage::SetSemantics { id: target, .. } if *target == id))
-            .expect("semantics reset");
-        let cleared = outgoing
-            .iter()
-            .position(|m| {
-                *m == AppMessage::SetContent {
-                    id,
-                    content: Content::None,
-                }
-            })
-            .expect("content cleared");
-        assert!(append < reset && append < cleared, "{outgoing:?}");
     }
 
     #[test]

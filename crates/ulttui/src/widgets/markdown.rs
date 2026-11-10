@@ -502,26 +502,7 @@ impl View for MarkdownView {
     /// the region being a live log); finished, each block is a region of
     /// its own.
     fn content(&self) -> Content {
-        if !self.streaming {
-            return Content::None;
-        }
-        let mut document = RichText::new();
-        for (index, block) in self.blocks.iter().enumerate() {
-            if index > 0 {
-                document = document.text("\n");
-            }
-            let dim = block_style(block).dim;
-            match block_content(block) {
-                Content::RichText(rich) => document.spans.extend(rich.spans),
-                Content::Text(text) => {
-                    let mut style = Style::new();
-                    style.dim = dim;
-                    document = document.span(text.text, style);
-                }
-                _ => {}
-            }
-        }
-        Content::RichText(document)
+        Content::None
     }
 
     /// A streaming view is a busy, polite live log (ADR 0021 §4); a
@@ -541,13 +522,13 @@ impl View for MarkdownView {
     }
 
     fn children_count(&self) -> usize {
-        if self.streaming {
-            0
-        } else {
-            self.blocks.len()
-        }
+        self.blocks.len()
     }
 
+    /// One region per block. While streaming, the last block, the one
+    /// still arriving, is live itself: what it grows by reaches it as
+    /// `AppendContent` and is announced, and a block that is finished
+    /// stops being live, so each region stays one block's size.
     fn render_child_native(
         &self,
         index: usize,
@@ -555,9 +536,6 @@ impl View for MarkdownView {
         parent: RegionId,
         next_id: &mut u32,
     ) -> crate::Result<Option<RegionId>> {
-        if self.streaming {
-            return Ok(None);
-        }
         let Some(block) = self.blocks.get(index) else {
             return Ok(None);
         };
@@ -581,9 +559,20 @@ impl View for MarkdownView {
             style,
         })?;
 
+        let content = block_content(block);
+        let arriving = self.streaming && index + 1 == self.blocks.len();
+        let block_semantics = Semantics {
+            live: if arriving {
+                self.accessible.live.unwrap_or(Live::Polite)
+            } else {
+                Live::Off
+            },
+            ..Semantics::default()
+        };
+        super::send_semantics(send_message, region_id, block_semantics, &content)?;
         send_message(&AppMessage::SetContent {
             id: region_id,
-            content: block_content(block),
+            content,
         })?;
 
         Ok(Some(region_id))
@@ -710,7 +699,11 @@ fn block_content(block: &Block) -> Content {
             }
             Content::RichText(rich)
         }
-        Block::CodeBlock { text } => Content::Text(TextContent::new(text.clone())),
+        // Without the fence's closing newline, which would be one more row
+        // than the block's height.
+        Block::CodeBlock { text } => {
+            Content::Text(TextContent::new(text.strip_suffix('\n').unwrap_or(text)))
+        }
         Block::ListItem {
             indent,
             prefix,
@@ -1144,94 +1137,164 @@ mod tests {
         assert_eq!(quiet.semantics().label.as_deref(), Some("Reply"));
     }
 
-    #[test]
-    fn streaming_natively_is_one_region_holding_the_whole_document() {
-        let view =
-            MarkdownView::new("# Title\n\nSome **bold** text\n\n```\ncode\n```").streaming(true);
-        assert_eq!(view.children_count(), 0, "no block regions while streaming");
-        let Content::RichText(document) = view.content() else {
-            panic!("expected rich text");
-        };
-        let text: String = document.spans.iter().map(|s| s.text.as_str()).collect();
-        assert_eq!(text, "TITLE\nSome bold text\ncode\n");
-        assert!(document
-            .spans
+    use crate::backend::native_diff::{optimize_frame_messages, FrameCapabilities, RetainedTree};
+    use crate::widgets::render_view_messages;
+    use std::collections::HashMap;
+
+    const ALL: FrameCapabilities = FrameCapabilities {
+        append_content: true,
+        semantics: true,
+    };
+
+    /// Stream `chunks` into a view, one frame each, through the backend
+    /// diff; the view, the retained tree and each frame's messages.
+    fn stream(chunks: &[&str]) -> (MarkdownView, RetainedTree, Vec<Vec<AppMessage>>) {
+        let mut tree = RetainedTree::new();
+        let mut frames = Vec::new();
+        let mut view = MarkdownView::new("").streaming(true);
+        for chunk in chunks {
+            view.append_chunk(chunk);
+            let frame = render_view_messages(&view).unwrap();
+            let (outgoing, next) = optimize_frame_messages(&tree, frame, &HashMap::new(), ALL);
+            tree = next;
+            frames.push(outgoing);
+        }
+        (view, tree, frames)
+    }
+
+    fn appends(messages: &[AppMessage]) -> Vec<String> {
+        messages
             .iter()
-            .any(|s| s.text == "bold" && s.style.bold));
-        assert!(document.spans.last().unwrap().style.dim, "code stays dim");
-        assert!(
-            !text.contains(STREAMING_CURSOR),
-            "no cursor natively: it would be appended and spoken"
-        );
-        assert_eq!(MarkdownView::new("hi").content(), Content::None);
+            .filter_map(|m| match m {
+                AppMessage::AppendContent { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
-    fn streaming_text_reaches_the_terminal_as_appends_to_one_live_region() {
-        use crate::backend::native_diff::{
-            optimize_frame_messages, FrameCapabilities, RetainedTree,
-        };
-        use crate::widgets::render_view_messages;
-        use std::collections::HashMap;
+    fn streaming_natively_is_a_region_per_block_and_only_the_last_is_live() {
+        let view = MarkdownView::new("# Title\n\nSome **bold** text\n\n```\ncode\n```\n\nafter")
+            .streaming(true);
+        assert_eq!(view.content(), Content::None);
+        assert_eq!(view.children_count(), 4);
+        let messages = render_view_messages(&view).unwrap();
+        let live: Vec<RegionId> = messages
+            .iter()
+            .filter_map(|m| match m {
+                AppMessage::SetSemantics { id, semantics }
+                    if semantics.live == Live::Polite && semantics.role == Role::Auto =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            live,
+            vec![RegionId::new(5)],
+            "only the block still arriving"
+        );
 
-        let all = FrameCapabilities {
-            append_content: true,
-            semantics: true,
-        };
-        let mut tree = RetainedTree::new();
-        let mut sent = Vec::new();
-        let mut view = MarkdownView::new("").streaming(true);
-        for chunk in [
+        // Each block region's text fits the rows it is given.
+        let mut heights = HashMap::new();
+        for message in &messages {
+            match message {
+                AppMessage::CreateRegion {
+                    id, constraints, ..
+                } => {
+                    heights.insert(*id, constraints.height);
+                }
+                AppMessage::SetContent { id, content } => {
+                    let text = match content {
+                        Content::Text(text) => text.text.clone(),
+                        Content::RichText(rich) => {
+                            rich.spans.iter().map(|s| s.text.as_str()).collect()
+                        }
+                        _ => continue,
+                    };
+                    let rows = text.split('\n').count() as f32;
+                    assert!(
+                        Dimension::Cells(rows) == heights[id]
+                            || matches!(heights[id], Dimension::Cells(h) if rows <= h),
+                        "{text:?} in {:?}",
+                        heights[id]
+                    );
+                    assert!(!text.contains(STREAMING_CURSOR));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_text_is_appended_to_the_block_arriving_and_spoken_once() {
+        let (mut view, tree, frames) = stream(&[
             "",
             "Hello",
             " world.\n\nA ",
             "**bo",
             "ld** move",
             "\n\n- item",
-        ] {
-            view.append_chunk(chunk);
-            let frame = render_view_messages(&view).unwrap();
-            let (outgoing, next) = optimize_frame_messages(&tree, frame, &HashMap::new(), all);
-            tree = next;
-            sent.push(outgoing);
-        }
-
-        let first = &sent[0];
-        assert!(first.iter().any(|m| matches!(
+        ]);
+        assert!(frames[0].iter().any(|m| matches!(
             m,
             AppMessage::SetSemantics { semantics, .. }
                 if semantics.role == Role::Log && semantics.live == Live::Polite && semantics.busy
         )));
-        let later: Vec<&AppMessage> = sent[1..].iter().flatten().collect();
-        assert!(
-            later.iter().all(|m| !matches!(
-                m,
-                AppMessage::CreateRegion { .. } | AppMessage::SetSemantics { .. }
-            )),
-            "no new regions and no semantics resent: {later:?}"
+        let spoken: Vec<String> = frames.iter().flat_map(|frame| appends(frame)).collect();
+        assert_eq!(
+            spoken.concat(),
+            "Hello world.A bold move• item",
+            "{spoken:?}"
         );
-        let appended: String = later
-            .iter()
-            .filter_map(|m| match m {
-                AppMessage::AppendContent { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(appended, "Hello world.\nA **bobold move\n• item");
+        assert!(spoken.iter().all(|text| !text.contains('*')), "{spoken:?}");
 
         // The last chunk and the end of the stream in one frame: the rest
-        // is still appended before the view becomes block regions.
+        // is still appended, and nothing is created or removed.
         view.append_chunk(" done.");
         let finished = view.streaming(false);
         let frame = render_view_messages(&finished).unwrap();
-        let (outgoing, _) = optimize_frame_messages(&tree, frame, &HashMap::new(), all);
-        assert!(
-            outgoing.contains(&AppMessage::AppendContent {
-                id: RegionId::new(1),
-                text: " done.".to_string()
-            }),
+        let (outgoing, _) = optimize_frame_messages(&tree, frame, &HashMap::new(), ALL);
+        assert_eq!(
+            appends(&outgoing),
+            vec![" done.".to_string()],
             "{outgoing:?}"
         );
+        assert!(!outgoing.iter().any(|m| matches!(
+            m,
+            AppMessage::CreateRegion { .. } | AppMessage::DeleteRegion { .. }
+        )));
+    }
+
+    #[test]
+    fn a_long_streamed_document_stays_within_codec_limits_and_costs_its_growth() {
+        use ultty_protocol::{Decode, Encode};
+
+        let items: Vec<String> = (0..3_500)
+            .map(|n| format!("- item **{n}** of `many`\n"))
+            .collect();
+        let chunks: Vec<String> = items.chunks(100).map(|chunk| chunk.concat()).collect();
+        let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        let (mut view, tree, frames) = stream(&chunk_refs);
+        for message in frames.iter().flatten() {
+            if let AppMessage::SetContent {
+                content: Content::RichText(rich),
+                ..
+            } = message
+            {
+                assert!(rich.spans.len() < 100, "one block per region");
+            }
+            let bytes = message.encode_to_bytes();
+            AppMessage::decode(&mut &bytes[..]).expect("the terminal decodes every message");
+        }
+
+        // One more item on a 3,500-item document costs that item.
+        view.append_chunk("- one more\n");
+        let frame = render_view_messages(&view).unwrap();
+        let (outgoing, _) = optimize_frame_messages(&tree, frame, &HashMap::new(), ALL);
+        let bytes: usize = outgoing.iter().map(|m| m.encode_to_bytes().len()).sum();
+        assert!(bytes < 1024, "{bytes} bytes for one item: {outgoing:?}");
     }
 
     #[test]

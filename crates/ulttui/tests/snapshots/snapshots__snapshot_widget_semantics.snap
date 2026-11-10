@@ -36,4 +36,5 @@ Modal: r1 dialog "Delete?" modal
 Modal: r4 button "Yes"
 Modal: r5 button "No"
 MarkdownView+streaming: r1 log live=polite busy
+MarkdownView+streaming: r2 auto live=polite
 Semantic: r1 log "Messages" live=polite
