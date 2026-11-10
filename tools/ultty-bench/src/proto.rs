@@ -92,7 +92,7 @@ impl Target {
                 reference_rows.resize_with(usize::from(rows), || Row::new(cols));
                 for (index, row) in reference_rows.iter_mut().enumerate() {
                     if let Some(visible) = buffer.visible_row(index as u16) {
-                        row.copy_from(&visible);
+                        visible.copy_into(row);
                     }
                 }
             }
@@ -141,7 +141,7 @@ impl Target {
             Target::Reference(terminal) => {
                 let row = terminal.buffer().row_at(index).expect("row in range");
                 out.clear();
-                out.extend(row.cells().copied());
+                out.extend(row.cells());
                 row.is_wrapped()
             }
             Target::A(terminal) if index < history => terminal.history_row(index, out),
