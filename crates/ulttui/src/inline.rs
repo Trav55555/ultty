@@ -83,8 +83,7 @@ use ultty_protocol::{
 };
 
 use crate::backend::native_diff::{
-    begin_native_key_recording, optimize_frame_messages, take_native_keys, FrameCapabilities,
-    RetainedTree,
+    begin_frame_notes, optimize_frame_messages, take_frame_notes, FrameCapabilities, RetainedTree,
 };
 use crate::widgets::{render_view_to_native, View};
 
@@ -709,7 +708,7 @@ fn surface_messages(
     // Provisional ids only need to differ from the surface's, the one
     // parent outside the walk.
     let mut provisional = surface.0.wrapping_add(1);
-    begin_native_key_recording();
+    begin_frame_notes();
     let walked = render_view_to_native(
         view,
         &mut |message| {
@@ -720,9 +719,9 @@ fn surface_messages(
         &mut provisional,
         Some(constraints),
     );
-    let keys = take_native_keys();
+    let notes = take_frame_notes();
     walked?;
-    let (outgoing, next) = optimize_frame_messages(tree, messages, &keys, capabilities);
+    let (outgoing, next) = optimize_frame_messages(tree, messages, &notes, capabilities);
     *next_id = (*next_id).max(next.next_id());
     *tree = next;
     Ok(outgoing)

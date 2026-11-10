@@ -30,9 +30,9 @@ pub(super) struct RegionSnapshot {
     /// What the frame sent with `SetSemantics`; `None` leaves the region's
     /// semantics to the terminal.
     pub(super) semantics: Option<Semantics>,
-    /// Bytes of a live region's text sent as `AppendContent`, and so
-    /// announced; 0 for a region that is not live.
-    pub(super) announced: usize,
+    /// The text of a live region announced so far (sent as
+    /// `AppendContent`), in the form it has now; empty when not live.
+    pub(super) announced: String,
 }
 
 /// Regions the terminal currently retains: stable ids plus sibling order.
@@ -101,28 +101,50 @@ impl RetainedTree {
     }
 }
 
+/// What the view walk says about its regions besides the messages, keyed
+/// by provisional region id.
+#[derive(Debug, Default)]
+pub(crate) struct FrameNotes {
+    /// Native keys ([`crate::widgets::View::native_key`]).
+    pub(crate) keys: HashMap<RegionId, String>,
+    /// Live regions whose text is markdown prose still arriving: an inline
+    /// opener at the end of it may yet turn into styling, so it is not
+    /// announced yet ([`held_back`]).
+    pub(crate) arriving_prose: HashSet<RegionId>,
+}
+
 thread_local! {
-    /// Native keys recorded by the view walk, keyed by provisional region id.
-    /// `None` while no native frame is being collected, so walks done for
-    /// tests or the mock backend record nothing.
-    static KEY_RECORDER: RefCell<Option<HashMap<RegionId, String>>> = const { RefCell::new(None) };
+    /// Notes recorded by the view walk. `None` while no native frame is
+    /// being collected, so walks done for tests or the mock backend record
+    /// nothing.
+    static NOTES_RECORDER: RefCell<Option<FrameNotes>> = const { RefCell::new(None) };
 }
 
 /// Record the native key of a region created during the current frame walk.
 pub(crate) fn record_native_key(id: RegionId, key: &str) {
-    KEY_RECORDER.with(|recorder| {
-        if let Some(keys) = recorder.borrow_mut().as_mut() {
-            keys.insert(id, key.to_string());
+    NOTES_RECORDER.with(|recorder| {
+        if let Some(notes) = recorder.borrow_mut().as_mut() {
+            notes.keys.insert(id, key.to_string());
         }
     });
 }
 
-pub(crate) fn begin_native_key_recording() {
-    KEY_RECORDER.with(|recorder| *recorder.borrow_mut() = Some(HashMap::new()));
+/// Record that region `id` of the current frame walk is markdown prose
+/// still arriving.
+pub(crate) fn record_arriving_prose(id: RegionId) {
+    NOTES_RECORDER.with(|recorder| {
+        if let Some(notes) = recorder.borrow_mut().as_mut() {
+            notes.arriving_prose.insert(id);
+        }
+    });
 }
 
-pub(crate) fn take_native_keys() -> HashMap<RegionId, String> {
-    KEY_RECORDER.with(|recorder| recorder.borrow_mut().take().unwrap_or_default())
+pub(crate) fn begin_frame_notes() {
+    NOTES_RECORDER.with(|recorder| *recorder.borrow_mut() = Some(FrameNotes::default()));
+}
+
+pub(crate) fn take_frame_notes() -> FrameNotes {
+    NOTES_RECORDER.with(|recorder| recorder.borrow_mut().take().unwrap_or_default())
 }
 
 struct ProvisionalNode {
@@ -159,10 +181,10 @@ struct Reconciliation {
 pub(crate) fn optimize_frame_messages(
     previous: &RetainedTree,
     frame_messages: Vec<AppMessage>,
-    native_keys: &HashMap<RegionId, String>,
+    notes: &FrameNotes,
     capabilities: FrameCapabilities,
 ) -> (Vec<AppMessage>, RetainedTree) {
-    let (nodes, order) = parse_provisional_tree(&frame_messages, native_keys);
+    let (nodes, order) = parse_provisional_tree(&frame_messages, &notes.keys);
     let mut reconciliation = Reconciliation {
         mapping: HashMap::new(),
         retained: HashSet::new(),
@@ -268,16 +290,20 @@ pub(crate) fn optimize_frame_messages(
                     _ if live && capabilities.append_content && plain_text(&content).is_some() => {
                         // A region that turns live has said what it shows
                         // already; only what it grows by is news.
-                        let (before, announced) = prev.map_or((&Content::None, 0), |prev| {
-                            let announced = if is_live(Some(prev)) {
-                                prev.announced
-                            } else {
-                                plain_text(&prev.content).map_or(0, |text| text.len())
-                            };
-                            (&prev.content, announced)
-                        });
+                        let (before, announced) =
+                            prev.map_or((&Content::None, String::new()), |prev| {
+                                let announced = if is_live(Some(prev)) {
+                                    prev.announced.clone()
+                                } else {
+                                    plain_text(&prev.content).unwrap_or_default().into_owned()
+                                };
+                                (&prev.content, announced)
+                            });
+                        // Held back only while it stays live: the frame it
+                        // stops is the last chance to say it.
+                        let hold = live_now && notes.arriving_prose.contains(&id);
                         let (messages, announced) =
-                            live_content_update(stable, before, announced, content, live_now);
+                            live_content_update(stable, before, &announced, content, hold);
                         outgoing.extend(messages);
                         if let Some(region) = next.regions.get_mut(&stable) {
                             region.announced = announced;
@@ -544,7 +570,7 @@ fn reconcile_children(
                 content: node.content.clone(),
                 scroll: node.scroll,
                 semantics: node.semantics.clone(),
-                announced: 0,
+                announced: String::new(),
             },
         );
         new_order.push(stable);
@@ -572,77 +598,147 @@ fn reconcile_children(
 }
 
 /// The messages that take a live region from `previous` to `next`
-/// content, given that `announced` bytes of its text have been appended
-/// so far; and how many have been after them.
+/// content, given the text it has `announced` so far (in its current
+/// form); and what it has announced after them.
 ///
 /// The terminal announces only text that arrives with `AppendContent`
-/// (ADR 0021 §3), so the text a live region shows past what it has
-/// announced is appended, then a `SetContent` in the same frame puts the
-/// styled result in place when appending alone does not give it (a span
-/// turned bold, a line rewritten). A region created live announces its
-/// first text the same way. Text is appended once: a rewrite of what was
-/// announced (`Title` set as `TITLE`) is set, not spoken again, and only
-/// what goes past it is new. While the region stays live, the end of its
-/// last line is held back from the first inline markdown opener that may
-/// still turn into styling ([`held_back`]); in the frame it stops being
-/// live, everything is appended.
+/// (ADR 0021 §3), so what the region shows past what it has announced is
+/// appended, then a `SetContent` in the same frame puts the styled result
+/// in place when appending alone does not give it (a span turned bold, a
+/// line rewritten). Where to resume is [`resume_at`]: text is never
+/// skipped, and repeated rather than dropped when it cannot be told apart.
+/// With `hold_back`, the end of the text from an unresolved inline
+/// markdown opener waits ([`held_back`]).
 fn live_content_update(
     id: RegionId,
     previous: &Content,
-    announced: usize,
+    announced: &str,
     next: Content,
-    stays_live: bool,
-) -> (Vec<AppMessage>, usize) {
+    hold_back: bool,
+) -> (Vec<AppMessage>, String) {
     let after = plain_text(&next).unwrap_or_default();
-    let speakable = if stays_live {
-        held_back(&after)
-    } else {
-        &after
-    };
+    let speakable = if hold_back { held_back(&after) } else { &after };
+    let start = resume_at(announced, speakable);
     let mut messages = Vec::new();
     let mut shown = previous.clone();
-    let mut announced = announced;
-    if speakable.len() > announced {
-        let mut start = announced;
-        while !speakable.is_char_boundary(start) {
-            start += 1;
-        }
+    if start < speakable.len() {
         let text = speakable[start..].to_string();
         shown = with_appended(previous, &text);
         messages.push(AppMessage::AppendContent { id, text });
-        announced = speakable.len();
     }
+    // Everything up to `start` had been said, in some form, and the rest
+    // just was.
+    let announced = speakable.to_string();
     if shown != next {
         messages.push(AppMessage::SetContent { id, content: next });
     }
     (messages, announced)
 }
 
-/// How far back an unresolved inline opener holds the text after it. Past
-/// that it is taken as a literal character, so a `*` or `[` in prose
-/// delays speech by at most this many bytes.
+/// Where in `speakable` the text not yet announced starts, given that
+/// `announced` was, in the form it then had.
+///
+/// Growth resumes where `announced` ends. Letter case is ignored, so a
+/// line set in capitals once complete (a `# Title`) is not news. When an
+/// earlier line was rewritten, the announced part of the last announced
+/// line is looked for at the start of the same line now, and resumed
+/// after. Text that only got shorter has nothing new. Otherwise it
+/// resumes at the start of the word where the texts
+/// part, so a word may be spoken twice but none is skipped.
+fn resume_at(announced: &str, speakable: &str) -> usize {
+    if let Some(end) = prefix_end(announced, speakable) {
+        return end;
+    }
+    if prefix_end(speakable, announced).is_some() {
+        // Only shorter: nothing new.
+        return speakable.len();
+    }
+    let line = announced.matches('\n').count();
+    let old_line_start = announced.rfind('\n').map_or(0, |index| index + 1);
+    let same_line_start = if line == 0 {
+        Some(0)
+    } else {
+        speakable
+            .match_indices('\n')
+            .nth(line - 1)
+            .map(|(index, _)| index + 1)
+    };
+    if let Some(start) = same_line_start {
+        if let Some(end) = prefix_end(&announced[old_line_start..], &speakable[start..]) {
+            return start + end;
+        }
+    }
+    let common = common_prefix_end(announced, speakable);
+    speakable[..common]
+        .rfind(char::is_whitespace)
+        .map_or(0, |index| {
+            index + speakable[index..].chars().next().map_or(1, char::len_utf8)
+        })
+}
+
+/// Whether two characters are the same but for letter case.
+fn same_letter(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase())
+}
+
+/// Where `prefix` ends in `text`, if `text` starts with it (ignoring
+/// letter case).
+fn prefix_end(prefix: &str, text: &str) -> Option<usize> {
+    let mut chars = text.char_indices();
+    for a in prefix.chars() {
+        let (_, b) = chars.next()?;
+        if !same_letter(a, b) {
+            return None;
+        }
+    }
+    Some(chars.next().map_or(text.len(), |(index, _)| index))
+}
+
+/// Where in `text` its longest common prefix with `other` ends (ignoring
+/// letter case).
+fn common_prefix_end(other: &str, text: &str) -> usize {
+    let mut end = 0;
+    for (a, (index, b)) in other.chars().zip(text.char_indices()) {
+        if !same_letter(a, b) {
+            return index;
+        }
+        end = index + b.len_utf8();
+    }
+    end
+}
+
+/// How far back a lone `*` or `_` holds the text after it. Past that it
+/// is taken as a literal character (`2 * 3`), so it delays speech by at
+/// most this many bytes.
 const HOLD_BACK_BYTES: usize = 80;
 
-/// `text` without the part of its last line from an inline markdown
-/// opener (`*`, `_` not inside a word, `` ` ``, `[`, `~`) that is still in
-/// the text as a character, within [`HOLD_BACK_BYTES`] of its end: until
-/// it resolves the opener is shown literally, and announcing it would
-/// speak `**bo` and then `bold`.
+/// `text` without the end of its last line from the first inline markdown
+/// opener still shown as characters: until it resolves into styling it is
+/// drawn literally, and announcing it would speak `**bo` and then `bold`,
+/// or a link's address. Openers with a closer (`` ` ``, `[`, `**`, `__`,
+/// `~~`) hold until the line ends (for a paragraph, until the block is
+/// finished); a lone `*` or `_` (not inside a word) only within
+/// [`HOLD_BACK_BYTES`] of the end.
 fn held_back(text: &str) -> &str {
     let line_start = text.rfind('\n').map_or(0, |index| index + 1);
-    let mut window_start = text.len().saturating_sub(HOLD_BACK_BYTES).max(line_start);
-    while !text.is_char_boundary(window_start) {
-        window_start += 1;
-    }
-    let mut previous = text[..window_start].chars().next_back();
-    for (offset, c) in text[window_start..].char_indices() {
+    let window_start = text.len().saturating_sub(HOLD_BACK_BYTES);
+    let line = &text[line_start..];
+    let mut previous: Option<char> = None;
+    let mut chars = line.char_indices().peekable();
+    while let Some((offset, c)) = chars.next() {
+        let next = chars.peek().map(|(_, next)| *next);
+        let at = line_start + offset;
         let opener = match c {
-            '*' | '`' | '[' | '~' => true,
-            '_' => !previous.is_some_and(char::is_alphanumeric),
+            '`' | '[' => true,
+            '*' | '_' | '~' if next == Some(c) => {
+                c != '_' || !previous.is_some_and(char::is_alphanumeric)
+            }
+            '*' => at >= window_start,
+            '_' => at >= window_start && !previous.is_some_and(char::is_alphanumeric),
             _ => false,
         };
         if opener {
-            return &text[..window_start + offset];
+            return &text[..at];
         }
         previous = Some(c);
     }
@@ -735,7 +831,7 @@ fn rich_text_append_delta(previous: &RichText, next: &RichText) -> Option<String
 
 #[cfg(test)]
 mod tests {
-    use super::{optimize_frame_messages, FrameCapabilities, RetainedTree};
+    use super::{optimize_frame_messages, FrameCapabilities, FrameNotes, RetainedTree};
     use std::collections::HashMap;
     use ultty_protocol::{
         AppMessage, Constraints, Content, RegionId, RichText, Style, TextContent,
@@ -772,7 +868,15 @@ mod tests {
 
     fn run(previous: &RetainedTree, specs: &[Spec<'_>]) -> (Vec<AppMessage>, RetainedTree) {
         let (messages, keys) = frame(specs);
-        optimize_frame_messages(previous, messages, &keys, FrameCapabilities::default())
+        optimize_frame_messages(
+            previous,
+            messages,
+            &FrameNotes {
+                keys,
+                ..FrameNotes::default()
+            },
+            FrameCapabilities::default(),
+        )
     }
 
     fn count(messages: &[AppMessage], pred: impl Fn(&AppMessage) -> bool) -> usize {
@@ -979,7 +1083,7 @@ mod tests {
                 content,
                 scroll: None,
                 semantics: None,
-                announced: 0,
+                announced: String::new(),
             },
         );
         tree.children.insert(ROOT, vec![id]);
@@ -1007,7 +1111,7 @@ mod tests {
         let frame = frame_with_content(id, Content::Text(TextContent::new("hello world")));
 
         let (outgoing, next) =
-            optimize_frame_messages(&previous, frame, &HashMap::new(), APPEND_ONLY);
+            optimize_frame_messages(&previous, frame, &FrameNotes::default(), APPEND_ONLY);
 
         assert_eq!(
             outgoing,
@@ -1029,7 +1133,7 @@ mod tests {
         let frame = frame_with_content(id, Content::RichText(RichText::new().text("hello world")));
 
         let (outgoing, next) =
-            optimize_frame_messages(&previous, frame, &HashMap::new(), APPEND_ONLY);
+            optimize_frame_messages(&previous, frame, &FrameNotes::default(), APPEND_ONLY);
 
         assert_eq!(
             outgoing,
@@ -1050,7 +1154,7 @@ mod tests {
         let previous = tree_with_text(removed, "gone");
 
         let (outgoing, next) =
-            optimize_frame_messages(&previous, Vec::new(), &HashMap::new(), APPEND_ONLY);
+            optimize_frame_messages(&previous, Vec::new(), &FrameNotes::default(), APPEND_ONLY);
 
         assert_eq!(outgoing, vec![AppMessage::DeleteRegion { id: removed }]);
         assert!(next.regions.is_empty());
@@ -1069,7 +1173,7 @@ mod tests {
         }];
 
         let (outgoing, _next) =
-            optimize_frame_messages(&previous, frame, &HashMap::new(), APPEND_ONLY);
+            optimize_frame_messages(&previous, frame, &FrameNotes::default(), APPEND_ONLY);
 
         assert_eq!(
             outgoing,
@@ -1089,7 +1193,7 @@ mod tests {
         let (outgoing, _next) = optimize_frame_messages(
             &previous,
             frame,
-            &HashMap::new(),
+            &FrameNotes::default(),
             FrameCapabilities::default(),
         );
 
@@ -1152,7 +1256,7 @@ mod tests {
         let frame = frame_with_semantics(id, text("x"), Some(labelled("Close")));
 
         let (outgoing, next) =
-            optimize_frame_messages(&RetainedTree::new(), frame, &HashMap::new(), ALL);
+            optimize_frame_messages(&RetainedTree::new(), frame, &FrameNotes::default(), ALL);
 
         let create = outgoing
             .iter()
@@ -1171,24 +1275,25 @@ mod tests {
     fn unchanged_semantics_are_not_sent_again_and_changed_ones_are() {
         let id = RegionId::new(1);
         let first = frame_with_semantics(id, text("x"), Some(labelled("Close")));
-        let (_, tree) = optimize_frame_messages(&RetainedTree::new(), first, &HashMap::new(), ALL);
+        let (_, tree) =
+            optimize_frame_messages(&RetainedTree::new(), first, &FrameNotes::default(), ALL);
 
         let same = frame_with_semantics(id, text("x"), Some(labelled("Close")));
-        let (outgoing, tree) = optimize_frame_messages(&tree, same, &HashMap::new(), ALL);
+        let (outgoing, tree) = optimize_frame_messages(&tree, same, &FrameNotes::default(), ALL);
         assert_eq!(outgoing, Vec::new(), "an unchanged frame sends nothing");
 
         let renamed = frame_with_semantics(id, text("x"), Some(labelled("Dismiss")));
-        let (outgoing, tree) = optimize_frame_messages(&tree, renamed, &HashMap::new(), ALL);
+        let (outgoing, tree) = optimize_frame_messages(&tree, renamed, &FrameNotes::default(), ALL);
         assert_eq!(semantics_sent(&outgoing), vec![(id, labelled("Dismiss"))]);
 
         // Back to what the content says: the terminal derives it again.
         let plain = frame_with_semantics(id, text("x"), None);
-        let (outgoing, tree) = optimize_frame_messages(&tree, plain, &HashMap::new(), ALL);
+        let (outgoing, tree) = optimize_frame_messages(&tree, plain, &FrameNotes::default(), ALL);
         assert_eq!(semantics_sent(&outgoing), vec![(id, Semantics::default())]);
         assert_eq!(tree.regions[&id].semantics, None);
 
         let plain = frame_with_semantics(id, text("x"), None);
-        let (outgoing, _) = optimize_frame_messages(&tree, plain, &HashMap::new(), ALL);
+        let (outgoing, _) = optimize_frame_messages(&tree, plain, &FrameNotes::default(), ALL);
         assert_eq!(outgoing, Vec::new());
     }
 
@@ -1200,12 +1305,17 @@ mod tests {
             semantics: false,
         };
         let frame = frame_with_semantics(id, text("x"), Some(labelled("Close")));
-        let (outgoing, tree) =
-            optimize_frame_messages(&RetainedTree::new(), frame, &HashMap::new(), append_only);
+        let (outgoing, tree) = optimize_frame_messages(
+            &RetainedTree::new(),
+            frame,
+            &FrameNotes::default(),
+            append_only,
+        );
         assert_eq!(semantics_sent(&outgoing), Vec::new());
 
         let plain = frame_with_semantics(id, text("x"), None);
-        let (outgoing, _) = optimize_frame_messages(&tree, plain, &HashMap::new(), append_only);
+        let (outgoing, _) =
+            optimize_frame_messages(&tree, plain, &FrameNotes::default(), append_only);
         assert_eq!(outgoing, Vec::new(), "no reset either");
     }
 
@@ -1220,9 +1330,10 @@ mod tests {
     fn live_step(previous: Content, next: Content) -> Vec<AppMessage> {
         let id = RegionId::new(1);
         let first = frame_with_semantics(id, previous, live_log());
-        let (_, tree) = optimize_frame_messages(&RetainedTree::new(), first, &HashMap::new(), ALL);
+        let (_, tree) =
+            optimize_frame_messages(&RetainedTree::new(), first, &FrameNotes::default(), ALL);
         let frame = frame_with_semantics(id, next, live_log());
-        optimize_frame_messages(&tree, frame, &HashMap::new(), ALL).0
+        optimize_frame_messages(&tree, frame, &FrameNotes::default(), ALL).0
     }
 
     #[test]
@@ -1279,7 +1390,7 @@ mod tests {
             vec![
                 AppMessage::AppendContent {
                     id,
-                    text: "nd and more".to_string()
+                    text: " and more".to_string()
                 },
                 AppMessage::SetContent { id, content: after }
             ]
@@ -1300,13 +1411,13 @@ mod tests {
             }]
         );
         assert_eq!(live_step(text("same"), text("same")), Vec::new());
-        // Past a multibyte character, at a character boundary.
+        // Nothing in common: all of it, repeated rather than dropped.
         assert_eq!(
             live_step(text("aé"), text("ééé")),
             vec![
                 AppMessage::AppendContent {
                     id,
-                    text: "é".to_string()
+                    text: "ééé".to_string()
                 },
                 AppMessage::SetContent {
                     id,
@@ -1321,7 +1432,7 @@ mod tests {
         let id = RegionId::new(1);
         let frame = frame_with_semantics(id, text("Thinking about it"), live_log());
         let (outgoing, tree) =
-            optimize_frame_messages(&RetainedTree::new(), frame, &HashMap::new(), ALL);
+            optimize_frame_messages(&RetainedTree::new(), frame, &FrameNotes::default(), ALL);
         assert!(matches!(outgoing[0], AppMessage::CreateRegion { .. }));
         assert!(matches!(outgoing[1], AppMessage::SetSemantics { .. }));
         assert_eq!(
@@ -1331,7 +1442,7 @@ mod tests {
                 text: "Thinking about it".to_string()
             }]
         );
-        assert_eq!(tree.regions[&id].announced, "Thinking about it".len());
+        assert_eq!(tree.regions[&id].announced, "Thinking about it");
     }
 
     #[test]
@@ -1363,7 +1474,7 @@ mod tests {
         ] {
             let first = frame_with_semantics(id, text(open), live_log());
             let (outgoing, tree) =
-                optimize_frame_messages(&RetainedTree::new(), first, &HashMap::new(), ALL);
+                optimize_frame_messages(&RetainedTree::new(), first, &prose(), ALL);
             let spoken: Vec<&AppMessage> = outgoing
                 .iter()
                 .filter(|m| matches!(m, AppMessage::AppendContent { .. }))
@@ -1380,7 +1491,7 @@ mod tests {
 
             let resolved = Content::RichText(resolved);
             let second = frame_with_semantics(id, resolved.clone(), live_log());
-            let (outgoing, _) = optimize_frame_messages(&tree, second, &HashMap::new(), ALL);
+            let (outgoing, _) = optimize_frame_messages(&tree, second, &prose(), ALL);
             let whole = plain_text_of(&resolved);
             assert_eq!(
                 outgoing,
@@ -1402,7 +1513,7 @@ mod tests {
         let (outgoing, _) = optimize_frame_messages(
             &RetainedTree::new(),
             frame_with_semantics(id, text(&literal), live_log()),
-            &HashMap::new(),
+            &prose(),
             ALL,
         );
         assert!(outgoing.contains(&AppMessage::AppendContent {
@@ -1413,9 +1524,9 @@ mod tests {
         assert_eq!(super::held_back("a snake_case"), "a snake_case");
         // In the frame the region stops being live, everything goes.
         let first = frame_with_semantics(id, text("A **bo"), live_log());
-        let (_, tree) = optimize_frame_messages(&RetainedTree::new(), first, &HashMap::new(), ALL);
+        let (_, tree) = optimize_frame_messages(&RetainedTree::new(), first, &prose(), ALL);
         let last = frame_with_semantics(id, text("A **bo"), None);
-        let (outgoing, _) = optimize_frame_messages(&tree, last, &HashMap::new(), ALL);
+        let (outgoing, _) = optimize_frame_messages(&tree, last, &prose(), ALL);
         assert_eq!(
             outgoing[0],
             AppMessage::AppendContent {
@@ -1427,6 +1538,54 @@ mod tests {
 
     fn plain_text_of(content: &Content) -> String {
         super::plain_text(content).unwrap().into_owned()
+    }
+
+    /// Notes for a frame whose region 1 is markdown prose still arriving.
+    fn prose() -> FrameNotes {
+        FrameNotes {
+            arriving_prose: [RegionId::new(1)].into(),
+            ..FrameNotes::default()
+        }
+    }
+
+    #[test]
+    fn only_arriving_markdown_prose_is_held_back() {
+        let id = RegionId::new(1);
+        // A plain live log says brackets and stars as they come.
+        let line = "[INFO] a * b `x";
+        let (outgoing, _) = optimize_frame_messages(
+            &RetainedTree::new(),
+            frame_with_semantics(id, text(line), live_log()),
+            &FrameNotes::default(),
+            ALL,
+        );
+        assert!(outgoing.contains(&AppMessage::AppendContent {
+            id,
+            text: line.to_string()
+        }));
+    }
+
+    #[test]
+    fn resuming_never_skips_text() {
+        use super::resume_at;
+        // Growth.
+        assert_eq!(resume_at("Hello", "Hello world"), 5);
+        // Case only (a heading set in capitals): nothing new.
+        assert_eq!(resume_at("Title", "TITLE"), 5);
+        // An earlier line rewritten: resume on the same line.
+        let after = "Changed\nsecond and more";
+        assert_eq!(&after[resume_at("First\nsecond", after)..], " and more");
+        // Announced text that shrank (a literal opener that resolved):
+        // resume at the start of the word where they part.
+        let after = "Start this is bold";
+        assert_eq!(&after[resume_at("Start *", after)..], "this is bold");
+        let after = "See the docs for";
+        assert_eq!(
+            &after[resume_at("See [the docs](https://example.com/a", after)..],
+            "the docs for"
+        );
+        // Never past the end.
+        assert_eq!(resume_at("abcdef", "abc"), 3);
     }
 
     #[test]
@@ -1452,10 +1611,11 @@ mod tests {
     fn text_that_arrives_as_a_region_stops_being_live_is_still_appended_first() {
         let id = RegionId::new(1);
         let first = frame_with_semantics(id, text("Hello"), live_log());
-        let (_, tree) = optimize_frame_messages(&RetainedTree::new(), first, &HashMap::new(), ALL);
+        let (_, tree) =
+            optimize_frame_messages(&RetainedTree::new(), first, &FrameNotes::default(), ALL);
 
         let last = frame_with_semantics(id, text("Hello world"), None);
-        let (outgoing, _) = optimize_frame_messages(&tree, last, &HashMap::new(), ALL);
+        let (outgoing, _) = optimize_frame_messages(&tree, last, &FrameNotes::default(), ALL);
         assert_eq!(
             outgoing,
             vec![
@@ -1501,9 +1661,14 @@ mod tests {
                 },
             ]
         };
-        let (_, tree) =
-            optimize_frame_messages(&RetainedTree::new(), frame("Hi"), &HashMap::new(), ALL);
-        let (outgoing, _) = optimize_frame_messages(&tree, frame("Hi there"), &HashMap::new(), ALL);
+        let (_, tree) = optimize_frame_messages(
+            &RetainedTree::new(),
+            frame("Hi"),
+            &FrameNotes::default(),
+            ALL,
+        );
+        let (outgoing, _) =
+            optimize_frame_messages(&tree, frame("Hi there"), &FrameNotes::default(), ALL);
         assert!(
             !outgoing.iter().any(
                 |m| matches!(m, AppMessage::AppendContent { id: target, .. } if *target == id)
@@ -1524,7 +1689,7 @@ mod tests {
         let (outgoing, _) = optimize_frame_messages(
             &previous,
             frame_with_content(id, after.clone()),
-            &HashMap::new(),
+            &FrameNotes::default(),
             ALL,
         );
         assert_eq!(

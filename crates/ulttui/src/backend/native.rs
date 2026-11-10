@@ -18,8 +18,8 @@ use crate::event::Event;
 use crate::widgets::View;
 
 use super::native_diff::{
-    begin_native_key_recording, optimize_frame_messages, record_native_key, take_native_keys,
-    FrameCapabilities, RetainedTree,
+    begin_frame_notes, optimize_frame_messages, record_native_key, take_frame_notes,
+    FrameCapabilities, FrameNotes, RetainedTree,
 };
 use transport::{FrameError, ReadOutcome};
 use ultty_client::{detect, in_band};
@@ -208,11 +208,11 @@ impl NativeBackend {
     /// Send the changes between the last frame and `view`. A view that
     /// renders the same as the last frame sends nothing at all.
     pub fn render(&mut self, view: &impl View) -> crate::Result<()> {
-        let (frame_messages, native_keys) = self.collect_frame(view)?;
+        let (frame_messages, notes) = self.collect_frame(view)?;
         let (mut optimized_messages, next_tree) = optimize_frame_messages(
             &self.retained,
             frame_messages,
-            &native_keys,
+            &notes,
             FrameCapabilities {
                 append_content: self.supports_capability(CAP_APPEND_CONTENT),
                 semantics: self.supports_capability(CAP_SEMANTICS),
@@ -257,16 +257,13 @@ impl NativeBackend {
         }
     }
 
-    /// Walk the view tree into provisional-id messages, recording the native
+    /// Walk the view tree into provisional-id messages, noting the native
     /// key of every region created along the way.
-    fn collect_frame(
-        &self,
-        view: &impl View,
-    ) -> crate::Result<(Vec<AppMessage>, HashMap<RegionId, String>)> {
-        begin_native_key_recording();
+    fn collect_frame(&self, view: &impl View) -> crate::Result<(Vec<AppMessage>, FrameNotes)> {
+        begin_frame_notes();
         let walked = self.render_view_tree(view);
-        let keys = take_native_keys();
-        walked.map(|messages| (messages, keys))
+        let notes = take_frame_notes();
+        walked.map(|messages| (messages, notes))
     }
 
     fn render_view_tree(&self, view: &impl View) -> crate::Result<Vec<AppMessage>> {

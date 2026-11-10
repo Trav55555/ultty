@@ -570,6 +570,15 @@ impl View for MarkdownView {
             ..Semantics::default()
         };
         super::send_semantics(send_message, region_id, block_semantics, &content)?;
+        // Prose may still hold an inline opener that has not turned into
+        // styling yet; code is shown as it comes.
+        let prose = matches!(
+            block,
+            Block::Paragraph { .. } | Block::Heading { .. } | Block::ListItem { .. }
+        );
+        if arriving && prose {
+            crate::backend::native_diff::record_arriving_prose(region_id);
+        }
         send_message(&AppMessage::SetContent {
             id: region_id,
             content,
@@ -1137,7 +1146,10 @@ mod tests {
         assert_eq!(quiet.semantics().label.as_deref(), Some("Reply"));
     }
 
-    use crate::backend::native_diff::{optimize_frame_messages, FrameCapabilities, RetainedTree};
+    use crate::backend::native_diff::{
+        begin_frame_notes, optimize_frame_messages, take_frame_notes, FrameCapabilities,
+        FrameNotes, RetainedTree,
+    };
     use crate::widgets::render_view_messages;
     use std::collections::HashMap;
 
@@ -1145,6 +1157,55 @@ mod tests {
         append_content: true,
         semantics: true,
     };
+
+    /// The view's native frame and what the walk noted, as the backend
+    /// collects them.
+    fn walk(view: &MarkdownView) -> (Vec<AppMessage>, FrameNotes) {
+        begin_frame_notes();
+        let frame = render_view_messages(view);
+        (frame.unwrap(), take_frame_notes())
+    }
+
+    /// Everything a stream of `chunks` announces, ending the stream after
+    /// the last one in the same frame.
+    fn spoken(chunks: &[&str]) -> String {
+        let (view, tree, frames) = stream(chunks);
+        let (frame, notes) = walk(&view.streaming(false));
+        let (last, _) = optimize_frame_messages(&tree, frame, &notes, ALL);
+        frames
+            .iter()
+            .chain(std::iter::once(&last))
+            .flat_map(|frame| appends(frame))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    #[test]
+    fn a_long_link_and_a_long_bold_phrase_are_spoken_once_whole() {
+        let link = "See [the docs](https://github.com/example/project/blob/main/docs/architecture/overview.md";
+        assert_eq!(
+            spoken(&["", link, ") **for** the details", " of it all."]),
+            "See |the docs for the details| of it all."
+        );
+        let phrase =
+            "this is a long bold phrase that goes on for well over eighty bytes before it ends";
+        assert_eq!(
+            spoken(&["", "Start **", phrase, "** and after."]),
+            format!("Start |{phrase} and after.")
+        );
+        // A link that never resolves on screen is said at the end.
+        assert_eq!(
+            spoken(&["", "Go [here", "](http://x"]),
+            "Go |[here](http://x"
+        );
+    }
+
+    #[test]
+    fn code_is_not_held_back() {
+        let said = spoken(&["", "```\n", "let a = [1, 2];\n", "let b = `x`;\n"]);
+        assert_eq!(said.replace('|', ""), "let a = [1, 2];\nlet b = `x`;");
+        assert!(said.starts_with("let a = [1, 2];|"), "{said:?}");
+    }
 
     /// Stream `chunks` into a view, one frame each, through the backend
     /// diff; the view, the retained tree and each frame's messages.
@@ -1154,8 +1215,8 @@ mod tests {
         let mut view = MarkdownView::new("").streaming(true);
         for chunk in chunks {
             view.append_chunk(chunk);
-            let frame = render_view_messages(&view).unwrap();
-            let (outgoing, next) = optimize_frame_messages(&tree, frame, &HashMap::new(), ALL);
+            let (frame, notes) = walk(&view);
+            let (outgoing, next) = optimize_frame_messages(&tree, frame, &notes, ALL);
             tree = next;
             frames.push(outgoing);
         }
@@ -1254,8 +1315,8 @@ mod tests {
         // is still appended, and nothing is created or removed.
         view.append_chunk(" done.");
         let finished = view.streaming(false);
-        let frame = render_view_messages(&finished).unwrap();
-        let (outgoing, _) = optimize_frame_messages(&tree, frame, &HashMap::new(), ALL);
+        let (frame, notes) = walk(&finished);
+        let (outgoing, _) = optimize_frame_messages(&tree, frame, &notes, ALL);
         assert_eq!(
             appends(&outgoing),
             vec![" done.".to_string()],
@@ -1291,8 +1352,8 @@ mod tests {
 
         // One more item on a 3,500-item document costs that item.
         view.append_chunk("- one more\n");
-        let frame = render_view_messages(&view).unwrap();
-        let (outgoing, _) = optimize_frame_messages(&tree, frame, &HashMap::new(), ALL);
+        let (frame, notes) = walk(&view);
+        let (outgoing, _) = optimize_frame_messages(&tree, frame, &notes, ALL);
         let bytes: usize = outgoing.iter().map(|m| m.encode_to_bytes().len()).sum();
         assert!(bytes < 1024, "{bytes} bytes for one item: {outgoing:?}");
     }
