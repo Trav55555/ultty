@@ -670,10 +670,20 @@ impl Grid {
         if !self.grapheme_clustering || c < '\u{300}' {
             return false;
         }
+        let Some(recorded) = self.last_print else {
+            return false;
+        };
+        // Most codepoints cannot join a cluster ending as the recorded one
+        // does, and then whether it can still be joined at all (nothing
+        // moved or changed since) does not matter.
+        let joins = cluster::joins_tail(recorded.tail, props.class());
+        if joins == Some(false) {
+            return false;
+        }
         let Some(last) = self.last_print() else {
             return false;
         };
-        match cluster::joins_tail(last.tail, props.class()) {
+        match joins {
             Some(joins) => joins,
             None => self.continues_cluster_slow(last, c),
         }
