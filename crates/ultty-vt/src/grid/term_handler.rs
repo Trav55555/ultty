@@ -1150,14 +1150,14 @@ mod tests {
         let mut history = term.buffer().clone();
         history.scroll_up(1);
         let top = history.visible_row(0).expect("history row");
-        assert_eq!(top.grapheme(0).as_deref(), Some("e\u{301}"));
+        assert_eq!(top.copy_text(0, 0), "e\u{301}");
         assert_eq!(top.text_trimmed(), "e\u{301}");
 
         term.resize(Dimensions::new(6, 2));
         let mut history = term.buffer().clone();
         history.scroll_up(1);
         let top = history.visible_row(0).expect("history row after reflow");
-        assert_eq!(top.grapheme(0).as_deref(), Some("e\u{301}"));
+        assert_eq!(top.copy_text(0, 0), "e\u{301}");
     }
 
     #[test]

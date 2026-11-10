@@ -1,10 +1,9 @@
 //! Terminal buffer with scrollback history.
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 
 use super::history::CompactRow;
-use super::{AnchorTag, Cell, CellFlags, Dimensions, Grid, Row, RowMarks};
+use super::{AnchorTag, Cell, CellFlags, Dimensions, Grid, Row, RowMarks, RowView};
 
 /// Default scrollback buffer size (lines).
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
@@ -540,7 +539,7 @@ impl Buffer {
     /// Index 0 is the top of the visible area. Rows of the live grid are
     /// borrowed; rows from scrollback are decoded, so hold the result only as
     /// long as needed.
-    pub fn visible_row(&self, visual_index: u16) -> Option<Cow<'_, Row>> {
+    pub fn visible_row(&self, visual_index: u16) -> Option<RowView<'_>> {
         let total_history = self.history.len();
         let visible_rows = self.grid.dimensions().rows as usize;
 
@@ -554,19 +553,19 @@ impl Buffer {
                 // This row is in history
                 self.history
                     .get(absolute_index)
-                    .map(|row| Cow::Owned(row.decode()))
+                    .map(|row| RowView::owned(row.decode()))
             } else {
                 // This row is in the visible grid
                 let grid_index = absolute_index - total_history;
                 if grid_index < visible_rows {
-                    self.grid.row(grid_index as u16).map(Cow::Borrowed)
+                    self.grid.row(grid_index as u16).map(RowView::from)
                 } else {
                     None
                 }
             }
         } else {
             // Not scrolled, show grid directly
-            self.grid.row(visual_index).map(Cow::Borrowed)
+            self.grid.row(visual_index).map(RowView::from)
         }
     }
 
@@ -575,15 +574,15 @@ impl Buffer {
     /// Index 0 is the oldest history row.
     /// Indices beyond history access the current grid.
     /// Like [`Buffer::visible_row`], scrollback rows are decoded.
-    pub fn row_at(&self, absolute_index: usize) -> Option<Cow<'_, Row>> {
+    pub fn row_at(&self, absolute_index: usize) -> Option<RowView<'_>> {
         let history_len = self.history.len();
         if absolute_index < history_len {
             self.history
                 .get(absolute_index)
-                .map(|row| Cow::Owned(row.decode()))
+                .map(|row| RowView::owned(row.decode()))
         } else {
             let grid_index = absolute_index - history_len;
-            self.grid.row(grid_index as u16).map(Cow::Borrowed)
+            self.grid.row(grid_index as u16).map(RowView::from)
         }
     }
 
@@ -1485,14 +1484,14 @@ mod tests {
         assert_eq!(buf.history_len(), 9);
         for (index, want) in expected.iter().take(9).enumerate() {
             let got = buf.row_at(index).unwrap();
-            assert!(got.cells().eq(want.cells()), "row_at({index})");
+            assert!(got.eq_row(want), "row_at({index})");
             assert_eq!(got.is_wrapped(), want.is_wrapped(), "row_at({index}) wrap");
         }
         buf.scroll_up(9);
         for visual in 0..4u16 {
             let got = buf.visible_row(visual).unwrap();
             assert!(
-                got.cells().eq(expected[visual as usize].cells()),
+                got.eq_row(&expected[visual as usize]),
                 "visible_row({visual}) after scrolling back"
             );
         }
@@ -1630,13 +1629,13 @@ mod tests {
         }
 
         // Not scrolled - should see grid
-        assert_eq!(buf.visible_row(0).unwrap()[0].char(), 'X');
+        assert_eq!(buf.visible_row(0).unwrap().cell(0).unwrap().char(), 'X');
 
         // Scroll up 5 lines
         buf.scroll_up(5);
 
         // Should now see history row at index (10-5) = 5
-        assert_eq!(buf.visible_row(0).unwrap()[0].char(), '5');
+        assert_eq!(buf.visible_row(0).unwrap().cell(0).unwrap().char(), '5');
     }
 
     #[test]
