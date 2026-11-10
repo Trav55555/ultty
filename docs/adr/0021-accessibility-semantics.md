@@ -79,7 +79,7 @@ SetSemantics (0x0026), gated by CAP_SEMANTICS = 0x0200
   description: Option<string>    longer help text
   live: u8                       Off=0, Polite=1, Assertive=2
   flags: u8                      busy=1, hidden=2, read_only=4, disabled=8,
-                                 atomic=16, modal=32
+                                 atomic=16, modal=32, selected=64
   toggled: u8                    Unset=0, False=1, True=2, Mixed=3
   expanded: u8                   Unset=0, Collapsed=1, Expanded=2
   value: Option<(f32 now, f32 min, f32 max)>
@@ -523,10 +523,15 @@ Each slice is independently testable and mergeable.
      expanded, chevron hidden; `Modal` modal dialog named by its title,
      hidden while not visible, its buttons buttons. `LoadingState`,
      `EmptyState`, `Table`, containers: the derived default.
-   - §1 has no `selected` state, so the active tab, list row and tree row
-     are not exposed as selected; only their style shows it. Adding a
-     `selected` flag is a protocol change for a later slice (open
-     questions).
+   - The active tab, the selected `List` row, the selected `Tree` row
+     and the selected `Table` row carry the `selected` flag (bit 64,
+     added after this slice; see open questions), and only that one
+     item does. The terminal exposes any `Tab`, `ListItem` or `TreeItem`
+     without the flag as selectable but not selected, as ARIA does for
+     those roles, so one bit is enough. A table row has no row role and
+     is a `Group` with the flag, which AccessKit's selection interface
+     does not count as an item. `Select` is one region, so its selected
+     option stays its `value_text` and position.
    - `MarkdownView` is one region per block, streaming or not. While it
      streams, the block still arriving is live itself (with the view's
      liveness) and the view is the busy log around it; a finished block
@@ -603,7 +608,9 @@ Each slice is independently testable and mergeable.
   0.1 ms); incremental updates stay a later optimisation.
 - Whether the unused `tokio` dependency of `crates/ultty` should go, now
   that a second executor arrives.
-- How should a selected item be exposed? §1 has no `selected` state, so
-  ulttui's active tab, selected list row and selected tree row show it
-  only by style (slice 7). A `selected` flag (AccessKit `set_selected`)
-  is an additive protocol change under ADR 0011; it needs sign-off.
+- How should a selected item be exposed? Answered: §1 gained a
+  `selected` flag, bit 64 of `flags`, which the terminal maps to
+  AccessKit `set_selected(true)` (AT-SPI state SELECTED). Semantics had
+  not shipped in a release, so it needed no new capability. ulttui sets
+  it on the active `Tabs` tab and the selected `List`, `Tree` and
+  `Table` row; a region without it says nothing about selection.

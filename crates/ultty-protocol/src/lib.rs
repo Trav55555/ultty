@@ -76,6 +76,7 @@ pub use semantics::{
     capped, derive_semantics, Expanded, Live, Role, SemanticValue, Semantics, SetPosition, Toggled,
     MAX_NAME_CHARS, SEMANTICS_FLAGS_ALL, SEMANTICS_FLAG_ATOMIC, SEMANTICS_FLAG_BUSY,
     SEMANTICS_FLAG_DISABLED, SEMANTICS_FLAG_HIDDEN, SEMANTICS_FLAG_MODAL, SEMANTICS_FLAG_READ_ONLY,
+    SEMANTICS_FLAG_SELECTED,
 };
 pub use style::{
     BorderEdges, BorderStyle, BorderType, Color, Easing, NamedColor, Style, Transition,

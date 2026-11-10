@@ -581,6 +581,14 @@ fn snapshot_widget_semantics() {
             ),
         ),
         (
+            "Table",
+            Box::new(
+                Table::new()
+                    .headers(vec!["Name"])
+                    .rows(vec![vec!["Ada"], vec!["Linus"]]),
+            ),
+        ),
+        (
             "Collapsible",
             Box::new(Collapsible::new(Text::new("More"), Text::new("body"))),
         ),
@@ -627,6 +635,7 @@ fn snapshot_widget_semantics() {
                     (semantics.busy, "busy"),
                     (semantics.hidden, "hidden"),
                     (semantics.modal, "modal"),
+                    (semantics.selected, "selected"),
                 ] {
                     if set {
                         line.push(' ');
@@ -660,6 +669,30 @@ fn snapshot_widget_semantics() {
         }
     }
     insta::assert_snapshot!(out);
+}
+
+/// The positions of the regions a widget's native render marks selected.
+fn selected_positions(view: &dyn View) -> Vec<Option<u32>> {
+    use ultty_protocol::AppMessage;
+    ulttui::widgets::render_view_messages(view)
+        .unwrap()
+        .into_iter()
+        .filter_map(|message| match message {
+            AppMessage::SetSemantics { semantics, .. } if semantics.selected => {
+                Some(semantics.position.map(|position| position.index))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn list_and_tabs_mark_only_their_selected_item_selected() {
+    let list = List::new().items(vec!["one", "two", "three"]).selected(1);
+    assert_eq!(selected_positions(&list), vec![Some(2)]);
+
+    let tabs = Tabs::new().labels(vec!["Log", "Diff", "Files"]).active(2);
+    assert_eq!(selected_positions(&tabs), vec![Some(3)]);
 }
 
 // ── Image ─────────────────────────────────────────────────────────────

@@ -96,7 +96,7 @@ impl Table {
             .max(self.rows.iter().map(Vec::len).max().unwrap_or(0))
     }
 
-    fn row_view<'a>(&self, cells: &'a [String], style: ProtoStyle) -> TableRow<'a> {
+    fn row_view<'a>(&self, cells: &'a [String], style: ProtoStyle, selected: bool) -> TableRow<'a> {
         TableRow {
             cells: cells
                 .iter()
@@ -107,6 +107,7 @@ impl Table {
                 })
                 .collect(),
             style,
+            selected,
         }
     }
 }
@@ -138,10 +139,12 @@ fn to_ratatui_style(style: &ProtoStyle) -> Style {
     out
 }
 
-/// One native table row: a flex row of `TableCell`s.
+/// One native table row: a flex row of `TableCell`s. The selected row
+/// says so to screen readers; its role is left to the terminal (a group).
 struct TableRow<'a> {
     cells: Vec<TableCell<'a>>,
     style: ProtoStyle,
+    selected: bool,
 }
 
 impl View for TableRow<'_> {
@@ -156,6 +159,13 @@ impl View for TableRow<'_> {
 
     fn style(&self) -> ProtoStyle {
         self.style.clone()
+    }
+
+    fn semantics(&self) -> ultty_protocol::Semantics {
+        ultty_protocol::Semantics {
+            selected: self.selected,
+            ..Default::default()
+        }
     }
 
     fn children_count(&self) -> usize {
@@ -239,18 +249,19 @@ impl View for Table {
     ) -> crate::Result<Option<RegionId>> {
         let theme = Theme::current();
         let row = if index == 0 {
-            self.row_view(&self.headers, header_style(&theme))
+            self.row_view(&self.headers, header_style(&theme), false)
         } else {
             let row_idx = index - 1;
             let Some(cells) = self.rows.get(row_idx) else {
                 return Ok(None);
             };
-            let style = if row_idx == self.selected {
+            let selected = row_idx == self.selected;
+            let style = if selected {
                 selected_row_style(&theme)
             } else {
                 ProtoStyle::default()
             };
-            self.row_view(cells, style)
+            self.row_view(cells, style, selected)
         };
         Ok(Some(super::render_view_to_native(
             &row,

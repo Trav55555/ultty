@@ -222,7 +222,8 @@ impl<T: std::fmt::Display> View for List<T> {
         let text = format!("{}", item);
 
         let theme = Theme::current();
-        let style = if index == self.selected {
+        let is_selected = index == self.selected;
+        let style = if is_selected {
             ProtoStyle::new()
                 .fg(theme.selection.fg)
                 .bg(theme.selection.bg)
@@ -250,13 +251,15 @@ impl<T: std::fmt::Display> View for List<T> {
         })?;
 
         let content = ultty_protocol::Content::Text(TextContent::new(text));
-        // Each row is an item with its place among the visible ones.
+        // Each row is an item with its place among the visible ones; the
+        // selected row says so.
         let row = ultty_protocol::Semantics {
             role: ultty_protocol::Role::ListItem,
             position: Some(ultty_protocol::SetPosition {
                 index: index as u32 + 1,
                 size: self.filtered_indices.len() as u32,
             }),
+            selected: is_selected,
             ..Default::default()
         };
         super::send_semantics(send_message, region_id, row, &content)?;

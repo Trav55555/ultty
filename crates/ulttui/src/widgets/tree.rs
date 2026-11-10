@@ -196,7 +196,8 @@ impl View for Tree {
         };
 
         let theme = Theme::current();
-        let row_style = if index == self.selected {
+        let is_selected = index == self.selected;
+        let row_style = if is_selected {
             ProtoStyle::new()
                 .bg(theme.primary)
                 .fg(contrasting_color(theme.primary, theme.foreground))
@@ -222,9 +223,9 @@ impl View for Tree {
             style: row_style,
         })?;
 
-        // The row is the tree item, named by its label, with its level and
-        // expanded state; the texts drawn in it (indent, chevron, icon,
-        // label) are hidden so it is not read twice.
+        // The row is the tree item, named by its label, with its level,
+        // expanded state and whether it is selected; the texts drawn in it
+        // (indent, chevron, icon, label) are hidden so it is not read twice.
         let item = Semantics {
             role: Role::TreeItem,
             label: Some(node.label.to_string()),
@@ -234,6 +235,7 @@ impl View for Tree {
                 (true, true) => Expanded::Expanded,
                 (true, false) => Expanded::Collapsed,
             },
+            selected: is_selected,
             ..Semantics::default()
         };
         super::send_semantics(send_message, row_id, item, &Content::None)?;

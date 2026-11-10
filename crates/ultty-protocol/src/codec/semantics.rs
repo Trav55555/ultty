@@ -197,6 +197,7 @@ mod tests {
             live: Live::Polite,
             busy: true,
             modal: true,
+            selected: true,
             toggled: Toggled::Mixed,
             expanded: Expanded::Collapsed,
             value: Some(SemanticValue {
@@ -277,8 +278,8 @@ mod tests {
             (ROLE, 21),
             (ROLE, 255),
             (LIVE, 3),
-            (FLAGS, 64),
             (FLAGS, 128),
+            (FLAGS, 255),
             (TOGGLED, 4),
             (EXPANDED, 3),
         ] {

@@ -141,8 +141,6 @@ impl View for Tabs {
 
         let display_text = format!(" {} ", label);
         let content = ultty_protocol::Content::Text(TextContent::new(display_text));
-        // The protocol has no "selected" state (ADR 0021 §1); the active
-        // tab shows only by its style.
         let tab = Semantics {
             role: Role::Tab,
             label: Some(label.clone()),
@@ -150,6 +148,7 @@ impl View for Tabs {
                 index: index as u32 + 1,
                 size: self.labels.len() as u32,
             }),
+            selected: is_active,
             ..Semantics::default()
         };
         super::send_semantics(send_message, region_id, tab, &content)?;

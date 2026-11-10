@@ -737,7 +737,7 @@ fn arb_semantics() -> impl Strategy<Value = Semantics> {
             Just(Expanded::Collapsed),
             Just(Expanded::Expanded)
         ],
-        proptest::array::uniform6(any::<bool>()),
+        proptest::array::uniform7(any::<bool>()),
         any::<u8>(),
     );
     // Within the codec's semantics string limits (4 KiB each, 8 KiB total).
@@ -759,7 +759,7 @@ fn arb_semantics() -> impl Strategy<Value = Semantics> {
             (label, description, value_text),
             (value, position, labelled_by, described_by, controls),
         )| {
-            let [busy, hidden, read_only, disabled, atomic, modal] = flags;
+            let [busy, hidden, read_only, disabled, atomic, modal, selected] = flags;
             Semantics {
                 role,
                 label,
@@ -771,6 +771,7 @@ fn arb_semantics() -> impl Strategy<Value = Semantics> {
                 disabled,
                 atomic,
                 modal,
+                selected,
                 toggled,
                 expanded,
                 value: value.map(|(now, min, max)| SemanticValue { now, min, max }),
