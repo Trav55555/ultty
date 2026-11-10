@@ -563,10 +563,13 @@ Each slice is independently testable and mergeable.
      `[INFO]`) holds back the end of its last line from the first inline
      opener still shown as characters, so `**bo` is not spoken before
      `bold` and a link's address is never spoken while it may resolve.
-     Openers with a closer (`` ` ``, `[`, `**`, `__`, `~~`) hold until
-     the line ends, which for a paragraph is when the block is finished;
-     a lone `*` or `_` (not in a word) only within 80 bytes of the end,
-     past which it is taken as literal (`2 * 3`). The walk notes such
+     `[`, `**`, `__` and `~~` hold until the line ends, which for a
+     paragraph is when the block is finished, except a `[` whose `]` is
+     already followed by something other than `(` or `[` (`x[i]`, `[1]`),
+     which can no longer become a link. A lone `*`, `_` (not in a word)
+     or `` ` `` holds only within 80 bytes of the end, past which it is
+     taken as literal (`2 * 3`); a closed code span no longer shows its
+     backticks. The walk notes such
      regions beside the native keys (`FrameNotes`).
    - A region created live announces its first text the same way, and a
      region that turns live announces only what it grows by.
