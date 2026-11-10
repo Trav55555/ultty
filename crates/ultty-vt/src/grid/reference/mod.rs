@@ -28,6 +28,7 @@
 mod buffer;
 mod grid;
 mod history;
+mod oracle;
 mod row;
 // Compiled a second time on purpose: see the module docs.
 #[allow(
