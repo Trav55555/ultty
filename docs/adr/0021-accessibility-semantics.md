@@ -539,17 +539,35 @@ Each slice is independently testable and mergeable.
      document as one region's text; review found it past the span limit
      at about 40 KB of markdown and resending the document whenever a
      block or styled span began.
-   - The backend keeps how much of each live region's text it has
-     appended (announced). What a live region shows past that is
-     appended, then a `SetContent` in the same frame sets the styled
-     result when appending alone does not give it (a span turned bold).
-     A rewrite of announced text (`Title` set as `TITLE`, an earlier
-     line) is set, not spoken again; only text past what was announced
-     is new, cut at a character boundary.
-   - While a region stays live, the end of its last line from the first
-     inline markdown opener still shown as a character (`*`, `_` not in
-     a word, `` ` ``, `[`, `~`) is held back, so `**bo` is not spoken and
-     then `bold` again; an opener 80 bytes back is taken as literal.
+     Not done: finished blocks are still rendered and diffed every frame
+     (CPU is O(blocks) per frame, as for any view); caching them is a
+     follow-up. Existing behaviour, also open: a link streamed in small
+     chunks can stay unresolved on screen
+     (`MarkdownView::try_append_chunk_incrementally` appends to the last
+     block without re-parsing it); its text is then announced literally
+     when the block is finished.
+   - The backend keeps the text it has appended to each live region
+     (announced), in the form it has now. What the region shows past
+     that is appended, then a `SetContent` in the same frame sets the
+     styled result when appending alone does not give it (a span turned
+     bold). Where to resume: after the announced text if the new text
+     starts with it (letter case ignored, so `Title` set as `TITLE` is
+     not news); nothing if the text only got shorter; after the
+     announced part of the same line when an earlier line was rewritten;
+     else at the start of the word where the two part. Text is repeated
+     rather than skipped; a first version counted bytes and lost text
+     whenever announced text got shorter (review probes: a long link, a
+     long bold phrase).
+   - Only `MarkdownView`'s arriving prose block (paragraph, heading, list
+     item; not code, not other live regions such as a plain log with
+     `[INFO]`) holds back the end of its last line from the first inline
+     opener still shown as characters, so `**bo` is not spoken before
+     `bold` and a link's address is never spoken while it may resolve.
+     Openers with a closer (`` ` ``, `[`, `**`, `__`, `~~`) hold until
+     the line ends, which for a paragraph is when the block is finished;
+     a lone `*` or `_` (not in a word) only within 80 bytes of the end,
+     past which it is taken as literal (`2 * 3`). The walk notes such
+     regions beside the native keys (`FrameNotes`).
    - A region created live announces its first text the same way, and a
      region that turns live announces only what it grows by.
      `SetSemantics` that makes a region live goes before its content in

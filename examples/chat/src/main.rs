@@ -21,6 +21,9 @@ const MARKDOWN_REPLY: &str = "Here is **bold** text and `inline code`.\n\n\
 - first item\n\
 - second item with [a link](https://example.com)\n\n\
 ```\nlet x = 1;\nlet y = 2;\n```\n\n\
+Read [the architecture overview](https://github.com/example/project/blob/main/docs/architecture/overview.md) \
+**for every detail of how the pieces fit together, which takes rather a long time to explain** \
+before you start.\n\n\
 That was markdown, streamed word by word.";
 
 struct ChatMessage {

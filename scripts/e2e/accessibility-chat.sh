@@ -8,7 +8,9 @@
 # AT-SPI as `object:announcement` events carrying the reply once, in
 # order, polite, with nothing else announced but the reply's own node.
 # Twice: a short reply, then one with markdown blocks, inline styles, a
-# link and a code block, none of whose markers may be spoken.
+# long link and a long bold phrase (each longer than the 80 bytes a lone
+# opener is held for) and a code block, none of whose markers or
+# addresses may be spoken.
 #
 #   scripts/e2e/accessibility-chat.sh [artifact-dir]
 #
@@ -218,7 +220,9 @@ converse ping ping \
     "Bot: You said: ping. That is 4 characters, streamed to you word by word."
 converse markdown markdown \
     "Bot: Here is bold text and inline code. • first item • second item with a link
-     let x = 1; let y = 2; That was markdown, streamed word by word."
+     let x = 1; let y = 2; Read the architecture overview for every detail of how the
+     pieces fit together, which takes rather a long time to explain before you start.
+     That was markdown, streamed word by word."
 
 ! grep -q "panicked at" "$out/ultty.log" || fail "Ultty logged a panic"
 echo "accessibility-chat: ok"
