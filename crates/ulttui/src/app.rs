@@ -498,7 +498,7 @@ impl<A: Application> App<A> {
             // Those messages may have changed the subscriptions; register
             // new timers now so the wait knows their deadlines. Due timers
             // fire on the next pass.
-            self.collect_subscriptions(rt, false);
+            self.refresh_subscriptions(rt, false);
         }
 
         let old_toast_count = self.active_toasts.len();
@@ -659,13 +659,13 @@ impl<A: Application> App<A> {
     }
 
     fn process_subscriptions(&mut self, rt: &Runtime) -> bool {
-        self.collect_subscriptions(rt, true)
+        self.refresh_subscriptions(rt, true)
     }
 
     /// Re-read the app's subscriptions: keep timer phases, start and stop
     /// streams. With `fire`, timers that are due fire (and their messages
     /// are queued); without, they stay due.
-    fn collect_subscriptions(&mut self, rt: &Runtime, fire: bool) -> bool {
+    fn refresh_subscriptions(&mut self, rt: &Runtime, fire: bool) -> bool {
         let now = Instant::now();
         let old_timers = std::mem::take(&mut self.timers);
         let mut new_timers = HashMap::new();
