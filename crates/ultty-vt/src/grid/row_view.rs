@@ -79,18 +79,18 @@ impl<'a> RowView<'a> {
         (0..self.width()).filter_map(|col| self.cell(col))
     }
 
-    /// The character at each column, without the rest of the cell, for
-    /// rows that are not scrollback (which has its own text path).
+    /// The character at each column, without the rest of the cell.
     fn chars(&self) -> impl Iterator<Item = char> + '_ {
-        let (packed, cells) = match &self.inner {
-            Inner::Screen { row, .. } => (row.cells(), &[][..]),
-            Inner::Row(row) => (&[][..], row.cells_slice()),
-            Inner::History(_) => (&[][..], &[][..]),
+        let (packed, cells, history) = match &self.inner {
+            Inner::Screen { row, .. } => (row.cells(), &[][..], None),
+            Inner::Row(row) => (&[][..], row.cells_slice(), None),
+            Inner::History(row) => (&[][..], &[][..], Some(*row)),
         };
         packed
             .iter()
             .map(|cell| cell.char())
             .chain(cells.iter().map(Cell::char))
+            .chain(history.into_iter().flat_map(HistoryRow::chars))
     }
 
     /// Codepoints following the base character of the cluster at `col`, if
@@ -138,6 +138,7 @@ impl<'a> RowView<'a> {
     /// The row's text, one char per column plus grapheme extras.
     pub fn text(&self) -> String {
         let mut text = String::with_capacity(usize::from(self.width()));
+        // Scrollback has a faster path that walks the extras in step.
         if let Inner::History(row) = &self.inner {
             row.push_text(&mut text);
             return text;
@@ -335,6 +336,38 @@ mod tests {
         let view = RowView::from(&row);
         assert_eq!(view.cell(1).map(|cell| cell.char()), Some('b'));
         assert_eq!(view.cell(8), None);
+    }
+
+    #[test]
+    fn chars_are_the_cells_chars_for_every_kind_of_row() {
+        let mut buffer = super::super::Buffer::new(super::super::Dimensions::new(8, 2));
+        let mut wide = row_of("ab");
+        wide[2] = Cell::new('日');
+        wide[2].set_flag(CellFlags::WIDE_CHAR);
+        wide[3] = Cell::default();
+        wide[3].set_flag(CellFlags::WIDE_CHAR_SPACER);
+        let mut combining = row_of("e!");
+        combining.set_grapheme_extra(0, &['\u{301}']);
+        // One history row in each form: Ascii, Chars and Cells.
+        buffer.push_to_history(vec![row_of("hi"), wide, combining]);
+        let owned = row_of("xyz");
+        let views = [
+            buffer.row_at(0).unwrap(),
+            buffer.row_at(1).unwrap(),
+            buffer.row_at(2).unwrap(),
+            buffer.visible_row(0).unwrap(),
+            RowView::from(&owned),
+        ];
+        assert!(matches!(views[0].inner, Inner::History(_)));
+        assert!(matches!(views[3].inner, Inner::Screen { .. }));
+        for view in &views {
+            let chars: String = view.chars().collect();
+            let want: String = view.cells().map(|cell| cell.char()).collect();
+            assert_eq!(chars.chars().count(), usize::from(view.width()));
+            assert_eq!(chars, want);
+        }
+        assert_eq!(views[1].chars().collect::<String>(), "ab日     ");
+        assert_eq!(views[2].chars().collect::<String>(), "e!      ");
     }
 
     #[test]

@@ -666,6 +666,31 @@ impl<'a> HistoryRow<'a> {
         Some(self.extra_chars(&extras[at]))
     }
 
+    /// The character at each column, without the rest of the cell or any
+    /// grapheme extras.
+    pub(super) fn chars(self) -> impl Iterator<Item = char> + 'a {
+        let range =
+            self.head.offset as usize..self.head.offset as usize + usize::from(self.head.len);
+        let (ascii, chars, cells) = match self.head.form() {
+            Form::Ascii => (&self.page.ascii[range], &[][..], &[][..]),
+            Form::Chars => (&[][..], &self.page.chars[range], &[][..]),
+            Form::Cells => (&[][..], &[][..], &self.page.cells[range]),
+        };
+        ascii
+            .iter()
+            .map(|&b| char::from(b))
+            .chain(
+                chars
+                    .iter()
+                    .map(|&bits| PackedCell::from_low_bits(bits, StyleKey::DEFAULT).char()),
+            )
+            .chain(cells.iter().map(|cell| cell.char()))
+            .chain(std::iter::repeat_n(
+                ' ',
+                usize::from(self.head.width - self.head.len),
+            ))
+    }
+
     /// Append the row's text, one char per column plus grapheme extras.
     pub(super) fn push_text(self, text: &mut String) {
         let range =
