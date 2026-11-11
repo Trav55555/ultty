@@ -4828,6 +4828,7 @@ dependencies = [
  "insta",
  "libc",
  "mlua",
+ "proptest",
  "pulldown-cmark",
  "ratatui",
  "thiserror 1.0.69",
@@ -4839,6 +4840,7 @@ dependencies = [
  "ulttui",
  "ultty-client",
  "ultty-protocol",
+ "unicode-segmentation",
  "unicode-width",
 ]
 
@@ -4901,6 +4903,7 @@ dependencies = [
  "ultty-bench",
  "ultty-protocol",
  "ultty-vt",
+ "unicode-segmentation",
  "unicode-width",
  "wgpu",
  "winit",

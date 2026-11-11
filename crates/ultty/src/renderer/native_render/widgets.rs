@@ -276,15 +276,7 @@ impl Renderer {
                     base_idx + 3,
                 ]);
 
-                let password_mask;
-                let display_text = if input.value.is_empty() {
-                    &input.placeholder
-                } else if input.password {
-                    password_mask = "•".repeat(input.value.chars().count());
-                    &password_mask
-                } else {
-                    &input.value
-                };
+                let display_text = crate::scene::caret::shown_text(input);
 
                 let text_color = if input.value.is_empty() {
                     self.color_scheme.named[8]
@@ -292,8 +284,8 @@ impl Renderer {
                     self.color_scheme.foreground
                 };
 
-                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
-                    display_text,
+                let (verts, idxs, _) = self.text_renderer.build_cell_text_vertices(
+                    &display_text,
                     x,
                     y,
                     text_color,
@@ -303,6 +295,37 @@ impl Renderer {
                 let base_idx = text_vertices.len() as u32;
                 text_vertices.extend(verts);
                 text_indices.extend(idxs.iter().map(|i| i + base_idx));
+
+                // The caret is a bar at the left edge of the cell it is
+                // before, in the text colour.
+                if let Some(col) = crate::scene::caret::caret_column(input) {
+                    let bar_w = (self.cell_width * 0.15).round().max(1.0);
+                    let bar_x = x + col as f32 * self.cell_width;
+                    let bar_y = y;
+                    let color = self.color_scheme.foreground;
+                    let base_idx = bg_vertices.len() as u32;
+                    for (px, py) in [
+                        (bar_x, bar_y),
+                        (bar_x + bar_w, bar_y),
+                        (bar_x + bar_w, bar_y + self.cell_height),
+                        (bar_x, bar_y + self.cell_height),
+                    ] {
+                        bg_vertices.push(Vertex {
+                            position: [px, py],
+                            tex_coord: [0.0, 0.0],
+                            color: [color.r, color.g, color.b, 1.0],
+                            is_color: 0,
+                        });
+                    }
+                    bg_indices.extend_from_slice(&[
+                        base_idx,
+                        base_idx + 1,
+                        base_idx + 2,
+                        base_idx,
+                        base_idx + 2,
+                        base_idx + 3,
+                    ]);
+                }
             }
             // Deprecated by ADR 0018: the terminal no longer interprets
             // Markdown or highlights Code. It shows the source verbatim so

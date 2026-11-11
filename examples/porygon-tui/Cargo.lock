@@ -2436,6 +2436,7 @@ dependencies = [
  "tracing",
  "ultty-client",
  "ultty-protocol",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

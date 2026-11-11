@@ -108,6 +108,25 @@ impl LuaApp {
         }
     }
 
+    /// What a key does to the focused `input`, if it is an editing key.
+    /// `None` means the key is not for an input (the script gets it as a
+    /// `key` message); `Some(None)` means it is, but changes nothing, such as
+    /// Left at the start.
+    fn input_edit(&self, key: &KeyEvent) -> Option<Option<ScriptMsg>> {
+        let id = key.focused_id.as_deref()?;
+        let (value, cursor) = self.script.input_state(id)?;
+        let op = ulttui::edit::op_for_key(key)?;
+        let (new_value, new_cursor) = ulttui::edit::apply(&value, cursor, &op);
+        if new_value == value && new_cursor == cursor {
+            return Some(None);
+        }
+        Some(Some(ScriptMsg::Input {
+            id: id.to_string(),
+            value: new_value,
+            cursor: new_cursor,
+        }))
+    }
+
     /// The whole frame: the error banner (if any) over the script's view.
     pub fn frame(&self) -> FrameView {
         let node = self.script.view();
@@ -320,7 +339,10 @@ impl Application for LuaApp {
         match event {
             // Tab and Shift+Tab stay with ulttui's focus navigation.
             Event::Key(key) if key.key == Key::Tab => None,
-            Event::Key(key) => Some(Msg::Script(key_msg(key))),
+            Event::Key(key) => match self.input_edit(key) {
+                Some(edit) => edit.map(Msg::Script),
+                None => Some(Msg::Script(key_msg(key))),
+            },
             Event::Click { id } => Some(Msg::Script(ScriptMsg::Click { id: id.clone() })),
             _ => None,
         }

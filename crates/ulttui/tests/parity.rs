@@ -219,16 +219,16 @@ fn loading_state_pinned_frame_matches_in_both_modes() {
 }
 
 #[test]
-fn a_focused_input_exposes_the_value_ansi_draws_not_the_native_decoration() {
+fn a_focused_input_sends_its_typed_text_and_a_name_natively() {
     let field = TextInput::new().id("msg").value("hello").label("Message");
     let rendered = render_both(&field, 30, 3, Some("msg"));
 
     // ANSI draws the mode marker and the value inside a focus border.
     assert!(row_text(&rendered.ansi, 1).contains("hello"));
 
-    // Native: the content carries the focus and mode markers; the
-    // semantics carry the name and the bare value, which differ from what
-    // the terminal would derive, so they are sent.
+    // Native: the content is the typed text alone (focus and mode are the
+    // region's style and the semantics description); the semantics carry
+    // the name, which the terminal would not derive, so they are sent.
     let Some(AppMessage::SetContent {
         content: Content::Widget(WidgetContent::Input(input)),
         ..
@@ -239,7 +239,7 @@ fn a_focused_input_exposes_the_value_ansi_draws_not_the_native_decoration() {
     else {
         panic!("an input region: {:?}", rendered.native);
     };
-    assert!(input.value.starts_with(">> "), "{:?}", input.value);
+    assert_eq!(input.value, "hello");
     let semantics = rendered
         .native
         .iter()

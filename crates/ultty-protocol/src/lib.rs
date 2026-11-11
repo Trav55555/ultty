@@ -119,6 +119,9 @@ pub const CAP_REGION_METADATA: u32 = 0x0080;
 pub const CAP_INLINE_SURFACES: u32 = 0x0100;
 /// Capability: Accessibility semantics (`SetSemantics`, ADR 0021).
 pub const CAP_SEMANTICS: u32 = 0x0200;
+/// Capability: the caret position of an input widget (`InputWidget::cursor`,
+/// sent as widget tag 7).
+pub const CAP_INPUT_CURSOR: u32 = 0x0400;
 
 /// All capabilities known by this protocol version.
 pub const CAP_ALL_KNOWN: u32 = CAP_LAYOUT_FLEXBOX
@@ -127,7 +130,8 @@ pub const CAP_ALL_KNOWN: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_STREAM_LIFECYCLE
     | CAP_REGION_METADATA
     | CAP_INLINE_SURFACES
-    | CAP_SEMANTICS;
+    | CAP_SEMANTICS
+    | CAP_INPUT_CURSOR;
 
 /// Default capability request for current clients.
 pub const CLIENT_DEFAULT_CAPABILITIES: u32 = CAP_ALL_KNOWN;

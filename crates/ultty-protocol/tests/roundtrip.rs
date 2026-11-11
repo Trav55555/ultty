@@ -481,14 +481,22 @@ fn arb_rich_text() -> impl Strategy<Value = RichText> {
 }
 
 fn arb_input_widget() -> impl Strategy<Value = InputWidget> {
-    (".*", ".*", any::<bool>(), any::<bool>()).prop_map(
-        |(value, placeholder, multiline, password)| InputWidget {
-            value,
-            placeholder,
-            multiline,
-            password,
-        },
+    (
+        ".*",
+        ".*",
+        any::<bool>(),
+        any::<bool>(),
+        proptest::option::of(any::<u32>()),
     )
+        .prop_map(
+            |(value, placeholder, multiline, password, cursor)| InputWidget {
+                value,
+                placeholder,
+                multiline,
+                password,
+                cursor,
+            },
+        )
 }
 
 fn arb_markdown_widget() -> impl Strategy<Value = MarkdownWidget> {
@@ -1358,6 +1366,14 @@ fn all_widget_types_roundtrip() {
             placeholder: "Enter text...".into(),
             multiline: true,
             password: false,
+            cursor: None,
+        }),
+        WidgetContent::Input(InputWidget {
+            value: "test".into(),
+            placeholder: String::new(),
+            multiline: false,
+            password: true,
+            cursor: Some(2),
         }),
         WidgetContent::Markdown(MarkdownWidget {
             source: "# Hello\n\n**Bold** and *italic*".into(),
@@ -1666,4 +1682,31 @@ fn terminal_message_error_roundtrip() {
     let mut cursor = encoded.as_ref();
     let decoded = TerminalMessage::decode(&mut cursor).expect("decode should succeed");
     assert_eq!(msg, decoded);
+}
+
+/// An input without a caret keeps the layout every terminal since v0.2.0
+/// decodes (tag 0, flags byte last); only a caret uses the new tag 7.
+#[test]
+fn an_input_without_a_caret_is_encoded_as_before() {
+    use bytes::BytesMut;
+
+    let mut input = InputWidget {
+        value: "ab".into(),
+        placeholder: "p".into(),
+        multiline: true,
+        password: false,
+        cursor: None,
+    };
+    let mut buf = BytesMut::new();
+    WidgetContent::Input(input.clone()).encode(&mut buf);
+    assert_eq!(
+        &buf[..],
+        [0, 2, 0, 0, 0, b'a', b'b', 1, 0, 0, 0, b'p', 1].as_slice()
+    );
+
+    input.cursor = Some(1);
+    let mut buf = BytesMut::new();
+    WidgetContent::Input(input).encode(&mut buf);
+    assert_eq!(buf[0], 7);
+    assert_eq!(&buf[buf.len() - 4..], [1, 0, 0, 0].as_slice());
 }

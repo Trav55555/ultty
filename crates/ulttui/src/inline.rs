@@ -79,7 +79,7 @@ use ratatui::Terminal;
 use ultty_client::UlttyClient;
 use ultty_protocol::{
     AppMessage, Constraints, Dimension, RegionId, Style, TerminalMessage, CAP_APPEND_CONTENT,
-    CAP_INLINE_SURFACES, CAP_SEMANTICS, MAX_SURFACE_ROWS, MIN_SURFACE_ROWS,
+    CAP_INLINE_SURFACES, CAP_INPUT_CURSOR, CAP_SEMANTICS, MAX_SURFACE_ROWS, MIN_SURFACE_ROWS,
 };
 
 use crate::backend::native_diff::{
@@ -675,6 +675,7 @@ fn frame_capabilities(client: &UlttyClient) -> FrameCapabilities {
     FrameCapabilities {
         append_content: client.supports_capability(CAP_APPEND_CONTENT),
         semantics: client.supports_capability(CAP_SEMANTICS),
+        input_cursor: client.supports_capability(CAP_INPUT_CURSOR),
     }
 }
 

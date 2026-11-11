@@ -7,9 +7,10 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthChar;
 
 use super::View;
+use crate::backend::native_diff::record_unspoken;
 use ultty_protocol::{
     AppMessage, BorderEdges, BorderStyle, BorderType, Color, Constraints, Content, Dimension,
-    Display, Live, NamedColor, RegionId, RichText, Role, Semantics, Style, TextContent,
+    Display, Live, NamedColor, RegionId, RichText, Role, Semantics, Style, TextContent, Toggled,
 };
 
 const STREAMING_CURSOR: &str = "|";
@@ -18,18 +19,35 @@ const STREAMING_CURSOR: &str = "|";
 pub struct MarkdownView {
     source: String,
     blocks: Vec<Block>,
+    /// Where parsing starts again when text is appended; `None` when the
+    /// source defines link references or footnotes, which reach back to
+    /// earlier blocks, so all of it is parsed again.
+    reparse_from: Option<ReparsePoint>,
     streaming: bool,
     wrap_width_cols: Option<usize>,
     accessible: super::Accessible,
 }
 
-#[derive(Debug, Clone)]
+/// The start of the line the last top-level block of a source starts on,
+/// or the last item of a top-level list, and how many blocks come before
+/// it. Markdown appended after it cannot change the blocks before it (but
+/// for reference definitions), so parsing from there gives the rest.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ReparsePoint {
+    offset: usize,
+    blocks: usize,
+    /// When it is a list item: the list it goes on, whose numbering the
+    /// item continues.
+    list: Option<ListState>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct StyledSpan {
     text: String,
     style: Style,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::enum_variant_names)]
 enum Block {
     Heading {
@@ -44,8 +62,12 @@ enum Block {
     },
     ListItem {
         indent: usize,
+        /// What is drawn before the text: the bullet or number, or for a
+        /// task the checkbox.
         prefix: String,
         spans: Vec<StyledSpan>,
+        /// A task list item's checkbox: whether it is checked.
+        task: Option<bool>,
     },
     HorizontalRule,
     BlockQuote {
@@ -73,6 +95,7 @@ enum CurrentBlock {
         indent: usize,
         prefix: String,
         spans: Vec<StyledSpan>,
+        ordered: bool,
         quoted: bool,
     },
 }
@@ -84,7 +107,7 @@ enum InlineStyleMarker {
     Link,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ListState {
     ordered: bool,
     next_number: u64,
@@ -93,10 +116,11 @@ struct ListState {
 impl MarkdownView {
     pub fn new(source: impl Into<String>) -> Self {
         let source = source.into();
-        let blocks = Self::parse_blocks(&source);
+        let (blocks, reparse_from) = parse(&source, None);
         Self {
             source,
             blocks,
+            reparse_from,
             streaming: false,
             wrap_width_cols: None,
             accessible: super::Accessible::default(),
@@ -107,17 +131,30 @@ impl MarkdownView {
         &self.source
     }
 
+    /// Append `chunk` to the source. Only the last top-level block, the
+    /// one text can still arrive in, is parsed again, so the cost is that
+    /// block's size and the result is what parsing the whole source gives.
     pub fn append_chunk(&mut self, chunk: impl AsRef<str>) {
         let chunk = chunk.as_ref();
         if chunk.is_empty() {
             return;
         }
-
-        let was_in_open_code_block = Self::is_in_open_fenced_code_block(&self.source);
         self.source.push_str(chunk);
-        if !self.try_append_chunk_incrementally(chunk, was_in_open_code_block) {
-            self.blocks = Self::parse_blocks(&self.source);
+
+        if let Some(from) = self.reparse_from {
+            let (tail, tail_from) = parse(&self.source[from.offset..], from.list);
+            if let Some(tail_from) = tail_from {
+                self.blocks.truncate(from.blocks);
+                self.blocks.extend(tail);
+                self.reparse_from = Some(ReparsePoint {
+                    offset: from.offset + tail_from.offset,
+                    blocks: from.blocks + tail_from.blocks,
+                    list: tail_from.list,
+                });
+                return;
+            }
         }
+        (self.blocks, self.reparse_from) = parse(&self.source, None);
     }
 
     pub fn with_appended(mut self, chunk: impl AsRef<str>) -> Self {
@@ -154,195 +191,6 @@ impl MarkdownView {
     pub fn wrap_width_cols(mut self, cols: usize) -> Self {
         self.wrap_width_cols = Some(cols.max(1));
         self
-    }
-
-    fn parse_blocks(source: &str) -> Vec<Block> {
-        let mut blocks = Vec::new();
-        let mut current: Option<CurrentBlock> = None;
-        let mut inline_style_stack: Vec<InlineStyleMarker> = Vec::new();
-        let mut list_stack: Vec<ListState> = Vec::new();
-        let mut quote_depth = 0usize;
-
-        let parser = Parser::new_ext(source, Options::all());
-        for event in parser {
-            match event {
-                Event::Start(tag) => match tag {
-                    Tag::Paragraph => {
-                        if let Some(done) = current.take() {
-                            blocks.push(Self::finish_block(done));
-                        }
-                        current = Some(CurrentBlock::Paragraph {
-                            spans: Vec::new(),
-                            quoted: quote_depth > 0,
-                        });
-                    }
-                    Tag::Heading { level, .. } => {
-                        if let Some(done) = current.take() {
-                            blocks.push(Self::finish_block(done));
-                        }
-                        current = Some(CurrentBlock::Heading {
-                            level,
-                            spans: Vec::new(),
-                            quoted: quote_depth > 0,
-                        });
-                    }
-                    Tag::CodeBlock(_) => {
-                        if let Some(done) = current.take() {
-                            blocks.push(Self::finish_block(done));
-                        }
-                        current = Some(CurrentBlock::CodeBlock {
-                            text: String::new(),
-                            quoted: quote_depth > 0,
-                        });
-                    }
-                    Tag::List(start) => {
-                        let (ordered, first) = match start {
-                            Some(n) => (true, n),
-                            None => (false, 1),
-                        };
-                        list_stack.push(ListState {
-                            ordered,
-                            next_number: first,
-                        });
-                    }
-                    Tag::Item => {
-                        if let Some(done) = current.take() {
-                            blocks.push(Self::finish_block(done));
-                        }
-                        let depth = list_stack.len().saturating_sub(1);
-                        let indent = depth * 2;
-                        let prefix = if let Some(last) = list_stack.last_mut() {
-                            if last.ordered {
-                                let p = format!("{}. ", last.next_number);
-                                last.next_number += 1;
-                                p
-                            } else {
-                                "• ".to_string()
-                            }
-                        } else {
-                            "• ".to_string()
-                        };
-                        current = Some(CurrentBlock::ListItem {
-                            indent,
-                            prefix,
-                            spans: Vec::new(),
-                            quoted: quote_depth > 0,
-                        });
-                    }
-                    Tag::BlockQuote(_) => {
-                        quote_depth += 1;
-                    }
-                    Tag::Strong => inline_style_stack.push(InlineStyleMarker::Strong),
-                    Tag::Emphasis => inline_style_stack.push(InlineStyleMarker::Emphasis),
-                    Tag::Link { .. } => inline_style_stack.push(InlineStyleMarker::Link),
-                    _ => {}
-                },
-                Event::End(tag) => match tag {
-                    TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::Item => {
-                        if let Some(done) = current.take() {
-                            blocks.push(Self::finish_block(done));
-                        }
-                    }
-                    TagEnd::List(_) => {
-                        list_stack.pop();
-                    }
-                    TagEnd::BlockQuote(_) => {
-                        quote_depth = quote_depth.saturating_sub(1);
-                    }
-                    TagEnd::Strong => {
-                        Self::pop_inline_style(&mut inline_style_stack, InlineStyleMarker::Strong);
-                    }
-                    TagEnd::Emphasis => {
-                        Self::pop_inline_style(
-                            &mut inline_style_stack,
-                            InlineStyleMarker::Emphasis,
-                        );
-                    }
-                    TagEnd::Link => {
-                        Self::pop_inline_style(&mut inline_style_stack, InlineStyleMarker::Link);
-                    }
-                    _ => {}
-                },
-                Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
-                    Self::push_text_span(&mut current, &inline_style_stack, text.as_ref(), false);
-                }
-                Event::Code(text) => {
-                    Self::push_text_span(&mut current, &inline_style_stack, text.as_ref(), true);
-                }
-                Event::SoftBreak | Event::HardBreak => {
-                    Self::push_text_span(&mut current, &inline_style_stack, "\n", false);
-                }
-                Event::Rule => blocks.push(Block::HorizontalRule),
-                Event::TaskListMarker(checked) => {
-                    let marker = if checked { "[x] " } else { "[ ] " };
-                    Self::push_text_span(&mut current, &inline_style_stack, marker, false);
-                }
-                _ => {}
-            }
-        }
-
-        if let Some(done) = current.take() {
-            blocks.push(Self::finish_block(done));
-        }
-
-        blocks
-    }
-
-    fn try_append_chunk_incrementally(
-        &mut self,
-        chunk: &str,
-        was_in_open_code_block: bool,
-    ) -> bool {
-        if was_in_open_code_block {
-            if Self::chunk_closes_fenced_code_block(chunk) {
-                return false;
-            }
-            if let Some(Block::CodeBlock { text }) = self.blocks.last_mut() {
-                text.push_str(chunk);
-                return true;
-            }
-        }
-
-        if Self::is_plain_paragraph_append(chunk) {
-            if let Some(Block::Paragraph { spans }) = self.blocks.last_mut() {
-                append_plain_text_span(spans, chunk);
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn is_plain_paragraph_append(chunk: &str) -> bool {
-        !chunk.is_empty()
-            && !chunk.contains('\n')
-            && !chunk.chars().any(|ch| {
-                matches!(
-                    ch,
-                    '*' | '_' | '`' | '[' | ']' | '<' | '>' | '#' | '!' | '|'
-                )
-            })
-    }
-
-    fn is_in_open_fenced_code_block(source: &str) -> bool {
-        source
-            .lines()
-            .filter(|line| line.trim_start().starts_with("```"))
-            .count()
-            % 2
-            == 1
-    }
-
-    fn chunk_closes_fenced_code_block(chunk: &str) -> bool {
-        chunk
-            .lines()
-            .any(|line| line.trim_start().starts_with("```"))
-    }
-
-    fn pop_inline_style(stack: &mut Vec<InlineStyleMarker>, marker: InlineStyleMarker) {
-        if let Some(pos) = stack.iter().rposition(|m| *m == marker) {
-            stack.remove(pos);
-        }
     }
 
     fn push_text_span(
@@ -431,8 +279,9 @@ impl MarkdownView {
             }
             CurrentBlock::ListItem {
                 indent,
-                prefix,
-                spans,
+                mut prefix,
+                mut spans,
+                ordered,
                 quoted,
             } => {
                 if quoted {
@@ -441,10 +290,19 @@ impl MarkdownView {
                     content.push_str(&spans_to_plain_text(&spans));
                     Block::BlockQuote { text: content }
                 } else {
+                    let task = take_task_marker(&mut spans);
+                    if let Some(checked) = task {
+                        // The checkbox in place of a bullet, after a number.
+                        if !ordered {
+                            prefix.clear();
+                        }
+                        prefix.push_str(if checked { "[x] " } else { "[ ] " });
+                    }
                     Block::ListItem {
                         indent,
                         prefix,
                         spans,
+                        task,
                     }
                 }
             }
@@ -464,6 +322,361 @@ impl MarkdownView {
     }
 }
 
+/// The blocks of `source`, and where to parse again from when text is
+/// appended to it (`None` when it defines link references or footnotes).
+/// With `list`, `source` starts with an item that goes on that list.
+fn parse(source: &str, list: Option<ListState>) -> (Vec<Block>, Option<ReparsePoint>) {
+    // Without metadata blocks: a reply that starts with a rule would have
+    // the text up to the next one hidden as front matter. Without
+    // definition lists: pulldown-cmark 0.12 panics on one in a block quote
+    // (`> _\n> : \n\n`); they are shown as the text they are. Without
+    // heading attributes: it panics on a heading a task marker was carried
+    // into (`1. [x] # x\n[r]: http://r\n  \t\n===\n`), and `{#id}` is
+    // shown as written.
+    let options = Options::all()
+        - Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+        - Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS
+        - Options::ENABLE_DEFINITION_LIST
+        - Options::ENABLE_HEADING_ATTRIBUTES
+        - Options::ENABLE_TASKLISTS;
+    if may_define_footnote(source) {
+        // A footnote definition reaches back to the references before it
+        // like a link reference, and pulldown-cmark 0.12's offsets around
+        // one can be out of order (its debug assertion fails), so they are
+        // not asked for.
+        let mut builder = BlockBuilder {
+            continue_list: list,
+            ..BlockBuilder::default()
+        };
+        for event in Parser::new_ext(source, options) {
+            builder.event(event);
+        }
+        return (builder.finish(), None);
+    }
+    let parser = Parser::new_ext(source, options).into_offset_iter();
+    let defines = parser.reference_definitions().iter().next().is_some();
+    let mut builder = BlockBuilder {
+        continue_list: list,
+        ..BlockBuilder::default()
+    };
+    // From the start, `source` goes on `list` again.
+    let mut reparse_from = ReparsePoint {
+        list,
+        ..ReparsePoint::default()
+    };
+    let mut depth = 0usize;
+    // A block after a list can still turn into one of its items (`1`
+    // becoming `1. x`).
+    let mut after_list = false;
+    let mut top_level_items = 0usize;
+    for (event, range) in parser {
+        if depth == 0 && builder.current.is_none() && !after_list {
+            // Only a block after a blank line: one that interrupts the
+            // paragraph before it may parse differently on its own.
+            let line_start = source[..range.start].rfind('\n').map_or(0, |i| i + 1);
+            let after_blank_line = line_start == 0
+                || source[..line_start - 1]
+                    .rsplit('\n')
+                    .next()
+                    .is_some_and(|line| line.trim_matches([' ', '\t', '\r']).is_empty());
+            if after_blank_line
+                && source[line_start..range.start]
+                    .chars()
+                    .all(|c| c == ' ' || c == '\t')
+            {
+                reparse_from = ReparsePoint {
+                    offset: line_start,
+                    blocks: builder.blocks.len(),
+                    // The start goes on `list` still.
+                    list: list.filter(|_| line_start == 0),
+                };
+            }
+        }
+        // An item of a top-level list after its first, once the one before
+        // it is done: the items before it are finished, and its list's
+        // numbering goes on. Not the first, which may have interrupted a
+        // paragraph.
+        let top_level_item = depth == 1 && matches!(event, Event::Start(Tag::Item));
+        if top_level_item
+            && top_level_items > 0
+            && builder.current.is_none()
+            && item_line_is_settled(source, range.start)
+        {
+            let line_start = source[..range.start].rfind('\n').map_or(0, |i| i + 1);
+            if source[line_start..range.start]
+                .chars()
+                .all(|c| c == ' ' || c == '\t')
+            {
+                reparse_from = ReparsePoint {
+                    offset: line_start,
+                    blocks: builder.blocks.len(),
+                    list: builder.list_stack.last().copied(),
+                };
+            }
+        }
+        if depth == 0 {
+            after_list = matches!(event, Event::Start(Tag::List(_) | Tag::DefinitionList));
+            top_level_items = 0;
+        }
+        if top_level_item {
+            top_level_items += 1;
+        }
+        match &event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        builder.event(event);
+    }
+    let blocks = builder.finish();
+    (blocks, (!defines).then_some(reparse_from))
+}
+
+/// Whether the first line of the list item starting at byte `start` of
+/// `source` (at its marker) keeps it a list item whatever follows: it has
+/// text after the marker (`1.` may become `1.5`), and not only `-`, `*`
+/// and `_` (`* *` may become the rule `* * *`).
+fn item_line_is_settled(source: &str, start: usize) -> bool {
+    let line = source[start..].split(['\n', '\r']).next().unwrap_or("");
+    let after_marker = line
+        .trim_start_matches([' ', '\t'])
+        .trim_start_matches(|c: char| c.is_ascii_digit())
+        .get(1..)
+        .unwrap_or("");
+    !after_marker.trim_matches([' ', '\t', '\r']).is_empty()
+        && line
+            .chars()
+            .any(|c| !matches!(c, ' ' | '\t' | '\r' | '-' | '*' | '_'))
+}
+
+/// Whether `source` may define a footnote: it has a `[^label]:`. It may
+/// say so for text that is not a definition (`[^a-z]:` in code), which
+/// only costs parsing all of it again; a `[^` without the `]:` (a regex,
+/// a reference) does not.
+fn may_define_footnote(source: &str) -> bool {
+    source.match_indices("[^").any(|(at, _)| {
+        let mut chars = source[at + 2..].chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => {
+                    chars.next();
+                }
+                ']' => return chars.as_str().starts_with(':'),
+                _ => {}
+            }
+        }
+        false
+    })
+}
+
+/// How long a task marker is, drawn (`[x] `) or written.
+const TASK_MARKER_LEN: usize = 4;
+
+/// Take a task marker (`[ ] `, `[x] `, `[X] `) off the start of a list
+/// item's text, and say whether it is checked. Only plain text makes one,
+/// with more text after it: `[x](url)` is a link, and `[ ]` alone stays
+/// as written.
+///
+/// pulldown-cmark finds task markers itself, but 0.12 gives the marker of
+/// an item that starts with another block (`- [ ] # x`) to whichever
+/// paragraph comes next, and panics on some of those; so its task lists
+/// are off and the item's own text is looked at instead.
+fn take_task_marker(spans: &mut Vec<StyledSpan>) -> Option<bool> {
+    let plain = Style::new();
+    let lead: String = spans
+        .iter()
+        .take_while(|span| span.style == plain)
+        .flat_map(|span| span.text.chars())
+        .take(TASK_MARKER_LEN)
+        .collect();
+    let checked = match lead.as_bytes() {
+        [b'[', b' ' | b'\t', b']', b' ' | b'\t'] => false,
+        [b'[', b'x' | b'X', b']', b' ' | b'\t'] => true,
+        _ => return None,
+    };
+    let text_len: usize = spans.iter().map(|span| span.text.len()).sum();
+    if text_len == TASK_MARKER_LEN {
+        return None;
+    }
+    let mut rest = TASK_MARKER_LEN;
+    while rest > 0 {
+        let first = &mut spans[0];
+        if first.text.len() <= rest {
+            rest -= first.text.len();
+            spans.remove(0);
+        } else {
+            first.text.drain(..rest);
+            rest = 0;
+        }
+    }
+    Some(checked)
+}
+
+/// Turns parser events into blocks.
+#[derive(Default)]
+struct BlockBuilder {
+    blocks: Vec<Block>,
+    current: Option<CurrentBlock>,
+    inline_style_stack: Vec<InlineStyleMarker>,
+    list_stack: Vec<ListState>,
+    quote_depth: usize,
+    table_depth: usize,
+    /// The list the first top-level list goes on, when parsing starts at
+    /// one of its items.
+    continue_list: Option<ListState>,
+}
+
+impl BlockBuilder {
+    fn finish_current(&mut self) {
+        if let Some(done) = self.current.take() {
+            self.blocks.push(MarkdownView::finish_block(done));
+        }
+    }
+
+    fn push_text(&mut self, text: &str, inline_code: bool) {
+        MarkdownView::push_text_span(
+            &mut self.current,
+            &self.inline_style_stack,
+            text,
+            inline_code,
+        );
+    }
+
+    fn event(&mut self, event: Event<'_>) {
+        // Only the list the source starts with goes on another.
+        if !matches!(event, Event::Start(Tag::List(_))) {
+            self.continue_list = None;
+        }
+        let quoted = self.quote_depth > 0;
+        match event {
+            Event::Start(tag) => match tag {
+                // A loose list item's first paragraph is its text.
+                Tag::Paragraph if self.item_is_empty() => {}
+                Tag::Paragraph => {
+                    self.finish_current();
+                    self.current = Some(CurrentBlock::Paragraph {
+                        spans: Vec::new(),
+                        quoted,
+                    });
+                }
+                Tag::Heading { level, .. } => {
+                    self.finish_current();
+                    self.current = Some(CurrentBlock::Heading {
+                        level,
+                        spans: Vec::new(),
+                        quoted,
+                    });
+                }
+                Tag::CodeBlock(_) => {
+                    self.finish_current();
+                    self.current = Some(CurrentBlock::CodeBlock {
+                        text: String::new(),
+                        quoted,
+                    });
+                }
+                Tag::List(start) => {
+                    let (ordered, first) = match start {
+                        Some(n) => (true, n),
+                        None => (false, 1),
+                    };
+                    let list = self.continue_list.take().unwrap_or(ListState {
+                        ordered,
+                        next_number: first,
+                    });
+                    self.list_stack.push(list);
+                }
+                Tag::Item => {
+                    self.finish_current();
+                    let depth = self.list_stack.len().saturating_sub(1);
+                    let indent = depth * 2;
+                    let prefix = match self.list_stack.last_mut() {
+                        Some(last) if last.ordered => {
+                            let p = format!("{}. ", last.next_number);
+                            last.next_number += 1;
+                            p
+                        }
+                        _ => "• ".to_string(),
+                    };
+                    let ordered = self.list_stack.last().is_some_and(|list| list.ordered);
+                    self.current = Some(CurrentBlock::ListItem {
+                        indent,
+                        prefix,
+                        spans: Vec::new(),
+                        ordered,
+                        quoted,
+                    });
+                }
+                Tag::BlockQuote(_) => self.quote_depth += 1,
+                Tag::Table(_) => self.table_depth += 1,
+                Tag::Strong => self.inline_style_stack.push(InlineStyleMarker::Strong),
+                Tag::Emphasis => self.inline_style_stack.push(InlineStyleMarker::Emphasis),
+                Tag::Link { .. } => self.inline_style_stack.push(InlineStyleMarker::Link),
+                _ => {}
+            },
+            Event::End(tag) => match tag {
+                TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::Item => {
+                    self.finish_current();
+                }
+                TagEnd::List(_) => {
+                    self.list_stack.pop();
+                }
+                TagEnd::Table => self.table_depth = self.table_depth.saturating_sub(1),
+                TagEnd::BlockQuote(_) => {
+                    self.quote_depth = self.quote_depth.saturating_sub(1);
+                }
+                TagEnd::Strong => self.pop_inline_style(InlineStyleMarker::Strong),
+                TagEnd::Emphasis => self.pop_inline_style(InlineStyleMarker::Emphasis),
+                TagEnd::Link => self.pop_inline_style(InlineStyleMarker::Link),
+                _ => {}
+            },
+            Event::Html(text) => self.push_text(text.as_ref(), false),
+            Event::Text(text) | Event::InlineHtml(text) => {
+                self.begin_tight_paragraph(quoted);
+                self.push_text(text.as_ref(), false);
+            }
+            Event::Code(text) => {
+                self.begin_tight_paragraph(quoted);
+                self.push_text(text.as_ref(), true);
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                self.begin_tight_paragraph(quoted);
+                self.push_text("\n", false);
+            }
+            Event::Rule => self.blocks.push(Block::HorizontalRule),
+            _ => {}
+        }
+    }
+
+    /// A tight list shows no paragraph events: text in an item after
+    /// another of its blocks (`- ```` ... ```` then text) begins a
+    /// paragraph, as it does in a loose list, so that the blocks do not
+    /// depend on whether a later blank line makes the list loose.
+    fn begin_tight_paragraph(&mut self, quoted: bool) {
+        if self.current.is_none() && !self.list_stack.is_empty() && self.table_depth == 0 {
+            self.current = Some(CurrentBlock::Paragraph {
+                spans: Vec::new(),
+                quoted,
+            });
+        }
+    }
+
+    /// Whether the block being built is a list item with no text yet.
+    fn item_is_empty(&self) -> bool {
+        matches!(&self.current, Some(CurrentBlock::ListItem { spans, .. }) if spans.is_empty())
+    }
+
+    fn pop_inline_style(&mut self, marker: InlineStyleMarker) {
+        if let Some(pos) = self.inline_style_stack.iter().rposition(|m| *m == marker) {
+            self.inline_style_stack.remove(pos);
+        }
+    }
+
+    fn finish(mut self) -> Vec<Block> {
+        self.finish_current();
+        self.blocks
+    }
+}
+
 impl Block {
     fn line_count(&self, wrap_width_cols: Option<usize>) -> usize {
         match self {
@@ -475,6 +688,7 @@ impl Block {
                 indent,
                 prefix,
                 spans,
+                ..
             } => {
                 let mut text = " ".repeat(*indent);
                 text.push_str(prefix);
@@ -559,15 +773,66 @@ impl View for MarkdownView {
             style,
         })?;
 
-        let content = block_content(block);
         let arriving = self.streaming && index + 1 == self.blocks.len();
-        let block_semantics = Semantics {
-            live: if arriving {
-                self.accessible.live.unwrap_or(Live::Polite)
+        // An item still arriving that may yet turn out a task is drawn
+        // empty until that is known: its bullet would be said, or go.
+        let content = match block {
+            Block::ListItem {
+                spans, task: None, ..
+            } if arriving && may_become_task(spans) => Content::RichText(RichText::new()),
+            _ => block_content(block),
+        };
+        let live = if arriving {
+            self.accessible.live.unwrap_or(Live::Polite)
+        } else {
+            Live::Off
+        };
+        if let Block::ListItem {
+            indent,
+            prefix,
+            task: Some(_),
+            ..
+        } = block
+        {
+            // The checkbox drawn before the text is the item's state; a
+            // bullet's indent goes with it, a number is said.
+            let end = indent + prefix.len();
+            let start = if prefix.len() > TASK_MARKER_LEN {
+                end - TASK_MARKER_LEN
             } else {
-                Live::Off
+                0
+            };
+            record_unspoken(region_id, start..end);
+        }
+        let block_semantics = match block {
+            // A read-only checkbox named by its text, its state `toggled`.
+            // Only once it has stopped arriving: a live node is announced
+            // again whenever its name changes, and a checkbox not named is
+            // named by its text, which grows.
+            Block::ListItem {
+                prefix,
+                spans,
+                task: Some(checked),
+                ..
+            } if !arriving => Semantics {
+                role: Role::Checkbox,
+                label: Some(format!(
+                    "{}{}",
+                    &prefix[..prefix.len() - TASK_MARKER_LEN],
+                    spans_to_plain_text(spans).trim()
+                )),
+                toggled: if *checked {
+                    Toggled::True
+                } else {
+                    Toggled::False
+                },
+                read_only: true,
+                ..Semantics::default()
             },
-            ..Semantics::default()
+            _ => Semantics {
+                live,
+                ..Semantics::default()
+            },
         };
         super::send_semantics(send_message, region_id, block_semantics, &content)?;
         // Prose may still hold an inline opener that has not turned into
@@ -622,6 +887,7 @@ impl View for MarkdownView {
                     indent,
                     prefix,
                     spans,
+                    ..
                 } => {
                     lines.extend(spans_to_lines(
                         spans,
@@ -663,6 +929,13 @@ impl View for MarkdownView {
 
         frame.render_widget(Paragraph::new(lines), area);
     }
+}
+
+/// Whether a list item's text so far is empty or could still be the start
+/// of a task marker (`[`, `[x`, `[ ]`).
+fn may_become_task(spans: &[StyledSpan]) -> bool {
+    let text = spans_to_plain_text(spans);
+    text.is_empty() || (text.starts_with('[') && text.len() <= 3)
 }
 
 /// A block region's style: code and quotes dim, code with a left rule.
@@ -717,6 +990,7 @@ fn block_content(block: &Block) -> Content {
             indent,
             prefix,
             spans,
+            ..
         } => {
             let mut rich =
                 RichText::new().span(format!("{}{}", " ".repeat(*indent), prefix), Style::new());
@@ -806,21 +1080,6 @@ fn spans_to_plain_text(spans: &[StyledSpan]) -> String {
         out.push_str(&span.text);
     }
     out
-}
-
-fn append_plain_text_span(spans: &mut Vec<StyledSpan>, chunk: &str) {
-    let default_style = Style::new();
-    if let Some(last) = spans.last_mut() {
-        if last.style == default_style {
-            last.text.push_str(chunk);
-            return;
-        }
-    }
-
-    spans.push(StyledSpan {
-        text: chunk.to_string(),
-        style: default_style,
-    });
 }
 
 fn spans_to_lines(
@@ -1152,10 +1411,12 @@ mod tests {
     };
     use crate::widgets::render_view_messages;
     use std::collections::HashMap;
+    use ultty_protocol::Toggled;
 
     const ALL: FrameCapabilities = FrameCapabilities {
         append_content: true,
         semantics: true,
+        input_cursor: true,
     };
 
     /// The view's native frame and what the walk noted, as the backend
@@ -1198,6 +1459,22 @@ mod tests {
             spoken(&["", "Go [here", "](http://x"]),
             "Go |[here](http://x"
         );
+    }
+
+    #[test]
+    fn a_link_or_setext_heading_streamed_in_small_chunks_is_spoken_as_shown() {
+        // Neither the address nor the brackets.
+        assert_eq!(
+            spoken(&["", "See [te", "xt](ht", "tp://x) now"]),
+            "See |text now"
+        );
+        assert_eq!(
+            spoken(&["", "See [te", "xt](ht", "tp://x \"ti", "tle\") now"]),
+            "See |text now"
+        );
+        // The underline is not said, nor the line again in capitals.
+        assert_eq!(spoken(&["", "Title", "\n", "====="]), "Title");
+        assert_eq!(spoken(&["", "Title", "\n", "-", "--"]), "Title");
     }
 
     #[test]
@@ -1394,10 +1671,9 @@ mod tests {
     }
 
     #[test]
-    fn append_chunk_incrementally_extends_plain_paragraph() {
+    fn append_chunk_extends_a_plain_paragraph() {
         let mut view = MarkdownView::new("hello");
-
-        assert!(view.try_append_chunk_incrementally(" world", false));
+        view.append_chunk(" world");
 
         match view.blocks.last().expect("paragraph should exist") {
             Block::Paragraph { spans } => {
@@ -1408,10 +1684,9 @@ mod tests {
     }
 
     #[test]
-    fn append_chunk_incrementally_extends_open_code_block() {
+    fn append_chunk_extends_an_open_code_block() {
         let mut view = MarkdownView::new("```rust\nlet x = 1;");
-
-        assert!(view.try_append_chunk_incrementally("\nlet y = 2;", true));
+        view.append_chunk("\nlet y = 2;");
 
         match view.blocks.last().expect("code block should exist") {
             Block::CodeBlock { text } => {
@@ -1467,5 +1742,572 @@ mod tests {
 
         let ansi = render_ansi_text(&view, 40, 4);
         assert!(ansi.contains("hello world"));
+    }
+
+    /// A view streamed `chunks`, one `append_chunk` each.
+    fn streamed(chunks: &[&str]) -> MarkdownView {
+        let mut view = MarkdownView::new("");
+        for chunk in chunks {
+            view.append_chunk(chunk);
+        }
+        view
+    }
+
+    #[test]
+    fn a_link_streamed_in_small_chunks_resolves() {
+        let view = streamed(&["See [te", "xt](ht", "tp://x) now"]);
+        assert_eq!(
+            view.blocks,
+            MarkdownView::new("See [text](http://x) now").blocks
+        );
+        let Block::Paragraph { spans } = &view.blocks[0] else {
+            panic!("{:?}", view.blocks);
+        };
+        assert_eq!(spans_to_plain_text(spans), "See text now");
+        assert!(spans.iter().any(|s| s.text == "text" && s.style.underline));
+    }
+
+    #[test]
+    fn a_setext_underline_streamed_after_its_line_makes_a_heading() {
+        for underline in ["=", "=====", "---"] {
+            let view = streamed(&["Title", "\n", underline]);
+            assert_eq!(view.blocks.len(), 1, "{underline:?}");
+            assert!(
+                matches!(&view.blocks[0], Block::Heading { spans, .. }
+                    if spans_to_plain_text(spans).eq_ignore_ascii_case("title")),
+                "{underline:?}: {:?}",
+                view.blocks
+            );
+        }
+    }
+
+    #[test]
+    fn appending_parses_again_from_the_last_top_level_block_only() {
+        let mut view = MarkdownView::new("# One\n\n- a\n- b\n\nmiddle\n\nlast para");
+        assert_eq!(
+            view.reparse_from,
+            Some(ReparsePoint {
+                offset: "# One\n\n- a\n- b\n\nmiddle\n\n".len(),
+                blocks: 4,
+                list: None,
+            })
+        );
+        view.append_chunk(" grows\n\nnext");
+        assert_eq!(
+            view.reparse_from.map(|p| p.offset),
+            Some("# One\n\n- a\n- b\n\nmiddle\n\nlast para grows\n\n".len())
+        );
+        // In a long list, from its last item, which goes on its numbering.
+        let items: String = (0..2_000).map(|n| format!("1. item {n}\n")).collect();
+        let mut list = MarkdownView::new(&items);
+        let last = items.rfind("1. ").unwrap();
+        assert_eq!(
+            list.reparse_from,
+            Some(ReparsePoint {
+                offset: last,
+                blocks: 1_999,
+                list: Some(ListState {
+                    ordered: true,
+                    next_number: 2_000,
+                }),
+            })
+        );
+        list.append_chunk("1. one more\n\n- [ ] a\n- ");
+        assert_eq!(list.blocks, MarkdownView::new(list.source()).blocks);
+        // Text after another block of a tight item is a paragraph, as when
+        // a blank line later makes the list loose.
+        let tight = "- a\n- ```\n  x\n  ```\n  text\n";
+        let mut view = MarkdownView::new(tight);
+        view.append_chunk("\n- c");
+        assert_eq!(view.blocks, MarkdownView::new(view.source()).blocks);
+        assert!(MarkdownView::new(tight).blocks.iter().any(
+            |b| matches!(b, Block::Paragraph { spans } if spans_to_plain_text(spans) == "text")
+        ));
+        // A regex is not a footnote definition; a definition is.
+        let regex = MarkdownView::new("Use `[^a-z]` or [^1].\n\nlast");
+        assert_eq!(
+            regex.reparse_from.map(|p| p.offset),
+            Some("Use `[^a-z]` or [^1].\n\n".len())
+        );
+        let mut noted = regex.clone();
+        noted.append_chunk("\n\n[^1]: a note");
+        assert_eq!(noted.reparse_from, None);
+        assert_eq!(noted.blocks, MarkdownView::new(noted.source()).blocks);
+        // Nor does an item whose text is indented code.
+        let code = MarkdownView::new("-     [ ] a\n\npara\n\nlast");
+        assert_eq!(
+            code.reparse_from.map(|p| p.offset),
+            Some("-     [ ] a\n\npara\n\n".len())
+        );
+        // A task list whose markers were given does not hold it back.
+        let tasks = MarkdownView::new("- [ ] a\n- [x] b\n\npara\n\nlast");
+        assert_eq!(
+            tasks.reparse_from.map(|p| p.offset),
+            Some("- [ ] a\n- [x] b\n\npara\n\n".len())
+        );
+        // A block after a list may still become one of its items.
+        let mut list = MarkdownView::new("- a\n\n1");
+        assert_eq!(list.reparse_from.map(|p| p.offset), Some(0));
+        list.append_chunk(". b");
+        assert_eq!(list.blocks, MarkdownView::new("- a\n\n1. b").blocks);
+        assert_eq!(view.blocks, MarkdownView::new(view.source()).blocks);
+    }
+
+    #[test]
+    fn a_reference_definition_arriving_later_resolves_earlier_links() {
+        let view = streamed(&["See [docs].\n\nMore.\n\n", "[docs]: http://x\n"]);
+        assert_eq!(view.reparse_from, None);
+        let Block::Paragraph { spans } = &view.blocks[0] else {
+            panic!("{:?}", view.blocks);
+        };
+        assert!(spans.iter().any(|s| s.text == "docs" && s.style.underline));
+        assert_eq!(view.blocks, MarkdownView::new(view.source()).blocks);
+    }
+
+    /// Markdown pieces random documents are made of: inline and block
+    /// markers, words, and the line breaks between them.
+    const PIECES: &[&str] = &[
+        "word",
+        "two words",
+        " ",
+        " ",
+        "\n",
+        "\n",
+        "\n\n",
+        "**",
+        "*",
+        "_",
+        "__",
+        "`",
+        "``",
+        "~~",
+        "[",
+        "]",
+        "](",
+        ")",
+        "(http://x.y/z)",
+        "http://x",
+        "\"title\"",
+        "# ",
+        "## ",
+        "=",
+        "===",
+        "-",
+        "---",
+        "- ",
+        "* ",
+        "+ ",
+        "1. ",
+        "2) ",
+        "[ ] ",
+        "[x] ",
+        "- [ ] ",
+        "- [x] ",
+        "```",
+        "```rust",
+        "~~~",
+        "    ",
+        "  ",
+        "\t",
+        "> ",
+        "| a | b |",
+        "|---|---|",
+        "<b>",
+        "</b>",
+        "<div>",
+        "<!--",
+        "-->",
+        "\\",
+        "&amp;",
+        "é",
+        "中文",
+        "$x$",
+        ": ",
+        "+++",
+        "[r]",
+        "[r]: http://r\n",
+        "[^1]",
+        "[^1]: note\n",
+        "![alt](i.png)",
+        "<http://a>",
+        "\u{a0}",
+        "\u{3000}",
+        "\r\n",
+        "\r",
+        "[^a-z]",
+        "`[^a-z]`",
+    ];
+
+    fn markdown_document() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        proptest::collection::vec(proptest::sample::select(PIECES), 0..48)
+            .prop_map(|pieces| pieces.concat())
+    }
+
+    /// Whole lines random documents are made of: every kind of block, in
+    /// and out of containers, with the line endings markdown knows.
+    const LINES: &[&str] = &[
+        "",
+        "",
+        "",
+        "word",
+        "two words",
+        "    indented code",
+        "\tcode tab",
+        "  two",
+        "   three",
+        "> quote",
+        "> - quoted item",
+        "> > deeper",
+        ">",
+        "- item",
+        "- [ ] task",
+        "- [x] done",
+        "  - nested",
+        "    - deep nested",
+        "1. one",
+        "2. two",
+        "10) ten",
+        "* star",
+        "+ plus",
+        "-",
+        "1.",
+        "- # head",
+        "<!--",
+        "-->",
+        "<pre>",
+        "</pre>",
+        "<div>",
+        "</div>",
+        "<script>",
+        "</script>",
+        "<?php",
+        "?>",
+        "| a | b |",
+        "|---|---|",
+        "| 1 | 2 |",
+        "a | b",
+        "---",
+        "***",
+        "___",
+        "===",
+        "# h",
+        "## h2",
+        "```",
+        "~~~",
+        "```rust",
+        "lazy *em",
+        "em* end",
+        "[r]: http://r",
+        "[r]",
+        "[^1]",
+        "[^1]: note",
+        "`[^a-z]` regex",
+        "\u{a0}",
+        "\u{a0}- [ ] x",
+        "\u{3000}",
+        "Intro\u{3000}",
+        "  \t",
+        "term",
+        ": def",
+        "$$",
+        "x = 1",
+        "foo\\",
+        "  ",
+        "- [ ]",
+        "- [ ] ",
+        "1. [x] # x",
+        "-     [ ] a",
+        "- ```",
+        "  code in item",
+        "<http://x>",
+        "<b>bold",
+        "<pa ok",
+        "é中文",
+        "+++",
+        "- a\r",
+        "b\r",
+        "\r",
+        "- [ ] item\r",
+        "-\t[ ] tab task",
+        "1.\t[x]\tdone",
+        "- [ ] \u{3000}",
+        ">\t- [ ] q",
+        "* *",
+        "- -",
+        "1. 2. nested",
+        " - one space",
+        "3. three",
+        "  text",
+        "```",
+    ];
+
+    fn line_document() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        let ending = proptest::sample::select(&["\n", "\n", "\n", "\r\n", "  \n", "\r"][..]);
+        proptest::collection::vec((proptest::sample::select(LINES), ending), 0..24).prop_map(
+            |lines| {
+                lines
+                    .into_iter()
+                    .map(|(line, ending)| format!("{line}{ending}"))
+                    .collect()
+            },
+        )
+    }
+
+    /// Stream `document` into a view, starting from its first `first`
+    /// characters and appending chunks of `sizes` characters in turn;
+    /// after each chunk, the blocks must be what parsing all of it so far
+    /// at once gives.
+    fn check_stream(document: &str, first: usize, sizes: &[usize]) -> Result<(), String> {
+        let chars: Vec<usize> = document.char_indices().map(|(i, _)| i).collect();
+        let split = |n: usize| chars.get(n).copied().unwrap_or(document.len());
+        let mut char_at = first.min(chars.len());
+        let mut at = split(char_at);
+        let mut view = MarkdownView::new(&document[..at]);
+        for size in sizes.iter().cycle() {
+            if at == document.len() {
+                break;
+            }
+            char_at = (char_at + size).min(chars.len());
+            let end = split(char_at);
+            view.append_chunk(&document[at..end]);
+            at = end;
+            let whole = MarkdownView::new(&document[..at]);
+            if view.blocks != whole.blocks {
+                return Err(format!(
+                    "after {:?} (chunks {sizes:?})\nstreamed {:?}\nwhole    {:?}",
+                    &document[..at],
+                    view.blocks,
+                    whole.blocks
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
+
+        /// However a document is cut into chunks, appending them one by
+        /// one gives, after each, what parsing all of it at once gives.
+        #[test]
+        fn streaming_in_any_chunks_matches_parsing_all_at_once(
+            document in markdown_document(),
+            sizes in proptest::collection::vec(1usize..8, 1..6),
+            first in 0usize..3,
+        ) {
+            let checked = check_stream(&document, first, &sizes);
+            proptest::prop_assert!(checked.is_ok(), "{}", checked.unwrap_err());
+        }
+
+        /// The same for documents made of whole lines of every kind of
+        /// block, also streamed a character at a time.
+        #[test]
+        fn streaming_lines_in_any_chunks_matches_parsing_all_at_once(
+            document in line_document(),
+            sizes in proptest::collection::vec(1usize..12, 1..6),
+        ) {
+            let checked = check_stream(&document, 0, &sizes);
+            proptest::prop_assert!(checked.is_ok(), "{}", checked.unwrap_err());
+            let checked = check_stream(&document, 0, &[1]);
+            proptest::prop_assert!(checked.is_ok(), "{}", checked.unwrap_err());
+        }
+    }
+
+    #[test]
+    fn syntax_pulldown_cmark_panics_on_is_shown_as_text() {
+        // pulldown-cmark 0.12 panics on this with definition lists on.
+        let quoted = MarkdownView::new("> _\n> : \n\n");
+        assert_eq!(quoted.blocks.len(), 1);
+        // And on this with heading attributes on.
+        MarkdownView::new("1. [x] # x\n[r]: http://r\n  \t\n===\n");
+        let heading = MarkdownView::new("# Title {#id}");
+        assert!(
+            matches!(&heading.blocks[0], Block::Heading { spans, .. } if spans_to_plain_text(spans) == "TITLE {#ID}")
+        );
+        let view = MarkdownView::new("term\n: definition");
+        let Block::Paragraph { spans } = &view.blocks[0] else {
+            panic!("{:?}", view.blocks);
+        };
+        assert_eq!(spans_to_plain_text(spans), "term\n: definition");
+    }
+
+    #[test]
+    fn streaming_known_hard_documents_matches_parsing_all_at_once() {
+        let documents = [
+            "a\n\n- [ ] x\n\nb\n\n- [x] y",
+            "\u{a0}\n- [ ] x y\n",
+            "para\n\n    code\n\n    more\nlazy",
+            "<!--\n\nfoo\n\n-->\n\nbar",
+            "> - a\n>\n> - b\n\nc\n\nd",
+            "a\r\n\r\n- [ ] b\r\n\r\nc",
+            "- a\n\n\n\nb\n\nc\n  d",
+            "| a | b |\n|---|---|\n| 1 | 2 |\n\nx\n\n| c |\n|---|",
+            "x\n\n1) a\n\n2) b\n\nq",
+            "a\n\n<div>\n\nb\n\n</div>\n\nc",
+            "a\n\n- [ ]\n  # h\n\nz",
+            // A blank line is spaces and tabs only: U+3000 and U+00A0 are
+            // text.
+            "Intro\u{3000}\n\u{3000}\n<pa ok",
+            "\u{a0}\n<path to it",
+            "Note:\u{3000}\n\u{3000}\n<p\nclass is a word",
+            "intro\u{3000}\n\u{3000}\n<div\nmore",
+            // A list's items parsed from its last: tight on their own, loose
+            // in the whole, numbered on.
+            "1. one\n\n1. [x] # x\n    indented code\n",
+            "1. one\n1. 2. nested\n",
+            "2) \n2) **word",
+            // A bare CR ends the line a task marker is on.
+            "1. [x] # x\n- [ ] \r-\n  \t\n- [ ]\n",
+            // No front matter: the text between two rules stays.
+            "---\ntitle: x\n\nbody\n---\nafter",
+            "---\n\nbody\n---\n",
+        ];
+        for document in documents {
+            for size in 1..=4 {
+                if let Err(problem) = check_stream(document, 0, &[size]) {
+                    panic!("{problem}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_task_list_item_draws_a_checkbox_in_place_of_its_bullet() {
+        let view = MarkdownView::new("- [ ] buy milk\n- [x] done\n1. [X] first");
+        let items: Vec<(&str, Option<bool>)> = view
+            .blocks
+            .iter()
+            .map(|block| match block {
+                Block::ListItem { prefix, task, .. } => (prefix.as_str(), *task),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            items,
+            [
+                ("[ ] ", Some(false)),
+                ("[x] ", Some(true)),
+                ("1. [x] ", Some(true))
+            ]
+        );
+        let ansi = render_ansi_text(&view, 30, 3);
+        assert!(ansi.contains("[ ] buy milk"), "{ansi}");
+        assert!(ansi.contains("[x] done"), "{ansi}");
+        assert!(!ansi.contains('•'), "{ansi}");
+
+        // Loose, the item's paragraph is its text all the same.
+        let loose = MarkdownView::new("- [ ] a\n\n- [x] b");
+        assert!(matches!(
+            &loose.blocks[..],
+            [
+                Block::ListItem { task: Some(false), spans: a, .. },
+                Block::ListItem { task: Some(true), spans: b, .. },
+            ] if spans_to_plain_text(a) == "a" && spans_to_plain_text(b) == "b"
+        ));
+    }
+
+    #[test]
+    fn a_task_list_item_is_a_read_only_checkbox_named_by_its_text() {
+        let view = MarkdownView::new("- [ ] buy milk\n- [x] done\n- plain\n\n3. [x] third");
+        let semantics: Vec<Semantics> = render_view_messages(&view)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m {
+                AppMessage::SetSemantics { semantics, .. } => Some(semantics),
+                _ => None,
+            })
+            .collect();
+        let checkbox = |label: &str, toggled| Semantics {
+            role: Role::Checkbox,
+            label: Some(label.to_string()),
+            toggled,
+            read_only: true,
+            ..Semantics::default()
+        };
+        assert_eq!(
+            semantics,
+            [
+                checkbox("buy milk", Toggled::False),
+                checkbox("done", Toggled::True),
+                checkbox("3. third", Toggled::True)
+            ]
+        );
+    }
+
+    #[test]
+    fn only_an_items_own_plain_text_makes_a_task() {
+        for source in [
+            "- [x](http://x) a link",
+            "- `[ ]` code",
+            "- [ ]",
+            "- [y] no",
+            "> - [ ] quoted",
+            "a\n\n[ ] not in a list",
+        ] {
+            let view = MarkdownView::new(source);
+            assert!(
+                view.blocks
+                    .iter()
+                    .all(|b| !matches!(b, Block::ListItem { task: Some(_), .. })),
+                "{source:?}: {:?}",
+                view.blocks
+            );
+        }
+        let view = MarkdownView::new("- [X] **bold** after");
+        assert!(matches!(
+            &view.blocks[0],
+            Block::ListItem { task: Some(true), spans, .. }
+                if spans_to_plain_text(spans) == "bold after"
+        ));
+    }
+
+    #[test]
+    fn an_ordered_task_items_number_is_spoken_and_its_checkbox_not() {
+        let said = spoken(&["", "1. [ ] fir", "st\n2. [x] second"]);
+        assert_eq!(said.replace('|', ""), "1. first2. second", "{said:?}");
+    }
+
+    #[test]
+    fn a_streamed_task_list_item_is_spoken_without_its_checkbox() {
+        let said = spoken(&[
+            "",
+            "- [ ] buy",
+            " milk\n- [x",
+            "] done\n",
+            "- ",
+            "[",
+            " ] la",
+            "st\n- ",
+            "plain",
+        ]);
+        assert!(!said.contains('['), "{said:?}");
+        assert_eq!(said.replace('|', ""), "buy milkdonelast• plain", "{said:?}");
+
+        // The terminal announces a live node when it is added and when its
+        // name changes: an item is a checkbox only once it is finished, and
+        // a region created live shows nothing it has not appended.
+        let (_, _, frames) = stream(&["", "- [ ] buy", " milk\n- ", "[x", "] done"]);
+        for frame in &frames {
+            for message in frame {
+                match message {
+                    AppMessage::SetSemantics { semantics, .. } if semantics.live != Live::Off => {
+                        assert_ne!(semantics.role, Role::Checkbox, "{frame:?}");
+                    }
+                    AppMessage::CreateRegion { id, .. } => {
+                        let appended = frame.iter().any(
+                            |m| matches!(m, AppMessage::AppendContent { id: a, .. } if a == id),
+                        );
+                        let shows_text = frame.iter().any(|m| {
+                            matches!(m, AppMessage::SetContent { id: s, content: Content::RichText(r) }
+                                if s == id && r.spans.iter().any(|span| !span.text.is_empty()))
+                        });
+                        assert!(appended || !shows_text, "{frame:?}");
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }

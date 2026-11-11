@@ -1530,6 +1530,7 @@ fn test_input_widget_round_trip() {
         placeholder: "Type here...".to_string(),
         multiline: false,
         password: false,
+        cursor: None,
     }));
 
     send_frame(
@@ -1640,6 +1641,7 @@ fn test_input_widget_snapshot() {
         placeholder: "Enter text...".to_string(),
         multiline: true,
         password: false,
+        cursor: None,
     }));
 
     send_frame(

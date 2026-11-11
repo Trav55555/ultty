@@ -39,6 +39,7 @@ compile_error!(
 pub mod app;
 pub mod backend;
 pub mod cmd;
+pub mod edit;
 pub mod event;
 pub mod focus;
 pub mod inline;

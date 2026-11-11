@@ -341,3 +341,213 @@ fn panes_example_without_a_grant_names_the_flag_to_add() {
     );
     assert!(error.contains("panes.luau:10: run:"), "{error}");
 }
+
+fn input_key(key: Key, ctrl: bool, alt: bool, focused: &str) -> Event {
+    Event::Key(KeyEvent {
+        key,
+        modifiers: Modifiers {
+            ctrl,
+            alt,
+            ..Modifiers::default()
+        },
+        focused_id: Some(focused.into()),
+    })
+}
+
+/// A script that keeps an input's text and cursor from `input` messages and
+/// shows them as `value|cursor`.
+fn input_app(name: &str, initial: &str) -> LuaApp {
+    let path = write(
+        name,
+        &format!(
+            r#"return app {{
+  init = function(prev) return prev or {{ text = "{initial}", cursor = utf8.len("{initial}") }} end,
+  update = function(s, m)
+    if m.type == "input" and m.id == "name" then
+      s.text = m.value
+      s.cursor = m.cursor
+    elseif m.type == "key" then
+      s.last = m.key .. ":" .. tostring(m.focused)
+    end
+    return s
+  end,
+  view = function(s)
+    return column {{
+      input {{ id = "name", value = s.text, cursor = s.cursor }},
+      button {{ id = "go", label = "go" }},
+      text(s.text .. "|" .. s.cursor .. "|" .. tostring(s.last)),
+    }}
+  end }}"#
+        ),
+    );
+    LuaApp::new(path, ScriptOptions::default()).unwrap()
+}
+
+/// Send `event` to the app, deliver the message it produced (if any), and
+/// return the summary line the script renders.
+fn press(app: &mut LuaApp, event: Event) -> String {
+    // The runtime reads the inputs of the last frame, as it does live.
+    let _ = app.frame();
+    if let Some(msg) = app.on_event(&event) {
+        app.update(msg);
+    }
+    frame_texts(app).pop().unwrap()
+}
+
+#[test]
+fn a_script_receives_the_edited_value_and_cursor_from_the_focused_input() {
+    let mut app = input_app("input-edit", "héllo wörld");
+    let name = |key, ctrl, alt| input_key(key, ctrl, alt, "name");
+
+    assert_eq!(
+        press(&mut app, name(Key::Left, false, false)),
+        "héllo wörld|10|nil"
+    );
+    assert_eq!(
+        press(&mut app, name(Key::Left, true, false)),
+        "héllo wörld|6|nil"
+    );
+    assert_eq!(
+        press(&mut app, name(Key::Char('X'), false, false)),
+        "héllo Xwörld|7|nil"
+    );
+    assert_eq!(
+        press(&mut app, name(Key::Backspace, false, false)),
+        "héllo wörld|6|nil"
+    );
+    assert_eq!(
+        press(&mut app, name(Key::Delete, false, false)),
+        "héllo örld|6|nil"
+    );
+    assert_eq!(
+        press(&mut app, name(Key::Home, false, false)),
+        "héllo örld|0|nil"
+    );
+    assert_eq!(
+        press(&mut app, name(Key::Right, false, true)),
+        "héllo örld|5|nil"
+    );
+    assert_eq!(
+        press(&mut app, name(Key::Char('e'), true, false)),
+        "héllo örld|10|nil"
+    );
+    assert_eq!(
+        press(&mut app, name(Key::Char('w'), true, false)),
+        "héllo |6|nil"
+    );
+    assert_eq!(
+        press(&mut app, name(Key::Char('a'), true, false)),
+        "héllo |0|nil"
+    );
+    assert_eq!(
+        press(&mut app, name(Key::End, false, false)),
+        "héllo |6|nil"
+    );
+    assert_eq!(press(&mut app, name(Key::Char('u'), true, false)), "|0|nil");
+}
+
+#[test]
+fn typed_characters_arrive_one_by_one_at_the_cursor_as_a_paste_would() {
+    let mut app = input_app("input-paste", "ad");
+    let name = |key| input_key(key, false, false, "name");
+    press(&mut app, name(Key::Left));
+    let mut last = String::new();
+    for c in "bc\u{1F600}".chars() {
+        last = press(&mut app, name(Key::Char(c)));
+    }
+    assert_eq!(last, "abc\u{1F600}d|4|nil");
+}
+
+#[test]
+fn edits_never_split_an_emoji() {
+    let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+    let mut app = input_app("input-emoji", &format!("a{family}b"));
+    let name = |key| input_key(key, false, false, "name");
+    assert_eq!(
+        press(&mut app, name(Key::Left)),
+        format!("a{family}b|2|nil")
+    );
+    assert_eq!(press(&mut app, name(Key::Backspace)), "ab|1|nil");
+}
+
+#[test]
+fn keys_that_do_not_edit_stay_key_messages_and_no_ops_send_nothing() {
+    let mut app = input_app("input-keys", "ab");
+    let _ = app.frame();
+    // Enter in an input, and typing while a button has focus, are keys.
+    assert_eq!(
+        press(&mut app, input_key(Key::Enter, false, false, "name")),
+        "ab|2|enter:name"
+    );
+    assert_eq!(
+        press(&mut app, input_key(Key::Char('z'), false, false, "go")),
+        "ab|2|z:go"
+    );
+    // Right at the end changes nothing, so the script hears nothing.
+    let _ = app.frame();
+    assert!(app
+        .on_event(&input_key(Key::Right, false, false, "name"))
+        .is_none());
+}
+
+#[test]
+fn edit_false_and_meta_chords_leave_keys_to_the_script() {
+    let path = write(
+        "input-no-edit",
+        r#"return app {
+  init = function(prev) return prev or { text = "ab", last = "" } end,
+  update = function(s, m)
+    if m.type == "key" then s.last = m.key .. ":" .. tostring(m.ctrl) .. ":" .. tostring(m.focused) end
+    if m.type == "input" then s.text = m.value end
+    return s
+  end,
+  view = function(s)
+    return column {
+      input { id = "raw", value = s.text, edit = false },
+      input { id = "cooked", value = s.text },
+      text(s.text .. "|" .. s.last),
+    }
+  end }"#,
+    );
+    let mut app = LuaApp::new(path, ScriptOptions::default()).unwrap();
+    // edit = false: Ctrl+A and a letter are plain key messages.
+    assert_eq!(
+        press(&mut app, input_key(Key::Char('a'), true, false, "raw")),
+        "ab|a:true:raw"
+    );
+    assert_eq!(
+        press(&mut app, input_key(Key::Char('x'), false, false, "raw")),
+        "ab|x:false:raw"
+    );
+    // With editing on, a Meta chord is still a key, not text.
+    let meta = Event::Key(KeyEvent {
+        key: Key::Char('v'),
+        modifiers: Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        },
+        focused_id: Some("cooked".into()),
+    });
+    assert_eq!(press(&mut app, meta), "ab|v:false:cooked");
+    assert_eq!(
+        press(&mut app, input_key(Key::Char('x'), false, false, "cooked")),
+        "abx|v:false:cooked"
+    );
+}
+
+#[test]
+fn two_focusable_views_with_one_id_are_a_view_error() {
+    let path = write(
+        "dup-ids",
+        r#"return app { view = function()
+  return column { input { id = "a" }, button { id = "a", label = "go" } }
+end }"#,
+    );
+    let app = LuaApp::new(path, ScriptOptions::default()).unwrap();
+    let _ = app.frame();
+    let error = app.script().error().expect("the view fails");
+    assert!(
+        error.contains("id \"a\"") && error.contains("unique"),
+        "{error}"
+    );
+}

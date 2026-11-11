@@ -6,6 +6,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::{expand_tabs, expand_tabs_from_column, View};
+use crate::edit::{self, EditOp};
 use crate::theme::{to_ratatui_color, Theme};
 use crate::vim::{KeyParser, VimConfig, VimHandler, VimResult};
 use crate::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimState};
@@ -219,6 +220,9 @@ pub struct TextInput {
     vim_config: VimConfig,
     key_parser: KeyParser,
     password: bool,
+    /// Whether the input shows (and says) its vim mode; a host that edits
+    /// insert-style, such as `ulttui-lua`, turns it off.
+    show_mode: bool,
     accessible: super::Accessible,
 }
 
@@ -237,6 +241,7 @@ impl Default for TextInput {
             vim_config: VimConfig::for_text_input(),
             key_parser: KeyParser::new(),
             password: false,
+            show_mode: true,
             accessible: super::Accessible::default(),
         }
     }
@@ -259,6 +264,22 @@ impl TextInput {
     pub fn value(mut self, value: impl Into<String>) -> Self {
         self.value = value.into();
         self.cursor = self.value.chars().count();
+        self
+    }
+
+    /// Put the cursor after the first `cursor` grapheme clusters (clamped to
+    /// the value). [`value`](Self::value) puts it at the end.
+    pub fn cursor(mut self, cursor: usize) -> Self {
+        self.cursor = edit::char_index_from_cursor(&self.value, cursor);
+        self
+    }
+
+    /// An input that is always in insert mode and shows no vim mode: for a
+    /// host that does its own editing, where vim's modes would be a
+    /// surprise.
+    pub fn without_vim_mode(mut self) -> Self {
+        self.show_mode = false;
+        self.vim_state.mode = VimMode::Insert;
         self
     }
 
@@ -536,6 +557,17 @@ impl TextInput {
         target_line_start + col.min(target_line_len)
     }
 
+    /// Apply an editing operation at the cursor, by grapheme cluster.
+    fn edit(&mut self, op: &EditOp) {
+        let cursor = edit::cursor_from_char_index(&self.value, self.cursor);
+        let (value, cursor) = edit::apply(&self.value, cursor, op);
+        self.cursor = edit::char_index_from_cursor(&value, cursor);
+        if value != self.value {
+            self.history.reset();
+        }
+        self.value = value;
+    }
+
     fn delete_range(&mut self, start: usize, end: usize) -> String {
         let chars: Vec<char> = self.value.chars().collect();
         let (start, end) = clamp_range(start, end, chars.len());
@@ -587,7 +619,20 @@ impl TextInput {
         }
     }
 
+    fn mode_name(&self) -> &'static str {
+        match self.vim_state.mode {
+            VimMode::Normal => "normal",
+            VimMode::Insert => "insert",
+            VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock => "visual",
+            VimMode::Command => "command",
+            VimMode::Search => "search",
+        }
+    }
+
     fn mode_indicator(&self) -> &'static str {
+        if !self.show_mode {
+            return "";
+        }
         match self.vim_state.mode {
             VimMode::Normal => "[N] ",
             VimMode::Insert => "[I] ",
@@ -633,16 +678,54 @@ impl View for TextInput {
         TextInput::widget_id(self)
     }
 
-    /// An input whose value and placeholder are what was typed and asked
-    /// for, without the focus marker and vim mode drawn before them; a
-    /// password's value is never exposed.
+    /// What was typed (never a password), described by the placeholder and
+    /// the vim mode, for assistive technology.
     fn semantics(&self) -> ultty_protocol::Semantics {
+        let mut description = Vec::new();
+        if !self.placeholder.is_empty() {
+            description.push(self.placeholder.clone());
+        }
+        if self.show_mode {
+            description.push(format!("vim {} mode", self.mode_name()));
+        }
         self.accessible.apply(ultty_protocol::Semantics {
             role: ultty_protocol::Role::Input,
             value_text: (!self.password).then(|| self.value.clone()),
-            description: (!self.placeholder.is_empty()).then(|| self.placeholder.clone()),
+            description: (!description.is_empty()).then(|| description.join(". ")),
             ..Default::default()
         })
+    }
+
+    /// Focus is a bar down the input's left edge, in the focus colour and
+    /// thick in insert mode (so the mode is visible), thin in any other; an
+    /// unfocused input keeps the cell, in its own colour, so focus moving
+    /// does not move the text.
+    fn style(&self) -> ultty_protocol::Style {
+        use ultty_protocol::{BorderEdges, BorderStyle, BorderType};
+
+        let theme = Theme::current();
+        let focused = super::is_widget_focused(self.widget_id());
+        let thick = focused && self.vim_state.mode == VimMode::Insert;
+        let mut style = ultty_protocol::Style::new()
+            .bg(theme.input.bg)
+            .border(BorderStyle {
+                style: if thick {
+                    BorderType::Thick
+                } else {
+                    BorderType::Thin
+                },
+                edges: BorderEdges {
+                    left: true,
+                    ..BorderEdges::NONE
+                },
+                radius: 0,
+            });
+        style.border_color = Some(if focused {
+            theme.input.focused_border
+        } else {
+            theme.input.bg
+        });
+        style
     }
 
     fn constraints(&self) -> ultty_protocol::Constraints {
@@ -659,20 +742,20 @@ impl View for TextInput {
         }
     }
 
+    /// The value and placeholder as they are, and where the caret is while
+    /// the input has focus; the backend drops the caret for a terminal that
+    /// cannot take one.
     fn content(&self) -> ultty_protocol::Content {
         let is_focused = super::is_widget_focused(self.widget_id());
-        let focus_prefix = if is_focused { ">> " } else { "" };
-        let mode_indicator = self.mode_indicator();
+        let cursor = (is_focused && !self.multiline)
+            .then(|| edit::cursor_from_char_index(&self.value, self.cursor) as u32);
         ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(
             ultty_protocol::InputWidget {
-                value: if self.value.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}{}{}", focus_prefix, mode_indicator, self.value)
-                },
-                placeholder: format!("{}{}{}", focus_prefix, mode_indicator, self.placeholder),
+                value: self.value.clone(),
+                placeholder: self.placeholder.clone(),
                 multiline: self.multiline,
                 password: self.password,
+                cursor,
             },
         ))
     }
@@ -687,7 +770,7 @@ impl View for TextInput {
         let theme = Theme::current();
         let masked = self
             .password
-            .then(|| "•".repeat(self.value.chars().count()));
+            .then(|| "•".repeat(edit::grapheme_count(&self.value)));
         let (display_text, style) = if self.value.is_empty() {
             (
                 self.placeholder.as_str(),
@@ -706,8 +789,27 @@ impl View for TextInput {
             mode_indicator,
             RStyle::default().add_modifier(Modifier::BOLD),
         );
-        let text_span = Span::styled(display_text.to_string(), style);
-        let line = Line::from(vec![mode_span, text_span]);
+        let mut spans = vec![mode_span];
+        if is_focused && !self.multiline {
+            // The cursor is the cell under it drawn reversed (a space past
+            // the end of the text).
+            let cursor = edit::cursor_from_char_index(&self.value, self.cursor);
+            let shown = masked.as_deref().unwrap_or(self.value.as_str());
+            let (before, under, after) = edit::split_at_cursor(shown, cursor);
+            let under = if under.is_empty() { " " } else { under };
+            spans.push(Span::styled(before.to_string(), style));
+            spans.push(Span::styled(
+                under.to_string(),
+                style.add_modifier(Modifier::REVERSED),
+            ));
+            spans.push(Span::styled(after.to_string(), style));
+            if self.value.is_empty() {
+                spans.push(Span::styled(self.placeholder.clone(), style));
+            }
+        } else {
+            spans.push(Span::styled(display_text.to_string(), style));
+        }
+        let line = Line::from(spans);
 
         let mut paragraph = Paragraph::new(line);
         if is_focused {
@@ -739,22 +841,23 @@ impl View for TextInput {
         }
 
         if self.vim_state.mode == VimMode::Insert {
+            if let Some(op) = crate::edit::op_for_key(key) {
+                // Home, End and the word and line deletions mean the whole
+                // value, which a multi-line input leaves to vim.
+                let line_op = !matches!(
+                    op,
+                    EditOp::Insert(_)
+                        | EditOp::Backspace
+                        | EditOp::Delete
+                        | EditOp::Left
+                        | EditOp::Right
+                );
+                if !(self.multiline && line_op) {
+                    self.edit(&op);
+                    return Some(super::FocusAction::Consumed);
+                }
+            }
             match key.key {
-                Key::Char(c) => {
-                    let chars: Vec<char> = self.value.chars().collect();
-                    let at = self.cursor.min(chars.len());
-                    let before: String = chars[..at].iter().collect();
-                    let after: String = chars[at..].iter().collect();
-                    self.value = format!("{}{}{}", before, c, after);
-                    self.cursor = at + 1;
-                    self.history.reset();
-                    return Some(super::FocusAction::Consumed);
-                }
-                Key::Backspace if self.cursor > 0 => {
-                    self.delete_range(self.cursor - 1, self.cursor);
-                    self.history.reset();
-                    return Some(super::FocusAction::Consumed);
-                }
                 Key::Up
                     if (!self.multiline || self.is_cursor_on_first_line())
                         && self.navigate_history_up() =>
@@ -1144,33 +1247,192 @@ mod tests {
     }
 
     #[test]
-    fn native_content_includes_mode_indicator() {
-        let input = TextInput::new().placeholder("Name");
+    fn native_content_is_the_users_text_only() {
+        let input = TextInput::new().placeholder("Name").value("ann");
         match <TextInput as View>::content(&input) {
             ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(w)) => {
-                assert!(w.placeholder.starts_with("[N] "));
+                assert_eq!(w.value, "ann");
+                assert_eq!(w.placeholder, "Name");
             }
             _ => panic!("Expected input widget content"),
         }
     }
 
     #[test]
-    fn focused_native_content_includes_focus_prefix() {
+    fn the_vim_mode_is_in_the_description_and_a_bar_down_the_edge() {
+        use ultty_protocol::BorderType;
+
         let old = FocusManager::set_current(FocusManager::new());
         FocusManager::with_current_mut(|fm| {
             fm.register("name".to_string());
             fm.focus("name");
         });
+        let normal = TextInput::new().id("name").placeholder("Name");
+        assert_eq!(
+            <TextInput as View>::semantics(&normal)
+                .description
+                .as_deref(),
+            Some("Name. vim normal mode")
+        );
+        let style = <TextInput as View>::style(&normal);
+        assert_eq!(style.border.style, BorderType::Thin);
+        assert!(style.border.edges.left && !style.border.edges.right);
 
-        let input = TextInput::new().id("name").placeholder("Name");
-        match <TextInput as View>::content(&input) {
-            ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(w)) => {
-                assert!(w.placeholder.starts_with(">> [N] "));
-            }
+        let mut insert = TextInput::new().id("name");
+        insert.vim_state.mode = VimMode::Insert;
+        assert_eq!(
+            <TextInput as View>::style(&insert).border.style,
+            BorderType::Thick
+        );
+
+        // An input with no vim mode says none and is always inserting.
+        let plain = TextInput::new().id("name").without_vim_mode();
+        assert_eq!(<TextInput as View>::semantics(&plain).description, None);
+        assert_eq!(
+            <TextInput as View>::style(&plain).border.style,
+            BorderType::Thick
+        );
+        FocusManager::set_current(old);
+
+        // Not focused: the bar is there, in the background colour.
+        let blurred = TextInput::new().id("other");
+        let style = <TextInput as View>::style(&blurred);
+        assert_eq!(style.border_color, style.bg);
+    }
+
+    fn typed(input: &mut TextInput, key: Key, ctrl: bool, alt: bool) {
+        let event = KeyEvent {
+            key,
+            modifiers: Modifiers {
+                ctrl,
+                alt,
+                ..Modifiers::default()
+            },
+            focused_id: None,
+        };
+        assert!(matches!(
+            input.on_key(&event),
+            Some(super::super::FocusAction::Consumed)
+        ));
+    }
+
+    #[test]
+    fn insert_mode_edits_at_the_cursor_by_grapheme() {
+        let mut input = TextInput::new().value("héllo wörld");
+        input.vim_state.mode = VimMode::Insert;
+
+        typed(&mut input, Key::Home, false, false);
+        typed(&mut input, Key::Right, false, false);
+        typed(&mut input, Key::Char('X'), false, false);
+        assert_eq!(input.current_value(), "hXéllo wörld");
+
+        typed(&mut input, Key::Delete, false, false);
+        assert_eq!(input.current_value(), "hXllo wörld");
+        typed(&mut input, Key::Backspace, false, false);
+        assert_eq!(input.current_value(), "hllo wörld");
+
+        typed(&mut input, Key::End, false, false);
+        typed(&mut input, Key::Char('w'), true, false);
+        assert_eq!(input.current_value(), "hllo ");
+        typed(&mut input, Key::Char('u'), true, false);
+        assert_eq!(input.current_value(), "");
+    }
+
+    #[test]
+    fn insert_mode_never_splits_a_grapheme() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let mut input = TextInput::new().value(format!("a{family}b"));
+        input.vim_state.mode = VimMode::Insert;
+
+        typed(&mut input, Key::Left, false, false);
+        typed(&mut input, Key::Backspace, false, false);
+        assert_eq!(input.current_value(), "ab");
+        assert_eq!(input.cursor_position(), 1);
+    }
+
+    #[test]
+    fn insert_mode_word_motions_and_ctrl_a_e() {
+        let mut input = TextInput::new().value("one two");
+        input.vim_state.mode = VimMode::Insert;
+        typed(&mut input, Key::Left, true, false);
+        assert_eq!(input.cursor_position(), 4);
+        typed(&mut input, Key::Char('a'), true, false);
+        assert_eq!(input.cursor_position(), 0);
+        typed(&mut input, Key::Right, false, true);
+        assert_eq!(input.cursor_position(), 3);
+        typed(&mut input, Key::Char('e'), true, false);
+        assert_eq!(input.cursor_position(), 7);
+    }
+
+    #[test]
+    fn cursor_builder_counts_graphemes_and_clamps() {
+        let input = TextInput::new().value("ae\u{301}b").cursor(2);
+        assert_eq!(input.cursor_position(), 3);
+        assert_eq!(TextInput::new().value("ab").cursor(9).cursor_position(), 2);
+    }
+
+    #[test]
+    fn focused_native_content_sends_the_caret_in_the_value() {
+        let old = FocusManager::set_current(FocusManager::new());
+        FocusManager::with_current_mut(|fm| {
+            fm.register("name".to_string());
+            fm.focus("name");
+        });
+        let widget_of = |input: &TextInput| match <TextInput as View>::content(input) {
+            ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(w)) => w,
             _ => panic!("Expected input widget content"),
-        }
+        };
+
+        // The caret counts clusters of the value, nothing else.
+        let input = widget_of(&TextInput::new().id("name").value("héllo").cursor(2));
+        assert_eq!((input.value.as_str(), input.cursor), ("héllo", Some(2)));
+        let end = widget_of(&TextInput::new().id("name").value("hi"));
+        assert_eq!(end.cursor, Some(2));
+        let accent = widget_of(&TextInput::new().id("name").value("ae\u{301}b").cursor(2));
+        assert_eq!(accent.cursor, Some(2));
+        // Empty: the placeholder shows, the caret at its start.
+        let empty = widget_of(&TextInput::new().id("name").placeholder("Name"));
+        assert_eq!(
+            (
+                empty.value.as_str(),
+                empty.placeholder.as_str(),
+                empty.cursor
+            ),
+            ("", "Name", Some(0))
+        );
+        // Not focused: no caret.
+        let blurred = widget_of(&TextInput::new().id("other").value("hi"));
+        assert_eq!((blurred.value.as_str(), blurred.cursor), ("hi", None));
+        let secret = widget_of(&TextInput::new().id("name").password().value("pw"));
+        assert_eq!((secret.value.as_str(), secret.cursor), ("pw", Some(2)));
 
         FocusManager::set_current(old);
+    }
+
+    #[test]
+    fn focused_ansi_render_reverses_the_cell_under_the_cursor() {
+        use ratatui::style::Modifier;
+
+        let old = FocusManager::set_current(FocusManager::new());
+        FocusManager::with_current_mut(|fm| {
+            fm.register("name".to_string());
+            fm.focus("name");
+        });
+        let input = TextInput::new().id("name").value("héllo").cursor(1);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 3)).unwrap();
+        terminal
+            .draw(|frame| input.render_ansi(frame, frame.area()))
+            .unwrap();
+        FocusManager::set_current(old);
+
+        let buffer = terminal.backend().buffer();
+        let reversed: Vec<&str> = (0..20)
+            .map(|x| &buffer[(x, 1)])
+            .filter(|cell| cell.modifier.contains(Modifier::REVERSED))
+            .map(|cell| cell.symbol())
+            .collect();
+        assert_eq!(reversed, ["é"]);
     }
 
     #[test]

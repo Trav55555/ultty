@@ -24,7 +24,7 @@ use bytes::BytesMut;
 use tracing::{debug, error, info, warn};
 use ultty_protocol::{
     AppMessage, Dimension, Display, FlexDirection, FrameId, LayoutTrigger, RegionId,
-    TerminalMessage, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, CAP_LAYOUT_FLEXBOX,
+    TerminalMessage, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, CAP_INPUT_CURSOR, CAP_LAYOUT_FLEXBOX,
     CAP_REGION_METADATA, CAP_SEMANTICS, CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, PROTOCOL_VERSION,
 };
 #[cfg(test)]
@@ -71,7 +71,8 @@ const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_APPEND_CONTENT
     | CAP_STREAM_LIFECYCLE
     | CAP_REGION_METADATA
-    | CAP_SEMANTICS;
+    | CAP_SEMANTICS
+    | CAP_INPUT_CURSOR;
 
 /// An in-band session with no traffic from its app for this long has ended.
 /// Clients send a heartbeat (an unsolicited `Pong`) at least every few
