@@ -7,9 +7,10 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthChar;
 
 use super::View;
+use crate::backend::native_diff::record_unspoken_prefix;
 use ultty_protocol::{
     AppMessage, BorderEdges, BorderStyle, BorderType, Color, Constraints, Content, Dimension,
-    Display, Live, NamedColor, RegionId, RichText, Role, Semantics, Style, TextContent,
+    Display, Live, NamedColor, RegionId, RichText, Role, Semantics, Style, TextContent, Toggled,
 };
 
 const STREAMING_CURSOR: &str = "|";
@@ -58,8 +59,12 @@ enum Block {
     },
     ListItem {
         indent: usize,
+        /// What is drawn before the text: the bullet or number, or for a
+        /// task the checkbox.
         prefix: String,
         spans: Vec<StyledSpan>,
+        /// A task list item's checkbox: whether it is checked.
+        task: Option<bool>,
     },
     HorizontalRule,
     BlockQuote {
@@ -87,6 +92,7 @@ enum CurrentBlock {
         indent: usize,
         prefix: String,
         spans: Vec<StyledSpan>,
+        task: Option<bool>,
         quoted: bool,
     },
 }
@@ -271,6 +277,7 @@ impl MarkdownView {
                 indent,
                 prefix,
                 spans,
+                task,
                 quoted,
             } => {
                 if quoted {
@@ -283,6 +290,7 @@ impl MarkdownView {
                         indent,
                         prefix,
                         spans,
+                        task,
                     }
                 }
             }
@@ -439,6 +447,8 @@ impl BlockBuilder {
         let quoted = self.quote_depth > 0;
         match event {
             Event::Start(tag) => match tag {
+                // A loose list item's first paragraph is its text.
+                Tag::Paragraph if self.item_is_empty() => {}
                 Tag::Paragraph => {
                     self.finish_current();
                     self.current = Some(CurrentBlock::Paragraph {
@@ -487,6 +497,7 @@ impl BlockBuilder {
                         indent,
                         prefix,
                         spans: Vec::new(),
+                        task: None,
                         quoted,
                     });
                 }
@@ -519,10 +530,33 @@ impl BlockBuilder {
             Event::Rule => self.blocks.push(Block::HorizontalRule),
             Event::TaskListMarker(checked) => {
                 let marker = if checked { "[x] " } else { "[ ] " };
-                self.push_text(marker, false);
+                let ordered = self.list_stack.last().is_some_and(|list| list.ordered);
+                match &mut self.current {
+                    Some(CurrentBlock::ListItem {
+                        prefix,
+                        spans,
+                        task,
+                        ..
+                    }) if spans.is_empty() && task.is_none() => {
+                        // The checkbox in place of a bullet, after a number.
+                        if !ordered {
+                            prefix.clear();
+                        }
+                        prefix.push_str(marker);
+                        *task = Some(checked);
+                    }
+                    // pulldown-cmark gives the marker of an item that
+                    // starts with another block to the next paragraph.
+                    _ => self.push_text(marker, false),
+                }
             }
             _ => {}
         }
+    }
+
+    /// Whether the block being built is a list item with no text yet.
+    fn item_is_empty(&self) -> bool {
+        matches!(&self.current, Some(CurrentBlock::ListItem { spans, .. }) if spans.is_empty())
     }
 
     fn pop_inline_style(&mut self, marker: InlineStyleMarker) {
@@ -548,6 +582,7 @@ impl Block {
                 indent,
                 prefix,
                 spans,
+                ..
             } => {
                 let mut text = " ".repeat(*indent);
                 text.push_str(prefix);
@@ -634,13 +669,53 @@ impl View for MarkdownView {
 
         let content = block_content(block);
         let arriving = self.streaming && index + 1 == self.blocks.len();
-        let block_semantics = Semantics {
-            live: if arriving {
-                self.accessible.live.unwrap_or(Live::Polite)
-            } else {
-                Live::Off
+        let live = if arriving {
+            self.accessible.live.unwrap_or(Live::Polite)
+        } else {
+            Live::Off
+        };
+        let block_semantics = match block {
+            // A read-only checkbox named by its text: what the glyph drawn
+            // before the text says is its state, so it is not spoken.
+            Block::ListItem {
+                indent,
+                prefix,
+                spans,
+                task: Some(checked),
+            } => {
+                record_unspoken_prefix(region_id, indent + prefix.len());
+                Semantics {
+                    role: Role::Checkbox,
+                    label: Some(spans_to_plain_text(spans).trim().to_string()),
+                    toggled: if *checked {
+                        Toggled::True
+                    } else {
+                        Toggled::False
+                    },
+                    read_only: true,
+                    live,
+                    ..Semantics::default()
+                }
+            }
+            // An item still arriving that may yet turn out a task says
+            // nothing, its bullet included, until it is known.
+            Block::ListItem {
+                indent,
+                prefix,
+                spans,
+                task: None,
+            } if arriving && may_become_task(spans) => {
+                let text = spans_to_plain_text(spans);
+                record_unspoken_prefix(region_id, indent + prefix.len() + text.len());
+                Semantics {
+                    live,
+                    ..Semantics::default()
+                }
+            }
+            _ => Semantics {
+                live,
+                ..Semantics::default()
             },
-            ..Semantics::default()
         };
         super::send_semantics(send_message, region_id, block_semantics, &content)?;
         // Prose may still hold an inline opener that has not turned into
@@ -695,6 +770,7 @@ impl View for MarkdownView {
                     indent,
                     prefix,
                     spans,
+                    ..
                 } => {
                     lines.extend(spans_to_lines(
                         spans,
@@ -736,6 +812,13 @@ impl View for MarkdownView {
 
         frame.render_widget(Paragraph::new(lines), area);
     }
+}
+
+/// Whether a list item's text so far is empty or could still be the start
+/// of a task marker (`[`, `[x`, `[ ]`).
+fn may_become_task(spans: &[StyledSpan]) -> bool {
+    let text = spans_to_plain_text(spans);
+    text.is_empty() || (text.starts_with('[') && text.len() <= 3)
 }
 
 /// A block region's style: code and quotes dim, code with a left rule.
@@ -790,6 +873,7 @@ fn block_content(block: &Block) -> Content {
             indent,
             prefix,
             spans,
+            ..
         } => {
             let mut rich =
                 RichText::new().span(format!("{}{}", " ".repeat(*indent), prefix), Style::new());
@@ -1210,6 +1294,7 @@ mod tests {
     };
     use crate::widgets::render_view_messages;
     use std::collections::HashMap;
+    use ultty_protocol::Toggled;
 
     const ALL: FrameCapabilities = FrameCapabilities {
         append_content: true,
@@ -1715,5 +1800,84 @@ mod tests {
                 proptest::prop_assert_eq!(&view.blocks, &whole.blocks, "after {:?}", &document[..at]);
             }
         }
+    }
+
+    #[test]
+    fn a_task_list_item_draws_a_checkbox_in_place_of_its_bullet() {
+        let view = MarkdownView::new("- [ ] buy milk\n- [x] done\n1. [X] first");
+        let items: Vec<(&str, Option<bool>)> = view
+            .blocks
+            .iter()
+            .map(|block| match block {
+                Block::ListItem { prefix, task, .. } => (prefix.as_str(), *task),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            items,
+            [
+                ("[ ] ", Some(false)),
+                ("[x] ", Some(true)),
+                ("1. [x] ", Some(true))
+            ]
+        );
+        let ansi = render_ansi_text(&view, 30, 3);
+        assert!(ansi.contains("[ ] buy milk"), "{ansi}");
+        assert!(ansi.contains("[x] done"), "{ansi}");
+        assert!(!ansi.contains('•'), "{ansi}");
+
+        // Loose, the item's paragraph is its text all the same.
+        let loose = MarkdownView::new("- [ ] a\n\n- [x] b");
+        assert!(matches!(
+            &loose.blocks[..],
+            [
+                Block::ListItem { task: Some(false), spans: a, .. },
+                Block::ListItem { task: Some(true), spans: b, .. },
+            ] if spans_to_plain_text(a) == "a" && spans_to_plain_text(b) == "b"
+        ));
+    }
+
+    #[test]
+    fn a_task_list_item_is_a_read_only_checkbox_named_by_its_text() {
+        let view = MarkdownView::new("- [ ] buy milk\n- [x] done\n- plain");
+        let semantics: Vec<Semantics> = render_view_messages(&view)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m {
+                AppMessage::SetSemantics { semantics, .. } => Some(semantics),
+                _ => None,
+            })
+            .collect();
+        let checkbox = |label: &str, toggled| Semantics {
+            role: Role::Checkbox,
+            label: Some(label.to_string()),
+            toggled,
+            read_only: true,
+            ..Semantics::default()
+        };
+        assert_eq!(
+            semantics,
+            [
+                checkbox("buy milk", Toggled::False),
+                checkbox("done", Toggled::True)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_streamed_task_list_item_is_spoken_without_its_checkbox() {
+        let said = spoken(&[
+            "",
+            "- [ ] buy",
+            " milk\n- [x",
+            "] done\n",
+            "- ",
+            "[",
+            " ] la",
+            "st\n- ",
+            "plain",
+        ]);
+        assert!(!said.contains('['), "{said:?}");
+        assert_eq!(said.replace('|', ""), "buy milkdonelast• plain", "{said:?}");
     }
 }
