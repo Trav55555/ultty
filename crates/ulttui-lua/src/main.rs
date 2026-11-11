@@ -162,6 +162,11 @@ mod tests {
     fn bad_command_lines_are_rejected() {
         assert!(parse("").is_err());
         assert!(parse("--exec app.luau").is_err());
+        // A grant that would allow anything must be spelled --allow-exec.
+        let refused = parse("--exec sh app.luau").unwrap_err();
+        assert!(refused.contains("--allow-exec"), "{refused}");
+        assert!(parse("--exec ulttyctl app.luau").is_err());
+        assert!(parse("--allow-exec app.luau").is_ok());
         assert!(parse("--allow app.luau").is_err());
         assert!(parse("a.luau b.luau").is_err());
         assert!(parse("app.luau --log").is_err());
