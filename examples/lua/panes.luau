@@ -1,8 +1,8 @@
 -- A live list of Ultty's panes, refreshed every 2 seconds from
--- `ulttyctl --json panes`. Needs leave to run ulttyctl:
+-- `ulttyctl --json panes`. Needs leave to run exactly that:
 --
---     ulttui-lua --exec ulttyctl examples/lua/panes.luau
---     ulttyctl lua open examples/lua/panes.luau --exec ulttyctl
+--     ulttui-lua --exec 'ulttyctl --json panes' examples/lua/panes.luau
+--     ulttyctl lua open examples/lua/panes.luau --exec 'ulttyctl --json panes'
 --
 -- Keys: up / down (or k / j) move the selection, g refreshes now, q quits.
 

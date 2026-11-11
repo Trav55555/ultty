@@ -56,41 +56,90 @@ impl Default for ScriptOptions {
     }
 }
 
-/// Which programs `run{}` may start (ADR 0023 §3). Fixed for the life of
-/// the script: a reload cannot widen it.
+/// What `run{}` may start (ADR 0024 §3). Fixed for the life of the script.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ExecGrant {
-    /// None: every `run{}` is an error.
+    /// Nothing: every `run{}` is an error.
     #[default]
     Deny,
-    /// Only these, compared to `argv[1]` exactly as the script wrote it
-    /// (`--exec PROG`).
-    Only(Vec<String>),
+    /// Command lines starting with one of these word lists, compared to
+    /// `argv` exactly as the script wrote it (`--exec 'ulttyctl --json
+    /// panes'`). A single word grants the program with any arguments, which
+    /// for `ulttyctl`, `git`, a shell or an interpreter is as good as
+    /// [`ExecGrant::Any`].
+    Only(Vec<Vec<String>>),
     /// Anything (`--allow-exec`).
     Any,
 }
 
 impl ExecGrant {
-    /// Whether `run{}` may start `program` (`argv[1]` as written).
-    pub fn allows(&self, program: &str) -> bool {
+    /// The words of one `--exec` grant: split on whitespace, with single or
+    /// double quotes keeping an argument together.
+    pub fn parse_grant(spec: &str) -> Result<Vec<String>, String> {
+        let mut words = Vec::new();
+        let mut word: Option<String> = None;
+        let mut quote: Option<char> = None;
+        for c in spec.chars() {
+            match (quote, c) {
+                (Some(q), c) if c == q => quote = None,
+                (Some(_), c) => word.get_or_insert_with(String::new).push(c),
+                (None, '\'' | '"') => {
+                    quote = Some(c);
+                    word.get_or_insert_with(String::new);
+                }
+                (None, c) if c.is_whitespace() => words.extend(word.take()),
+                (None, c) => word.get_or_insert_with(String::new).push(c),
+            }
+        }
+        if quote.is_some() {
+            return Err(format!("--exec {spec:?}: unbalanced quote"));
+        }
+        words.extend(word);
+        if words.is_empty() {
+            return Err("--exec needs a program".to_string());
+        }
+        Ok(words)
+    }
+
+    /// Whether `run{}` may start `argv` (as written).
+    pub fn allows(&self, argv: &[String]) -> bool {
         match self {
             ExecGrant::Deny => false,
-            ExecGrant::Only(programs) => programs.iter().any(|p| p == program),
+            ExecGrant::Only(prefixes) => prefixes.iter().any(|p| argv.starts_with(p)),
             ExecGrant::Any => true,
         }
     }
 
-    /// The error `run{}` raises for a program this grant does not allow,
-    /// naming the flag that would.
-    fn denial(&self, program: &str) -> String {
-        let mut message =
-            format!("{program} is not allowed; open the script with --exec {program}");
-        if let ExecGrant::Only(programs) = self {
-            if !programs.is_empty() {
-                message.push_str(&format!(" (allowed: {})", programs.join(", ")));
+    /// The error `run{}` raises for a command line this grant does not
+    /// allow, naming the flag that would.
+    fn denial(&self, argv: &[String]) -> String {
+        let mut message = format!(
+            "{} is not allowed; open the script with --exec {}",
+            argv.join(" "),
+            quote_words(argv)
+        );
+        let mut notes = Vec::new();
+        if argv.len() > 1 {
+            notes.push("or a shorter prefix".to_string());
+        }
+        if let ExecGrant::Only(prefixes) = self {
+            if !prefixes.is_empty() {
+                let allowed: Vec<String> = prefixes.iter().map(|p| quote_words(p)).collect();
+                notes.push(format!("allowed: {}", allowed.join(", ")));
             }
         }
+        if !notes.is_empty() {
+            message.push_str(&format!(" ({})", notes.join("; ")));
+        }
         message
+    }
+}
+
+/// `words` as one shell argument: bare for a single word, quoted otherwise.
+fn quote_words(words: &[String]) -> String {
+    match words {
+        [one] => one.clone(),
+        many => format!("'{}'", many.join(" ")),
     }
 }
 
@@ -675,8 +724,8 @@ fn install_api(lua: &Lua, globals: &Table, exec: ExecGrant) -> mlua::Result<()> 
         lua.create_function(move |lua, spec: Value| {
             let command = parse_run(spec).map_err(|e| located(lua, format!("run: {e}")))?;
             if let Command::Run { argv, .. } = &command {
-                if !exec.allows(&argv[0]) {
-                    return Err(located(lua, format!("run: {}", exec.denial(&argv[0]))));
+                if !exec.allows(argv) {
+                    return Err(located(lua, format!("run: {}", exec.denial(argv))));
                 }
             }
             Ok(CommandHandle(command))

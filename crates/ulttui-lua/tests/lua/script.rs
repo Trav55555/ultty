@@ -209,7 +209,7 @@ fn run_is_refused_without_a_grant() {
     assert_eq!(
         error,
         format!(
-            "update: {}:6: run: ls is not allowed; open the script with --exec ls",
+            "update: {}:6: run: ls -l is not allowed; open the script with --exec 'ls -l' (or a shorter prefix)",
             path.display()
         )
     );
@@ -218,7 +218,7 @@ fn run_is_refused_without_a_grant() {
 #[test]
 fn run_allows_only_the_granted_programs() {
     let options = ScriptOptions {
-        exec: ExecGrant::Only(vec!["ls".into(), "ulttyctl".into()]),
+        exec: ExecGrant::Only(vec![words("ls"), words("ulttyctl --json panes")]),
         ..ScriptOptions::default()
     };
     let mut script = load("run-only", RUNNER, options);
@@ -236,20 +236,51 @@ fn run_allows_only_the_granted_programs() {
     assert_eq!(
         script.error().unwrap(),
         format!(
-            "update: {}:8: run: true is not allowed; open the script with --exec true (allowed: ls, ulttyctl)",
+            "update: {}:8: run: true is not allowed; open the script with --exec true (allowed: ls, 'ulttyctl --json panes')",
             path.display()
         )
     );
 }
 
+fn words(line: &str) -> Vec<String> {
+    line.split_whitespace().map(str::to_string).collect()
+}
+
 #[test]
-fn exec_grants_compare_the_program_as_written() {
-    let grant = ExecGrant::Only(vec!["git".into()]);
-    assert!(grant.allows("git"));
-    assert!(!grant.allows("/usr/bin/git"));
-    assert!(!grant.allows("gi"));
-    assert!(ExecGrant::Any.allows("/usr/bin/git"));
-    assert!(!ExecGrant::Deny.allows("git"));
+fn exec_grants_are_command_line_prefixes_compared_as_written() {
+    let grant = ExecGrant::Only(vec![words("git status")]);
+    assert!(grant.allows(&words("git status")));
+    assert!(grant.allows(&words("git status --short")));
+    assert!(!grant.allows(&words("git")));
+    assert!(!grant.allows(&words("git commit")));
+    assert!(!grant.allows(&words("/usr/bin/git status")));
+    assert!(!grant.allows(&words("env git status")));
+    assert!(!grant.allows(&words("gi")));
+    // A bare program name allows any arguments.
+    let bare = ExecGrant::Only(vec![words("git")]);
+    assert!(bare.allows(&words("git")));
+    assert!(bare.allows(&words("git -c alias.x=!sh x")));
+    assert!(ExecGrant::Any.allows(&words("/usr/bin/git")));
+    assert!(!ExecGrant::Deny.allows(&words("git")));
+}
+
+#[test]
+fn exec_grants_split_on_whitespace_with_quotes() {
+    assert_eq!(
+        ExecGrant::parse_grant("ulttyctl --json panes").unwrap(),
+        words("ulttyctl --json panes")
+    );
+    assert_eq!(
+        ExecGrant::parse_grant(r#"  git  log --format="%h %s" 'a b'  "#).unwrap(),
+        ["git", "log", "--format=%h %s", "a b"]
+    );
+    assert_eq!(
+        ExecGrant::parse_grant(r#"touch """#).unwrap(),
+        ["touch", ""]
+    );
+    assert!(ExecGrant::parse_grant("").is_err());
+    assert!(ExecGrant::parse_grant("   ").is_err());
+    assert!(ExecGrant::parse_grant("git 'log").is_err());
 }
 
 #[test]
@@ -271,7 +302,7 @@ return app {
     assert_eq!(script.error(), None);
     let caught = string(&script, "state.err");
     assert!(
-        caught.contains("run: rm is not allowed; open the script with --exec rm"),
+        caught.contains("run: rm -rf / is not allowed; open the script with --exec 'rm -rf /'"),
         "{caught}"
     );
 }

@@ -334,7 +334,9 @@ fn panes_example_without_a_grant_names_the_flag_to_add() {
     let app = LuaApp::new(example("panes.luau"), ScriptOptions::default()).unwrap();
     let error = app.script().error().unwrap();
     assert!(
-        error.contains("ulttyctl is not allowed; open the script with --exec ulttyctl"),
+        error.contains(
+            "ulttyctl --json panes is not allowed; open the script with --exec 'ulttyctl --json panes'"
+        ),
         "{error}"
     );
     assert!(error.contains("panes.luau:10: run:"), "{error}");
