@@ -25,8 +25,9 @@ use ultty::event_loop::{EventLoop, TerminalEvent};
 use ultty::grid::Row;
 use ultty_bench::corpus::{self, Corpus};
 
-const COLS: u16 = 120;
-const ROWS: u16 = 40;
+/// Window sizes in cells: the common one and a large one, where every
+/// scrolled row and every frame's copy is about five times wider.
+const GEOMETRIES: [(u16, u16); 2] = [(120, 40), (300, 75)];
 const CORPUS_BYTES: usize = 32 * 1024 * 1024;
 /// The UI's frame pacing (`FRAME_INTERVAL` in the app).
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -54,8 +55,9 @@ impl Wakes {
     }
 }
 
-/// Run `dd` on `path` in a terminal until it exits; returns the elapsed time.
-fn flood(path: &str, rows: &mut Vec<Row>) -> Duration {
+/// Run `dd` on `path` in a `cols` x `lines` terminal until it exits;
+/// returns the elapsed time.
+fn flood(path: &str, (cols, lines): (u16, u16), rows: &mut Vec<Row>) -> Duration {
     let start = Instant::now();
     // Raw mode, as `ubench-feed` sets it: with output processing on, the
     // line discipline's ONLCR pass costs more than the terminal does.
@@ -67,8 +69,8 @@ fn flood(path: &str, rows: &mut Vec<Row>) -> Duration {
             "stty raw -echo && exec dd if=\"$0\" bs=65536 status=none",
             path,
         ],
-        COLS,
-        ROWS,
+        cols,
+        lines,
     )
     .expect("spawn dd");
     let wakes = Arc::new(Wakes::default());
@@ -86,7 +88,7 @@ fn flood(path: &str, rows: &mut Vec<Row>) -> Duration {
             }
             let terminal = event_loop.terminal();
             let buffer = terminal.buffer();
-            rows.resize_with(usize::from(ROWS), || Row::new(COLS));
+            rows.resize_with(usize::from(lines), || Row::new(cols));
             for (index, row) in rows.iter_mut().enumerate() {
                 if let Some(visible) = buffer.visible_row(index as u16) {
                     visible.copy_into(row);
@@ -124,11 +126,13 @@ fn bench_pty_flood(c: &mut Criterion) {
             .and_then(|mut file| file.write_all(&generated.bytes))
             .expect("write corpus");
         let path = path.to_str().expect("utf-8 temp path").to_owned();
-        let mut rows = Vec::new();
         group.throughput(Throughput::Bytes(generated.bytes.len() as u64));
-        group.bench_function(format!("{}/{COLS}x{ROWS}", corpus.name()), |b| {
-            b.iter_custom(|iters| (0..iters).map(|_| flood(&path, &mut rows)).sum());
-        });
+        for geometry @ (cols, lines) in GEOMETRIES {
+            let mut rows = Vec::new();
+            group.bench_function(format!("{}/{cols}x{lines}", corpus.name()), |b| {
+                b.iter_custom(|iters| (0..iters).map(|_| flood(&path, geometry, &mut rows)).sum());
+            });
+        }
     }
     group.finish();
 }

@@ -13,11 +13,6 @@ tracing = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = "1.12"
 
-[features]
-# Throwaway page-storage prototype (ADR 0022) for ultty-bench; never
-# enabled by anything that ships.
-page-proto = []
-
 [build-dependencies]
 unicode-width = { workspace = true }
 

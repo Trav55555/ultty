@@ -666,6 +666,31 @@ impl<'a> HistoryRow<'a> {
         Some(self.extra_chars(&extras[at]))
     }
 
+    /// The character at each column, without the rest of the cell or any
+    /// grapheme extras.
+    pub(super) fn chars(self) -> impl Iterator<Item = char> + 'a {
+        let range =
+            self.head.offset as usize..self.head.offset as usize + usize::from(self.head.len);
+        let (ascii, chars, cells) = match self.head.form() {
+            Form::Ascii => (&self.page.ascii[range], &[][..], &[][..]),
+            Form::Chars => (&[][..], &self.page.chars[range], &[][..]),
+            Form::Cells => (&[][..], &[][..], &self.page.cells[range]),
+        };
+        ascii
+            .iter()
+            .map(|&b| char::from(b))
+            .chain(
+                chars
+                    .iter()
+                    .map(|&bits| PackedCell::from_low_bits(bits, StyleKey::DEFAULT).char()),
+            )
+            .chain(cells.iter().map(|cell| cell.char()))
+            .chain(std::iter::repeat_n(
+                ' ',
+                usize::from(self.head.width - self.head.len),
+            ))
+    }
+
     /// Append the row's text, one char per column plus grapheme extras.
     pub(super) fn push_text(self, text: &mut String) {
         let range =
@@ -713,7 +738,8 @@ impl<'a> HistoryRow<'a> {
 /// Every page but the last holds [`PAGE_ROWS`] rows, so row `i` is in page
 /// `(front + i) / PAGE_ROWS`. The buffer decides when to evict; this only
 /// stores.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), derive(Default))]
 pub(super) struct History {
     pages: VecDeque<Page>,
     /// Rows of `pages[0]` already evicted.
@@ -725,6 +751,26 @@ pub(super) struct History {
     /// table and numbering in `remap_stamp`.
     remap: Vec<u32>,
     remap_stamp: Option<(u64, u64)>,
+    /// Rows per page in tests, which can make pages tiny
+    /// (`test_support::page_rows`) so short streams cross page boundaries.
+    #[cfg(test)]
+    page_rows: usize,
+}
+
+#[cfg(test)]
+impl Default for History {
+    fn default() -> Self {
+        Self {
+            pages: VecDeque::new(),
+            front: 0,
+            len: 0,
+            spare: None,
+            remap: Vec::new(),
+            remap_stamp: None,
+            #[cfg(test)]
+            page_rows: test_support::forced_page_rows().unwrap_or(PAGE_ROWS),
+        }
+    }
 }
 
 /// The newest page's key for `key`, a key of `screen`: inline keys and the
@@ -776,6 +822,19 @@ fn start_page<'a>(pages: &'a mut VecDeque<Page>, spare: &mut Option<Page>) -> &'
 }
 
 impl History {
+    /// Rows per page.
+    #[cfg(not(test))]
+    #[inline(always)]
+    fn page_rows(&self) -> usize {
+        PAGE_ROWS
+    }
+
+    /// Rows per page: [`PAGE_ROWS`], unless the test shrank it.
+    #[cfg(test)]
+    fn page_rows(&self) -> usize {
+        self.page_rows
+    }
+
     /// The number of rows.
     #[inline]
     pub(super) fn len(&self) -> usize {
@@ -787,7 +846,7 @@ impl History {
     fn locate(&self, index: usize) -> Option<(usize, usize)> {
         (index < self.len).then(|| {
             let at = self.front + index;
-            (at / PAGE_ROWS, at % PAGE_ROWS)
+            (at / self.page_rows(), at % self.page_rows())
         })
     }
 
@@ -832,8 +891,9 @@ impl History {
     #[inline]
     pub(super) fn push(&mut self, row: ScreenRow<'_>, screen: &StyleTable) {
         let stamp = screen.stamp();
+        let page_rows = self.page_rows();
         let page = match self.pages.back_mut() {
-            Some(page) if page.heads.len() < PAGE_ROWS => page,
+            Some(page) if page.heads.len() < page_rows => page,
             _ => {
                 // The remap is for the newest page.
                 self.remap_stamp = None;
@@ -869,7 +929,7 @@ impl History {
         }
         self.front += 1;
         self.len -= 1;
-        if self.front >= PAGE_ROWS || self.len == 0 {
+        if self.front >= self.page_rows() || self.len == 0 {
             self.free_front_page();
         }
     }
@@ -998,10 +1058,11 @@ impl History {
         }
         let pages = self.pages.len();
         for (index, page) in self.pages.iter().enumerate() {
-            if index + 1 < pages && page.heads.len() != PAGE_ROWS {
+            if index + 1 < pages && page.heads.len() != self.page_rows() {
                 return Err(format!(
-                    "page {index} of {pages} holds {} rows, not {PAGE_ROWS}",
-                    page.heads.len()
+                    "page {index} of {pages} holds {} rows, not {}",
+                    page.heads.len(),
+                    self.page_rows()
                 ));
             }
             page.check_integrity(max_extra)
@@ -1042,6 +1103,35 @@ impl RowPacker {
         packed.assign_row(row, &mut self.styles);
         let packed = self.page.row(0).expect("the page has one row");
         (packed, &self.styles)
+    }
+}
+
+/// Test-only control over the page size, so short streams cross pages.
+#[cfg(test)]
+pub(super) mod test_support {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ROWS: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    pub(in crate::grid) fn forced_page_rows() -> Option<usize> {
+        ROWS.with(Cell::get)
+    }
+
+    /// While the guard lives, histories created on this thread keep `rows`
+    /// rows a page.
+    pub(in crate::grid) fn page_rows(rows: usize) -> Guard {
+        ROWS.with(|forced| forced.set(Some(rows.max(1))));
+        Guard
+    }
+
+    pub(in crate::grid) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ROWS.with(|forced| forced.set(None));
+        }
     }
 }
 
@@ -1337,39 +1427,46 @@ mod tests {
         assert_eq!(form(&history, 4), Form::Ascii);
     }
 
-    #[test]
-    fn rows_are_evicted_one_at_a_time_and_pages_reused() {
+    /// Per-row eviction, the spare page, truncation and draining, on pages
+    /// of whatever size the test has set.
+    fn evict_reuse_truncate_drain() {
         let mut history = History::default();
+        let page = history.page_rows();
         let mut packer = RowPacker::new();
         let row_of = |n: usize| {
             let mut row = Row::new(8);
             row.write_ascii(0, format!("{n:>8}").as_bytes(), Cell::default());
             row
         };
-        for n in 0..3 * PAGE_ROWS {
+        for n in 0..3 * page {
             history.push_row(&row_of(n), &mut packer);
         }
         assert_eq!(history.pages.len(), 3);
-        for n in 0..PAGE_ROWS + 1 {
+        for n in 0..page + 1 {
             history.pop_front();
             history.check_integrity(16).unwrap();
-            assert_eq!(history.len(), 3 * PAGE_ROWS - n - 1);
+            assert_eq!(history.len(), 3 * page - n - 1);
         }
         assert_eq!(history.pages.len(), 2, "the first page went");
         assert!(history.spare.is_some(), "and was kept for reuse");
         let first = history.row(0).unwrap();
         let mut text = String::new();
         first.push_text(&mut text);
-        assert_eq!(text.trim(), (PAGE_ROWS + 1).to_string());
+        assert_eq!(text.trim(), (page + 1).to_string());
 
-        history.truncate(10);
+        // The oldest row is the second page's second, so keeping up to
+        // `page - 1` rows leaves them all in that page.
+        let keep = (page - 1).min(10);
+        history.truncate(keep);
         history.check_integrity(16).unwrap();
-        assert_eq!(history.len(), 10);
+        assert_eq!(history.len(), keep);
         assert_eq!(history.pages.len(), 1);
         history.push_row(&row_of(7), &mut packer);
-        assert_eq!(owned(&history, 10).cells().nth(7).unwrap().char(), '7');
+        history.check_integrity(16).unwrap();
+        assert_eq!(owned(&history, keep).cells().nth(7).unwrap().char(), '7');
 
-        history.drop_front(4);
+        let dropped = keep / 2;
+        history.drop_front(dropped);
         history.check_integrity(16).unwrap();
         let mut seen = Vec::new();
         history.clone().drain(|row| {
@@ -1377,7 +1474,7 @@ mod tests {
             row.push_text(&mut text);
             seen.push(text.trim().to_string());
         });
-        let want: Vec<String> = (PAGE_ROWS + 5..PAGE_ROWS + 11)
+        let want: Vec<String> = (page + 1 + dropped..page + 1 + keep)
             .map(|n| n.to_string())
             .chain(["7".to_string()])
             .collect();
@@ -1387,6 +1484,15 @@ mod tests {
         history.check_integrity(16).unwrap();
         assert_eq!(history.len(), 0);
         assert!(history.row(0).is_none());
+    }
+
+    #[test]
+    fn rows_are_evicted_one_at_a_time_and_pages_reused() {
+        evict_reuse_truncate_drain();
+        for rows in [2, 3, 4, 7] {
+            let _rows = test_support::page_rows(rows);
+            evict_reuse_truncate_drain();
+        }
     }
 
     #[test]
@@ -1463,6 +1569,57 @@ mod tests {
             61,
             "rewrites find the page's styles again"
         );
+    }
+
+    #[test]
+    fn compacting_keeps_grapheme_extras_with_their_rows() {
+        let mut history = History::default();
+        let mut packer = RowPacker::new();
+        let texts = [
+            "a\u{301}b c\u{302}\u{303}",
+            "plain",
+            "日本 e\u{301}語 x",
+            "👍\u{1f3fd} 🏳\u{fe0f}\u{200d}🌈",
+        ];
+        for text in texts {
+            push_grid(&mut history, &grid_row(20, text));
+        }
+        // Rewrite the first and third rows so their old payloads, extras
+        // included, become garbage in the middle of the page.
+        let rewritten = [
+            (0, "x\u{308}\u{30a} y\u{301}"),
+            (2, "z\u{301}\u{302}\u{303}"),
+        ];
+        let mut want: Vec<Row> = texts
+            .iter()
+            .map(|text| grid_row(20, text).row(0).unwrap().to_row())
+            .collect();
+        for (index, text) in rewritten {
+            let row = grid_row(20, text).row(0).unwrap().to_row();
+            history.replace(index, &row, &mut packer);
+            want[index] = row;
+        }
+        let page = &history.pages[0];
+        assert!(page.garbage > 0);
+        let live: usize = page.heads.iter().map(|head| page.payload_bytes(head)).sum();
+        assert!(page.total_bytes() > live);
+
+        history.pages[0].compact();
+        history.check_integrity(16).unwrap();
+        let page = &history.pages[0];
+        assert_eq!(page.garbage, 0);
+        assert_eq!(page.total_bytes(), live, "only live payload is left");
+        for (index, want) in want.iter().enumerate() {
+            assert!(same(&owned(&history, index), want), "row {index}");
+            let row = history.row(index).unwrap();
+            for col in 0..want.width() {
+                assert_eq!(
+                    row.grapheme_extra(col),
+                    want.grapheme_extra(col),
+                    "row {index} col {col}"
+                );
+            }
+        }
     }
 
     #[test]

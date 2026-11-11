@@ -5,6 +5,11 @@ interned styles, a screen page with slot rotation, and append-only history
 pages. It says not to refactor until a prototype has passed a gate. This
 note is that prototype's measurements and the gate applied to them.
 
+The prototype's code (`grid/proto/`, the `proto` features and
+subcommands, `ultty-proto-mem`, `scripts/bench/proto-icount.sh`) was
+removed in migration slice 6; check out `3f97d11` to rerun the commands
+below.
+
 **First-round verdict: not GO.** The page design (variant C) passes every criterion but
 one. It cuts ASCII to 18.6–19.4 instructions per byte and runs the PTY flood
 45–50% faster, but sgr-dense costs 16–23% more instructions and 12–16% more

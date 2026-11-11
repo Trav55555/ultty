@@ -16,7 +16,5 @@
 
 pub mod corpus;
 pub mod env;
-#[cfg(feature = "proto")]
-pub mod proto;
 pub mod stats;
 pub mod tty;
