@@ -388,7 +388,7 @@ mod tests {
             Badge, Divider, ErrorState, Image, ProgressBar, Section, Select, Spacer, Spinner,
             TextInput, Title,
         };
-        use ultty_protocol::{Expanded, SemanticValue, SetPosition};
+        use ultty_protocol::{Expanded, SemanticValue};
 
         let progress = ProgressBar::new(40.0).label("Upload").semantics();
         assert_eq!(progress.role, Role::Progress);
@@ -466,10 +466,10 @@ mod tests {
             .selected(1)
             .label("Letter")
             .semantics();
-        assert_eq!(select.role, Role::List);
+        assert_eq!(select.role, Role::ComboBox);
         assert_eq!(select.expanded, Expanded::Collapsed);
         assert_eq!(select.value_text.as_deref(), Some("b"));
-        assert_eq!(select.position, Some(SetPosition { index: 2, size: 3 }));
+        assert_eq!(select.position, None, "its options carry their places");
         assert_eq!(select.label.as_deref(), Some("Letter"));
     }
 
