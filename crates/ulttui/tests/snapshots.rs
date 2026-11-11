@@ -6,7 +6,7 @@
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
-use ulttui::event::{Event, Modifiers, MouseEvent, MouseEventKind};
+use ulttui::event::{Event, Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
 use ulttui::widgets::{
     Badge, Button, Card, Checkbox, Collapsible, Column, DiffView, Divider, DockLayout, Image,
     Inset, List, MarkdownView, Modal, ProgressBar, Row, ScrollView, Section, Select, Spacer,
@@ -563,6 +563,17 @@ fn snapshot_widget_semantics() {
             "Select",
             Box::new(Select::new(vec!["a".into(), "b".into()]).label("Letter")),
         ),
+        ("Select+expanded", {
+            let mut select = Select::new(vec!["a".into(), "b".into()])
+                .label("Letter")
+                .selected(1);
+            select.on_key(&KeyEvent {
+                key: Key::Enter,
+                modifiers: Modifiers::default(),
+                focused_id: None,
+            });
+            Box::new(select)
+        }),
         (
             "List",
             Box::new(List::new().items(vec!["one", "two"]).label("Numbers")),
@@ -584,8 +595,8 @@ fn snapshot_widget_semantics() {
             "Table",
             Box::new(
                 Table::new()
-                    .headers(vec!["Name"])
-                    .rows(vec![vec!["Ada"], vec!["Linus"]]),
+                    .headers(vec!["Name", "Age"])
+                    .rows(vec![vec!["Ada", "36"], vec!["Linus", "28"]]),
             ),
         ),
         (

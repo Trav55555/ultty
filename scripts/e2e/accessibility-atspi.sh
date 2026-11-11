@@ -209,10 +209,12 @@ native_focus() {
     ctl --json regions | /usr/bin/python3 -I scripts/e2e/native_focus.py
 }
 # Selection (ADR 0021 §1 `selected`): dashboard's list marks the item it
-# has selected, and its other items are selectable but not selected.
+# has selected, and its other items are selectable but not selected; each
+# reports its place among the list's five as ARIA counts it.
 ctl send-text "$(printf %q "$DASHBOARD")"$'\r' >/dev/null || fail "ulttyctl send-text failed"
-widgets=$(read_widgets --selected "System Overview" --unselected "Network" --timeout 30) ||
-    fail "dashboard's first item is not the selected one: $widgets"
+widgets=$(read_widgets --selected "System Overview" --unselected "Network" \
+    --place "System Overview=1/5" --place "Network=2/5" --timeout 30) ||
+    fail "dashboard's first item is not the selected one, or places are off: $widgets"
 echo "$widgets" >"$out/selected-first.json"
 ctl send-text j >/dev/null || fail "ulttyctl send-text failed"
 widgets=$(read_widgets --selected "Network" --unselected "System Overview" --timeout 15) ||

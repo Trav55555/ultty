@@ -8,8 +8,8 @@ use ratatui::Frame;
 use super::View;
 use crate::theme::{to_ratatui_color, Theme};
 use ultty_protocol::{
-    AppMessage, Constraints, Dimension, Display, FlexDirection, RegionId, Style as ProtoStyle,
-    TextContent,
+    AppMessage, Constraints, Dimension, Display, FlexDirection, RegionId, Role, Semantics,
+    SetPosition, Style as ProtoStyle, TextContent,
 };
 
 /// A table with headers and selectable rows.
@@ -96,7 +96,20 @@ impl Table {
             .max(self.rows.iter().map(Vec::len).max().unwrap_or(0))
     }
 
-    fn row_view<'a>(&self, cells: &'a [String], style: ProtoStyle, selected: bool) -> TableRow<'a> {
+    /// Native row `index` (0 is the header row) with `cells`.
+    fn row_view<'a>(
+        &self,
+        index: usize,
+        cells: &'a [String],
+        style: ProtoStyle,
+        selected: bool,
+    ) -> TableRow<'a> {
+        let columns = self.column_count();
+        let cell_role = if index == 0 {
+            Role::ColumnHeader
+        } else {
+            Role::Cell
+        };
         TableRow {
             cells: cells
                 .iter()
@@ -104,11 +117,23 @@ impl Table {
                 .map(|(col, text)| TableCell {
                     text,
                     width: self.column_width(col),
+                    role: cell_role,
+                    position: set_position(col, columns),
                 })
                 .collect(),
             style,
             selected,
+            position: set_position(index, 1 + self.rows.len()),
         }
+    }
+}
+
+/// The 1-based place of item `index` in a set of `size`.
+fn set_position(index: usize, size: usize) -> SetPosition {
+    let wire = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    SetPosition {
+        index: wire(index + 1),
+        size: wire(size),
     }
 }
 
@@ -139,12 +164,14 @@ fn to_ratatui_style(style: &ProtoStyle) -> Style {
     out
 }
 
-/// One native table row: a flex row of `TableCell`s. The selected row
-/// says so to screen readers; its role is left to the terminal (a group).
+/// One native table row: a flex row of `TableCell`s, a `Row` with its
+/// place among the table's rows (the header row first) and whether it is
+/// the selected row.
 struct TableRow<'a> {
     cells: Vec<TableCell<'a>>,
     style: ProtoStyle,
     selected: bool,
+    position: SetPosition,
 }
 
 impl View for TableRow<'_> {
@@ -161,10 +188,12 @@ impl View for TableRow<'_> {
         self.style.clone()
     }
 
-    fn semantics(&self) -> ultty_protocol::Semantics {
-        ultty_protocol::Semantics {
+    fn semantics(&self) -> Semantics {
+        Semantics {
+            role: Role::Row,
+            position: Some(self.position),
             selected: self.selected,
-            ..Default::default()
+            ..Semantics::default()
         }
     }
 
@@ -193,9 +222,12 @@ impl View for TableRow<'_> {
 }
 
 /// One native table cell: fixed width when the column has one, else flex.
+/// A `Cell`, or a `ColumnHeader` in the header row, with its column.
 struct TableCell<'a> {
     text: &'a str,
     width: Option<f32>,
+    role: Role,
+    position: SetPosition,
 }
 
 impl View for TableCell<'_> {
@@ -218,6 +250,14 @@ impl View for TableCell<'_> {
     fn content(&self) -> ultty_protocol::Content {
         ultty_protocol::Content::Text(TextContent::new(self.text))
     }
+
+    fn semantics(&self) -> Semantics {
+        Semantics {
+            role: self.role,
+            position: Some(self.position),
+            ..Semantics::default()
+        }
+    }
 }
 
 impl View for Table {
@@ -235,6 +275,13 @@ impl View for Table {
         ProtoStyle::new().border(ultty_protocol::BorderStyle::thin())
     }
 
+    fn semantics(&self) -> Semantics {
+        Semantics {
+            role: Role::Table,
+            ..Semantics::default()
+        }
+    }
+
     fn children_count(&self) -> usize {
         // header row + data rows
         1 + self.rows.len()
@@ -249,7 +296,7 @@ impl View for Table {
     ) -> crate::Result<Option<RegionId>> {
         let theme = Theme::current();
         let row = if index == 0 {
-            self.row_view(&self.headers, header_style(&theme), false)
+            self.row_view(0, &self.headers, header_style(&theme), false)
         } else {
             let row_idx = index - 1;
             let Some(cells) = self.rows.get(row_idx) else {
@@ -261,7 +308,7 @@ impl View for Table {
             } else {
                 ProtoStyle::default()
             };
-            self.row_view(cells, style, selected)
+            self.row_view(index, cells, style, selected)
         };
         Ok(Some(super::render_view_to_native(
             &row,
@@ -476,6 +523,45 @@ mod tests {
         assert_eq!(data_cells.len(), 3);
         assert_eq!(data_cells[0].width, Dimension::Cells(10.0));
         assert_eq!(data_cells[2].flex_grow, 1.0);
+    }
+
+    #[test]
+    fn native_table_is_rows_of_cells_under_column_headers() {
+        let mut table = Table::new()
+            .headers(vec!["Name", "Age"])
+            .rows(vec![vec!["Ada", "36"], vec!["Bob", "25"]]);
+        table.move_selection(1);
+        /// Region, role, position and whether it is selected.
+        type Sent = (u32, Role, Option<(u32, u32)>, bool);
+        let semantics: Vec<Sent> = native_messages(&table)
+            .into_iter()
+            .filter_map(|message| match message {
+                AppMessage::SetSemantics { id, semantics } => Some((
+                    id.0,
+                    semantics.role,
+                    semantics
+                        .position
+                        .map(|position| (position.index, position.size)),
+                    semantics.selected,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            semantics,
+            [
+                (1, Role::Table, None, false),
+                (2, Role::Row, Some((1, 3)), false),
+                (3, Role::ColumnHeader, Some((1, 2)), false),
+                (4, Role::ColumnHeader, Some((2, 2)), false),
+                (5, Role::Row, Some((2, 3)), false),
+                (6, Role::Cell, Some((1, 2)), false),
+                (7, Role::Cell, Some((2, 2)), false),
+                (8, Role::Row, Some((3, 3)), true),
+                (9, Role::Cell, Some((1, 2)), false),
+                (10, Role::Cell, Some((2, 2)), false),
+            ]
+        );
     }
 
     #[test]
