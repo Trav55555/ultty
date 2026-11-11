@@ -488,6 +488,14 @@ impl NativeBackend {
                     // Scroll position updates from the terminal are informational;
                     // the app already knows its own scroll state.
                 }
+                // The terminal pings after 30 s without a message from the
+                // app and drops the session 10 s later without an answer. A
+                // ping read just before the terminal closed cannot be
+                // answered; the close itself becomes the Quit below.
+                TerminalMessage::Ping => match self.send_message(&AppMessage::Pong) {
+                    Err(crate::Error::Io(err)) if terminal_gone(&err) => {}
+                    other => other?,
+                },
                 _ => {}
             }
         }
@@ -737,6 +745,18 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "handshake took {elapsed:?}"
         );
+    }
+
+    /// The terminal pings an app that has sent nothing for 30 s and closes
+    /// the session if no pong comes back within 10 s, so an idle app that
+    /// ignores the ping is gone 40 s after its last frame.
+    #[test]
+    fn a_ping_from_the_terminal_is_answered_with_a_pong() {
+        use ultty_protocol::Encode;
+        let (mut backend, mut terminal) = backend_over_pair();
+        std::io::Write::write_all(&mut terminal, &TerminalMessage::Ping.encode_to_bytes()).unwrap();
+        assert!(backend.poll_event().unwrap().is_none());
+        assert_eq!(drain_messages(&mut terminal), [AppMessage::Pong]);
     }
 
     #[test]
