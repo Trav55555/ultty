@@ -173,14 +173,19 @@ plus its own check.
    counter-app`, `regions --json --pane N` shows a scene whose root is the
    pane's size, `send-text +` counts to 3, `resize` changes the root's
    width, a screenshot is written. Spec §1.2, ADR 0024 cross-reference.
+   *Done 2026-11-11.* As built: binding is retried on every poll while a
+   session is unbound (a few syscalls per unbound session, rare); the
+   pane-precise `regions` of slice 4 came with it.
 2. **Mouse per pane.** `pane_at` → pane cells → bound sessions. Check:
    server unit test that a click in the right pane reaches only the right
-   pane's session with pane-local coordinates.
+   pane's session with pane-local coordinates. *Done 2026-11-11.*
 3. **Accessibility per pane.** Scenes under their pane's node; live text
-   per bound session. Check: `accessibility_snapshot` unit test with two
-   panes; `scripts/e2e/accessibility-*.sh` keep passing.
+   per bound session. Check: a tree test with a scene in an unfocused pane
+   (under that pane's node, focus stays on the focused pane's screen);
+   `scripts/e2e/accessibility-*.sh` keep passing. *Done 2026-11-11.*
 4. **`regions --pane` and screenshots.** Pane-precise `regions`; e2e
    asserts the shell pane lists no scene. Screenshot comes with slice 1.
+   *Done with slice 1.*
 5. **`lua open --split` native.** Drop `--ansi` and the note; lua-open.sh.
 6. **Later, each its own slice:** in-band sessions in split panes; inline
    surfaces in split panes; A3 connected/dropped events; per-pane

@@ -39,9 +39,12 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   window resizes), and is disconnected when the pane closes. `ulttyctl split
   right <ulttui app>` therefore draws natively; `ulttyctl regions --pane N`
   lists the sessions bound to pane N (plus its tab's unbound ones), and
-  screenshots of split tabs include the scenes. No wire change. Mouse
-  routing, accessibility and inline surfaces in split panes, and
-  `lua open --split` without `--ansi`, are the ADR's later slices.
+  screenshots of split tabs include the scenes. Mouse and scroll events go
+  to the sessions of the pane under the pointer, in that pane's cells, and
+  the accessibility tree puts each pane's scenes under the pane's node
+  (the focused pane keeps the focus). No wire change. Inline surfaces and
+  in-band sessions in split panes, and `lua open --split` without
+  `--ansi`, are the ADR's later slices.
 - Text editing in `ulttui` and `ulttui-lua`: `ulttui::edit` (cursor moves,
   word motions, deletes at the cursor, by grapheme cluster), used by
   `TextInput`'s insert mode and by Lua `input` nodes, which take `cursor`
