@@ -339,9 +339,11 @@ fn parse(source: &str, at_document_start: bool) -> (Vec<Block>, Option<ReparsePo
     let mut depth = 0usize;
     // pulldown-cmark gives a task marker to the next paragraph, which is
     // not the item's own when the item starts with another block
-    // (`- [ ] # x`); until it is given, parsing cannot start again.
+    // (`- [ ] # x`); until it is given, parsing cannot start again. It is
+    // given where a paragraph starts, which in a tight list shows no
+    // event of its own, so right after the item's start.
     let mut task_marker_pending = false;
-    let mut after_paragraph_start = false;
+    let mut marker_given_here = false;
     // A block after a list can still turn into one of its items (`1`
     // becoming `1. x`).
     let mut after_list = false;
@@ -370,17 +372,19 @@ fn parse(source: &str, at_document_start: bool) -> (Vec<Block>, Option<ReparsePo
         if depth == 0 {
             after_list = matches!(event, Event::Start(Tag::List(_) | Tag::DefinitionList));
         }
+        let mut item_waits = false;
         match &event {
             Event::Start(Tag::Item) => {
-                task_marker_pending |= task_marker_waits_for_paragraph(&source[range.start..]);
+                item_waits = task_marker_waits_for_paragraph(&source[range.start..]);
+                task_marker_pending |= item_waits;
                 depth += 1;
             }
-            Event::TaskListMarker(_) if after_paragraph_start => task_marker_pending = false,
+            Event::TaskListMarker(_) if marker_given_here => task_marker_pending = false,
             Event::Start(_) => depth += 1,
             Event::End(_) => depth = depth.saturating_sub(1),
             _ => {}
         }
-        after_paragraph_start = matches!(event, Event::Start(Tag::Paragraph));
+        marker_given_here = item_waits || matches!(event, Event::Start(Tag::Paragraph));
         builder.event(event);
     }
     let blocks = builder.finish();
@@ -1676,6 +1680,12 @@ mod tests {
         assert_eq!(
             view.reparse_from.map(|p| p.offset),
             Some("# One\n\n- a\n- b\n\nmiddle\n\nlast para grows\n\n".len())
+        );
+        // A task list whose markers were given does not hold it back.
+        let tasks = MarkdownView::new("- [ ] a\n- [x] b\n\npara\n\nlast");
+        assert_eq!(
+            tasks.reparse_from.map(|p| p.offset),
+            Some("- [ ] a\n- [x] b\n\npara\n\n".len())
         );
         // A block after a list may still become one of its items.
         let mut list = MarkdownView::new("- a\n\n1");
