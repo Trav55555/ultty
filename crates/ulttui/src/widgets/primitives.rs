@@ -104,13 +104,22 @@ impl View for Spacer {
 
 /// Grouped content section with optional title and surface background.
 pub struct Section {
+    id: Option<String>,
     title: Option<String>,
     children: Vec<Box<dyn View>>,
 }
 
 impl Section {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self {
+            id: None,
             title: None,
             children: Vec::new(),
         }
@@ -134,6 +143,10 @@ impl Default for Section {
 }
 
 impl View for Section {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     /// A group named by its title, which is shown as a level 2 heading.
     fn semantics(&self) -> ultty_protocol::Semantics {
         ultty_protocol::Semantics {
@@ -258,14 +271,23 @@ impl View for Section {
 
 /// Elevated card with `surface_1` background and subtle border.
 pub struct Card {
+    id: Option<String>,
     children: Vec<Box<dyn View>>,
     max_width: Option<f32>,
     align_center: bool,
 }
 
 impl Card {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self {
+            id: None,
             children: Vec::new(),
             max_width: None,
             align_center: false,
@@ -295,6 +317,10 @@ impl Default for Card {
 }
 
 impl View for Card {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         let theme = Theme::current();
         let mut c = Constraints {

@@ -15,6 +15,7 @@ use ultty_protocol::{
 
 /// A modal dialog overlay.
 pub struct Modal {
+    id: Option<String>,
     title: String,
     body: String,
     body_view: Option<Box<dyn View>>,
@@ -28,6 +29,7 @@ pub struct Modal {
 impl Default for Modal {
     fn default() -> Self {
         Self {
+            id: None,
             title: String::new(),
             body: String::new(),
             body_view: None,
@@ -51,6 +53,13 @@ impl std::fmt::Debug for Modal {
 }
 
 impl Modal {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -124,6 +133,10 @@ impl Modal {
 }
 
 impl View for Modal {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     /// A modal dialog named by its title; left out while not visible.
     fn semantics(&self) -> ultty_protocol::Semantics {
         ultty_protocol::Semantics {

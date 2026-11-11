@@ -2,6 +2,24 @@
 
 All built-in widgets in the `ulttui` framework. Import via `use ulttui::prelude::*`.
 
+## Widget ids
+
+Every widget that renders a region takes `.id("name")`: the layout and display
+widgets (`Column`, `Row`, `Stack`, `ScrollView`, `List`, `Table`, `Tabs`,
+`Modal`, `DockLayout`, `Section`, `Card`, `Text`, `RichText`, `MarkdownView`,
+`Image`, `Badge`, `Divider`, `ProgressBar`, `Spinner`, `Title`, `Body`, `Muted`,
+`Accent`, `EmptyState`, `LoadingState`, `ErrorState`) as well as the
+interactive ones below. The id is the widget's region key, shows in
+`ulttyctl regions`, and is what a user's overrides (ADR 0023) match on.
+`Inset` and `Semantic` wrap a view and pass its id through; `Spacer` has no
+state to hold one.
+
+```rust
+Column::new().id("sidebar").child(Text::new("Status").id("status"))
+```
+
+Ids only act as focus targets on widgets that take focus.
+
 ## Display Widgets
 
 ### Text

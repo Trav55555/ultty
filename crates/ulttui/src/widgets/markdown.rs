@@ -17,6 +17,7 @@ const STREAMING_CURSOR: &str = "|";
 
 #[derive(Debug, Clone)]
 pub struct MarkdownView {
+    id: Option<String>,
     source: String,
     blocks: Vec<Block>,
     /// Where parsing starts again when text is appended; `None` when the
@@ -114,10 +115,18 @@ struct ListState {
 }
 
 impl MarkdownView {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new(source: impl Into<String>) -> Self {
         let source = source.into();
         let (blocks, reparse_from) = parse(&source, None);
         Self {
+            id: None,
             source,
             blocks,
             reparse_from,
@@ -701,6 +710,10 @@ impl Block {
 }
 
 impl View for MarkdownView {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         Constraints {
             display: Display::Flex,

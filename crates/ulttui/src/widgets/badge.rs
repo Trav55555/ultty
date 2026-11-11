@@ -23,13 +23,22 @@ pub enum BadgeVariant {
 /// Small badge for status indicators.
 #[derive(Debug, Clone)]
 pub struct Badge {
+    id: Option<String>,
     text: String,
     variant: BadgeVariant,
 }
 
 impl Badge {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new(text: impl Into<String>) -> Self {
         Self {
+            id: None,
             text: text.into(),
             variant: BadgeVariant::Primary,
         }
@@ -42,6 +51,7 @@ impl Badge {
 
     pub fn success(text: impl Into<String>) -> Self {
         Self {
+            id: None,
             text: text.into(),
             variant: BadgeVariant::Success,
         }
@@ -49,6 +59,7 @@ impl Badge {
 
     pub fn error(text: impl Into<String>) -> Self {
         Self {
+            id: None,
             text: text.into(),
             variant: BadgeVariant::Error,
         }
@@ -56,6 +67,7 @@ impl Badge {
 
     pub fn warning(text: impl Into<String>) -> Self {
         Self {
+            id: None,
             text: text.into(),
             variant: BadgeVariant::Warning,
         }
@@ -63,6 +75,10 @@ impl Badge {
 }
 
 impl View for Badge {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         let width = self.text.chars().count() + 2; // +2 for padding spaces
         Constraints {

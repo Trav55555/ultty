@@ -15,6 +15,7 @@ use ultty_protocol::{
 /// A table with headers and selectable rows.
 #[derive(Default)]
 pub struct Table {
+    id: Option<String>,
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
     selected: usize,
@@ -32,6 +33,13 @@ impl std::fmt::Debug for Table {
 }
 
 impl Table {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -261,6 +269,10 @@ impl View for TableCell<'_> {
 }
 
 impl View for Table {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         Constraints {
             display: Display::Flex,
