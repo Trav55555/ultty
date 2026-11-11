@@ -23,7 +23,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ultty::grid::{Dimensions, Terminal, TerminalHandler};
 use ultty::protocol::ansi::{AnsiOutput, AnsiParser};
 use ultty::scene::{Region, SceneTree};
-use ultty_protocol::{Constraints, Display, RegionId};
+use ultty_protocol::{
+    Constraints, Content, Display, RegionId, Role, Semantics, SetPosition, TextContent,
+};
 
 struct Counting;
 
@@ -152,6 +154,46 @@ fn sgr_dense_lines(count: usize, cols: usize) -> Vec<u8> {
     out
 }
 
+/// Lines of CJK words and the spaces between them, about 40 wide
+/// characters (80 columns) each, as the `vt` bench's cjk corpus prints them;
+/// every third one green. Scrollback stores wide characters at more bytes a
+/// cell than ASCII (ADR 0022, Risks), which no other case covers.
+fn cjk_lines(count: usize) -> Vec<u8> {
+    const WORDS: [&str; 12] = [
+        "日本語",
+        "中文字符",
+        "한국어",
+        "東京都",
+        "ひらがな",
+        "カタカナ",
+        "漢字",
+        "終端",
+        "文字化け",
+        "表示",
+        "速度",
+        "测试",
+    ];
+    let mut out = Vec::new();
+    for i in 0..count {
+        if i % 3 == 0 {
+            out.extend_from_slice(b"\x1b[32m");
+        }
+        let (mut chars, mut word) = (0, i);
+        while chars < 27 {
+            let text = WORDS[word % WORDS.len()];
+            out.extend_from_slice(text.as_bytes());
+            out.push(b' ');
+            chars += text.chars().count() + 1;
+            word += 7;
+        }
+        if i % 3 == 0 {
+            out.extend_from_slice(b"\x1b[0m");
+        }
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
 fn scene_tree(regions: usize) -> SceneTree {
     let mut tree = SceneTree::new();
     for i in 1..=regions {
@@ -162,6 +204,65 @@ fn scene_tree(regions: usize) -> SceneTree {
             ..Default::default()
         };
         tree.insert(region);
+    }
+    tree
+}
+
+/// A table of `rows` rows of `columns` one-word cells, as ulttui's `Table`
+/// draws it, with the semantics it sends (ADR 0021) when `semantic`.
+fn scene_table(rows: u32, columns: u32, semantic: bool) -> SceneTree {
+    let mut tree = SceneTree::new();
+    let mut next = 1;
+    let mut add = |tree: &mut SceneTree, parent, content, semantics: Semantics| {
+        let id = RegionId::new(next);
+        next += 1;
+        let mut region = Region::new(id);
+        region.parent = Some(parent);
+        region.content = content;
+        if semantic {
+            region.set_semantics(semantics);
+        }
+        tree.insert(region);
+        id
+    };
+    let table = add(
+        &mut tree,
+        RegionId::ROOT,
+        Content::None,
+        Semantics {
+            role: Role::Table,
+            ..Semantics::default()
+        },
+    );
+    for row in 1..=rows {
+        let row_id = add(
+            &mut tree,
+            table,
+            Content::None,
+            Semantics {
+                role: Role::Row,
+                position: Some(SetPosition {
+                    index: row,
+                    size: rows,
+                }),
+                ..Semantics::default()
+            },
+        );
+        for column in 1..=columns {
+            add(
+                &mut tree,
+                row_id,
+                Content::Text(TextContent::new(format!("r{row}c{column}"))),
+                Semantics {
+                    role: Role::Cell,
+                    position: Some(SetPosition {
+                        index: column,
+                        size: columns,
+                    }),
+                    ..Semantics::default()
+                },
+            );
+        }
     }
     tree
 }
@@ -250,10 +351,38 @@ const CASES: &[Case] = &[
         },
     },
     Case {
+        name: "cjk_10k_lines_120x40",
+        // Measured 4_594_320 with `CompactRow` scrollback (before ADR 0022
+        // slice 5) + 5%, like the other budgets until slice 6 lowers them;
+        // history pages hold it in about half that.
+        budget: 4_824_000,
+        peak_budget: None,
+        run: || {
+            let input = cjk_lines(10_040);
+            measure(|| filled_terminal(120, 40, &input))
+        },
+    },
+    Case {
         name: "scene_tree_1000_regions",
         budget: 953_000,
         peak_budget: None,
         run: || measure(|| scene_tree(1000)),
+    },
+    Case {
+        // The table below without semantics, to price them.
+        name: "scene_table_1000x4_plain",
+        // Measured 3_730_192 on 2026-11-10 + 5%.
+        budget: 3_917_000,
+        peak_budget: None,
+        run: || measure(|| scene_table(1000, 4, false)),
+    },
+    Case {
+        name: "scene_table_1000x4_semantic",
+        // Measured 4_410_328 on 2026-11-10 + 5%: 680 KB more than plain
+        // for 5001 regions, about 136 bytes each.
+        budget: 4_631_000,
+        peak_budget: None,
+        run: || measure(|| scene_table(1000, 4, true)),
     },
 ];
 

@@ -4,6 +4,10 @@
 
 Accepted 2026-11-09, after the prototype gate in §Prototype passed in round 3 (below). The history of the gate follows. Accepting it adopts round 2's style layout: §1's bits 24..64 become one style key, either an inline style or a 24-bit table id, and the per-page style table interns approximately. The sgr-dense wall-clock cost (3.6–4.4% slower in C on the quiet machine, against +0.5% to +1.4% instructions) is explained in the perf note's "sgr-dense wall clock" section. The implementation should apply SGR directly to the style key rather than going through `Style::of`.
 
+Slice 4 (the screen page) shipped 2026-11-10 with one deviation: graphemes live in a store per slot, not one per page (§4; [perf note](../perf/2026-11-10-page-storage-slice4.md)).
+
+Slice 5 (history pages) meets every GO instruction and heap criterion on the real code, with one addition: a third history row form, Chars, for one-style rows without grapheme extras, which holds CJK in half its old memory instead of 1.7 times (§3; [perf note](../perf/2026-11-10-page-storage-slice5.md)). Its wall-clock criterion waits for slice 6's quiet-machine run.
+
 Proposed 2026-11-09. Not accepted until the prototype gate in §Prototype passes; if it fails, this ADR is recorded as Rejected together with the measurements.
 
 **Prototype measured 2026-11-09: not GO** ([2026-11-09-page-storage-prototype.md](../perf/2026-11-09-page-storage-prototype.md)). Variant C meets every GO criterion but one:
@@ -110,10 +114,11 @@ ScreenPage {
   cols, rows,
   cells:  Vec<PackedCell>      rows * cols, one allocation, slot s at s*cols..
   slots:  Vec<u16>             screen row r is shown by slot slots[r]
-  heads:  Vec<RowHead>         per slot: used u16, uniform style id u32, flags
-                               (wrapped, has_graphemes, uniform), RowMarks, AnchorTag
+  heads:  Vec<(RowHead, GraphemeStore)>
+                               per slot: used u16, uniform style id u32, flags
+                               (wrapped, has_graphemes, uniform), RowMarks, AnchorTag,
+                               and the slot's graphemes (§4)
   styles: StyleTable
-  graphemes: GraphemeStore     (§4)
 }
 ```
 
@@ -149,6 +154,8 @@ A row that scrolls off is appended to the newest page in one of two forms:
 - **Uniform ASCII:** its bytes, narrowed from the packed cells. Trailing spaces are trimmed when the style is the default, as today; otherwise the row is kept up to `used`. The style is interned once per row.
 - **Cells:** a memcpy of the used packed cells, then a style remap per cell (`remap[id]`, interning on a miss), then the row's grapheme extras appended after the cells as (col, count, chars).
 
+As built in slice 5, there is a third form, **Chars**: four bytes a cell (the codepoint and the width bits) in one style, for any row whose cells share a style and carry no grapheme extras. That is how CJK output arrives; as cells it would have cost 1.7 times its `CompactRow` (§9), and as chars the CJK memory case measures half of it. A non-uniform row that is still ASCII in one style (printed a character at a time) takes the ASCII form. Each page keeps its payloads in one typed vector per form, its own style list (the remap's target), and its rows' grapheme extras in a list of (column, len, start) entries; the remap is held by `History` for the newest page and keyed on the screen table's identity and generation. A row rewritten in place (an inline surface) appends its new payload and leaves the old as garbage, compacted once it outgrows the page's live payload.
+
 No per-row heap allocation happens in either case; pages come from `free` once history is full. Eviction stays per row (`front += 1`; a fully evicted page goes to `free`), so `max_history`, `evicted` and the anchor line numbering are unchanged. `row_at(i)` is O(1): page `(i + front) / 256`. `clear_history` and `set_max_history` drop pages or advance `front`.
 
 This is a deliberate departure from Ghostty. Ghostty's active area is the tail of the page list, so a scroll copies nothing. Here the screen stays in one hot page of fixed size (38 KB at 120x40, against 115 KB of 24-byte cells today), regions, IL and DL never span pages, and history is narrowed as it is written. The copy costs about 1 instruction per byte of input (§Expected gain). Keeping all history at 8 bytes per cell instead would break the memory budgets (§9).
@@ -157,7 +164,8 @@ This is a deliberate departure from Ghostty. Ghostty's active area is the tail o
 
 On both page kinds, the cell's grapheme bit says that extras exist.
 
-- **Screen page:** `GraphemeStore { index: Vec<(u32 cell, u32 start, u8 len)>, chars: Vec<char> }`, sorted by cell index, appended at the end in the common left-to-right case, and compacted when garbage exceeds the live chars. The 16-per-cell cap is unchanged.
+- **Screen page:** each slot owns a `GraphemeStore`: an index of (column, len, start) sorted by column, and one `Vec<char>` of runs. A codepoint is appended in place while its cluster is the last run, and garbage is compacted in place once it passes 32 codepoints and half the store. Erasing a row empties the store but keeps its capacity, so a reused row does not allocate. The 16-per-cell cap is unchanged.
+- **Why not one store per page.** This ADR first drew a single page-wide store sorted by cell index. Slice 4 built it and rejected it: after rotation a slot sits anywhere in cell order, so every insert or erase shifted the whole index. That cost vt/combining +105%, emoji-zwj +47% and unicode-mixed +36% in instructions, and appends never reached the compaction check, so the store only grew. The per-slot store came out at −10.3%, −7.2% and −0.3% against the baseline ([slice 4 note](../perf/2026-11-10-page-storage-slice4.md)).
 - **Write paths** test the bit on the cells they overwrite instead of calling into the map. That removes the per-character `drop_grapheme_entries` call the unicode note found expensive.
 - **History rows** carry their extras inline after their cells.
 - **`LastPrint` and `Tail`** are unchanged: they are screen coordinates.
@@ -288,7 +296,7 @@ Every slice is one or more small commits. After each one, all of these pass:
 1. **Read seam.** Add `RowView` over the current storage (a wrapper around `&Row` or a decoded `Row`). Port the renderer (`text.rs`, `panes.rs`, `mod.rs`, `overlays.rs`, `text_cache.rs`), `selected_text`, `control.rs`, app search and wait, `input.rs` and `pty_flood` to it, with `cell(col)` by value. No storage change; icount within ±1%.
 2. **Differential oracle.** Copy today's `Grid`, `Row`, `Buffer` and `CompactRow` into a `#[cfg(test)] grid::reference` module. Add a proptest that drives the `integrity.rs` stream strategies (both feed paths, plus resizes and scrollback-limit changes) through both implementations, comparing cursor, every visible row, every history row (cells, extras, wrapped, marks, anchors) and `history_len` after every step. It passes trivially at first and is the main safety net for slices 3–5.
 3. **Packed cells.** Row storage becomes `Vec<PackedCell>` plus a grid `StyleTable` with collection; mutation goes through `set_cell` / `update`; `uniform` replaces `plain`; `CompactRow::encode_from` reads packed cells, compares runs by style id, and leaves out the structural bits. `check_integrity` gains checks for id validity and the grapheme bit. Gate: the instruction cut is in the range the prototype measured for A.
-4. **Screen page.** `Grid.rows` becomes a `ScreenPage`. Scroll, IL, DL and regions become slot rotations; graphemes go into the `GraphemeStore`. Add a test that IL/DL/scroll allocate nothing, using the counting allocator pattern from `memory.rs`. Gate: scroll and scroll-region instruction cuts; kill rule if the cumulative pty_flood gain is under half of the prototype's prediction for these levers.
+4. **Screen page.** `Grid.rows` becomes a `ScreenPage`. Scroll, IL, DL and regions become slot rotations; graphemes go into a `GraphemeStore` per slot. Add a test that IL/DL/scroll allocate nothing, using the counting allocator pattern from `memory.rs`. Gate: scroll and scroll-region instruction cuts; kill rule if the cumulative pty_flood gain is under half of the prototype's prediction for these levers.
 5. **History pages.** `VecDeque<CompactRow>` becomes `History`: the uniform and cells row forms, per-row eviction, `RowView` over history rows, reflow and height resize written into pages, and heads for anchors and marks. The round-trip proptest now checks `push(row).view().to_row() == row` with the same generator, including the flags only direct edits create. Gate: all of the GO criteria, on the real code.
 6. **Cleanup.** Remove `CompactRow`, the `Cow<Row>` shims and the reference module. Regenerate the baselines and update the memory budgets downward, explaining why. Write `docs/perf/<date>-page-storage.md`, rerun the AWS T4 comparison (`compare.sh`, X11 and Wayland, against Ghostty), and update this ADR's status.
 
@@ -306,7 +314,7 @@ Every slice is one or more small commits. After each one, all of these pass:
 ## Open questions
 
 1. Should the scrollback limit become a byte budget, as Ghostty's is, rather than a line count, now that a row's size varies by about 10x between its forms? It would change configuration semantics.
-2. Is a third history row form (UTF-8 plus one style plus a wide bitmap) worth having for CJK memory?
+2. Is a third history row form (UTF-8 plus one style plus a wide bitmap) worth having for CJK memory? Answered for CJK by slice 5's Chars form (four bytes a cell, one style); emoji rows with grapheme extras still take the Cells form.
 3. Should the renderer cache gain a (page uid, slot, row version) fast path ahead of the content comparison, and is that safe for panes and the alternate screen?
 4. History page size: 256 rows, or a byte cap? How large should the free list be, and should `clear_history` return memory to the allocator?
 5. Should the write loop use explicit SIMD if autovectorisation does not happen, or is the scalar loop enough?

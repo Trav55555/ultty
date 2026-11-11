@@ -49,6 +49,12 @@ impl Backend {
         }
     }
 
+    /// The ANSI backend, whatever the terminal: for a pane where Ultty does
+    /// not draw native scenes (a split tab, spec §1.3).
+    pub fn ansi() -> Self {
+        Backend::Ansi(ansi::AnsiBackend::new())
+    }
+
     /// Initialize the backend.
     ///
     /// For native backends, if the connection fails, automatically falls back to ANSI.

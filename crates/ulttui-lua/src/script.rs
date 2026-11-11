@@ -40,8 +40,8 @@ impl From<mlua::Error> for ScriptError {
 /// How a script may run.
 #[derive(Debug, Clone)]
 pub struct ScriptOptions {
-    /// Whether `run{}` may start processes.
-    pub allow_exec: bool,
+    /// Which programs `run{}` may start.
+    pub exec: ExecGrant,
     /// Longest one call into the script (load, init, update, view) may take
     /// before it is stopped with an error.
     pub call_budget: Duration,
@@ -50,9 +50,96 @@ pub struct ScriptOptions {
 impl Default for ScriptOptions {
     fn default() -> Self {
         Self {
-            allow_exec: false,
+            exec: ExecGrant::Deny,
             call_budget: Duration::from_secs(1),
         }
+    }
+}
+
+/// What `run{}` may start (ADR 0024 §3). Fixed for the life of the script.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ExecGrant {
+    /// Nothing: every `run{}` is an error.
+    #[default]
+    Deny,
+    /// Command lines starting with one of these word lists, compared to
+    /// `argv` exactly as the script wrote it (`--exec 'ulttyctl --json
+    /// panes'`). A single word grants the program with any arguments, which
+    /// for `ulttyctl`, `git`, a shell or an interpreter is as good as
+    /// [`ExecGrant::Any`].
+    Only(Vec<Vec<String>>),
+    /// Anything (`--allow-exec`).
+    Any,
+}
+
+impl ExecGrant {
+    /// The words of one `--exec` grant: split on whitespace, with single or
+    /// double quotes keeping an argument together.
+    pub fn parse_grant(spec: &str) -> Result<Vec<String>, String> {
+        let mut words = Vec::new();
+        let mut word: Option<String> = None;
+        let mut quote: Option<char> = None;
+        for c in spec.chars() {
+            match (quote, c) {
+                (Some(q), c) if c == q => quote = None,
+                (Some(_), c) => word.get_or_insert_with(String::new).push(c),
+                (None, '\'' | '"') => {
+                    quote = Some(c);
+                    word.get_or_insert_with(String::new);
+                }
+                (None, c) if c.is_whitespace() => words.extend(word.take()),
+                (None, c) => word.get_or_insert_with(String::new).push(c),
+            }
+        }
+        if quote.is_some() {
+            return Err(format!("--exec {spec:?}: unbalanced quote"));
+        }
+        words.extend(word);
+        if words.is_empty() {
+            return Err("--exec needs a program".to_string());
+        }
+        Ok(words)
+    }
+
+    /// Whether `run{}` may start `argv` (as written).
+    pub fn allows(&self, argv: &[String]) -> bool {
+        match self {
+            ExecGrant::Deny => false,
+            ExecGrant::Only(prefixes) => prefixes.iter().any(|p| argv.starts_with(p)),
+            ExecGrant::Any => true,
+        }
+    }
+
+    /// The error `run{}` raises for a command line this grant does not
+    /// allow, naming the flag that would.
+    fn denial(&self, argv: &[String]) -> String {
+        let mut message = format!(
+            "{} is not allowed; open the script with --exec {}",
+            argv.join(" "),
+            quote_words(argv)
+        );
+        let mut notes = Vec::new();
+        if argv.len() > 1 {
+            notes.push("or a shorter prefix".to_string());
+        }
+        if let ExecGrant::Only(prefixes) = self {
+            if !prefixes.is_empty() {
+                let allowed: Vec<String> = prefixes.iter().map(|p| quote_words(p)).collect();
+                notes.push(format!("allowed: {}", allowed.join(", ")));
+            }
+        }
+        if !notes.is_empty() {
+            message.push_str(&format!(" ({})", notes.join("; ")));
+        }
+        message
+    }
+}
+
+/// `words` as one shell argument: bare for a single word, quoted otherwise.
+fn quote_words(words: &[String]) -> String {
+    match words {
+        [one] => one.clone(),
+        many => format!("'{}'", many.join(" ")),
     }
 }
 
@@ -173,7 +260,7 @@ impl Script {
         // versions (or another function's), past the per-load one.
         globals.raw_set("getfenv", Value::Nil)?;
         globals.raw_set("setfenv", Value::Nil)?;
-        install_api(&lua, &globals, options.allow_exec)?;
+        install_api(&lua, &globals, options.exec)?;
         // Freezes the globals and the libraries: scripts write to their own
         // environment (see `try_load`).
         lua.sandbox(true)?;
@@ -619,7 +706,7 @@ pub fn describe_error(error: &mlua::Error) -> String {
     }
 }
 
-fn install_api(lua: &Lua, globals: &Table, allow_exec: bool) -> mlua::Result<()> {
+fn install_api(lua: &Lua, globals: &Table, exec: ExecGrant) -> mlua::Result<()> {
     node::register(lua, globals)?;
 
     // The terminal is the UI: `print` goes to the log, with where it was called.
@@ -662,15 +749,13 @@ fn install_api(lua: &Lua, globals: &Table, allow_exec: bool) -> mlua::Result<()>
     globals.set(
         "run",
         lua.create_function(move |lua, spec: Value| {
-            if !allow_exec {
-                return Err(located(
-                    lua,
-                    "run: running processes is off; start ulttui-lua with --allow-exec",
-                ));
+            let command = parse_run(spec).map_err(|e| located(lua, format!("run: {e}")))?;
+            if let Command::Run { argv, .. } = &command {
+                if !exec.allows(argv) {
+                    return Err(located(lua, format!("run: {}", exec.denial(argv))));
+                }
             }
-            parse_run(spec)
-                .map(CommandHandle)
-                .map_err(|e| located(lua, format!("run: {e}")))
+            Ok(CommandHandle(command))
         })?,
     )?;
 

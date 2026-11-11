@@ -58,11 +58,27 @@ pub enum Role {
     Image = 19,
     /// A link.
     Link = 20,
+    /// A table of `Row`s.
+    Table = 21,
+    /// A row of a table; `position` gives its place among the table's
+    /// rows, header rows included, and `selected` marks the selected row.
+    Row = 22,
+    /// A cell of a table row; `position` gives its column.
+    Cell = 23,
+    /// A cell of a header row naming its column; `position` gives the
+    /// column.
+    ColumnHeader = 24,
+    /// A collapsible choice of one option, such as a dropdown: `value_text`
+    /// gives the chosen option and `expanded` whether its options show.
+    ComboBox = 25,
+    /// One option of a `ComboBox`; `position` gives its place, and
+    /// `selected` marks the one picking would choose.
+    Option = 26,
 }
 
 impl Role {
     /// Every role, in wire order.
-    pub const ALL: [Role; 21] = [
+    pub const ALL: [Role; 27] = [
         Role::Auto,
         Role::Group,
         Role::Text,
@@ -84,6 +100,12 @@ impl Role {
         Role::TreeItem,
         Role::Image,
         Role::Link,
+        Role::Table,
+        Role::Row,
+        Role::Cell,
+        Role::ColumnHeader,
+        Role::ComboBox,
+        Role::Option,
     ];
 
     /// The role with this wire value, if there is one.
@@ -115,6 +137,12 @@ impl Role {
             Role::TreeItem => "tree_item",
             Role::Image => "image",
             Role::Link => "link",
+            Role::Table => "table",
+            Role::Row => "row",
+            Role::Cell => "cell",
+            Role::ColumnHeader => "column_header",
+            Role::ComboBox => "combo_box",
+            Role::Option => "option",
         }
     }
 }
@@ -482,8 +510,9 @@ mod tests {
             assert_eq!(*role as u8 as usize, index);
             assert_eq!(Role::from_u8(index as u8), Some(*role));
         }
-        assert_eq!(Role::from_u8(21), None);
+        assert_eq!(Role::from_u8(27), None);
         assert_eq!(Role::Link as u8, 20);
+        assert_eq!(Role::Option as u8, 26);
     }
 
     #[test]

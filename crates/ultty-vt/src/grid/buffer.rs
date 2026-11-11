@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use super::history::{CompactRow, RowPacker};
+use super::history::{History, RowPacker};
 use super::{AnchorTag, Cell, CellFlags, Dimensions, Grid, Row, RowMarks, RowView};
 
 /// Default scrollback buffer size (lines).
@@ -58,9 +58,9 @@ struct AnchorEntry {
 pub struct Buffer {
     /// The visible grid
     grid: Grid,
-    /// Scrollback history (oldest first), in compact form so it stays small
-    /// enough to keep in cache; see [`CompactRow`].
-    history: VecDeque<CompactRow>,
+    /// Scrollback history (oldest first), in pages that store each row in
+    /// the smallest form that holds it; see [`History`].
+    history: History,
     /// Maximum history size
     max_history: usize,
     /// Current scroll offset (0 = at bottom, >0 = scrolled up)
@@ -87,26 +87,38 @@ pub struct Buffer {
     anchor_visits: std::cell::Cell<usize>,
 }
 
+/// The first row of anchor `anchor` is now line `line` (as numbered in
+/// [`AnchorEntry::first_line`]).
+#[cold]
+fn note_first_row(anchors: &mut [Option<AnchorEntry>], anchor: AnchorTag, line: usize) {
+    if let Some(Some(entry)) = anchors.get_mut(usize::from(anchor.tag()) - 1) {
+        entry.first_line = line;
+    }
+}
+
 /// A cell being re-wrapped, plus the extra codepoints of its grapheme.
 type ReflowCell = (Cell, Option<Vec<char>>);
 
-fn push_reflow_cells(line: &mut Vec<ReflowCell>, row: &Row) {
-    for (col, cell) in row.cells().enumerate() {
-        let extra = row.grapheme_extra(col as u16).map(<[char]>::to_vec);
-        line.push((*cell, extra));
+fn push_reflow_cells(line: &mut Vec<ReflowCell>, row: &RowView<'_>) {
+    for col in 0..row.width() {
+        let Some(cell) = row.cell(col) else {
+            break;
+        };
+        let extra = row.grapheme_extra(col).map(<[char]>::to_vec);
+        line.push((cell, extra));
     }
 }
 
 /// Where [`Buffer::reflow_all`] puts rewrapped rows: the last screenful
-/// whole, for the grid, and older rows compacted into history as they leave
-/// it, keeping at most `max_history`.
+/// whole, for the grid, and older rows appended to history pages as they
+/// leave it, keeping at most `max_history`.
 struct Rewrap {
     cols: u16,
     screen_rows: usize,
     max_history: usize,
-    history: VecDeque<CompactRow>,
+    history: History,
     screen: VecDeque<Row>,
-    /// Encodes the rows that go to history.
+    /// Packs the rows that go to history.
     packer: RowPacker,
     /// Rows made so far, including those dropped past the history limit.
     total: usize,
@@ -126,7 +138,7 @@ impl Rewrap {
             cols,
             screen_rows,
             max_history,
-            history: VecDeque::with_capacity(max_history.min(1000)),
+            history: History::default(),
             screen: VecDeque::with_capacity(screen_rows + 1),
             packer: RowPacker::new(),
             total: 0,
@@ -153,13 +165,10 @@ impl Rewrap {
                 return;
             };
             if self.max_history > 0 {
-                let mut compact = if self.history.len() >= self.max_history {
-                    self.history.pop_front().unwrap_or_default()
-                } else {
-                    CompactRow::default()
-                };
-                self.packer.encode(&old, &mut compact);
-                self.history.push_back(compact);
+                if self.history.len() >= self.max_history {
+                    self.history.pop_front();
+                }
+                self.history.push_row(&old, &mut self.packer);
             }
         }
     }
@@ -388,8 +397,15 @@ impl Buffer {
                 self.history.len()
             ));
         }
-        for (index, row) in self.history.iter().enumerate() {
-            row.decode()
+        self.history
+            .check_integrity(super::MAX_COMBINING_PER_CELL)?;
+        for index in 0..self.history.len() {
+            let row = self
+                .history
+                .row(index)
+                .ok_or_else(|| format!("history row {index} is missing"))?;
+            RowView::history(row)
+                .to_row()
                 .check_integrity(super::MAX_COMBINING_PER_CELL)
                 .map_err(|e| format!("history row {index}: {e}"))?;
         }
@@ -434,7 +450,7 @@ impl Buffer {
     pub fn with_scrollback(dims: Dimensions, max_history: usize) -> Self {
         Self {
             grid: Grid::new(dims),
-            history: VecDeque::with_capacity(max_history.min(1000)), // Pre-allocate reasonably
+            history: History::default(),
             max_history,
             scroll_offset: 0,
             anchors: Vec::new(),
@@ -501,26 +517,28 @@ impl Buffer {
 
     /// Copy the top `n` grid rows into history.
     ///
-    /// Once history is full, the evicted oldest row's allocation is reused
-    /// for the copy, so steady-state scrolling allocates nothing.
+    /// Once history is full, the oldest row is evicted for each one, and
+    /// pages freed that way are reused, so steady-state scrolling allocates
+    /// nothing.
     fn save_top_rows(&mut self, n: usize) {
         if self.max_history == 0 {
             return;
         }
         for index in 0..n.min(self.grid.dimensions().rows as usize) as u16 {
-            let Some(anchor) = self.grid.page.row(index).map(|row| row.anchor()) else {
+            let Some(row) = self.grid.page.row(index) else {
                 break;
             };
-            let mut row = if self.history.len() >= self.max_history {
+            if self.history.len() >= self.max_history {
                 self.evicted += 1;
-                self.history.pop_front().unwrap_or_default()
-            } else {
-                CompactRow::default()
-            };
-            self.note_row_to_history(anchor);
-            let screen_row = self.grid.page.row(index).expect("the row was read above");
-            row.encode_from(screen_row, &self.grid.styles);
-            self.history.push_back(row);
+                self.history.pop_front();
+            }
+            if row.anchor().is_first() {
+                // As `note_row_to_history`, on the fields the row does not
+                // borrow.
+                let line = self.evicted + self.history.len();
+                note_first_row(&mut self.anchors, row.anchor(), line);
+            }
+            self.history.push(row, &self.grid.styles);
         }
     }
 
@@ -531,23 +549,19 @@ impl Buffer {
         }
         let mut packer = RowPacker::new();
         for row in rows {
-            let mut compact = if self.history.len() >= self.max_history {
+            if self.history.len() >= self.max_history {
                 self.evicted += 1;
-                self.history.pop_front().unwrap_or_default()
-            } else {
-                CompactRow::default()
-            };
+                self.history.pop_front();
+            }
             self.note_row_to_history(row.anchor());
-            packer.encode(&row, &mut compact);
-            self.history.push_back(compact);
+            self.history.push_row(&row, &mut packer);
         }
     }
 
     /// Get a row at the given visual index (accounting for scroll).
     ///
-    /// Index 0 is the top of the visible area. Rows of the live grid are
-    /// borrowed; rows from scrollback are decoded, so hold the result only as
-    /// long as needed.
+    /// Index 0 is the top of the visible area. Screen and scrollback rows
+    /// alike are read in place.
     pub fn visible_row(&self, visual_index: u16) -> Option<RowView<'_>> {
         let total_history = self.history.len();
         let visible_rows = self.grid.dimensions().rows as usize;
@@ -560,9 +574,7 @@ impl Buffer {
 
             if absolute_index < total_history {
                 // This row is in history
-                self.history
-                    .get(absolute_index)
-                    .map(|row| RowView::owned(row.decode()))
+                self.history.row(absolute_index).map(RowView::history)
             } else {
                 // This row is in the visible grid
                 let grid_index = absolute_index - total_history;
@@ -582,13 +594,11 @@ impl Buffer {
     ///
     /// Index 0 is the oldest history row.
     /// Indices beyond history access the current grid.
-    /// Like [`Buffer::visible_row`], scrollback rows are decoded.
+    /// Like [`Buffer::visible_row`], scrollback rows are read in place.
     pub fn row_at(&self, absolute_index: usize) -> Option<RowView<'_>> {
         let history_len = self.history.len();
         if absolute_index < history_len {
-            self.history
-                .get(absolute_index)
-                .map(|row| RowView::owned(row.decode()))
+            self.history.row(absolute_index).map(RowView::history)
         } else {
             let grid_index = absolute_index - history_len;
             self.grid.row(grid_index as u16)
@@ -596,11 +606,11 @@ impl Buffer {
     }
 
     /// The shell marks of the row at `absolute_index` (as for
-    /// [`Buffer::row_at`]), without decoding a scrollback row.
+    /// [`Buffer::row_at`]), from the row's head.
     pub fn marks_at(&self, absolute_index: usize) -> Option<RowMarks> {
         let history_len = self.history.len();
         if absolute_index < history_len {
-            self.history.get(absolute_index).map(CompactRow::marks)
+            self.history.marks(absolute_index)
         } else {
             let grid_index = absolute_index - history_len;
             let row = u16::try_from(grid_index)
@@ -614,7 +624,7 @@ impl Buffer {
     /// [`Buffer::row_at`]) with those of `row`, as writing an inline
     /// surface does (ADR 0020). The row keeps its anchor tag and shell
     /// marks, does not wrap, and is clipped or padded to the buffer's
-    /// width; a scrollback row is re-encoded in place. Returns whether the
+    /// width; a scrollback row is rewritten in its page. Returns whether the
     /// row changed: one that already holds those cells, or that does not
     /// exist, is left alone.
     ///
@@ -628,16 +638,16 @@ impl Buffer {
         replaced.resize(cols);
         replaced.set_wrapped(false);
         if absolute_index < history_len {
-            let Some(compact) = self.history.get_mut(absolute_index) else {
+            let Some(old) = self.history.row(absolute_index) else {
                 return false;
             };
-            replaced.set_marks(compact.marks());
-            replaced.set_anchor(compact.anchor());
-            let old = compact.decode();
-            if old.same_content(&replaced) && !old.is_wrapped() {
+            replaced.set_marks(old.marks());
+            replaced.set_anchor(old.anchor());
+            if RowView::history(old).eq_row(&replaced) && !old.is_wrapped() {
                 return false;
             }
-            RowPacker::new().encode(&replaced, compact);
+            self.history
+                .replace(absolute_index, &replaced, &mut RowPacker::new());
         } else {
             let Ok(index) = u16::try_from(absolute_index - history_len) else {
                 return false;
@@ -694,13 +704,13 @@ impl Buffer {
     }
 
     /// The anchor tag of the row at `absolute_index` (as for
-    /// [`Buffer::row_at`]), without decoding a scrollback row.
+    /// [`Buffer::row_at`]), from the row's head.
     pub fn anchor_at(&self, absolute_index: usize) -> Option<AnchorTag> {
         #[cfg(test)]
         self.anchor_visits.set(self.anchor_visits.get() + 1);
         let history_len = self.history.len();
         if absolute_index < history_len {
-            self.history.get(absolute_index).map(CompactRow::anchor)
+            self.history.anchor(absolute_index)
         } else {
             let grid_index = absolute_index - history_len;
             let row = u16::try_from(grid_index)
@@ -886,11 +896,7 @@ impl Buffer {
                 }),
         );
         self.anchors.clear();
-        for compact in &mut self.history {
-            if !compact.anchor().is_none() {
-                compact.set_anchor(AnchorTag::NONE);
-            }
-        }
+        self.history.clear_anchors();
         self.strip_grid_tags(|_| true);
         live
     }
@@ -907,10 +913,8 @@ impl Buffer {
         for line in start..end {
             #[cfg(test)]
             self.anchor_visits.set(self.anchor_visits.get() + 1);
-            if let Some(compact) = self.history.get_mut(line) {
-                if compact.anchor().tag() == tag {
-                    compact.set_anchor(AnchorTag::NONE);
-                }
+            if self.history.anchor(line).is_some_and(|a| a.tag() == tag) {
+                self.history.set_anchor(line, AnchorTag::NONE);
             }
         }
         self.strip_grid_tags(|t| t == tag);
@@ -971,12 +975,9 @@ impl Buffer {
     /// A row tagged `anchor` is about to become scrollback line
     /// `history.len()`: if it is a first row, that is where its anchor is.
     fn note_row_to_history(&mut self, anchor: AnchorTag) {
-        if !anchor.is_first() {
-            return;
-        }
-        let line = self.evicted + self.history.len();
-        if let Some(Some(entry)) = self.anchors.get_mut(usize::from(anchor.tag()) - 1) {
-            entry.first_line = line;
+        if anchor.is_first() {
+            let line = self.evicted + self.history.len();
+            note_first_row(&mut self.anchors, anchor, line);
         }
     }
 
@@ -1030,7 +1031,7 @@ impl Buffer {
     pub fn set_max_history(&mut self, max_history: usize) -> usize {
         self.max_history = max_history;
         let excess = self.history.len().saturating_sub(max_history);
-        self.history.drain(..excess);
+        self.history.drop_front(excess);
         self.evicted += excess;
         self.scroll_offset = self.scroll_offset.min(self.history.len());
         excess
@@ -1091,11 +1092,11 @@ impl Buffer {
             if rows_to_pull > 0 {
                 // Pull from end of history (most recent)
                 let start = self.history.len() - rows_to_pull;
-                let pulled: Vec<Row> = self
-                    .history
-                    .drain(start..)
-                    .map(|r| CompactRow::decode(&r))
+                let pulled: Vec<Row> = (start..self.history.len())
+                    .filter_map(|index| self.history.row(index))
+                    .map(|row| RowView::history(row).to_row())
                     .collect();
+                self.history.truncate(start);
                 // Insert at beginning of grid
                 self.grid.prepend_rows(pulled);
                 self.unsettle_anchors();
@@ -1113,8 +1114,9 @@ impl Buffer {
         let old_cursor_col = self.grid.cursor().position.col as usize;
 
         // Each logical line is rewrapped as soon as it is complete, and rows
-        // older than a screenful are compacted into history as they are
-        // made, so the scrollback is never held decoded all at once.
+        // older than a screenful go to new history pages as they are made,
+        // while the old pages are freed as their rows are read, so the
+        // scrollback is never held unpacked all at once.
         let mut out = Rewrap::new(new_dims.cols, new_rows, self.max_history);
 
         // Each cell carries the extra codepoints of its grapheme cluster so
@@ -1138,15 +1140,15 @@ impl Buffer {
             }
         };
 
-        for compact in std::mem::take(&mut self.history) {
-            let row = compact.decode();
+        std::mem::take(&mut self.history).drain(|row| {
+            let row = RowView::history(row);
             if runs.keep(row.anchor()) {
                 finish_open(&mut out, &mut current_line, &mut current_marks, &mut open);
-                let made = out.finish_tagged(&row);
+                let made = out.finish_tagged(&row.to_row());
                 if row.anchor().is_first() {
                     runs.placed(row.anchor().tag(), made);
                 }
-                continue;
+                return;
             }
             // Laid out as text from its cells, so a stale tag goes with it.
             push_reflow_cells(&mut current_line, &row);
@@ -1155,7 +1157,7 @@ impl Buffer {
             if !open {
                 out.finish_line(&mut current_line, std::mem::take(&mut current_marks));
             }
-        }
+        });
 
         // Grid rows, skipping trailing blank ones. A blank row with shell
         // marks (output that has not started yet) or an anchor tag (a
@@ -1193,7 +1195,7 @@ impl Buffer {
             if idx == old_cursor_row {
                 out.set_cursor(current_line.len() + old_cursor_col);
             }
-            push_reflow_cells(&mut current_line, row);
+            push_reflow_cells(&mut current_line, &RowView::from(row));
             current_marks = current_marks.or(row.marks());
             open = row.is_wrapped();
             if !open {
@@ -1441,8 +1443,8 @@ mod tests {
         assert_eq!(buf.history_len(), 20);
         assert_eq!(buf.max_history(), 20);
         // Line 30 is now the oldest.
-        assert_eq!(buf.history[0].decode()[0].char(), '0');
-        assert_eq!(buf.history[1].decode()[0].char(), '1');
+        assert_eq!(buf.row_at(0).unwrap().cell(0).unwrap().char(), '0');
+        assert_eq!(buf.row_at(1).unwrap().cell(0).unwrap().char(), '1');
         assert_eq!(buf.scroll_offset(), 20);
         assert!(buf.check_integrity().is_ok());
 
@@ -1470,7 +1472,7 @@ mod tests {
         buf.write_ascii_span(b"abcdef");
 
         assert_eq!(buf.history_len(), 1);
-        assert_eq!(buf.history[0].decode()[0].char(), 'A');
+        assert_eq!(buf.row_at(0).unwrap().cell(0).unwrap().char(), 'A');
         assert_eq!(buf.grid().row(0).unwrap().text(), "abcde");
         assert_eq!(buf.grid().row(1).unwrap().text_trimmed(), "f");
     }
@@ -1546,8 +1548,9 @@ mod tests {
             buf.newline();
         }
         assert_eq!(buf.history_len(), DEFAULT_SCROLLBACK);
-        // Measured 2026-11-06: 2.42 MB, about 240 bytes a line.
-        let bytes: usize = buf.history.iter().map(CompactRow::footprint).sum();
+        // Measured 2026-11-06: 2.42 MB, about 240 bytes a line, as
+        // `CompactRow`s; 2026-11-10 in pages: see the memory bench.
+        let bytes = buf.history.heap_bytes();
         let full_rows = DEFAULT_SCROLLBACK * 300 * std::mem::size_of::<Cell>();
         assert!(
             bytes * 20 < full_rows,
@@ -1676,7 +1679,7 @@ mod tests {
 
         // First row should be in history now
         assert_eq!(buf.history_len(), 1);
-        assert_eq!(buf.history[0].decode()[0].char(), 'A');
+        assert_eq!(buf.row_at(0).unwrap().cell(0).unwrap().char(), 'A');
 
         // Grid first row should be empty
         assert_eq!(buf.grid().cell(0, 0).unwrap().char(), ' ');
@@ -1807,8 +1810,8 @@ mod tests {
 
         // Top 2 rows (A, B) should move to history
         assert_eq!(buf.history_len(), 2);
-        assert_eq!(buf.history[0].decode()[0].char(), 'A');
-        assert_eq!(buf.history[1].decode()[0].char(), 'B');
+        assert_eq!(buf.row_at(0).unwrap().cell(0).unwrap().char(), 'A');
+        assert_eq!(buf.row_at(1).unwrap().cell(0).unwrap().char(), 'B');
 
         // Grid should have C, D, E - cell() takes (col, row)
         assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'C');
@@ -1928,7 +1931,7 @@ mod tests {
         buf.write_char('Y');
 
         assert_eq!(buf.history_len(), 1);
-        assert_eq!(buf.history[0].decode()[0].char(), '0');
+        assert_eq!(buf.row_at(0).unwrap().cell(0).unwrap().char(), '0');
         assert_eq!(buf.grid().cell(0, 0).unwrap().char(), '1');
     }
 
@@ -1956,7 +1959,7 @@ mod tests {
         );
 
         // First history row should start with 'A'
-        assert_eq!(buf.history[0].decode()[0].char(), 'A');
+        assert_eq!(buf.row_at(0).unwrap().cell(0).unwrap().char(), 'A');
     }
 
     #[test]

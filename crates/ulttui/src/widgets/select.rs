@@ -9,11 +9,16 @@ use ratatui::Frame;
 use super::{FocusAction, View};
 use crate::event::{Key, KeyEvent};
 use crate::theme::{to_ratatui_color, Theme};
+use ultty_protocol::{
+    AppMessage, Constraints, Content, Dimension, Display, Expanded, FlexDirection, RegionId, Role,
+    Semantics, SetPosition, TextContent,
+};
 
 /// A select widget with a list of options.
 ///
 /// When collapsed, shows `▼ selected_option`.
-/// When expanded, shows all options with a cursor and selection marker.
+/// When expanded, shows all options with a cursor and selection marker;
+/// natively each option is a region of its own.
 #[derive(Debug)]
 pub struct Select {
     options: Vec<String>,
@@ -84,25 +89,28 @@ impl Select {
     pub fn is_expanded(&self) -> bool {
         self.expanded
     }
+
+    /// The line drawn for option `index` while expanded: the cursor, the
+    /// mark of the selected option, the option.
+    fn option_line(&self, index: usize, option: &str) -> String {
+        let cursor = if index == self.cursor { "> " } else { "  " };
+        let mark = if index == self.selected { "* " } else { "  " };
+        format!("{cursor}{mark}{option}")
+    }
 }
 
 impl View for Select {
-    /// A list, collapsed or expanded, whose value is the selected option
-    /// and its place among the options.
-    fn semantics(&self) -> ultty_protocol::Semantics {
-        let position = (!self.options.is_empty()).then(|| ultty_protocol::SetPosition {
-            index: self.selected as u32 + 1,
-            size: self.options.len() as u32,
-        });
-        self.accessible.apply(ultty_protocol::Semantics {
-            role: ultty_protocol::Role::List,
+    /// A combo box whose value is the selected option, expanded or not;
+    /// its options are its children while it is expanded.
+    fn semantics(&self) -> Semantics {
+        self.accessible.apply(Semantics {
+            role: Role::ComboBox,
             expanded: if self.expanded {
-                ultty_protocol::Expanded::Expanded
+                Expanded::Expanded
             } else {
-                ultty_protocol::Expanded::Collapsed
+                Expanded::Collapsed
             },
             value_text: Some(self.selected_value().to_string()),
-            position,
             ..Default::default()
         })
     }
@@ -122,28 +130,107 @@ impl View for Select {
         ultty_protocol::Style::new().fg(fg)
     }
 
-    fn content(&self) -> ultty_protocol::Content {
+    /// The selected option while collapsed; nothing while expanded, when
+    /// the options are child regions.
+    fn content(&self) -> Content {
+        if self.expanded {
+            return Content::None;
+        }
         let is_focused = super::is_widget_focused(self.widget_id());
         let focus_prefix = if is_focused { ">> " } else { "" };
-        let text = if self.expanded {
-            let mut lines = Vec::new();
-            for (i, option) in self.options.iter().enumerate() {
-                let cursor = if i == self.cursor { "> " } else { "  " };
-                let mark = if i == self.selected { "* " } else { "  " };
-                lines.push(format!("{}{}{}", cursor, mark, option));
-            }
-            lines.join("\n")
-        } else {
-            let selected_text = self.selected_value();
-            format!("{}\u{25bc} {}", focus_prefix, selected_text)
-        };
-
-        ultty_protocol::Content::Text(ultty_protocol::TextContent {
-            text,
+        Content::Text(TextContent {
+            text: format!("{}\u{25bc} {}", focus_prefix, self.selected_value()),
             wrap: ultty_protocol::TextWrap::None,
             align: ultty_protocol::TextAlign::Left,
             overflow: ultty_protocol::TextOverflow::Clip,
         })
+    }
+
+    fn children_count(&self) -> usize {
+        if self.expanded {
+            self.options.len()
+        } else {
+            0
+        }
+    }
+
+    /// Option `index`, while expanded: an `Option` region named by the
+    /// option, with its place among the options and `selected` on the one
+    /// under the cursor, which Enter would choose (the combo box's value
+    /// stays the chosen one until then). The line drawn in it is hidden
+    /// so the option is not read twice.
+    fn render_child_native(
+        &self,
+        index: usize,
+        send_message: &mut dyn FnMut(&AppMessage) -> crate::Result<()>,
+        parent: RegionId,
+        next_id: &mut u32,
+    ) -> crate::Result<Option<RegionId>> {
+        let Some(option) = self.options.get(index).filter(|_| self.expanded) else {
+            return Ok(None);
+        };
+        let wire = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let under_cursor = index == self.cursor;
+        // The option under the cursor is highlighted across the row, as
+        // a `List`'s selected row is.
+        let (row_style, line_style) = if under_cursor {
+            let theme = Theme::current();
+            let highlight = ultty_protocol::Style::new()
+                .fg(theme.selection.fg)
+                .bg(theme.selection.bg)
+                .bold();
+            (highlight.clone(), highlight)
+        } else {
+            (ultty_protocol::Style::default(), self.style())
+        };
+
+        let option_id = RegionId::new(*next_id);
+        *next_id += 1;
+        send_message(&AppMessage::CreateRegion {
+            id: option_id,
+            parent,
+            insert_index: -1,
+            constraints: Constraints {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                width: Dimension::Percent(100.0),
+                height: Dimension::Cells(1.0),
+                ..Default::default()
+            },
+            style: row_style,
+        })?;
+        let semantics = Semantics {
+            role: Role::Option,
+            label: Some(option.clone()),
+            position: Some(SetPosition {
+                index: wire(index + 1),
+                size: wire(self.options.len()),
+            }),
+            selected: under_cursor,
+            ..Semantics::default()
+        };
+        super::send_semantics(send_message, option_id, semantics, &Content::None)?;
+
+        let line_id = RegionId::new(*next_id);
+        *next_id += 1;
+        send_message(&AppMessage::CreateRegion {
+            id: line_id,
+            parent: option_id,
+            insert_index: -1,
+            constraints: Constraints::default(),
+            style: line_style,
+        })?;
+        let content = Content::Text(TextContent::new(self.option_line(index, option)));
+        let hidden = Semantics {
+            hidden: true,
+            ..Semantics::default()
+        };
+        super::send_semantics(send_message, line_id, hidden, &content)?;
+        send_message(&AppMessage::SetContent {
+            id: line_id,
+            content,
+        })?;
+        Ok(Some(option_id))
     }
 
     fn is_focusable(&self) -> bool {
@@ -199,8 +286,6 @@ impl View for Select {
         if self.expanded {
             let mut lines = Vec::new();
             for (i, option) in self.options.iter().enumerate() {
-                let cursor = if i == self.cursor { "> " } else { "  " };
-                let mark = if i == self.selected { "* " } else { "  " };
                 let style = if i == self.cursor {
                     Style::default()
                         .fg(to_ratatui_color(theme.selection.fg))
@@ -208,7 +293,7 @@ impl View for Select {
                 } else {
                     Style::default().fg(to_ratatui_color(theme.control.fg))
                 };
-                lines.push(Line::styled(format!("{}{}{}", cursor, mark, option), style));
+                lines.push(Line::styled(self.option_line(i, option), style));
             }
             let paragraph = Paragraph::new(lines);
             frame.render_widget(paragraph, area);
@@ -402,25 +487,114 @@ mod tests {
         assert!(matches!(result, Some(FocusAction::Previous)));
     }
 
-    #[test]
-    fn expanded_content_shows_all_options() {
-        let mut s = Select::new(sample_options());
-        let enter = KeyEvent {
-            key: Key::Enter,
+    fn key(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
             modifiers: crate::event::Modifiers::default(),
             focused_id: None,
-        };
-        s.on_key(&enter);
-        assert!(s.is_expanded());
-
-        match s.content() {
-            ultty_protocol::Content::Text(tc) => {
-                assert!(tc.text.contains("Red"));
-                assert!(tc.text.contains("Green"));
-                assert!(tc.text.contains("Blue"));
-            }
-            _ => panic!("Expected Text content"),
         }
+    }
+
+    /// The text drawn by each region and the semantics sent for it, in
+    /// the order a native render sends them.
+    fn native(s: &Select) -> (Vec<String>, Vec<(u32, Semantics)>) {
+        let mut texts = Vec::new();
+        let mut semantics = Vec::new();
+        for message in crate::widgets::render_view_messages(s).unwrap() {
+            match message {
+                AppMessage::SetContent {
+                    content: Content::Text(text),
+                    ..
+                } => texts.push(text.text),
+                AppMessage::SetSemantics {
+                    id,
+                    semantics: sent,
+                } => semantics.push((id.0, sent)),
+                _ => {}
+            }
+        }
+        (texts, semantics)
+    }
+
+    #[test]
+    fn collapsed_native_is_one_combo_box_valued_by_the_selection() {
+        let s = Select::new(sample_options()).selected(1).label("Colour");
+        let (texts, semantics) = native(&s);
+        assert_eq!(texts, ["\u{25bc} Green"]);
+        assert_eq!(semantics.len(), 1, "no option regions while collapsed");
+        let (id, combo) = &semantics[0];
+        assert_eq!(*id, 1);
+        assert_eq!(combo.role, Role::ComboBox);
+        assert_eq!(combo.label.as_deref(), Some("Colour"));
+        assert_eq!(combo.value_text.as_deref(), Some("Green"));
+        assert_eq!(combo.expanded, Expanded::Collapsed);
+    }
+
+    #[test]
+    fn expanded_native_highlights_the_option_under_the_cursor() {
+        let theme = Theme::dark();
+        Theme::set_current(theme.clone());
+        let mut s = Select::new(sample_options());
+        s.on_key(&key(Key::Enter));
+        s.on_key(&key(Key::Down));
+        // Regions 2, 4 and 6 are the option rows (each with its line).
+        let backgrounds: Vec<_> = crate::widgets::render_view_messages(&s)
+            .unwrap()
+            .into_iter()
+            .filter_map(|message| match message {
+                AppMessage::CreateRegion { id, style, .. } if [2, 4, 6].contains(&id.0) => {
+                    Some(style.bg)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(backgrounds, [None, Some(theme.selection.bg), None]);
+    }
+
+    #[test]
+    fn expanded_native_draws_each_option_in_an_option_region() {
+        let mut s = Select::new(sample_options()).selected(1);
+        s.on_key(&key(Key::Enter));
+        s.on_key(&key(Key::Down));
+        assert!(s.is_expanded());
+        let (texts, semantics) = native(&s);
+        assert_eq!(texts, ["    Red", "  * Green", ">   Blue"]);
+
+        let (_, combo) = &semantics[0];
+        assert_eq!(combo.role, Role::ComboBox);
+        assert_eq!(combo.expanded, Expanded::Expanded);
+        assert_eq!(
+            combo.value_text.as_deref(),
+            Some("Green"),
+            "the value is the chosen option until Enter"
+        );
+        let options: Vec<_> = semantics
+            .iter()
+            .filter(|(_, semantics)| semantics.role == Role::Option)
+            .map(|(_, option)| {
+                (
+                    option.label.as_deref().unwrap_or_default(),
+                    option
+                        .position
+                        .map(|position| (position.index, position.size)),
+                    option.selected,
+                )
+            })
+            .collect();
+        assert_eq!(
+            options,
+            [
+                ("Red", Some((1, 3)), false),
+                ("Green", Some((2, 3)), false),
+                ("Blue", Some((3, 3)), true),
+            ],
+            "the option under the cursor is the selected one"
+        );
+        let hidden_lines = semantics
+            .iter()
+            .filter(|(_, semantics)| semantics.hidden)
+            .count();
+        assert_eq!(hidden_lines, 3, "the drawn lines are not read again");
     }
 
     #[test]

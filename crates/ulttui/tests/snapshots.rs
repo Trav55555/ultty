@@ -6,7 +6,7 @@
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
-use ulttui::event::{Event, Modifiers, MouseEvent, MouseEventKind};
+use ulttui::event::{Event, Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
 use ulttui::widgets::{
     Badge, Button, Card, Checkbox, Collapsible, Column, DiffView, Divider, DockLayout, Image,
     Inset, List, MarkdownView, Modal, ProgressBar, Row, ScrollView, Section, Select, Spacer,
@@ -502,6 +502,18 @@ fn snapshot_markdown_basic() {
     insta::assert_snapshot!(output);
 }
 
+/// A loose list (blank lines between items): each item's first paragraph
+/// is on its bullet's line, a second paragraph after it; tasks draw their
+/// checkbox.
+#[test]
+fn snapshot_markdown_loose_list() {
+    let md = MarkdownView::new(
+        "- First item\n\n- Second item\n\n  More about it.\n\n- [x] A task done\n\n1. One\n\n2. [ ] Two",
+    );
+    let output = render_to_string(&md, 40, 8);
+    insta::assert_snapshot!(output);
+}
+
 #[test]
 fn snapshot_markdown_streaming() {
     let md = MarkdownView::new("Partial **markdown** response").streaming(true);
@@ -563,6 +575,17 @@ fn snapshot_widget_semantics() {
             "Select",
             Box::new(Select::new(vec!["a".into(), "b".into()]).label("Letter")),
         ),
+        ("Select+expanded", {
+            let mut select = Select::new(vec!["a".into(), "b".into()])
+                .label("Letter")
+                .selected(1);
+            select.on_key(&KeyEvent {
+                key: Key::Enter,
+                modifiers: Modifiers::default(),
+                focused_id: None,
+            });
+            Box::new(select)
+        }),
         (
             "List",
             Box::new(List::new().items(vec!["one", "two"]).label("Numbers")),
@@ -584,8 +607,8 @@ fn snapshot_widget_semantics() {
             "Table",
             Box::new(
                 Table::new()
-                    .headers(vec!["Name"])
-                    .rows(vec![vec!["Ada"], vec!["Linus"]]),
+                    .headers(vec!["Name", "Age"])
+                    .rows(vec![vec!["Ada", "36"], vec!["Linus", "28"]]),
             ),
         ),
         (

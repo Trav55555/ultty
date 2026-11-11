@@ -17,7 +17,8 @@ slot lookup: cjk +1.7%, cursor-redraw +2.1%, alt-screen +1.8%, sgr-dense
 workstation puts the cumulative ascii gain since before slice 3 at +24.7%
 (paired median, IQR +8% to +53%): the kill rule, at its strictest reading
 (half of C's +44.8%), does not fire, but the spread is too wide to call
-that confirmed.
+that confirmed. The [quiet-machine rerun](#quiet-machine-rerun) settles
+it: +33.1% (95% CI +33.0% to +33.1%), so the rule does not fire.
 
 ## What was built
 
@@ -250,3 +251,77 @@ wall-clock change at a few percent either way.
 Ryzen 5 7600 (6 cores, 12 threads), Ubuntu 26.04.1, Linux 7.0.0-42,
 rustc 1.98.1, valgrind 3.27.1, release profile. Shared workstation; the
 1-minute load was 35–60 throughout.
+
+## Quiet-machine rerun
+
+The `pty_flood` comparison above, rerun on an idle machine to settle the
+kill rule. Same method, with sgr-dense added.
+
+- AWS c7a.2xlarge (AMD EPYC 9R14, 8 vCPUs, no SMT), us-east-1, on demand,
+  as in the prototype's [third round](2026-11-09-page-storage-prototype.md#third-round-quiet-machine).
+  Ubuntu 26.04.1, kernel 7.0.0-1016-aws, rustc 1.98.1. No cpufreq
+  interface; not pinned.
+- Three bench binaries, built on the instance with
+  `cargo bench --locked -p ultty --bench pty_flood --no-run` from `git
+  archive` of `ad6a334` (before slice 3), `da60b34` (slice 3 plus the CJK
+  print path) and `1837151` (`main`, this slice merged).
+- The harness as above: every arm once per corpus per round, the order
+  reversed on even rounds, criterion's 10 samples per run (1 s warm-up,
+  3 s measurement). Three batches of 15 rounds over ascii, cjk and
+  sgr-dense, 45 rounds in all, after one discarded trial round.
+- Quiet: the timers that could fire (sysstat, apt, man-db, fwupd, fstrim,
+  tmpfiles, update-notifier, motd-news, dpkg-db-backup, logrotate,
+  e2scrub), snapd and unattended-upgrades were stopped. The 1-minute load
+  was 0.82 before the first batch and 0.82 to 1.83 during the runs, which
+  is the harness itself.
+
+| corpus | arm | median MiB/s | IQR / median | range |
+|---|---|---:|---:|---:|
+| ascii | before slice 3 | 164.6 | 0.0% | 164.6–164.7 |
+| ascii | slice 3 + CJK | 202.3 | 2.6% | 197.3–214.3 |
+| ascii | `main` | 219.1 | 0.0% | 217.8–219.1 |
+| cjk | before slice 3 | 60.1 | 0.0% | 55.1–60.1 |
+| cjk | slice 3 + CJK | 73.1 | 0.7% | 70.5–73.4 |
+| cjk | `main` | 73.4 | 0.0% | 73.1–73.4 |
+| sgr-dense | before slice 3 | 86.1 | 0.0% | 83.2–86.1 |
+| sgr-dense | slice 3 + CJK | 82.4 | 0.0% | 82.4–82.5 |
+| sgr-dense | `main` | 82.5 | 0.0% | 80.8–82.5 |
+
+"0.0%" is under 0.05%: those arms ran within a few hundredths of a MiB/s
+of each other in nearly every round. The slice-3 arm on ascii is the only
+one that wanders, between about 197 and 214 MiB/s from round to round.
+
+Paired per-round ratios, 45 rounds: median and 95% percentile bootstrap
+interval over rounds (10,000 resamples).
+
+| corpus | `main` / before slice 3 | `main` / slice 3 + CJK | slice 3 + CJK / before slice 3 |
+|---|---|---|---|
+| ascii | **1.331** (1.330–1.331) | 1.077 (1.066–1.088) | 1.229 (1.223–1.248) |
+| cjk | 1.222 (1.222–1.222) | 1.004 (1.000–1.004) | 1.217 (1.217–1.222) |
+| sgr-dense | 0.958 (0.958–0.958) | 1.000 (1.000–1.000) | 0.958 (0.958–0.958) |
+
+| batch | 1-min load before → after | `main` / before slice 3: ascii, cjk, sgr-dense |
+|---|---|---|
+| 1 | 0.82 → 1.34 | 1.330, 1.222, 0.958 |
+| 2 | 1.34 → 1.34 | 1.331, 1.222, 0.958 |
+| 3 | 1.34 → 1.69 | 1.330, 1.222, 0.958 |
+
+### The kill rule, settled
+
+The cumulative ascii gain since before slice 3 is **+33.1%** (95% CI
++33.0% to +33.1%), against the strictest threshold of +22.4% (half of
+C's +44.8%). **The kill rule does not fire**, and the whole interval
+clears the threshold by more than ten points; every batch agrees to
+0.1%. Slices 3 and 4 have delivered 74% of the gain the prototype's full
+design predicted, with history pages (slice 5) still to come.
+
+The workstation's +24.7% understated the gain, and its slice-4 increment
+(+15.7% ascii, −3.4% cjk) was noise in both directions. On the quiet
+machine slice 4 is worth +7.7% on ascii (CI +6.6% to +8.8%), more than its
+5.5% instruction cut, and nothing measurable on cjk (+0.4%) or sgr-dense
+(0.0%), where the instruction counts had predicted +1.7% and +1.0%.
+
+sgr-dense is 4.2% slower than before slice 3, all of it from slice 3.
+That is the prototype's C result again (about 4% slower in time on
+sgr-dense), whose causes are in the prototype note's sgr-dense section.
+It does not bear on this kill rule, which is about ascii.

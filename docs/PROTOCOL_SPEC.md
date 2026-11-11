@@ -529,7 +529,7 @@ An unknown `role`, `live`, `toggled` or `expanded` value, a flag bit outside `0x
 
 Out-of-range numbers are accepted and clamped when the tree is exposed: a `position` index is clamped to `1..=size`, a `value` with `min > max` is treated as having no known range, and otherwise `now` is clamped into `[min, max]`. Relationship targets are not checked: apps create regions in any order inside a frame, and a target that does not exist is ignored when the tree is exposed.
 
-`busy` marks work in progress; `hidden` leaves the region and its subtree out of the accessibility tree (decorative dividers, spacers); `atomic` asks for the whole region to be announced when part of it changes; `modal` marks a `Dialog` that blocks the rest of the app; `selected` marks the chosen item of a set (the active `Tab`, the selected `ListItem`, `TreeItem` or table row). A `Tab`, `ListItem` or `TreeItem` without it is exposed as selectable but not selected; other roles expose no selection state unless it is set.
+`busy` marks work in progress; `hidden` leaves the region and its subtree out of the accessibility tree (decorative dividers, spacers); `atomic` asks for the whole region to be announced when part of it changes; `modal` marks a `Dialog` that blocks the rest of the app; `selected` marks the chosen item of a set (the active `Tab`, the selected `ListItem`, `TreeItem`, `Row` or `Option`). A `Tab`, `ListItem`, `TreeItem` or `Option` without it is exposed as selectable but not selected, as is a `Row` of a `Table` one of whose rows is selected; other roles expose no selection state unless it is set.
 
 Roles form a closed set. Each maps to an AccessKit role when the terminal exposes the tree:
 
@@ -556,6 +556,12 @@ Roles form a closed set. Each maps to an AccessKit role when the terminal expose
 | 18 | `TreeItem` | `TreeItem`, with `expanded`, `level` and `selected` |
 | 19 | `Image` | `Image`; the label is the alt text |
 | 20 | `Link` | `Link` |
+| 21 | `Table` | `Table`, with its row and column counts: its `Row` children, and the most `Cell` and `ColumnHeader` children of one of them |
+| 22 | `Row` | `Row`; `position` is its row index (header rows count), and `selected` marks the selected row |
+| 23 | `Cell` | `Cell`; `position` is its column index |
+| 24 | `ColumnHeader` | `ColumnHeader`; `position` is its column index |
+| 25 | `ComboBox` | `ComboBox`, with `value_text` (the chosen option) and `expanded`; its `Option` children are its options |
+| 26 | `Option` | `ListBoxOption`, with `position` and `selected` |
 
 Adding a role is additive; removing one is not.
 
@@ -668,6 +674,7 @@ Supply row and column track vectors and place children with start/end `GridLine`
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.1.0-draft | 2026-11-10 | Roles `Table`, `Row`, `Cell`, `ColumnHeader`, `ComboBox` and `Option` (21 to 26), section 10.5 (ADR 0021) |
 | 0.1.0-draft | 2026-11-10 | `CAP_INPUT_CURSOR` (`0x0400`) and the input widget's caret, widget tag 7, section 8.4 |
 | 0.1.0-draft | 2026-11-08 | `CreateSurface` (`0x0015`), `CloseSurface` (`0x0016`), `SurfaceEvent` (terminal `0x0026`) and `CAP_INLINE_SURFACES` (`0x0100`), section 10.6 (ADR 0020) |
 | 0.1.0-draft | 2026-11-08 | `SetSemantics` (`0x0026`) and `CAP_SEMANTICS` (`0x0200`), section 10.5 (ADR 0021) |

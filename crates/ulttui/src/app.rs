@@ -260,9 +260,16 @@ struct SubCollectCtx<'a, M> {
 }
 
 impl<A: Application> App<A> {
-    /// Create a new app runner.
+    /// Create a new app runner on the backend [`Backend::detect`] picks.
     pub fn new(app: A) -> Self {
         Self::with_backend(app, Backend::detect())
+    }
+
+    /// Create a new app runner on `backend` instead of detecting one:
+    /// [`Backend::ansi`] to draw with ANSI inside Ultty too, or a mock in
+    /// tests.
+    pub fn new_with_backend(app: A, backend: Backend) -> Self {
+        Self::with_backend(app, backend)
     }
 
     fn with_backend(app: A, backend: Backend) -> Self {
@@ -1037,14 +1044,6 @@ impl<A: Application> Drop for App<A> {
             }
             self.backend_shutdown = true;
         }
-    }
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-impl<A: Application> App<A> {
-    /// Create an app with a specific backend (for testing).
-    pub fn new_with_backend(app: A, backend: Backend) -> Self {
-        Self::with_backend(app, backend)
     }
 }
 

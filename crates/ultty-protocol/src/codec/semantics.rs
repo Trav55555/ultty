@@ -266,6 +266,16 @@ mod tests {
         assert_eq!(decoded, message);
     }
 
+    #[test]
+    fn every_role_round_trips() {
+        for role in Role::ALL {
+            let mut bytes = minimal_bytes();
+            bytes[ROLE] = role as u8;
+            let semantics = decode_payload(&bytes).expect("a defined role decodes");
+            assert_eq!(semantics.role, role);
+        }
+    }
+
     fn decode_payload(bytes: &[u8]) -> Result<Semantics> {
         let mut cursor = &bytes[4..];
         Semantics::decode(&mut cursor)
@@ -275,7 +285,7 @@ mod tests {
     fn unknown_enum_values_and_flag_bits_are_rejected() {
         assert!(decode_payload(&minimal_bytes()).is_ok());
         for (offset, bad) in [
-            (ROLE, 21),
+            (ROLE, 27),
             (ROLE, 255),
             (LIVE, 3),
             (FLAGS, 128),

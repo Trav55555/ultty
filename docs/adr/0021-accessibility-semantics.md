@@ -116,7 +116,7 @@ Role vocabulary, closed, each with the AccessKit role it maps to and the
 | Checkbox | `CheckBox` + `toggled` | `Checkbox` |
 | Switch | `Switch` + `toggled` | `Toggle` |
 | Progress | `ProgressIndicator` + `value` | `ProgressBar` |
-| List | `List` | `List`, `Select` |
+| List | `List` | `List` |
 | ListItem | `ListItem` + `position` | their rows |
 | TabList | `TabList` | `Tabs` |
 | Tab | `Tab` + `position` | each tab label |
@@ -124,10 +124,18 @@ Role vocabulary, closed, each with the AccessKit role it maps to and the
 | TreeItem | `TreeItem` + `expanded`, `level` | `TreeNode`, `Collapsible` |
 | Image | `Image` | `Image` (label is the alt text) |
 | Link | `Link` | OSC 8 style links in rich text, later |
+| Table (21) | `Table` + row and column counts | `Table` |
+| Row | `Row` + row index, `selected` | `Table` rows, the header row first |
+| Cell | `Cell` + column index | `Table` cells |
+| ColumnHeader | `ColumnHeader` + column index | `Table` header cells |
+| ComboBox | `ComboBox` + `value`, `expanded` | `Select` |
+| Option (26) | `ListBoxOption` + `position`, `selected` | `Select` options while expanded |
 
-Not in the set: `Table`/`Row`/`Cell` (`Table` synthesises cells, which are
-not regions; it exposes as `Text`), `Terminal` (the grid's), menus,
-sliders. Adding a role is additive under ADR 0011; removing one is not.
+Not in the set: `Terminal` (the grid's), menus, sliders, a listbox apart
+from a combo box. Adding a role is additive under ADR 0011; removing one
+is not. The table and combo box roles were added after slice 7, before
+semantics shipped in a release, so they need no capability (see open
+questions).
 
 **Defaults when an app sends nothing** (`role = Auto`, or no `SetSemantics`
 at all), derived from content: `None` → Group; `Text`/`RichText`/`Markdown`/
@@ -515,23 +523,25 @@ Each slice is independently testable and mergeable.
      `Divider`, `Spacer` hidden; `Image` image, `.label()` is the alt
      text; `TextInput` input with the typed value and placeholder (not
      the focus and vim markers its content draws), nothing for a
-     `.password()`; `Select` list, collapsed or expanded, the selected
-     option as `value_text` and its position; `List` list, rows list
+     `.password()`; `Select` combo box, the selected option as
+     `value_text`, its options child `Option` regions while expanded
+     (see open questions); `List` list, rows list
      items with position; `Tabs` tab list, tabs named by their labels
      with position; `Tree` tree, rows tree items with level and
      expanded, the texts drawn in a row hidden; `Collapsible` tree item,
      expanded, chevron hidden; `Modal` modal dialog named by its title,
-     hidden while not visible, its buttons buttons. `LoadingState`,
-     `EmptyState`, `Table`, containers: the derived default.
+     hidden while not visible, its buttons buttons; `Table` table, rows
+     rows, the header row's cells column headers. `LoadingState`,
+     `EmptyState`, containers: the derived default.
    - The active tab, the selected `List` row, the selected `Tree` row
      and the selected `Table` row carry the `selected` flag (bit 64,
      added after this slice; see open questions), and only that one
      item does. The terminal exposes any `Tab`, `ListItem` or `TreeItem`
      without the flag as selectable but not selected, as ARIA does for
-     those roles, so one bit is enough. A table row has no row role and
-     is a `Group` with the flag, which AccessKit's selection interface
-     does not count as an item. `Select` is one region, so its selected
-     option stays its `value_text` and position.
+     those roles, so one bit is enough. A first version had no row role:
+     a table row was a `Group` with the flag, and `Select` was one region
+     whose options were lines of its text; both now have roles of their
+     own (see open questions).
    - `MarkdownView` is one region per block, streaming or not. While it
      streams, the block still arriving is live itself (with the view's
      liveness) and the view is the busy log around it; a finished block
@@ -546,11 +556,60 @@ Each slice is independently testable and mergeable.
      block or styled span began.
      Not done: finished blocks are still rendered and diffed every frame
      (CPU is O(blocks) per frame, as for any view); caching them is a
-     follow-up. Existing behaviour, also open: a link streamed in small
-     chunks can stay unresolved on screen
-     (`MarkdownView::try_append_chunk_incrementally` appends to the last
-     block without re-parsing it); its text is then announced literally
-     when the block is finished.
+     follow-up. A first version appended a plain-looking chunk to the
+     last block without parsing it again, so a link streamed in small
+     chunks (`[te` `xt](ht` `tp://x)`) stayed literal on screen and its
+     address was spoken when the stream ended, and a setext underline
+     (`Title`, `\n`, `=====`) showed and was spoken (review probes). Now
+     every `append_chunk` parses again from the line the last top-level
+     block starts on, or a top-level list's last item, keeping the blocks
+     before it: O(that block or item) per chunk, and the same blocks as
+     parsing the whole source (two property tests stream random markdown,
+     made of pieces and of whole lines of every kind of block, in random
+     chunks and a character at a time, against a whole parse). A restart
+     point is taken only after a blank line (spaces and tabs only, not
+     U+00A0 or U+3000), not after a list (`1` can still become `1. x`,
+     one of its items); in a list, at an item after its first once the
+     one before is done and the item's first line keeps it an item
+     (text after the marker, not only `-`, `*`, `_`), carrying the list's
+     numbering. Parsed from its last item a list can be tight where the
+     whole is loose, so text after another block of a tight item begins
+     a paragraph as it would in a loose one. A source with a link
+     reference definition, or a `[^label]:` footnote definition (not any
+     `[^`: a regex is common), is parsed whole on every chunk, as those
+     reach back to earlier blocks. Streaming in 4-byte chunks, release,
+     in all (before, parsing the whole source on most chunks): 40 KB of
+     paragraphs 13 ms (700 ms), the same with `[^a-z]` in a code span
+     10 ms (660 ms; any `[^` once parsed it whole, seconds), a 2,000-item
+     list 9 ms (6 s), ordered 15 ms (8 s). An open fenced code block is
+     one block, parsed again whole: 40 KB of code 130 ms (70 ms, when
+     code was appended without parsing).
+   - Options: pulldown-cmark's metadata blocks are off (a reply that
+     starts with `---` had the text to the next rule hidden as front
+     matter, and only in a whole parse), and so are definition lists,
+     heading attributes and its own task lists: 0.12.2 panics, in
+     release too, on a definition list in a block quote (`> _\n> : \n\n`)
+     and on a heading a task marker was carried into (it gives the marker
+     of an item that starts with another block, `- [ ] # x`, to whichever
+     paragraph comes next). Their syntax shows as the text it is; a task
+     item is a list item whose own plain text starts with `[ ] `, `[x] `
+     or `[X] ` and goes on.
+   - A task list item (`- [ ] buy milk`) draws the `Checkbox` widget's
+     ASCII `[ ]` / `[x]` in place of its bullet (after its number when
+     ordered) and is a read-only `Checkbox` named by its text, `toggled`
+     True or False: GitHub draws a task item as a disabled checkbox, and
+     the region is the item, so no extra node is needed. The checkbox is
+     drawn but never announced (the walk notes the unspoken bytes of the
+     region, `FrameNotes`); an ordered item's number is said, and is in
+     its name (`1. text`). While it arrives the item is an ordinary
+     block region and becomes the checkbox in the frame it stops being
+     live: the adapters announce a live node whenever its name changes,
+     and a checkbox without a label is named by its growing text
+     (`accessibility-chat.sh` heard `[x] a task that`). An arriving item
+     whose text is empty or could still be a task marker (`[`, `[x`) is
+     drawn empty until that is known: a region created live with text it
+     has not appended is named by it and announced (`• `). A task item
+     inside a block quote stays quoted text.
    - The backend keeps the text it has appended to each live region
      (announced), in the form it has now. What the region shows past
      that is appended, then a `SetContent` in the same frame sets the
@@ -574,7 +633,8 @@ Each slice is independently testable and mergeable.
      which can no longer become a link. A lone `*`, `_` (not in a word)
      or `` ` `` holds only within 80 bytes of the end, past which it is
      taken as literal (`2 * 3`); a closed code span no longer shows its
-     backticks. The walk notes such
+     backticks. A last line of only `=` or `-`, which under a line of
+     text is a setext underline, is held whole. The walk notes such
      regions beside the native keys (`FrameNotes`).
    - A region created live announces its first text the same way, and a
      region that turns live announces only what it grows by.
@@ -618,3 +678,67 @@ Each slice is independently testable and mergeable.
   `scripts/e2e/accessibility-atspi.sh` checks over AT-SPI that the
   `dashboard` example's selected list item is SELECTED, its others
   SELECTABLE only, and that the selection follows `j`.
+- How should `Table` rows and `Select` options be exposed? Answered: §1
+  gained `Table`, `Row`, `Cell`, `ColumnHeader`, `ComboBox` and `Option`
+  (21 to 26), mapped to the AccessKit roles of the same names (`Option`
+  to `ListBoxOption`). Semantics had still not shipped, so no capability.
+  - `Table` maps to AccessKit `Table`, not `Grid`. AccessKit 0.25.2
+    counts only item roles (list items, options, tree items, tabs) as a
+    selection container's items, never a `Row` (its table support is
+    AccessKit issue #29), so a `Grid` would offer a selection interface
+    that reports no row selected. A row carries `selected`, which AT-SPI
+    shows as SELECTED on a `table row`; the rows of a table one of whose
+    rows is selected are SELECTABLE, as list items are, and a table that
+    selects nothing says nothing.
+  - A row's `position` is its row index (the header row first) and a
+    cell's its column index: the terminal sets AccessKit's zero-based
+    `row_index` and `column_index`, not `position_in_set`, which ARIA
+    does not allow on rows and cells. The table's `row_count` and
+    `column_count` are derived from its children: its `Row`s, and the
+    most `Cell`s and `ColumnHeader`s in one of them, so an app need not
+    send them. AccessKit 0.25.2's AT-SPI adapter does not expose the
+    counts or indices (no `Table` interface yet); they are in the tree
+    for adapters that do.
+  - `Cell` and `ColumnHeader` are needed for a table to be navigable as
+    one: a header cell names its column, which a screen reader with
+    table support reads with each cell of it. `Table` already drew each
+    cell as a region, so they cost no regions.
+  - `Select` is a `ComboBox` valued by the chosen option. While
+    expanded its region holds no text and has one `Option` child per
+    option, named by the option, with its position, the drawn line
+    (cursor, mark, option) a hidden child. The options are the combo
+    box's own children rather than a listbox's: AccessKit treats
+    `ComboBox` as a selection container and `ListBoxOption` as an item,
+    so the combo box's selection interface lists them, with no listbox
+    role. `selected` is on the option under the cursor, the one Enter
+    would choose, as the ARIA combo box pattern puts `aria-selected` on
+    the active option; the chosen one stays the combo box's value until
+    Enter. With `selected` on the chosen one instead, moving through the
+    options would change nothing a screen reader is told.
+  - Focus stays on the combo box (the app's focused widget), so the
+    terminal makes an expanded `ComboBox`'s selected `Option` child its
+    `active_descendant`: AccessKit then reports the option as focused,
+    and focus moves with the cursor. No protocol field is needed; an
+    app's own active descendant would need one.
+  - An option is two regions, the `Option` and a hidden child holding
+    its drawn line. One region holding the line and labelled by the
+    option would have its line read as well: the terminal gives a
+    labelled region's text as `Label` children whenever the label is
+    not the whole text, and the line ("> * Red") never is.
+  - Cost: each `Row`, `Cell` and `ColumnHeader` now has semantics, which
+    the terminal keeps boxed per region. The `scene_table_1000x4` cases
+    of `benches/memory.rs` measure it: a table of 1000 rows of 4 cells
+    (5001 regions) holds 3.73 MB without semantics and 4.41 MB with
+    them, about 136 bytes a region. A session holds at most 10,000
+    regions (`MAX_REGION_COUNT`), so semantics add at most about 1.4 MB
+    to one, a table of some 2,000 rows of 4 cells.
+- Positions and levels were off by one on every platform, and set sizes
+  missing. AccessKit 0.25.2 counts `position_in_set` and `level` from 0
+  and reads the size of a set from the items' container
+  (`size_of_set_from_container`), while the first version passed the
+  1-based wire values and set the size on each item: AT-SPI reported
+  item 1 of 2 as `posinset` 2 with no `setsize`. The terminal now
+  subtracts 1 and sets `size_of_set` on the container of items with a
+  `position` (the largest size among them; rows and cells are indexed
+  instead). `scripts/e2e/accessibility-atspi.sh` checks the dashboard
+  list's items report `posinset` 1 and 2 of `setsize` 5 over AT-SPI.
