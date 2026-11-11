@@ -37,7 +37,7 @@ use crate::scene::layout::LayoutEngine;
 use crate::scene::region::Region;
 use crate::scene::semantics::effective_semantics;
 use crate::scene::tree::SceneTree;
-use crate::terminal_manager::TabId;
+use crate::terminal_manager::{TabId, TerminalId};
 
 /// A region's content kind as `ulttyctl regions` names it, and its text
 /// when it has some. A password input's value is never reported.
@@ -101,6 +101,11 @@ pub struct NativeSession {
     /// Input and clipboard access are routed by tab, and only sessions of
     /// the visible tab are rendered.
     tab_id: TabId,
+    /// The pane this session draws in and takes input from, once the app
+    /// binds it (ADR 0025): the pane of `tab_id` whose PTY runs the app.
+    /// `None` until then; such a session is laid out at the window's size
+    /// and not drawn in a split tab.
+    pane: Option<TerminalId>,
     /// Scene tree for this session.
     scene: SceneTree,
     /// Upper bound on the bytes of text in `scene`; see
@@ -287,6 +292,7 @@ impl NativeSession {
         Self {
             session_id,
             tab_id,
+            pane: None,
             scene,
             text_bytes_bound: 0,
             layout: LayoutEngine::new(),
@@ -385,6 +391,37 @@ impl NativeSession {
 
     pub fn viewport(&self) -> (f32, f32) {
         (self.viewport_width, self.viewport_height)
+    }
+
+    /// The pane this session is bound to, if any (ADR 0025).
+    pub fn pane(&self) -> Option<TerminalId> {
+        self.pane
+    }
+
+    /// Bind this session to `pane` for its life.
+    pub fn bind_pane(&mut self, pane: TerminalId) {
+        self.pane = Some(pane);
+    }
+
+    /// For a socket session, the process that connected.
+    pub fn peer_pid(&self) -> Option<i32> {
+        self.peer_pid
+    }
+
+    /// Size the viewport to `cols` x `rows` cells and, when that is a
+    /// change, tell the app (`Resize`, then `LayoutComputed` for a scene
+    /// with regions). Returns whether the size changed.
+    pub fn resize_to(&mut self, cols: u16, rows: u16) -> io::Result<bool> {
+        let (width, height) = (f32::from(cols), f32::from(rows));
+        if (self.viewport_width - width).abs() <= 0.1
+            && (self.viewport_height - height).abs() <= 0.1
+        {
+            return Ok(false);
+        }
+        self.set_viewport(width, height);
+        self.send_resize(cols, rows)?;
+        self.relayout_for_resize()?;
+        Ok(true)
     }
 
     /// Return the negotiated protocol version.
@@ -2463,6 +2500,40 @@ mod tests {
         let child = regions.iter().find(|r| r.id == RegionId::new(1)).unwrap();
         assert_eq!(child.width, 120.0);
         assert!(!session.scene_dirty, "resize layout leaves the scene clean");
+    }
+
+    #[test]
+    fn resize_to_tells_the_app_only_when_the_size_changes() {
+        let mut session = make_session();
+        session.set_viewport(80.0, 24.0);
+        run_frame(&mut session, 1, vec![create_region(1, 0)]);
+        drain_messages(&mut session);
+
+        assert!(!session.resize_to(80, 24).unwrap(), "same size");
+        assert!(drain_messages(&mut session).is_empty());
+
+        assert!(session.resize_to(40, 24).unwrap(), "a pane's width");
+        let messages = drain_messages(&mut session);
+        assert!(matches!(
+            messages.first(),
+            Some(TerminalMessage::Resize(ultty_protocol::ResizeEvent {
+                width: 40,
+                height: 24
+            }))
+        ));
+        assert_eq!(
+            layout_replies(&messages),
+            vec![(None, LayoutTrigger::Resize)]
+        );
+        assert_eq!(session.viewport(), (40.0, 24.0));
+    }
+
+    #[test]
+    fn a_session_starts_unbound_and_binds_once() {
+        let mut session = make_session();
+        assert_eq!(session.pane(), None);
+        session.bind_pane(TerminalId::new(7));
+        assert_eq!(session.pane(), Some(TerminalId::new(7)));
     }
 
     #[test]

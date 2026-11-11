@@ -21,8 +21,48 @@ pub struct SurfaceOrigin {
     pub top: f32,
 }
 
+/// A pane's rectangle in window pixels, `(min_x, min_y, max_x, max_y)`:
+/// where a bound full scene is drawn and what it is clipped to (ADR 0025).
+pub type PaneBounds = (f32, f32, f32, f32);
+
+/// A scissor rectangle in whole surface pixels, `(x, y, width, height)`.
+pub type Scissor = (u32, u32, u32, u32);
+
+/// The scissor rectangle that keeps a pane's drawing inside `bounds`, on
+/// a surface of `surface` pixels: `bounds` rounded outwards to whole
+/// pixels and cut to the surface (a scissor outside it is a GPU error), or
+/// `None` when nothing of it is on the surface.
+pub fn scissor_for(bounds: PaneBounds, surface: (u32, u32)) -> Option<Scissor> {
+    let (min_x, min_y, max_x, max_y) = bounds;
+    let x0 = min_x.floor().max(0.0) as u32;
+    let y0 = min_y.floor().max(0.0) as u32;
+    let x1 = (max_x.ceil().max(0.0) as u32).min(surface.0);
+    let y1 = (max_y.ceil().max(0.0) as u32).min(surface.1);
+    (x0 < x1 && y0 < y1).then(|| (x0, y0, x1 - x0, y1 - y0))
+}
+
+/// What a session's scroll geometry was built for: where it is drawn, what
+/// it is clipped to, the cell size, and the session's viewport. Any change
+/// moves regions or clip rectangles.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct GeometryKey {
+    origin: (f32, f32),
+    bounds: Option<PaneBounds>,
+    cell: (f32, f32),
+    viewport: (f32, f32),
+}
+
+/// A full-scene session's scroll adjustments and clip rectangles, valid
+/// for the placement they were built for.
+#[derive(Default)]
+pub struct SceneGeometry {
+    placement: GeometryKey,
+    scroll: geometry::ScrollAdjustments,
+    clip: geometry::ClipRects,
+}
+
 /// Vertices of native regions, built before they are uploaded.
-struct NativeVertices {
+pub(super) struct NativeVertices {
     bg_vertices: Vec<Vertex>,
     bg_indices: Vec<u32>,
     text_vertices: Vec<Vertex>,
@@ -140,9 +180,24 @@ impl Renderer {
     ) {
         if sessions.iter().any(|session| session.is_full_scene()) {
             let (matches, current) = search.map_or((None, 0), |(m, i)| (Some(m), i));
+            let origin = (0.0, self.tab_bar_height);
+            let region_count: usize = sessions
+                .iter()
+                .map(|session| session.scene().iter_depth_first().count())
+                .sum();
+            let mut vertices = self.native_vertices_for(region_count);
             for session in sessions {
-                self.render_native_session(encoder, view, session, matches, current);
+                self.build_native_session_vertices(
+                    session,
+                    origin,
+                    None,
+                    matches,
+                    current,
+                    &mut vertices,
+                );
             }
+            self.retain_native_geometry(sessions.iter().map(|s| s.session_id()));
+            self.draw_native_vertices(encoder, view, vertices, None);
             return;
         }
         let dims = terminal.dimensions();
@@ -166,7 +221,7 @@ impl Renderer {
 
     /// Vertex buffers for `region_count` regions, sized from the last
     /// frame's use.
-    fn native_vertices_for(&self, region_count: usize) -> NativeVertices {
+    pub(super) fn native_vertices_for(&self, region_count: usize) -> NativeVertices {
         let est = region_count.saturating_mul(4);
         NativeVertices {
             bg_vertices: Vec::with_capacity(Self::next_capacity(self.prev_bg_count.0, est, 4)),
@@ -177,12 +232,15 @@ impl Renderer {
         }
     }
 
-    /// Upload, draw and cache `vertices`, then draw their images.
-    fn draw_native_vertices(
+    /// Upload, draw and cache `vertices`, then draw their images, all
+    /// within `scissor` when one is given: a pane's rectangle, which clips
+    /// widget content too (glyphs and quads are also clipped as built).
+    pub(super) fn draw_native_vertices(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         vertices: NativeVertices,
+        scissor: Option<Scissor>,
     ) {
         self.upload_draw_and_cache_native_buffers(
             encoder,
@@ -191,57 +249,89 @@ impl Renderer {
             &vertices.bg_indices,
             &vertices.text_vertices,
             &vertices.text_indices,
+            scissor,
         );
-        self.render_deferred_native_images(encoder, view, &vertices.deferred_images);
+        self.render_deferred_native_images(encoder, view, &vertices.deferred_images, scissor);
     }
 
-    /// Render a native protocol session's full-scene tree (backgrounds,
-    /// text, widgets, images) over the whole pane.
-    pub fn render_native_session(
+    /// Whether the cached native buffers still draw the right frame: no
+    /// session changed, the glyph atlas is the one their UVs index (after
+    /// it grows or empties they point at the wrong glyphs), and every scene
+    /// is where it was: `surfaces` at their anchor rows, full scenes in
+    /// `panes`' rectangles.
+    pub(crate) fn native_cache_valid(
+        &self,
+        any_dirty: bool,
+        surfaces: &[(u64, SurfaceOrigin)],
+        panes: &[(u64, PaneBounds)],
+    ) -> bool {
+        !any_dirty
+            && self.cached_native_atlas_epoch == self.text_renderer.atlas_epoch()
+            && surfaces == self.cached_native_surfaces
+            && panes == self.cached_native_panes
+            && self.has_cached_native_buffers()
+    }
+
+    /// Forget the geometry of sessions other than `live`, which ended.
+    pub(super) fn retain_native_geometry(&mut self, live: impl Iterator<Item = u64>) {
+        let live: Vec<u64> = live.collect();
+        self.native_geometry.retain(|id, _| live.contains(id));
+    }
+
+    /// Append the vertices of `session`'s full-scene tree (backgrounds,
+    /// text, widgets, images), laid out from pixel `origin` and, for a pane
+    /// of a split tab, clipped to `bounds`. The session's scroll geometry is
+    /// reused from the last frame while it has not changed or moved; it is
+    /// built again when another scene in the batch made the frame.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn build_native_session_vertices(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        view: &wgpu::TextureView,
         session: &crate::protocol::NativeSession,
+        origin: (f32, f32),
+        bounds: Option<PaneBounds>,
         search_matches: Option<&[crate::scene::SearchMatch]>,
         current_match_index: usize,
+        vertices: &mut NativeVertices,
     ) {
         let scene = session.scene();
-        let mut vertices = self.native_vertices_for(scene.iter_depth_first().count());
-        let origin = (0.0, self.tab_bar_height);
+        let placement = GeometryKey {
+            origin,
+            bounds,
+            cell: (self.cell_width, self.cell_height),
+            viewport: session.viewport(),
+        };
+        let unchanged = !session.is_scroll_dirty() && !session.is_render_dirty();
+        let geometry = match self.native_geometry.remove(&session.session_id()) {
+            Some(geometry) if unchanged && geometry.placement == placement => geometry,
+            stale => {
+                let mut geometry = stale.unwrap_or_default();
+                geometry.placement = placement;
+                geometry::rebuild_scroll_geometry(
+                    scene,
+                    ultty_protocol::RegionId::ROOT,
+                    |id| session.scroll_offset(id),
+                    self.cell_width,
+                    self.cell_height,
+                    origin,
+                    bounds,
+                    &mut geometry.scroll,
+                    &mut geometry.clip,
+                );
+                geometry
+            }
+        };
 
-        let needs_scroll_rebuild =
-            session.is_scroll_dirty() || self.scroll_adjustments_cache.is_empty();
-
-        if needs_scroll_rebuild {
-            geometry::rebuild_scroll_geometry(
-                scene,
-                ultty_protocol::RegionId::ROOT,
-                |id| session.scroll_offset(id),
-                self.cell_width,
-                self.cell_height,
-                origin,
-                None,
-                &mut self.scroll_adjustments_cache,
-                &mut self.clip_rects_cache,
-            );
-        }
-
-        let scroll_adjustments = std::mem::take(&mut self.scroll_adjustments_cache);
-        let clip_rects = std::mem::take(&mut self.clip_rects_cache);
         self.build_tree_vertices(
             session,
             ultty_protocol::RegionId::ROOT,
             origin,
-            &scroll_adjustments,
-            &clip_rects,
+            &geometry.scroll,
+            &geometry.clip,
             search_matches,
             current_match_index,
-            &mut vertices,
+            vertices,
         );
-        self.scroll_adjustments_cache = scroll_adjustments;
-        self.clip_rects_cache = clip_rects;
-
-        self.draw_native_vertices(encoder, view, vertices);
+        self.native_geometry.insert(session.session_id(), geometry);
     }
 
     /// Render `session`'s placed inline surfaces (ADR 0020): each at its
@@ -295,7 +385,7 @@ impl Renderer {
                 &mut vertices,
             );
         }
-        self.draw_native_vertices(encoder, view, vertices);
+        self.draw_native_vertices(encoder, view, vertices, None);
     }
 
     /// Append the vertices of the tree under `root`, laid out from pixel
@@ -855,5 +945,37 @@ mod tests {
             feed(&mut term, b"\x1b[?1049h");
             assert_eq!(draw(&term), Vec::new());
         }
+    }
+}
+
+#[cfg(test)]
+mod scissor_tests {
+    use super::scissor_for;
+
+    #[test]
+    fn a_pane_rectangle_becomes_a_whole_pixel_scissor_rounded_outwards() {
+        assert_eq!(
+            scissor_for((500.5, 40.2, 999.5, 699.9), (1000, 700)),
+            Some((500, 40, 500, 660))
+        );
+    }
+
+    #[test]
+    fn a_scissor_is_cut_to_the_surface() {
+        // A pane laid out before the surface shrank must not reach past it.
+        assert_eq!(
+            scissor_for((500.0, 40.0, 1200.0, 900.0), (1000, 700)),
+            Some((500, 40, 500, 660))
+        );
+        assert_eq!(
+            scissor_for((-10.0, -5.0, 100.0, 50.0), (1000, 700)),
+            Some((0, 0, 100, 50))
+        );
+    }
+
+    #[test]
+    fn nothing_on_the_surface_is_no_scissor() {
+        assert_eq!(scissor_for((1000.0, 0.0, 1200.0, 700.0), (1000, 700)), None);
+        assert_eq!(scissor_for((10.0, 10.0, 10.0, 50.0), (1000, 700)), None);
     }
 }

@@ -132,22 +132,49 @@ impl App {
         )
     }
 
-    /// Forward a mouse event to native protocol sessions.
-    /// Returns true if any session consumed the event.
+    /// Forward a mouse event at `(x, y)`, in pixels below the tab bar, to
+    /// the native sessions of the pane under it, in that pane's cells (ADR
+    /// 0025 §4). While a button is held, moves and the release go to the
+    /// pane that took the press, wherever the pointer is. Returns true if
+    /// there was a pane to send it to.
     fn forward_mouse_to_native_sessions(
         &mut self,
         event_type: ultty_protocol::InputType,
-        cell_x: f32,
-        cell_y: f32,
+        x: f64,
+        y: f64,
     ) -> bool {
+        use ultty_protocol::InputType;
         let modifiers = self.winit_mods_to_protocol();
-        if let Some(ref mut server) = self.protocol_server {
-            if server.session_count() > 0 {
-                server.broadcast_mouse(event_type, cell_x, cell_y, modifiers);
-                return true;
-            }
+        let Some(ref mut server) = self.protocol_server else {
+            return false;
+        };
+        if server.session_count() == 0 {
+            return false;
         }
-        false
+        let (cell_width, cell_height) = self.renderer.cell_dimensions();
+        if cell_width <= 0.0 || cell_height <= 0.0 {
+            return false;
+        }
+        let (width, height) = self.renderer.terminal_area();
+        let captured = match event_type {
+            InputType::MouseMove | InputType::MouseUp { .. } => self.native_mouse_capture,
+            _ => None,
+        };
+        let Some((pane, cell_x, cell_y)) = super::native_panes::native_mouse_target(
+            &self.terminal_manager.active_pane_rects(width, height),
+            captured,
+            (x as f32, y as f32),
+            (cell_width, cell_height),
+        ) else {
+            return false;
+        };
+        match event_type {
+            InputType::MouseDown { .. } => self.native_mouse_capture = Some(pane),
+            InputType::MouseUp { .. } => self.native_mouse_capture = None,
+            _ => {}
+        }
+        server.broadcast_mouse(pane, event_type, cell_x, cell_y, modifiers);
+        true
     }
 
     /// Convert winit MouseButton to protocol MouseButton.
@@ -412,7 +439,11 @@ impl App {
                     let event_type = ultty_protocol::InputType::MouseDown {
                         button: proto_button,
                     };
-                    self.forward_mouse_to_native_sessions(event_type, col as f32, row as f32);
+                    self.forward_mouse_to_native_sessions(
+                        event_type,
+                        self.mouse_pos.x,
+                        self.mouse_pos.y - self.tab_bar.content_top() as f64,
+                    );
                 }
 
                 // Check for Ctrl+Click on URL
@@ -476,11 +507,14 @@ impl App {
                 // Forward MouseUp to native protocol sessions
                 if let Some(proto_button) = Self::winit_to_protocol_mouse_button(button) {
                     let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
-                    let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y.max(0.0));
                     let event_type = ultty_protocol::InputType::MouseUp {
                         button: proto_button,
                     };
-                    self.forward_mouse_to_native_sessions(event_type, col as f32, row as f32);
+                    self.forward_mouse_to_native_sessions(
+                        event_type,
+                        self.mouse_pos.x,
+                        adjusted_y.max(0.0),
+                    );
                 }
 
                 // End tab drag if active
@@ -539,14 +573,11 @@ impl App {
         }
 
         // Forward mouse move to native protocol sessions
-        {
-            let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
-            self.forward_mouse_to_native_sessions(
-                ultty_protocol::InputType::MouseMove,
-                col as f32,
-                row as f32,
-            );
-        }
+        self.forward_mouse_to_native_sessions(
+            ultty_protocol::InputType::MouseMove,
+            self.mouse_pos.x,
+            adjusted_y,
+        );
 
         let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
         let point = SelectionPoint::new(col as i32, row as i32);
@@ -787,7 +818,6 @@ impl App {
         // Forward scroll to native protocol sessions
         {
             let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
-            let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y.max(0.0));
             let delta_y = match delta {
                 MouseScrollDelta::LineDelta(_, y) => y,
                 MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
@@ -797,8 +827,8 @@ impl App {
                     delta_x: 0.0,
                     delta_y,
                 },
-                col as f32,
-                row as f32,
+                self.mouse_pos.x,
+                adjusted_y.max(0.0),
             );
         }
 

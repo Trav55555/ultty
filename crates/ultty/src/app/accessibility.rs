@@ -39,13 +39,18 @@ impl App {
         let Some(adapter) = self.accessibility.as_mut() else {
             return;
         };
-        // Native scenes are shown only in a tab of one pane (see
-        // `accessibility_snapshot`); text for scenes that are not shown is
-        // dropped rather than flushed into a tree that leaves it out.
-        let scenes_shown = self.terminal_manager.active_pane_rects(1.0, 1.0).len() == 1;
+        // A scene is shown once its session is bound to a pane of the
+        // visible tab (ADR 0025; see `accessibility_snapshot`); text for a
+        // scene that is not shown is dropped rather than flushed into a
+        // tree that leaves it out.
         if let Some(server) = self.protocol_server.as_mut() {
+            let shown: std::collections::HashSet<u64> = server
+                .active_tab_sessions()
+                .filter(|session| session.pane().is_some())
+                .map(|session| session.session_id())
+                .collect();
             server.take_live_appends(|session, change| match change {
-                LiveChange::Appended { region, live, text } if scenes_shown => {
+                LiveChange::Appended { region, live, text } if shown.contains(&session) => {
                     adapter.appended(session, region.0, live, &text, now);
                 }
                 LiveChange::Appended { .. } => {}
@@ -121,9 +126,10 @@ impl App {
 }
 
 /// The tabs from the tab bar (its titles are the ones drawn), and the
-/// active tab's panes in window pixels with the focused one's screen and,
-/// when the tab has that one pane, the native scenes drawn over it: the
-/// renderer draws them only then (spec §10.6).
+/// active tab's panes in window pixels with the focused one's screen, the
+/// full scenes of the sessions bound to each pane (ADR 0025), and, when the
+/// tab has one pane, the inline surfaces drawn over its screen: the
+/// renderer draws those only then (spec §10.6).
 ///
 /// Each pane is locked once, briefly: the focused one to copy its rows and
 /// find its surfaces, the others to read their titles. Native scenes are
@@ -150,18 +156,24 @@ fn accessibility_snapshot(
     let focused = terminal_manager.focused_terminal_id();
     let rects = terminal_manager
         .active_pane_rects(window_width as f32, window_height as f32 - tab_bar_height);
-    // Native sessions, in a stable order, when the tab has one pane.
-    let mut sessions: Vec<&NativeSession> = match (server, rects.len()) {
-        (Some(server), 1) => server.active_tab_sessions().collect(),
-        _ => Vec::new(),
-    };
+    // The shown sessions, in a stable order; each pane takes the ones bound
+    // to it. Surfaces are drawn only in a one-pane tab.
+    let mut sessions: Vec<&NativeSession> = server
+        .map(|server| server.active_tab_sessions().collect())
+        .unwrap_or_default();
     sessions.sort_by_key(|session| session.session_id());
-    let full_scene = sessions.iter().any(|session| session.is_full_scene());
+    let surfaces_shown = rects.len() == 1;
     let cell = (f64::from(cell_width), f64::from(cell_height));
     let panes = rects
         .into_iter()
         .filter_map(|(id, (x, y, width, height))| {
             let managed = terminal_manager.terminal(id)?;
+            let sessions: Vec<&NativeSession> = sessions
+                .iter()
+                .copied()
+                .filter(|session| session.pane() == Some(id))
+                .collect();
+            let full_scene = sessions.iter().any(|session| session.is_full_scene());
             let bounds = Rect {
                 x0: f64::from(x),
                 y0: f64::from(y + tab_bar_height),
@@ -179,7 +191,7 @@ fn accessibility_snapshot(
             let (title, grid) = {
                 let terminal = managed.event_loop.terminal();
                 let grid = (is_focused && !full_scene).then(|| {
-                    if !scrolled_back(&terminal) {
+                    if surfaces_shown && !scrolled_back(&terminal) {
                         on_screen = ultty::protocol::pairing::surfaces_on_screen(
                             &terminal,
                             sessions.iter().copied(),
@@ -189,18 +201,14 @@ fn accessibility_snapshot(
                 });
                 (pane_title(managed, terminal.title()), grid)
             };
-            // The terminal is unlocked; now copy the scenes.
-            let scenes = if is_focused && full_scene {
-                // The scene hides the grid; the renderer draws every
-                // session's ROOT tree.
-                sessions
-                    .iter()
-                    .filter(|session| session.is_full_scene())
-                    .map(|session| capture(session, RegionId::ROOT, at(bounds.y0)))
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            // The terminal is unlocked; now copy the scenes: the renderer
+            // draws every bound full-scene session's ROOT tree over the
+            // pane, hiding its grid.
+            let scenes = sessions
+                .iter()
+                .filter(|session| session.is_full_scene())
+                .map(|session| capture(session, RegionId::ROOT, at(bounds.y0)))
+                .collect();
             let surfaces = on_screen
                 .into_iter()
                 .filter_map(|surface| {
@@ -217,6 +225,7 @@ fn accessibility_snapshot(
             Some(PaneSnapshot {
                 id: id.raw(),
                 title,
+                focused: is_focused,
                 bounds,
                 grid,
                 scenes,

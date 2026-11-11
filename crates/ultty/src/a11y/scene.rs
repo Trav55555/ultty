@@ -882,6 +882,7 @@ mod tests {
             panes: vec![PaneSnapshot {
                 id: 1,
                 title: "app".to_owned(),
+                focused: true,
                 bounds: Rect {
                     x0: 0.0,
                     y0: 40.0,
@@ -893,6 +894,48 @@ mod tests {
                 surfaces: Vec::new(),
             }],
         }
+    }
+
+    #[test]
+    fn a_scene_in_an_unfocused_pane_is_under_that_pane_and_focus_stays_put() {
+        let mut scene = Scene::new();
+        scene.add(1, 0, text("count: 3"));
+        scene.focused = Some(RegionId::new(1));
+        let unfocused = PaneSnapshot {
+            id: 2,
+            title: "app".to_owned(),
+            focused: false,
+            bounds: Rect {
+                x0: 200.0,
+                y0: 40.0,
+                x1: 400.0,
+                y1: 140.0,
+            },
+            grid: None,
+            scenes: vec![scene.capture(7, 0)],
+            surfaces: Vec::new(),
+        };
+        let mut snapshot = pane(Vec::new(), Some(screen(10, 2, "$ ")));
+        snapshot.panes.push(unfocused);
+        let update = build("Ultty", &snapshot);
+        assert_eq!(
+            node(&update, pane_node_id(2)).children(),
+            &[region_node_id(7, 0)],
+            "the scene's root is the unfocused pane's content"
+        );
+        assert_eq!(
+            node(&update, region_node_id(7, 1)).value(),
+            Some("count: 3")
+        );
+        let tree = consume(update);
+        let focus = tree.state().focus().expect("a focused node");
+        // Only the focused pane's screen is a terminal node; the scene's
+        // pane is a group.
+        assert_eq!(
+            focus.role(),
+            accesskit::Role::Terminal,
+            "the focused pane's screen keeps focus"
+        );
     }
 
     /// The tree of a full-scene app, session 7, showing `scene`'s ROOT.

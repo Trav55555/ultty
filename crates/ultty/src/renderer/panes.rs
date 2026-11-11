@@ -5,8 +5,9 @@
 //! tab bar / vim indicator / shortcuts overlay.
 
 use super::block_chars::block_char_rects;
+use super::native_render::{scissor_for, PaneBounds};
 use super::powerline::powerline_triangle;
-use super::{OverlayState, PaneInfo, Renderer, Rgba, Vertex};
+use super::{OverlayState, PaneDraw, PaneInfo, Renderer, Rgba, Vertex};
 use crate::grid::{CellFlags, CursorShape, Terminal};
 use wgpu::util::DeviceExt;
 
@@ -16,7 +17,7 @@ impl Renderer {
     pub fn render_panes(
         &mut self,
         view: &wgpu::TextureView,
-        panes: &[(&Terminal, PaneInfo)],
+        panes: &[PaneDraw<'_>],
         overlay: &OverlayState,
     ) {
         let mut encoder = self
@@ -33,11 +34,18 @@ impl Renderer {
     /// Record the whole multi-pane frame (clear, chrome, panes, borders,
     /// overlays) into `encoder`, drawing onto `view`. The window and the
     /// screenshot path both draw through this, so they stay pixel-identical.
+    ///
+    /// A pane with a bound full-scene session shows the scene in place of
+    /// its grid text, in its own rectangle and clipped to it by a scissor
+    /// rectangle (so widget content stays inside too), under its border
+    /// (ADR 0025 §3). Each such pane is one vertex batch; the batches are
+    /// cached like the one-pane frame's until a session changes or a pane
+    /// moves.
     pub(super) fn encode_panes(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        panes: &[(&Terminal, PaneInfo)],
+        panes: &[PaneDraw<'_>],
         overlay: &OverlayState,
     ) {
         // Update tab bar height from overlay state
@@ -163,12 +171,42 @@ impl Renderer {
             }
         }
 
+        // Full scenes bound to panes, each with the rectangle it is drawn
+        // in; the cache is reused while none changed and none moved.
+        let tab_bar_height = self.tab_bar_height;
+        let pane_bounds = move |pane: &PaneInfo| -> PaneBounds {
+            let y = pane.y + tab_bar_height;
+            (pane.x, y, pane.x + pane.width, y + pane.height)
+        };
+        let native_panes: Vec<(u64, PaneBounds)> = panes
+            .iter()
+            .flat_map(|pane| {
+                let bounds = pane_bounds(&pane.info);
+                pane.sessions
+                    .iter()
+                    .filter(|session| session.is_full_scene())
+                    .map(move |session| (session.session_id(), bounds))
+            })
+            .collect();
+        let any_dirty = panes
+            .iter()
+            .flat_map(|pane| pane.sessions.iter())
+            .any(|session| session.is_render_dirty());
+        let native_cached =
+            !native_panes.is_empty() && self.native_cache_valid(any_dirty, &[], &native_panes);
+        if !native_panes.is_empty() && !native_cached {
+            self.clear_cached_native_buffers();
+        }
+        let surface = self.surface_size();
+
         // Render each pane
-        for (terminal, pane) in panes {
-            self.pane_offset_x = pane.x;
-            self.pane_offset_y = pane.y + self.tab_bar_height;
+        for pane in panes {
+            let terminal = pane.terminal;
+            let info = &pane.info;
+            self.pane_offset_x = info.x;
+            self.pane_offset_y = info.y + self.tab_bar_height;
             let cursor_blink_visible =
-                pane_cursor_blink_visible(overlay.cursor_blink_visible, pane.is_focused);
+                pane_cursor_blink_visible(overlay.cursor_blink_visible, info.is_focused);
 
             // Render pane backgrounds
             let (bg_v, bg_i) =
@@ -213,26 +251,69 @@ impl Renderer {
                 rp.draw_indexed(0..bg_i.len() as u32, 0, 0..1);
             }
 
-            // Render pane text
-            self.text_renderer.render_with_offset(
-                encoder,
-                view,
-                terminal,
-                &self
-                    .color_scheme
-                    .for_terminal(terminal.palette(), terminal.modes().reverse_video),
-                self.cell_width,
-                self.cell_height,
-                self.pane_offset_x,
-                self.pane_offset_y,
-                cursor_blink_visible,
-                &self.uniform_bind_group,
-            );
+            let scenes: Vec<_> = pane
+                .sessions
+                .iter()
+                .copied()
+                .filter(|session| session.is_full_scene())
+                .collect();
+            if scenes.is_empty() {
+                // Render pane text
+                self.text_renderer.render_with_offset(
+                    encoder,
+                    view,
+                    terminal,
+                    &self
+                        .color_scheme
+                        .for_terminal(terminal.palette(), terminal.modes().reverse_video),
+                    self.cell_width,
+                    self.cell_height,
+                    self.pane_offset_x,
+                    self.pane_offset_y,
+                    cursor_blink_visible,
+                    &self.uniform_bind_group,
+                );
+            } else if !native_cached {
+                // The scenes hide the grid: one batch for this pane, drawn
+                // within its rectangle.
+                let bounds = pane_bounds(info);
+                let origin = (bounds.0, bounds.1);
+                let regions: usize = scenes
+                    .iter()
+                    .map(|session| session.scene().iter_depth_first().count())
+                    .sum();
+                let mut native = self.native_vertices_for(regions);
+                for session in scenes {
+                    self.build_native_session_vertices(
+                        session,
+                        origin,
+                        Some(bounds),
+                        None,
+                        0,
+                        &mut native,
+                    );
+                }
+                if let Some(scissor) = scissor_for(bounds, surface) {
+                    self.draw_native_vertices(encoder, view, native, Some(scissor));
+                }
+            }
+        }
 
+        if native_cached {
+            self.draw_cached_native_buffers(encoder, view);
+        } else if !native_panes.is_empty() {
+            self.retain_native_geometry(native_panes.iter().map(|(id, _)| *id));
+            self.cached_native_surfaces.clear();
+            self.cached_native_panes = native_panes;
+        }
+
+        // Pane borders go over the panes' content, scenes included.
+        for pane in panes {
+            let info = &pane.info;
             // Draw pane border if not focused
-            if !pane.is_focused {
+            if !info.is_focused {
                 let border_color = Rgba::new(0.3, 0.3, 0.3, 1.0);
-                let (bv, bi) = self.build_pane_border_vertices(pane, border_color);
+                let (bv, bi) = self.build_pane_border_vertices(info, border_color);
                 if !bv.is_empty() {
                     let vb = self
                         .device
@@ -275,7 +356,7 @@ impl Renderer {
             } else {
                 // Draw focused pane border in accent color
                 let accent_color = Rgba::new(0.3, 0.5, 0.8, 1.0);
-                let (bv, bi) = self.build_pane_border_vertices(pane, accent_color);
+                let (bv, bi) = self.build_pane_border_vertices(info, accent_color);
                 if !bv.is_empty() {
                     let vb = self
                         .device

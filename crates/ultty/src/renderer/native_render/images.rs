@@ -2,15 +2,17 @@
 
 use wgpu::util::DeviceExt;
 
-use super::Renderer;
+use super::{Renderer, Scissor};
 use crate::renderer::{DeferredImageRender, Vertex};
 
 impl Renderer {
+    /// Draw `deferred_images`, each within `scissor` when one is given.
     pub(super) fn render_deferred_native_images(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         deferred_images: &[DeferredImageRender],
+        scissor: Option<Scissor>,
     ) {
         for image in deferred_images {
             let Some(cached) = self.native_image_cache.get(&image.region_id) else {
@@ -51,6 +53,9 @@ impl Renderer {
             });
 
             if let Some(image_pipeline) = self.image_pipeline.as_ref() {
+                if let Some((x, y, width, height)) = scissor {
+                    render_pass.set_scissor_rect(x, y, width, height);
+                }
                 render_pass.set_pipeline(&image_pipeline.pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 render_pass.set_bind_group(1, &cached.bind_group, &[]);
