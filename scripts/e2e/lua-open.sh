@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Open Luau tools from Ultty itself with `ulttyctl lua open` (ADR 0023) in a
+# Open Luau tools from Ultty itself with `ulttyctl lua open` (ADR 0024) in a
 # fresh Ultty on a virtual X display, and check through `ulttyctl`:
 #
-#   - `lua open panes.luau --exec ulttyctl` opens a tab drawing natively,
-#     with a list row per pane;
+#   - `lua open panes.luau --exec 'ulttyctl --json panes'` opens a tab
+#     drawing natively, with a list row per pane, in the caller's directory;
 #   - `lua open panes.luau` without a grant shows the banner naming the
 #     flag to add, and runs nothing;
-#   - `lua open hello.luau --split right` opens a split pane next to the
-#     shell, drawn with ANSI, and says so on stderr.
+#   - `--pane 0 lua open hello.luau --split right` opens a split pane next
+#     to the shell in tab 1, drawn with ANSI, and says so on stderr.
 #
 #   scripts/e2e/lua-open.sh [artifact-dir]
 #
@@ -99,12 +99,13 @@ done
 pane_count() {
     "$ULTTYCTL" --json panes | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["panes"]))'
 }
-# The tab index of pane $1, from `panes`.
-tab_of() {
+# Field $2 of pane $1, from `panes`.
+pane_field() {
     "$ULTTYCTL" --json panes | python3 -c '
 import json, sys
-print(next(p["tab_index"] for p in json.load(sys.stdin)["panes"] if p["id"] == int(sys.argv[1])))' "$1"
+print(next(p[sys.argv[2]] for p in json.load(sys.stdin)["panes"] if p["id"] == int(sys.argv[1])))' "$1" "$2"
 }
+tab_of() { pane_field "$1" tab_index; }
 # `regions --json` for pane $2's tab, saved as $out/$1.json.
 regions() {
     "$ULTTYCTL" --json --pane "$2" regions >"$out/$1.json" 2>/dev/null || true
@@ -128,11 +129,15 @@ wait_regions() {
 }
 
 # 1. A granted tool in a new tab draws natively: a row per pane (the shell
-#    tab and its own).
-granted=$("$ULTTYCTL" lua open "$out/panes.luau" --exec ulttyctl --log "$out/granted.log") ||
+#    tab and its own). Relative paths and the pane's directory are the
+#    caller's.
+granted=$(cd "$out" && "$ULTTYCTL" lua open panes.luau --exec 'ulttyctl --json panes' --log granted.log) ||
     fail "lua open with a grant"
 [[ "$granted" =~ ^[0-9]+$ ]] || fail "lua open printed '$granted', not a pane id"
 [ "$(tab_of "$granted")" = 1 ] || fail "the granted tool is not in a tab of its own"
+[ "$(pane_field "$granted" cwd)" = "$out" ] ||
+    fail "the granted tool runs in $(pane_field "$granted" cwd), not the caller's $out"
+[ -f "$out/granted.log" ] || fail "a relative --log was not made absolute against the caller's directory"
 wait_regions granted "$granted" --list panes --rows 2 --text "Ultty panes" ||
     fail "the granted tool did not list a row per pane"
 echo "lua-open: granted tool lists $(pane_count) panes natively in pane $granted"
@@ -142,15 +147,15 @@ echo "lua-open: granted tool lists $(pane_count) panes natively in pane $granted
 denied=$("$ULTTYCTL" lua open "$out/panes.luau" --log "$out/denied.log") ||
     fail "lua open without a grant"
 wait_regions denied "$denied" --id ulttui-lua-error \
-    --text "panes.luau:10: run: ulttyctl is not allowed; open the script with --exec ulttyctl" ||
-    fail "the denied tool did not show the banner naming --exec ulttyctl"
+    --text "panes.luau:10: run: ulttyctl --json panes is not allowed; open the script with --exec 'ulttyctl --json panes'" ||
+    fail "the denied tool did not show the banner naming the grant to add"
 python3 scripts/e2e/lua_regions.py "$out/denied.json" --id panes >/dev/null 2>&1 &&
     fail "the denied tool drew its list, so its init ran past run{}"
 echo "lua-open: denied tool shows the banner in pane $denied"
 
-# 3. A split next to the shell draws with ANSI and says so.
-"$ULTTYCTL" switch-tab 1 >/dev/null || fail "switch-tab 1"
-split=$("$ULTTYCTL" lua open "$out/hello.luau" --split right 2>"$out/note.txt") ||
+# 3. A split next to pane 0 (the shell, in a tab that is not the visible
+#    one) draws with ANSI and says so.
+split=$("$ULTTYCTL" --pane 0 lua open "$out/hello.luau" --split right 2>"$out/note.txt") ||
     fail "lua open --split"
 grep -q "draws with ANSI" "$out/note.txt" || fail "no ANSI note for --split (got: $(cat "$out/note.txt"))"
 [ "$(tab_of "$split")" = 0 ] || fail "the split pane is not in the shell's tab"
@@ -175,6 +180,24 @@ for _ in $(seq 50); do
 done
 [ -n "$ok" ] || fail "the split pane did not take a key"
 echo "lua-open: split pane $split draws hello.luau with ANSI"
+
+# 4. From inside a pane, `split` with no --pane splits that pane (Ultty
+#    sets ULTTY_PANE), not the visible tab's focused one.
+"$ULTTYCTL" --pane 0 send-text 'ulttyctl split down' >/dev/null
+"$ULTTYCTL" --pane 0 send-key enter >/dev/null
+ok=""
+for _ in $(seq 100); do
+    panes_in_tab0=$("$ULTTYCTL" --json panes | python3 -c '
+import json, sys
+print(sum(1 for p in json.load(sys.stdin)["panes"] if p["tab_index"] == 0))')
+    if [ "$panes_in_tab0" = 3 ]; then
+        ok=1
+        break
+    fi
+    sleep 0.1
+done
+[ -n "$ok" ] || fail "split from inside pane 0 did not add a pane to its tab (tab 0 has $panes_in_tab0 panes)"
+echo "lua-open: split from inside pane 0 lands in its tab"
 
 ! grep -q "panicked at" "$out/ultty.log" || fail "Ultty logged a panic"
 echo "lua-open: ok ($out)"
