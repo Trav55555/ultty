@@ -754,8 +754,7 @@ mod tests {
     fn a_ping_from_the_terminal_is_answered_with_a_pong() {
         use ultty_protocol::Encode;
         let (mut backend, mut terminal) = backend_over_pair();
-        std::io::Write::write_all(&mut terminal, &TerminalMessage::Ping.encode_to_bytes())
-            .unwrap();
+        std::io::Write::write_all(&mut terminal, &TerminalMessage::Ping.encode_to_bytes()).unwrap();
         assert!(backend.poll_event().unwrap().is_none());
         assert_eq!(drain_messages(&mut terminal), [AppMessage::Pong]);
     }
