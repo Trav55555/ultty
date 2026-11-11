@@ -502,6 +502,18 @@ fn snapshot_markdown_basic() {
     insta::assert_snapshot!(output);
 }
 
+/// A loose list (blank lines between items): each item's first paragraph
+/// is on its bullet's line, a second paragraph after it; tasks draw their
+/// checkbox.
+#[test]
+fn snapshot_markdown_loose_list() {
+    let md = MarkdownView::new(
+        "- First item\n\n- Second item\n\n  More about it.\n\n- [x] A task done\n\n1. One\n\n2. [ ] Two",
+    );
+    let output = render_to_string(&md, 40, 8);
+    insta::assert_snapshot!(output);
+}
+
 #[test]
 fn snapshot_markdown_streaming() {
     let md = MarkdownView::new("Partial **markdown** response").streaming(true);

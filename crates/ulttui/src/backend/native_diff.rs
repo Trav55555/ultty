@@ -14,6 +14,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use ultty_protocol::{
     AppMessage, Constraints, Content, Live, RegionId, RichText, Semantics, Style,
@@ -111,6 +112,9 @@ pub(crate) struct FrameNotes {
     /// opener at the end of it may yet turn into styling, so it is not
     /// announced yet ([`held_back`]).
     pub(crate) arriving_prose: HashSet<RegionId>,
+    /// Live regions with bytes of their text drawn but not said: a task
+    /// list item's checkbox, which its semantics give as `toggled`.
+    pub(crate) unspoken: HashMap<RegionId, Range<usize>>,
 }
 
 thread_local! {
@@ -135,6 +139,16 @@ pub(crate) fn record_arriving_prose(id: RegionId) {
     NOTES_RECORDER.with(|recorder| {
         if let Some(notes) = recorder.borrow_mut().as_mut() {
             notes.arriving_prose.insert(id);
+        }
+    });
+}
+
+/// Record that bytes `range` of region `id`'s text are drawn but not
+/// announced.
+pub(crate) fn record_unspoken(id: RegionId, range: Range<usize>) {
+    NOTES_RECORDER.with(|recorder| {
+        if let Some(notes) = recorder.borrow_mut().as_mut() {
+            notes.unspoken.insert(id, range);
         }
     });
 }
@@ -288,6 +302,7 @@ pub(crate) fn optimize_frame_messages(
                 let prev = previous.regions.get(&stable);
                 match prev {
                     _ if live && capabilities.append_content && plain_text(&content).is_some() => {
+                        let unspoken = notes.unspoken.get(&id).cloned().unwrap_or_default();
                         // A region that turns live has said what it shows
                         // already; only what it grows by is news.
                         let (before, announced) =
@@ -295,15 +310,17 @@ pub(crate) fn optimize_frame_messages(
                                 let announced = if is_live(Some(prev)) {
                                     prev.announced.clone()
                                 } else {
-                                    plain_text(&prev.content).unwrap_or_default().into_owned()
+                                    let shown = plain_text(&prev.content).unwrap_or_default();
+                                    spoken_part(&shown, unspoken.clone()).into_owned()
                                 };
                                 (&prev.content, announced)
                             });
                         // Held back only while it stays live: the frame it
                         // stops is the last chance to say it.
                         let hold = live_now && notes.arriving_prose.contains(&id);
-                        let (messages, announced) =
-                            live_content_update(stable, before, &announced, content, hold);
+                        let (messages, announced) = live_content_update(
+                            stable, before, &announced, content, hold, unspoken,
+                        );
                         outgoing.extend(messages);
                         if let Some(region) = next.regions.get_mut(&stable) {
                             region.announced = announced;
@@ -608,16 +625,23 @@ fn reconcile_children(
 /// line rewritten). Where to resume is [`resume_at`]: text is never
 /// skipped, and repeated rather than dropped when it cannot be told apart.
 /// With `hold_back`, the end of the text from an unresolved inline
-/// markdown opener waits ([`held_back`]).
+/// markdown opener waits ([`held_back`]). Bytes `unspoken` of the text
+/// are never said.
 fn live_content_update(
     id: RegionId,
     previous: &Content,
     announced: &str,
     next: Content,
     hold_back: bool,
+    unspoken: Range<usize>,
 ) -> (Vec<AppMessage>, String) {
     let after = plain_text(&next).unwrap_or_default();
-    let speakable = if hold_back { held_back(&after) } else { &after };
+    let spoken = spoken_part(&after, unspoken);
+    let speakable = if hold_back {
+        held_back(&spoken)
+    } else {
+        &spoken
+    };
     let start = resume_at(announced, speakable);
     let mut messages = Vec::new();
     let mut shown = previous.clone();
@@ -633,6 +657,18 @@ fn live_content_update(
         messages.push(AppMessage::SetContent { id, content: next });
     }
     (messages, announced)
+}
+
+/// `text` without bytes `unspoken`, or all of it when they are not a
+/// range of it.
+fn spoken_part(text: &str, unspoken: Range<usize>) -> Cow<'_, str> {
+    match (text.get(..unspoken.start), text.get(unspoken.end..)) {
+        (Some(""), Some(after)) => Cow::Borrowed(after),
+        (Some(before), Some(after)) if unspoken.start <= unspoken.end => {
+            Cow::Owned(format!("{before}{after}"))
+        }
+        _ => Cow::Borrowed(text),
+    }
 }
 
 /// Where in `speakable` the text not yet announced starts, given that
@@ -720,11 +756,19 @@ const HOLD_BACK_BYTES: usize = 80;
 /// something that cannot start a link target (`x[i] = 0`); so do `**`,
 /// `__` and `~~`. A lone `*`, `_` (not inside a word) or `` ` `` holds
 /// only within [`HOLD_BACK_BYTES`] of the end: a code span that closed
-/// would no longer show its backticks.
+/// would no longer show its backticks. A last line of only `=` or `-` is
+/// held whole: under a line of text it is a setext underline that turns
+/// the block into a heading.
 fn held_back(text: &str) -> &str {
     let line_start = text.rfind('\n').map_or(0, |index| index + 1);
     let window_start = text.len().saturating_sub(HOLD_BACK_BYTES);
     let line = &text[line_start..];
+    let underline = line.trim();
+    if !underline.is_empty()
+        && (underline.bytes().all(|b| b == b'=') || underline.bytes().all(|b| b == b'-'))
+    {
+        return &text[..line_start.saturating_sub(1)];
+    }
     let mut previous: Option<char> = None;
     let mut chars = line.char_indices().peekable();
     while let Some((offset, c)) = chars.next() {
@@ -1560,6 +1604,71 @@ mod tests {
                 id,
                 text: "**bo".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn a_link_address_and_a_setext_underline_are_never_spoken() {
+        let id = RegionId::new(1);
+        let bold = Style::new().bold();
+        let frames = [
+            text("See [te"),
+            text("See [text](ht"),
+            text("See [text](http://x \"ti"),
+            Content::RichText(RichText::new().text("See ").span("text", bold).text(" now")),
+            text("See text now\nTitle"),
+            text("See text now\nTitle\n="),
+            text("See text now\nTitle\n====="),
+            text("See text now\nTITLE"),
+        ];
+        let mut tree = RetainedTree::new();
+        let mut said = Vec::new();
+        for content in frames {
+            let frame = frame_with_semantics(id, content, live_log());
+            let (outgoing, next) = optimize_frame_messages(&tree, frame, &prose(), ALL);
+            tree = next;
+            said.extend(outgoing.into_iter().filter_map(|m| match m {
+                AppMessage::AppendContent { text, .. } => Some(text),
+                _ => None,
+            }));
+        }
+        assert_eq!(said, ["See ", "text now", "\nTitle"]);
+        assert_eq!(super::held_back("Title\n====="), "Title");
+        assert_eq!(super::held_back("Title\n-- "), "Title");
+        assert_eq!(super::held_back("a\n= b"), "a\n= b");
+        assert_eq!(super::held_back("=-="), "=-=");
+    }
+
+    #[test]
+    fn an_unspoken_prefix_is_drawn_but_not_announced() {
+        let id = RegionId::new(1);
+        let notes = || FrameNotes {
+            unspoken: [(id, 0..4)].into(),
+            ..FrameNotes::default()
+        };
+        let first = frame_with_semantics(id, text("[ ] buy"), live_log());
+        let (outgoing, tree) = optimize_frame_messages(&RetainedTree::new(), first, &notes(), ALL);
+        assert_eq!(
+            outgoing[2..],
+            [
+                AppMessage::AppendContent {
+                    id,
+                    text: "buy".to_string()
+                },
+                AppMessage::SetContent {
+                    id,
+                    content: text("[ ] buy")
+                }
+            ]
+        );
+        let second = frame_with_semantics(id, text("[ ] buy milk"), live_log());
+        let (outgoing, _) = optimize_frame_messages(&tree, second, &notes(), ALL);
+        assert_eq!(
+            outgoing,
+            [AppMessage::AppendContent {
+                id,
+                text: " milk".to_string()
+            }]
         );
     }
 
