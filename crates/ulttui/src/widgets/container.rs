@@ -24,6 +24,17 @@ fn extract_cells(edges: &Edges<Dimension>) -> (u16, u16, u16, u16) {
     )
 }
 
+/// The children an override does not hide (ADR 0023). The native layout
+/// leaves hidden regions out (`display: none`); the ANSI layout of `Column`
+/// and `Row` does the same with this.
+fn visible_children(children: &[Box<dyn View>]) -> Vec<&dyn View> {
+    children
+        .iter()
+        .map(|child| child.as_ref())
+        .filter(|child| !crate::overrides::is_hidden(*child))
+        .collect()
+}
+
 fn map_border_type(bt: BorderType) -> ratatui::widgets::BorderType {
     match bt {
         BorderType::Thin => ratatui::widgets::BorderType::Plain,
@@ -256,6 +267,7 @@ impl View for Column {
         }
 
         let bordered = render_style_block(&self.style, frame, area);
+        let children = visible_children(&self.children);
 
         let pad = extract_cells(&self.constraints.padding);
         let inner = Rect::new(
@@ -266,14 +278,13 @@ impl View for Column {
         );
 
         // Reserve space for gaps between children
-        let total_gap = self.gap * (self.children.len().saturating_sub(1)) as u16;
+        let total_gap = self.gap * (children.len().saturating_sub(1)) as u16;
         let available = inner.height.saturating_sub(total_gap);
 
-        let constraints: Vec<Constraint> = self
-            .children
+        let constraints: Vec<Constraint> = children
             .iter()
             .map(|child| {
-                let c = child.constraints();
+                let c = crate::overrides::constraints_of(*child);
                 match c.height {
                     Dimension::Cells(n) => Constraint::Length(n as u16),
                     Dimension::Percent(p) => Constraint::Percentage(p as u16),
@@ -296,11 +307,11 @@ impl View for Column {
             .split(no_gap_area);
 
         let mut y_offset = 0u16;
-        for (i, (child, chunk)) in self.children.iter().zip(chunks.iter()).enumerate() {
+        for (i, (child, chunk)) in children.iter().zip(chunks.iter()).enumerate() {
             let shifted = Rect::new(inner.x, inner.y + y_offset, chunk.width, chunk.height);
-            child.render_ansi(frame, shifted);
+            super::render_view_ansi(*child, frame, shifted);
             y_offset += chunk.height;
-            if i < self.children.len() - 1 {
+            if i < children.len() - 1 {
                 y_offset += self.gap;
             }
         }
@@ -459,6 +470,7 @@ impl View for Row {
         }
 
         let bordered = render_style_block(&self.style, frame, area);
+        let children = visible_children(&self.children);
 
         let pad = extract_cells(&self.constraints.padding);
         let inner = Rect::new(
@@ -468,14 +480,13 @@ impl View for Row {
             bordered.height.saturating_sub(pad.0 + pad.2),
         );
 
-        let total_gap = self.gap * (self.children.len().saturating_sub(1)) as u16;
+        let total_gap = self.gap * (children.len().saturating_sub(1)) as u16;
         let available = inner.width.saturating_sub(total_gap);
 
-        let constraints: Vec<Constraint> = self
-            .children
+        let constraints: Vec<Constraint> = children
             .iter()
             .map(|child| {
-                let c = child.constraints();
+                let c = crate::overrides::constraints_of(*child);
                 match c.width {
                     Dimension::Cells(n) => Constraint::Length(n as u16),
                     Dimension::Percent(p) => Constraint::Percentage(p as u16),
@@ -498,11 +509,11 @@ impl View for Row {
             .split(no_gap_area);
 
         let mut x_offset = 0u16;
-        for (i, (child, chunk)) in self.children.iter().zip(chunks.iter()).enumerate() {
+        for (i, (child, chunk)) in children.iter().zip(chunks.iter()).enumerate() {
             let shifted = Rect::new(inner.x + x_offset, inner.y, chunk.width, chunk.height);
-            child.render_ansi(frame, shifted);
+            super::render_view_ansi(*child, frame, shifted);
             x_offset += chunk.width;
-            if i < self.children.len() - 1 {
+            if i < children.len() - 1 {
                 x_offset += self.gap;
             }
         }
@@ -591,7 +602,7 @@ impl View for Stack {
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         for child in &self.children {
-            child.render_ansi(frame, area);
+            super::render_view_ansi(child.as_ref(), frame, area);
         }
     }
 }

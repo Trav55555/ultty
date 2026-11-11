@@ -46,6 +46,9 @@ impl FocusManager {
     /// calls it once per frame before rendering, so ANSI and native modes
     /// always agree on the Tab order.
     pub fn register_view_tree(&mut self, view: &dyn View) {
+        if crate::overrides::is_hidden(view) {
+            return;
+        }
         if view.is_focusable() {
             if let Some(id) = view.widget_id() {
                 self.register(id.to_string());

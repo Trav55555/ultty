@@ -245,7 +245,7 @@ impl View for Section {
         }
         for child in &self.children {
             if chunk_idx < chunks.len() {
-                child.render_ansi(frame, chunks[chunk_idx]);
+                super::render_view_ansi(child.as_ref(), frame, chunks[chunk_idx]);
                 chunk_idx += 1;
             }
         }
@@ -377,7 +377,7 @@ impl View for Card {
             .split(inner);
 
         for (child, chunk) in self.children.iter().zip(chunks.iter()) {
-            child.render_ansi(frame, *chunk);
+            super::render_view_ansi(child.as_ref(), frame, *chunk);
         }
     }
 }

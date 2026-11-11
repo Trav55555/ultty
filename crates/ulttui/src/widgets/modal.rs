@@ -305,7 +305,7 @@ impl View for Modal {
                 inner.height.saturating_sub(2),
             );
             if let Some(ref body_view) = self.body_view {
-                body_view.render_ansi(frame, body_area);
+                super::render_view_ansi(body_view.as_ref(), frame, body_area);
             } else {
                 let body = Paragraph::new(self.body.as_str()).wrap(Wrap { trim: true });
                 frame.render_widget(body, body_area);

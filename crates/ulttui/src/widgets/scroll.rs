@@ -234,11 +234,11 @@ impl ScrollView {
             Ok(terminal) => terminal,
             Err(err) => {
                 tracing::warn!("ScrollView offscreen canvas failed: {err}");
-                child.render_ansi(frame, viewport);
+                super::render_view_ansi(child, frame, viewport);
                 return;
             }
         };
-        if let Err(err) = canvas.draw(|f| child.render_ansi(f, f.area())) {
+        if let Err(err) = canvas.draw(|f| super::render_view_ansi(child, f, f.area())) {
             tracing::warn!("ScrollView offscreen draw failed: {err}");
             return;
         }

@@ -29,6 +29,7 @@ futures-util = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+toml = "0.8"
 pulldown-cmark = { workspace = true }
 unicode-width = { workspace = true }
 

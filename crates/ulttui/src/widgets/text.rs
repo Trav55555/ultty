@@ -31,7 +31,10 @@ impl Text {
 
 impl View for Text {
     fn constraints(&self) -> ultty_protocol::Constraints {
-        let line_count = self.content.lines().count().max(1);
+        let line_count = crate::overrides::text_or(&self.content)
+            .lines()
+            .count()
+            .max(1);
         ultty_protocol::Constraints {
             display: ultty_protocol::Display::Flex,
             width: ultty_protocol::Dimension::Percent(100.0),
@@ -42,11 +45,13 @@ impl View for Text {
     }
 
     fn content(&self) -> ultty_protocol::Content {
-        ultty_protocol::Content::Text(ultty_protocol::TextContent::new(&self.content))
+        ultty_protocol::Content::Text(ultty_protocol::TextContent::new(crate::overrides::text_or(
+            &self.content,
+        )))
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
-        let paragraph = Paragraph::new(self.content.as_str());
+        let paragraph = Paragraph::new(crate::overrides::text_or(&self.content));
         frame.render_widget(paragraph, area);
     }
 }
@@ -83,6 +88,22 @@ impl RichText {
     pub fn spans(&self) -> &[(String, ultty_protocol::Style)] {
         &self.spans
     }
+
+    /// The spans drawn: replacement text from a user override (ADR 0023)
+    /// becomes one span in the first span's style.
+    fn shown_spans(&self) -> std::borrow::Cow<'_, [(String, ultty_protocol::Style)]> {
+        match crate::overrides::replacement_text() {
+            Some(text) => {
+                let style = self
+                    .spans
+                    .first()
+                    .map(|(_, s)| s.clone())
+                    .unwrap_or_default();
+                std::borrow::Cow::Owned(vec![(text.to_string(), style)])
+            }
+            None => std::borrow::Cow::Borrowed(&self.spans),
+        }
+    }
 }
 
 impl View for RichText {
@@ -90,7 +111,11 @@ impl View for RichText {
         let width = if self.fill_width {
             ultty_protocol::Dimension::Percent(100.0)
         } else {
-            let total_chars: usize = self.spans.iter().map(|(t, _)| t.chars().count()).sum();
+            let total_chars: usize = self
+                .shown_spans()
+                .iter()
+                .map(|(t, _)| t.chars().count())
+                .sum();
             ultty_protocol::Dimension::Cells(total_chars as f32)
         };
         ultty_protocol::Constraints {
@@ -105,7 +130,7 @@ impl View for RichText {
 
     fn content(&self) -> ultty_protocol::Content {
         let mut rich = ultty_protocol::RichText::new();
-        for (text, style) in &self.spans {
+        for (text, style) in self.shown_spans().iter() {
             rich = rich.span(text.clone(), style.clone());
         }
         ultty_protocol::Content::RichText(rich)
@@ -116,7 +141,7 @@ impl View for RichText {
         use ratatui::text::Span;
 
         let spans: Vec<Span> = self
-            .spans
+            .shown_spans()
             .iter()
             .map(|(text, style)| {
                 let mut rstyle = RStyle::default();

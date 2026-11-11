@@ -1,0 +1,16 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+expression: out
+---
+-- native --
+r1 create display=Flex fg=None bg=None bold=false
+r2 create display=Block fg=Some(Named(Red)) bg=Some(Rgb(69, 71, 90)) bold=true
+r2 button "Write"
+r3 create display=None fg=Some(Rgb(205, 214, 244)) bg=Some(Rgb(69, 71, 90)) bold=true
+r4 create display=Block fg=Some(Rgb(205, 214, 244)) bg=Some(Rgb(32, 48, 64)) bold=true
+r4 button "Quit"
+-- ansi --
+[ Write ] [ Quit ]
+-- styles --
+0:0-8 fg=Red bg=Rgb(69, 71, 90) mod=BOLD
+0:10-17 fg=Rgb(205, 214, 244) bg=Rgb(32, 48, 64) mod=BOLD

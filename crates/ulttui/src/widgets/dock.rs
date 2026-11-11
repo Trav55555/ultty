@@ -237,7 +237,7 @@ impl View for DockLayout {
         if let Some(top) = &self.top {
             let h = Self::dimension_to_cells(&top.constraints().height, middle.height, 1);
             let top_area = Rect::new(middle.x, middle.y, middle.width, h);
-            top.render_ansi(frame, top_area);
+            super::render_view_ansi(top.as_ref(), frame, top_area);
             middle = Rect::new(
                 middle.x,
                 middle.y + h,
@@ -254,7 +254,7 @@ impl View for DockLayout {
                 middle.width,
                 h,
             );
-            bottom.render_ansi(frame, bottom_area);
+            super::render_view_ansi(bottom.as_ref(), frame, bottom_area);
             middle = Rect::new(
                 middle.x,
                 middle.y,
@@ -272,7 +272,7 @@ impl View for DockLayout {
         if let Some(left) = &self.left {
             let w = Self::dimension_to_cells(&left.constraints().width, center_area.width, 20);
             let left_area = Rect::new(center_area.x, center_area.y, w, center_area.height);
-            left.render_ansi(frame, left_area);
+            super::render_view_ansi(left.as_ref(), frame, left_area);
             center_area = Rect::new(
                 center_area.x + w,
                 center_area.y,
@@ -289,7 +289,7 @@ impl View for DockLayout {
                 w,
                 center_area.height,
             );
-            right.render_ansi(frame, right_area);
+            super::render_view_ansi(right.as_ref(), frame, right_area);
             center_area = Rect::new(
                 center_area.x,
                 center_area.y,
@@ -299,7 +299,7 @@ impl View for DockLayout {
         }
 
         if let Some(center) = &self.center {
-            center.render_ansi(frame, center_area);
+            super::render_view_ansi(center.as_ref(), frame, center_area);
         }
     }
 }
