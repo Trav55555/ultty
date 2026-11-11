@@ -665,3 +665,30 @@ Each slice is independently testable and mergeable.
     the active option; the chosen one stays the combo box's value until
     Enter. With `selected` on the chosen one instead, moving through the
     options would change nothing a screen reader is told.
+  - Focus stays on the combo box (the app's focused widget), so the
+    terminal makes an expanded `ComboBox`'s selected `Option` child its
+    `active_descendant`: AccessKit then reports the option as focused,
+    and focus moves with the cursor. No protocol field is needed; an
+    app's own active descendant would need one.
+  - An option is two regions, the `Option` and a hidden child holding
+    its drawn line. One region holding the line and labelled by the
+    option would have its line read as well: the terminal gives a
+    labelled region's text as `Label` children whenever the label is
+    not the whole text, and the line ("> * Red") never is.
+  - Cost: each `Row`, `Cell` and `ColumnHeader` now has semantics, which
+    the terminal keeps boxed per region. The `scene_table_1000x4` cases
+    of `benches/memory.rs` measure it: a table of 1000 rows of 4 cells
+    (5001 regions) holds 3.73 MB without semantics and 4.41 MB with
+    them, about 136 bytes a region. A session holds at most 10,000
+    regions (`MAX_REGION_COUNT`), so semantics add at most about 1.4 MB
+    to one, a table of some 2,000 rows of 4 cells.
+- Positions and levels were off by one on every platform, and set sizes
+  missing. AccessKit 0.25.2 counts `position_in_set` and `level` from 0
+  and reads the size of a set from the items' container
+  (`size_of_set_from_container`), while the first version passed the
+  1-based wire values and set the size on each item: AT-SPI reported
+  item 1 of 2 as `posinset` 2 with no `setsize`. The terminal now
+  subtracts 1 and sets `size_of_set` on the container of items with a
+  `position` (the largest size among them; rows and cells are indexed
+  instead). `scripts/e2e/accessibility-atspi.sh` checks the dashboard
+  list's items report `posinset` 1 and 2 of `setsize` 5 over AT-SPI.
