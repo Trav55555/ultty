@@ -20,6 +20,7 @@
 //! in a row: see [`super::Grid`]'s `collect_styles_if_due`.
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::cell::{Cell, CellFlags, Color, PackedColor};
 use super::screen::ScreenPage;
@@ -117,14 +118,65 @@ impl StyleKey {
 
     /// The table id this key names, if it is not inline.
     #[inline]
-    fn table_id(self) -> Option<usize> {
+    pub(super) fn table_id(self) -> Option<usize> {
         (self.0 & Self::INLINE == 0).then_some(self.0 as usize)
     }
 
-    /// The key with these raw bits, for tests that need a bad one.
-    #[cfg(test)]
+    /// The key naming table id `id`.
+    #[inline]
+    pub(super) fn from_id(id: u32) -> Self {
+        Self(u64::from(id))
+    }
+
+    /// The style this key names, with table ids looked up in `table`
+    /// (whose entry 0 is the default style).
+    #[inline]
+    pub(super) fn style_in(self, table: &[Style]) -> Style {
+        match self.table_id() {
+            Some(id) => table[id],
+            None => self.inline_style(),
+        }
+    }
+
+    /// Whether this is a key `table` can hand out: an inline key in its
+    /// canonical form, or the id of a style in `table` that does not fit
+    /// inline.
+    pub(super) fn check_in(self, table: &[Style]) -> Result<(), String> {
+        match self.table_id() {
+            Some(0) => Ok(()),
+            Some(id) if id >= table.len() => Err(format!(
+                "style id {id} past the table's {} styles",
+                table.len()
+            )),
+            Some(id) if StyleKey::inline(&table[id]).is_some() => {
+                Err(format!("style id {id} names a style that fits inline"))
+            }
+            Some(_) => Ok(()),
+            None => {
+                let style = self.inline_style();
+                if self.0 >> StyleKey::BITS != 0
+                    || self.0 & !StyleKey::INLINE & !StyleKey::INLINE_PAYLOAD != 0
+                    || StyleKey::inline(&style) != Some(self)
+                {
+                    Err(format!("inline style key {:#x} is not canonical", self.0))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// The key with these raw bits: one [`StyleKey::bits`] gave, or, in
+    /// tests, a bad one.
+    #[inline]
     pub(super) fn from_bits(bits: u64) -> Self {
         Self(bits)
+    }
+
+    /// The key's raw bits, for storage that keeps it in a word of its own.
+    #[inline]
+    pub(super) fn bits(self) -> u64 {
+        self.0
     }
 
     /// The key in a packed cell's position.
@@ -353,6 +405,38 @@ impl fmt::Debug for PackedCell {
     }
 }
 
+/// What a run of cells has in common, for choosing how history stores a
+/// row (see `history.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Summary {
+    /// Every cell is in the first cell's style.
+    pub(super) one_key: bool,
+    /// Every cell is ASCII with no structure bits.
+    pub(super) ascii: bool,
+    /// Some cell has the grapheme bit.
+    pub(super) graphemes: bool,
+}
+
+impl Summary {
+    /// One pass of ORs over `cells`, which the compiler can vectorise.
+    #[inline]
+    pub(super) fn of(cells: &[PackedCell]) -> Self {
+        let first = cells
+            .first()
+            .map_or(0, |cell| cell.0 >> PackedCell::KEY_SHIFT);
+        let (mut keys, mut structure) = (0, 0);
+        for cell in cells {
+            keys |= (cell.0 >> PackedCell::KEY_SHIFT) ^ first;
+            structure |= cell.0 & PackedCell::NOT_UNIFORM;
+        }
+        Self {
+            one_key: keys == 0,
+            ascii: structure == 0,
+            graphemes: structure & PackedCell::GRAPHEME != 0,
+        }
+    }
+}
+
 /// Slots in [`StyleTable`]'s cache of recent styles.
 const RECENT: usize = 256;
 
@@ -369,6 +453,10 @@ pub(super) struct StyleTable {
     /// Slot to the id last interned there; 0 means empty (the default style
     /// never reaches the cache).
     recent: Box<[u32; RECENT]>,
+    /// Which table this is: tables made separately never share one, so
+    /// together with `generation` it says which ids a cached key is in.
+    /// A clone keeps it, as it keeps the ids.
+    id: u64,
     /// Bumped by every collection or reset, which renumber ids.
     generation: u64,
     /// The table length at which the next collection is due.
@@ -399,9 +487,11 @@ fn collect_interval(cells: usize) -> usize {
 impl StyleTable {
     /// An empty table for a screen of `cells` cells.
     pub(super) fn new(cells: usize) -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         Self {
             styles: vec![Style::default()],
             recent: Box::new([0; RECENT]),
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             generation: 0,
             collect_at: 1 + collect_interval(cells),
         }
@@ -411,6 +501,14 @@ impl StyleTable {
     #[inline]
     pub(super) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// The table and the numbering its ids are in: an id cached with one
+    /// stamp means the same style for as long as the table's stamp is the
+    /// same.
+    #[inline]
+    pub(super) fn stamp(&self) -> (u64, u64) {
+        (self.id, self.generation)
     }
 
     #[cfg(test)]
@@ -444,10 +542,7 @@ impl StyleTable {
     /// The style `key` names.
     #[inline]
     pub(super) fn style(&self, key: StyleKey) -> Style {
-        match key.table_id() {
-            Some(id) => self.styles[id],
-            None => key.inline_style(),
-        }
+        key.style_in(&self.styles)
     }
 
     /// `cell` packed, interning its style if it needs the table.
@@ -513,32 +608,23 @@ impl StyleTable {
     /// Whether `key` is one this table can hand out: an inline key in its
     /// canonical form, or the id of a style that does not fit inline.
     pub(super) fn check_key(&self, key: StyleKey) -> Result<(), String> {
-        match key.table_id() {
-            Some(0) => Ok(()),
-            Some(id) if id >= self.styles.len() => Err(format!(
-                "style id {id} past the table's {} styles",
-                self.styles.len()
-            )),
-            Some(id) if StyleKey::inline(&self.styles[id]).is_some() => {
-                Err(format!("style id {id} names a style that fits inline"))
-            }
-            Some(_) => Ok(()),
-            None => {
-                let style = key.inline_style();
-                if key.0 >> StyleKey::BITS != 0
-                    || key.0 & !StyleKey::INLINE & !StyleKey::INLINE_PAYLOAD != 0
-                    || StyleKey::inline(&style) != Some(key)
-                {
-                    Err(format!("inline style key {:#x} is not canonical", key.0))
-                } else {
-                    Ok(())
-                }
-            }
-        }
+        key.check_in(&self.styles)
     }
 }
 
 impl PackedCell {
+    /// The bits below the style key: the codepoint and the structure.
+    #[inline]
+    pub(super) fn low_bits(self) -> u32 {
+        (self.0 & ((1 << Self::KEY_SHIFT) - 1)) as u32
+    }
+
+    /// The cell whose [`PackedCell::low_bits`] are `bits`, in style `key`.
+    #[inline]
+    pub(super) fn from_low_bits(bits: u32, key: StyleKey) -> Self {
+        Self(key.base() | u64::from(bits))
+    }
+
     /// This cell in style `key` instead.
     #[inline]
     pub(super) fn with_key(self, key: StyleKey) -> Self {
