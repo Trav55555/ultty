@@ -1547,6 +1547,57 @@ mod tests {
     }
 
     #[test]
+    fn compacting_keeps_grapheme_extras_with_their_rows() {
+        let mut history = History::default();
+        let mut packer = RowPacker::new();
+        let texts = [
+            "a\u{301}b c\u{302}\u{303}",
+            "plain",
+            "日本 e\u{301}語 x",
+            "👍\u{1f3fd} 🏳\u{fe0f}\u{200d}🌈",
+        ];
+        for text in texts {
+            push_grid(&mut history, &grid_row(20, text));
+        }
+        // Rewrite the first and third rows so their old payloads, extras
+        // included, become garbage in the middle of the page.
+        let rewritten = [
+            (0, "x\u{308}\u{30a} y\u{301}"),
+            (2, "z\u{301}\u{302}\u{303}"),
+        ];
+        let mut want: Vec<Row> = texts
+            .iter()
+            .map(|text| grid_row(20, text).row(0).unwrap().to_row())
+            .collect();
+        for (index, text) in rewritten {
+            let row = grid_row(20, text).row(0).unwrap().to_row();
+            history.replace(index, &row, &mut packer);
+            want[index] = row;
+        }
+        let page = &history.pages[0];
+        assert!(page.garbage > 0);
+        let live: usize = page.heads.iter().map(|head| page.payload_bytes(head)).sum();
+        assert!(page.total_bytes() > live);
+
+        history.pages[0].compact();
+        history.check_integrity(16).unwrap();
+        let page = &history.pages[0];
+        assert_eq!(page.garbage, 0);
+        assert_eq!(page.total_bytes(), live, "only live payload is left");
+        for (index, want) in want.iter().enumerate() {
+            assert!(same(&owned(&history, index), want), "row {index}");
+            let row = history.row(index).unwrap();
+            for col in 0..want.width() {
+                assert_eq!(
+                    row.grapheme_extra(col),
+                    want.grapheme_extra(col),
+                    "row {index} col {col}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn taking_rows_back_off_the_end_gives_their_payload_back() {
         let mut history = History::default();
         let grid = grid_row(40, "日本 e\u{301}語 x");
