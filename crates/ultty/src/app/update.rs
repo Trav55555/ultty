@@ -436,6 +436,7 @@ impl App {
 
         self.publish_pane_changes();
         self.complete_pending_control_waits();
+        self.complete_pending_override_pushes();
 
         // Check if bell animation needs to continue
         if let Some(until) = self.bell_active_until {

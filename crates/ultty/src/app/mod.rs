@@ -197,6 +197,11 @@ pub struct App {
     control_server: Option<ControlServer>,
     /// Control wait requests that are checked after terminal output is drained.
     pending_control_waits: Vec<control_wait::PendingControlWait>,
+    /// Override pushes relayed to a native app and waiting for its answer
+    /// (ADR 0023 §9).
+    pending_override_pushes: Vec<control::PendingOverridePush>,
+    /// The `request_id` of the next override push.
+    next_override_request: u32,
     /// Panes subscribers were last told about, for pane opened/closed events.
     published_panes: Vec<ultty::terminal_manager::TerminalId>,
     /// Cross-thread wakeups from PTY readiness into winit.
@@ -439,6 +444,8 @@ impl App {
             protocol_server,
             control_server,
             pending_control_waits: Vec::new(),
+            pending_override_pushes: Vec::new(),
+            next_override_request: 1,
             published_panes,
             socket_wakeup,
             native_search_matches: Vec::new(),

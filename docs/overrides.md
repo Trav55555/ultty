@@ -196,6 +196,33 @@ ulttui = { version = "...", features = ["lua-overrides"] }
 without it logs that it is ignoring the `.luau` file and still applies its
 `.toml` file.
 
+## Trying an override on a running app
+
+Inside Ultty, an app drawing natively can take an override without a file
+under `~/.config`:
+
+```sh
+ulttyctl override push try.toml        # the app in the focused pane
+ulttyctl --pane 3 override push try.luau
+ulttyctl override clear
+```
+
+`push` reads the file (Luau when its name ends in `.luau`, TOML otherwise)
+and sends it to the app, which applies it on its next frame. The push lives
+in the app's memory, over its files: a pushed TOML file replaces the file's
+entry for each widget id it names and its `[keys]` are asked first; a pushed
+Luau file stands in for the `.luau` file's hooks. A second push replaces the
+first, and `clear` takes it away. Nothing is written to disk; when you like
+the result, put it in the app's file.
+
+A push that does not parse is refused with the same message the log would
+show for a bad file, `ulttyctl` exits 1, and the app keeps what it had. So
+does a Luau push to an app built without the `lua-overrides` feature. A pane
+with no native app (one drawing with ANSI, which reads only its files) is an
+error too. `ulttyctl regions` lists the widget ids to aim at; an agent gets
+the same through the `ultty_push_override` and `ultty_clear_override` MCP
+tools ([docs/agents.md](agents.md)).
+
 ## What it cannot do (yet)
 
 - Change layout (sizes, order, gaps) or a widget's borders on their own.

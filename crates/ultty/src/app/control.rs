@@ -58,6 +58,14 @@ impl App {
                 continue;
             }
 
+            if is_override_request(&request) {
+                // Answered when the app does, or at once with why it cannot.
+                if let Some(response) = self.relay_override_request(client_key, request) {
+                    responses.push((client_key, response));
+                }
+                continue;
+            }
+
             let response = self.process_control_request(client_key, request);
             responses.push((client_key, response));
         }
@@ -89,12 +97,189 @@ impl App {
         Ok(target)
     }
 
-    /// The earliest instant a pending wait needs the UI awake for.
+    /// The earliest instant a pending wait or override push needs the UI
+    /// awake for.
     pub(super) fn next_control_wait_deadline(&self) -> Option<Instant> {
         self.pending_control_waits
             .iter()
             .map(PendingControlWait::deadline)
+            .chain(self.pending_override_pushes.iter().map(|push| push.expires))
             .min()
+    }
+
+    /// Send a `PushOverride` or `ClearOverride` on to the native app in the
+    /// target pane's tab (ADR 0023 §9). `None` means the request now waits
+    /// for the app's `OverrideResult`; `Some` is an immediate answer, which
+    /// is always an error: no app to send it to, or a push too large.
+    fn relay_override_request(
+        &mut self,
+        client_key: usize,
+        request: ultty_protocol::control::ControlRequest,
+    ) -> Option<ultty_protocol::control::ControlResponse> {
+        use ultty_protocol::control::{ControlRequest, ControlResponse};
+        use ultty_protocol::{PushedOverride, MAX_OVERRIDE_SOURCE_LEN};
+
+        if let Some(response) = self.auth_error_for_request(client_key, &request) {
+            return Some(response);
+        }
+        let (pushed, target) = match request {
+            ControlRequest::PushOverride {
+                format,
+                source,
+                target,
+            } => (Some(PushedOverride { format, source }), target),
+            ControlRequest::ClearOverride { target } => (None, target),
+            _ => return None,
+        };
+        if let Some(pushed) = &pushed {
+            if pushed.source.len() > MAX_OVERRIDE_SOURCE_LEN {
+                return Some(ControlResponse::Error {
+                    code: OVERRIDE_REJECTED,
+                    message: format!(
+                        "The override is {} bytes; at most {MAX_OVERRIDE_SOURCE_LEN} can be pushed",
+                        pushed.source.len()
+                    ),
+                });
+            }
+        }
+        let pane = match resolve_control_target(&self.terminal_manager, target) {
+            Ok(pane) => pane,
+            Err(response) => return Some(response),
+        };
+        let session_key = match self.override_target_session(pane) {
+            Ok(key) => key,
+            Err(response) => return Some(response),
+        };
+        let request_id = self.next_override_request;
+        self.next_override_request = self.next_override_request.wrapping_add(1);
+        let sent = self
+            .protocol_server
+            .as_mut()
+            .map(|server| server.send_set_override(session_key, request_id, pushed))
+            .unwrap_or_else(|| Err(io::Error::other("no protocol server")));
+        if let Err(error) = sent {
+            return Some(ControlResponse::Error {
+                code: NO_NATIVE_APP,
+                message: format!(
+                    "Cannot reach the native app in pane {}: {error}",
+                    pane.raw()
+                ),
+            });
+        }
+        self.pending_override_pushes.push(PendingOverridePush {
+            client_key,
+            session_key,
+            request_id,
+            expires: Instant::now() + OVERRIDE_REPLY_TIMEOUT,
+        });
+        None
+    }
+
+    /// The session an override for `pane` goes to: the one native session
+    /// in the pane's tab, or of several the one in the pane's foreground
+    /// process group. Until sessions map to panes this is the best the
+    /// terminal knows.
+    fn override_target_session(
+        &self,
+        pane: TerminalId,
+    ) -> Result<usize, ultty_protocol::control::ControlResponse> {
+        use ultty_protocol::control::ControlResponse;
+
+        let no_app = |message: String| ControlResponse::Error {
+            code: NO_NATIVE_APP,
+            message,
+        };
+        let tab = self.terminal_manager.terminal(pane).map(|t| t.tab_id);
+        let server = self.protocol_server.as_ref().ok_or_else(|| {
+            no_app("This Ultty is running without its native protocol server".to_string())
+        })?;
+        let in_tab: Vec<(usize, &ultty::protocol::NativeSession)> = server
+            .sessions_with_keys()
+            .filter(|(_, session)| Some(session.tab_id()) == tab)
+            .collect();
+        let (key, session) = match in_tab.as_slice() {
+            [] => {
+                return Err(no_app(format!(
+                    "No native app in pane {}'s tab; an app drawing with ANSI reads its override files instead",
+                    pane.raw()
+                )))
+            }
+            [only] => *only,
+            several => {
+                let foreground = self.pane_foreground_pgrp(pane);
+                *several
+                    .iter()
+                    .find(|(_, session)| session.is_in_foreground(foreground))
+                    .ok_or_else(|| {
+                        no_app(format!(
+                            "{} native apps in pane {}'s tab and none in its foreground",
+                            several.len(),
+                            pane.raw()
+                        ))
+                    })?
+            }
+        };
+        if !session.accepts_override_push() {
+            return Err(no_app(format!(
+                "The native app in pane {} does not take pushed overrides (it was built before CAP_OVERRIDE_PUSH)",
+                pane.raw()
+            )));
+        }
+        Ok(key)
+    }
+
+    /// Answer the override pushes whose app has replied, whose app is gone,
+    /// or whose reply is overdue.
+    pub(super) fn complete_pending_override_pushes(&mut self) {
+        use ultty_protocol::control::ControlResponse;
+
+        if self.pending_override_pushes.is_empty() {
+            return;
+        }
+        let Some(server) = self.protocol_server.as_mut() else {
+            return;
+        };
+        let results = server.take_override_results();
+        let now = Instant::now();
+        let mut responses = Vec::new();
+        let pending = std::mem::take(&mut self.pending_override_pushes);
+        for push in pending {
+            let answered = results
+                .iter()
+                .find(|(key, id, _)| *key == push.session_key && *id == push.request_id);
+            let response = if let Some((_, _, error)) = answered {
+                match error {
+                    None => ControlResponse::Ok,
+                    Some(error) => ControlResponse::Error {
+                        code: OVERRIDE_REJECTED,
+                        message: error.clone(),
+                    },
+                }
+            } else if !server.has_session(push.session_key) {
+                ControlResponse::Error {
+                    code: NO_NATIVE_APP,
+                    message: "The native app disconnected before answering the override"
+                        .to_string(),
+                }
+            } else if now >= push.expires {
+                ControlResponse::Error {
+                    code: OVERRIDE_REJECTED,
+                    message: format!(
+                        "The native app did not answer the override within {} s",
+                        OVERRIDE_REPLY_TIMEOUT.as_secs()
+                    ),
+                }
+            } else {
+                self.pending_override_pushes.push(push);
+                continue;
+            };
+            responses.push((push.client_key, response));
+        }
+        if let Some(ref mut control) = self.control_server {
+            for (client_key, response) in responses {
+                control.send_response(client_key, &response);
+            }
+        }
     }
 
     /// Answer the waits on `pane` that were waiting for `event`, and restart
@@ -884,6 +1069,16 @@ impl App {
                 message: "wait-for cannot be used inside batch requests".to_string(),
             },
 
+            // Relayed to the app and answered later; see
+            // `relay_override_request`. Reached only inside a batch.
+            ControlRequest::PushOverride { .. } | ControlRequest::ClearOverride { .. } => {
+                ControlResponse::Error {
+                    code: 5,
+                    message: "override push and clear cannot be used inside batch requests"
+                        .to_string(),
+                }
+            }
+
             ControlRequest::Batch { commands } => {
                 let results: Vec<ControlResponse> = commands
                     .into_iter()
@@ -1056,6 +1251,28 @@ fn terminal_info(
 
 /// Error code for a `target` that names no open pane.
 const PANE_NOT_FOUND: u16 = 6;
+/// No native app to push an override into (or one that cannot take it).
+const NO_NATIVE_APP: u16 = 9;
+/// The app refused the pushed override, or did not answer in time.
+const OVERRIDE_REJECTED: u16 = 10;
+/// How long an app has to answer `SetOverride`.
+const OVERRIDE_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// An override push relayed to a native app, waiting for its answer.
+pub(super) struct PendingOverridePush {
+    client_key: usize,
+    session_key: usize,
+    request_id: u32,
+    expires: Instant,
+}
+
+fn is_override_request(request: &ultty_protocol::control::ControlRequest) -> bool {
+    use ultty_protocol::control::ControlRequest;
+    matches!(
+        request,
+        ControlRequest::PushOverride { .. } | ControlRequest::ClearOverride { .. }
+    )
+}
 
 /// Error code for `last_command` in a pane whose shell marked no command.
 const NO_COMMAND_RECORDED: u16 = 7;
@@ -1222,6 +1439,8 @@ fn control_request_requires_auth(request: &ultty_protocol::control::ControlReque
         | ControlRequest::Search { .. }
         | ControlRequest::WaitFor { .. }
         | ControlRequest::Subscribe { .. }
+        | ControlRequest::PushOverride { .. }
+        | ControlRequest::ClearOverride { .. }
         | ControlRequest::SendText { .. }
         | ControlRequest::SendKey { .. }
         | ControlRequest::SendRaw { .. }

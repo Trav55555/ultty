@@ -894,6 +894,48 @@ impl ProtocolServer {
         self.flush();
     }
 
+    /// Every session with the key that names it to
+    /// [`ProtocolServer::send_set_override`] and in
+    /// [`ProtocolServer::take_override_results`].
+    pub fn sessions_with_keys(&self) -> impl Iterator<Item = (usize, &NativeSession)> {
+        self.sessions.iter().map(|(&key, session)| (key, session))
+    }
+
+    /// Whether the session `key` names is still connected.
+    pub fn has_session(&self, key: usize) -> bool {
+        self.sessions.contains_key(&key)
+    }
+
+    /// Push an override into one session (ADR 0023 §9); `None` clears the
+    /// pushed one. The app's answer comes back through
+    /// [`ProtocolServer::take_override_results`].
+    pub fn send_set_override(
+        &mut self,
+        session_key: usize,
+        request_id: u32,
+        pushed: Option<ultty_protocol::PushedOverride>,
+    ) -> io::Result<()> {
+        let session = self
+            .sessions
+            .get_mut(&session_key)
+            .ok_or_else(|| io::Error::other("the native session is gone"))?;
+        session.send_set_override(request_id, pushed)?;
+        self.flush();
+        Ok(())
+    }
+
+    /// The apps' answers to `SetOverride` since the last call: session key,
+    /// request id and the error, if any.
+    pub fn take_override_results(&mut self) -> Vec<(usize, u32, Option<String>)> {
+        let mut results = Vec::new();
+        for (&key, session) in &mut self.sessions {
+            for (request_id, error) in session.take_override_results() {
+                results.push((key, request_id, error));
+            }
+        }
+        results
+    }
+
     /// Advance all animations (scroll and style transitions) across all sessions.
     /// Returns true if any session still has active animations.
     pub fn update_animations(&mut self) -> bool {

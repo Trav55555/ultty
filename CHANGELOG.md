@@ -30,6 +30,14 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Added
 
+- `ulttyctl override push <file>` and `override clear` (ADR 0023 §9): try a
+  user override on the native `ulttui` app in a pane without writing it
+  under `~/.config`. The override applies on the app's next frame, in
+  memory over its files; a bad one is refused with the app's parse error.
+  New protocol messages `SetOverride` and `OverrideResult` (both `0x0080`)
+  behind `CAP_OVERRIDE_PUSH` (`0x0800`); apps on older `ulttui` are told
+  apart and refused cleanly. `ulttyctl mcp` serves them as
+  `ultty_push_override` and `ultty_clear_override`.
 - Text editing in `ulttui` and `ulttui-lua`: `ulttui::edit` (cursor moves,
   word motions, deletes at the cursor, by grapheme cluster), used by
   `TextInput`'s insert mode and by Lua `input` nodes, which take `cursor`
@@ -123,6 +131,10 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Fixed
 
+- A Luau override file with a `widget` hook panicked every `ulttui` app
+  on its first frame ("RefCell already mutably borrowed"): the runner
+  registered focusable widgets while holding the focus manager, and the
+  hook read focus through it. Registration no longer holds it.
 - `DiffView`'s line texts are one cell high in native mode; they were laid
   out with no height.
 - `ulttui` answers the terminal's `Ping` over the socket. An app that had

@@ -23,9 +23,10 @@ use std::os::unix::net::UnixStream;
 use bytes::BytesMut;
 use tracing::{debug, error, info, warn};
 use ultty_protocol::{
-    AppMessage, Dimension, Display, FlexDirection, FrameId, LayoutTrigger, RegionId,
-    TerminalMessage, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, CAP_INPUT_CURSOR, CAP_LAYOUT_FLEXBOX,
-    CAP_REGION_METADATA, CAP_SEMANTICS, CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, PROTOCOL_VERSION,
+    AppMessage, Dimension, Display, FlexDirection, FrameId, LayoutTrigger, PushedOverride,
+    RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, CAP_INPUT_CURSOR,
+    CAP_LAYOUT_FLEXBOX, CAP_OVERRIDE_PUSH, CAP_REGION_METADATA, CAP_SEMANTICS,
+    CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, PROTOCOL_VERSION,
 };
 #[cfg(test)]
 use ultty_protocol::{Content, Style};
@@ -72,7 +73,8 @@ const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_STREAM_LIFECYCLE
     | CAP_REGION_METADATA
     | CAP_SEMANTICS
-    | CAP_INPUT_CURSOR;
+    | CAP_INPUT_CURSOR
+    | CAP_OVERRIDE_PUSH;
 
 /// An in-band session with no traffic from its app for this long has ended.
 /// Clients send a heartbeat (an unsolicited `Pong`) at least every few
@@ -166,6 +168,9 @@ pub struct NativeSession {
     pending_clipboard_get: bool,
     /// Pending clipboard set request.
     pending_clipboard_set: Option<String>,
+    /// Answers to `SetOverride` the app sent and the control plane has not
+    /// taken: request id and the app's error, if any (ADR 0023 §9).
+    pending_override_results: Vec<(u32, Option<String>)>,
     /// Active style transitions: region_id -> (start_time, start_opacity, target_style).
     style_animations: HashMap<RegionId, StyleAnimation>,
     /// Time of last data received from client.
@@ -317,6 +322,7 @@ impl NativeSession {
             active_streams: HashMap::new(),
             pending_clipboard_get: false,
             pending_clipboard_set: None,
+            pending_override_results: Vec::new(),
             style_animations: HashMap::new(),
             last_activity: std::time::Instant::now(),
             last_ping_sent: None,
@@ -1129,6 +1135,28 @@ impl NativeSession {
         self.send_message(&TerminalMessage::ClipboardContent { text })
     }
 
+    /// Whether the app negotiated `CAP_OVERRIDE_PUSH`, so it can be sent
+    /// `SetOverride` and will answer it.
+    pub fn accepts_override_push(&self) -> bool {
+        self.capabilities & CAP_OVERRIDE_PUSH != 0
+    }
+
+    /// Push an override into the app (`None` clears the pushed one). The
+    /// app answers with an `OverrideResult` for `request_id`, read back with
+    /// [`NativeSession::take_override_results`].
+    pub fn send_set_override(
+        &mut self,
+        request_id: u32,
+        pushed: Option<PushedOverride>,
+    ) -> io::Result<()> {
+        self.send_message(&TerminalMessage::SetOverride { request_id, pushed })
+    }
+
+    /// The app's answers to `SetOverride` since the last call.
+    pub fn take_override_results(&mut self) -> Vec<(u32, Option<String>)> {
+        std::mem::take(&mut self.pending_override_results)
+    }
+
     /// Send a scroll event notification to the client for a specific region.
     pub fn send_scroll_event(
         &mut self,
@@ -1189,6 +1217,81 @@ mod tests {
                     | CAP_INLINE_SURFACES,
             })
             .unwrap();
+    }
+
+    /// An app that asks for `CAP_OVERRIDE_PUSH` gets it, can be sent
+    /// `SetOverride`, and its answers are collected for the control plane;
+    /// an app that did not ask is told apart (ADR 0023 §9).
+    #[test]
+    fn override_push_is_negotiated_relayed_and_answered() {
+        let mut session = make_session();
+        session
+            .handle_message(AppMessage::ClientHello {
+                version: PROTOCOL_VERSION,
+                requested_capabilities: CAP_LAYOUT_FLEXBOX,
+            })
+            .unwrap();
+        assert!(!session.accepts_override_push());
+
+        let mut session = make_session();
+        session
+            .handle_message(AppMessage::ClientHello {
+                version: PROTOCOL_VERSION,
+                requested_capabilities: CAP_LAYOUT_FLEXBOX | CAP_OVERRIDE_PUSH,
+            })
+            .unwrap();
+        assert!(session.accepts_override_push());
+        session.take_sent_messages();
+
+        let pushed = PushedOverride {
+            format: ultty_protocol::OverrideFormat::Toml,
+            source: "[widget.a]\nhidden = true\n".to_string(),
+        };
+        session.send_set_override(3, Some(pushed.clone())).unwrap();
+        session.send_set_override(4, None).unwrap();
+        assert_eq!(
+            session.take_sent_messages(),
+            vec![
+                TerminalMessage::SetOverride {
+                    request_id: 3,
+                    pushed: Some(pushed),
+                },
+                TerminalMessage::SetOverride {
+                    request_id: 4,
+                    pushed: None,
+                },
+            ]
+        );
+
+        let shown = session.shown_generation();
+        session
+            .handle_message(AppMessage::OverrideResult {
+                request_id: 3,
+                error: Some("widget.a.hidden: expected true or false".to_string()),
+            })
+            .unwrap();
+        session
+            .handle_message(AppMessage::OverrideResult {
+                request_id: 4,
+                error: None,
+            })
+            .unwrap();
+        assert_eq!(
+            session.take_override_results(),
+            vec![
+                (
+                    3,
+                    Some("widget.a.hidden: expected true or false".to_string())
+                ),
+                (4, None),
+            ]
+        );
+        assert!(session.take_override_results().is_empty());
+        assert_eq!(
+            session.shown_generation(),
+            shown,
+            "an answer changes nothing the app shows"
+        );
     }
 
     #[test]

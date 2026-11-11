@@ -13,6 +13,7 @@ use serde_json::{json, Map, Value};
 use ultty_protocol::control::{
     ControlData, ControlRequest, ControlResponse, PaneInfo, PaneState, PaneStatus, WaitCondition,
 };
+use ultty_protocol::OverrideFormat;
 
 use super::server::{parse_key, parse_modifiers};
 
@@ -176,6 +177,22 @@ impl McpServer<'_, '_> {
                 target: pane,
             })?,
             "ultty_regions" => self.request(ControlRequest::Regions { target: pane })?,
+            "ultty_push_override" => {
+                let source = required_str(args, "source")?.to_string();
+                let format = match optional_str(args, "format")?.unwrap_or("toml") {
+                    "toml" => OverrideFormat::Toml,
+                    "luau" => OverrideFormat::Luau,
+                    other => return Err(format!("format must be toml or luau, not {other}")),
+                };
+                self.request(ControlRequest::PushOverride {
+                    format,
+                    source,
+                    target: pane,
+                })?
+            }
+            "ultty_clear_override" => {
+                self.request(ControlRequest::ClearOverride { target: pane })?
+            }
             "ultty_set_status" => self.request(ControlRequest::SetPaneStatus {
                 status: pane_status(args)?,
                 target: pane,
@@ -471,6 +488,29 @@ fn tools() -> Vec<Value> {
              content kind and text, the metadata the app set, and which region has \
              focus. Empty when the tab runs only plain terminal programs; read those \
              with ultty_read_text.",
+            json!({ "pane": pane_property() }),
+            &[],
+        ),
+        tool(
+            "ultty_push_override",
+            "Reshape the native (ulttui) app in a pane without editing its files: push a \
+             user override keyed by the widget ids ultty_regions shows. TOML: \
+             [widget.<id>] with fg, bg, bold, hidden or text, and [keys] mapping a key \
+             to another key or { focus = \"<id>\" }. It applies on the app's next frame, \
+             in memory, over the app's override files, and replaces an earlier push; \
+             ultty_clear_override takes it away. Fails with the app's parse error when \
+             the source is wrong, and when the pane has no native app.",
+            json!({
+                "pane": pane_property(),
+                "source": { "type": "string", "description": "The override file's text." },
+                "format": { "type": "string", "enum": ["toml", "luau"], "description": "Default toml." },
+            }),
+            &["source"],
+        ),
+        tool(
+            "ultty_clear_override",
+            "Take back the override pushed into a pane's native app with \
+             ultty_push_override; its override files apply as before.",
             json!({ "pane": pane_property() }),
             &[],
         ),
