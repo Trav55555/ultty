@@ -268,32 +268,9 @@ async fn run_process(id: String, argv: Vec<String>) -> Msg {
     Msg::Script(done)
 }
 
-/// Name of a key as scripts see it.
-pub fn key_name(key: &Key) -> String {
-    match key {
-        Key::Char(' ') => "space".to_string(),
-        Key::Char(c) => c.to_string(),
-        Key::Enter => "enter".to_string(),
-        Key::Escape => "escape".to_string(),
-        Key::Backspace => "backspace".to_string(),
-        Key::Tab => "tab".to_string(),
-        Key::Up => "up".to_string(),
-        Key::Down => "down".to_string(),
-        Key::Left => "left".to_string(),
-        Key::Right => "right".to_string(),
-        Key::Home => "home".to_string(),
-        Key::End => "end".to_string(),
-        Key::PageUp => "pageup".to_string(),
-        Key::PageDown => "pagedown".to_string(),
-        Key::Delete => "delete".to_string(),
-        Key::Insert => "insert".to_string(),
-        Key::F(n) => format!("f{n}"),
-    }
-}
-
 fn key_msg(event: &KeyEvent) -> ScriptMsg {
     ScriptMsg::Key {
-        key: key_name(&event.key),
+        key: event.key.name(),
         ctrl: event.modifiers.ctrl,
         alt: event.modifiers.alt,
         shift: event.modifiers.shift,
