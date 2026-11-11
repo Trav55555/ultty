@@ -13,7 +13,8 @@ Section: r2 heading level=2
 Divider: r1 auto hidden
 Spacer: r1 auto hidden
 Image: r1 image "A red dot"
-TextInput: r1 input "Message" desc="Type" value_text=""
+TextInput: r1 input "Message" desc="Type. vim normal mode" value_text=""
+TextInput+password: r1 input desc="vim normal mode"
 Select: r1 combo_box "Letter" expanded=Collapsed value_text="a"
 Select+expanded: r1 combo_box "Letter" expanded=Expanded value_text="b"
 Select+expanded: r2 option "a" pos=1/2

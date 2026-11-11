@@ -165,6 +165,10 @@ pub struct InputWidget {
     pub multiline: bool,
     /// Is password (masked).
     pub password: bool,
+    /// Caret position: grapheme clusters of `value` before it. `None` when
+    /// the input has no caret (not focused, or the app does not say). Only
+    /// sent to a terminal that negotiated `CAP_INPUT_CURSOR`.
+    pub cursor: Option<u32>,
 }
 
 /// Markdown widget.

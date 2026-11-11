@@ -178,6 +178,9 @@ pub(crate) struct FrameCapabilities {
     /// `SetSemantics` may be sent (`CAP_SEMANTICS`); without it the
     /// frame's semantics are dropped.
     pub(crate) semantics: bool,
+    /// An input's caret may be sent (`CAP_INPUT_CURSOR`); without it the
+    /// frame's inputs go without one.
+    pub(crate) input_cursor: bool,
 }
 
 /// Result of matching one frame's provisional regions onto retained ids.
@@ -192,12 +195,30 @@ struct Reconciliation {
     next: RetainedTree,
 }
 
+/// Take the caret out of every input in `messages`, for a terminal that
+/// cannot decode one.
+fn drop_input_cursors(messages: &mut [AppMessage]) {
+    for message in messages {
+        if let AppMessage::SetContent {
+            content: Content::Widget(ultty_protocol::WidgetContent::Input(input)),
+            ..
+        } = message
+        {
+            input.cursor = None;
+        }
+    }
+}
+
 pub(crate) fn optimize_frame_messages(
     previous: &RetainedTree,
     frame_messages: Vec<AppMessage>,
     notes: &FrameNotes,
     capabilities: FrameCapabilities,
 ) -> (Vec<AppMessage>, RetainedTree) {
+    let mut frame_messages = frame_messages;
+    if !capabilities.input_cursor {
+        drop_input_cursors(&mut frame_messages);
+    }
     let (nodes, order) = parse_provisional_tree(&frame_messages, &notes.keys);
     let mut reconciliation = Reconciliation {
         mapping: HashMap::new(),
@@ -1244,6 +1265,42 @@ mod tests {
     }
 
     #[test]
+    fn an_inputs_caret_is_sent_only_to_a_terminal_that_negotiated_it() {
+        use ultty_protocol::{InputWidget, WidgetContent};
+
+        let id = RegionId::new(1);
+        let input = |cursor| {
+            Content::Widget(WidgetContent::Input(InputWidget {
+                value: "héllo".into(),
+                cursor,
+                ..InputWidget::default()
+            }))
+        };
+        let sent_cursor = |capabilities| {
+            let frame = frame_with_content(id, input(Some(2)));
+            let (outgoing, _next) = optimize_frame_messages(
+                &RetainedTree::new(),
+                frame,
+                &FrameNotes::default(),
+                capabilities,
+            );
+            outgoing
+                .iter()
+                .filter_map(|message| match message {
+                    AppMessage::SetContent {
+                        content: Content::Widget(ultty_protocol::WidgetContent::Input(input)),
+                        ..
+                    } => Some(input.cursor),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(sent_cursor(ALL), [Some(2)]);
+        assert_eq!(sent_cursor(APPEND_ONLY), [None]);
+    }
+
+    #[test]
     fn optimize_falls_back_to_set_content_when_append_not_negotiated() {
         let id = RegionId::new(1);
         let previous = tree_with_text(id, "alpha");
@@ -1268,11 +1325,13 @@ mod tests {
     const APPEND_ONLY: FrameCapabilities = FrameCapabilities {
         append_content: true,
         semantics: false,
+        input_cursor: false,
     };
 
     const ALL: FrameCapabilities = FrameCapabilities {
         append_content: true,
         semantics: true,
+        input_cursor: true,
     };
 
     fn frame_with_semantics(
@@ -1362,6 +1421,7 @@ mod tests {
         let append_only = FrameCapabilities {
             append_content: true,
             semantics: false,
+            input_cursor: false,
         };
         let frame = frame_with_semantics(id, text("x"), Some(labelled("Close")));
         let (outgoing, tree) = optimize_frame_messages(

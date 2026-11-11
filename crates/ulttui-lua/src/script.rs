@@ -167,6 +167,13 @@ pub enum ScriptMsg {
         shift: bool,
         focused: Option<String>,
     },
+    /// The focused `input` was edited: the key moved its cursor or changed
+    /// its text. `cursor` counts grapheme clusters before the cursor.
+    Input {
+        id: String,
+        value: String,
+        cursor: usize,
+    },
     /// A widget was clicked (native mode).
     Click { id: String },
     /// A named timer from the app's `every` table fired.
@@ -453,14 +460,23 @@ impl Script {
         let value: Value = self
             .guarded(|| view.call(state.clone()))
             .map_err(|e| format!("view: {}", describe_error(&e)))?;
-        match value {
+        let node = match value {
             Value::UserData(ud) => node::node_from_userdata(&ud)
-                .ok_or_else(|| "view: returned a userdata that is not a view".to_string()),
-            Value::String(s) => Ok(Rc::new(Node::text(s.to_string_lossy()))),
-            other => Err(format!(
-                "view: returned {}; it must return a view such as column{{...}}",
-                other.type_name()
+                .ok_or_else(|| "view: returned a userdata that is not a view".to_string())?,
+            Value::String(s) => Rc::new(Node::text(s.to_string_lossy())),
+            other => {
+                return Err(format!(
+                    "view: returned {}; it must return a view such as column{{...}}",
+                    other.type_name()
+                ))
+            }
+        };
+        match node.duplicate_focus_id() {
+            Some(id) => Err(format!(
+                "view: more than one button or input has the id \"{id}\"; \
+                 their ids must be unique"
             )),
+            None => Ok(node),
         }
     }
 
@@ -470,6 +486,11 @@ impl Script {
         let result = f();
         self.deadline.set(None);
         result
+    }
+
+    /// The text and cursor of the input `id` in the last view that built.
+    pub fn input_state(&self, id: &str) -> Option<(String, usize)> {
+        self.last_view.borrow().as_ref()?.input_state(id)
     }
 
     /// Evaluate `expr` against the state, for tests and tools.
@@ -635,6 +656,12 @@ fn msg_table(lua: &Lua, msg: &ScriptMsg) -> mlua::Result<Table> {
             t.set("alt", *alt)?;
             t.set("shift", *shift)?;
             t.set("focused", focused.as_deref())?;
+        }
+        ScriptMsg::Input { id, value, cursor } => {
+            t.set("type", "input")?;
+            t.set("id", id.as_str())?;
+            t.set("value", value.as_str())?;
+            t.set("cursor", *cursor)?;
         }
         ScriptMsg::Click { id } => {
             t.set("type", "click")?;

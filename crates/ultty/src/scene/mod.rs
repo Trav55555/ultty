@@ -1,5 +1,6 @@
 //! Scene graph for retained mode rendering.
 
+pub(crate) mod caret;
 pub(crate) mod geometry;
 pub mod layout;
 pub mod raster;

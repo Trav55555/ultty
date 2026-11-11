@@ -13,6 +13,10 @@
 //! value is its name), else one `Label` child per line, which Orca reads
 //! line by line in browse mode and flat review.
 //!
+//! A text input is the exception: its value is a `TextRun` child, so the
+//! caret an app sends (`InputWidget::cursor`) can be the input's text
+//! selection, without a mark in the value.
+//!
 //! Apps are not trusted: a pane shows at most [`MAX_PANE_NODES`] nodes of
 //! native scenes, and since node ids are hashes of names the app partly
 //! chooses, a node whose id is already in the tree is left out with its
@@ -22,11 +26,17 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use accesskit::{Live as AkLive, Node, NodeId, Rect, Role as AkRole, Toggled as AkToggled};
+use accesskit::{
+    Live as AkLive, Node, NodeId, Rect, Role as AkRole, TextDirection, TextPosition, TextSelection,
+    Toggled as AkToggled,
+};
 use ultty_protocol::{Content, Expanded, Live, RegionId, Role, Semantics, Toggled, WidgetContent};
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::live::{Announcement, LiveRegions};
-use super::tree::{region_announcement_node_id, region_line_node_id, region_node_id};
+use super::tree::{
+    region_announcement_node_id, region_input_run_node_id, region_line_node_id, region_node_id,
+};
 use crate::scene::semantics::{capped, effective_semantics};
 use crate::scene::tree::SceneTree;
 
@@ -84,10 +94,14 @@ struct RegionSnapshot {
     bounds: Rect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct InputKind {
     multiline: bool,
     password: bool,
+    /// The value and the caret in it as a count of characters (`char`s)
+    /// before it, when the app gave one and the value may be exposed:
+    /// never a password's.
+    caret: Option<(String, usize)>,
 }
 
 impl SceneSnapshot {
@@ -297,6 +311,33 @@ impl SceneSnapshot {
                 }
                 out.nodes.push((line_id, label));
                 children.push(line_id);
+            }
+        }
+        if let Some((value, cursor)) = region.input.as_ref().and_then(|input| input.caret.as_ref())
+        {
+            let run_id = region_input_run_node_id(self.session, region.id);
+            if *budget == 0 {
+                out.truncated = true;
+            } else if out.claim(run_id) {
+                *budget -= 1;
+                // One AccessKit character per `char`: its length in bytes
+                // is at most 4, so the lengths always add up to the value.
+                let lengths: Vec<u8> = value.chars().map(|c| c.len_utf8() as u8).collect();
+                let mut run = Node::new(AkRole::TextRun);
+                run.set_value(value.as_str());
+                run.set_text_direction(TextDirection::LeftToRight);
+                run.set_bounds(region.bounds);
+                run.set_character_lengths(lengths);
+                out.nodes.push((run_id, run));
+                children.push(run_id);
+                let position = TextPosition {
+                    node: run_id,
+                    character_index: (*cursor).min(value.chars().count()),
+                };
+                node.set_text_selection(TextSelection {
+                    anchor: position,
+                    focus: position,
+                });
             }
         }
         for child in &region.children {
@@ -542,10 +583,27 @@ fn content_text(content: &Content) -> Option<Cow<'_, str>> {
 /// An `Input` widget's flags.
 fn input_kind(content: &Content) -> Option<InputKind> {
     match content {
-        Content::Widget(WidgetContent::Input(input)) => Some(InputKind {
-            multiline: input.multiline,
-            password: input.password,
-        }),
+        Content::Widget(WidgetContent::Input(input)) => {
+            let caret = input
+                .cursor
+                .filter(|_| !input.password && !input.value.is_empty())
+                .map(|cursor| {
+                    // The widget's caret counts grapheme clusters; AccessKit
+                    // text runs count characters.
+                    let chars = input
+                        .value
+                        .graphemes(true)
+                        .take(cursor as usize)
+                        .map(|g| g.chars().count())
+                        .sum();
+                    (input.value.clone(), chars)
+                });
+            Some(InputKind {
+                multiline: input.multiline,
+                password: input.password,
+                caret,
+            })
+        }
         _ => None,
     }
 }
@@ -592,7 +650,7 @@ fn region_node(region: &RegionSnapshot, set: &SetFacts, selectable: bool) -> Nod
         Role::Status => AkRole::Status,
         Role::Alert => AkRole::Alert,
         Role::Dialog => AkRole::Dialog,
-        Role::Input => match region.input {
+        Role::Input => match &region.input {
             Some(InputKind { password: true, .. }) => AkRole::PasswordInput,
             Some(InputKind {
                 multiline: true, ..
@@ -912,6 +970,101 @@ mod tests {
             assert_eq!(region(&update, id).role(), expected, "{role:?}");
         }
         consume(update);
+    }
+
+    /// The caret an app sends is the input's text selection, in a text run
+    /// under it: the value stays the real value, with no mark in it.
+    #[test]
+    fn an_inputs_caret_is_its_text_selection() {
+        let input = |value: &str, password: bool, cursor| {
+            widget(WidgetContent::Input(InputWidget {
+                value: value.to_owned(),
+                password,
+                cursor,
+                ..InputWidget::default()
+            }))
+        };
+        let mut scene = Scene::new();
+        scene.add(1, 0, input("héllo wörld", false, Some(7)));
+        scene.add(2, 0, input("no caret", false, None));
+        scene.add(3, 0, input("hunter2", true, Some(3)));
+        scene.add(4, 0, input("ae\u{301}b", false, Some(2)));
+        let update = full_scene(&scene);
+
+        let field = region(&update, 1);
+        assert_eq!(field.value(), Some("héllo wörld"));
+        let run_id = region_input_run_node_id(7, 1);
+        assert_eq!(field.children(), &[run_id]);
+        let run = node(&update, run_id);
+        assert_eq!(run.role(), AkRole::TextRun);
+        assert_eq!(run.value(), Some("héllo wörld"));
+        let selection = field.text_selection().expect("the input has a caret");
+        assert_eq!(selection.anchor, selection.focus);
+        assert_eq!(selection.focus.node, run_id);
+        assert_eq!(selection.focus.character_index, 7);
+        // One character per `char` (é is two bytes), so the lengths add
+        // up to the text.
+        assert_eq!(run.character_lengths().len(), 11);
+        assert_eq!(
+            run.character_lengths()
+                .iter()
+                .map(|&n| usize::from(n))
+                .sum::<usize>(),
+            "héllo wörld".len()
+        );
+
+        assert!(region(&update, 2).text_selection().is_none());
+        // A password's text never leaves the app, caret or not.
+        let password = region(&update, 3);
+        assert!(password.text_selection().is_none() && password.children().is_empty());
+
+        // The caret counts clusters, AccessKit characters are `char`s: after
+        // "ae\u{301}" is three of them.
+        let combined = region(&update, 4);
+        assert_eq!(combined.text_selection().unwrap().focus.character_index, 3);
+        assert_eq!(
+            node(&update, region_input_run_node_id(7, 4)).character_lengths(),
+            &[1, 1, 2, 1]
+        );
+        consume(update);
+    }
+
+    /// A cluster of more than 255 bytes (a letter and a hundred combining
+    /// marks) must not break the consumer: the run's lengths add up to its
+    /// text, and the caret is where the cluster count puts it.
+    #[test]
+    fn a_very_long_cluster_does_not_break_the_caret() {
+        let mut value = String::from("a");
+        value.extend(std::iter::repeat_n('\u{20D0}', 100));
+        value.push('b');
+        let mut scene = Scene::new();
+        scene.add(
+            1,
+            0,
+            widget(WidgetContent::Input(InputWidget {
+                value: value.clone(),
+                cursor: Some(1),
+                ..InputWidget::default()
+            })),
+        );
+        scene.focused = Some(RegionId::new(1));
+        let update = full_scene(&scene);
+
+        let run = node(&update, region_input_run_node_id(7, 1));
+        assert_eq!(
+            run.character_lengths()
+                .iter()
+                .map(|&n| usize::from(n))
+                .sum::<usize>(),
+            value.len()
+        );
+        let tree = consume(update);
+        let state = tree.state();
+        let focus = state.focus().expect("a focused node");
+        let caret = focus.text_selection_focus().expect("a caret");
+        // After "a" and its hundred marks.
+        assert_eq!(caret.to_global_usv_index(), 101);
+        assert_eq!(focus.document_range().text(), value);
     }
 
     #[test]

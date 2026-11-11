@@ -1416,6 +1416,7 @@ mod tests {
     const ALL: FrameCapabilities = FrameCapabilities {
         append_content: true,
         semantics: true,
+        input_cursor: true,
     };
 
     /// The view's native frame and what the walk noted, as the backend

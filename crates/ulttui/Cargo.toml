@@ -31,6 +31,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 pulldown-cmark = { workspace = true }
 unicode-width = { workspace = true }
+unicode-segmentation = "1.12"
 
 [dev-dependencies]
 tokio-test = "0.4"
