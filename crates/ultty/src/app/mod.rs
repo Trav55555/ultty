@@ -98,6 +98,8 @@ enum AppEvent {
     RuntimeReadable,
     /// A request from assistive technology, for [`ultty::a11y::Adapter`].
     Accessibility(accesskit_winit::Event),
+    /// SIGTERM, SIGHUP or SIGINT: exit as if the window were closed.
+    ShutdownSignal,
 }
 
 impl From<accesskit_winit::Event> for AppEvent {
@@ -728,6 +730,15 @@ impl App {
     /// Run the application.
     pub fn run() -> Result<()> {
         let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
+        let signal_proxy = event_loop.create_proxy();
+        if let Err(e) = ultty::platform::shutdown::on_shutdown_signal(move || {
+            let _ = signal_proxy.send_event(AppEvent::ShutdownSignal);
+        }) {
+            tracing::warn!(
+                "Failed to catch termination signals; one will kill Ultty without cleanup: {}",
+                e
+            );
+        }
         let mut handler = AppHandler {
             proxy: event_loop.create_proxy(),
             app: None,
@@ -1598,6 +1609,12 @@ impl ApplicationHandler<AppEvent> for AppHandler {
                         adapter.handle(&app.window, event.window_event);
                     }
                 }
+            }
+            AppEvent::ShutdownSignal => {
+                if let Some(app) = self.app.as_ref() {
+                    app.save_session();
+                }
+                event_loop.exit();
             }
         }
     }

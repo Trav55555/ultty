@@ -7,6 +7,7 @@ pub mod linux;
 pub mod macos;
 
 pub mod runtime_files;
+pub mod shutdown;
 pub mod socket;
 
 use crate::pty::Child;
