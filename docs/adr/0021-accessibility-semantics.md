@@ -452,7 +452,16 @@ Each slice is independently testable and mergeable.
      even after a later `SetContent`: a stated choice, so a stream is
      not spoken twice.
    - "At most four flushes a second" is a spacing of 250 ms per session;
-     a flush is one announcement, of the region that has waited longest.
+     a flush is one announcement, of the session's oldest queue (the one
+     whose unflushed text began earliest), and only once that queue is
+     due. A first version flushed whichever queue was due first, so a
+     younger region's complete line, due at once, went ahead of an older
+     region's words still inside their 250 ms: in a streamed reply a
+     code block begun 240 ms after a list item's first word was heard
+     before the item (`accessibility-chat.sh`). Speech in arrival order
+     across a live log's regions is what a listener needs; the cost is
+     that such a line waits at most 250 ms for the older queue, and a
+     line in a session with no older queue is still said at once.
    - A flush with a line break in it takes the complete lines only. The
      line begun after them waits for its own break or 250 ms from its own
      first byte; flushing everything once the queue was 250 ms old cut a
