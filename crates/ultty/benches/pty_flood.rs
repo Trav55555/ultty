@@ -5,11 +5,19 @@
 //! thread reads, parses and applies it exactly as in the live terminal. The
 //! corpora are 32 MiB because spawning and reaping the child costs tens of
 //! milliseconds, which hid most of the work at 8 MiB. The bench thread
-//! plays the UI: it sleeps until the I/O thread wakes it, waits out a frame
-//! interval, then holds the terminal lock while it copies every visible row,
-//! as the renderer's row cache does. What is timed is spawn to child exit,
-//! so it covers PTY reads and wakeups, lock hand-off with the "renderer",
-//! and parse plus grid work, but no GPU.
+//! plays the UI: it sleeps until the I/O thread wakes it, collects the
+//! events, and once a frame interval has passed since the last frame holds
+//! the terminal lock while it copies every visible row, as the renderer's
+//! row cache does. What is timed is spawn to child exit, so it covers PTY
+//! reads and wakeups, lock hand-off with the "renderer", and parse plus grid
+//! work, but no GPU.
+//!
+//! Like the app, the bench thread waits for the next frame on the waker, not
+//! in a blind sleep, so it sees the child's exit as soon as it is reported.
+//! A blind sleep rounded every run up to the next frame boundary: times came
+//! out as whole frames plus a constant, and ascii sat at 9 frames (about 219
+//! MiB/s on a c7a.2xlarge) whatever the VT core did. See
+//! `docs/perf/2026-11-11-pty-flood-frame-quantum.md`.
 //!
 //! The headless parse+grid ceiling is `ultty-bench vt`; the live numbers
 //! with a real window are `scripts/bench/compare.sh`. This sits between the
@@ -79,13 +87,21 @@ fn flood(path: &str, (cols, lines): (u16, u16), rows: &mut Vec<Row>) -> Duration
         Arc::new(move || wakes.wake())
     });
     let mut last_frame = Instant::now();
+    let mut needs_frame = false;
     loop {
-        wakes.wait(FRAME_INTERVAL);
+        let timeout = if needs_frame {
+            FRAME_INTERVAL.saturating_sub(last_frame.elapsed())
+        } else {
+            FRAME_INTERVAL
+        };
+        wakes.wait(timeout);
         let events = event_loop.process().expect("process");
-        if events.iter().any(|e| matches!(e, TerminalEvent::Redraw)) {
-            if let Some(wait) = FRAME_INTERVAL.checked_sub(last_frame.elapsed()) {
-                std::thread::sleep(wait);
-            }
+        needs_frame |= events.iter().any(|e| matches!(e, TerminalEvent::Redraw));
+        let exited = events
+            .iter()
+            .any(|e| matches!(e, TerminalEvent::ChildExited { .. }));
+        // On exit, copy the last output before the clock stops.
+        if needs_frame && (exited || last_frame.elapsed() >= FRAME_INTERVAL) {
             let terminal = event_loop.terminal();
             let buffer = terminal.buffer();
             rows.resize_with(usize::from(lines), || Row::new(cols));
@@ -95,11 +111,9 @@ fn flood(path: &str, (cols, lines): (u16, u16), rows: &mut Vec<Row>) -> Duration
                 }
             }
             last_frame = Instant::now();
+            needs_frame = false;
         }
-        if events
-            .iter()
-            .any(|e| matches!(e, TerminalEvent::ChildExited { .. }))
-        {
+        if exited {
             return start.elapsed();
         }
     }
