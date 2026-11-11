@@ -116,7 +116,7 @@ Role vocabulary, closed, each with the AccessKit role it maps to and the
 | Checkbox | `CheckBox` + `toggled` | `Checkbox` |
 | Switch | `Switch` + `toggled` | `Toggle` |
 | Progress | `ProgressIndicator` + `value` | `ProgressBar` |
-| List | `List` | `List`, `Select` |
+| List | `List` | `List` |
 | ListItem | `ListItem` + `position` | their rows |
 | TabList | `TabList` | `Tabs` |
 | Tab | `Tab` + `position` | each tab label |
@@ -124,10 +124,18 @@ Role vocabulary, closed, each with the AccessKit role it maps to and the
 | TreeItem | `TreeItem` + `expanded`, `level` | `TreeNode`, `Collapsible` |
 | Image | `Image` | `Image` (label is the alt text) |
 | Link | `Link` | OSC 8 style links in rich text, later |
+| Table (21) | `Table` + row and column counts | `Table` |
+| Row | `Row` + row index, `selected` | `Table` rows, the header row first |
+| Cell | `Cell` + column index | `Table` cells |
+| ColumnHeader | `ColumnHeader` + column index | `Table` header cells |
+| ComboBox | `ComboBox` + `value`, `expanded` | `Select` |
+| Option (26) | `ListBoxOption` + `position`, `selected` | `Select` options while expanded |
 
-Not in the set: `Table`/`Row`/`Cell` (`Table` synthesises cells, which are
-not regions; it exposes as `Text`), `Terminal` (the grid's), menus,
-sliders. Adding a role is additive under ADR 0011; removing one is not.
+Not in the set: `Terminal` (the grid's), menus, sliders, a listbox apart
+from a combo box. Adding a role is additive under ADR 0011; removing one
+is not. The table and combo box roles were added after slice 7, before
+semantics shipped in a release, so they need no capability (see open
+questions).
 
 **Defaults when an app sends nothing** (`role = Auto`, or no `SetSemantics`
 at all), derived from content: `None` → Group; `Text`/`RichText`/`Markdown`/
@@ -515,23 +523,25 @@ Each slice is independently testable and mergeable.
      `Divider`, `Spacer` hidden; `Image` image, `.label()` is the alt
      text; `TextInput` input with the typed value and placeholder (not
      the focus and vim markers its content draws), nothing for a
-     `.password()`; `Select` list, collapsed or expanded, the selected
-     option as `value_text` and its position; `List` list, rows list
+     `.password()`; `Select` combo box, the selected option as
+     `value_text`, its options child `Option` regions while expanded
+     (see open questions); `List` list, rows list
      items with position; `Tabs` tab list, tabs named by their labels
      with position; `Tree` tree, rows tree items with level and
      expanded, the texts drawn in a row hidden; `Collapsible` tree item,
      expanded, chevron hidden; `Modal` modal dialog named by its title,
-     hidden while not visible, its buttons buttons. `LoadingState`,
-     `EmptyState`, `Table`, containers: the derived default.
+     hidden while not visible, its buttons buttons; `Table` table, rows
+     rows, the header row's cells column headers. `LoadingState`,
+     `EmptyState`, containers: the derived default.
    - The active tab, the selected `List` row, the selected `Tree` row
      and the selected `Table` row carry the `selected` flag (bit 64,
      added after this slice; see open questions), and only that one
      item does. The terminal exposes any `Tab`, `ListItem` or `TreeItem`
      without the flag as selectable but not selected, as ARIA does for
-     those roles, so one bit is enough. A table row has no row role and
-     is a `Group` with the flag, which AccessKit's selection interface
-     does not count as an item. `Select` is one region, so its selected
-     option stays its `value_text` and position.
+     those roles, so one bit is enough. A first version had no row role:
+     a table row was a `Group` with the flag, and `Select` was one region
+     whose options were lines of its text; both now have roles of their
+     own (see open questions).
    - `MarkdownView` is one region per block, streaming or not. While it
      streams, the block still arriving is live itself (with the view's
      liveness) and the view is the busy log around it; a finished block
@@ -618,3 +628,40 @@ Each slice is independently testable and mergeable.
   `scripts/e2e/accessibility-atspi.sh` checks over AT-SPI that the
   `dashboard` example's selected list item is SELECTED, its others
   SELECTABLE only, and that the selection follows `j`.
+- How should `Table` rows and `Select` options be exposed? Answered: §1
+  gained `Table`, `Row`, `Cell`, `ColumnHeader`, `ComboBox` and `Option`
+  (21 to 26), mapped to the AccessKit roles of the same names (`Option`
+  to `ListBoxOption`). Semantics had still not shipped, so no capability.
+  - `Table` maps to AccessKit `Table`, not `Grid`. AccessKit 0.25.2
+    counts only item roles (list items, options, tree items, tabs) as a
+    selection container's items, never a `Row` (its table support is
+    AccessKit issue #29), so a `Grid` would offer a selection interface
+    that reports no row selected. A row carries `selected`, which AT-SPI
+    shows as SELECTED on a `table row`; the rows of a table one of whose
+    rows is selected are SELECTABLE, as list items are, and a table that
+    selects nothing says nothing.
+  - A row's `position` is its row index (the header row first) and a
+    cell's its column index: the terminal sets AccessKit's zero-based
+    `row_index` and `column_index`, not `position_in_set`, which ARIA
+    does not allow on rows and cells. The table's `row_count` and
+    `column_count` are derived from its children: its `Row`s, and the
+    most `Cell`s and `ColumnHeader`s in one of them, so an app need not
+    send them. AccessKit 0.25.2's AT-SPI adapter does not expose the
+    counts or indices (no `Table` interface yet); they are in the tree
+    for adapters that do.
+  - `Cell` and `ColumnHeader` are needed for a table to be navigable as
+    one: a header cell names its column, which a screen reader with
+    table support reads with each cell of it. `Table` already drew each
+    cell as a region, so they cost no regions.
+  - `Select` is a `ComboBox` valued by the chosen option. While
+    expanded its region holds no text and has one `Option` child per
+    option, named by the option, with its position, the drawn line
+    (cursor, mark, option) a hidden child. The options are the combo
+    box's own children rather than a listbox's: AccessKit treats
+    `ComboBox` as a selection container and `ListBoxOption` as an item,
+    so the combo box's selection interface lists them, with no listbox
+    role. `selected` is on the option under the cursor, the one Enter
+    would choose, as the ARIA combo box pattern puts `aria-selected` on
+    the active option; the chosen one stays the combo box's value until
+    Enter. With `selected` on the chosen one instead, moving through the
+    options would change nothing a screen reader is told.
