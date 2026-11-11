@@ -103,26 +103,18 @@ resamples), and the median of each batch.
 | `pty_flood` ascii median, 300x75 | +15% or better | +42.5% (CI +41.4% to +43.0%) | yes |
 | spread | under 5% | per-arm IQR/median 0.0–2.3% on ascii (2.6% at most on any arm); ascii batches agree within 1.1 points | yes |
 
-**`main` ascii is at a ceiling here, at about 219 MiB/s.** Slice 4's
-`main` ran ascii 120x40 at 219.1 MiB/s on the same instance type; slice 5
-cut vt/ascii instructions by another 29.8% and this run gives 219.3. The
-300x75 arm, with five times the row width, runs at the same 218, and the
-before arm, which is below the ceiling, slows at 300x75 as its per-row
-work grows. cjk, which runs at 86 MiB/s, did move with slice 5: 73.4 in
-slice 4's rerun, 86.2 now (+17%, against −29% instructions). So past
-about 219 MiB/s the cost that sets the rate is outside the VT core: the
-PTY reads, wakeups and lock hand-off in `EventLoop`, or `dd` itself. The
-prototype's C reached 291 MiB/s on this instance type through
-`proto-flood`, a harness with its own reader thread and no `EventLoop`,
-which points at the event loop's I/O path rather than the kernel. This
-was not profiled here; it is the first thing to look at for the rest of
-the gap (below). The criterion is met with the ceiling in place, so the
+**The 219 MiB/s ascii figure was not a ceiling.** Slice 4's `main` ran
+ascii 120x40 at 219.1 MiB/s on the same instance type and slice 5 gave
+219.3 despite cutting vt/ascii instructions by another 29.8%, which looked
+like a limit set outside the VT core. It was the bench: every `pty_flood`
+time here is a whole number of 16 ms frames plus a small constant (see
+[the frame quantum note](2026-11-11-pty-flood-frame-quantum.md)), and the
+fixed bench puts `main` at 261.9 MiB/s for ascii 120x40 and 255.5 at
+300x75 on a quiet c7a ([quiet rerun](2026-11-11-pty-flood-quiet-rerun.md)).
+The `pty_flood` numbers in this note are frame-quantised and are lower
+bounds, not rates; the ratios between arms in different frames hold only to
+about a frame (11% at ascii's 146 ms). The criterion is met with the ceiling in place, so the
 ascii ratios understate what the storage change is worth.
-
-Update: the ceiling was the bench. Its UI thread slept out each frame
-blind and saw the exit only at a frame boundary, so every time here is a
-whole number of 16 ms frames plus about 2 ms; see
-[the frame quantum note](2026-11-11-pty-flood-frame-quantum.md).
 
 sgr-dense at 120x40 is 3.3% slower than before slice 3, as in slice 4's
 rerun (4.2%) and the prototype's C (3.6–4.4%); the cause is in the
@@ -298,10 +290,11 @@ not exist; keeping a frozen implementation alive is what it would cost.
 On ASCII the T4 gap to Ghostty is closed: Ultty is level to 8% ahead
 under X11 and Wayland, and 27% ahead on unicode-mixed. What remains:
 
-- **The I/O path above the VT core.** On the quiet c7a, `pty_flood` ascii
-  stopped at about 219 MiB/s after slice 4 and did not move with slice
-  5's 30% instruction cut, at either size, while the prototype's harness
-  reached 291 on the same hardware. Profiling `EventLoop`'s read, wakeup
+- **The I/O path above the VT core.** The apparent 219 MiB/s `pty_flood`
+  ceiling was the bench's frame sleep; on the fixed bench `main` runs
+  ascii at 262 MiB/s on the quiet c7a (the prototype's harness reached 291
+  on the same hardware), so the gap is smaller than this note first read
+  it. Profiling `EventLoop`'s read, wakeup
   and lock hand-off under a flood is the next step; ADR 0022's
   Consequences already named the parser and handler dispatch and the
   kernel's 4 KiB reads as what this ADR does not address.

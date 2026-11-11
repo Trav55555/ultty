@@ -32,7 +32,7 @@ run_arm() { # batch round arm binary
       exit 1
     }
     for size in "${SIZES[@]}"; do
-      local sample="$home/pty_flood/$corpus/$size/new/sample.json"
+      local sample="$home/pty_flood/${corpus}_${size}/new/sample.json"
       [[ -f "$sample" ]] || { echo "missing $sample" >&2; exit 1; }
       cp "$sample" "$OUT/raw/$batch-$round-$arm-$corpus-$size.json"
       python3 -I - "$sample" "$batch" "$round" "$arm" "$corpus" "$size" "$(cut -d' ' -f1 /proc/loadavg)" >>"$OUT/runs.tsv" <<'PY'
@@ -40,7 +40,7 @@ import json, statistics, sys
 s = json.load(open(sys.argv[1]))
 # sample.json holds each sample's total time and its iteration count.
 per = sorted(t / i for t, i in zip(s["times"], s["iters"]))
-print("\t".join([*sys.argv[2:7], f"{statistics.median(per):.0f}"]))
+print("\t".join([*sys.argv[2:8], f"{statistics.median(per):.0f}"]))
 PY
     done
   done
