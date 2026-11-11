@@ -22,7 +22,7 @@
 use std::fmt;
 
 use super::cell::{Cell, CellFlags, Color, PackedColor};
-use super::row::{AnchorTag, GraphemeMap, Row, RowMarks};
+use super::screen::ScreenPage;
 
 /// Flags a packed cell keeps in its own bits rather than in its style.
 const STRUCTURAL: CellFlags = CellFlags::WIDE_CHAR
@@ -121,9 +121,15 @@ impl StyleKey {
         (self.0 & Self::INLINE == 0).then_some(self.0 as usize)
     }
 
+    /// The key with these raw bits, for tests that need a bad one.
+    #[cfg(test)]
+    pub(super) fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
     /// The key in a packed cell's position.
     #[inline]
-    fn base(self) -> u64 {
+    pub(super) fn base(self) -> u64 {
         self.0 << PackedCell::KEY_SHIFT
     }
 
@@ -309,8 +315,27 @@ impl PackedCell {
         Self(self.0 & !Self::CP_MASK | u64::from(c))
     }
 
+    /// The ASCII character `byte` in the style whose
+    /// [`StyleKey::base`] is `base`.
     #[inline]
-    fn without_grapheme(self) -> Self {
+    pub(super) fn ascii(base: u64, byte: u8) -> Self {
+        Self(base | u64::from(byte))
+    }
+
+    /// Whether the cell can be part of a uniform row: ASCII with no
+    /// structure bits.
+    #[inline]
+    pub(super) fn is_uniform_ascii(self) -> bool {
+        self.0 & Self::NOT_UNIFORM == 0
+    }
+
+    #[inline]
+    pub(super) fn with_grapheme(self) -> Self {
+        Self(self.0 | Self::GRAPHEME)
+    }
+
+    #[inline]
+    pub(super) fn without_grapheme(self) -> Self {
         Self(self.0 & !Self::GRAPHEME)
     }
 }
@@ -445,25 +470,15 @@ impl StyleTable {
         self.styles.len() >= self.collect_at
     }
 
-    /// Keep only the ids `rows` use, renumbered densely, and rewrite the
-    /// rows to match. The caller must hold no other id of this table.
-    pub(super) fn collect(&mut self, rows: &mut [PackedRow]) {
+    /// Keep only the ids `page` uses, renumbered densely, and rewrite the
+    /// page to match. The caller must hold no other id of this table.
+    pub(super) fn collect(&mut self, page: &mut ScreenPage) {
         let mut map = vec![0u32; self.styles.len()];
-        let mut mark = |key: StyleKey| {
+        page.for_each_key(|key| {
             if let Some(id) = key.table_id() {
                 map[id] = 1;
             }
-        };
-        let mut cells = 0;
-        for row in rows.iter() {
-            cells += row.cells.len();
-            if row.is_uniform() {
-                mark(row.uniform_key);
-            }
-            for cell in row.used_cells() {
-                mark(cell.key());
-            }
-        }
+        });
         // Renumber the survivors in place; `map` becomes old id -> new id,
         // 0 for a dropped one. Id 0, the default style, stays 0.
         map[0] = 0;
@@ -479,25 +494,12 @@ impl StyleTable {
         for slot in self.recent.iter_mut() {
             *slot = map[*slot as usize];
         }
-        let remap = |key: StyleKey| match key.table_id() {
+        page.remap_keys(|key| match key.table_id() {
             Some(id) => StyleKey(u64::from(map[id])),
             None => key,
-        };
-        for row in rows.iter_mut() {
-            row.uniform_key = if row.is_uniform() {
-                remap(row.uniform_key)
-            } else {
-                StyleKey::DEFAULT
-            };
-            let used = usize::from(row.used);
-            for cell in &mut row.cells[..used] {
-                if cell.key().table_id().is_some_and(|id| id != 0) {
-                    *cell = cell.with_key(remap(cell.key()));
-                }
-            }
-        }
+        });
         self.generation += 1;
-        self.collect_at = next + collect_interval(cells);
+        self.collect_at = next + collect_interval(page.cell_count());
     }
 
     /// Forget every style, for when every row is about to be replaced.
@@ -537,8 +539,9 @@ impl StyleTable {
 }
 
 impl PackedCell {
+    /// This cell in style `key` instead.
     #[inline]
-    fn with_key(self, key: StyleKey) -> Self {
+    pub(super) fn with_key(self, key: StyleKey) -> Self {
         Self(self.0 & !(!0 << Self::KEY_SHIFT) | key.base())
     }
 }
@@ -569,555 +572,6 @@ pub(super) mod test_support {
         fn drop(&mut self) {
             INTERVAL.with(|interval| interval.set(None));
         }
-    }
-}
-
-/// A screen row of packed cells, in the grid that owns its style table.
-///
-/// It keeps what [`Row`] keeps, with `uniform` in place of `plain`: every
-/// cell before `used` is ASCII with no structure bits, in style
-/// `uniform_key`. Like `used`, it may understate (anything writing a cell
-/// directly clears it) but never overstates, so history can copy such a
-/// row's text and style it once.
-#[derive(Debug, Clone)]
-pub(super) struct PackedRow {
-    /// A boxed slice rather than a `Vec`: a row's width only changes on a
-    /// resize, and the 8 bytes saved are moved on every scroll.
-    cells: Box<[PackedCell]>,
-    /// Extra grapheme codepoints by column; an entry counts only while its
-    /// cell has the grapheme bit (see [`Row`]'s field of the same name).
-    graphemes: GraphemeMap,
-    /// The style of a uniform row; meaningless otherwise.
-    uniform_key: StyleKey,
-    /// Every cell at or after this column is [`PackedCell::BLANK`]. May
-    /// overstate, never understates.
-    used: u16,
-    flags: u8,
-    marks: RowMarks,
-    anchor: AnchorTag,
-}
-
-impl PackedRow {
-    const WRAPPED: u8 = 1 << 0;
-    const UNIFORM: u8 = 1 << 1;
-
-    pub(super) fn new(width: u16) -> Self {
-        Self {
-            cells: vec![PackedCell::BLANK; usize::from(width)].into_boxed_slice(),
-            graphemes: GraphemeMap::default(),
-            uniform_key: StyleKey::DEFAULT,
-            used: 0,
-            flags: Self::UNIFORM,
-            marks: RowMarks::default(),
-            anchor: AnchorTag::NONE,
-        }
-    }
-
-    #[inline]
-    fn set_flag(&mut self, flag: u8, on: bool) {
-        if on {
-            self.flags |= flag;
-        } else {
-            self.flags &= !flag;
-        }
-    }
-
-    #[inline]
-    pub(super) fn width(&self) -> u16 {
-        self.cells.len() as u16
-    }
-
-    #[inline]
-    pub(super) fn cells(&self) -> &[PackedCell] {
-        &self.cells
-    }
-
-    #[inline]
-    pub(super) fn get(&self, col: u16) -> Option<PackedCell> {
-        self.cells.get(usize::from(col)).copied()
-    }
-
-    /// The cells up to the used mark: every cell after them is blank.
-    #[inline]
-    pub(super) fn used_cells(&self) -> &[PackedCell] {
-        &self.cells[..usize::from(self.used)]
-    }
-
-    /// Whether every used cell is ASCII with no structure in
-    /// [`PackedRow::uniform_key`]. `false` does not mean some cell is not.
-    #[inline]
-    pub(super) fn is_uniform(&self) -> bool {
-        self.flags & Self::UNIFORM != 0
-    }
-
-    #[inline]
-    pub(super) fn uniform_key(&self) -> StyleKey {
-        self.uniform_key
-    }
-
-    #[inline]
-    pub(super) fn is_wrapped(&self) -> bool {
-        self.flags & Self::WRAPPED != 0
-    }
-
-    #[inline]
-    pub(super) fn set_wrapped(&mut self, wrapped: bool) {
-        self.set_flag(Self::WRAPPED, wrapped);
-    }
-
-    #[inline]
-    pub(super) fn marks(&self) -> RowMarks {
-        self.marks
-    }
-
-    #[inline]
-    pub(super) fn set_marks(&mut self, marks: RowMarks) {
-        self.marks = marks;
-    }
-
-    #[inline]
-    pub(super) fn anchor(&self) -> AnchorTag {
-        self.anchor
-    }
-
-    #[inline]
-    pub(super) fn set_anchor(&mut self, anchor: AnchorTag) {
-        self.anchor = anchor;
-    }
-
-    /// Record that cells before `end` may no longer be blank.
-    #[inline]
-    fn mark_used(&mut self, end: usize) {
-        let end = end.min(self.cells.len()) as u16;
-        self.used = self.used.max(end);
-    }
-
-    /// Set the cell at `col`, if there is one, as a direct edit: the row
-    /// is no longer known to be uniform.
-    #[inline]
-    pub(super) fn set(&mut self, col: u16, cell: PackedCell) {
-        if let Some(slot) = self.cells.get_mut(usize::from(col)) {
-            *slot = cell;
-            self.flags &= !Self::UNIFORM;
-            self.mark_used(usize::from(col) + 1);
-        }
-    }
-
-    /// Write printable ASCII `bytes` from `col` in style `key`. The caller
-    /// has resolved any wide character straddling the span's edges (see
-    /// [`PackedRow::clear_ascii_edges`]); the span must fit on the row.
-    #[inline]
-    pub(super) fn write_ascii(&mut self, col: u16, bytes: &[u8], key: StyleKey) {
-        let start = usize::from(col);
-        let end = start + bytes.len();
-        self.drop_grapheme_entries(col, end as u16);
-        let used = usize::from(self.used);
-        if start == 0 && end >= used {
-            // Every used cell is about to be in `key`.
-            self.flags |= Self::UNIFORM;
-            self.uniform_key = key;
-        } else if self.uniform_key != key || (start > used && !key.is_default()) {
-            // Cells in another style before or after the span, or blanks
-            // between the used mark and the span.
-            self.flags &= !Self::UNIFORM;
-        }
-        let base = key.base();
-        for (cell, &byte) in self.cells[start..end].iter_mut().zip(bytes) {
-            *cell = PackedCell(base | u64::from(byte));
-        }
-        self.used = self.used.max(end as u16);
-    }
-
-    /// Blank the halves of wide characters an ASCII span over `start..end`
-    /// would cut: the character before a spacer at `start`, and a spacer
-    /// at `end`. Every cell in between is overwritten, so a wide character
-    /// can only be split at the two edges.
-    #[inline]
-    pub(super) fn clear_ascii_edges(&mut self, start: u16, end: u16) {
-        if start > 0 && self.get(start).is_some_and(PackedCell::is_spacer) {
-            self.set(start - 1, PackedCell::BLANK);
-        }
-        if self.get(end).is_some_and(PackedCell::is_spacer) {
-            self.set(end, PackedCell::BLANK);
-        }
-    }
-
-    /// Write `c`, taking `width` (1 or 2) columns from `col`, in style
-    /// `key` (and a spacer after a wide character), if those columns hold
-    /// no part of a wide character and fit on the row. Returns `false`,
-    /// having changed nothing, otherwise.
-    #[inline]
-    pub(super) fn write_char_in_place(
-        &mut self,
-        col: u16,
-        c: char,
-        width: u16,
-        key: StyleKey,
-    ) -> bool {
-        let start = usize::from(col);
-        let end = start + usize::from(width);
-        let Some(cells) = self.cells.get_mut(start..end) else {
-            return false;
-        };
-        if cells.iter().any(|cell| cell.is_wide_part()) {
-            return false;
-        }
-        if width > 1 {
-            cells[0] = PackedCell::wide(c, key);
-            cells[1] = PackedCell::spacer(key);
-        } else {
-            cells[0] = PackedCell::new(c, key);
-        }
-        self.drop_grapheme_entries(col, col + 1);
-        self.flags &= !Self::UNIFORM;
-        self.mark_used(end);
-        true
-    }
-
-    /// Codepoints following the base character of the cluster at `col`, if
-    /// the cell holds a multi-codepoint grapheme.
-    #[inline]
-    pub(super) fn grapheme_extra(&self, col: u16) -> Option<&[char]> {
-        if !self.get(col)?.has_grapheme() {
-            return None;
-        }
-        self.graphemes.get(col)
-    }
-
-    /// The full grapheme at `col`: base character plus any extra codepoints.
-    pub(super) fn grapheme(&self, col: u16) -> Option<String> {
-        let cell = self.get(col)?;
-        let mut s = String::new();
-        s.push(cell.char());
-        if let Some(extra) = self.grapheme_extra(col) {
-            s.extend(extra);
-        }
-        Some(s)
-    }
-
-    /// Run `f` on the grapheme at `col` followed by `then`, as one string.
-    /// Clusters of the length a cell can hold are assembled on the stack,
-    /// so asking about the cluster under the cursor does not allocate.
-    pub(super) fn with_grapheme_str<R>(
-        &self,
-        col: u16,
-        then: Option<char>,
-        f: impl FnOnce(&str) -> R,
-    ) -> Option<R> {
-        let cell = self.get(col)?;
-        let extra = self.grapheme_extra(col).unwrap_or(&[]);
-        let chars = std::iter::once(cell.char())
-            .chain(extra.iter().copied())
-            .chain(then);
-        let mut buf = [0u8; 4 * 20];
-        let mut len = 0;
-        for c in chars.clone() {
-            if len + c.len_utf8() > buf.len() {
-                return Some(f(&chars.collect::<String>()));
-            }
-            len += c.encode_utf8(&mut buf[len..]).len();
-        }
-        Some(match std::str::from_utf8(&buf[..len]) {
-            Ok(s) => f(s),
-            // Whole characters were encoded, so this does not happen.
-            Err(_) => f(&chars.collect::<String>()),
-        })
-    }
-
-    /// Append a codepoint to the grapheme cluster at `col`. At most `cap`
-    /// extra codepoints are kept per cell. Returns whether `c` was kept.
-    pub(super) fn push_grapheme_char(&mut self, col: u16, c: char, cap: usize) -> bool {
-        let Some(cell) = self.cells.get_mut(usize::from(col)) else {
-            return false;
-        };
-        self.flags &= !Self::UNIFORM;
-        let extra = self.graphemes.entry(col);
-        if !cell.has_grapheme() {
-            // Whatever is stored for this column belonged to earlier content.
-            extra.clear();
-            cell.0 |= PackedCell::GRAPHEME;
-            self.used = self.used.max(col + 1);
-        }
-        let kept = extra.len() < cap;
-        if kept {
-            extra.push(c);
-        }
-        kept
-    }
-
-    /// Drop grapheme data for columns in `start..end` and clear their bits.
-    pub(super) fn clear_graphemes(&mut self, start: u16, end: u16) {
-        if start >= end {
-            return;
-        }
-        self.drop_grapheme_entries(start, end);
-        let end = usize::from(end).min(self.cells.len());
-        for cell in self
-            .cells
-            .get_mut(usize::from(start)..end)
-            .into_iter()
-            .flatten()
-        {
-            *cell = cell.without_grapheme();
-        }
-    }
-
-    /// Remove stored grapheme data for `start..end` without touching cells.
-    #[inline]
-    fn drop_grapheme_entries(&mut self, start: u16, end: u16) {
-        if start < end && self.graphemes.any_in(start, end) {
-            self.graphemes.remove_range(start, end);
-        }
-    }
-
-    /// Erase the row per ECMA-48 with blanks in style `key` (the erase
-    /// style, background only): no grapheme data, marks, anchor or wrap.
-    #[inline]
-    pub(super) fn erase(&mut self, key: StyleKey) {
-        if key.is_default() {
-            // Cells past the used mark are already blank.
-            self.cells[..usize::from(self.used)].fill(PackedCell::BLANK);
-            self.used = 0;
-        } else {
-            self.cells.fill(PackedCell::blank(key));
-            self.used = self.width();
-        }
-        self.uniform_key = key;
-        self.graphemes.clear();
-        self.marks = RowMarks::default();
-        self.anchor = AnchorTag::NONE;
-        // Uniform and no longer wrapped, in one store: every scroll erases
-        // a row.
-        self.flags = Self::UNIFORM;
-    }
-
-    /// Erase cells `start..end` per ECMA-48: blanks in style `key`, with no
-    /// grapheme data.
-    pub(super) fn erase_range(&mut self, start: u16, end: u16, key: StyleKey) {
-        let end = end.min(self.width());
-        if start >= end {
-            return;
-        }
-        self.drop_grapheme_entries(start, end);
-        if key.is_default() {
-            // Cells past the used mark are already blank.
-            let fill_end = end.min(self.used);
-            if start < fill_end {
-                self.cells[usize::from(start)..usize::from(fill_end)].fill(PackedCell::BLANK);
-            }
-            if end >= self.used {
-                self.used = self.used.min(start);
-            } else if !self.uniform_key.is_default() {
-                // Default blanks inside a row of another style.
-                self.flags &= !Self::UNIFORM;
-            }
-        } else {
-            if start == 0 && end >= self.used {
-                // Every used cell is about to be a blank in `key`; the
-                // grapheme entries in range are gone, and no cell past
-                // `end` is used, so no wide or grapheme state remains.
-                self.flags |= Self::UNIFORM;
-                self.uniform_key = key;
-            } else if self.uniform_key != key || start > self.used {
-                self.flags &= !Self::UNIFORM;
-            }
-            self.cells[usize::from(start)..usize::from(end)].fill(PackedCell::blank(key));
-            self.mark_used(usize::from(end));
-        }
-    }
-
-    /// Fill the row with `c` in the default style, as DECALN does.
-    pub(super) fn fill_with_char(&mut self, c: char) {
-        self.erase(StyleKey::DEFAULT);
-        self.cells.fill(PackedCell::new(c, StyleKey::DEFAULT));
-        self.used = self.width();
-        self.flags &= !Self::UNIFORM;
-    }
-
-    /// Resize the row, dropping or adding blank cells at the end.
-    pub(super) fn resize(&mut self, width: u16) {
-        let mut cells = std::mem::take(&mut self.cells).into_vec();
-        cells.resize(usize::from(width), PackedCell::BLANK);
-        self.cells = cells.into_boxed_slice();
-        self.used = self.used.min(width);
-        self.graphemes.truncate(width);
-    }
-
-    /// Insert `count` blanks in style `key` at `at`, shifting cells right.
-    pub(super) fn insert_cells(&mut self, at: u16, count: u16, key: StyleKey) {
-        let at = usize::from(at);
-        let count = usize::from(count);
-        let len = self.cells.len();
-        if at >= len || count == 0 {
-            return;
-        }
-
-        // Inserting at a wide char's spacer splits the pair: the primary
-        // stays put and the spacer would be shifted away from it, so both
-        // halves are cleared.
-        if at > 0 && self.cells[at].is_spacer() {
-            self.cells[at - 1] = PackedCell::BLANK;
-            self.cells[at] = PackedCell::BLANK;
-        }
-
-        // The last cell that stays on the row lands in the final column. If
-        // it is a wide char, its spacer is the first cell pushed off, so it
-        // would be left without one.
-        let first_pushed = len.saturating_sub(count);
-        if first_pushed > at && self.cells[first_pushed - 1].is_wide() {
-            self.cells[first_pushed - 1] = PackedCell::BLANK;
-        }
-
-        let src_end = len.saturating_sub(count);
-        if at < src_end {
-            self.cells.copy_within(at..src_end, at + count);
-        }
-        self.graphemes.shift(at as u16, count as i32, self.width());
-        self.used = self.width();
-        self.flags &= !Self::UNIFORM;
-        self.cells[at..(at + count).min(len)].fill(PackedCell::blank(key));
-    }
-
-    /// Delete `count` cells at `at`, shifting the rest left and filling the
-    /// end with blanks in style `key`.
-    pub(super) fn delete_cells(&mut self, at: u16, count: u16, key: StyleKey) {
-        let at = usize::from(at);
-        let count = usize::from(count);
-        let len = self.cells.len();
-        if at >= len || count == 0 {
-            return;
-        }
-
-        // Deleting from a wide char's spacer orphans its primary.
-        if at > 0 && self.cells[at].is_spacer() {
-            self.cells[at - 1] = PackedCell::BLANK;
-        }
-        // Ending in the middle of a wide char orphans its spacer.
-        let end = (at + count).min(len);
-        if end < len && self.cells[end].is_spacer() {
-            self.cells[end] = PackedCell::BLANK;
-        }
-
-        let src_start = (at + count).min(len);
-        if src_start < len {
-            self.cells.copy_within(src_start..len, at);
-        }
-        self.drop_grapheme_entries(at as u16, src_start as u16);
-        self.used = self.width();
-        self.flags &= !Self::UNIFORM;
-        self.graphemes
-            .shift(src_start as u16, -(count as i32), self.width());
-
-        // A count running past the end of the row vacates only cells from
-        // `at` onward.
-        self.cells[len.saturating_sub(count).max(at)..len].fill(PackedCell::blank(key));
-    }
-
-    /// Make this row hold `row`'s cells, graphemes, wrap, marks and anchor,
-    /// interning its styles in `styles` (which never collects).
-    pub(super) fn assign_row(&mut self, row: &Row, styles: &mut StyleTable) {
-        if self.cells.len() == usize::from(row.width()) {
-            for (packed, cell) in self.cells.iter_mut().zip(row.cells()) {
-                *packed = styles.pack(cell);
-            }
-        } else {
-            self.cells = row.cells().map(|cell| styles.pack(cell)).collect();
-        }
-        self.graphemes.clear();
-        for col in 0..row.width() {
-            if self.cells[usize::from(col)].has_grapheme() {
-                if let Some(extra) = row.grapheme_extra(col) {
-                    self.graphemes.insert(col, extra.to_vec());
-                }
-            }
-        }
-        self.used = self
-            .cells
-            .iter()
-            .rposition(|&cell| cell != PackedCell::BLANK)
-            .map_or(0, |last| last as u16 + 1);
-        let used = self.used_cells();
-        let key = used.first().map_or(StyleKey::DEFAULT, |cell| cell.key());
-        let uniform = used
-            .iter()
-            .all(|cell| cell.0 & PackedCell::NOT_UNIFORM == 0 && cell.key() == key);
-        self.uniform_key = key;
-        self.flags = if uniform { Self::UNIFORM } else { 0 };
-        self.set_wrapped(row.is_wrapped());
-        self.marks = row.marks();
-        self.anchor = row.anchor();
-    }
-
-    /// Check the row's invariants: those of [`Row::check_integrity`], plus
-    /// a valid style key in every cell, a uniform row that is uniform, and
-    /// grapheme data behind every grapheme bit.
-    pub(super) fn check_integrity(
-        &self,
-        max_extra: usize,
-        styles: &StyleTable,
-    ) -> Result<(), String> {
-        let cells = &self.cells;
-        let used = usize::from(self.used).min(cells.len());
-        if usize::from(self.used) > cells.len() {
-            return Err(format!(
-                "used mark {} is past the row's {} cells",
-                self.used,
-                cells.len()
-            ));
-        }
-        if let Some(col) = cells[used..]
-            .iter()
-            .position(|&cell| cell != PackedCell::BLANK)
-        {
-            return Err(format!(
-                "cell at col {} is past the used mark {used} but not blank",
-                used + col
-            ));
-        }
-        if self.is_uniform() {
-            styles
-                .check_key(self.uniform_key)
-                .map_err(|e| format!("uniform style: {e}"))?;
-            if let Some(col) = cells[..used].iter().position(|cell| {
-                cell.0 & PackedCell::NOT_UNIFORM != 0 || cell.key() != self.uniform_key
-            }) {
-                return Err(format!(
-                    "row is marked uniform but cell at col {col} ({:?}) is not",
-                    cells[col]
-                ));
-            }
-        }
-        for (col, &cell) in cells.iter().enumerate() {
-            styles
-                .check_key(cell.key())
-                .map_err(|e| format!("cell at col {col}: {e}"))?;
-            if cell.is_wide() && cell.is_spacer() {
-                return Err(format!("cell at col {col} is both wide and a spacer"));
-            }
-            if cell.is_wide() && !cells.get(col + 1).is_some_and(|next| next.is_spacer()) {
-                return Err(format!("wide cell at col {col} has no spacer after it"));
-            }
-            if cell.is_spacer() && !(col > 0 && cells[col - 1].is_wide()) {
-                return Err(format!("spacer at col {col} does not follow a wide cell"));
-            }
-            if cell.has_grapheme() {
-                match self.graphemes.get(col as u16) {
-                    None | Some([]) => {
-                        return Err(format!(
-                            "cell at col {col} has the grapheme bit but no extra codepoints"
-                        ));
-                    }
-                    Some(extra) if extra.len() > max_extra => {
-                        return Err(format!(
-                            "cell at col {col} holds {} grapheme codepoints (max {max_extra})",
-                            extra.len()
-                        ));
-                    }
-                    Some(_) => {}
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -1214,43 +668,42 @@ mod tests {
         assert_eq!(StyleKey::inline(&Style::default()), Some(StyleKey::DEFAULT));
     }
 
-    /// Rows of table styles, some on screen and some gone.
-    fn truecolor_rows(table: &mut StyleTable, rows: usize, width: u16, blue: u8) -> Vec<PackedRow> {
-        (0..rows)
-            .map(|r| {
-                let mut row = PackedRow::new(width);
-                for col in 0..width {
-                    let mut cell = Cell::new('a');
-                    cell.set_fg(Color::rgb(r as u8, col as u8, blue));
-                    row.set(col, table.pack(&cell));
-                }
-                row
-            })
+    /// A page of table styles, some on screen and some gone.
+    fn truecolor_page(table: &mut StyleTable, rows: u16, width: u16, blue: u8) -> ScreenPage {
+        let mut page = ScreenPage::new(width, rows);
+        for r in 0..rows {
+            let mut row = page.row_mut(r).unwrap();
+            for col in 0..width {
+                let mut cell = Cell::new('a');
+                cell.set_fg(Color::rgb(r as u8, col as u8, blue));
+                row.set(col, table.pack(&cell));
+            }
+        }
+        page
+    }
+
+    fn unpacked(page: &ScreenPage, table: &StyleTable) -> Vec<Vec<Cell>> {
+        page.iter()
+            .map(|row| row.cells().iter().map(|&c| table.unpack(c)).collect())
             .collect()
     }
 
     #[test]
     fn collection_keeps_what_is_on_screen_and_drops_the_rest() {
         let mut table = StyleTable::new(0);
-        let mut rows = truecolor_rows(&mut table, 4, 6, 1);
-        let before: Vec<Vec<Cell>> = rows
-            .iter()
-            .map(|row| row.cells().iter().map(|&c| table.unpack(c)).collect())
-            .collect();
+        let mut page = truecolor_page(&mut table, 4, 6, 1);
+        let before = unpacked(&page, &table);
         // Styles no row uses any more.
-        truecolor_rows(&mut table, 3, 6, 2);
+        truecolor_page(&mut table, 3, 6, 2);
         assert_eq!(table.len(), 1 + 7 * 6);
         let generation = table.generation();
 
-        table.collect(&mut rows);
+        table.collect(&mut page);
 
         assert_eq!(table.len(), 1 + 4 * 6);
         assert_ne!(table.generation(), generation);
-        for (row, cells) in rows.iter().zip(&before) {
-            row.check_integrity(16, &table).unwrap();
-            let after: Vec<Cell> = row.cells().iter().map(|&c| table.unpack(c)).collect();
-            assert_eq!(&after, cells);
-        }
+        page.check_integrity(16, &table).unwrap();
+        assert_eq!(unpacked(&page, &table), before);
     }
 
     #[test]
@@ -1262,178 +715,30 @@ mod tests {
         let mut kept = Cell::new('x');
         kept.set_bg(Color::rgb(1, 1, 1));
         let key = table.pack(&kept).key();
-        let mut rows = vec![PackedRow::new(4), PackedRow::new(4)];
-        rows[0].write_ascii(0, b"abc", key);
-        assert!(rows[0].is_uniform());
+        let mut page = ScreenPage::new(4, 2);
+        page.row_mut(0).unwrap().write_ascii(0, b"abc", key);
+        assert!(page.row(0).unwrap().is_uniform());
 
-        table.collect(&mut rows);
+        table.collect(&mut page);
 
-        assert!(rows[0].is_uniform());
-        assert_eq!(rows[0].uniform_key().table_id(), Some(1));
-        rows[0].check_integrity(16, &table).unwrap();
+        let row = page.row(0).unwrap();
+        assert!(row.is_uniform());
+        assert_eq!(row.uniform_key().table_id(), Some(1));
+        page.check_integrity(16, &table).unwrap();
         assert_eq!(
-            rows[1].uniform_key(),
+            page.row(1).unwrap().uniform_key(),
             StyleKey::DEFAULT,
             "the default style stays id 0"
         );
         assert_eq!(
-            table.unpack(rows[0].cells()[0]),
+            table.unpack(page.row(0).unwrap().cells()[0]),
             kept.with_char('a'),
             "the cells and the uniform style moved together"
         );
     }
 
     #[test]
-    fn a_row_is_uniform_until_something_else_lands() {
-        let key = StyleKey::inline(&Style {
-            fg: PackedColor::pack(Color::Named(2)),
-            ..Style::default()
-        })
-        .unwrap();
-        let mut row = PackedRow::new(10);
-        row.write_ascii(0, b"abc", key);
-        row.write_ascii(3, b"de", key);
-        assert!(row.is_uniform());
-        row.erase_range(4, 10, StyleKey::DEFAULT);
-        assert!(row.is_uniform(), "erasing the tail keeps it");
-        row.write_ascii(6, b"x", key);
-        assert!(
-            !row.is_uniform(),
-            "blanks before the span are another style"
-        );
-
-        row.write_ascii(0, b"0123456789", StyleKey::DEFAULT);
-        assert!(
-            row.is_uniform(),
-            "rewriting every used cell makes it uniform"
-        );
-        row.write_ascii(2, b"q", key);
-        assert!(!row.is_uniform());
-
-        row.erase(key);
-        assert!(row.is_uniform());
-        assert_eq!(row.uniform_key(), key);
-        assert!(row.write_char_in_place(0, 'z', 1, key));
-        assert!(!row.is_uniform(), "any other write gives up on it");
-    }
-
-    #[test]
-    fn insert_at_a_spacer_clears_both_halves() {
-        let mut row = PackedRow::new(6);
-        row.write_ascii(0, b"ab", StyleKey::DEFAULT);
-        assert!(row.write_char_in_place(2, '中', 2, StyleKey::DEFAULT));
-        row.insert_cells(3, 1, StyleKey::DEFAULT);
-        let table = StyleTable::new(0);
-        row.check_integrity(16, &table).unwrap();
-        assert_eq!(row.get(2), Some(PackedCell::BLANK));
-    }
-
-    #[test]
-    fn insert_that_pushes_off_a_spacer_clears_its_wide_char() {
-        let mut row = PackedRow::new(4);
-        row.write_ascii(0, b"ab", StyleKey::DEFAULT);
-        assert!(row.write_char_in_place(2, '中', 2, StyleKey::DEFAULT));
-        row.insert_cells(0, 1, StyleKey::DEFAULT);
-        row.check_integrity(16, &StyleTable::new(0)).unwrap();
-        assert_eq!(row.get(3), Some(PackedCell::BLANK));
-    }
-
-    #[test]
-    fn delete_from_a_spacer_or_into_a_wide_char_clears_the_orphan() {
-        let table = StyleTable::new(0);
-        let mut row = PackedRow::new(6);
-        assert!(row.write_char_in_place(0, '中', 2, StyleKey::DEFAULT));
-        assert!(row.write_char_in_place(2, '文', 2, StyleKey::DEFAULT));
-        row.delete_cells(1, 2, StyleKey::DEFAULT);
-        row.check_integrity(16, &table).unwrap();
-        assert!(row.cells().iter().all(|cell| !cell.is_wide_part()));
-    }
-
-    #[test]
-    fn integrity_catches_a_bad_key_and_a_bare_grapheme_bit() {
-        let table = StyleTable::new(0);
-        let mut row = PackedRow::new(4);
-        row.set(0, PackedCell::new('a', StyleKey(5)));
-        assert!(
-            row.check_integrity(16, &table).is_err(),
-            "id past the table"
-        );
-
-        let mut row = PackedRow::new(4);
-        row.set(
-            0,
-            PackedCell::new('a', StyleKey::DEFAULT).with_structure(CellFlags::HAS_COMBINING),
-        );
-        assert!(
-            row.check_integrity(16, &table).is_err(),
-            "bit with no extras"
-        );
-        row.cells[0] = PackedCell::new('a', StyleKey::DEFAULT);
-        row.push_grapheme_char(0, '\u{301}', 16);
-        row.check_integrity(16, &table).unwrap();
-
-        let mut row = PackedRow::new(4);
-        row.write_ascii(0, b"ab", StyleKey::DEFAULT);
-        row.cells[1] = PackedCell::new('é', StyleKey::DEFAULT);
-        assert!(
-            row.check_integrity(16, &table).is_err(),
-            "uniform but not ASCII"
-        );
-    }
-
-    #[test]
-    fn grapheme_str_is_the_cluster_then_the_extra_char() {
-        let mut row = PackedRow::new(4);
-        row.set(1, PackedCell::new('e', StyleKey::DEFAULT));
-        row.push_grapheme_char(1, '\u{301}', 16);
-        let got = row.with_grapheme_str(1, Some('\u{302}'), str::to_string);
-        assert_eq!(got.as_deref(), Some("e\u{301}\u{302}"));
-        assert_eq!(
-            row.with_grapheme_str(0, None, str::to_string).as_deref(),
-            Some(" ")
-        );
-        assert_eq!(row.with_grapheme_str(4, None, str::to_string), None);
-
-        // Longer than the stack buffer.
-        let long = ['\u{1F600}'; 30];
-        for c in long {
-            row.push_grapheme_char(2, c, long.len());
-        }
-        let expected: String = std::iter::once(' ').chain(long).chain(['x']).collect();
-        let got = row.with_grapheme_str(2, Some('x'), str::to_string);
-        assert_eq!(got.as_deref(), Some(expected.as_str()));
-    }
-
-    #[test]
-    fn erasing_a_blank_row_from_column_zero_leaves_it_uniform() {
-        let mut table = StyleTable::new(0);
-        let key = table.key(&Style::erased(Color::Indexed(4)));
-        assert!(!key.is_default());
-        for end in [3, 6] {
-            let mut row = PackedRow::new(6);
-            row.erase_range(0, end, key);
-            assert!(row.is_uniform(), "erase to {end}");
-            assert_eq!(row.uniform_key(), key);
-            row.check_integrity(16, &table).unwrap();
-        }
-    }
-
-    #[test]
-    fn erasing_part_of_a_styled_row_is_not_uniform() {
-        let mut table = StyleTable::new(0);
-        let key = table.key(&Style::erased(Color::Indexed(4)));
-        let mut row = PackedRow::new(6);
-        row.set(4, PackedCell::new('x', StyleKey::DEFAULT));
-        row.erase_range(0, 2, key);
-        row.check_integrity(16, &table).unwrap();
-        assert!(!row.is_uniform());
-    }
-
-    #[test]
-    fn packed_rows_stay_small() {
-        // Every scroll moves the region's rows by value, so its cost grows
-        // with a row's size.
-        assert_eq!(std::mem::size_of::<PackedRow>(), 40);
+    fn packed_cells_stay_small() {
         assert_eq!(std::mem::size_of::<PackedCell>(), 8);
     }
 }

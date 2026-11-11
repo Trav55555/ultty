@@ -12,8 +12,9 @@
 //! something reads them, which is at most a screenful while scrolled back.
 
 use super::cell::CellFlags;
-use super::packed::{PackedCell, PackedRow, Style, StyleTable};
+use super::packed::{PackedCell, Style, StyleTable};
 use super::row::{AnchorTag, Row, RowMarks};
+use super::screen::{ScreenPage, ScreenRow};
 
 /// The number of cells up to and including the last one that is not
 /// blank in the default style.
@@ -105,7 +106,7 @@ impl CompactRow {
     /// This runs for every line that scrolls off the screen, so it is one
     /// pass over the used cells, finding style runs by comparing keys and
     /// looking each run's style up once.
-    pub(super) fn encode_from(&mut self, row: &PackedRow, styles: &StyleTable) {
+    pub(super) fn encode_from(&mut self, row: ScreenRow<'_>, styles: &StyleTable) {
         self.width = row.width();
         self.wrapped = row.is_wrapped();
         self.row_marks = row.marks();
@@ -167,7 +168,7 @@ impl CompactRow {
     /// has structure bits and whose character is already in the text: its
     /// extra codepoints and its [`Mark`]. Returns how many cells it took:
     /// a wide character takes its spacer with it when they share a style.
-    fn mark(&mut self, row: &PackedRow, cells: &[PackedCell], col: usize) -> usize {
+    fn mark(&mut self, row: ScreenRow<'_>, cells: &[PackedCell], col: usize) -> usize {
         let cell = cells[col];
         let mut mark: Mark = 0;
         if cell.has_grapheme() {
@@ -329,14 +330,15 @@ impl CompactRow {
 /// row and its style table are reused.
 pub(super) struct RowPacker {
     styles: StyleTable,
-    row: PackedRow,
+    /// One row, as wide as the last row encoded.
+    page: ScreenPage,
 }
 
 impl RowPacker {
     pub(super) fn new() -> Self {
         Self {
             styles: StyleTable::new(0),
-            row: PackedRow::new(0),
+            page: ScreenPage::new(0, 1),
         }
     }
 
@@ -347,8 +349,13 @@ impl RowPacker {
         if self.styles.is_due() {
             self.styles.reset(0);
         }
-        self.row.assign_row(row, &mut self.styles);
-        compact.encode_from(&self.row, &self.styles);
+        if self.page.cols() != row.width() {
+            self.page = ScreenPage::new(row.width(), 1);
+        }
+        let mut packed = self.page.row_mut(0).expect("the page has one row");
+        packed.assign_row(row, &mut self.styles);
+        let packed = self.page.row(0).expect("the page has one row");
+        compact.encode_from(packed, &self.styles);
     }
 }
 
@@ -523,7 +530,8 @@ mod tests {
                 _ => cell.set_bg(Color::rgb(1, 2, 3)),
             }
             let key = styles.pack(&cell).key();
-            let mut row = PackedRow::new(width);
+            let mut page = ScreenPage::new(width, 1);
+            let mut row = page.row_mut(0).unwrap();
             for (col, text, erase) in writes {
                 let col = col.min(width - 1);
                 if erase {
@@ -533,15 +541,18 @@ mod tests {
                     row.write_ascii(col, &text.as_bytes()[..len], key);
                 }
             }
+            let row = page.row(0).unwrap();
             prop_assert!(row.is_uniform() || style != 0, "default-style text stays uniform");
             if row.is_uniform() {
-                let mut copy = row.clone();
-                copy.set(0, row.get(0).unwrap());
+                let mut copy = page.clone();
+                let first = row.get(0).unwrap();
+                copy.row_mut(0).unwrap().set(0, first);
+                let copy = copy.row(0).unwrap();
                 prop_assert!(!copy.is_uniform());
                 let mut compact = CompactRow::default();
-                compact.encode_from(&row, &styles);
+                compact.encode_from(row, &styles);
                 let mut general = CompactRow::default();
-                general.encode_from(&copy, &styles);
+                general.encode_from(copy, &styles);
                 prop_assert_eq!(&compact, &general);
             }
         }
@@ -564,7 +575,7 @@ mod tests {
             grid.write_char(c);
         }
         let mut compact = CompactRow::default();
-        compact.encode_from(&grid.rows[0], &grid.styles);
+        compact.encode_from(grid.page.row(0).unwrap(), &grid.styles);
         assert_eq!(compact.runs.len(), 1);
         assert_eq!(compact.marks.len(), 4, "{:?}", compact.marks);
         assert!(same(&grid.row(0).unwrap().to_row(), &compact.decode()));
@@ -604,7 +615,7 @@ mod tests {
 mod size {
     /// Scrollback keeps up to tens of thousands of these. The shell marks
     /// (ADR 0019) and the anchor tag (ADR 0020) fit in padding; keep it
-    /// that way. (Screen rows are `PackedRow`s, sized in `packed.rs`.)
+    /// that way. (Screen rows live in a `ScreenPage`, in `screen.rs`.)
     #[test]
     fn rows_do_not_grow() {
         assert_eq!(std::mem::size_of::<super::CompactRow>(), 80);
