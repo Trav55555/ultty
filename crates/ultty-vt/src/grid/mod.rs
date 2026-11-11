@@ -35,9 +35,6 @@ mod history;
 mod image;
 mod packed;
 mod palette;
-#[cfg(feature = "page-proto")]
-#[doc(hidden)]
-pub mod proto;
 #[cfg(test)]
 mod reference;
 mod row;
