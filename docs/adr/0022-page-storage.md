@@ -4,6 +4,8 @@
 
 Accepted 2026-11-09, after the prototype gate in §Prototype passed in round 3 (below). The history of the gate follows. Accepting it adopts round 2's style layout: §1's bits 24..64 become one style key, either an inline style or a 24-bit table id, and the per-page style table interns approximately. The sgr-dense wall-clock cost (3.6–4.4% slower in C on the quiet machine, against +0.5% to +1.4% instructions) is explained in the perf note's "sgr-dense wall clock" section. The implementation should apply SGR directly to the style key rather than going through `Style::of`.
 
+Slice 4 (the screen page) shipped 2026-11-10 with one deviation: graphemes live in a store per slot, not one per page (§4; [perf note](../perf/2026-11-10-page-storage-slice4.md)).
+
 Proposed 2026-11-09. Not accepted until the prototype gate in §Prototype passes; if it fails, this ADR is recorded as Rejected together with the measurements.
 
 **Prototype measured 2026-11-09: not GO** ([2026-11-09-page-storage-prototype.md](../perf/2026-11-09-page-storage-prototype.md)). Variant C meets every GO criterion but one:
@@ -110,10 +112,11 @@ ScreenPage {
   cols, rows,
   cells:  Vec<PackedCell>      rows * cols, one allocation, slot s at s*cols..
   slots:  Vec<u16>             screen row r is shown by slot slots[r]
-  heads:  Vec<RowHead>         per slot: used u16, uniform style id u32, flags
-                               (wrapped, has_graphemes, uniform), RowMarks, AnchorTag
+  heads:  Vec<(RowHead, GraphemeStore)>
+                               per slot: used u16, uniform style id u32, flags
+                               (wrapped, has_graphemes, uniform), RowMarks, AnchorTag,
+                               and the slot's graphemes (§4)
   styles: StyleTable
-  graphemes: GraphemeStore     (§4)
 }
 ```
 
@@ -157,7 +160,8 @@ This is a deliberate departure from Ghostty. Ghostty's active area is the tail o
 
 On both page kinds, the cell's grapheme bit says that extras exist.
 
-- **Screen page:** `GraphemeStore { index: Vec<(u32 cell, u32 start, u8 len)>, chars: Vec<char> }`, sorted by cell index, appended at the end in the common left-to-right case, and compacted when garbage exceeds the live chars. The 16-per-cell cap is unchanged.
+- **Screen page:** each slot owns a `GraphemeStore`: an index of (column, len, start) sorted by column, and one `Vec<char>` of runs. A codepoint is appended in place while its cluster is the last run, and garbage is compacted in place once it passes 32 codepoints and half the store. Erasing a row empties the store but keeps its capacity, so a reused row does not allocate. The 16-per-cell cap is unchanged.
+- **Why not one store per page.** This ADR first drew a single page-wide store sorted by cell index. Slice 4 built it and rejected it: after rotation a slot sits anywhere in cell order, so every insert or erase shifted the whole index. That cost vt/combining +105%, emoji-zwj +47% and unicode-mixed +36% in instructions, and appends never reached the compaction check, so the store only grew. The per-slot store came out at −10.3%, −7.2% and −0.3% against the baseline ([slice 4 note](../perf/2026-11-10-page-storage-slice4.md)).
 - **Write paths** test the bit on the cells they overwrite instead of calling into the map. That removes the per-character `drop_grapheme_entries` call the unicode note found expensive.
 - **History rows** carry their extras inline after their cells.
 - **`LastPrint` and `Tail`** are unchanged: they are screen coordinates.
@@ -288,7 +292,7 @@ Every slice is one or more small commits. After each one, all of these pass:
 1. **Read seam.** Add `RowView` over the current storage (a wrapper around `&Row` or a decoded `Row`). Port the renderer (`text.rs`, `panes.rs`, `mod.rs`, `overlays.rs`, `text_cache.rs`), `selected_text`, `control.rs`, app search and wait, `input.rs` and `pty_flood` to it, with `cell(col)` by value. No storage change; icount within ±1%.
 2. **Differential oracle.** Copy today's `Grid`, `Row`, `Buffer` and `CompactRow` into a `#[cfg(test)] grid::reference` module. Add a proptest that drives the `integrity.rs` stream strategies (both feed paths, plus resizes and scrollback-limit changes) through both implementations, comparing cursor, every visible row, every history row (cells, extras, wrapped, marks, anchors) and `history_len` after every step. It passes trivially at first and is the main safety net for slices 3–5.
 3. **Packed cells.** Row storage becomes `Vec<PackedCell>` plus a grid `StyleTable` with collection; mutation goes through `set_cell` / `update`; `uniform` replaces `plain`; `CompactRow::encode_from` reads packed cells, compares runs by style id, and leaves out the structural bits. `check_integrity` gains checks for id validity and the grapheme bit. Gate: the instruction cut is in the range the prototype measured for A.
-4. **Screen page.** `Grid.rows` becomes a `ScreenPage`. Scroll, IL, DL and regions become slot rotations; graphemes go into the `GraphemeStore`. Add a test that IL/DL/scroll allocate nothing, using the counting allocator pattern from `memory.rs`. Gate: scroll and scroll-region instruction cuts; kill rule if the cumulative pty_flood gain is under half of the prototype's prediction for these levers.
+4. **Screen page.** `Grid.rows` becomes a `ScreenPage`. Scroll, IL, DL and regions become slot rotations; graphemes go into a `GraphemeStore` per slot. Add a test that IL/DL/scroll allocate nothing, using the counting allocator pattern from `memory.rs`. Gate: scroll and scroll-region instruction cuts; kill rule if the cumulative pty_flood gain is under half of the prototype's prediction for these levers.
 5. **History pages.** `VecDeque<CompactRow>` becomes `History`: the uniform and cells row forms, per-row eviction, `RowView` over history rows, reflow and height resize written into pages, and heads for anchors and marks. The round-trip proptest now checks `push(row).view().to_row() == row` with the same generator, including the flags only direct edits create. Gate: all of the GO criteria, on the real code.
 6. **Cleanup.** Remove `CompactRow`, the `Cow<Row>` shims and the reference module. Regenerate the baselines and update the memory budgets downward, explaining why. Write `docs/perf/<date>-page-storage.md`, rerun the AWS T4 comparison (`compare.sh`, X11 and Wayland, against Ghostty), and update this ADR's status.
 
