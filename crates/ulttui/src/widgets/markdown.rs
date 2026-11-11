@@ -318,10 +318,11 @@ fn parse(source: &str) -> (Vec<Block>, Option<ReparsePoint>) {
     let options = Options::all()
         - Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
         - Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS;
-    if source.contains("[^") {
-        // Footnotes reach back to earlier blocks like link references, and
-        // pulldown-cmark 0.12's offsets around them can be out of order
-        // (its debug assertion fails), so they are not asked for.
+    if may_define_footnote(source) {
+        // A footnote definition reaches back to the references before it
+        // like a link reference, and pulldown-cmark 0.12's offsets around
+        // one can be out of order (its debug assertion fails), so they are
+        // not asked for.
         let mut builder = BlockBuilder::default();
         for event in Parser::new_ext(source, options) {
             builder.event(event);
@@ -385,6 +386,26 @@ fn parse(source: &str) -> (Vec<Block>, Option<ReparsePoint>) {
     }
     let blocks = builder.finish();
     (blocks, (!defines).then_some(reparse_from))
+}
+
+/// Whether `source` may define a footnote: it has a `[^label]:`. It may
+/// say so for text that is not a definition (`[^a-z]:` in code), which
+/// only costs parsing all of it again; a `[^` without the `]:` (a regex,
+/// a reference) does not.
+fn may_define_footnote(source: &str) -> bool {
+    source.match_indices("[^").any(|(at, _)| {
+        let mut chars = source[at + 2..].chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => {
+                    chars.next();
+                }
+                ']' => return chars.as_str().starts_with(':'),
+                _ => {}
+            }
+        }
+        false
+    })
 }
 
 /// Whether list item source `item`, from its marker on, starts with a task
@@ -1677,6 +1698,16 @@ mod tests {
             view.reparse_from.map(|p| p.offset),
             Some("# One\n\n- a\n- b\n\nmiddle\n\nlast para grows\n\n".len())
         );
+        // A regex is not a footnote definition; a definition is.
+        let regex = MarkdownView::new("Use `[^a-z]` or [^1].\n\nlast");
+        assert_eq!(
+            regex.reparse_from.map(|p| p.offset),
+            Some("Use `[^a-z]` or [^1].\n\n".len())
+        );
+        let mut noted = regex.clone();
+        noted.append_chunk("\n\n[^1]: a note");
+        assert_eq!(noted.reparse_from, None);
+        assert_eq!(noted.blocks, MarkdownView::new(noted.source()).blocks);
         // A task list whose markers were given does not hold it back.
         let tasks = MarkdownView::new("- [ ] a\n- [x] b\n\npara\n\nlast");
         assert_eq!(
