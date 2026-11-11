@@ -303,9 +303,7 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
                 let open = LuaOpen::parse(&rest[1..])?;
                 let cwd = std::env::current_dir()
                     .map_err(|e| format!("cannot find the current directory: {e}"))?;
-                if !cwd.join(&open.script).is_file() {
-                    return Err(format!("{}: no such file", open.script));
-                }
+                open.check(&cwd)?;
                 if open.split.is_some() {
                     eprintln!(
                         "note: a split pane draws with ANSI until native sessions map to panes"
@@ -513,12 +511,28 @@ impl LuaOpen {
         Ok(open)
     }
 
+    /// What ulttui-lua would refuse at startup, checked here so the error
+    /// reaches the person who typed the command instead of a pane that
+    /// closes: the script must exist in `cwd`, and each grant must pass the
+    /// same check ulttui-lua makes.
+    fn check(&self, cwd: &Path) -> Result<(), String> {
+        if !cwd.join(&self.script).is_file() {
+            return Err(format!("{}: no such file", self.script));
+        }
+        for command in &self.exec {
+            ultty_protocol::exec_grant::parse(command)?;
+        }
+        Ok(())
+    }
+
     /// The request that opens the script with `runner` (the `ulttui-lua`
     /// binary) in `cwd`, the caller's directory, which also makes the script
-    /// and log paths absolute.
+    /// and log paths absolute. Nobody sees ulttui-lua's stderr in a pane that
+    /// closes when it exits, so it is told to hold a startup error on screen
+    /// until a key is pressed.
     fn request(&self, runner: &str, cwd: &Path) -> ControlRequest {
         let script = cwd.join(&self.script).display().to_string();
-        let mut runner_args: Vec<String> = Vec::new();
+        let mut runner_args = vec!["--wait-on-error".to_string()];
         for command in &self.exec {
             runner_args.extend(["--exec".to_string(), command.clone()]);
         }
@@ -978,9 +992,11 @@ LUA TOOLS (docs/lua.md):
                             and print its pane's id. run{{}} may start only
                             command lines beginning with an --exec <cmd>,
                             e.g. --exec 'ulttyctl --json panes'; a bare
-                            program name allows any arguments. ulttui-lua
-                            refuses a grant on a shell, env, sudo, an
-                            interpreter or bare ulttyctl: say --allow-exec
+                            program name allows any arguments. A grant on
+                            a shell, env, sudo, an interpreter or bare
+                            ulttyctl is refused before any pane opens: say
+                            --allow-exec. If the tool still cannot start,
+                            its pane shows why until a key is pressed
 
 STATUS:
     status <state> [label] [--progress <0-1|N%>] [--attention]
@@ -1538,6 +1554,41 @@ mod tests {
     }
 
     #[test]
+    fn lua_open_refuses_before_opening_what_ulttui_lua_would_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tool.luau"), "return {}").unwrap();
+        let check = |line: &str| LuaOpen::parse(&args(line)).unwrap().check(dir.path());
+
+        assert_eq!(check("tool.luau"), Ok(()));
+        assert_eq!(check("--exec git --allow-exec tool.luau"), Ok(()));
+        let one_command = LuaOpen::parse(&[
+            "--exec".to_string(),
+            "ulttyctl --json panes".to_string(),
+            "tool.luau".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(one_command.check(dir.path()), Ok(()));
+
+        assert_eq!(
+            check("missing.luau"),
+            Err("missing.luau: no such file".into())
+        );
+        // A grant on a program runner is refused with ulttui-lua's own words,
+        // which name the flag to use instead.
+        for refused in ["sh", "/usr/bin/env", "python3", "ulttyctl"] {
+            let error = check(&format!("--exec git --exec {refused} tool.luau")).unwrap_err();
+            assert_eq!(
+                error,
+                ultty_protocol::exec_grant::parse(refused).unwrap_err()
+            );
+            assert!(error.contains("--allow-exec"), "{error}");
+        }
+        // --allow-exec does not excuse a refused grant: ulttui-lua still
+        // refuses it, so the pane would only show an error.
+        assert!(check("--exec sh --allow-exec tool.luau").is_err());
+    }
+
+    #[test]
     fn lua_open_runs_the_script_in_the_callers_directory_with_its_grants() {
         let open = LuaOpen::parse(&args("--exec ulttyctl --log l.log tools/panes.luau")).unwrap();
         assert_eq!(
@@ -1545,7 +1596,9 @@ mod tests {
             ControlRequest::NewTab {
                 title: Some("panes.luau".to_string()),
                 command: Some("/opt/ultty/ulttui-lua".to_string()),
-                args: args("--exec ulttyctl --log /home/me/l.log /home/me/tools/panes.luau"),
+                args: args(
+                    "--wait-on-error --exec ulttyctl --log /home/me/l.log /home/me/tools/panes.luau"
+                ),
                 working_dir: Some("/home/me".to_string()),
             }
         );
@@ -1555,7 +1608,7 @@ mod tests {
             ControlRequest::NewTab {
                 title: Some("tool.luau".to_string()),
                 command: Some("ulttui-lua".to_string()),
-                args: args("--allow-exec --log /var/l.log /abs/tool.luau"),
+                args: args("--wait-on-error --allow-exec --log /var/l.log /abs/tool.luau"),
                 working_dir: Some("/home/me".to_string()),
             }
         );
@@ -1569,7 +1622,7 @@ mod tests {
             ControlRequest::SplitPane {
                 direction: SplitDirection::Right,
                 command: Some("/a=b/ulttui-lua".to_string()),
-                args: args("--ansi --exec git /w/tool.luau"),
+                args: args("--ansi --wait-on-error --exec git /w/tool.luau"),
                 working_dir: Some("/w".to_string()),
                 target: None,
             }

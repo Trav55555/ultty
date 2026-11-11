@@ -7,7 +7,11 @@
 #   - `lua open panes.luau` without a grant shows the banner naming the
 #     flag to add, and runs nothing;
 #   - `--pane 0 lua open hello.luau --split right` opens a split pane next
-#     to the shell in tab 1, drawn with ANSI, and says so on stderr.
+#     to the shell in tab 1, drawn with ANSI, and says so on stderr;
+#   - `lua open` with `--exec sh` or a missing file fails on its own stderr
+#     and opens no pane;
+#   - an error only ulttui-lua finds (an unwritable --log) stays in its
+#     pane until a key is pressed.
 #
 #   scripts/e2e/lua-open.sh [artifact-dir]
 #
@@ -208,6 +212,53 @@ print(sum(1 for p in json.load(sys.stdin)["panes"] if p["tab_index"] == 0))')
 done
 [ -n "$ok" ] || fail "split from inside pane 0 did not add a pane to its tab (tab 0 has $panes_in_tab0 panes)"
 echo "lua-open: split from inside pane 0 lands in its tab"
+
+# 5. What ulttui-lua would refuse at startup, `lua open` refuses itself,
+#    on its own stderr, and opens no pane: a grant on a program runner and
+#    a missing file.
+before=$(pane_count)
+if "$ULTTYCTL" lua open "$out/hello.luau" --exec sh 2>"$out/open-refused.txt"; then
+    fail "lua open --exec sh succeeded"
+fi
+grep -q -- '--allow-exec' "$out/open-refused.txt" ||
+    fail "lua open --exec sh did not name --allow-exec (got: $(cat "$out/open-refused.txt"))"
+if "$ULTTYCTL" lua open "$out/missing.luau" 2>"$out/open-missing.txt"; then
+    fail "lua open of a missing file succeeded"
+fi
+grep -q 'no such file' "$out/open-missing.txt" ||
+    fail "lua open of a missing file did not say so (got: $(cat "$out/open-missing.txt"))"
+[ "$(pane_count)" = "$before" ] || fail "a refused lua open opened a pane"
+echo "lua-open: refused grant and missing file reported by ulttyctl, no pane opened"
+
+# 6. An error only ulttui-lua can find (here a log it cannot create) stays
+#    on screen in its pane until a key is pressed, then the pane closes.
+held=$("$ULTTYCTL" lua open "$out/hello.luau" --log "$out/no-such-dir/x.log") ||
+    fail "lua open with an unwritable log"
+ok=""
+for _ in $(seq 100); do
+    if "$ULTTYCTL" --pane "$held" text 2>/dev/null | grep -q "press any key to close"; then
+        ok=1
+        break
+    fi
+    sleep 0.1
+done
+[ -n "$ok" ] || fail "pane $held did not hold its startup error"
+"$ULTTYCTL" --pane "$held" text | grep -q "cannot create log file" ||
+    fail "pane $held does not say why it could not start"
+# Still there a moment later: it waits for the key, not a timer.
+sleep 1
+[ "$(pane_count)" = "$((before + 1))" ] || fail "pane $held closed before a key was pressed"
+"$ULTTYCTL" --pane "$held" send-key enter >/dev/null
+ok=""
+for _ in $(seq 100); do
+    if [ "$(pane_count)" = "$before" ]; then
+        ok=1
+        break
+    fi
+    sleep 0.1
+done
+[ -n "$ok" ] || fail "pane $held did not close after a key"
+echo "lua-open: startup error held in pane $held until a key"
 
 ! grep -q "panicked at" "$out/ultty.log" || fail "Ultty logged a panic"
 echo "lua-open: ok ($out)"

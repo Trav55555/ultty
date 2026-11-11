@@ -26,7 +26,7 @@ Facts that shape the design:
 - Native scenes are drawn only in a tab with one pane (spec §1.3,
   `render_multi_pane`): a native session in a split tab exists but is not
   drawn. Mapping sessions to panes is the A1 follow-up in
-  `docs/agent-tui-plan.md`.
+  `docs/agent-tui-plan.md`; ADR 0025 does it.
 - The only way a script reaches outside the VM is `run{}` (`docs/lua.md`
   "Sandbox"). There is no file or network API yet.
 
@@ -53,7 +53,8 @@ and prints the new pane's id like `new-tab` does. `ulttyctl` resolves the
 binary next to its own executable (`target/debug`, an install prefix) and
 otherwise leaves the name for the PATH of the Ultty process. `FILE` and
 `--log` are made absolute against the caller's directory, which the pane
-also starts in; `FILE` must exist.
+also starts in; `FILE` must exist. (See the 2026-11-11 amendment below for
+how a tool that cannot start reports why.)
 
 `--split` uses a new control request, `SplitPane { direction, command, args,
 working_dir, target }`, exposed as `ulttyctl split [right|down] [cmd
@@ -94,8 +95,8 @@ basename, so `/bin/sh` too) is a shell, `env`, `xargs`, `sudo`, `timeout`,
 `ssh`, an interpreter and the like, or `ulttyctl`/`ulttui-lua` with no
 subcommand word, is an error at startup naming `--allow-exec`, so allowing
 anything is always an explicit choice. The list is one constant,
-`ulttui_lua::PROGRAM_RUNNERS` (plus `NEED_SUBCOMMAND`), documented in
-`docs/lua.md`. It is a guard against mistakes, not a sandbox: `git` with no
+`ultty_protocol::exec_grant::PROGRAM_RUNNERS` (plus `NEED_SUBCOMMAND`;
+re-exported by `ulttui_lua`), documented in `docs/lua.md`. It is a guard against mistakes, not a sandbox: `git` with no
 subcommand is as broad and stays allowed, as does any runner not on the
 list.
 
@@ -169,6 +170,36 @@ split panes (A1 follow-up).
   already have to agree (ADR 0013), so a tool looks the same apart from
   `align`/`justify`.
 - `ScriptOptions::allow_exec` becomes `ScriptOptions::exec: ExecGrant`.
+- A pane closes when its program exits, so an error `ulttui-lua` prints
+  before it exits is lost unless something holds it; see the amendment.
+
+## Amendment 2026-11-11: startup errors reach the person who ran the command
+
+As first built, `ulttyctl lua open FILE --exec sh` opened a tab whose
+`ulttui-lua` refused the grant, printed why to its stderr, and exited; the
+pane closed with it, so the user saw a tab flash and nothing else. The
+same happened to an unknown flag or a `--log` path that cannot be created.
+
+1. **`ulttyctl lua open` checks first.** Before it asks Ultty for a pane it
+   checks that `FILE` exists and passes each `--exec` grant through the
+   same function `ulttui-lua` uses, `ultty_protocol::exec_grant::parse`
+   (moved there from `ulttui-lua` with `PROGRAM_RUNNERS` and
+   `NEED_SUBCOMMAND`, since `ultty` does not depend on `ulttui-lua` and its
+   Luau build). A refusal is printed on `ulttyctl`'s stderr with exit
+   status 2, and no pane opens. `ultty-protocol` already carries the
+   control requests `lua open` sends, so the grant vocabulary sits beside
+   them; one list means the two checks cannot disagree, and a test in
+   `ulttui-lua` asserts it refuses exactly what the shared function does.
+2. **`ulttui-lua --wait-on-error` holds what is left.** Errors only the
+   tool can find (a log file it cannot create, the file gone since the
+   check, a terminal it cannot drive) are printed as plain text, followed
+   by "press any key to close", and the process waits for a key before it
+   exits with its usual non-zero status. `lua open` always passes the flag;
+   run from a shell without it, `ulttui-lua` exits at once as before, so
+   scripts keep exit-status behaviour. The message is plain text rather
+   than the native error banner because every such error happens before
+   the app runs or after it has restored the terminal; errors in the
+   script itself never exit and already show in the banner.
 
 ## Slices
 
@@ -202,6 +233,9 @@ split panes (A1 follow-up).
 1. **Whether `lua open --split` should wait for native panes** rather than
    fall back to ANSI. The fallback is honest and useful now; it may teach
    users that splits are second class.
+
+   *2026-11-11: ADR 0025 draws native sessions in split panes; dropping the
+   forced `--ansi` is its slice 5.*
 2. **An MCP tool.** `ulttyctl mcp` serves `new_tab`; whether agents want
    `lua_open` as a tool or are fine shelling out.
 3. **Grant text.** A tool that pipes through `sh -c` needs `--exec sh`,

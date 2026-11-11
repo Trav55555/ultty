@@ -5,8 +5,9 @@ use std::time::Instant;
 use super::update::pipeline_trace_enabled;
 use super::App;
 use ultty::event_loop::TerminalGuard;
-use ultty::renderer::{ImePreedit, OverlayState, PaneInfo};
-use ultty::terminal_manager::TerminalManager;
+use ultty::protocol::ProtocolServer;
+use ultty::renderer::{ImePreedit, OverlayState, PaneDraw, PaneInfo};
+use ultty::terminal_manager::{TerminalId, TerminalManager};
 
 impl App {
     /// Render the terminal.
@@ -170,10 +171,10 @@ impl App {
         view: &wgpu::TextureView,
         cursor_cell: Option<CellRect>,
     ) -> bool {
-        let Some(terminal) = self
+        let Some((pane, terminal)) = self
             .terminal_manager
             .focused_terminal()
-            .map(|t| t.event_loop.terminal())
+            .map(|t| (t.id, t.event_loop.terminal()))
         else {
             return false;
         };
@@ -221,10 +222,12 @@ impl App {
                 }),
         };
 
-        // Only the visible tab's native sessions are drawn; a session in a
-        // background tab must not paint over the tab the user is looking at.
+        // Only the visible tab's native sessions are drawn, and only the
+        // ones of this pane or not bound yet: a session in a background
+        // tab, or bound to a pane that closed under it, must not paint over
+        // what the user is looking at.
         if let Some(ref server) = self.protocol_server {
-            if server.active_tab_sessions().next().is_some() {
+            if server.pane_or_unbound_sessions(pane).next().is_some() {
                 let search_matches =
                     if self.native_search_active && !self.native_search_matches.is_empty() {
                         Some(self.native_search_matches.as_slice())
@@ -245,7 +248,7 @@ impl App {
                     view,
                     &terminal,
                     &overlay,
-                    server.active_tab_sessions(),
+                    server.pane_or_unbound_sessions(pane),
                     search_matches,
                     self.native_search_index,
                 );
@@ -277,10 +280,7 @@ impl App {
             return false;
         }
 
-        let panes: Vec<(&ultty::grid::Terminal, PaneInfo)> = locked
-            .iter()
-            .map(|(terminal, pane)| (&**terminal, *pane))
-            .collect();
+        let panes = pane_draws(&locked, self.protocol_server.as_ref());
 
         // Check if bell is still active
         let bell_active = self
@@ -330,6 +330,30 @@ impl App {
     }
 }
 
+/// A pane of the active tab, locked for drawing.
+pub(super) struct LockedPane<'a> {
+    pub id: TerminalId,
+    pub terminal: TerminalGuard<'a>,
+    pub info: PaneInfo,
+}
+
+/// The locked panes as the renderer draws them, each with the shown native
+/// sessions bound to it (ADR 0025).
+pub(super) fn pane_draws<'a>(
+    locked: &'a [LockedPane<'a>],
+    server: Option<&'a ProtocolServer>,
+) -> Vec<PaneDraw<'a>> {
+    locked
+        .iter()
+        .map(|pane| PaneDraw {
+            terminal: &pane.terminal,
+            info: pane.info,
+            sessions: server
+                .map_or_else(Vec::new, |server| server.pane_sessions(pane.id).collect()),
+        })
+        .collect()
+}
+
 /// A cell's rectangle in window pixels.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CellRect {
@@ -348,7 +372,7 @@ pub(super) fn lock_active_panes(
     terminal_manager: &TerminalManager,
     window_size: winit::dpi::PhysicalSize<u32>,
     tab_bar_height: f32,
-) -> Vec<(TerminalGuard<'_>, PaneInfo)> {
+) -> Vec<LockedPane<'_>> {
     let terminals = terminal_manager.active_tab_terminals();
     let focused_id = terminal_manager.focused_terminal_id();
     terminal_manager
@@ -359,10 +383,11 @@ pub(super) fn lock_active_panes(
         .into_iter()
         .filter_map(|(id, (x, y, w, h))| {
             let managed = terminals.iter().find(|managed| managed.id == id)?;
-            Some((
-                managed.event_loop.terminal(),
-                PaneInfo::new(x, y, w, h, Some(id) == focused_id),
-            ))
+            Some(LockedPane {
+                id,
+                terminal: managed.event_loop.terminal(),
+                info: PaneInfo::new(x, y, w, h, Some(id) == focused_id),
+            })
         })
         .collect()
 }

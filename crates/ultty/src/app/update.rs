@@ -237,6 +237,11 @@ impl App {
             }
         }
 
+        // Sessions that just connected learn their pane; panes that were
+        // laid out again since the last update size their sessions.
+        self.bind_native_sessions();
+        self.sync_native_viewports_if_panes_changed();
+
         self.pump_in_band();
 
         if let Some(ref mut server) = self.control_server {

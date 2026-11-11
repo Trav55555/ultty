@@ -14,6 +14,7 @@ use crate::theme::{to_ratatui_color, Theme};
 
 /// Image widget that displays inline RGBA pixel data.
 pub struct Image {
+    id: Option<String>,
     data: Vec<u8>,
     width: u32,
     height: u32,
@@ -22,9 +23,17 @@ pub struct Image {
 }
 
 impl Image {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     /// Create a new image widget from RGBA pixel data.
     pub fn new(data: Vec<u8>, width: u32, height: u32) -> Self {
         Self {
+            id: None,
             data,
             width,
             height,
@@ -48,6 +57,10 @@ impl Image {
 }
 
 impl View for Image {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn semantics(&self) -> Semantics {
         Semantics {
             role: Role::Image,

@@ -4849,6 +4849,7 @@ name = "ulttui-lua"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "crossterm",
  "mlua",
  "notify",
  "ratatui",

@@ -569,6 +569,9 @@ impl App {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
+                // The sessions drawn in the pane, plus its tab's sessions
+                // that have no pane yet (a background job in a split): still
+                // worth inspecting, drawn nowhere (ADR 0025 §5).
                 let tab = self.terminal_manager.terminal(pane).map(|t| t.tab_id);
                 let scenes = self
                     .protocol_server
@@ -576,7 +579,10 @@ impl App {
                     .map(|server| {
                         server
                             .sessions()
-                            .filter(|session| Some(session.tab_id()) == tab)
+                            .filter(|session| {
+                                Some(session.tab_id()) == tab
+                                    && session.pane().is_none_or(|p| p == pane)
+                            })
                             .map(|session| session.describe())
                             .collect()
                     })
@@ -899,12 +905,12 @@ impl App {
                     let overlay_state = self.build_screenshot_overlay_state();
                     let overlay = overlay_state.as_overlay();
 
-                    // The visible tab's sessions, as the window draws them:
-                    // their surfaces are anchored in this terminal.
+                    // The pane's sessions, as the window draws them: their
+                    // surfaces are anchored in this terminal.
                     let native_sessions: Vec<&ultty::protocol::NativeSession> = self
                         .protocol_server
                         .as_ref()
-                        .map(|s| s.active_tab_sessions().collect())
+                        .map(|s| s.pane_or_unbound_sessions(terminal.id).collect())
                         .unwrap_or_default();
 
                     if let Some(parent) = path.parent() {

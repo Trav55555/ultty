@@ -31,14 +31,23 @@ fn clock_frame() -> usize {
 /// A reusable empty-state widget.
 #[derive(Debug, Clone)]
 pub struct EmptyState {
+    id: Option<String>,
     title: String,
     detail: Option<String>,
     hint: Option<String>,
 }
 
 impl EmptyState {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new(title: impl Into<String>) -> Self {
         Self {
+            id: None,
             title: title.into(),
             detail: None,
             hint: None,
@@ -68,6 +77,10 @@ impl EmptyState {
 }
 
 impl View for EmptyState {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn style(&self) -> ProtoStyle {
         let theme = Theme::current();
         ProtoStyle::new().fg(theme.muted)
@@ -101,13 +114,22 @@ impl View for EmptyState {
 ///   (for example in snapshot tests).
 #[derive(Debug, Clone)]
 pub struct LoadingState {
+    id: Option<String>,
     label: String,
     frame: Option<usize>,
 }
 
 impl LoadingState {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new(label: impl Into<String>) -> Self {
         Self {
+            id: None,
             label: label.into(),
             frame: None,
         }
@@ -125,6 +147,10 @@ impl LoadingState {
 }
 
 impl View for LoadingState {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn style(&self) -> ProtoStyle {
         let theme = Theme::current();
         ProtoStyle::new().fg(theme.primary).bold()
@@ -152,13 +178,22 @@ impl View for LoadingState {
 /// A reusable error-state widget.
 #[derive(Debug, Clone)]
 pub struct ErrorState {
+    id: Option<String>,
     message: String,
     hint: Option<String>,
 }
 
 impl ErrorState {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new(message: impl Into<String>) -> Self {
         Self {
+            id: None,
             message: message.into(),
             hint: None,
         }
@@ -179,6 +214,10 @@ impl ErrorState {
 }
 
 impl View for ErrorState {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     /// An alert, named by the error and described by the hint.
     fn semantics(&self) -> ultty_protocol::Semantics {
         ultty_protocol::Semantics {

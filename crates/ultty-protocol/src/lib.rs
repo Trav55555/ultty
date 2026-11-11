@@ -45,6 +45,7 @@ mod content;
 pub mod control;
 mod error;
 mod events;
+pub mod exec_grant;
 pub mod in_band;
 mod layout;
 mod messages;

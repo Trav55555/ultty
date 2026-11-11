@@ -391,8 +391,15 @@ case this is for.
    *Resolved 2026-11-11: yes, §9.* `ulttyctl override push FILE` and
    `override clear`, over the control socket and a `SetOverride` message
    behind `CAP_OVERRIDE_PUSH`; in memory, over the files, never saved.
-4. A generic way for a Rust app to give any view an id (an `Id` wrapper, or
-   `.id()` on `Column`, `Row` and `Text`), so more of an app is reachable.
+4. ~~A generic way for a Rust app to give any view an id.~~ Resolved: every
+   widget that renders a region now has its own `.id(impl Into<String>)`
+   builder (`Column`, `Row`, `Stack`, `ScrollView`, `List`, `Table`, `Tabs`,
+   `Modal`, `DockLayout`, `Section`, `Card`, `Text`, `RichText`, `MarkdownView`,
+   `Image`, `Badge`, `Divider`, `ProgressBar`, `Spinner`, the typography
+   widgets and the empty, loading and error states), feeding the same
+   `View::widget_id` the older ones use. No `Id` wrapper was added: `Inset`
+   and `Semantic` already pass a child's id through, and `Spacer` is a unit
+   struct with nothing to override.
 5. Should a pushed override be saveable (`override push --save`)? The app
    would have to tell `ulttyctl` where its files are (its name and config
    directory), or `ulttyctl` would have to guess them.

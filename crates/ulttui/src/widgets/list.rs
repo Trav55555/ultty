@@ -19,6 +19,7 @@ use ultty_protocol::{
 /// A selectable list with vim navigation.
 #[derive(Debug)]
 pub struct List<T> {
+    id: Option<String>,
     items: Vec<T>,
     selected: usize,
     vim_state: VimState,
@@ -32,6 +33,7 @@ pub struct List<T> {
 impl<T> Default for List<T> {
     fn default() -> Self {
         Self {
+            id: None,
             items: Vec::new(),
             selected: 0,
             vim_state: VimState::new(),
@@ -45,6 +47,13 @@ impl<T> Default for List<T> {
 }
 
 impl<T> List<T> {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -175,6 +184,10 @@ impl<T: AsRef<str>> List<T> {
 }
 
 impl<T: std::fmt::Display> View for List<T> {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         Constraints {
             display: Display::Flex,

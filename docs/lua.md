@@ -17,10 +17,15 @@ Options:
 | `--allow-exec` | Let `run{}` start anything.                                     |
 | `--ansi`       | Draw with ANSI even inside Ultty (a split pane, where native scenes are not drawn). |
 | `--log FILE`   | Write logs to `FILE` (the terminal is the UI, so never stderr). |
+| `--wait-on-error` | If `ulttui-lua` cannot start, print why and wait for a key before exiting, instead of exiting at once. `ulttyctl lua open` passes it, since its pane closes when the tool exits. |
 
 Inside Ultty, `ulttyctl lua open FILE [--split right|down] [--exec CMD]...`
 opens a script in a new tab (or a split next to the caller's pane) without a
 shell, in the caller's directory; see [ADR 0024](adr/0024-lua-in-ultty.md).
+It checks the file and the grants before opening anything, so a refused
+grant or a missing file is an error from `ulttyctl` itself; anything else
+that stops the tool starting stays on screen in its pane until a key is
+pressed.
 
 This is a prototype. The API below is small on purpose and may change.
 
@@ -205,7 +210,8 @@ programs, and asks for `--allow-exec` instead: the shells `sh`, `bash`,
 `python3`, `perl`, `ruby`, `node`, `deno`, `bun`, `lua`, `luajit`, `php`,
 `tclsh`, `awk`, `gawk`, `busybox`; and `ulttyctl` or `ulttui-lua` with no
 subcommand word (`'ulttyctl --json panes'` is fine). The list is
-`ulttui_lua::PROGRAM_RUNNERS` and `NEED_SUBCOMMAND`. It is a guard against
+`ultty_protocol::exec_grant::PROGRAM_RUNNERS` and `NEED_SUBCOMMAND`
+(re-exported by `ulttui_lua`), which `ulttyctl lua open` checks too. It is a guard against
 mistakes, not a sandbox: `git` with no subcommand (aliases, hooks, pagers)
 is still allowed and still broad. A
 call into the script (load, `init`, `update`, `view`) that runs Luau code for

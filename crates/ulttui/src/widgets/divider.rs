@@ -10,15 +10,24 @@ use crate::theme::{to_ratatui_color, Theme};
 use ultty_protocol::{Constraints, Content, Dimension, Display, TextContent};
 
 /// Divider widget for visual separation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Divider {
+    id: Option<String>,
     horizontal: bool,
     ch: char,
 }
 
 impl Divider {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn horizontal() -> Self {
         Self {
+            id: None,
             horizontal: true,
             ch: '-',
         }
@@ -26,6 +35,7 @@ impl Divider {
 
     pub fn vertical() -> Self {
         Self {
+            id: None,
             horizontal: false,
             ch: '|',
         }
@@ -38,6 +48,10 @@ impl Divider {
 }
 
 impl View for Divider {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         if self.horizontal {
             Constraints {

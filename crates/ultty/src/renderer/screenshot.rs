@@ -7,7 +7,7 @@
 //! [`encode_rgba_png`]) are free functions so they can be unit-tested
 //! without a GPU context.
 
-use super::{OverlayState, PaneInfo, Renderer};
+use super::{OverlayState, Renderer};
 use crate::grid::Terminal;
 use crate::renderer::Vertex;
 use wgpu::util::DeviceExt;
@@ -169,7 +169,7 @@ impl Renderer {
     /// window shows for these panes (rectangles, borders, chrome, overlays).
     pub fn capture_panes_screenshot(
         &mut self,
-        panes: &[(&Terminal, PaneInfo)],
+        panes: &[super::PaneDraw<'_>],
         overlay: &OverlayState,
         path: &std::path::Path,
     ) -> anyhow::Result<()> {

@@ -78,10 +78,7 @@ impl App {
             self.renderer.surface_size().into(),
             self.tab_bar.content_top(),
         );
-        let panes: Vec<(&ultty::grid::Terminal, ultty::renderer::PaneInfo)> = locked
-            .iter()
-            .map(|(terminal, pane)| (&**terminal, *pane))
-            .collect();
+        let panes = super::render::pane_draws(&locked, self.protocol_server.as_ref());
         self.renderer
             .capture_panes_screenshot(&panes, &overlay, path)
     }

@@ -42,6 +42,16 @@ process group of the focused pane's PTY, so a background job that subscribes
 to keys sees nothing the user types. In-band sessions talk over the PTY
 itself and qualify while they last.
 
+Within its tab a session belongs to a **pane**
+([ADR 0025](adr/0025-native-sessions-in-panes.md)): the pane whose PTY has
+the connecting process's group in the foreground when the terminal binds the
+session, shortly after it connects; a tab's only pane, whatever the group.
+The binding lasts for the session's life. Its scene is drawn in that pane's
+rectangle, its viewport (`Resize`, `LayoutComputed`) is that pane's grid
+rather than the window's, and closing the pane disconnects it. A session in
+a split tab whose process is in no pane's foreground is laid out at the
+window's size and not drawn until it is bound.
+
 **In-band** ([ADR 0018](adr/0018-in-band-native-transport.md)). Frames travel
 in the terminal byte stream, so native mode works wherever that stream goes:
 over ssh, under sudo, in containers, and through recorders such as `script`.
@@ -691,6 +701,7 @@ Supply row and column track vectors and place children with start/end `GridLine`
 | Version | Date | Changes |
 |---------|------|---------|
 | 0.1.0-draft | 2026-11-11 | `SetOverride` (terminal `0x0080`), `OverrideResult` (app `0x0080`) and `CAP_OVERRIDE_PUSH` (`0x0800`), section 10.7 (ADR 0023 §9) |
+| 0.1.0-draft | 2026-11-11 | Sessions belong to panes: drawn in, sized to and closed with their pane, section 1.2 (ADR 0025); no wire change |
 | 0.1.0-draft | 2026-11-10 | Roles `Table`, `Row`, `Cell`, `ColumnHeader`, `ComboBox` and `Option` (21 to 26), section 10.5 (ADR 0021) |
 | 0.1.0-draft | 2026-11-10 | `CAP_INPUT_CURSOR` (`0x0400`) and the input widget's caret, widget tag 7, section 8.4 |
 | 0.1.0-draft | 2026-11-08 | `CreateSurface` (`0x0015`), `CloseSurface` (`0x0016`), `SurfaceEvent` (terminal `0x0026`) and `CAP_INLINE_SURFACES` (`0x0100`), section 10.6 (ADR 0020) |

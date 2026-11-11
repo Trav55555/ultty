@@ -17,7 +17,7 @@ use ultty_protocol::{
 };
 
 use ultty::protocol::ProtocolServer;
-use ultty::terminal_manager::TabId;
+use ultty::terminal_manager::{TabId, TerminalId};
 
 const TAB_A: TabId = TabId::new(0);
 const TAB_B: TabId = TabId::new(1);
@@ -1364,8 +1364,12 @@ fn test_mouse_event_delivery() {
     client.write_all(&buf).unwrap();
     server.poll(Some(Duration::from_millis(10))).unwrap();
 
-    // Broadcast a mouse event
+    // Mouse events go to the sessions of the pane under the pointer (ADR
+    // 0025): bind the session to one, then click in it.
+    let pane = TerminalId::new(0);
+    assert_eq!(server.bind_unbound_sessions(|_, _| Some(pane)), 1);
     server.broadcast_mouse(
+        pane,
         InputType::MouseDown {
             button: MouseButton::Left,
         },
@@ -2102,18 +2106,20 @@ fn test_mouse_routes_only_to_sessions_of_the_active_tab() {
     let (mut on_b, _) = handshake(&mut server, &path_b);
     subscribe_root_mouse(&mut on_b, &mut server);
     short_read_timeout(&on_b);
+    let pane = TerminalId::new(1);
+    assert_eq!(server.bind_unbound_sessions(|_, _| Some(pane)), 1);
 
     let click = || InputType::MouseDown {
         button: MouseButton::Left,
     };
-    server.broadcast_mouse(click(), 5.0, 3.0, Modifiers::NONE);
+    server.broadcast_mouse(pane, click(), 5.0, 3.0, Modifiers::NONE);
     assert!(
         read_messages(&mut on_b).is_empty(),
         "a click on the visible tab must not reach a hidden tab's app"
     );
 
     server.set_active_tab(Some(TAB_B));
-    server.broadcast_mouse(click(), 5.0, 3.0, Modifiers::NONE);
+    server.broadcast_mouse(pane, click(), 5.0, 3.0, Modifiers::NONE);
     let msgs = read_messages(&mut on_b);
     assert!(msgs.iter().any(|m| matches!(
         m,

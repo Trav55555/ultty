@@ -78,13 +78,16 @@ pub struct TabSnapshot {
 pub struct PaneSnapshot {
     pub id: usize,
     pub title: String,
+    /// Whether the pane has keyboard focus: its content takes the focus.
+    pub focused: bool,
     /// Where the pane is, in window pixels.
     pub bounds: Rect,
     /// The screen's text, for the focused pane only, unless a native app
     /// hides it under a full scene.
     pub grid: Option<GridSnapshot>,
-    /// The `ROOT` trees of the full-scene native apps the focused pane
-    /// shows, in drawing order; when there are any, they replace the grid.
+    /// The `ROOT` trees of the full-scene native apps the pane shows (the
+    /// sessions bound to it, ADR 0025), in drawing order; when there are
+    /// any, they replace the grid.
     pub scenes: Vec<SceneSnapshot>,
     /// The inline surfaces on the focused pane's screen.
     pub surfaces: Vec<SurfaceSnapshot>,
@@ -392,16 +395,18 @@ pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
                 .filter_map(|scene| scene.emit(&mut out, &mut budget, None))
                 .collect();
             push_truncation_note(&mut out, pane.id, &mut children);
-            // The app drawn last is on top; with several, the last one
-            // with a focused region has the keyboard. Focus must be on a
-            // node that was built.
-            focus = scenes
-                .iter()
-                .rev()
-                .find_map(|scene| scene.focus_node_id())
-                .or_else(|| scenes.last().map(|scene| scene.root_node_id()))
-                .filter(|&focus| out.contains(focus))
-                .unwrap_or(id);
+            // In the focused pane, the app drawn last is on top; with
+            // several, the last one with a focused region has the
+            // keyboard. Focus must be on a node that was built.
+            if pane.focused {
+                focus = scenes
+                    .iter()
+                    .rev()
+                    .find_map(|scene| scene.focus_node_id())
+                    .or_else(|| scenes.last().map(|scene| scene.root_node_id()))
+                    .filter(|&focus| out.contains(focus))
+                    .unwrap_or(id);
+            }
             let mut group = Node::new(Role::Group);
             group.set_label(pane.title.as_str());
             group.set_bounds(pane.bounds);
@@ -641,6 +646,7 @@ mod tests {
         PaneSnapshot {
             id,
             title: title.to_owned(),
+            focused: grid.is_some(),
             bounds: Rect {
                 x0: 0.0,
                 y0: 40.0,

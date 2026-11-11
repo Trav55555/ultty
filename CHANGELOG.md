@@ -42,6 +42,22 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   apps on older `ulttui` and raw `ultty-client` apps are refused cleanly.
   `ulttyctl mcp` serves them as `ultty_push_override` and
   `ultty_clear_override`.
+- Native apps draw in split panes ([ADR 0025](docs/adr/0025-native-sessions-in-panes.md)):
+  a native session is bound to the pane whose PTY runs its app (the pane
+  whose foreground process group the connecting process is in; a one-pane
+  tab's pane regardless), is drawn in that pane's rectangle under the pane
+  borders, is laid out to that pane's grid (`Resize` and `LayoutComputed`
+  follow the pane, not the window, through splits, closes, divider drags and
+  window resizes), and is disconnected when the pane closes. `ulttyctl split
+  right <ulttui app>` therefore draws natively; `ulttyctl regions --pane N`
+  lists the sessions bound to pane N (plus its tab's unbound ones), and
+  screenshots of split tabs include the scenes. Mouse and scroll events go
+  to the sessions of the pane under the pointer, in that pane's cells (a
+  drag stays with the pane it started in), and
+  the accessibility tree puts each pane's scenes under the pane's node
+  (the focused pane keeps the focus). No wire change. Inline surfaces and
+  in-band sessions in split panes, and `lua open --split` without
+  `--ansi`, are the ADR's later slices.
 - Text editing in `ulttui` and `ulttui-lua`: `ulttui::edit` (cursor moves,
   word motions, deletes at the cursor, by grapheme cluster), used by
   `TextInput`'s insert mode and by Lua `input` nodes, which take `cursor`

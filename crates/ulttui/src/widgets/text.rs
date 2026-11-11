@@ -15,12 +15,21 @@ use crate::{impl_vim_ext, impl_vim_handler_accessors};
 /// Plain text widget.
 #[derive(Debug, Clone)]
 pub struct Text {
+    id: Option<String>,
     content: String,
 }
 
 impl Text {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new(content: impl Into<String>) -> Self {
         Self {
+            id: None,
             content: expand_tabs(&content.into()).into_owned(),
         }
     }
@@ -31,6 +40,10 @@ impl Text {
 }
 
 impl View for Text {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> ultty_protocol::Constraints {
         let line_count = crate::overrides::text_or(&self.content)
             .lines()
@@ -60,12 +73,20 @@ impl View for Text {
 /// Rich text with styled spans.
 #[derive(Debug, Clone, Default)]
 pub struct RichText {
+    id: Option<String>,
     spans: Vec<(String, ultty_protocol::Style)>,
     fill_width: bool,
     column: usize,
 }
 
 impl RichText {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -108,6 +129,10 @@ impl RichText {
 }
 
 impl View for RichText {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> ultty_protocol::Constraints {
         let width = if self.fill_width {
             ultty_protocol::Dimension::Percent(100.0)
