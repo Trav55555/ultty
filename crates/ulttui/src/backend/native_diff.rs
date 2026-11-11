@@ -720,11 +720,19 @@ const HOLD_BACK_BYTES: usize = 80;
 /// something that cannot start a link target (`x[i] = 0`); so do `**`,
 /// `__` and `~~`. A lone `*`, `_` (not inside a word) or `` ` `` holds
 /// only within [`HOLD_BACK_BYTES`] of the end: a code span that closed
-/// would no longer show its backticks.
+/// would no longer show its backticks. A last line of only `=` or `-` is
+/// held whole: under a line of text it is a setext underline that turns
+/// the block into a heading.
 fn held_back(text: &str) -> &str {
     let line_start = text.rfind('\n').map_or(0, |index| index + 1);
     let window_start = text.len().saturating_sub(HOLD_BACK_BYTES);
     let line = &text[line_start..];
+    let underline = line.trim();
+    if !underline.is_empty()
+        && (underline.bytes().all(|b| b == b'=') || underline.bytes().all(|b| b == b'-'))
+    {
+        return &text[..line_start.saturating_sub(1)];
+    }
     let mut previous: Option<char> = None;
     let mut chars = line.char_indices().peekable();
     while let Some((offset, c)) = chars.next() {
@@ -1561,6 +1569,38 @@ mod tests {
                 text: "**bo".to_string()
             }
         );
+    }
+
+    #[test]
+    fn a_link_address_and_a_setext_underline_are_never_spoken() {
+        let id = RegionId::new(1);
+        let bold = Style::new().bold();
+        let frames = [
+            text("See [te"),
+            text("See [text](ht"),
+            text("See [text](http://x \"ti"),
+            Content::RichText(RichText::new().text("See ").span("text", bold).text(" now")),
+            text("See text now\nTitle"),
+            text("See text now\nTitle\n="),
+            text("See text now\nTitle\n====="),
+            text("See text now\nTITLE"),
+        ];
+        let mut tree = RetainedTree::new();
+        let mut said = Vec::new();
+        for content in frames {
+            let frame = frame_with_semantics(id, content, live_log());
+            let (outgoing, next) = optimize_frame_messages(&tree, frame, &prose(), ALL);
+            tree = next;
+            said.extend(outgoing.into_iter().filter_map(|m| match m {
+                AppMessage::AppendContent { text, .. } => Some(text),
+                _ => None,
+            }));
+        }
+        assert_eq!(said, ["See ", "text now", "\nTitle"]);
+        assert_eq!(super::held_back("Title\n====="), "Title");
+        assert_eq!(super::held_back("Title\n-- "), "Title");
+        assert_eq!(super::held_back("a\n= b"), "a\n= b");
+        assert_eq!(super::held_back("=-="), "=-=");
     }
 
     fn plain_text_of(content: &Content) -> String {
