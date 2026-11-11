@@ -26,6 +26,7 @@ use crate::{
         TrackSizingFunction,
     },
     messages::{ComputedRegionLayout, FrameId, LayoutTrigger},
+    overrides::{OverrideFormat, PushedOverride},
     style::{BorderEdges, BorderStyle, BorderType, Color, Easing, NamedColor, Style, Transition},
     surface::{SurfaceEventKind, MAX_SURFACE_ROWS, MIN_SURFACE_ROWS},
     AppMessage, ProtocolError, RegionId, Result, TerminalMessage,
@@ -2025,6 +2026,7 @@ mod msg_type {
     pub const CLIPBOARD_GET: u16 = 0x0060;
     pub const CLIPBOARD_SET: u16 = 0x0061;
     pub const PONG: u16 = 0x0070;
+    pub const OVERRIDE_RESULT: u16 = 0x0080;
     pub const DISCONNECT: u16 = 0x00FF;
 
     // Terminal -> App
@@ -2038,11 +2040,32 @@ mod msg_type {
     pub const CLIPBOARD_CONTENT: u16 = 0x0025;
     pub const SURFACE_EVENT: u16 = 0x0026;
     pub const PING: u16 = 0x0070;
+    pub const SET_OVERRIDE: u16 = 0x0080;
     pub const ERROR: u16 = 0x00FF;
 }
 
 /// Decode a surface root id: any region id but the root, which is the
 /// terminal's and never a surface.
+fn decode_u8(buf: &mut impl Buf) -> Result<u8> {
+    if buf.remaining() < 1 {
+        return Err(ProtocolError::UnexpectedEof {
+            needed: 1,
+            have: buf.remaining(),
+        });
+    }
+    Ok(buf.get_u8())
+}
+
+fn decode_u32(buf: &mut impl Buf) -> Result<u32> {
+    if buf.remaining() < 4 {
+        return Err(ProtocolError::UnexpectedEof {
+            needed: 4,
+            have: buf.remaining(),
+        });
+    }
+    Ok(buf.get_u32_le())
+}
+
 fn decode_surface_id(buf: &mut impl Buf) -> Result<RegionId> {
     let id = RegionId::decode(buf)?;
     if id == RegionId::ROOT {
@@ -2191,6 +2214,11 @@ impl Encode for AppMessage {
             }
             AppMessage::Disconnect => msg_type::DISCONNECT,
             AppMessage::Pong => msg_type::PONG,
+            AppMessage::OverrideResult { request_id, error } => {
+                buf.put_u32_le(*request_id);
+                encode_option_string(error, buf);
+                msg_type::OVERRIDE_RESULT
+            }
         };
 
         finish_frame(buf, frame, type_code);
@@ -2416,6 +2444,11 @@ impl Decode for AppMessage {
             }
             msg_type::DISCONNECT => Ok(AppMessage::Disconnect),
             msg_type::PONG => Ok(AppMessage::Pong),
+            msg_type::OVERRIDE_RESULT => {
+                let request_id = decode_u32(buf)?;
+                let error = decode_option_string(buf)?;
+                Ok(AppMessage::OverrideResult { request_id, error })
+            }
             _ => Err(ProtocolError::UnknownMessageType(header.type_code)),
         };
 
@@ -2510,6 +2543,18 @@ impl Encode for TerminalMessage {
                 msg_type::SURFACE_EVENT
             }
             TerminalMessage::Ping => msg_type::PING,
+            TerminalMessage::SetOverride { request_id, pushed } => {
+                buf.put_u32_le(*request_id);
+                match pushed {
+                    Some(pushed) => {
+                        buf.put_u8(1);
+                        buf.put_u8(pushed.format as u8);
+                        encode_string(&pushed.source, buf);
+                    }
+                    None => buf.put_u8(0),
+                }
+                msg_type::SET_OVERRIDE
+            }
             TerminalMessage::Error { code, message } => {
                 buf.put_u16_le(*code);
                 encode_string(message, buf);
@@ -2613,6 +2658,22 @@ impl Decode for TerminalMessage {
                 Ok(TerminalMessage::SurfaceEvent { id, kind })
             }
             msg_type::PING => Ok(TerminalMessage::Ping),
+            msg_type::SET_OVERRIDE => {
+                let request_id = decode_u32(buf)?;
+                let pushed = match decode_u8(buf)? {
+                    0 => None,
+                    1 => {
+                        let value = decode_u8(buf)?;
+                        let format = OverrideFormat::from_u8(value).ok_or_else(|| {
+                            ProtocolError::InvalidData(format!("invalid override format: {value}"))
+                        })?;
+                        let source = decode_string(buf)?;
+                        Some(PushedOverride { format, source })
+                    }
+                    _ => return Err(ProtocolError::InvalidData("invalid option tag".into())),
+                };
+                Ok(TerminalMessage::SetOverride { request_id, pushed })
+            }
             msg_type::CLIPBOARD_CONTENT => {
                 let text = decode_option_string(buf)?;
                 Ok(TerminalMessage::ClipboardContent { text })
@@ -3343,7 +3404,7 @@ mod tests {
     #[test]
     fn message_type_codes_match_documented_table() {
         // Mirrors docs/PROTOCOL_SPEC.md section 3.2. Update both together.
-        let app: [(&str, u16); 25] = [
+        let app: [(&str, u16); 26] = [
             ("CLIENT_HELLO", 0x0001),
             ("CREATE_REGION", 0x0010),
             ("DELETE_REGION", 0x0012),
@@ -3368,6 +3429,7 @@ mod tests {
             ("CLIPBOARD_GET", 0x0060),
             ("CLIPBOARD_SET", 0x0061),
             ("PONG", 0x0070),
+            ("OVERRIDE_RESULT", 0x0080),
             ("DISCONNECT", 0x00FF),
         ];
         let actual_app = [
@@ -3395,11 +3457,12 @@ mod tests {
             ("CLIPBOARD_GET", msg_type::CLIPBOARD_GET),
             ("CLIPBOARD_SET", msg_type::CLIPBOARD_SET),
             ("PONG", msg_type::PONG),
+            ("OVERRIDE_RESULT", msg_type::OVERRIDE_RESULT),
             ("DISCONNECT", msg_type::DISCONNECT),
         ];
         assert_eq!(actual_app, app);
 
-        let terminal: [(&str, u16); 11] = [
+        let terminal: [(&str, u16); 12] = [
             ("SERVER_HELLO", 0x0001),
             ("SESSION_READY", 0x0002),
             ("LAYOUT_COMPUTED", 0x0010),
@@ -3410,6 +3473,7 @@ mod tests {
             ("CLIPBOARD_CONTENT", 0x0025),
             ("SURFACE_EVENT", 0x0026),
             ("PING", 0x0070),
+            ("SET_OVERRIDE", 0x0080),
             ("ERROR", 0x00FF),
         ];
         let actual_terminal = [
@@ -3423,6 +3487,7 @@ mod tests {
             ("CLIPBOARD_CONTENT", msg_type::CLIPBOARD_CONTENT),
             ("SURFACE_EVENT", msg_type::SURFACE_EVENT),
             ("PING", msg_type::PING),
+            ("SET_OVERRIDE", msg_type::SET_OVERRIDE),
             ("ERROR", msg_type::ERROR),
         ];
         assert_eq!(actual_terminal, terminal);
@@ -3433,9 +3498,9 @@ mod tests {
         // Mirrors docs/PROTOCOL_SPEC.md section 2.1 and 7.5.
         use crate::{
             CAP_ALL_KNOWN, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, CAP_INPUT_CURSOR,
-            CAP_LAYOUT_FLEXBOX, CAP_REGION_METADATA, CAP_SEMANTICS, CAP_STREAM_LIFECYCLE,
-            CAP_WIDGET_SCROLL, MAX_SURFACES, MAX_SURFACE_ROWS, MIN_PROTOCOL_VERSION,
-            MIN_SURFACE_ROWS, PROTOCOL_VERSION,
+            CAP_LAYOUT_FLEXBOX, CAP_OVERRIDE_PUSH, CAP_REGION_METADATA, CAP_SEMANTICS,
+            CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, MAX_SURFACES, MAX_SURFACE_ROWS,
+            MIN_PROTOCOL_VERSION, MIN_SURFACE_ROWS, PROTOCOL_VERSION,
         };
         assert_eq!(CAP_LAYOUT_FLEXBOX, 0x0001);
         assert_eq!(CAP_WIDGET_SCROLL, 0x0010);
@@ -3445,7 +3510,8 @@ mod tests {
         assert_eq!(CAP_INLINE_SURFACES, 0x0100);
         assert_eq!(CAP_SEMANTICS, 0x0200);
         assert_eq!(CAP_INPUT_CURSOR, 0x0400);
-        assert_eq!(CAP_ALL_KNOWN, 0x07F1);
+        assert_eq!(CAP_OVERRIDE_PUSH, 0x0800);
+        assert_eq!(CAP_ALL_KNOWN, 0x0FF1);
         assert_eq!((MIN_SURFACE_ROWS, MAX_SURFACE_ROWS), (1, 128));
         assert_eq!(MAX_SURFACES, 16);
         assert_eq!(PROTOCOL_VERSION, 1);
@@ -3490,6 +3556,65 @@ mod tests {
         .encode_to_bytes();
         assert_eq!(&create[..4], &[0x55, 0x54, 0x15, 0x00]);
         assert_eq!(&create[8..14], &[7, 0, 0, 0, 0x02, 0x01]);
+    }
+
+    #[test]
+    fn override_messages_have_golden_frame_bytes() {
+        let push = TerminalMessage::SetOverride {
+            request_id: 7,
+            pushed: Some(PushedOverride {
+                format: OverrideFormat::Luau,
+                source: "ab".to_string(),
+            }),
+        }
+        .encode_to_bytes();
+        assert_eq!(
+            &push[..],
+            &[0x55, 0x54, 0x80, 0x00, 12, 0, 0, 0, 7, 0, 0, 0, 1, 1, 2, 0, 0, 0, b'a', b'b']
+        );
+
+        let clear = TerminalMessage::SetOverride {
+            request_id: 7,
+            pushed: None,
+        }
+        .encode_to_bytes();
+        assert_eq!(
+            &clear[..],
+            &[0x55, 0x54, 0x80, 0x00, 5, 0, 0, 0, 7, 0, 0, 0, 0]
+        );
+
+        let ok = AppMessage::OverrideResult {
+            request_id: 7,
+            error: None,
+        }
+        .encode_to_bytes();
+        assert_eq!(
+            &ok[..],
+            &[0x55, 0x54, 0x80, 0x00, 5, 0, 0, 0, 7, 0, 0, 0, 0]
+        );
+
+        let failed = AppMessage::OverrideResult {
+            request_id: 7,
+            error: Some("no".to_string()),
+        }
+        .encode_to_bytes();
+        assert_eq!(
+            &failed[..],
+            &[0x55, 0x54, 0x80, 0x00, 11, 0, 0, 0, 7, 0, 0, 0, 1, 2, 0, 0, 0, b'n', b'o']
+        );
+    }
+
+    #[test]
+    fn set_override_rejects_unknown_format_and_option_tags() {
+        let bad_format = [
+            0x55, 0x54, 0x80, 0x00, 10, 0, 0, 0, 7, 0, 0, 0, 1, 2, 0, 0, 0, 0,
+        ];
+        let err = TerminalMessage::decode(&mut &bad_format[..]).unwrap_err();
+        assert!(matches!(err, ProtocolError::InvalidData(_)), "{err:?}");
+
+        let bad_tag = [0x55, 0x54, 0x80, 0x00, 5, 0, 0, 0, 7, 0, 0, 0, 2];
+        let err = TerminalMessage::decode(&mut &bad_tag[..]).unwrap_err();
+        assert!(matches!(err, ProtocolError::InvalidData(_)), "{err:?}");
     }
 
     fn create_surface_bytes(id: u32, rows: u16) -> Bytes {

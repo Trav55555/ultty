@@ -3,7 +3,7 @@
 //! This module defines messages for external control of ultty,
 //! separate from the TUI app protocol.
 
-use crate::{Key, Modifiers};
+use crate::{Key, Modifiers, OverrideFormat};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -133,6 +133,28 @@ pub enum ControlRequest {
     },
 
     GetInfo,
+
+    // === Overrides (ADR 0023 §9) ===
+    /// Push a user override into the native app in a pane's tab, where it
+    /// applies on the next frame, in memory, over the app's override files.
+    /// Answered `Ok` once the app applied it, or with the app's parse
+    /// error.
+    PushOverride {
+        format: OverrideFormat,
+        /// The override file's text, at most `MAX_OVERRIDE_SOURCE_LEN` bytes.
+        source: String,
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
+
+    /// Take back the override pushed into the native app in a pane's tab;
+    /// its files apply as before.
+    ClearOverride {
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
 
     /// The last command the pane's shell ran (or is running) and what it
     /// printed, from OSC 133 shell integration marks.
@@ -934,6 +956,28 @@ mod tests {
                 working_dir: None,
                 target: None,
             }
+        );
+    }
+
+    #[test]
+    fn override_requests_spell_their_format_lowercase_and_default_the_target() {
+        let push = ControlRequest::PushOverride {
+            format: OverrideFormat::Luau,
+            source: "return {}".to_string(),
+            target: Some(2),
+        };
+        let json = serde_json::to_string(&push).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"push_override","format":"luau","source":"return {}","target":2}"#
+        );
+        assert_eq!(serde_json::from_str::<ControlRequest>(&json).unwrap(), push);
+
+        let clear: ControlRequest = serde_json::from_str(r#"{"type":"clear_override"}"#).unwrap();
+        assert_eq!(clear, ControlRequest::ClearOverride { target: None });
+        assert_eq!(
+            serde_json::to_string(&clear).unwrap(),
+            r#"{"type":"clear_override"}"#
         );
     }
 

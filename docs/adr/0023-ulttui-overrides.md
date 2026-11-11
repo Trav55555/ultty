@@ -3,7 +3,8 @@
 ## Status
 
 Proposed 2026-11-10. Amended 2026-11-11 to add Luau override files
-(§8), which v1 had left out.
+(§8), which v1 had left out. Amended 2026-11-11 to let `ulttyctl` push an
+override into a running native app (§9, open question 3).
 
 ## Context
 
@@ -243,6 +244,97 @@ TOML one. The release build of `counter-app` (LTO,
 about twice the size) with it on, measured 2026-11-11.
 `porygon-tui`, which does not turn the feature on, does not link mlua.
 
+### 9. Amendment: pushing an override into a running app
+
+Editing a file under `~/.config/ulttui/overrides/` and pressing a key is
+fine for a change one means to keep. It is slow for trying one out ("is
+it this panel?"), and an agent helping the user reshape an app should not
+have to write into the user's config directory to show them a result.
+`ulttyctl override push` sends an override to the app in a pane, where it
+applies on the next frame; `ulttyctl override clear` takes it away.
+
+**Transport.** A control request, relayed over the native protocol:
+
+    ulttyctl [--pane N] override push FILE
+    ulttyctl [--pane N] override clear
+
+`ulttyctl` reads `FILE` (Luau when its name ends in `.luau`, TOML
+otherwise) and sends `PushOverride { format, source, target }`; `clear`
+sends `ClearOverride { target }`. Ultty finds the native session in the
+pane's tab (below) and sends it a new terminal-to-app message,
+`SetOverride { request_id, override: Option<(format, source)> }`, `None`
+meaning clear. The app answers `OverrideResult { request_id, error:
+Option<String> }`, and Ultty turns that into the control reply. The
+alternatives were a second socket into every app (one more thing for each
+app to listen on, and a path for `ulttyctl` to find), or `ulttyctl`
+writing the file itself (which is what the user did not want). The
+control socket already authenticates the caller and knows which pane is
+which; the native session is already the terminal's channel into the app.
+
+Native sessions only. An app drawing with ANSI has no session for the
+message to travel on; it keeps reading its files (§5), which `ulttyctl`
+cannot reach. A pane with no native app answers an error saying so.
+
+**Which session.** A push targets a pane (`--pane N`, else the focused
+one), and the sessions Ultty knows belong to a tab (spec §1.2), not a
+pane. Of the sessions in the pane's tab: one session is the one; of
+several, the one whose process is in the pane's foreground process group
+(the rule key input already uses); none in the foreground, or no session
+at all, is an error naming the pane. When sessions map to panes (the A1
+follow-up in `docs/agent-tui-plan.md`), the first rule becomes "the pane's
+session" and the rest goes.
+
+**Semantics.** A pushed override lives in the app's memory, for that
+process, and is one layer: a second push replaces the first. It sits over
+the files, which keep reloading underneath it:
+
+- A pushed TOML file merges over the TOML file per widget id (the pushed
+  entry for an id replaces the file's entry for that id, other ids keep
+  the file's) and its `[keys]` are asked before the file's.
+- A pushed Luau file replaces the Luau file's hooks while it is in force.
+  `resolve` and `remap` take one script; two would need a rule for which
+  hook answers first, for no case yet.
+- `clear` removes the pushed layer; the files apply as before.
+
+Nothing is written to disk. A user who likes the result edits the file;
+`--save` is left out until something wants it, since `ulttyctl` would have
+to learn the app's name and config directory from the app (open question
+5).
+
+**Errors.** The app parses the source with the same code that reads its
+files (`Overrides::parse`, `OverrideScript::load`), so a push can fail for
+every reason a file can, and for one more: a Luau push to an app built
+without `lua-overrides`. The app sends the reason back in
+`OverrideResult`, and `ulttyctl` prints it and exits 1. A failed push
+leaves the overrides in force unchanged, as a bad file reload does (§6).
+Ultty answers for the app when it cannot: no native app in the pane; an
+app that did not negotiate the capability; an app that does not answer
+within 5 s or disconnects first.
+
+**Capability.** `CAP_OVERRIDE_PUSH` (`0x0800`). Ultty sends `SetOverride`
+only to a session that negotiated it, and answers the control request with
+an error otherwise, so an app built before this never sees a message it
+cannot decode. An app that negotiated it must answer every `SetOverride`.
+
+**Security.** The control socket is in the user's runtime directory
+(mode 0700) and every request that touches a pane needs the token Ultty
+wrote next to it at start, readable only by the user (ADR 0017). A caller
+who can push an override can already type into the user's shell with
+`send-text`; the push gives no power over the app the files do not. A
+pushed Luau file runs in the app's `ulttui::lua_sandbox` with the
+override budget (§8: 2 ms a call, 8 ms a frame, 4 MiB), so it cannot
+start a process or read a file. The source is at most 1 MiB, the file
+limit (§6), checked by `ulttyctl` before sending and by Ultty before
+relaying (the protocol's string limit is the same). The message travels
+only terminal to app, so a remote host at the other end of an in-band
+session (spec §1.3) cannot push anything into the user's apps; it can
+receive a push, which runs in the app's sandbox on that host.
+
+**MCP.** `ulttyctl mcp` serves `ultty_push_override` and
+`ultty_clear_override` next to `ultty_regions`: an agent reads the
+widget ids from one and reshapes the app with the other, which is the
+case this is for.
+
 ## Consequences
 
 - Widget ids become a user-facing interface. Renaming one in an app breaks
@@ -281,5 +373,12 @@ about twice the size) with it on, measured 2026-11-11.
 2. Overrides keyed by something other than id (widget type, role) would reach
    widgets without ids, at the cost of the precision ids give.
 3. Should `ulttyctl` be able to push an override into a running native app?
+
+   *Resolved 2026-11-11: yes, §9.* `ulttyctl override push FILE` and
+   `override clear`, over the control socket and a `SetOverride` message
+   behind `CAP_OVERRIDE_PUSH`; in memory, over the files, never saved.
 4. A generic way for a Rust app to give any view an id (an `Id` wrapper, or
    `.id()` on `Column`, `Row` and `Text`), so more of an app is reachable.
+5. Should a pushed override be saveable (`override push --save`)? The app
+   would have to tell `ulttyctl` where its files are (its name and config
+   directory), or `ulttyctl` would have to guess them.
