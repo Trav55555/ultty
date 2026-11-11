@@ -4,8 +4,9 @@
 //! leaves behind (and its peak), and `/proc/self/statm` gives the RSS delta.
 //! Allocation counts do not depend on machine load, so the heap figures are
 //! a deterministic gate: each case fails when it exceeds its budget, which is
-//! the bytes measured on 2026-11-07 plus 5%. When a change moves a number on
-//! purpose, update the budget in the same commit and say why.
+//! the bytes measured when the budget was set plus 5% (the terminal cases on
+//! 2026-11-11, after ADR 0022's page storage). When a change moves a number
+//! on purpose, update the budget in the same commit and say why.
 //!
 //! cargo bench -p ultty --bench memory   (release profile, LTO: slow to build)
 //! cargo test -p ultty --bench memory    (same allocations, builds faster)
@@ -285,19 +286,19 @@ fn filled_terminal(cols: u16, rows: u16, bytes: &[u8]) -> Terminal {
 const CASES: &[Case] = &[
     Case {
         name: "empty_terminal_80x24",
-        budget: 185_000,
+        budget: 38_800,
         peak_budget: None,
         run: || measure(|| Terminal::new(Dimensions::new(80, 24))),
     },
     Case {
         name: "empty_terminal_300x75",
-        budget: 1_229_000,
+        budget: 394_000,
         peak_budget: None,
         run: || measure(|| Terminal::new(Dimensions::new(300, 75))),
     },
     Case {
         name: "typical_10k_lines_80x24",
-        budget: 2_915_000,
+        budget: 767_800,
         peak_budget: None,
         run: || {
             let input = typical_lines(10_024);
@@ -306,7 +307,7 @@ const CASES: &[Case] = &[
     },
     Case {
         name: "typical_10k_lines_120x40",
-        budget: 3_461_000,
+        budget: 1_223_400,
         peak_budget: None,
         run: || {
             let input = typical_lines(10_040);
@@ -315,7 +316,7 @@ const CASES: &[Case] = &[
     },
     Case {
         name: "typical_10k_lines_300x75",
-        budget: 4_358_000,
+        budget: 1_527_000,
         peak_budget: None,
         run: || {
             let input = typical_lines(10_075);
@@ -326,10 +327,10 @@ const CASES: &[Case] = &[
         // Resizing reflows the scrollback; it must stay as compact as it
         // was (found by the 2026-11-08 soak: RSS grew with each resize).
         name: "typical_10k_lines_120x40_resized",
-        budget: 3_461_000,
-        // Measured 4_699_129 (it was 149 MB when reflow decoded the whole
-        // scrollback at once) + 5%.
-        peak_budget: Some(4_935_000),
+        budget: 1_221_300,
+        // Measured 1_448_974 + 5%. It was 149 MB when reflow decoded the
+        // whole scrollback at once, and 4.7 MB before history pages.
+        peak_budget: Some(1_521_500),
         run: || {
             let input = typical_lines(10_040);
             measure(|| {
@@ -343,7 +344,7 @@ const CASES: &[Case] = &[
     },
     Case {
         name: "sgr_dense_10k_lines_120x40",
-        budget: 18_980_000,
+        budget: 10_457_200,
         peak_budget: None,
         run: || {
             let input = sgr_dense_lines(10_040, 120);
@@ -352,10 +353,9 @@ const CASES: &[Case] = &[
     },
     Case {
         name: "cjk_10k_lines_120x40",
-        // Measured 4_594_320 with `CompactRow` scrollback (before ADR 0022
-        // slice 5) + 5%, like the other budgets until slice 6 lowers them;
-        // history pages hold it in about half that.
-        budget: 4_824_000,
+        // 4_594_320 with `CompactRow` scrollback; history pages' Chars form
+        // holds it in about half that.
+        budget: 2_440_200,
         peak_budget: None,
         run: || {
             let input = cjk_lines(10_040);
