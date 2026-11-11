@@ -462,4 +462,22 @@ proptest! {
             }
         }
     }
+
+    /// History pages of two to four rows, so that short streams evict,
+    /// truncate, reflow and rewrite across page boundaries.
+    #[test]
+    fn live_storage_matches_reference_across_small_pages(
+        page_rows in 2usize..=4,
+        cols in 1u16..=40,
+        rows in 1u16..=12,
+        scrollback in 0usize..=40,
+        ops in prop::collection::vec(op(), 1..64),
+    ) {
+        let _pages = crate::grid::history::test_support::page_rows(page_rows);
+        for spans in [false, true] {
+            if let Err(difference) = run(Dimensions::new(cols, rows), scrollback, &ops, spans) {
+                prop_assert!(false, "pages of {}, spans {}: {}", page_rows, spans, difference);
+            }
+        }
+    }
 }
