@@ -6,7 +6,7 @@
 use crate::widgets::View;
 
 /// Tracks which widget is currently focused.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct FocusManager {
     /// Ordered list of focusable widget IDs (collected during each render).
     focusable_ids: Vec<String>,
@@ -175,6 +175,18 @@ impl FocusManager {
     /// Access the current thread-local FocusManager (mutable).
     pub fn with_current_mut<R>(f: impl FnOnce(&mut FocusManager) -> R) -> R {
         CURRENT_FOCUS.with(|fm| f(&mut fm.borrow_mut()))
+    }
+
+    /// Register `view`'s tree in the current thread-local FocusManager
+    /// without holding it borrowed while the tree is walked: the walk asks
+    /// the overrides whether each view is hidden, and a Luau `widget` hook
+    /// reads the current focus on the way, which would otherwise borrow the
+    /// manager a second time and panic. The walk runs on a copy that sees
+    /// the same focus, and the copy becomes the current manager.
+    pub fn register_current_view_tree(view: &dyn View) {
+        let mut current = Self::with_current(|fm| fm.clone());
+        current.register_view_tree(view);
+        Self::set_current(current);
     }
 
     /// Replace the thread-local FocusManager. Returns the old one.

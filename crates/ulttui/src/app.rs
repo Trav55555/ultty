@@ -708,12 +708,12 @@ impl<A: Application> App<A> {
             if let Some(screen) = self.screen_stack.last() {
                 let view = screen.view();
                 let composed = OverlayView::new(&view, overlay);
-                FocusManager::with_current_mut(|fm| fm.register_view_tree(&composed));
+                FocusManager::register_current_view_tree(&composed);
                 self.backend.render(&composed)?;
             } else {
                 let view = self.app.view();
                 let composed = OverlayView::new(&view, overlay);
-                FocusManager::with_current_mut(|fm| fm.register_view_tree(&composed));
+                FocusManager::register_current_view_tree(&composed);
                 self.backend.render(&composed)?;
             }
             FocusManager::with_current_mut(|fm| fm.end_frame());
@@ -2461,6 +2461,40 @@ mod async_tests {
         assert!(runner.run_tick(&rt).unwrap());
         assert_eq!(rendered_labels(&runner), ["A", "B"]);
         assert_eq!(override_results(&runner), [(7, None), (8, None)]);
+    }
+
+    /// A pushed Luau file's `widget` hook relabels through the runner too,
+    /// and a later TOML push replaces it.
+    #[cfg(feature = "lua-overrides")]
+    #[test]
+    fn a_pushed_luau_override_applies_and_a_toml_push_replaces_it() {
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut mock = MockBackend::new(vec![]).blocking_when_exhausted();
+        mock.push_override(
+            1,
+            Some(ultty_protocol::PushedOverride {
+                format: ultty_protocol::OverrideFormat::Luau,
+                source: "return { widget = function(id) if id == 'a' then return { text = 'Lua' } end end }"
+                    .to_string(),
+            }),
+        );
+        let mut runner = App::new_with_backend(KeyLogApp { keys }, Backend::Mock(mock));
+        let rt = test_runtime();
+        runner.render().unwrap();
+
+        assert!(runner.run_tick(&rt).unwrap());
+        assert_eq!(rendered_labels(&runner), ["Lua", "B"]);
+        // The hook is cached; another frame asks nothing new of it.
+        assert!(runner.run_tick(&rt).unwrap());
+        assert_eq!(rendered_labels(&runner), ["Lua", "B"]);
+
+        let Backend::Mock(mock) = &mut runner.backend else {
+            panic!("mock backend");
+        };
+        mock.push_override(2, toml_push("[widget.b]\ntext = \"Toml\"\n"));
+        assert!(runner.run_tick(&rt).unwrap());
+        assert_eq!(rendered_labels(&runner), ["A", "Toml"]);
+        assert_eq!(override_results(&runner), [(1, None), (2, None)]);
     }
 
     /// A push that does not parse is answered with the reason and leaves
