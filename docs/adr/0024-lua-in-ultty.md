@@ -1,4 +1,4 @@
-# ADR 0023: Luau Tools Opened From Ultty, With Named Grants
+# ADR 0024: Luau Tools Opened From Ultty, With Named Grants
 
 ## Status
 
@@ -45,20 +45,23 @@ working from a shell, over ssh and under tmux unchanged.
 
 ### 2. Launch: `ulttyctl lua open`
 
-    ulttyctl lua open FILE [--split right|down] [--exec PROG]... [--allow-exec] [--log FILE]
+    ulttyctl lua open FILE [--split right|down] [--exec CMD]... [--allow-exec] [--log FILE]
 
-Opens `FILE` in a new tab (the default) or in a split next to the focused
-pane, running `ulttui-lua` with the grants given, and prints the new pane's
-id like `new-tab` does. `ulttyctl` resolves the binary next to its own
-executable (`target/debug`, an install prefix) and otherwise leaves the name
-for the PATH of the Ultty process. `FILE` is made absolute first, since the
-new pane does not start in the caller's directory, and must exist.
+Opens `FILE` in a new tab (the default) or in a split next to the caller's
+pane, running `ulttui-lua` with the grants given in the caller's directory,
+and prints the new pane's id like `new-tab` does. `ulttyctl` resolves the
+binary next to its own executable (`target/debug`, an install prefix) and
+otherwise leaves the name for the PATH of the Ultty process. `FILE` and
+`--log` are made absolute against the caller's directory, which the pane
+also starts in; `FILE` must exist.
 
 `--split` uses a new control request, `SplitPane { direction, command, args,
-working_dir }`, exposed as `ulttyctl split [right|down] [cmd args...]` and
-useful on its own. Until native sessions map to panes, a tool in a split
-draws with ANSI: `lua open --split` starts it with `ULTTY_IN_BAND=0` and
-without `ULTTY_SOCKET`, and says so once on stderr. A split pane that
+working_dir, target }`, exposed as `ulttyctl split [right|down] [cmd
+args...]` and useful on its own. The pane split is `--pane`, else the pane
+`ulttyctl` runs in (Ultty sets `ULTTY_PANE` in every pane, next to
+`ULTTY_PID`), else the focused one. Until native sessions map to panes, a
+tool in a split draws with ANSI: `lua open --split` starts it with
+`ulttui-lua --ansi`, and says so once on stderr. A split pane that
 connected natively would be blank.
 
 Keybindings and a `[lua]` config table (named tools with their file, grants
@@ -73,17 +76,28 @@ is `exec`:
 
 | Flag | Meaning |
 |---|---|
-| `--exec PROG` | `run{}` may start `PROG`, compared to `argv[1]` as written (`git` does not allow `/usr/bin/git`, nor the reverse). Repeatable. |
-| `--allow-exec` | `run{}` may start anything. The old flag, kept; `--exec sh` would mean the same. |
+| `--exec CMD` | `run{}` may start command lines that begin with the words of `CMD` (split on whitespace, quotes keep a word together), compared to `argv` as written: `--exec 'ulttyctl --json panes'` allows that and `ulttyctl --json panes --x`, not `ulttyctl new-tab` nor `/usr/bin/ulttyctl --json panes`. Repeatable. |
+| `--allow-exec` | `run{}` may start anything. The old flag, kept. |
+
+A bare program name (`--exec git`) is a one-word prefix: the program with
+**any arguments**. For `ulttyctl` (`new-tab sh`, `send-text` into the
+user's shell, `lua open --allow-exec`), `git` (`-c alias.x='!sh'`,
+`core.pager`), a shell, an interpreter, `env`, `xargs`, `find -exec` and
+the like, that is `--allow-exec` by another name. Grant the subcommand
+(`'ulttyctl --json panes'`, `'git status'`) and remember that a prefix
+grant bounds the words, not what the program does with them: a tool that
+needs more than a few fixed command lines wants `--allow-exec` and the
+user's eyes.
 
 A denied `run{}` is a Lua error at the call, so it shows in the banner with
 the file and line and a script can `pcall` it:
 
-    run: git is not allowed; open the script with --exec git (allowed: ulttyctl)
+    run: git commit is not allowed; open the script with --exec 'git commit' (or a shorter prefix; allowed: 'ulttyctl --json panes')
 
-Grants cannot widen from inside the script: a reload runs the new version
-with the grants the pane opened with, so editing a tool is never an
-escalation. To change grants, open it again.
+The grants are fixed when the pane opens: a reload runs the new version with
+the same ones, so editing the file does not by itself change what it may
+run. It is not a sandbox against the grants themselves; with a grant that
+reaches `ulttyctl lua open`, a shell or `git`, a script can open anything.
 
 The user sees the grants where they gave them: on the `lua open` command
 line, in a script's own header comment (the convention `examples/lua` uses),
@@ -126,14 +140,21 @@ split panes (A1 follow-up).
   basename match lets `/tmp/x/git` through a `git` grant; a resolved path
   needs the child's PATH at grant time. Exact text is explicit and the error
   tells the user the exact flag to add.
+- **Program-only grants.** The first cut; `--exec ulttyctl` turned out to be
+  `--allow-exec` through `ulttyctl new-tab sh` or `lua open --allow-exec`.
+  Prefixes let the common case (`'ulttyctl --json panes'`) be narrow without
+  a grammar for arguments.
 
 ## Consequences
 
 - Opening a Luau tool from Ultty is one command; an agent in a pane can open
   a tool for the user with `ulttyctl lua open`.
-- `--allow-exec` scripts keep working; scripts that need one program state
-  it, and get a precise error otherwise.
-- `ulttyctl split` exists for every program, not only Lua.
+- `--allow-exec` scripts keep working; scripts that need a few fixed
+  command lines state them, and get a precise error otherwise. A grant on a
+  program that runs programs is as wide as `--allow-exec`, and the docs say
+  so rather than the grant pretending otherwise.
+- `ulttyctl split` exists for every program, not only Lua; every pane
+  carries `ULTTY_PANE`, so a program can name its own pane to `ulttyctl`.
 - A tool in a split draws ANSI until sessions map to panes; the two modes
   already have to agree (ADR 0013), so a tool looks the same apart from
   `align`/`justify`.
@@ -141,19 +162,21 @@ split panes (A1 follow-up).
 
 ## Slices
 
-1. **Grants in `ulttui-lua`.** `ExecGrant { Deny, Only(programs), Any }`,
-   `--exec PROG`, the error text above, tests for parsing and enforcement
-   (a denied program is a Lua error the script sees; a granted one becomes a
-   `Command::Run`).
-2. **`SplitPane`.** Control request, `ControlData::PaneOpened`,
-   `terminal_manager` split with a command, `ulttyctl split`, auth and
-   JSON round-trip tests.
-3. **`ulttyctl lua open`.** Resolution of the binary and the file, grants
-   forwarded, `--split` with the ANSI note. Parser tests.
+1. **Grants in `ulttui-lua`.** `ExecGrant { Deny, Only(prefixes), Any }`,
+   `--exec CMD`, the error text above, tests for parsing and enforcement
+   (a denied command line is a Lua error the script sees; a granted one
+   becomes a `Command::Run`; a prefix matches only from the first word).
+2. **`SplitPane`.** Control request with a target pane,
+   `ControlData::PaneOpened`, `terminal_manager` split of any pane with a
+   command, `ULTTY_PANE`, `ulttyctl split`, auth and JSON round-trip tests.
+3. **`ulttyctl lua open`.** Resolution of the binary and the file, the
+   caller's directory, grants forwarded, `--split` with `--ansi` and the
+   note. Parser tests.
 4. **E2E.** `scripts/e2e/lua-open.sh`: a headless Ultty; `lua open
-   panes.luau --exec ulttyctl` draws a list with a row per pane; `lua open
-   panes.luau` without grants shows the banner naming `--exec ulttyctl`;
-   `lua open hello.luau --split right` draws in a split pane.
+   panes.luau --exec 'ulttyctl --json panes'` draws a list with a row per
+   pane in the caller's directory; `lua open panes.luau` without grants
+   shows the banner naming the flag; `--pane 0 lua open hello.luau --split
+   right` draws in a split pane next to pane 0.
    *Slices 1 to 4 done 2026-11-10.* As built: the first run showed every
    idle socket-mode `ulttui` app, Luau or not, dropped by the terminal 40 s
    after its last frame, because the native backend never answered `Ping`;
@@ -171,6 +194,6 @@ split panes (A1 follow-up).
    users that splits are second class.
 2. **An MCP tool.** `ulttyctl mcp` serves `new_tab`; whether agents want
    `lua_open` as a tool or are fine shelling out.
-3. **Grant text.** `--exec` names programs; a tool that pipes through `sh
-   -c` needs `--exec sh`, which is `--allow-exec` in effect. Whether to
-   refuse that spelling or let the error text say what it means.
+3. **Grant text.** A tool that pipes through `sh -c` needs `--exec sh`,
+   which is `--allow-exec` in effect. Whether to refuse known program
+   runners (`sh`, `env`, `ulttyctl` bare) or let the docs say what it means.
