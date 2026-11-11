@@ -7,7 +7,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthChar;
 
 use super::View;
-use crate::backend::native_diff::record_unspoken_prefix;
+use crate::backend::native_diff::record_unspoken;
 use ultty_protocol::{
     AppMessage, BorderEdges, BorderStyle, BorderType, Color, Constraints, Content, Dimension,
     Display, Live, NamedColor, RegionId, RichText, Role, Semantics, Style, TextContent, Toggled,
@@ -469,6 +469,9 @@ fn may_define_footnote(source: &str) -> bool {
     })
 }
 
+/// How long a task marker is, drawn (`[x] `) or written.
+const TASK_MARKER_LEN: usize = 4;
+
 /// Take a task marker (`[ ] `, `[x] `, `[X] `) off the start of a list
 /// item's text, and say whether it is checked. Only plain text makes one,
 /// with more text after it: `[x](url)` is a link, and `[ ]` alone stays
@@ -484,15 +487,18 @@ fn take_task_marker(spans: &mut Vec<StyledSpan>) -> Option<bool> {
         .iter()
         .take_while(|span| span.style == plain)
         .flat_map(|span| span.text.chars())
-        .take(5)
+        .take(TASK_MARKER_LEN)
         .collect();
-    let bytes = lead.as_bytes();
-    let checked = match bytes {
-        [b'[', b' ' | b'\t', b']', b' ' | b'\t', _, ..] => false,
-        [b'[', b'x' | b'X', b']', b' ' | b'\t', _, ..] => true,
+    let checked = match lead.as_bytes() {
+        [b'[', b' ' | b'\t', b']', b' ' | b'\t'] => false,
+        [b'[', b'x' | b'X', b']', b' ' | b'\t'] => true,
         _ => return None,
     };
-    let mut rest = 4;
+    let text_len: usize = spans.iter().map(|span| span.text.len()).sum();
+    if text_len == TASK_MARKER_LEN {
+        return None;
+    }
+    let mut rest = TASK_MARKER_LEN;
     while rest > 0 {
         let first = &mut spans[0];
         if first.text.len() <= rest {
@@ -788,8 +794,15 @@ impl View for MarkdownView {
             ..
         } = block
         {
-            // The checkbox drawn before the text is the item's state.
-            record_unspoken_prefix(region_id, indent + prefix.len());
+            // The checkbox drawn before the text is the item's state; a
+            // bullet's indent goes with it, a number is said.
+            let end = indent + prefix.len();
+            let start = if prefix.len() > TASK_MARKER_LEN {
+                end - TASK_MARKER_LEN
+            } else {
+                0
+            };
+            record_unspoken(region_id, start..end);
         }
         let block_semantics = match block {
             // A read-only checkbox named by its text, its state `toggled`.
@@ -797,12 +810,17 @@ impl View for MarkdownView {
             // again whenever its name changes, and a checkbox not named is
             // named by its text, which grows.
             Block::ListItem {
+                prefix,
                 spans,
                 task: Some(checked),
                 ..
             } if !arriving => Semantics {
                 role: Role::Checkbox,
-                label: Some(spans_to_plain_text(spans).trim().to_string()),
+                label: Some(format!(
+                    "{}{}",
+                    &prefix[..prefix.len() - TASK_MARKER_LEN],
+                    spans_to_plain_text(spans).trim()
+                )),
                 toggled: if *checked {
                     Toggled::True
                 } else {
@@ -2191,7 +2209,7 @@ mod tests {
 
     #[test]
     fn a_task_list_item_is_a_read_only_checkbox_named_by_its_text() {
-        let view = MarkdownView::new("- [ ] buy milk\n- [x] done\n- plain");
+        let view = MarkdownView::new("- [ ] buy milk\n- [x] done\n- plain\n\n3. [x] third");
         let semantics: Vec<Semantics> = render_view_messages(&view)
             .unwrap()
             .into_iter()
@@ -2211,9 +2229,43 @@ mod tests {
             semantics,
             [
                 checkbox("buy milk", Toggled::False),
-                checkbox("done", Toggled::True)
+                checkbox("done", Toggled::True),
+                checkbox("3. third", Toggled::True)
             ]
         );
+    }
+
+    #[test]
+    fn only_an_items_own_plain_text_makes_a_task() {
+        for source in [
+            "- [x](http://x) a link",
+            "- `[ ]` code",
+            "- [ ]",
+            "- [y] no",
+            "> - [ ] quoted",
+            "a\n\n[ ] not in a list",
+        ] {
+            let view = MarkdownView::new(source);
+            assert!(
+                view.blocks
+                    .iter()
+                    .all(|b| !matches!(b, Block::ListItem { task: Some(_), .. })),
+                "{source:?}: {:?}",
+                view.blocks
+            );
+        }
+        let view = MarkdownView::new("- [X] **bold** after");
+        assert!(matches!(
+            &view.blocks[0],
+            Block::ListItem { task: Some(true), spans, .. }
+                if spans_to_plain_text(spans) == "bold after"
+        ));
+    }
+
+    #[test]
+    fn an_ordered_task_items_number_is_spoken_and_its_checkbox_not() {
+        let said = spoken(&["", "1. [ ] fir", "st\n2. [x] second"]);
+        assert_eq!(said.replace('|', ""), "1. first2. second", "{said:?}");
     }
 
     #[test]

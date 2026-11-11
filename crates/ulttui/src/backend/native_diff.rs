@@ -14,6 +14,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use ultty_protocol::{
     AppMessage, Constraints, Content, Live, RegionId, RichText, Semantics, Style,
@@ -111,10 +112,9 @@ pub(crate) struct FrameNotes {
     /// opener at the end of it may yet turn into styling, so it is not
     /// announced yet ([`held_back`]).
     pub(crate) arriving_prose: HashSet<RegionId>,
-    /// Live regions whose text starts with this many bytes drawn but not
-    /// said: a task list item's checkbox, which its semantics give as
-    /// `toggled`.
-    pub(crate) unspoken_prefix: HashMap<RegionId, usize>,
+    /// Live regions with bytes of their text drawn but not said: a task
+    /// list item's checkbox, which its semantics give as `toggled`.
+    pub(crate) unspoken: HashMap<RegionId, Range<usize>>,
 }
 
 thread_local! {
@@ -143,12 +143,12 @@ pub(crate) fn record_arriving_prose(id: RegionId) {
     });
 }
 
-/// Record that the first `len` bytes of region `id`'s text are drawn but
-/// not announced.
-pub(crate) fn record_unspoken_prefix(id: RegionId, len: usize) {
+/// Record that bytes `range` of region `id`'s text are drawn but not
+/// announced.
+pub(crate) fn record_unspoken(id: RegionId, range: Range<usize>) {
     NOTES_RECORDER.with(|recorder| {
         if let Some(notes) = recorder.borrow_mut().as_mut() {
-            notes.unspoken_prefix.insert(id, len);
+            notes.unspoken.insert(id, range);
         }
     });
 }
@@ -302,7 +302,7 @@ pub(crate) fn optimize_frame_messages(
                 let prev = previous.regions.get(&stable);
                 match prev {
                     _ if live && capabilities.append_content && plain_text(&content).is_some() => {
-                        let unspoken = notes.unspoken_prefix.get(&id).copied().unwrap_or(0);
+                        let unspoken = notes.unspoken.get(&id).cloned().unwrap_or_default();
                         // A region that turns live has said what it shows
                         // already; only what it grows by is news.
                         let (before, announced) =
@@ -311,7 +311,7 @@ pub(crate) fn optimize_frame_messages(
                                     prev.announced.clone()
                                 } else {
                                     let shown = plain_text(&prev.content).unwrap_or_default();
-                                    spoken_part(&shown, unspoken).to_string()
+                                    spoken_part(&shown, unspoken.clone()).into_owned()
                                 };
                                 (&prev.content, announced)
                             });
@@ -625,19 +625,23 @@ fn reconcile_children(
 /// line rewritten). Where to resume is [`resume_at`]: text is never
 /// skipped, and repeated rather than dropped when it cannot be told apart.
 /// With `hold_back`, the end of the text from an unresolved inline
-/// markdown opener waits ([`held_back`]). The first `unspoken` bytes of
-/// the text are never said.
+/// markdown opener waits ([`held_back`]). Bytes `unspoken` of the text
+/// are never said.
 fn live_content_update(
     id: RegionId,
     previous: &Content,
     announced: &str,
     next: Content,
     hold_back: bool,
-    unspoken: usize,
+    unspoken: Range<usize>,
 ) -> (Vec<AppMessage>, String) {
     let after = plain_text(&next).unwrap_or_default();
     let spoken = spoken_part(&after, unspoken);
-    let speakable = if hold_back { held_back(spoken) } else { spoken };
+    let speakable = if hold_back {
+        held_back(&spoken)
+    } else {
+        &spoken
+    };
     let start = resume_at(announced, speakable);
     let mut messages = Vec::new();
     let mut shown = previous.clone();
@@ -655,10 +659,16 @@ fn live_content_update(
     (messages, announced)
 }
 
-/// `text` past its first `unspoken` bytes, or all of it when that is not
-/// a character boundary in it.
-fn spoken_part(text: &str, unspoken: usize) -> &str {
-    text.get(unspoken..).unwrap_or(text)
+/// `text` without bytes `unspoken`, or all of it when they are not a
+/// range of it.
+fn spoken_part(text: &str, unspoken: Range<usize>) -> Cow<'_, str> {
+    match (text.get(..unspoken.start), text.get(unspoken.end..)) {
+        (Some(""), Some(after)) => Cow::Borrowed(after),
+        (Some(before), Some(after)) if unspoken.start <= unspoken.end => {
+            Cow::Owned(format!("{before}{after}"))
+        }
+        _ => Cow::Borrowed(text),
+    }
 }
 
 /// Where in `speakable` the text not yet announced starts, given that
@@ -1633,7 +1643,7 @@ mod tests {
     fn an_unspoken_prefix_is_drawn_but_not_announced() {
         let id = RegionId::new(1);
         let notes = || FrameNotes {
-            unspoken_prefix: [(id, 4)].into(),
+            unspoken: [(id, 0..4)].into(),
             ..FrameNotes::default()
         };
         let first = frame_with_semantics(id, text("[ ] buy"), live_log());
