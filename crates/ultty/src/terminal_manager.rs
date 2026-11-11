@@ -33,6 +33,15 @@ pub fn no_tab_env(_tab_id: TabId) -> io::Result<TabEnv> {
     Ok(Vec::new())
 }
 
+/// `env` plus `ULTTY_PANE`, the pane's id as `ulttyctl panes` lists it, so
+/// a program in the pane can name its own pane to `ulttyctl` (`--pane`, or
+/// the pane `split` puts a new one next to).
+fn pane_env(id: TerminalId, env: &[(OsString, OsString)]) -> Vec<(OsString, OsString)> {
+    let mut env = env.to_vec();
+    env.push(("ULTTY_PANE".into(), id.0.to_string().into()));
+    env
+}
+
 /// Direction of pane splits within a tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SplitDirection {
@@ -112,7 +121,8 @@ impl ManagedTerminal {
         rows: u16,
         env: &[(OsString, OsString)],
     ) -> io::Result<Self> {
-        let child = Child::spawn_shell(PtySize::new(cols, rows), env).map_err(io::Error::other)?;
+        let child = Child::spawn_shell(PtySize::new(cols, rows), &pane_env(id, env))
+            .map_err(io::Error::other)?;
         let event_loop = TerminalEventLoop::from_child(child, cols, rows)?;
         Ok(Self {
             id,
@@ -783,20 +793,35 @@ impl TerminalManager {
     /// Put a new pane next to the focused one. Splitting along the focused
     /// pane's own split adds a sibling; splitting across it nests.
     fn split_focused(&mut self, direction: SplitDirection) -> io::Result<Option<TerminalId>> {
-        self.split_focused_with(direction, |this, tab_id| this.create_terminal(tab_id))
+        let Some(target) = self.focused_terminal_id() else {
+            return Ok(None);
+        };
+        self.split_pane(target, direction)
     }
 
-    /// Split the focused pane, the new pane running `command` (with the
-    /// tab's shell environment) instead of the shell. `None` without an
-    /// active tab.
-    pub fn split_with_command(
+    /// Put a new shell pane next to `target`, in whatever tab holds it.
+    /// `None` when no tab does.
+    pub fn split_pane(
         &mut self,
+        target: TerminalId,
+        direction: SplitDirection,
+    ) -> io::Result<Option<TerminalId>> {
+        self.split_pane_with(target, direction, |this, tab_id| {
+            this.create_terminal(tab_id)
+        })
+    }
+
+    /// Like [`Self::split_pane`], the new pane running `command` (with the
+    /// tab's shell environment) instead of the shell.
+    pub fn split_pane_with_command(
+        &mut self,
+        target: TerminalId,
         direction: SplitDirection,
         command: &str,
         args: &[String],
         working_dir: Option<&str>,
     ) -> io::Result<Option<TerminalId>> {
-        self.split_focused_with(direction, |this, tab_id| {
+        self.split_pane_with(target, direction, |this, tab_id| {
             let env = this
                 .tabs
                 .iter()
@@ -807,17 +832,17 @@ impl TerminalManager {
         })
     }
 
-    fn split_focused_with(
+    fn split_pane_with(
         &mut self,
+        target: TerminalId,
         direction: SplitDirection,
         spawn: impl FnOnce(&mut Self, TabId) -> io::Result<TerminalId>,
     ) -> io::Result<Option<TerminalId>> {
-        let Some(tab) = self.active_tab() else {
+        let Some(tab_id) = self.terminal(target).map(|t| t.tab_id) else {
             return Ok(None);
         };
-        let (tab_id, target) = (tab.id, tab.focused_terminal);
         let terminal_id = spawn(self, tab_id)?;
-        if let Some(tab) = self.active_tab_mut() {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             tab.split(target, direction, terminal_id);
         }
         self.relayout();
@@ -1008,7 +1033,7 @@ impl TerminalManager {
             &full_args,
             &dir,
             PtySize::new(self.default_cols, self.default_rows),
-            env,
+            &pane_env(terminal_id, env),
         )
         .map_err(io::Error::other)?;
         let event_loop =
@@ -1400,8 +1425,9 @@ impl ManagedTerminal {
         working_dir: &str,
         env: &[(OsString, OsString)],
     ) -> io::Result<Self> {
-        let child = Child::spawn_shell_in_dir(PtySize::new(cols, rows), working_dir, env)
-            .map_err(io::Error::other)?;
+        let child =
+            Child::spawn_shell_in_dir(PtySize::new(cols, rows), working_dir, &pane_env(id, env))
+                .map_err(io::Error::other)?;
         let event_loop = TerminalEventLoop::from_child(child, cols, rows)?;
         Ok(Self {
             id,

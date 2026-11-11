@@ -535,22 +535,25 @@ impl App {
                 command,
                 args,
                 working_dir,
+                target,
             } => {
+                let target = match resolve_control_target(&self.terminal_manager, target) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
                 let direction = match direction {
                     ultty_protocol::control::SplitDirection::Right => SplitDirection::Horizontal,
                     ultty_protocol::control::SplitDirection::Down => SplitDirection::Vertical,
                 };
                 let result = match command {
-                    Some(command) => self.terminal_manager.split_with_command(
+                    Some(command) => self.terminal_manager.split_pane_with_command(
+                        target,
                         direction,
                         &command,
                         &args,
                         working_dir.as_deref(),
                     ),
-                    None => match direction {
-                        SplitDirection::Horizontal => self.terminal_manager.split_horizontal(),
-                        SplitDirection::Vertical => self.terminal_manager.split_vertical(),
-                    },
+                    None => self.terminal_manager.split_pane(target, direction),
                 };
                 match result {
                     Ok(Some(pane)) => {
@@ -559,16 +562,22 @@ impl App {
                             .terminal_manager
                             .tabs()
                             .iter()
-                            .position(|tab| tab.terminals.contains(&pane))
-                            .unwrap_or(0);
-                        ControlResponse::Data(ControlData::PaneOpened {
-                            tab_index,
-                            pane: pane.raw() as u64,
-                        })
+                            .position(|tab| tab.terminals.contains(&pane));
+                        match tab_index {
+                            Some(tab_index) => ControlResponse::Data(ControlData::PaneOpened {
+                                tab_index,
+                                pane: pane.raw() as u64,
+                            }),
+                            // The command exited at once and the pane closed.
+                            None => ControlResponse::Error {
+                                code: 2,
+                                message: "The pane closed as soon as it opened".to_string(),
+                            },
+                        }
                     }
                     Ok(None) => ControlResponse::Error {
-                        code: 2,
-                        message: "No active tab to split".to_string(),
+                        code: PANE_NOT_FOUND,
+                        message: format!("No pane {}; `ulttyctl panes` lists them", target.raw()),
                     },
                     Err(e) => ControlResponse::Error {
                         code: 2,
@@ -1471,6 +1480,7 @@ mod tests {
             command: None,
             args: Vec::new(),
             working_dir: None,
+            target: None,
         }));
     }
 

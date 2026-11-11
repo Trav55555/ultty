@@ -85,8 +85,9 @@ pub enum ControlRequest {
         target: Option<u64>,
     },
 
-    /// Open a pane next to the focused one, running `command` (the shell
-    /// when omitted). Answered with `ControlData::PaneOpened`.
+    /// Open a pane next to `target` (the focused pane when omitted), running
+    /// `command` (the shell when omitted). Answered with
+    /// `ControlData::PaneOpened`.
     SplitPane {
         direction: SplitDirection,
         command: Option<String>,
@@ -94,6 +95,9 @@ pub enum ControlRequest {
         args: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
+        /// Pane to split (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
     },
 
     CloseTab {
@@ -905,12 +909,13 @@ mod tests {
             direction: SplitDirection::Right,
             command: Some("htop".to_string()),
             args: vec!["-d".to_string()],
-            working_dir: None,
+            working_dir: Some("/tmp".to_string()),
+            target: Some(4),
         };
         let json = serde_json::to_string(&request).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"split_pane","direction":"right","command":"htop","args":["-d"]}"#
+            r#"{"type":"split_pane","direction":"right","command":"htop","args":["-d"],"working_dir":"/tmp","target":4}"#
         );
         assert_eq!(
             serde_json::from_str::<ControlRequest>(&json).unwrap(),
@@ -927,6 +932,7 @@ mod tests {
                 command: None,
                 args: Vec::new(),
                 working_dir: None,
+                target: None,
             }
         );
     }
