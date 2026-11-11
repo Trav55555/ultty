@@ -10,8 +10,11 @@
 //! begun after them waits for its own break, or the delay from its own
 //! first byte, so lines held back by the cap below do not drag a fragment
 //! of the next one with them. A session flushes at most once per
-//! [`FLUSH_SPACING`] (four a second), oldest queue first; text that
-//! arrives meanwhile joins the next flush. A flush is at most
+//! [`FLUSH_SPACING`] (four a second), its oldest queue first, the one
+//! whose unflushed text began earliest, and only when that one is due: a
+//! younger queue's complete line waits for it, so text is spoken in the
+//! order it arrived across the session's regions (a reply's blocks). Text
+//! that arrives meanwhile joins the next flush. A flush is at most
 //! [`MAX_FLUSH_BYTES`], cut at the last line break inside that (else the
 //! last blank, else a character boundary), and the rest waits. A region
 //! keeps its last [`MAX_ANNOUNCEMENTS`]; the region's own text nodes carry
@@ -139,55 +142,68 @@ impl LiveRegions {
         }
     }
 
-    /// Flush what is due at `now`: per session at most one region, the one
-    /// waiting longest, and none within [`FLUSH_SPACING`] of its last
-    /// flush. Returns whether a new announcement was made.
+    /// Flush what is due at `now`: per session at most one region, its
+    /// oldest queue ([`LiveRegions::oldest_queues`]) when that is due, and
+    /// none within [`FLUSH_SPACING`] of the session's last flush. Returns
+    /// whether a new announcement was made.
     pub fn flush(&mut self, now: Instant) -> bool {
         self.last_flush
             .retain(|_, at| now.saturating_duration_since(*at) < FLUSH_SPACING);
-        // Each session's region whose queue has waited longest, if due.
-        let mut due: HashMap<u64, ((u64, u32), Instant)> = HashMap::new();
-        for (&key, region) in &self.regions {
-            let Some(ready) = region.ready_at().filter(|&ready| ready <= now) else {
-                continue;
-            };
-            if self.last_flush.contains_key(&key.0) {
-                continue;
-            }
-            let best = due.entry(key.0).or_insert((key, ready));
-            if ready < best.1 {
-                *best = (key, ready);
-            }
-        }
         let mut announced = false;
-        for (session, (key, _)) in due {
-            let Some(region) = self.regions.get_mut(&key) else {
-                continue;
-            };
-            let before = region.size();
-            let flushed = region.flush(now, self.next_serial);
-            account(&mut self.bytes, session, before, region.size());
-            if flushed {
-                self.next_serial += 1;
-                self.last_flush.insert(session, now);
-                announced = true;
+        // A queue of only blanks is dropped without an announcement and
+        // does not use the slot; the next oldest gets it.
+        loop {
+            let due: Vec<(u64, u32)> = self
+                .oldest_queues()
+                .filter(|(key, ready)| !self.last_flush.contains_key(&key.0) && *ready <= now)
+                .map(|(key, _)| key)
+                .collect();
+            if due.is_empty() {
+                return announced;
+            }
+            for key in due {
+                let Some(region) = self.regions.get_mut(&key) else {
+                    continue;
+                };
+                let before = region.size();
+                let flushed = region.flush(now, self.next_serial);
+                account(&mut self.bytes, key.0, before, region.size());
+                if flushed {
+                    self.next_serial += 1;
+                    self.last_flush.insert(key.0, now);
+                    announced = true;
+                }
             }
         }
-        announced
+    }
+
+    /// Each session's oldest queue, the one whose unflushed text began
+    /// earliest (by region id when two began together), and when it is
+    /// due.
+    fn oldest_queues(&self) -> impl Iterator<Item = ((u64, u32), Instant)> {
+        let mut oldest: HashMap<u64, ((u64, u32), Instant, Instant)> = HashMap::new();
+        for (&key, region) in &self.regions {
+            let (Some(since), Some(ready)) = (region.since, region.ready_at()) else {
+                continue;
+            };
+            let best = oldest.entry(key.0).or_insert((key, since, ready));
+            if since < best.1 {
+                *best = (key, since, ready);
+            }
+        }
+        oldest.into_values().map(|(key, _, ready)| (key, ready))
     }
 
     /// When [`LiveRegions::flush`] next has something to do, if any queue
     /// holds text.
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.regions
-            .iter()
-            .filter_map(|(&(session, _), region)| {
-                let ready = region.ready_at()?;
-                Some(match self.last_flush.get(&session) {
+        self.oldest_queues()
+            .map(
+                |((session, _), ready)| match self.last_flush.get(&session) {
                     Some(&last) => ready.max(last + FLUSH_SPACING),
                     None => ready,
-                })
-            })
+                },
+            )
             .min()
     }
 
@@ -503,6 +519,57 @@ mod tests {
         // Another session is not held back.
         live.push(8, 1, Live::Polite, "other\n", t0 + ms(1950));
         assert!(live.flush(t0 + ms(1950)));
+    }
+
+    /// What session 7 announced, in the order it was announced.
+    fn spoken_in_order(live: &LiveRegions) -> Vec<String> {
+        let mut all: Vec<&Announcement> = live
+            .regions
+            .iter()
+            .filter(|((session, _), _)| *session == 7)
+            .flat_map(|(_, region)| &region.announced)
+            .collect();
+        all.sort_by_key(|a| a.serial);
+        all.into_iter().map(|a| a.text.clone()).collect()
+    }
+
+    #[test]
+    fn regions_are_announced_in_the_order_their_text_arrived() {
+        // A streamed reply: a list item's words from t0 (no line break),
+        // then a code block begun 240 ms later whose first line ends at
+        // once. The item is due 250 ms after its first byte, the code
+        // block as soon as its line is complete, but the item came first.
+        let t0 = Instant::now();
+        let mut live = LiveRegions::default();
+        for (n, word) in ["a", " task", " that", " is", " done"]
+            .into_iter()
+            .enumerate()
+        {
+            live.push(7, 5, Live::Polite, word, t0 + ms(40 * n as u64));
+        }
+        live.push(7, 6, Live::Polite, "let x = 1;\n", t0 + ms(240));
+        // The code block's line does not go ahead of the older item.
+        assert_eq!(live.next_deadline(), Some(t0 + FLUSH_DELAY));
+        assert!(!live.flush(t0 + ms(245)));
+        assert!(live.flush(t0 + FLUSH_DELAY));
+        assert!(live.flush(t0 + FLUSH_DELAY + FLUSH_SPACING));
+        assert_eq!(
+            spoken_in_order(&live),
+            ["a task that is done", "let x = 1;"]
+        );
+
+        // Both due: the older first, even when the younger has a line.
+        let mut live = LiveRegions::default();
+        live.push(7, 5, Live::Polite, "older words", t0);
+        live.push(7, 6, Live::Polite, "younger line\n", t0 + ms(100));
+        assert!(live.flush(t0 + ms(400)));
+        assert!(live.flush(t0 + ms(650)));
+        assert_eq!(spoken_in_order(&live), ["older words", "younger line"]);
+
+        // Alone, a complete line is still said at once.
+        let mut live = LiveRegions::default();
+        live.push(7, 6, Live::Polite, "a line\n", t0);
+        assert_eq!(live.next_deadline(), Some(t0));
     }
 
     #[test]

@@ -221,8 +221,8 @@ EOF
 converse ping ping \
     "Bot: You said: ping. That is 4 characters, streamed to you word by word."
 converse markdown markdown \
-    "Bot: Here is bold text and inline code. • first item a task that is done • an item
-     with a link let x = 1; let y = 2; Read the architecture overview for every detail of how the
+    "Bot: Here is bold text and inline code. • first item • second item with a link
+     a task that is done let x = 1; let y = 2; Read the architecture overview for every detail of how the
      pieces fit together, which takes rather a long time to explain before you start.
      That was markdown, streamed word by word."
 
