@@ -188,11 +188,35 @@ pub enum Remapped {
     Focus(String),
 }
 
-/// One app's overrides, parsed.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg(feature = "lua-overrides")]
+mod script;
+#[cfg(feature = "lua-overrides")]
+pub use script::{OverrideScript, CALL_BUDGET, FRAME_BUDGET};
+
+/// One app's overrides: the TOML file's, and the Luau file's hooks when
+/// there is one (with the `lua-overrides` feature). Where both answer,
+/// Luau wins: its `widget` fields go over the TOML ones, and its `key`
+/// answer is taken before `[keys]`.
+#[derive(Debug, Clone, Default)]
 pub struct Overrides {
     widgets: HashMap<String, WidgetOverride>,
     keys: Vec<(KeyChord, KeyAction)>,
+    #[cfg(feature = "lua-overrides")]
+    script: Option<Rc<OverrideScript>>,
+}
+
+impl PartialEq for Overrides {
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(feature = "lua-overrides")]
+        let same_script = match (&self.script, &other.script) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        };
+        #[cfg(not(feature = "lua-overrides"))]
+        let same_script = true;
+        self.widgets == other.widgets && self.keys == other.keys && same_script
+    }
 }
 
 impl Overrides {
@@ -227,24 +251,77 @@ impl Overrides {
         Ok(overrides)
     }
 
+    /// Overrides with only the hooks of the Luau override file `source`
+    /// (`name` names it in errors).
+    #[cfg(feature = "lua-overrides")]
+    pub fn parse_luau(source: &str, name: &str) -> Result<Self, String> {
+        let script = OverrideScript::load(source, name)?;
+        Ok(Self::default().with_script(Some(Rc::new(script))))
+    }
+
+    /// These overrides with `script`'s hooks over them.
+    #[cfg(feature = "lua-overrides")]
+    pub fn with_script(mut self, script: Option<Rc<OverrideScript>>) -> Self {
+        self.script = script;
+        self
+    }
+
+    /// The Luau hooks, if any.
+    #[cfg(feature = "lua-overrides")]
+    pub fn script(&self) -> Option<&Rc<OverrideScript>> {
+        self.script.as_ref()
+    }
+
     pub fn is_empty(&self) -> bool {
+        #[cfg(feature = "lua-overrides")]
+        if self.script.is_some() {
+            return false;
+        }
         self.widgets.is_empty() && self.keys.is_empty()
     }
 
-    /// The override for widget `id`, if the file has one.
+    /// The TOML override for widget `id`, if the file has one.
     pub fn widget(&self, id: &str) -> Option<&WidgetOverride> {
         self.widgets.get(id)
+    }
+
+    /// The override for `view`: the TOML one, with the Luau `widget` hook's
+    /// answer over it.
+    fn resolve(&self, view: &dyn View) -> Option<WidgetOverride> {
+        let id = view.widget_id()?;
+        let base = self.widgets.get(id);
+        #[cfg(feature = "lua-overrides")]
+        if let Some(patch) = self.script.as_ref().and_then(|s| s.widget(id, view)) {
+            return Some(patch.over(base));
+        }
+        base.cloned()
+    }
+
+    /// Start a frame (the Luau hooks' per-frame budget and results).
+    fn begin_frame(&self) {
+        #[cfg(feature = "lua-overrides")]
+        if let Some(script) = &self.script {
+            script.begin_frame();
+        }
     }
 
     /// What the user remapped `event` to, if anything. A remapped key keeps
     /// the event's `focused_id`. When `typing` (the focused widget takes
     /// text), plain characters are left alone so they can be typed.
     pub fn remap(&self, event: &KeyEvent, typing: bool) -> Option<Remapped> {
+        #[cfg(feature = "lua-overrides")]
+        if let Some(action) = self.script.as_ref().and_then(|s| s.key(event, typing)) {
+            return Some(Self::remapped(event, &action));
+        }
         let (_, action) = self
             .keys
             .iter()
             .find(|(from, _)| from.matches(event) && !(typing && from.is_typing()))?;
-        Some(match action {
+        Some(Self::remapped(event, action))
+    }
+
+    fn remapped(event: &KeyEvent, action: &KeyAction) -> Remapped {
+        match action {
             KeyAction::Focus(id) => Remapped::Focus(id.clone()),
             KeyAction::Key(to) => Remapped::Key(KeyEvent {
                 key: to.key.clone(),
@@ -256,7 +333,7 @@ impl Overrides {
                 },
                 focused_id: event.focused_id.clone(),
             }),
-        })
+        }
     }
 }
 
@@ -321,13 +398,56 @@ fn parse_key_action(value: &toml::Value) -> Result<KeyAction, String> {
     }
 }
 
-/// Where an app's overrides come from, and the last good parse of it.
-#[derive(Debug, Default)]
-pub struct OverrideFile {
-    path: Option<PathBuf>,
+/// One file an app's overrides come from, and when it was last read.
+#[derive(Debug)]
+struct Source {
+    path: PathBuf,
     /// Modification time and length when last read; `None` before the
     /// first read and while the file is missing.
     stamp: Option<(Option<SystemTime>, u64)>,
+}
+
+/// What [`Source::poll`] found.
+enum Polled {
+    Unchanged,
+    /// The file is gone (or never was).
+    Gone,
+    /// The file changed: its text, or why it cannot be read.
+    Changed(Result<String, String>),
+}
+
+impl Source {
+    fn new(path: PathBuf) -> Self {
+        Self { path, stamp: None }
+    }
+
+    fn poll(&mut self) -> Polled {
+        let meta = std::fs::metadata(&self.path).ok();
+        let stamp = meta.as_ref().map(|meta| (meta.modified().ok(), meta.len()));
+        if stamp == self.stamp {
+            return Polled::Unchanged;
+        }
+        let was_there = self.stamp.is_some();
+        self.stamp = stamp;
+        match meta {
+            None if was_there => Polled::Gone,
+            None => Polled::Unchanged,
+            Some(meta) => Polled::Changed(read_source(&self.path, meta.is_file())),
+        }
+    }
+}
+
+/// Where an app's overrides come from (a TOML file, a Luau file, or both),
+/// and the last good version of each.
+#[derive(Debug, Default)]
+pub struct OverrideFile {
+    toml: Option<Source>,
+    luau: Option<Source>,
+    /// The last good parse of the TOML file.
+    parsed: Overrides,
+    /// The last good load of the Luau file.
+    #[cfg(feature = "lua-overrides")]
+    script: Option<Rc<OverrideScript>>,
     current: Rc<Overrides>,
 }
 
@@ -337,75 +457,130 @@ impl OverrideFile {
         Self::default()
     }
 
-    /// Read overrides from `path`.
+    /// Read overrides from `path`: a Luau file if it ends in `.luau`,
+    /// TOML otherwise.
     pub fn at(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        if is_luau(&path) {
+            Self::from_paths(None, Some(path))
+        } else {
+            Self::from_paths(Some(path), None)
+        }
+    }
+
+    fn from_paths(toml: Option<PathBuf>, luau: Option<PathBuf>) -> Self {
         let mut file = Self {
-            path: Some(path.into()),
+            toml: toml.map(Source::new),
+            luau: luau.map(Source::new),
             ..Self::default()
         };
         file.refresh();
         file
     }
 
-    /// The file for app `name`, as the environment says (see the module
+    /// The files for app `name`, as the environment says (see the module
     /// docs and ADR 0023): off when `ULTTUI_NO_OVERRIDES` is set, the path
-    /// in `ULTTUI_OVERRIDES` when that is set, otherwise
-    /// `$XDG_CONFIG_HOME/ulttui/overrides/<name>.toml` (or under
+    /// in `ULTTUI_OVERRIDES` when that is set, otherwise `<name>.toml` and
+    /// `<name>.luau` in `$XDG_CONFIG_HOME/ulttui/overrides` (or under
     /// `~/.config`).
     pub fn for_app(name: &str) -> Self {
         match resolve_path(name, |key| std::env::var_os(key)) {
-            Some(path) => Self::at(path),
+            Some(Resolved::One(path)) => Self::at(path),
+            Some(Resolved::Both { toml, luau }) => Self::from_paths(Some(toml), Some(luau)),
             None => Self::disabled(),
         }
     }
 
-    /// The file being read, if any.
-    pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
+    /// The files being read.
+    pub fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.toml
+            .iter()
+            .chain(self.luau.iter())
+            .map(|source| source.path.as_path())
     }
 
-    /// The overrides in force: the last good parse of the file.
+    /// The overrides in force: the last good version of each file.
     pub fn overrides(&self) -> &Rc<Overrides> {
         &self.current
     }
 
-    /// Reread the file if its modification time or length changed. A file
-    /// that fails to read or parse is logged and the last good overrides
-    /// stay; a file that is gone means no overrides. Returns whether the
+    /// Reread each file whose modification time or length changed. A file
+    /// that fails to read, parse or load is logged and its last good version
+    /// stays; a file that is gone contributes nothing. Returns whether the
     /// overrides changed.
     pub fn refresh(&mut self) -> bool {
-        let Some(path) = &self.path else {
+        let mut changed = false;
+        if let Some(source) = &mut self.toml {
+            match source.poll() {
+                Polled::Unchanged => {}
+                Polled::Gone => {
+                    tracing::info!(path = %source.path.display(), "override file removed");
+                    self.parsed = Overrides::default();
+                    changed = true;
+                }
+                Polled::Changed(read) => match read.and_then(|text| Overrides::parse(&text)) {
+                    Ok(parsed) => {
+                        tracing::info!(path = %source.path.display(), "loaded overrides");
+                        self.parsed = parsed;
+                        changed = true;
+                    }
+                    Err(error) => {
+                        tracing::warn!(path = %source.path.display(), %error, "ignoring override file");
+                    }
+                },
+            }
+        }
+        if let Some(source) = &mut self.luau {
+            match source.poll() {
+                Polled::Unchanged => {}
+                Polled::Gone => {
+                    tracing::info!(path = %source.path.display(), "override script removed");
+                    #[cfg(feature = "lua-overrides")]
+                    {
+                        self.script = None;
+                    }
+                    changed = true;
+                }
+                Polled::Changed(read) => {
+                    #[cfg(feature = "lua-overrides")]
+                    {
+                        let name = source.path.display().to_string();
+                        match read.and_then(|text| OverrideScript::load(&text, &name)) {
+                            Ok(script) => {
+                                tracing::info!(path = %name, "loaded override script");
+                                self.script = Some(Rc::new(script));
+                                changed = true;
+                            }
+                            Err(error) => {
+                                tracing::warn!(path = %name, %error, "ignoring override script");
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "lua-overrides"))]
+                    {
+                        let _ = read;
+                        tracing::warn!(
+                            path = %source.path.display(),
+                            "this app was built without the lua-overrides feature; ignoring the Luau override file"
+                        );
+                    }
+                }
+            }
+        }
+        if !changed {
             return false;
-        };
-        let meta = std::fs::metadata(path).ok();
-        let stamp = meta.as_ref().map(|meta| (meta.modified().ok(), meta.len()));
-        if stamp == self.stamp {
-            return false;
         }
-        self.stamp = stamp;
-        if stamp.is_none() {
-            if self.current.is_empty() {
-                return false;
-            }
-            tracing::info!(path = %path.display(), "override file removed; overrides off");
-            self.current = Rc::default();
-            return true;
-        }
-        let is_file = meta.is_some_and(|meta| meta.is_file());
-        let parsed = read_source(path, is_file).and_then(|source| Overrides::parse(&source));
-        match parsed {
-            Ok(overrides) => {
-                tracing::info!(path = %path.display(), "loaded overrides");
-                let changed = *self.current != overrides;
-                self.current = Rc::new(overrides);
-                changed
-            }
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "ignoring override file");
-                false
-            }
-        }
+        let combined = self.parsed.clone();
+        #[cfg(feature = "lua-overrides")]
+        let combined = combined.with_script(self.script.clone());
+        let differs = *self.current != combined;
+        self.current = Rc::new(combined);
+        differs
     }
+}
+
+fn is_luau(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "luau")
 }
 
 /// The largest override file read; a bigger one is ignored.
@@ -430,14 +605,23 @@ fn read_source(path: &Path, is_file: bool) -> Result<String, String> {
     Ok(source)
 }
 
-/// The override path for app `name` given environment lookup `env`.
-fn resolve_path(name: &str, env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+/// Where an app's overrides are read from.
+#[derive(Debug, PartialEq, Eq)]
+enum Resolved {
+    /// One file named by `ULTTUI_OVERRIDES`.
+    One(PathBuf),
+    /// The app's TOML and Luau files, either of which may be missing.
+    Both { toml: PathBuf, luau: PathBuf },
+}
+
+/// The override paths for app `name` given environment lookup `env`.
+fn resolve_path(name: &str, env: impl Fn(&str) -> Option<OsString>) -> Option<Resolved> {
     let set = |key: &str| env(key).filter(|v| !v.is_empty());
     if set(DISABLE_ENV).is_some_and(|v| v != "0") {
         return None;
     }
     if let Some(path) = set(PATH_ENV) {
-        return Some(PathBuf::from(path));
+        return Some(Resolved::One(PathBuf::from(path)));
     }
     if name.is_empty() || name.starts_with('.') || name.contains('/') {
         tracing::warn!(name, "not a usable app name for overrides; overrides off");
@@ -446,12 +630,11 @@ fn resolve_path(name: &str, env: impl Fn(&str) -> Option<OsString>) -> Option<Pa
     let config = set("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| set("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(
-        config
-            .join("ulttui")
-            .join("overrides")
-            .join(format!("{name}.toml")),
-    )
+    let dir = config.join("ulttui").join("overrides");
+    Some(Resolved::Both {
+        toml: dir.join(format!("{name}.toml")),
+        luau: dir.join(format!("{name}.luau")),
+    })
 }
 
 /// The app name overrides are looked up by: the base name of `argv[0]`.
@@ -479,6 +662,7 @@ pub fn with_overrides<R>(overrides: Rc<Overrides>, f: impl FnOnce() -> R) -> R {
             ACTIVE.with(|active| *active.borrow_mut() = previous);
         }
     }
+    overrides.begin_frame();
     let active = (!overrides.is_empty()).then_some(overrides);
     let _restore = Restore(ACTIVE.with(|slot| slot.replace(active)));
     f()
@@ -491,7 +675,7 @@ pub fn with_overrides<R>(overrides: Rc<Overrides>, f: impl FnOnce() -> R) -> R {
 /// While the widget has focus its `fg` and `bg` are left out, so the
 /// widget's own focus colours stay visible.
 pub(crate) fn for_view(view: &dyn View) -> Option<Option<WidgetOverride>> {
-    let mut user = lookup(view, |user| user.cloned())?;
+    let mut user = lookup(view)?;
     if let Some(user) = &mut user {
         if (user.fg.is_some() || user.bg.is_some())
             && crate::widgets::is_widget_focused(view.widget_id())
@@ -523,16 +707,15 @@ pub(crate) fn root_override(root: &dyn View) -> Option<WidgetOverride> {
 
 /// Whether `view` is hidden by an override.
 pub(crate) fn is_hidden(view: &dyn View) -> bool {
-    lookup(view, |user| user.is_some_and(|u| u.hidden)) == Some(true)
+    matches!(lookup(view), Some(Some(user)) if user.hidden)
 }
 
-/// `f` of `view`'s override, if overrides are active.
-fn lookup<R>(view: &dyn View, f: impl FnOnce(Option<&WidgetOverride>) -> R) -> Option<R> {
-    ACTIVE.with(|active| {
-        let active = active.borrow();
-        let overrides = active.as_ref()?;
-        Some(f(view.widget_id().and_then(|id| overrides.widget(id))))
-    })
+/// `view`'s override, if overrides are active (the outer `None` when not).
+fn lookup(view: &dyn View) -> Option<Option<WidgetOverride>> {
+    // The active overrides are taken out of the slot's borrow before the
+    // Luau hook runs: it reads the view, which may look overrides up again.
+    let overrides = ACTIVE.with(|active| active.borrow().clone())?;
+    Some(overrides.resolve(view))
 }
 
 /// Run `f` with `text` as the replacement text that [`text_or`] gives.
@@ -783,17 +966,21 @@ mod tests {
                     .map(|(_, v)| OsString::from(v))
             }
         };
+        let both = |dir: &str| Resolved::Both {
+            toml: PathBuf::from(format!("{dir}/todo.toml")),
+            luau: PathBuf::from(format!("{dir}/todo.luau")),
+        };
         assert_eq!(
             resolve_path("todo", env(&[("HOME", "/home/u")])),
-            Some(PathBuf::from("/home/u/.config/ulttui/overrides/todo.toml"))
+            Some(both("/home/u/.config/ulttui/overrides"))
         );
         assert_eq!(
             resolve_path("todo", env(&[("HOME", "/h"), ("XDG_CONFIG_HOME", "/x")])),
-            Some(PathBuf::from("/x/ulttui/overrides/todo.toml"))
+            Some(both("/x/ulttui/overrides"))
         );
         assert_eq!(
-            resolve_path("todo", env(&[("HOME", "/h"), (PATH_ENV, "/tmp/o.toml")])),
-            Some(PathBuf::from("/tmp/o.toml"))
+            resolve_path("todo", env(&[("HOME", "/h"), (PATH_ENV, "/tmp/o.luau")])),
+            Some(Resolved::One(PathBuf::from("/tmp/o.luau")))
         );
         assert_eq!(
             resolve_path(
@@ -878,6 +1065,26 @@ mod tests {
         );
         std::fs::write(&big, entry).unwrap();
         assert!(OverrideFile::at(&big).overrides().widget("a").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without the `lua-overrides` feature a Luau file is logged and
+    /// ignored, and the TOML file beside it still applies.
+    #[cfg(not(feature = "lua-overrides"))]
+    #[test]
+    fn without_the_feature_a_luau_file_is_ignored() {
+        let dir = scratch_dir("no-luau");
+        let toml = dir.join("app.toml");
+        let luau = dir.join("app.luau");
+        std::fs::write(&toml, "[widget.a]\nhidden = true\n").unwrap();
+        std::fs::write(
+            &luau,
+            "return { widget = function() return { text = 'x' } end }",
+        )
+        .unwrap();
+        let file = OverrideFile::from_paths(Some(toml), Some(luau.clone()));
+        assert!(file.overrides().widget("a").unwrap().hidden);
+        assert!(OverrideFile::at(&luau).overrides().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

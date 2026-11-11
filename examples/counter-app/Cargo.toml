@@ -8,6 +8,6 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-ulttui = { workspace = true }
+ulttui = { workspace = true, features = ["lua-overrides"] }
 ultty-protocol = { workspace = true }
 anyhow = { workspace = true }

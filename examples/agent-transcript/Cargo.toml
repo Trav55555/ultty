@@ -8,5 +8,5 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-ulttui = { path = "../../crates/ulttui" }
+ulttui = { path = "../../crates/ulttui", features = ["lua-overrides"] }
 anyhow = { workspace = true }

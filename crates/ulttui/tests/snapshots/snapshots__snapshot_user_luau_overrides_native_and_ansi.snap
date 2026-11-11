@@ -1,0 +1,17 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+expression: "render_overridden(std::rc::Rc::new(overrides), &override_fixture())"
+---
+-- native --
+r1 create display=Flex fg=None bg=None bold=false
+r2 create display=Block fg=Some(Named(Red)) bg=Some(Rgb(69, 71, 90)) bold=true
+r2 button "Write"
+r3 create display=None fg=Some(Rgb(205, 214, 244)) bg=Some(Rgb(69, 71, 90)) bold=true
+SetSemantics { id: RegionId(3), semantics: Semantics { role: Auto, label: None, description: None, live: Off, busy: false, hidden: true, read_only: false, disabled: false, atomic: false, modal: false, selected: false, toggled: Unset, expanded: Unset, value: None, value_text: None, position: None, level: 0, labelled_by: None, described_by: None, controls: None } }
+r4 create display=Block fg=Some(Rgb(205, 214, 244)) bg=Some(Rgb(32, 48, 64)) bold=true
+r4 button "Quit"
+-- ansi --
+[ Write ] [ Quit ]
+-- styles --
+0:0-8 fg=Red bg=Rgb(69, 71, 90) mod=BOLD
+0:10-17 fg=Rgb(205, 214, 244) bg=Rgb(32, 48, 64) mod=BOLD

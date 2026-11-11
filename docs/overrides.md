@@ -3,20 +3,22 @@
 Any app built with ulttui (including `ulttui-lua` scripts) reads a file of
 your changes when it starts, and again whenever the file changes. With it
 you can recolour, hide or relabel any widget that has an id, and remap keys,
-without the app's source. It works the same inside Ultty and in any other
+without the app's source. The file is TOML, or Luau when the changes are
+computed (see [Luau overrides](#luau-overrides)). It works the same inside Ultty and in any other
 terminal. The design is [ADR 0023](adr/0023-ulttui-overrides.md).
 
 ## Where the file goes
 
-`~/.config/ulttui/overrides/<app>.toml` (`$XDG_CONFIG_HOME` instead of
-`~/.config` when it is set), where `<app>` is the name you ran the app by:
-`todo-app` for `todo-app`, `counter-app` for `./target/debug/counter-app`.
-For `ulttui-lua` it is the script's name without `.luau`:
-`ulttui-lua examples/lua/hello.luau` reads `hello.toml`.
+`~/.config/ulttui/overrides/<app>.toml`, `<app>.luau`, or both
+(`$XDG_CONFIG_HOME` instead of `~/.config` when it is set), where `<app>` is
+the name you ran the app by: `todo-app` for `todo-app`, `counter-app` for
+`./target/debug/counter-app`. For `ulttui-lua` it is the script's name
+without `.luau`: `ulttui-lua examples/lua/hello.luau` reads `hello.toml`
+and `hello.luau` from the overrides directory (not the script itself).
 
 | Variable | Effect |
 |----------|--------|
-| `ULTTUI_OVERRIDES=<path>` | Read this file instead. |
+| `ULTTUI_OVERRIDES=<path>` | Read this file instead: Luau if it ends in `.luau`, TOML otherwise. |
 | `ULTTUI_NO_OVERRIDES=1` | No overrides at all (any value but empty or `0`). Wins over `ULTTUI_OVERRIDES`. |
 
 An app can choose its own name with `App::app_name`, or its own file with
@@ -123,10 +125,74 @@ Only a regular file of at most 1 MiB is read: a directory, FIFO or device
 ulttui apps log through `tracing`, so where the message goes is up to the
 app; `ulttui-lua` writes it to its `--log` file.
 
+## Luau overrides
+
+A `<app>.luau` file computes overrides instead of listing them. It returns
+a table with a `widget` function, a `key` function, or both:
+
+```lua
+-- ~/.config/ulttui/overrides/hello.luau
+return {
+  -- Called for each widget with an id. Return the same fields as a
+  -- [widget.<id>] table, or nil to leave the widget alone.
+  widget = function(id, info)
+    -- info.role: "button", "input", "heading", ..., or "auto"
+    -- info.text: the widget's text as the app wrote it (nil if none)
+    -- info.focused: whether it has focus
+    if id == "count" then
+      local n = tonumber(info.text:match("-?%d+") or 0)
+      if n < 0 then return { fg = "red", bold = true } end
+      if n > 100 then return { fg = "green" } end
+    end
+    if info.role == "button" and info.text:find("^Reset") then
+      return { hidden = true }
+    end
+  end,
+
+  -- Called for each key. Return another key, { focus = "<id>" }, or nil.
+  -- chord is written as in [keys]: "j", "ctrl+n", "shift+tab".
+  key = function(chord, focused)
+    if chord == "j" and focused ~= "log" then return "down" end
+    if chord == "k" and focused ~= "log" then return "up" end
+    if chord == "/" then return { focus = "search" } end
+  end,
+}
+```
+
+- With both files, both apply: the TOML file first, then Luau over it. The
+  fields `widget` returns replace the same TOML fields and leave the others;
+  `key` is asked first and `[keys]` answers when it returns nil.
+- The rules of the TOML file hold: no colour while a widget has focus,
+  nothing typed into an input reaches `key`, `hidden` and `text` do not apply
+  to the root.
+- `widget`'s answers are remembered by (id, role, text, focused): it is
+  called again only when one of those changes, so write it as a function of
+  its arguments.
+- The script runs in the same sandbox as `ulttui-lua` scripts: Luau's
+  `string`, `table`, `math`, `utf8`, `bit32`, `buffer`, `coroutine` and `os`
+  (no `execute`), no `io`, `require` or `loadstring`, and it cannot start
+  processes. `print` writes to the app's log.
+- Each call has 2 ms and each frame 8 ms. A call that errors, returns
+  something that is not an override, or runs out of time is logged once, and
+  the widget keeps the last answer that worked; a failing `key` call falls
+  through to `[keys]`. A loop that never ends costs a frame about 8 ms.
+- A file that fails to load (a syntax error, a value other than a table of
+  these two functions, more than 200 ms to run) is logged and the last good
+  version stays, as for TOML.
+
+Apps get Luau overrides when they are built with ulttui's `lua-overrides`
+feature, which links a Luau VM:
+
+```toml
+ulttui = { version = "...", features = ["lua-overrides"] }
+```
+
+`ulttui-lua` and the examples in this repository have it on. An app built
+without it logs that it is ignoring the `.luau` file and still applies its
+`.toml` file.
+
 ## What it cannot do (yet)
 
 - Change layout (sizes, order, gaps) or a widget's borders on their own.
-- Target widgets by type rather than by id.
-- Compute anything: the file is data. Luau overrides are a possible next
-  step (ADR 0023, §1).
+- Target widgets without an id (a Luau `widget` hook sees only those too).
 - Inline cards (`ulttui::inline`) do not read overrides.

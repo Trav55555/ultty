@@ -153,9 +153,10 @@ can overrun it. The VM is capped at 256 MiB.
 
 Like every ulttui app, a script reads the user's overrides: recolour, hide
 or relabel any node with an `id`, and remap keys, from
-`~/.config/ulttui/overrides/<script>.toml`, where `<script>` is the script's
-file name without `.luau` (`hello.toml` for `hello.luau`). See
-[overrides.md](overrides.md). `ULTTUI_NO_OVERRIDES=1` turns them off.
+`~/.config/ulttui/overrides/<script>.toml` and `<script>.luau`, where
+`<script>` is the script's file name without `.luau` (`hello.toml` and
+`hello.luau` for `hello.luau`). A Luau override file runs in the same
+sandbox as the script, without `run{}`. See [overrides.md](overrides.md). `ULTTUI_NO_OVERRIDES=1` turns them off.
 
 ## Hot reload and errors
 

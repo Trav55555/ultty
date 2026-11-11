@@ -2,10 +2,8 @@
 
 ## Status
 
-Proposed 2026-11-10.
-
-The number may need changing at merge: another ADR (Luau in Ultty) was being
-written at the same time and may also have taken 0023.
+Proposed 2026-11-10. Amended 2026-11-11 to add Luau override files
+(§8), which v1 had left out.
 
 ## Context
 
@@ -146,8 +144,84 @@ makes a typo visible in the log instead of half applying.
 
 ### 7. Sandboxing
 
-TOML is data: there is nothing to run, read or execute. If Luau overrides
-come later they run under `ulttui-lua`'s sandbox with exec off.
+TOML is data: there is nothing to run, read or execute. Luau override files
+run in the sandbox `ulttui-lua` scripts run in (§8), with no way to start a
+process.
+
+### 8. Amendment: Luau override files
+
+Some changes are computed rather than written out: colour a count red when
+it is negative, hide every button whose label starts with "Delete", map `j`
+to Down except in one list. A Luau file does these.
+
+**File.** `<app>.luau` next to `<app>.toml` (`ULTTUI_OVERRIDES=<path>` reads
+a Luau file when the path ends in `.luau`). Either, both or neither may
+exist. When both do, both apply: TOML first, then Luau over it. For a
+widget, the fields the Luau hook returns replace the same TOML fields and
+the rest stay; for a key, the Luau hook answers first and `[keys]` answers
+when it returns nil. Picking only one would make adding a small script mean
+porting the whole TOML file.
+
+**API.** The file returns a table with up to two functions:
+
+```lua
+return {
+  widget = function(id, info)   -- info = { role, text, focused }
+    if id == "count" and tonumber(info.text:match("-?%d+") or 0) < 0 then
+      return { fg = "red", bold = true }  -- the [widget.<id>] fields, or nil
+    end
+  end,
+  key = function(chord, focused)  -- chord as [keys] writes it: "ctrl+n", "j"
+    if chord == "j" and focused ~= "search" then return "down" end
+    if chord == "/" then return { focus = "search" } end
+  end,
+}
+```
+
+`info.role` is the widget's accessibility role (`button`, `input`,
+`heading`, ..., or `auto` when the widget does not say), `info.text` its text (a text widget's text, a button's label, `nil`
+for others) as the app wrote it, `info.focused` whether it has focus. Any
+other field in the returned table, or a value of the wrong type, is an error.
+The rules for TOML hold: no colour override while the widget has focus,
+characters typed into an input are not passed to `key`, keys held with meta
+match nothing, `hidden` and `text` do not apply to the root.
+
+**Cost.** `widget` is called only if the file defines it, and only for
+widgets with an id. Its results are cached by (id, role, text, focused), so
+a widget is asked again only when one of those changes; the hook must be a
+function of its arguments (it can keep state, but cached results will not
+see it). Within a frame each id is resolved once however often the walks
+ask. With 200 buttons and a hook that recolours some, a debug build
+(opt-level 1) took 0.2 ms for the native walk without overrides, 1.0 ms
+for the first frame with them (200 calls) and 0.2 ms for the next frame (no
+calls) (`two_hundred_widgets_call_luau_once_each_then_not_at_all`).
+
+**Bounds.** Each call gets 2 ms of Luau time and the frame 8 ms: a call that
+runs over is stopped by the VM's interrupt (at loops and calls), and once a
+frame has spent its 8 ms the remaining widgets keep their last results until
+the next frame, so a loop that never ends costs a frame at most about 8 ms
+plus one call. Loading the file gets 200 ms and 16 MiB. A call that fails
+(an error, the time limit, a bad return value) is logged once per loaded
+version, and the widget keeps the last result that worked (nothing, if none
+did); a failing `key` call falls through to `[keys]`.
+
+**Sandbox.** The VM is `ulttui::lua_sandbox::Sandbox`, which is what
+`ulttui-lua` used before and now shares: Luau's safe libraries only
+(`string`, `table`, `math`, `utf8`, `bit32`, `buffer`, `coroutine`, and `os`
+without `execute`), no `io`, `require`, `loadstring`, `getfenv`, `setfenv` or
+`debug`, globals frozen, a memory cap and the time limit. `print` goes to
+the log. There is no `run{}`: override scripts cannot start processes.
+
+**Reload and errors.** As for TOML (§5, §6): checked before each frame, a
+file that fails to load (syntax, a time-out while loading, a wrong return)
+is logged and the last good version stays, a removed file stops applying.
+
+**Feature.** Linking Luau means mlua and the Luau VM built from C++ in every
+binary. That is behind a cargo feature, `lua-overrides`, off by default for
+`ulttui`; `ulttui-lua` and the workspace examples turn it on. An app built
+without it logs that it is ignoring a `.luau` file and still applies the
+TOML one. Release `counter-app` (LTO, `panic = "abort"`): SIZE_LINE.
+`porygon-tui`, which does not turn the feature on, does not link mlua.
 
 ## Consequences
 
@@ -165,7 +239,12 @@ come later they run under `ulttui-lua`'s sandbox with exec off.
 
 ## Alternatives considered
 
-- **Luau overrides (v1).** Rejected for now; see §1.
+- **Luau overrides (v1).** Left out of v1 (§1), added behind a feature in
+  §8.
+- **Luau overrides through a hook that `ulttui-lua` fills in**, so `ulttui`
+  never names mlua. Every app would need code (and a dependency on
+  `ulttui-lua`) to get them; a feature gives them to an app with one line in
+  its manifest.
 - **Overrides as a wrapper `View` built per widget.** Containers own their
   children as concrete or boxed views and call them directly, so a wrapper
   cannot reach them without each container's help. Hooking the two walks
