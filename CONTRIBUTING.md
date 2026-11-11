@@ -114,6 +114,15 @@ by the user, checked at start) under `$TMPDIR` or `/tmp`. `ulttyctl` talks to
 the most recently started instance that is still running. This is the socket
 the smoke gates use.
 
+**Cleanup.** Ultty removes its sockets and token when it exits, including on
+SIGTERM, SIGHUP and SIGINT, which it handles as a window close (a signal it
+inherited as ignored, as under `nohup`, stays ignored). An instance killed with
+SIGKILL or one that crashes cannot clean up, so each instance, before it binds,
+removes `ultty-<pid>-tab<N>.sock`, `ultty-ctl-<pid>.sock` and
+`ultty-auth-<pid>.token` files that are owned by the user, whose pid is not a
+running Ultty, and whose socket (for a token, the control socket of that pid)
+accepts no connection. `scripts/e2e/runtime-file-cleanup.sh` checks both.
+
 Both sockets accept connections only from peers running as the same uid, and the
 control socket additionally requires a token. Ultty writes the token to
 `ultty-auth-<pid>.token` next to its socket with owner-only permissions; a client sends
