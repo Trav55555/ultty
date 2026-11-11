@@ -45,7 +45,7 @@ impl View for Title {
 
     fn constraints(&self) -> Constraints {
         Constraints {
-            width: Dimension::Cells(self.text.chars().count() as f32),
+            width: Dimension::Cells(crate::overrides::text_or(&self.text).chars().count() as f32),
             height: Dimension::Cells(1.0),
             flex_shrink: 0.0,
             ..Default::default()
@@ -55,7 +55,9 @@ impl View for Title {
     fn content(&self) -> Content {
         let theme = Theme::current();
         let style = ProtoStyle::new().fg(theme.tokens.text_title).bold();
-        Content::RichText(ultty_protocol::RichText::new().span(&self.text, style))
+        Content::RichText(
+            ultty_protocol::RichText::new().span(crate::overrides::text_or(&self.text), style),
+        )
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
@@ -63,7 +65,10 @@ impl View for Title {
         let style = RStyle::default()
             .fg(to_ratatui_color(theme.tokens.text_title))
             .add_modifier(Modifier::BOLD);
-        frame.render_widget(Paragraph::new(Line::styled(&self.text, style)), area);
+        frame.render_widget(
+            Paragraph::new(Line::styled(crate::overrides::text_or(&self.text), style)),
+            area,
+        );
     }
 }
 
@@ -83,7 +88,7 @@ impl Body {
 impl View for Body {
     fn constraints(&self) -> Constraints {
         Constraints {
-            width: Dimension::Cells(self.text.chars().count() as f32),
+            width: Dimension::Cells(crate::overrides::text_or(&self.text).chars().count() as f32),
             height: Dimension::Cells(1.0),
             flex_shrink: 0.0,
             ..Default::default()
@@ -93,13 +98,18 @@ impl View for Body {
     fn content(&self) -> Content {
         let theme = Theme::current();
         let style = ProtoStyle::new().fg(theme.tokens.text_body);
-        Content::RichText(ultty_protocol::RichText::new().span(&self.text, style))
+        Content::RichText(
+            ultty_protocol::RichText::new().span(crate::overrides::text_or(&self.text), style),
+        )
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         let theme = Theme::current();
         let style = RStyle::default().fg(to_ratatui_color(theme.tokens.text_body));
-        frame.render_widget(Paragraph::new(Line::styled(&self.text, style)), area);
+        frame.render_widget(
+            Paragraph::new(Line::styled(crate::overrides::text_or(&self.text), style)),
+            area,
+        );
     }
 }
 
@@ -119,7 +129,7 @@ impl Muted {
 impl View for Muted {
     fn constraints(&self) -> Constraints {
         Constraints {
-            width: Dimension::Cells(self.text.chars().count() as f32),
+            width: Dimension::Cells(crate::overrides::text_or(&self.text).chars().count() as f32),
             height: Dimension::Cells(1.0),
             flex_shrink: 0.0,
             ..Default::default()
@@ -129,13 +139,18 @@ impl View for Muted {
     fn content(&self) -> Content {
         let theme = Theme::current();
         let style = ProtoStyle::new().fg(theme.tokens.text_muted);
-        Content::RichText(ultty_protocol::RichText::new().span(&self.text, style))
+        Content::RichText(
+            ultty_protocol::RichText::new().span(crate::overrides::text_or(&self.text), style),
+        )
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         let theme = Theme::current();
         let style = RStyle::default().fg(to_ratatui_color(theme.tokens.text_muted));
-        frame.render_widget(Paragraph::new(Line::styled(&self.text, style)), area);
+        frame.render_widget(
+            Paragraph::new(Line::styled(crate::overrides::text_or(&self.text), style)),
+            area,
+        );
     }
 }
 
@@ -155,7 +170,7 @@ impl Accent {
 impl View for Accent {
     fn constraints(&self) -> Constraints {
         Constraints {
-            width: Dimension::Cells(self.text.chars().count() as f32),
+            width: Dimension::Cells(crate::overrides::text_or(&self.text).chars().count() as f32),
             height: Dimension::Cells(1.0),
             flex_shrink: 0.0,
             ..Default::default()
@@ -165,7 +180,9 @@ impl View for Accent {
     fn content(&self) -> Content {
         let theme = Theme::current();
         let style = ProtoStyle::new().fg(theme.tokens.text_accent).bold();
-        Content::RichText(ultty_protocol::RichText::new().span(&self.text, style))
+        Content::RichText(
+            ultty_protocol::RichText::new().span(crate::overrides::text_or(&self.text), style),
+        )
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
@@ -173,7 +190,10 @@ impl View for Accent {
         let style = RStyle::default()
             .fg(to_ratatui_color(theme.tokens.text_accent))
             .add_modifier(Modifier::BOLD);
-        frame.render_widget(Paragraph::new(Line::styled(&self.text, style)), area);
+        frame.render_widget(
+            Paragraph::new(Line::styled(crate::overrides::text_or(&self.text), style)),
+            area,
+        );
     }
 }
 

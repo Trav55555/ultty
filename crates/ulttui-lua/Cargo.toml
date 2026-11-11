@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-ulttui = { workspace = true }
+ulttui = { workspace = true, features = ["lua-overrides"] }
 ultty-protocol = { workspace = true }
 mlua = { version = "0.12", features = ["luau"] }
 notify = "6.1"

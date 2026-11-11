@@ -29,6 +29,10 @@ futures-util = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+toml = "0.8"
+# Luau override files (ADR 0023): off by default, so apps that do not ask
+# for them do not link a Luau VM. ulttui-lua and the examples turn it on.
+mlua = { version = "0.12", features = ["luau"], optional = true }
 pulldown-cmark = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = "1.12"
@@ -41,3 +45,4 @@ ulttui = { path = ".", features = ["test-utils"] }
 
 [features]
 test-utils = []
+lua-overrides = ["dep:mlua"]

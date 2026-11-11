@@ -896,3 +896,105 @@ fn snapshot_wide_table() {
     let output = render_to_string(&table, 120, 4);
     insta::assert_snapshot!(output);
 }
+
+// ── User overrides (ADR 0023) ─────────────────────────────────────────
+
+/// The three-button row both override snapshots draw.
+fn override_fixture() -> Row {
+    Row::new()
+        .gap(1.0)
+        .child(Button::new("Save").id("save"))
+        .child(Button::new("Delete").id("delete"))
+        .child(Button::new("Quit").id("quit"))
+}
+
+/// `view` under `overrides`, drawn both ways: the native messages in brief,
+/// then the ANSI buffer.
+fn render_overridden(
+    overrides: std::rc::Rc<ulttui::overrides::Overrides>,
+    view: &dyn View,
+) -> String {
+    use ulttui::overrides::with_overrides;
+    use ulttui::widgets::{render_view_ansi, render_view_messages};
+    use ultty_protocol::{AppMessage, Content, WidgetContent};
+
+    let (native, ansi) = with_overrides(overrides, || {
+        let native = render_view_messages(view).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(30, 1)).unwrap();
+        terminal
+            .draw(|frame| render_view_ansi(view, frame, frame.area()))
+            .unwrap();
+        (native, buffer_to_string(terminal.backend().buffer()))
+    });
+
+    let mut out = String::from("-- native --\n");
+    for message in native {
+        match message {
+            AppMessage::CreateRegion {
+                id,
+                constraints,
+                style,
+                ..
+            } => out.push_str(&format!(
+                "r{} create display={:?} fg={:?} bg={:?} bold={}\n",
+                id.0, constraints.display, style.fg, style.bg, style.bold
+            )),
+            AppMessage::SetContent {
+                id,
+                content: Content::Widget(WidgetContent::Button(button)),
+            } => out.push_str(&format!("r{} button {:?}\n", id.0, button.label)),
+            other => out.push_str(&format!("{other:?}\n")),
+        }
+    }
+    out.push_str("-- ansi --\n");
+    out.push_str(&ansi);
+    out
+}
+
+/// One app view under a user's overrides, drawn both ways: a button with
+/// new text, colour and bold, one hidden, one with a new background.
+#[test]
+fn snapshot_user_overrides_native_and_ansi() {
+    let overrides = ulttui::overrides::Overrides::parse(
+        r##"
+        [widget.save]
+        text = "Write"
+        fg = "red"
+        bold = true
+        [widget.delete]
+        hidden = true
+        [widget.quit]
+        bg = "#203040"
+        "##,
+    )
+    .unwrap();
+    insta::assert_snapshot!(render_overridden(
+        std::rc::Rc::new(overrides),
+        &override_fixture()
+    ));
+}
+
+/// The same view under a Luau override file that computes the same
+/// changes from what each widget shows; the output matches the TOML one.
+#[cfg(feature = "lua-overrides")]
+#[test]
+fn snapshot_user_luau_overrides_native_and_ansi() {
+    let overrides = ulttui::overrides::Overrides::parse_luau(
+        r##"
+        return {
+          widget = function(id, info)
+            if info.role ~= "button" then return nil end
+            if info.text == "Save" then return { text = "Write", fg = "red", bold = true } end
+            if info.text:find("^Del") then return { hidden = true } end
+            if id == "quit" then return { bg = "#203040" } end
+          end,
+        }
+        "##,
+        "snapshot.luau",
+    )
+    .unwrap();
+    insta::assert_snapshot!(render_overridden(
+        std::rc::Rc::new(overrides),
+        &override_fixture()
+    ));
+}

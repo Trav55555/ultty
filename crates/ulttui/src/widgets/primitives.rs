@@ -73,6 +73,10 @@ impl<V: View> View for Inset<V> {
         self.child.is_focusable()
     }
 
+    fn accepts_text(&self) -> bool {
+        self.child.accepts_text()
+    }
+
     fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
         self.child.for_each_child(visit)
     }
@@ -245,7 +249,7 @@ impl View for Section {
         }
         for child in &self.children {
             if chunk_idx < chunks.len() {
-                child.render_ansi(frame, chunks[chunk_idx]);
+                super::render_view_ansi(child.as_ref(), frame, chunks[chunk_idx]);
                 chunk_idx += 1;
             }
         }
@@ -377,7 +381,7 @@ impl View for Card {
             .split(inner);
 
         for (child, chunk) in self.children.iter().zip(chunks.iter()) {
-            child.render_ansi(frame, *chunk);
+            super::render_view_ansi(child.as_ref(), frame, *chunk);
         }
     }
 }

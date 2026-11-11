@@ -76,7 +76,7 @@ impl AnsiBackend {
 
         terminal.draw(|frame| {
             let area = frame.area();
-            view.render_ansi(frame, area);
+            crate::widgets::render_view_ansi(view, frame, area);
         })?;
 
         Ok(())

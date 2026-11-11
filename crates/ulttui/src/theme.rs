@@ -5,7 +5,7 @@
 
 use std::cell::RefCell;
 
-use ultty_protocol::Color;
+use ultty_protocol::{Color, NamedColor};
 
 /// Theme for consistent widget styling across the application.
 #[derive(Debug, Clone)]
@@ -250,6 +250,57 @@ impl Theme {
             },
         }
     }
+}
+
+/// The colour names `parse_color` accepts, as `ulttui-lua` scripts and
+/// override files write them.
+pub const COLOR_NAMES: &[(&str, NamedColor)] = &[
+    ("black", NamedColor::Black),
+    ("red", NamedColor::Red),
+    ("green", NamedColor::Green),
+    ("yellow", NamedColor::Yellow),
+    ("blue", NamedColor::Blue),
+    ("magenta", NamedColor::Magenta),
+    ("cyan", NamedColor::Cyan),
+    ("white", NamedColor::White),
+    ("gray", NamedColor::BrightBlack),
+    ("bright_black", NamedColor::BrightBlack),
+    ("bright_red", NamedColor::BrightRed),
+    ("bright_green", NamedColor::BrightGreen),
+    ("bright_yellow", NamedColor::BrightYellow),
+    ("bright_blue", NamedColor::BrightBlue),
+    ("bright_magenta", NamedColor::BrightMagenta),
+    ("bright_cyan", NamedColor::BrightCyan),
+    ("bright_white", NamedColor::BrightWhite),
+];
+
+/// A colour written as a name from [`COLOR_NAMES`] or `#rrggbb`. (A palette
+/// index is a number, not a string; callers that accept one check for it
+/// first.)
+pub fn parse_color(s: &str) -> Result<Color, String> {
+    if let Some(hex) = s.strip_prefix('#') {
+        let channel = |i: usize| {
+            hex.get(i..i + 2)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        };
+        if hex.len() == 6 {
+            if let (Some(r), Some(g), Some(b)) = (channel(0), channel(2), channel(4)) {
+                return Ok(Color::Rgb(r, g, b));
+            }
+        }
+        return Err(format!("'{s}' is not a #rrggbb colour"));
+    }
+    COLOR_NAMES
+        .iter()
+        .find(|(name, _)| *name == s)
+        .map(|(_, c)| Color::Named(*c))
+        .ok_or_else(|| {
+            let names: Vec<_> = COLOR_NAMES.iter().map(|(n, _)| *n).collect();
+            format!(
+                "'{s}' is not a colour (use #rrggbb, 0-255, or one of: {})",
+                names.join(", ")
+            )
+        })
 }
 
 thread_local! {

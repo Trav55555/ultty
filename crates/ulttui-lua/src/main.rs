@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "ulttui_lua=info".into()),
+                    .unwrap_or_else(|_| "ulttui_lua=info,ulttui::overrides=info".into()),
             )
             .with_writer(std::sync::Mutex::new(file))
             .with_ansi(false)
@@ -100,6 +100,12 @@ fn main() -> anyhow::Result<()> {
     } else {
         App::new(app)
     };
+    // Each script has its own overrides file, named after it.
+    let name = args
+        .script
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned());
+    let runner = runner.app_name(name.as_deref().unwrap_or_default());
     let proxy = runner.proxy();
     // Each change goes straight to the event loop, waking it.
     let _watch = watch_file(&args.script, move |msg| {

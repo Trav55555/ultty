@@ -173,12 +173,12 @@ impl View for Collapsible {
 
         if area.width > 2 {
             let header_area = Rect::new(area.x + 2, area.y, area.width - 2, 1);
-            self.header.render_ansi(frame, header_area);
+            super::render_view_ansi(self.header.as_ref(), frame, header_area);
         }
 
         if self.expanded && area.height > 1 {
             let body_area = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
-            self.body.render_ansi(frame, body_area);
+            super::render_view_ansi(self.body.as_ref(), frame, body_area);
         }
     }
 

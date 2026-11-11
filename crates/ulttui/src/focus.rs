@@ -14,6 +14,8 @@ pub struct FocusManager {
     focused_id: Option<String>,
     /// Index of the last focused widget (for nearest-neighbor fallback on removal).
     last_focused_index: Option<usize>,
+    /// Focusable widgets registered this frame that take typed text.
+    text_entry_ids: Vec<String>,
 }
 
 impl FocusManager {
@@ -24,6 +26,7 @@ impl FocusManager {
     /// Clear the focusable list (called before each render pass).
     pub fn begin_frame(&mut self) {
         self.focusable_ids.clear();
+        self.text_entry_ids.clear();
     }
 
     /// Register a focusable widget ID for this frame.
@@ -46,12 +49,24 @@ impl FocusManager {
     /// calls it once per frame before rendering, so ANSI and native modes
     /// always agree on the Tab order.
     pub fn register_view_tree(&mut self, view: &dyn View) {
+        if crate::overrides::is_hidden(view) {
+            return;
+        }
         if view.is_focusable() {
             if let Some(id) = view.widget_id() {
-                self.register(id.to_string());
+                if self.register(id.to_string()) && view.accepts_text() {
+                    self.text_entry_ids.push(id.to_string());
+                }
             }
         }
         view.for_each_child(&mut |child| self.register_view_tree(child));
+    }
+
+    /// Whether the focused widget takes typed text ([`View::accepts_text`]).
+    pub fn focused_accepts_text(&self) -> bool {
+        self.focused_id
+            .as_ref()
+            .is_some_and(|id| self.text_entry_ids.contains(id))
     }
 
     /// Focusable widget IDs registered this frame, in Tab order.

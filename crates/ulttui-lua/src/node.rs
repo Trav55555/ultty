@@ -19,7 +19,7 @@ use ulttui::widgets::{
 };
 use ultty_protocol::{
     AlignItems, AppMessage, BorderStyle, BorderType, Color, Constraints, Content, Dimension,
-    JustifyContent, NamedColor, RegionId, Style,
+    JustifyContent, RegionId, Style,
 };
 
 /// How a prop's Lua value is read.
@@ -631,57 +631,12 @@ fn parse_dimension(value: &Value) -> Result<Dimension, String> {
     }
 }
 
-const NAMED_COLORS: &[(&str, NamedColor)] = &[
-    ("black", NamedColor::Black),
-    ("red", NamedColor::Red),
-    ("green", NamedColor::Green),
-    ("yellow", NamedColor::Yellow),
-    ("blue", NamedColor::Blue),
-    ("magenta", NamedColor::Magenta),
-    ("cyan", NamedColor::Cyan),
-    ("white", NamedColor::White),
-    ("gray", NamedColor::BrightBlack),
-    ("bright_black", NamedColor::BrightBlack),
-    ("bright_red", NamedColor::BrightRed),
-    ("bright_green", NamedColor::BrightGreen),
-    ("bright_yellow", NamedColor::BrightYellow),
-    ("bright_blue", NamedColor::BrightBlue),
-    ("bright_magenta", NamedColor::BrightMagenta),
-    ("bright_cyan", NamedColor::BrightCyan),
-    ("bright_white", NamedColor::BrightWhite),
-];
-
 fn parse_color(value: &Value) -> Result<Color, String> {
     match value {
         Value::Integer(i) => u8::try_from(*i)
             .map(Color::Indexed)
             .map_err(|_| format!("palette index {i} is outside 0-255")),
-        Value::String(s) => {
-            let s = s.to_string_lossy();
-            if let Some(hex) = s.strip_prefix('#') {
-                let channel = |i: usize| {
-                    hex.get(i..i + 2)
-                        .and_then(|h| u8::from_str_radix(h, 16).ok())
-                };
-                if hex.len() == 6 {
-                    if let (Some(r), Some(g), Some(b)) = (channel(0), channel(2), channel(4)) {
-                        return Ok(Color::Rgb(r, g, b));
-                    }
-                }
-                return Err(format!("'{s}' is not a #rrggbb colour"));
-            }
-            NAMED_COLORS
-                .iter()
-                .find(|(name, _)| *name == s)
-                .map(|(_, c)| Color::Named(*c))
-                .ok_or_else(|| {
-                    let names: Vec<_> = NAMED_COLORS.iter().map(|(n, _)| *n).collect();
-                    format!(
-                        "'{s}' is not a colour (use #rrggbb, 0-255, or one of: {})",
-                        names.join(", ")
-                    )
-                })
-        }
+        Value::String(s) => ulttui::theme::parse_color(&s.to_string_lossy()),
         other => Err(format!(
             "expected a colour name, \"#rrggbb\" or 0-255, got {}",
             other.type_name()
@@ -823,6 +778,10 @@ impl View for LuaView {
 
     fn is_focusable(&self) -> bool {
         self.inner.is_focusable()
+    }
+
+    fn accepts_text(&self) -> bool {
+        self.inner.accepts_text()
     }
 
     fn scroll_offset(&self) -> Option<(f32, f32)> {

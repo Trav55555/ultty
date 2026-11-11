@@ -55,6 +55,62 @@ pub enum Key {
     F(u8),
 }
 
+impl Key {
+    /// The key's name as `ulttui-lua` scripts and override files write it:
+    /// the character itself (`"a"`, `"+"`), `space`, `enter`, `escape`,
+    /// `backspace`, `tab`, `up`, `down`, `left`, `right`, `home`, `end`,
+    /// `pageup`, `pagedown`, `delete`, `insert`, or `f1`..`f12`.
+    pub fn name(&self) -> String {
+        match self {
+            Key::Char(' ') => "space".to_string(),
+            Key::Char(c) => c.to_string(),
+            Key::F(n) => format!("f{n}"),
+            named => NAMED_KEYS
+                .iter()
+                .find(|(_, key)| key == named)
+                .map_or_else(String::new, |(name, _)| (*name).to_string()),
+        }
+    }
+
+    /// The key [`Key::name`] calls `name`, also accepting `esc`.
+    pub fn from_name(name: &str) -> Option<Key> {
+        let mut chars = name.chars();
+        if let (Some(c), None) = (chars.next(), chars.next()) {
+            return Some(Key::Char(c));
+        }
+        if name == "space" {
+            return Some(Key::Char(' '));
+        }
+        if name == "esc" {
+            return Some(Key::Escape);
+        }
+        if let Some(n) = name.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()) {
+            return (1..=12).contains(&n).then_some(Key::F(n));
+        }
+        NAMED_KEYS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, key)| key.clone())
+    }
+}
+
+const NAMED_KEYS: &[(&str, Key)] = &[
+    ("enter", Key::Enter),
+    ("escape", Key::Escape),
+    ("backspace", Key::Backspace),
+    ("tab", Key::Tab),
+    ("up", Key::Up),
+    ("down", Key::Down),
+    ("left", Key::Left),
+    ("right", Key::Right),
+    ("home", Key::Home),
+    ("end", Key::End),
+    ("pageup", Key::PageUp),
+    ("pagedown", Key::PageDown),
+    ("delete", Key::Delete),
+    ("insert", Key::Insert),
+];
+
 /// Modifier keys.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Modifiers {
@@ -95,6 +151,27 @@ pub enum MouseButton {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_names_round_trip() {
+        let mut keys: Vec<Key> = NAMED_KEYS.iter().map(|(_, k)| k.clone()).collect();
+        keys.extend([
+            Key::Char('a'),
+            Key::Char('+'),
+            Key::Char(' '),
+            Key::Char('é'),
+        ]);
+        keys.extend((1..=12).map(Key::F));
+        for key in keys {
+            assert_eq!(Key::from_name(&key.name()), Some(key.clone()), "{key:?}");
+        }
+        assert_eq!(Key::Char(' ').name(), "space");
+        assert_eq!(Key::from_name("esc"), Some(Key::Escape));
+        assert_eq!(Key::from_name("f"), Some(Key::Char('f')));
+        for bad in ["", "f0", "f13", "pgup", "ctrl"] {
+            assert_eq!(Key::from_name(bad), None, "{bad:?}");
+        }
+    }
 
     // --- Event variant construction ---
 

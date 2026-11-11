@@ -137,19 +137,50 @@ pub(crate) fn render_view_to_native(
     let region_id = RegionId::new(*next_id);
     *next_id += 1;
 
+    // The user's override for this widget (ADR 0023): `None` outside an
+    // override scope. Constraints, style, content and semantics are read with
+    // the widget's replacement text in scope; its children (rendered below,
+    // outside the scope) see their own.
+    let user = crate::overrides::for_view(child).flatten();
+    let hidden = user.as_ref().is_some_and(|u| u.hidden);
+    let text = user.as_ref().and_then(|u| u.text.clone());
+    let (constraints, style, shown) = crate::overrides::with_text(text, || {
+        let mut constraints = constraint_overrides.unwrap_or_else(|| child.constraints());
+        let mut style = child.style();
+        if hidden {
+            constraints.display = ultty_protocol::Display::None;
+            return (constraints, style, None);
+        }
+        let mut content = child.content();
+        if let Some(user) = &user {
+            style = user.apply_style(style);
+            content = user.apply_content(content);
+        }
+        (constraints, style, Some((content, child.semantics())))
+    });
+
     send_message(&AppMessage::CreateRegion {
         id: region_id,
         parent,
         insert_index: -1,
-        constraints: constraint_overrides.unwrap_or_else(|| child.constraints()),
-        style: child.style(),
+        constraints,
+        style,
     })?;
     if let Some(key) = child.native_key() {
         crate::backend::native_diff::record_native_key(region_id, key);
     }
+    // A hidden widget is an empty `display: none` region, left out of the
+    // accessibility tree too.
+    let Some((content, semantics)) = shown else {
+        let hidden = ultty_protocol::Semantics {
+            hidden: true,
+            ..Default::default()
+        };
+        send_semantics(send_message, region_id, hidden, &Content::None)?;
+        return Ok(region_id);
+    };
 
-    let content = child.content();
-    send_semantics(send_message, region_id, child.semantics(), &content)?;
+    send_semantics(send_message, region_id, semantics, &content)?;
     if content != Content::None {
         send_message(&AppMessage::SetContent {
             id: region_id,
@@ -171,6 +202,39 @@ pub(crate) fn render_view_to_native(
     }
 
     Ok(region_id)
+}
+
+/// Render `view` in ANSI mode with the user's overrides for it (ADR 0023).
+///
+/// The ANSI counterpart of the native walk: the backend draws the root
+/// through it and every container draws each child through it, so an
+/// override reaches any widget with an id. A hidden widget draws nothing;
+/// an overridden colour or bold is painted over the widget's area after it
+/// draws; replacement text is in scope while it draws.
+pub fn render_view_ansi(view: &dyn View, frame: &mut Frame, area: Rect) {
+    let Some(user) = crate::overrides::for_view(view) else {
+        view.render_ansi(frame, area);
+        return;
+    };
+    let user = user.unwrap_or_default();
+    if user.hidden {
+        return;
+    }
+    crate::overrides::with_text(user.text.clone(), || view.render_ansi(frame, area));
+    paint_override(&user, frame, area);
+}
+
+/// Paint `user`'s colours and bold, if it sets any, over `area`.
+pub(crate) fn paint_override(
+    user: &crate::overrides::WidgetOverride,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    if let Some(style) = user.ratatui_style() {
+        let buffer = frame.buffer_mut();
+        let area = area.intersection(buffer.area);
+        buffer.set_style(area, style);
+    }
 }
 
 /// Padding that keeps a bordered widget's children off its border. A native
@@ -258,6 +322,14 @@ pub trait View {
         false
     }
 
+    /// Whether typed characters are text for this widget (an input) rather
+    /// than commands. Plain-character key remaps from a user's overrides
+    /// (ADR 0023) are not applied while such a widget has focus. Wrappers
+    /// that forward `is_focusable` forward this too.
+    fn accepts_text(&self) -> bool {
+        false
+    }
+
     /// Apply a key to app-owned widget state.
     ///
     /// The Ulttui runner does not dispatch this through the rendered view tree:
@@ -337,6 +409,10 @@ impl<T: View> View for &T {
 
     fn is_focusable(&self) -> bool {
         (*self).is_focusable()
+    }
+
+    fn accepts_text(&self) -> bool {
+        (*self).accepts_text()
     }
 
     fn scroll_offset(&self) -> Option<(f32, f32)> {

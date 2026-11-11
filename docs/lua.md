@@ -213,6 +213,15 @@ more than a second is stopped with an error; the check runs at loops and
 calls, so a single slow library call (a pathological `string.find` pattern)
 can overrun it. The VM is capped at 256 MiB.
 
+## User overrides
+
+Like every ulttui app, a script reads the user's overrides: recolour, hide
+or relabel any node with an `id`, and remap keys, from
+`~/.config/ulttui/overrides/<script>.toml` and `<script>.luau`, where
+`<script>` is the script's file name without `.luau` (`hello.toml` and
+`hello.luau` for `hello.luau`). A Luau override file runs in the same
+sandbox as the script, without `run{}`. See [overrides.md](overrides.md). `ULTTUI_NO_OVERRIDES=1` turns them off.
+
 ## Hot reload and errors
 
 `ulttui-lua` watches the script's file (through its directory, so editors

@@ -88,7 +88,7 @@ impl Button {
 
 impl View for Button {
     fn constraints(&self) -> ultty_protocol::Constraints {
-        let label_width = self.label.chars().count() as f32 + 4.0;
+        let label_width = crate::overrides::text_or(&self.label).chars().count() as f32 + 4.0;
         ultty_protocol::Constraints {
             width: ultty_protocol::Dimension::Cells(label_width),
             height: ultty_protocol::Dimension::Cells(1.0),
@@ -120,7 +120,7 @@ impl View for Button {
             ButtonStyle::Success => ProtoButtonStyle::Success,
         };
         ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Button(ButtonWidget {
-            label: self.label.clone(),
+            label: crate::overrides::text_or(&self.label).into_owned(),
             style: proto_style,
         }))
     }
@@ -128,7 +128,7 @@ impl View for Button {
     fn semantics(&self) -> Semantics {
         Semantics {
             role: Role::Button,
-            label: Some(self.label.clone()),
+            label: Some(crate::overrides::text_or(&self.label).into_owned()),
             description: self.description.clone(),
             ..Semantics::default()
         }
@@ -137,7 +137,7 @@ impl View for Button {
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         let is_focused = super::is_widget_focused(self.widget_id());
 
-        let styled_label = format!("[ {} ]", self.label);
+        let styled_label = format!("[ {} ]", crate::overrides::text_or(&self.label));
         let theme = Theme::current();
         let (fg, bg) = if is_focused {
             (
