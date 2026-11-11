@@ -106,7 +106,7 @@ TextInput::new()
 
 **Keyboard**: Starts in vim Normal mode. `i` enters Insert mode, `Escape` returns to Normal. Full vim motions: `h/l` (left/right), `w/b/e` (word), `0/$` (line), `gg/G` (document), `d/c/y` (operators), `v/V` (visual).
 
-In Insert mode, typing edits at the cursor by grapheme cluster: Left/Right, Home/End, Ctrl+A/E, Ctrl/Alt+arrows (words), Backspace, Delete, Ctrl+W (word back), Ctrl+U/K (to start/end). The same operations are available as pure functions in `ulttui::edit`. A focused input draws its cursor: the reversed cell in ANSI mode, a `|` in native mode.
+In Insert mode, typing edits at the cursor by grapheme cluster: Left/Right, Home/End, Ctrl+A/E, Ctrl/Alt+arrows (words), Backspace, Delete, Ctrl+W (word back), Ctrl+U/K (to start/end). The same operations are available as pure functions in `ulttui::edit`. A focused input draws its cursor: the reversed cell in ANSI mode, a caret the terminal draws at the cursor in native mode (protocol `CAP_INPUT_CURSOR`; none from a terminal without it).
 
 ### Checkbox
 

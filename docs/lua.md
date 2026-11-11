@@ -159,7 +159,7 @@ message. The framework has no paste event yet: pasted text arrives as
 typed characters, each inserted at the cursor in turn.
 
 A focused input shows its cursor: in ANSI mode as the reversed cell under
-it, in native mode as a `|` drawn into the text (not drawn for a password).
+it, in native mode as a caret the terminal draws (none from a terminal that lacks `CAP_INPUT_CURSOR`).
 
 ## Other globals
 
