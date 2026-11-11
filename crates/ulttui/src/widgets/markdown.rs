@@ -113,7 +113,7 @@ struct ListState {
 impl MarkdownView {
     pub fn new(source: impl Into<String>) -> Self {
         let source = source.into();
-        let (blocks, reparse_from) = parse(&source, true);
+        let (blocks, reparse_from) = parse(&source);
         Self {
             source,
             blocks,
@@ -139,7 +139,7 @@ impl MarkdownView {
         self.source.push_str(chunk);
 
         if let Some(from) = self.reparse_from {
-            let (tail, tail_from) = parse(&self.source[from.offset..], from.offset == 0);
+            let (tail, tail_from) = parse(&self.source[from.offset..]);
             if let Some(tail_from) = tail_from {
                 self.blocks.truncate(from.blocks);
                 self.blocks.extend(tail);
@@ -150,7 +150,7 @@ impl MarkdownView {
                 return;
             }
         }
-        (self.blocks, self.reparse_from) = parse(&self.source, true);
+        (self.blocks, self.reparse_from) = parse(&self.source);
     }
 
     pub fn with_appended(mut self, chunk: impl AsRef<str>) -> Self {
@@ -312,16 +312,12 @@ impl MarkdownView {
 
 /// The blocks of `source`, and where to parse again from when text is
 /// appended to it (`None` when it defines link references or footnotes).
-/// `at_document_start` is false for the end of a document parsed on its
-/// own, where a `---` line cannot open a metadata block.
-fn parse(source: &str, at_document_start: bool) -> (Vec<Block>, Option<ReparsePoint>) {
-    let mut options = Options::all();
-    if !at_document_start {
-        options.remove(
-            Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
-                | Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS,
-        );
-    }
+fn parse(source: &str) -> (Vec<Block>, Option<ReparsePoint>) {
+    // Without metadata blocks: a reply that starts with a rule would have
+    // the text up to the next one hidden as front matter.
+    let options = Options::all()
+        - Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+        - Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS;
     if source.contains("[^") {
         // Footnotes reach back to earlier blocks like link references, and
         // pulldown-cmark 0.12's offsets around them can be out of order
@@ -357,7 +353,7 @@ fn parse(source: &str, at_document_start: bool) -> (Vec<Block>, Option<ReparsePo
                 || source[..line_start - 1]
                     .rsplit('\n')
                     .next()
-                    .is_some_and(|line| line.trim().is_empty());
+                    .is_some_and(|line| line.trim_matches([' ', '\t', '\r']).is_empty());
             if after_blank_line
                 && source[line_start..range.start]
                     .chars()
@@ -1772,12 +1768,149 @@ mod tests {
         "[^1]: note\n",
         "![alt](i.png)",
         "<http://a>",
+        "\u{a0}",
+        "\u{3000}",
+        "\r\n",
+        "\r",
+        "[^a-z]",
+        "`[^a-z]`",
     ];
 
     fn markdown_document() -> impl proptest::strategy::Strategy<Value = String> {
         use proptest::prelude::*;
         proptest::collection::vec(proptest::sample::select(PIECES), 0..48)
             .prop_map(|pieces| pieces.concat())
+    }
+
+    /// Whole lines random documents are made of: every kind of block, in
+    /// and out of containers, with the line endings markdown knows.
+    const LINES: &[&str] = &[
+        "",
+        "",
+        "",
+        "word",
+        "two words",
+        "    indented code",
+        "\tcode tab",
+        "  two",
+        "   three",
+        "> quote",
+        "> - quoted item",
+        "> > deeper",
+        ">",
+        "- item",
+        "- [ ] task",
+        "- [x] done",
+        "  - nested",
+        "    - deep nested",
+        "1. one",
+        "2. two",
+        "10) ten",
+        "* star",
+        "+ plus",
+        "-",
+        "1.",
+        "- # head",
+        "<!--",
+        "-->",
+        "<pre>",
+        "</pre>",
+        "<div>",
+        "</div>",
+        "<script>",
+        "</script>",
+        "<?php",
+        "?>",
+        "| a | b |",
+        "|---|---|",
+        "| 1 | 2 |",
+        "a | b",
+        "---",
+        "***",
+        "___",
+        "===",
+        "# h",
+        "## h2",
+        "```",
+        "~~~",
+        "```rust",
+        "lazy *em",
+        "em* end",
+        "[r]: http://r",
+        "[r]",
+        "[^1]",
+        "[^1]: note",
+        "`[^a-z]` regex",
+        "\u{a0}",
+        "\u{a0}- [ ] x",
+        "\u{3000}",
+        "Intro\u{3000}",
+        "  \t",
+        "term",
+        ": def",
+        "$$",
+        "x = 1",
+        "foo\\",
+        "  ",
+        "- [ ]",
+        "- [ ] ",
+        "1. [x] # x",
+        "-     [ ] a",
+        "- ```",
+        "  code in item",
+        "<http://x>",
+        "<b>bold",
+        "<pa ok",
+        "é中文",
+        "+++",
+        "- a\r",
+        "b\r",
+        "\r",
+        "- [ ] item\r",
+    ];
+
+    fn line_document() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        let ending = proptest::sample::select(&["\n", "\n", "\n", "\r\n", "  \n", "\r"][..]);
+        proptest::collection::vec((proptest::sample::select(LINES), ending), 0..24).prop_map(
+            |lines| {
+                lines
+                    .into_iter()
+                    .map(|(line, ending)| format!("{line}{ending}"))
+                    .collect()
+            },
+        )
+    }
+
+    /// Stream `document` into a view, starting from its first `first`
+    /// characters and appending chunks of `sizes` characters in turn;
+    /// after each chunk, the blocks must be what parsing all of it so far
+    /// at once gives.
+    fn check_stream(document: &str, first: usize, sizes: &[usize]) -> Result<(), String> {
+        let chars: Vec<usize> = document.char_indices().map(|(i, _)| i).collect();
+        let split = |n: usize| chars.get(n).copied().unwrap_or(document.len());
+        let mut char_at = first.min(chars.len());
+        let mut at = split(char_at);
+        let mut view = MarkdownView::new(&document[..at]);
+        for size in sizes.iter().cycle() {
+            if at == document.len() {
+                break;
+            }
+            char_at = (char_at + size).min(chars.len());
+            let end = split(char_at);
+            view.append_chunk(&document[at..end]);
+            at = end;
+            let whole = MarkdownView::new(&document[..at]);
+            if view.blocks != whole.blocks {
+                return Err(format!(
+                    "after {:?} (chunks {sizes:?})\nstreamed {:?}\nwhole    {:?}",
+                    &document[..at],
+                    view.blocks,
+                    whole.blocks
+                ));
+            }
+        }
+        Ok(())
     }
 
     proptest::proptest! {
@@ -1791,22 +1924,53 @@ mod tests {
             sizes in proptest::collection::vec(1usize..8, 1..6),
             first in 0usize..3,
         ) {
-            let chars: Vec<(usize, char)> = document.char_indices().collect();
-            let split = |n: usize| chars.get(n).map_or(document.len(), |(i, _)| *i);
-            let start = split(first.min(chars.len()));
-            let mut view = MarkdownView::new(&document[..start]);
-            let mut at = start;
-            let mut char_at = first.min(chars.len());
-            for size in sizes.iter().cycle() {
-                if at == document.len() {
-                    break;
+            let checked = check_stream(&document, first, &sizes);
+            proptest::prop_assert!(checked.is_ok(), "{}", checked.unwrap_err());
+        }
+
+        /// The same for documents made of whole lines of every kind of
+        /// block, also streamed a character at a time.
+        #[test]
+        fn streaming_lines_in_any_chunks_matches_parsing_all_at_once(
+            document in line_document(),
+            sizes in proptest::collection::vec(1usize..12, 1..6),
+        ) {
+            let checked = check_stream(&document, 0, &sizes);
+            proptest::prop_assert!(checked.is_ok(), "{}", checked.unwrap_err());
+            let checked = check_stream(&document, 0, &[1]);
+            proptest::prop_assert!(checked.is_ok(), "{}", checked.unwrap_err());
+        }
+    }
+
+    #[test]
+    fn streaming_known_hard_documents_matches_parsing_all_at_once() {
+        let documents = [
+            "a\n\n- [ ] x\n\nb\n\n- [x] y",
+            "\u{a0}\n- [ ] x y\n",
+            "para\n\n    code\n\n    more\nlazy",
+            "<!--\n\nfoo\n\n-->\n\nbar",
+            "> - a\n>\n> - b\n\nc\n\nd",
+            "a\r\n\r\n- [ ] b\r\n\r\nc",
+            "- a\n\n\n\nb\n\nc\n  d",
+            "| a | b |\n|---|---|\n| 1 | 2 |\n\nx\n\n| c |\n|---|",
+            "x\n\n1) a\n\n2) b\n\nq",
+            "a\n\n<div>\n\nb\n\n</div>\n\nc",
+            "a\n\n- [ ]\n  # h\n\nz",
+            // A blank line is spaces and tabs only: U+3000 and U+00A0 are
+            // text.
+            "Intro\u{3000}\n\u{3000}\n<pa ok",
+            "\u{a0}\n<path to it",
+            "Note:\u{3000}\n\u{3000}\n<p\nclass is a word",
+            "intro\u{3000}\n\u{3000}\n<div\nmore",
+            // No front matter: the text between two rules stays.
+            "---\ntitle: x\n\nbody\n---\nafter",
+            "---\n\nbody\n---\n",
+        ];
+        for document in documents {
+            for size in 1..=4 {
+                if let Err(problem) = check_stream(document, 0, &[size]) {
+                    panic!("{problem}");
                 }
-                char_at = (char_at + size).min(chars.len());
-                let end = split(char_at);
-                view.append_chunk(&document[at..end]);
-                at = end;
-                let whole = MarkdownView::new(&document[..at]);
-                proptest::prop_assert_eq!(&view.blocks, &whole.blocks, "after {:?}", &document[..at]);
             }
         }
     }
