@@ -221,6 +221,11 @@ pub const CONSTRUCTORS: &[CtorSpec] = &[
         body: Body::Empty,
         props: &[
             prop("value", PropKind::Str, "Current text"),
+            prop(
+                "cursor",
+                PropKind::Num,
+                "Grapheme clusters before the cursor (default: the end)",
+            ),
             prop("placeholder", PropKind::Str, "Shown while empty"),
         ],
         required: &[],
@@ -260,6 +265,21 @@ impl Node {
             Some(PropValue::Num(n)) => Some(*n),
             _ => None,
         }
+    }
+
+    /// The text and cursor (grapheme clusters before it) of the `input`
+    /// whose id is `id`, searching this node and its descendants. Without a
+    /// `cursor` prop the cursor is at the end; one past the end is clamped.
+    pub fn input_state(&self, id: &str) -> Option<(String, usize)> {
+        if self.kind == "input" && self.str("id") == Some(id) {
+            let value = self.str("value").unwrap_or_default().to_string();
+            let end = ulttui::edit::grapheme_count(&value);
+            let cursor = self
+                .num("cursor")
+                .map_or(end, |c| (c.max(0.0) as usize).min(end));
+            return Some((value, cursor));
+        }
+        self.children.iter().find_map(|child| child.input_state(id))
     }
 
     fn bool(&self, name: &str) -> bool {
@@ -887,6 +907,9 @@ pub fn build(node: &Node) -> LuaView {
             }
             if let Some(value) = node.str("value") {
                 input = input.value(value);
+            }
+            if let Some(cursor) = node.num("cursor") {
+                input = input.cursor(cursor.max(0.0) as usize);
             }
             if let Some(placeholder) = node.str("placeholder") {
                 input = input.placeholder(placeholder);

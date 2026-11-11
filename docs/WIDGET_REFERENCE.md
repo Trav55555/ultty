@@ -96,6 +96,7 @@ TextInput::new()
 | `new()` | Create empty input |
 | `id(id)` | Set widget ID |
 | `value(s)` | Set initial value (cursor moves to end) |
+| `cursor(n)` | Put the cursor after the first `n` grapheme clusters |
 | `placeholder(s)` | Set placeholder text |
 | `multiline()` | Enable multiline mode |
 | `current_value()` | Get current text |
@@ -104,6 +105,8 @@ TextInput::new()
 | `widget_id()` | Get the widget ID |
 
 **Keyboard**: Starts in vim Normal mode. `i` enters Insert mode, `Escape` returns to Normal. Full vim motions: `h/l` (left/right), `w/b/e` (word), `0/$` (line), `gg/G` (document), `d/c/y` (operators), `v/V` (visual).
+
+In Insert mode, typing edits at the cursor by grapheme cluster: Left/Right, Home/End, Ctrl+A/E, Ctrl/Alt+arrows (words), Backspace, Delete, Ctrl+W (word back), Ctrl+U/K (to start/end). The same operations are available as pure functions in `ulttui::edit`. A focused input draws its cursor: the reversed cell in ANSI mode, a `|` in native mode.
 
 ### Checkbox
 

@@ -57,6 +57,7 @@ an array of them.
 |---------|--------|------|
 | `key`   | `key`, `ctrl`, `alt`, `shift`, `focused` | A key was pressed. `key` is the character (`"a"`, `"+"`) or a name: `space`, `enter`, `escape`, `backspace`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `delete`, `insert`, `f1`..`f12`. `focused` is the id of the focused widget, if any, so Enter on a button arrives as `key = "enter", focused = "<button id>"`. |
 | `click` | `id` | A widget was clicked (native mode). |
+| `input` | `id`, `value`, `cursor` | A key edited the focused `input` (see [Text input](#text-input)). |
 | `tick`  | `name` | A timer from `every` fired. |
 | `done`  | `id`, `stdout`, `stderr`, `status`, `error` | A process started with `run{}` finished. `status` is the exit code (`nil` if it was killed by a signal or never started); `error` says why it could not start. |
 
@@ -90,7 +91,7 @@ missing required prop is an error that names the file and line.
 | `progress` | | `value` (required, 0 to 1), `label` | |
 | `spinner`  | | `frame`, `label` | Without `frame` the spinner follows the clock, so it moves whenever the view redraws (use a timer to redraw). |
 | `button`   | | `label` (required), `variant` | Focusable when it has an `id`. `variant`: `default`, `primary`, `danger`, `success`. |
-| `input`    | | `value`, `placeholder` | Focusable when it has an `id`. The script owns the text: append `msg.key` while `msg.focused` is the input's id. |
+| `input`    | | `value`, `cursor`, `placeholder` | Focusable when it has an `id`. The script owns the text and cursor; see [Text input](#text-input). |
 
 Layout props, accepted by every constructor:
 
@@ -116,6 +117,49 @@ Value types of the other props:
 
 The mapping lives in one table, `ulttui_lua::node::CONSTRUCTORS`; a test
 checks that every constructor and prop in it is named on this page.
+
+## Text input
+
+An `input` with an `id` is edited by the runtime, and the script keeps the
+result. When a key arrives while that input has focus, the runtime applies it
+to the `value` and `cursor` the input showed in the last view, and sends the
+script an `input` message instead of a `key` message:
+
+```lua
+update = function(state, msg)
+  if msg.type == "input" and msg.id == "name" then
+    state.name, state.cursor = msg.value, msg.cursor
+  end
+  return state
+end,
+view = function(state)
+  return input { id = "name", value = state.name, cursor = state.cursor }
+end,
+```
+
+`cursor` is the number of grapheme clusters before the cursor, so `0` is the
+start and the number of clusters in `value` is the end; edits never
+split a cluster such as `e` plus an accent or a family emoji. Without a
+`cursor` prop the cursor is at the end. A key that changes neither text nor
+cursor (Left at the start) sends nothing.
+
+| Keys | Edit |
+|------|------|
+| printable characters | Insert at the cursor. |
+| Left, Right | Move one cluster. |
+| Ctrl+Left / Ctrl+Right, Alt+Left / Alt+Right, Alt+B / Alt+F | Move to the start of the previous word, or the end of the next. A word is a run of non-space characters. |
+| Home, End, Ctrl+A, Ctrl+E | Move to the start or end. |
+| Backspace, Delete | Delete the cluster before or at the cursor. |
+| Ctrl+W, Alt+Backspace | Delete back to the start of the previous word. |
+| Ctrl+U, Ctrl+K | Delete everything before, or from, the cursor. |
+
+Every other key (Enter, Escape, Up, Down, other Ctrl or Alt combinations),
+and any key while another widget has focus, still arrives as a `key`
+message. The framework has no paste event yet: pasted text arrives as
+typed characters, each inserted at the cursor in turn.
+
+A focused input shows its cursor: in ANSI mode as the reversed cell under
+it, in native mode as a `|` drawn into the text (not drawn for a password).
 
 ## Other globals
 

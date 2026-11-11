@@ -80,6 +80,13 @@ pub enum ScriptMsg {
         shift: bool,
         focused: Option<String>,
     },
+    /// The focused `input` was edited: the key moved its cursor or changed
+    /// its text. `cursor` counts grapheme clusters before the cursor.
+    Input {
+        id: String,
+        value: String,
+        cursor: usize,
+    },
     /// A widget was clicked (native mode).
     Click { id: String },
     /// A named timer from the app's `every` table fired.
@@ -385,6 +392,11 @@ impl Script {
         result
     }
 
+    /// The text and cursor of the input `id` in the last view that built.
+    pub fn input_state(&self, id: &str) -> Option<(String, usize)> {
+        self.last_view.borrow().as_ref()?.input_state(id)
+    }
+
     /// Evaluate `expr` against the state, for tests and tools.
     pub fn eval_with_state(&self, expr: &str) -> mlua::Result<Value> {
         let f: Function = self
@@ -548,6 +560,12 @@ fn msg_table(lua: &Lua, msg: &ScriptMsg) -> mlua::Result<Table> {
             t.set("alt", *alt)?;
             t.set("shift", *shift)?;
             t.set("focused", focused.as_deref())?;
+        }
+        ScriptMsg::Input { id, value, cursor } => {
+            t.set("type", "input")?;
+            t.set("id", id.as_str())?;
+            t.set("value", value.as_str())?;
+            t.set("cursor", *cursor)?;
         }
         ScriptMsg::Click { id } => {
             t.set("type", "click")?;
