@@ -1,13 +1,14 @@
 //! The Luau side: a sandboxed VM holding the running script, its state, and
 //! the last version that loaded cleanly.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use mlua::{Function, Lua, LuaOptions, StdLib, Table, UserData, Value, VmState};
+use mlua::{Function, Lua, Table, UserData, Value};
+use ulttui::lua_sandbox::Sandbox;
 
 use crate::node::{self, located, Node};
 
@@ -226,7 +227,8 @@ pub struct Script {
     /// The frozen global table: what every version's environment reads
     /// through to.
     base: Table,
-    deadline: Rc<Cell<Option<Instant>>>,
+    /// The VM `lua` belongs to, and its time limit.
+    sandbox: Sandbox,
     budget: Duration,
 }
 
@@ -235,38 +237,14 @@ impl Script {
     /// [`Script::reload`].
     pub fn new(path: impl Into<PathBuf>, options: ScriptOptions) -> Result<Self, ScriptError> {
         let path = path.into();
-        let libs = StdLib::COROUTINE
-            | StdLib::TABLE
-            | StdLib::STRING
-            | StdLib::UTF8
-            | StdLib::BIT
-            | StdLib::MATH
-            | StdLib::BUFFER
-            | StdLib::OS;
-        let lua = Lua::new_with(libs, LuaOptions::default())?;
+        // The sandbox (ulttui's, shared with Luau override files) freezes the
+        // globals once the API is in: scripts write to their own environment
+        // (see `try_load`).
+        let sandbox = Sandbox::new(256 * 1024 * 1024, |lua, globals| {
+            install_api(lua, globals, options.exec)
+        })?;
+        let lua = sandbox.lua().clone();
         let globals = lua.globals();
-        // Luau has no `io` and its `os` cannot run programs; these two would
-        // still load other code from disk or from strings.
-        globals.raw_set("require", Value::Nil)?;
-        globals.raw_set("loadstring", Value::Nil)?;
-        // These would hand a script the environment table shared between
-        // versions (or another function's), past the per-load one.
-        globals.raw_set("getfenv", Value::Nil)?;
-        globals.raw_set("setfenv", Value::Nil)?;
-        install_api(&lua, &globals, options.exec)?;
-        // Freezes the globals and the libraries: scripts write to their own
-        // environment (see `try_load`).
-        lua.sandbox(true)?;
-        lua.set_memory_limit(256 * 1024 * 1024)?;
-
-        let deadline: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
-        let watch = deadline.clone();
-        lua.set_interrupt(move |_| match watch.get() {
-            Some(deadline) if Instant::now() > deadline => Err(mlua::Error::runtime(
-                "script took too long (stuck in a loop?)",
-            )),
-            _ => Ok(VmState::Continue),
-        });
 
         Ok(Self {
             lua,
@@ -280,7 +258,7 @@ impl Script {
             view_error: RefCell::new(None),
             last_view: RefCell::new(None),
             base: globals,
-            deadline,
+            sandbox,
             budget: options.call_budget,
         })
     }
@@ -466,10 +444,7 @@ impl Script {
 
     /// Run `f` with the per-call time budget armed.
     fn guarded<R>(&self, f: impl FnOnce() -> mlua::Result<R>) -> mlua::Result<R> {
-        self.deadline.set(Some(Instant::now() + self.budget));
-        let result = f();
-        self.deadline.set(None);
-        result
+        self.sandbox.guarded(self.budget, f)
     }
 
     /// Evaluate `expr` against the state, for tests and tools.

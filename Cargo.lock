@@ -4827,6 +4827,7 @@ dependencies = [
  "futures-util",
  "insta",
  "libc",
+ "mlua",
  "pulldown-cmark",
  "ratatui",
  "thiserror 1.0.69",
