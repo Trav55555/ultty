@@ -19,8 +19,8 @@ const WORD_INTERVAL: Duration = Duration::from_millis(40);
 /// rest (scripts/e2e/accessibility-chat.sh checks what is announced).
 const MARKDOWN_REPLY: &str = "Here is **bold** text and `inline code`.\n\n\
 - first item\n\
-- second item with [a link](https://example.com \"Example home\")\n\
-- [x] a task that is done\n\n\
+- [x] a task that is done\n\
+- an item with [a link](https://example.com \"Example home\")\n\n\
 ```\nlet x = 1;\nlet y = 2;\n```\n\n\
 Read [the architecture overview](https://github.com/example/project/blob/main/docs/architecture/overview.md) \
 **for every detail of how the pieces fit together, which takes rather a long time to explain** \
