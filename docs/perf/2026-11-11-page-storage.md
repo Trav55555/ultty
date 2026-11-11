@@ -119,6 +119,11 @@ was not profiled here; it is the first thing to look at for the rest of
 the gap (below). The criterion is met with the ceiling in place, so the
 ascii ratios understate what the storage change is worth.
 
+Update: the ceiling was the bench. Its UI thread slept out each frame
+blind and saw the exit only at a frame boundary, so every time here is a
+whole number of 16 ms frames plus about 2 ms; see
+[the frame quantum note](2026-11-11-pty-flood-frame-quantum.md).
+
 sgr-dense at 120x40 is 3.3% slower than before slice 3, as in slice 4's
 rerun (4.2%) and the prototype's C (3.6–4.4%); the cause is in the
 prototype note's sgr-dense section. At 300x75 it is level. The criterion
