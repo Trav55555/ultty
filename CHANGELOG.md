@@ -38,7 +38,9 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   `scroll`, `list`, `progress`, `spinner`, `button` and `input`; unknown
   props are errors with file and line. `run{}` starts only command lines
   beginning with a granted prefix, `--exec 'ulttyctl --json panes'` (a bare
-  program name allows any arguments; `--allow-exec` allows anything), and
+  program name allows any arguments; `--allow-exec` allows anything; a grant
+  on a shell, `env`, `sudo`, an interpreter or bare `ulttyctl` is refused at
+  startup in favour of `--allow-exec`), and
   otherwise raises an error naming the flag to add; `json.decode` reads
   their output. Scripts run in Luau's sandbox. A broken save leaves the last
   good version running under an error banner. Native in Ultty, ANSI

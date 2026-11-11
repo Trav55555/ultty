@@ -13,7 +13,7 @@ Options:
 
 | Option         | Meaning                                                        |
 |----------------|----------------------------------------------------------------|
-| `--exec CMD`   | Let `run{}` start command lines that begin with the words of `CMD`. Repeatable. Nothing is allowed by default. A bare program name allows it with any arguments, which for `ulttyctl`, `git`, a shell, an interpreter, `env` or `xargs` is as good as `--allow-exec`. |
+| `--exec CMD`   | Let `run{}` start command lines that begin with the words of `CMD`. Repeatable. Nothing is allowed by default. A bare program name allows it with any arguments. A grant that would allow anything is refused at startup (see below); say `--allow-exec` instead. |
 | `--allow-exec` | Let `run{}` start anything.                                     |
 | `--ansi`       | Draw with ANSI even inside Ultty (a split pane, where native scenes are not drawn). |
 | `--log FILE`   | Write logs to `FILE` (the terminal is the UI, so never stderr). |
@@ -142,8 +142,18 @@ one version is gone in the next. There is no `io`, no `os.execute`, no
 only way to affect the system is `run{}`, and only the command lines granted
 with `--exec` (or any, with `--allow-exec`). The grants are fixed when the
 script starts; a reload keeps them. They bound the words of the command
-line, not what the program does with them: a grant on a program that runs
-other programs (`ulttyctl`, `git`, a shell) is as wide as `--allow-exec`. A
+line, not what the program does with them, so `ulttui-lua` refuses a grant
+whose first word (by basename) is a program whose job is to run other
+programs, and asks for `--allow-exec` instead: the shells `sh`, `bash`,
+`zsh`, `dash`, `fish`, `ksh`, `csh`, `tcsh`; `env`, `xargs`, `exec`,
+`nohup`, `setsid`, `sudo`, `doas`, `su`, `timeout`, `nice`, `ionice`,
+`stdbuf`, `flock`, `watch`, `script`, `ssh`; the interpreters `python`,
+`python3`, `perl`, `ruby`, `node`, `deno`, `bun`, `lua`, `luajit`, `php`,
+`tclsh`, `awk`, `gawk`, `busybox`; and `ulttyctl` or `ulttui-lua` with no
+subcommand word (`'ulttyctl --json panes'` is fine). The list is
+`ulttui_lua::PROGRAM_RUNNERS` and `NEED_SUBCOMMAND`. It is a guard against
+mistakes, not a sandbox: `git` with no subcommand (aliases, hooks, pagers)
+is still allowed and still broad. A
 call into the script (load, `init`, `update`, `view`) that runs Luau code for
 more than a second is stopped with an error; the check runs at loops and
 calls, so a single slow library call (a pathological `string.find` pattern)

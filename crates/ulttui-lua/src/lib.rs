@@ -11,4 +11,7 @@ pub mod runner;
 pub mod script;
 
 pub use runner::LuaApp;
-pub use script::{Command, ExecGrant, Reload, Script, ScriptError, ScriptMsg, ScriptOptions};
+pub use script::{
+    Command, ExecGrant, Reload, Script, ScriptError, ScriptMsg, ScriptOptions, NEED_SUBCOMMAND,
+    PROGRAM_RUNNERS,
+};

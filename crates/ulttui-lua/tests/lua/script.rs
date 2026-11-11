@@ -265,6 +265,63 @@ fn exec_grants_are_command_line_prefixes_compared_as_written() {
 }
 
 #[test]
+fn grants_on_program_runners_are_refused_and_point_to_allow_exec() {
+    // One of each class, by name and by path.
+    for runner in [
+        "sh",
+        "/bin/sh",
+        "bash -c",
+        "zsh",
+        "env",
+        "/usr/bin/env FOO=1",
+        "xargs -0",
+        "sudo",
+        "timeout 5",
+        "nohup",
+        "ssh host",
+        "python3 -c",
+        "/usr/bin/python3",
+        "node",
+        "awk",
+        "busybox sh",
+        "ulttyctl",
+        "/opt/ultty/ulttyctl",
+        "ulttui-lua",
+    ] {
+        let error = ulttui_lua::ExecGrant::parse_grant(runner).unwrap_err();
+        assert!(error.contains("--allow-exec"), "{runner}: {error}");
+        assert!(error.contains("--exec"), "{runner}: {error}");
+    }
+    assert_eq!(
+        ulttui_lua::ExecGrant::parse_grant("/bin/sh").unwrap_err(),
+        "--exec \"/bin/sh\": sh runs whatever it is told to, so this grant would allow anything; say so with --allow-exec"
+    );
+    assert_eq!(
+        ulttui_lua::ExecGrant::parse_grant("ulttyctl").unwrap_err(),
+        "--exec \"ulttyctl\": a bare ulttyctl can open panes running anything; grant one command such as --exec 'ulttyctl --json panes', or allow anything with --allow-exec"
+    );
+    // A subcommand makes ulttyctl one fixed command; other programs are
+    // allowed bare, broad as git is.
+    for allowed in [
+        "ulttyctl --json panes",
+        "ulttyctl panes",
+        "git status",
+        "git",
+        "ls -l",
+        "cargo test",
+        "shellcheck",
+        "envsubst",
+    ] {
+        assert!(
+            ulttui_lua::ExecGrant::parse_grant(allowed).is_ok(),
+            "{allowed} should be allowed"
+        );
+    }
+    assert!(ulttui_lua::PROGRAM_RUNNERS.contains(&"sh"));
+    assert!(ulttui_lua::NEED_SUBCOMMAND.contains(&"ulttyctl"));
+}
+
+#[test]
 fn exec_grants_split_on_whitespace_with_quotes() {
     assert_eq!(
         ExecGrant::parse_grant("ulttyctl --json panes").unwrap(),

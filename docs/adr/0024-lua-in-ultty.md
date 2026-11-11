@@ -89,6 +89,16 @@ grant bounds the words, not what the program does with them: a tool that
 needs more than a few fixed command lines wants `--allow-exec` and the
 user's eyes.
 
+**Known program runners are refused.** A grant whose first word (by
+basename, so `/bin/sh` too) is a shell, `env`, `xargs`, `sudo`, `timeout`,
+`ssh`, an interpreter and the like, or `ulttyctl`/`ulttui-lua` with no
+subcommand word, is an error at startup naming `--allow-exec`, so allowing
+anything is always an explicit choice. The list is one constant,
+`ulttui_lua::PROGRAM_RUNNERS` (plus `NEED_SUBCOMMAND`), documented in
+`docs/lua.md`. It is a guard against mistakes, not a sandbox: `git` with no
+subcommand is as broad and stays allowed, as does any runner not on the
+list.
+
 A denied `run{}` is a Lua error at the call, so it shows in the banner with
 the file and line and a script can `pcall` it:
 
@@ -151,8 +161,8 @@ split panes (A1 follow-up).
   a tool for the user with `ulttyctl lua open`.
 - `--allow-exec` scripts keep working; scripts that need a few fixed
   command lines state them, and get a precise error otherwise. A grant on a
-  program that runs programs is as wide as `--allow-exec`, and the docs say
-  so rather than the grant pretending otherwise.
+  program that runs programs is as wide as `--allow-exec`; the known ones
+  are refused in favour of that flag, the rest the docs name.
 - `ulttyctl split` exists for every program, not only Lua; every pane
   carries `ULTTY_PANE`, so a program can name its own pane to `ulttyctl`.
 - A tool in a split draws ANSI until sessions map to panes; the two modes
@@ -197,3 +207,7 @@ split panes (A1 follow-up).
 3. **Grant text.** A tool that pipes through `sh -c` needs `--exec sh`,
    which is `--allow-exec` in effect. Whether to refuse known program
    runners (`sh`, `env`, `ulttyctl` bare) or let the docs say what it means.
+
+   *Resolved 2026-11-11: refused.* `ulttui-lua` rejects such grants at
+   startup with an error naming `--allow-exec` (§3, `PROGRAM_RUNNERS`); the
+   broad flag is the only spelling of "anything".

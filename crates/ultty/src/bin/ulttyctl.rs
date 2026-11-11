@@ -934,9 +934,9 @@ LUA TOOLS (docs/lua.md):
                             and print its pane's id. run{{}} may start only
                             command lines beginning with an --exec <cmd>,
                             e.g. --exec 'ulttyctl --json panes'; a bare
-                            program name allows any arguments, and for
-                            ulttyctl, git, shells or interpreters that is
-                            as good as --allow-exec
+                            program name allows any arguments. ulttui-lua
+                            refuses a grant on a shell, env, sudo, an
+                            interpreter or bare ulttyctl: say --allow-exec
 
 STATUS:
     status <state> [label] [--progress <0-1|N%>] [--attention]

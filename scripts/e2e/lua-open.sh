@@ -26,7 +26,8 @@ if [ -z "${ULTTY:-}" ] || [ -z "${ULTTYCTL:-}" ]; then
 fi
 ULTTY=$(realpath "$ULTTY")
 ULTTYCTL=$(realpath "$ULTTYCTL")
-[ -x "$(dirname "$ULTTYCTL")/ulttui-lua" ] || { echo "no ulttui-lua next to $ULTTYCTL" >&2; exit 2; }
+ULTTUI_LUA="$(dirname "$ULTTYCTL")/ulttui-lua"
+[ -x "$ULTTUI_LUA" ] || { echo "no ulttui-lua next to $ULTTYCTL" >&2; exit 2; }
 
 out="${1:-$(mktemp -d)}"
 mkdir -p "$out/config/ultty" "$out/bin"
@@ -38,6 +39,15 @@ rm -f "$out"/*.json "$out"/*.log "$out"/*.luau "$out"/*.txt
 ln -sf "$ULTTYCTL" "$out/bin/ulttyctl"
 cp examples/lua/panes.luau "$out/panes.luau"
 cp examples/lua/hello.luau "$out/hello.luau"
+
+# A grant that would allow anything is refused before any UI, naming the
+# flag that says so.
+if "$ULTTUI_LUA" --exec sh "$out/hello.luau" 2>"$out/refused.txt"; then
+    echo "FAIL: ulttui-lua --exec sh started" >&2; exit 1
+fi
+grep -q -- '--allow-exec' "$out/refused.txt" ||
+    { echo "FAIL: refusing --exec sh did not name --allow-exec" >&2; cat "$out/refused.txt" >&2; exit 1; }
+echo "lua-open: --exec sh refused in favour of --allow-exec"
 # Unix socket paths are short (108 bytes), so the runtime dir must be too.
 runtime=$(mktemp -d /tmp/ultty-lua.XXXXXX)
 chmod 700 "$runtime"
