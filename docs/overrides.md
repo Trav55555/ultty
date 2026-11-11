@@ -90,6 +90,11 @@ are the ones `ulttui-lua` gives `msg.key`: the character itself (`"a"`,
 
 - For characters shift is not compared: write `"A"`, not `"shift+a"`.
 - For named keys it is: `"tab"` and `"shift+tab"` are different keys.
+- While a text input has focus, a character typed without ctrl or alt is
+  text, not a command: `"j" = "down"` and `"/" = { focus = "search" }` still
+  let you type `j` and `/` into the search box. Chords with ctrl or alt are
+  remapped there as everywhere.
+- A key held with super (meta) is never remapped.
 - A remapped key is not remapped again, so `"j" = "k"` and `"k" = "j"` swap
   them.
 - The new key goes everywhere the old one would have: to an open screen, the

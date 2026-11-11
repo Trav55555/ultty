@@ -725,6 +725,10 @@ impl View for TextInput {
         true
     }
 
+    fn accepts_text(&self) -> bool {
+        true
+    }
+
     fn on_key(&mut self, key: &crate::event::KeyEvent) -> Option<super::FocusAction> {
         use crate::event::Key;
 

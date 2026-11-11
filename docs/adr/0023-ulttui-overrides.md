@@ -89,7 +89,10 @@ Per widget id:
 Per key, in `[keys]`: a key (`ctrl+n`, `alt+x`, `shift+tab`, `j`, `enter`;
 the names are `ulttui-lua`'s) maps to another key, or to `{ focus = "<id>" }`,
 which moves focus to that widget and swallows the key. Remapping is one
-lookup: a key a remap produces is not remapped again.
+lookup: a key a remap produces is not remapped again. While a widget that
+takes text (`View::accepts_text`, set by `TextInput`) has focus, characters
+without ctrl or alt are not remapped, so they can be typed. A key held with
+meta matches no chord.
 
 ### 4. Where it is applied
 

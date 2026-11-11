@@ -307,6 +307,14 @@ pub trait View {
         false
     }
 
+    /// Whether typed characters are text for this widget (an input) rather
+    /// than commands. Plain-character key remaps from a user's overrides
+    /// (ADR 0023) are not applied while such a widget has focus. Wrappers
+    /// that forward `is_focusable` forward this too.
+    fn accepts_text(&self) -> bool {
+        false
+    }
+
     /// Apply a key to app-owned widget state.
     ///
     /// The Ulttui runner does not dispatch this through the rendered view tree:
@@ -386,6 +394,10 @@ impl<T: View> View for &T {
 
     fn is_focusable(&self) -> bool {
         (*self).is_focusable()
+    }
+
+    fn accepts_text(&self) -> bool {
+        (*self).accepts_text()
     }
 
     fn scroll_offset(&self) -> Option<(f32, f32)> {

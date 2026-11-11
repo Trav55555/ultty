@@ -231,6 +231,10 @@ impl<V: View> View for Semantic<V> {
         self.child.is_focusable()
     }
 
+    fn accepts_text(&self) -> bool {
+        self.child.accepts_text()
+    }
+
     fn on_key(&mut self, key: &KeyEvent) -> Option<FocusAction> {
         self.child.on_key(key)
     }

@@ -155,12 +155,20 @@ impl KeyChord {
         Ok(chord)
     }
 
+    /// Whether `event` is this chord. A key held with meta (super) is
+    /// never matched: no chord can name it.
     fn matches(&self, event: &KeyEvent) -> bool {
         let m = event.modifiers;
         self.key == event.key
             && self.ctrl == m.ctrl
             && self.alt == m.alt
+            && !m.meta
             && (matches!(self.key, Key::Char(_)) || self.shift == m.shift)
+    }
+
+    /// A character typed without ctrl or alt: text, when an input has focus.
+    fn is_typing(&self) -> bool {
+        matches!(self.key, Key::Char(_)) && !self.ctrl && !self.alt
     }
 }
 
@@ -229,9 +237,13 @@ impl Overrides {
     }
 
     /// What the user remapped `event` to, if anything. A remapped key keeps
-    /// the event's `focused_id`.
-    pub fn remap(&self, event: &KeyEvent) -> Option<Remapped> {
-        let (_, action) = self.keys.iter().find(|(from, _)| from.matches(event))?;
+    /// the event's `focused_id`. When `typing` (the focused widget takes
+    /// text), plain characters are left alone so they can be typed.
+    pub fn remap(&self, event: &KeyEvent, typing: bool) -> Option<Remapped> {
+        let (_, action) = self
+            .keys
+            .iter()
+            .find(|(from, _)| from.matches(event) && !(typing && from.is_typing()))?;
         Some(match action {
             KeyAction::Focus(id) => Remapped::Focus(id.clone()),
             KeyAction::Key(to) => Remapped::Key(KeyEvent {
@@ -627,7 +639,8 @@ mod tests {
         )
         .unwrap();
 
-        let Some(Remapped::Key(down)) = overrides.remap(&key(Key::Char('j'), false, false, false))
+        let Some(Remapped::Key(down)) =
+            overrides.remap(&key(Key::Char('j'), false, false, false), false)
         else {
             panic!("j should remap to a key");
         };
@@ -637,33 +650,45 @@ mod tests {
 
         // Shift is not compared for characters.
         assert!(overrides
-            .remap(&key(Key::Char('j'), false, false, true))
+            .remap(&key(Key::Char('j'), false, false, true), false)
             .is_some());
         // Ctrl and alt are.
         assert!(overrides
-            .remap(&key(Key::Char('j'), true, false, false))
+            .remap(&key(Key::Char('j'), true, false, false), false)
             .is_none());
         assert!(overrides
-            .remap(&key(Key::Char('j'), false, true, false))
+            .remap(&key(Key::Char('j'), false, true, false), false)
             .is_none());
 
         let Some(Remapped::Key(ctrl_down)) =
-            overrides.remap(&key(Key::Char('n'), true, false, false))
+            overrides.remap(&key(Key::Char('n'), true, false, false), false)
         else {
             panic!("ctrl+n should remap to a key");
         };
         assert_eq!((ctrl_down.key, ctrl_down.modifiers.ctrl), (Key::Down, true));
 
         assert!(matches!(
-            overrides.remap(&key(Key::Char('/'), false, false, false)),
+            overrides.remap(&key(Key::Char('/'), false, false, false), false),
             Some(Remapped::Focus(id)) if id == "search"
         ));
-        // Shift is compared for named keys.
+        // While an input has focus, plain characters are typed, not remapped;
+        // chords with ctrl or alt still are.
         assert!(overrides
-            .remap(&key(Key::Tab, false, false, false))
+            .remap(&key(Key::Char('j'), false, false, false), true)
             .is_none());
         assert!(overrides
-            .remap(&key(Key::Tab, false, false, true))
+            .remap(&key(Key::Char('n'), true, false, false), true)
+            .is_some());
+        // A key held with meta (super) matches no chord.
+        let mut super_j = key(Key::Char('j'), false, false, false);
+        super_j.modifiers.meta = true;
+        assert!(overrides.remap(&super_j, false).is_none());
+        // Shift is compared for named keys.
+        assert!(overrides
+            .remap(&key(Key::Tab, false, false, false), false)
+            .is_none());
+        assert!(overrides
+            .remap(&key(Key::Tab, false, false, true), false)
             .is_some());
     }
 

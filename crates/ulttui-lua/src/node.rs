@@ -731,6 +731,10 @@ impl View for LuaView {
         self.inner.is_focusable()
     }
 
+    fn accepts_text(&self) -> bool {
+        self.inner.accepts_text()
+    }
+
     fn scroll_offset(&self) -> Option<(f32, f32)> {
         self.inner.scroll_offset()
     }

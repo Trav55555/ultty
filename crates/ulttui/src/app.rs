@@ -564,7 +564,8 @@ impl<A: Application> App<A> {
             return Some(event);
         };
         key_event.focused_id = self.focus.focused_id().map(str::to_string);
-        match self.overrides.overrides().remap(key_event) {
+        let typing = self.focus.focused_accepts_text();
+        match self.overrides.overrides().remap(key_event, typing) {
             None => Some(event),
             Some(Remapped::Key(remapped)) => Some(Event::Key(remapped)),
             Some(Remapped::Focus(id)) => {
@@ -2183,6 +2184,7 @@ mod async_tests {
             Column::new()
                 .child(crate::widgets::Button::new("A").id("a"))
                 .child(crate::widgets::Button::new("B").id("b"))
+                .child(crate::widgets::TextInput::new().id("search"))
         }
     }
 
@@ -2239,6 +2241,47 @@ mod async_tests {
                 (Key::Char('g'), Some("b".to_string())),
             ]
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn plain_character_remaps_leave_a_focused_input_alone() {
+        let (path, file) = override_file(
+            "typing.toml",
+            "[keys]\n\"j\" = \"down\"\n\"/\" = { focus = \"search\" }\n\"ctrl+n\" = \"down\"\n",
+        );
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut events: Vec<Option<Event>> = "/join/".chars().map(|c| key(Key::Char(c))).collect();
+        events.push(Some(Event::Key(KeyEvent {
+            key: Key::Char('n'),
+            modifiers: crate::event::Modifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+            focused_id: None,
+        })));
+        let backend = Backend::Mock(MockBackend::new(events));
+        let mut runner =
+            App::new_with_backend(KeyLogApp { keys: keys.clone() }, backend).override_file(file);
+        let rt = test_runtime();
+        runner.render().unwrap();
+
+        for _ in 0..7 {
+            assert!(runner.run_tick(&rt).unwrap());
+        }
+
+        let keys = keys.lock().unwrap();
+        let typed: String = keys
+            .iter()
+            .filter_map(|(key, focused)| match key {
+                Key::Char(c) if focused.as_deref() == Some("search") => Some(*c),
+                _ => None,
+            })
+            .collect();
+        // "/" jumped to the input; then j, o, i, n and "/" were typed into it.
+        assert_eq!(typed, "join/");
+        // A chord with ctrl is still remapped inside the input.
+        assert_eq!(keys.last(), Some(&(Key::Down, Some("search".to_string()))));
         let _ = std::fs::remove_file(path);
     }
 

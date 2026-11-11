@@ -73,6 +73,10 @@ impl<V: View> View for Inset<V> {
         self.child.is_focusable()
     }
 
+    fn accepts_text(&self) -> bool {
+        self.child.accepts_text()
+    }
+
     fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
         self.child.for_each_child(visit)
     }
