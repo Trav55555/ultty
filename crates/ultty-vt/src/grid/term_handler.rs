@@ -1,11 +1,11 @@
 //! Handler that applies ANSI parser actions to the Terminal.
 
-use super::{
-    decode_sixel, format_color_spec, Cell, CellFlags, CursorShape, MouseEncoding, MouseMode,
-    Terminal, TerminalImage,
-};
 use crate::ansi::{
     Action, Attribute, Color as AnsiColor, DynamicColor, Mode, NamedColor, WindowOp,
+};
+use crate::grid::{
+    decode_sixel, format_color_spec, Cell, CellFlags, CursorShape, MouseEncoding, MouseMode,
+    Terminal, TerminalImage,
 };
 
 use super::cell::{Color, UnderlineStyle};
@@ -91,7 +91,7 @@ impl<'a> TerminalHandler<'a> {
                 session_id,
                 surface_id,
                 rows,
-            } => self.terminal.place_anchor(super::Anchor {
+            } => self.terminal.place_anchor(crate::grid::Anchor {
                 session_id,
                 surface_id,
                 rows,
@@ -318,7 +318,7 @@ impl<'a> TerminalHandler<'a> {
 
             // Cursor style (DECSCUSR)
             Action::SetCursorStyle(style) => {
-                use super::CursorShape;
+                use crate::grid::CursorShape;
                 let cursor = self.terminal.grid_mut().cursor_mut();
                 match style {
                     0 | 1 => {
@@ -478,11 +478,12 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.grid_mut().reset_scroll_region();
                 self.terminal.grid_mut().set_auto_wrap(true);
                 self.terminal.grid_mut().set_insert_mode(false);
-                self.terminal.grid_mut().cursor_mut().position = super::CursorPosition::origin();
+                self.terminal.grid_mut().cursor_mut().position =
+                    crate::grid::CursorPosition::origin();
                 self.terminal.grid_mut().cursor_mut().visible = true;
                 self.terminal.grid_mut().cursor_mut().wrap_pending = false;
                 self.terminal.grid_mut().reset_tab_stops();
-                *self.terminal.modes_mut() = super::terminal::TerminalModes::default();
+                *self.terminal.modes_mut() = crate::grid::terminal::TerminalModes::default();
                 if self.terminal.is_alternate_screen() {
                     self.terminal.leave_alternate_screen();
                 }
@@ -514,7 +515,8 @@ impl<'a> TerminalHandler<'a> {
             Action::ScreenAlignmentPattern => {
                 self.terminal.grid_mut().fill_with_char('E');
                 self.terminal.grid_mut().reset_scroll_region();
-                self.terminal.grid_mut().cursor_mut().position = super::CursorPosition::origin();
+                self.terminal.grid_mut().cursor_mut().position =
+                    crate::grid::CursorPosition::origin();
                 self.terminal.grid_mut().cursor_mut().wrap_pending = false;
             }
 
@@ -797,7 +799,7 @@ impl<'a> TerminalHandler<'a> {
                     0
                 };
                 let cursor = self.terminal.grid_mut().cursor_mut();
-                cursor.position = super::CursorPosition::new(0, top);
+                cursor.position = crate::grid::CursorPosition::new(0, top);
                 cursor.wrap_pending = false;
             }
             Mode::AutoWrap => {
@@ -825,7 +827,8 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.request_column_resize(columns);
                 // Clear the screen when switching column modes (per DECCOLM spec)
                 self.terminal.grid_mut().clear();
-                self.terminal.grid_mut().cursor_mut().position = super::CursorPosition::origin();
+                self.terminal.grid_mut().cursor_mut().position =
+                    crate::grid::CursorPosition::origin();
             }
             Mode::AlternateScreen => {
                 if enabled {
@@ -986,7 +989,7 @@ fn sgr_report(attrs: &Cell) -> String {
 }
 
 /// The DECSCUSR number for a cursor's shape and blinking.
-fn cursor_style_number(cursor: &super::Cursor) -> u8 {
+fn cursor_style_number(cursor: &crate::grid::Cursor) -> u8 {
     let steady = u8::from(!cursor.blinking);
     match cursor.shape {
         CursorShape::Block => 1 + steady,
@@ -1129,7 +1132,7 @@ mod tests {
 
     #[test]
     fn copied_text_keeps_graphemes_and_skips_wide_spacers() {
-        use super::super::{SelectionMode, SelectionPoint};
+        use crate::grid::{SelectionMode, SelectionPoint};
 
         let mut term = Terminal::new(Dimensions::new(20, 2));
         process(
@@ -1416,7 +1419,7 @@ mod tests {
     /// button-event mode (1002 alone) reports only drags.
     #[test]
     fn mouse_motion_reports_drags_and_buttonless_motion_by_mode() {
-        use super::super::{MouseButton, MouseModifiers};
+        use crate::grid::{MouseButton, MouseModifiers};
         let mut term = Terminal::new(Dimensions::new(80, 24));
         let none = MouseModifiers::default();
 
@@ -1439,7 +1442,7 @@ mod tests {
 
     #[test]
     fn mouse_event_encoding_sgr() {
-        use super::super::MouseModifiers;
+        use crate::grid::MouseModifiers;
 
         let mut term = Terminal::new(Dimensions::new(80, 24));
         let no_mods = MouseModifiers::default();
@@ -1450,27 +1453,20 @@ mod tests {
 
         // Test left button press at column 10, row 5
         let event = term
-            .encode_mouse_event(super::super::MouseButton::Left, 10, 5, true, false, no_mods)
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, false, no_mods)
             .unwrap();
         assert_eq!(event, b"\x1b[<0;11;6M"); // 0-indexed to 1-indexed
 
         // Test left button release - SGR uses Left button with pressed=false
         let event = term
-            .encode_mouse_event(
-                super::super::MouseButton::Left,
-                10,
-                5,
-                false,
-                false,
-                no_mods,
-            )
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, false, false, no_mods)
             .unwrap();
         assert_eq!(event, b"\x1b[<0;11;6m"); // lowercase 'm' for release
 
         // Test scroll up
         let event = term
             .encode_mouse_event(
-                super::super::MouseButton::ScrollUp,
+                crate::grid::MouseButton::ScrollUp,
                 10,
                 5,
                 true,
@@ -1483,14 +1479,14 @@ mod tests {
         // Test motion tracking
         process(&mut term, b"\x1b[?1003h"); // Any event mode
         let event = term
-            .encode_mouse_event(super::super::MouseButton::Left, 10, 5, true, true, no_mods)
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, true, no_mods)
             .unwrap();
         assert_eq!(event, b"\x1b[<32;11;6M"); // motion flag adds 32
     }
 
     #[test]
     fn mouse_event_with_modifiers() {
-        use super::super::MouseModifiers;
+        use crate::grid::MouseModifiers;
 
         let mut term = Terminal::new(Dimensions::new(80, 24));
 
@@ -1502,7 +1498,7 @@ mod tests {
         let shift_mods = MouseModifiers::new(true, false, false, false);
         let event = term
             .encode_mouse_event(
-                super::super::MouseButton::Left,
+                crate::grid::MouseButton::Left,
                 10,
                 5,
                 true,
@@ -1516,7 +1512,7 @@ mod tests {
         let ctrl_mods = MouseModifiers::new(false, false, true, false);
         let event = term
             .encode_mouse_event(
-                super::super::MouseButton::Left,
+                crate::grid::MouseButton::Left,
                 10,
                 5,
                 true,
@@ -1529,35 +1525,21 @@ mod tests {
         // Test alt+click (adds 8 to button code)
         let alt_mods = MouseModifiers::new(false, true, false, false);
         let event = term
-            .encode_mouse_event(
-                super::super::MouseButton::Left,
-                10,
-                5,
-                true,
-                false,
-                alt_mods,
-            )
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, false, alt_mods)
             .unwrap();
         assert_eq!(event, b"\x1b[<8;11;6M"); // 0 + 8 = 8
 
         // Test shift+ctrl+alt+click (adds 4 + 8 + 16 = 28)
         let all_mods = MouseModifiers::new(true, true, true, false);
         let event = term
-            .encode_mouse_event(
-                super::super::MouseButton::Left,
-                10,
-                5,
-                true,
-                false,
-                all_mods,
-            )
+            .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, false, all_mods)
             .unwrap();
         assert_eq!(event, b"\x1b[<28;11;6M"); // 0 + 4 + 8 + 16 = 28
 
         // Test shift+middle click
         let event = term
             .encode_mouse_event(
-                super::super::MouseButton::Middle,
+                crate::grid::MouseButton::Middle,
                 10,
                 5,
                 true,

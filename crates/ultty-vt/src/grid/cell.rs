@@ -67,14 +67,6 @@ impl CellFlags {
         Self(bits)
     }
 
-    /// The flags set in both (the reference storage's history encoder
-    /// uses it).
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn intersection(self, other: CellFlags) -> CellFlags {
-        CellFlags(self.0 & other.0)
-    }
-
     /// The flags set in either; `|` for constants.
     pub(crate) const fn union(self, other: CellFlags) -> CellFlags {
         CellFlags(self.0 | other.0)

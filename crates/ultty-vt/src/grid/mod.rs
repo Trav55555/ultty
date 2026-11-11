@@ -31,12 +31,12 @@ mod buffer;
 mod cell;
 mod char_class;
 mod cluster;
+#[cfg(test)]
+mod differential;
 mod history;
 mod image;
 mod packed;
 mod palette;
-#[cfg(test)]
-mod reference;
 mod row;
 mod row_view;
 mod screen;
