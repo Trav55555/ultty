@@ -4,13 +4,15 @@
 # virtual X display with a private session bus and AT-SPI bus. The `chat`
 # example runs in Ultty: `ulttyctl regions` must show its transcript as a
 # polite live log, and after a message is typed, the bot's reply, which
-# streams word by word into a `MarkdownView::streaming(true)`, must reach
-# AT-SPI as `object:announcement` events carrying the reply once, in
-# order, polite, with nothing else announced but the reply's own node.
-# Twice: a short reply, then one with markdown blocks, inline styles, a
-# long link and a long bold phrase (each longer than the 80 bytes a lone
-# opener is held for) and a code block, none of whose markers or
-# addresses may be spoken.
+# streams word by word into a `MarkdownView::streaming(true)` with
+# `append_chunk`, must reach AT-SPI as `object:announcement` events
+# carrying the reply once, in order, polite, with nothing else announced
+# but the reply's own node. Twice: a short reply, then one with markdown
+# blocks, inline styles, a link with a title (its last word arrives as
+# plain text, after the link has begun), a task list item, a long link and
+# a long bold phrase (each longer than the 80 bytes a lone opener is held
+# for) and a code block, none of whose markers, checkboxes or addresses
+# may be spoken.
 #
 #   scripts/e2e/accessibility-chat.sh [artifact-dir]
 #
@@ -220,7 +222,7 @@ converse ping ping \
     "Bot: You said: ping. That is 4 characters, streamed to you word by word."
 converse markdown markdown \
     "Bot: Here is bold text and inline code. • first item • second item with a link
-     let x = 1; let y = 2; Read the architecture overview for every detail of how the
+     a task that is done let x = 1; let y = 2; Read the architecture overview for every detail of how the
      pieces fit together, which takes rather a long time to explain before you start.
      That was markdown, streamed word by word."
 

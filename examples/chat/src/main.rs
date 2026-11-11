@@ -19,7 +19,8 @@ const WORD_INTERVAL: Duration = Duration::from_millis(40);
 /// rest (scripts/e2e/accessibility-chat.sh checks what is announced).
 const MARKDOWN_REPLY: &str = "Here is **bold** text and `inline code`.\n\n\
 - first item\n\
-- second item with [a link](https://example.com)\n\n\
+- second item with [a link](https://example.com \"Example home\")\n\
+- [x] a task that is done\n\n\
 ```\nlet x = 1;\nlet y = 2;\n```\n\n\
 Read [the architecture overview](https://github.com/example/project/blob/main/docs/architecture/overview.md) \
 **for every detail of how the pieces fit together, which takes rather a long time to explain** \
@@ -32,10 +33,12 @@ struct ChatMessage {
     is_user: bool,
 }
 
-/// The bot reply being streamed: all of it, and how much is shown.
+/// The bot reply being streamed: all of it, how much is shown, and the
+/// view it is streamed into, a word at a time.
 struct Streaming {
     text: String,
     shown: usize,
+    view: MarkdownView,
 }
 
 struct ChatApp {
@@ -82,6 +85,7 @@ impl ChatApp {
         self.reply = Some(Streaming {
             text: reply,
             shown: 0,
+            view: MarkdownView::new("Bot: "),
         });
     }
 
@@ -95,6 +99,7 @@ impl ChatApp {
         let word_end = rest[word_start..]
             .find(char::is_whitespace)
             .map_or(rest.len(), |end| word_start + end);
+        reply.view.append_chunk(&rest[..word_end]);
         reply.shown += word_end;
         if reply.shown == reply.text.len() {
             let text = std::mem::take(&mut reply.text);
@@ -183,11 +188,7 @@ impl ChatApp {
             };
         }
         if let Some(reply) = &self.reply {
-            col = col.child(
-                MarkdownView::new(format!("Bot: {}", &reply.text[..reply.shown]))
-                    .streaming(true)
-                    .label("Bot reply"),
-            );
+            col = col.child(reply.view.clone().streaming(true).label("Bot reply"));
         }
         Semantic::new(col)
             .role(Role::Log)
