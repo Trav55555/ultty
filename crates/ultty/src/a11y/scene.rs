@@ -82,6 +82,12 @@ struct RegionSnapshot {
     /// [`SceneSnapshot::set_announcements`].
     announcements: Vec<Announcement>,
     bounds: Rect,
+    /// A `Row` of a table one of whose rows is selected, so it is
+    /// selectable even when not selected itself.
+    selectable: bool,
+    /// A `Table`'s rows and columns: its `Row` children, and the most
+    /// `Cell`s and `ColumnHeader`s in one of them.
+    table_size: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -175,8 +181,11 @@ impl SceneSnapshot {
                     x1: x0 + f64::from(layout.width) * at.cell_width,
                     y1: y0 + f64::from(layout.height) * at.cell_height,
                 },
+                selectable: false,
+                table_size: None,
             });
         }
+        describe_tables(&mut regions);
         Self {
             session,
             root: root.0,
@@ -432,6 +441,49 @@ enum RelationKind {
     Controls,
 }
 
+/// Give each `Table` in `regions` its size, and its rows `selectable`
+/// when one of them is selected: a table that selects rows, whose other
+/// rows are then selectable but not selected, as list items are.
+fn describe_tables(regions: &mut [RegionSnapshot]) {
+    let by_id: HashMap<u32, usize> = regions
+        .iter()
+        .enumerate()
+        .map(|(index, region)| (region.id, index))
+        .collect();
+    let has_role = |regions: &[RegionSnapshot], id: &u32, roles: &[Role]| {
+        by_id
+            .get(id)
+            .is_some_and(|&index| roles.contains(&regions[index].semantics.role))
+    };
+    for table in 0..regions.len() {
+        if regions[table].semantics.role != Role::Table {
+            continue;
+        }
+        let rows: Vec<usize> = regions[table]
+            .children
+            .iter()
+            .filter(|id| has_role(regions, id, &[Role::Row]))
+            .map(|id| by_id[id])
+            .collect();
+        let columns = rows
+            .iter()
+            .map(|&row| {
+                regions[row]
+                    .children
+                    .iter()
+                    .filter(|id| has_role(regions, id, &[Role::Cell, Role::ColumnHeader]))
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+        regions[table].table_size = Some((rows.len(), columns));
+        let selects_rows = rows.iter().any(|&row| regions[row].semantics.selected);
+        for row in rows {
+            regions[row].selectable = selects_rows;
+        }
+    }
+}
+
 /// A region content's text: borrowed, except rich text, whose spans are
 /// joined (a region holds at most 4 MiB).
 fn content_text(content: &Content) -> Option<Cow<'_, str>> {
@@ -516,6 +568,12 @@ fn region_node(region: &RegionSnapshot) -> Node {
         Role::TreeItem => AkRole::TreeItem,
         Role::Image => AkRole::Image,
         Role::Link => AkRole::Link,
+        Role::Table => AkRole::Table,
+        Role::Row => AkRole::Row,
+        Role::Cell => AkRole::Cell,
+        Role::ColumnHeader => AkRole::ColumnHeader,
+        Role::ComboBox => AkRole::ComboBox,
+        Role::Option => AkRole::ListBoxOption,
     };
     let mut node = Node::new(role);
     node.set_bounds(region.bounds);
@@ -535,14 +593,19 @@ fn region_node(region: &RegionSnapshot) -> Node {
     if let Some(description) = &semantics.description {
         node.set_description(capped(description));
     }
-    set_state(&mut node, semantics);
+    set_state(&mut node, semantics, region.selectable);
+    if let Some((rows, columns)) = region.table_size {
+        node.set_row_count(rows);
+        node.set_column_count(columns);
+    }
     node
 }
 
 /// The state fields: value and range, toggled, expanded, level, position
-/// in set, the flags and liveness. Out-of-range numbers are clamped as
-/// spec §10.5 says.
-fn set_state(node: &mut Node, semantics: &Semantics) {
+/// in set (a table row's or cell's index), the flags and liveness;
+/// `selectable` for a node that is selectable whatever its role.
+/// Out-of-range numbers are clamped as spec §10.5 says.
+fn set_state(node: &mut Node, semantics: &Semantics, selectable: bool) {
     if let Some(value) = semantics.value {
         let finite = [value.now, value.min, value.max]
             .iter()
@@ -571,9 +634,17 @@ fn set_state(node: &mut Node, semantics: &Semantics) {
         node.set_level(usize::from(semantics.level));
     }
     if let Some(position) = semantics.position.filter(|position| position.size > 0) {
-        let index = position.index.clamp(1, position.size);
-        node.set_position_in_set(index as usize);
-        node.set_size_of_set(position.size as usize);
+        let index = position.index.clamp(1, position.size) as usize;
+        // A row's or cell's place is its index in the table, which
+        // AccessKit counts from 0; the table carries the counts.
+        match semantics.role {
+            Role::Row => node.set_row_index(index - 1),
+            Role::Cell | Role::ColumnHeader => node.set_column_index(index - 1),
+            _ => {
+                node.set_position_in_set(index);
+                node.set_size_of_set(position.size as usize);
+            }
+        }
     }
     if semantics.busy {
         node.set_busy();
@@ -587,12 +658,18 @@ fn set_state(node: &mut Node, semantics: &Semantics) {
     if semantics.modal {
         node.set_modal();
     }
-    // Tabs, list items and tree items are selectable by role (as in
-    // ARIA), so one without the flag is "not selected" rather than
-    // unknown; other roles say nothing unless the flag is set.
+    // Tabs, list items, tree items and options are selectable by role
+    // (as in ARIA), as are the rows of a table that selects rows, so one
+    // without the flag is "not selected" rather than unknown; other roles
+    // say nothing unless the flag is set.
     if semantics.selected {
         node.set_selected(true);
-    } else if matches!(semantics.role, Role::Tab | Role::ListItem | Role::TreeItem) {
+    } else if selectable
+        || matches!(
+            semantics.role,
+            Role::Tab | Role::ListItem | Role::TreeItem | Role::Option
+        )
+    {
         node.set_selected(false);
     }
     match semantics.live {
@@ -773,6 +850,12 @@ mod tests {
             (Role::TreeItem, AkRole::TreeItem),
             (Role::Image, AkRole::Image),
             (Role::Link, AkRole::Link),
+            (Role::Table, AkRole::Table),
+            (Role::Row, AkRole::Row),
+            (Role::Cell, AkRole::Cell),
+            (Role::ColumnHeader, AkRole::ColumnHeader),
+            (Role::ComboBox, AkRole::ComboBox),
+            (Role::Option, AkRole::ListBoxOption),
         ];
         let mut scene = Scene::new();
         for (id, (role, _)) in (1..).zip(table) {
@@ -1075,6 +1158,150 @@ mod tests {
         assert_eq!(alert.live(), Some(AkLive::Assertive));
         assert_eq!(alert.value(), Some("3 errors"));
         consume(update);
+    }
+
+    #[test]
+    fn a_table_has_its_size_its_rows_and_cells_their_indices() {
+        let mut scene = Scene::new();
+        scene
+            .add(1, 0, Content::None)
+            .set_semantics(semantics(Role::Table));
+        let mut id = 2;
+        for (row, cells) in [["Name", "Age"], ["Ada", "36"], ["Bob", "25"]]
+            .into_iter()
+            .enumerate()
+        {
+            let row_id = id;
+            scene
+                .add(row_id, 1, Content::None)
+                .set_semantics(Semantics {
+                    position: Some(SetPosition {
+                        index: row as u32 + 1,
+                        size: 3,
+                    }),
+                    selected: row == 2,
+                    ..semantics(Role::Row)
+                });
+            id += 1;
+            for (column, cell) in cells.into_iter().enumerate() {
+                let role = if row == 0 {
+                    Role::ColumnHeader
+                } else {
+                    Role::Cell
+                };
+                scene.add(id, row_id, text(cell)).set_semantics(Semantics {
+                    position: Some(SetPosition {
+                        index: column as u32 + 1,
+                        size: 2,
+                    }),
+                    ..semantics(role)
+                });
+                id += 1;
+            }
+        }
+        let update = full_scene(&scene);
+
+        let table = region(&update, 1);
+        assert_eq!(table.role(), AkRole::Table);
+        assert_eq!(
+            (table.row_count(), table.column_count()),
+            (Some(3), Some(2))
+        );
+        let header = region(&update, 2);
+        assert_eq!(header.role(), AkRole::Row);
+        assert_eq!(header.row_index(), Some(0));
+        assert_eq!(
+            header.position_in_set(),
+            None,
+            "rows are indexed, not in a set"
+        );
+        assert_eq!(
+            header.is_selected(),
+            Some(false),
+            "the table selects rows, so every row is selectable"
+        );
+        let age = region(&update, 4);
+        assert_eq!(age.role(), AkRole::ColumnHeader);
+        assert_eq!((age.label(), age.column_index()), (Some("Age"), Some(1)));
+        let bob = region(&update, 8);
+        assert_eq!((bob.row_index(), bob.is_selected()), (Some(2), Some(true)));
+        let cell = region(&update, 9);
+        assert_eq!(cell.role(), AkRole::Cell);
+        assert_eq!((cell.label(), cell.column_index()), (Some("Bob"), Some(0)));
+        consume(update);
+    }
+
+    #[test]
+    fn rows_of_a_table_that_selects_none_say_nothing_about_selection() {
+        let mut scene = Scene::new();
+        scene
+            .add(1, 0, Content::None)
+            .set_semantics(semantics(Role::Table));
+        scene
+            .add(2, 1, Content::None)
+            .set_semantics(semantics(Role::Row));
+        let update = full_scene(&scene);
+        assert_eq!(region(&update, 2).is_selected(), None);
+        assert_eq!(
+            (
+                region(&update, 1).row_count(),
+                region(&update, 1).column_count()
+            ),
+            (Some(1), Some(0))
+        );
+    }
+
+    #[test]
+    fn a_combo_box_has_its_value_and_its_options_their_selection() {
+        let mut scene = Scene::new();
+        scene.add(1, 0, Content::None).set_semantics(Semantics {
+            label: Some("Colour".to_owned()),
+            value_text: Some("Red".to_owned()),
+            expanded: Expanded::Expanded,
+            ..semantics(Role::ComboBox)
+        });
+        for (index, name) in ["Red", "Green"].into_iter().enumerate() {
+            let id = index as u32 + 2;
+            scene.add(id, 1, Content::None).set_semantics(Semantics {
+                label: Some(name.to_owned()),
+                position: Some(SetPosition {
+                    index: index as u32 + 1,
+                    size: 2,
+                }),
+                selected: index == 1,
+                ..semantics(Role::Option)
+            });
+        }
+        let update = full_scene(&scene);
+
+        let combo = region(&update, 1);
+        assert_eq!(combo.role(), AkRole::ComboBox);
+        assert_eq!(
+            (combo.label(), combo.value(), combo.is_expanded()),
+            (Some("Colour"), Some("Red"), Some(true))
+        );
+        let red = region(&update, 2);
+        assert_eq!(red.role(), AkRole::ListBoxOption);
+        assert_eq!(red.is_selected(), Some(false), "options are selectable");
+        let green = region(&update, 3);
+        assert_eq!(
+            (green.is_selected(), green.position_in_set()),
+            (Some(true), Some(2))
+        );
+
+        // The combo box is AccessKit's selection container for its options.
+        let tree = consume(update);
+        let state = tree.state();
+        let combo = state
+            .node_by_tree_local_id(region_node_id(7, 1), accesskit::TreeId::ROOT)
+            .expect("the combo box");
+        assert!(combo.is_container_with_selectable_children());
+        let selected: Vec<_> = combo
+            .items(|_| accesskit_consumer::FilterResult::Include)
+            .filter(|item| item.is_selected() == Some(true))
+            .map(|item| item.label())
+            .collect();
+        assert_eq!(selected, [Some("Green".to_owned())]);
     }
 
     #[test]
