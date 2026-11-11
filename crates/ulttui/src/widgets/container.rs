@@ -85,6 +85,7 @@ fn render_style_block(style: &ProtoStyle, frame: &mut Frame, area: Rect) -> Rect
 
 /// Vertical flex container.
 pub struct Column {
+    id: Option<String>,
     constraints: Constraints,
     style: ProtoStyle,
     children: Vec<Box<dyn View>>,
@@ -109,8 +110,16 @@ impl std::fmt::Debug for Column {
 }
 
 impl Column {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self {
+            id: None,
             constraints: Constraints {
                 display: Display::Flex,
                 flex_direction: FlexDirection::Column,
@@ -222,6 +231,10 @@ impl Column {
 }
 
 impl View for Column {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         self.constraints.clone()
     }
@@ -320,6 +333,7 @@ impl View for Column {
 
 /// Horizontal flex container.
 pub struct Row {
+    id: Option<String>,
     constraints: Constraints,
     style: ProtoStyle,
     children: Vec<Box<dyn View>>,
@@ -344,8 +358,16 @@ impl std::fmt::Debug for Row {
 }
 
 impl Row {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self {
+            id: None,
             constraints: Constraints {
                 display: Display::Flex,
                 flex_direction: FlexDirection::Row,
@@ -425,6 +447,10 @@ impl Row {
 }
 
 impl View for Row {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         self.constraints.clone()
     }
@@ -522,6 +548,7 @@ impl View for Row {
 
 /// Z-ordered stack container.
 pub struct Stack {
+    id: Option<String>,
     constraints: Constraints,
     children: Vec<Box<dyn View>>,
 }
@@ -542,8 +569,16 @@ impl std::fmt::Debug for Stack {
 }
 
 impl Stack {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self {
+            id: None,
             constraints: Constraints {
                 display: Display::Flex,
                 flex_direction: FlexDirection::Column,
@@ -566,6 +601,10 @@ impl Stack {
 }
 
 impl View for Stack {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         self.constraints.clone()
     }

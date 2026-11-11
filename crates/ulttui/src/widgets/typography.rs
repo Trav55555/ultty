@@ -15,13 +15,22 @@ use ultty_protocol::{Constraints, Content, Dimension, Style as ProtoStyle};
 /// For assistive technology it is a heading, of level 1 unless
 /// [`Title::level`] says otherwise.
 pub struct Title {
+    id: Option<String>,
     text: String,
     level: u8,
 }
 
 impl Title {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new(text: impl Into<String>) -> Self {
         Self {
+            id: None,
             text: expand_tabs(&text.into()).into_owned(),
             level: 1,
         }
@@ -35,6 +44,10 @@ impl Title {
 }
 
 impl View for Title {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn semantics(&self) -> ultty_protocol::Semantics {
         ultty_protocol::Semantics {
             role: ultty_protocol::Role::Heading,
@@ -74,18 +87,31 @@ impl View for Title {
 
 /// Standard body text. Uses `text_body` color.
 pub struct Body {
+    id: Option<String>,
     text: String,
 }
 
 impl Body {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new(text: impl Into<String>) -> Self {
         Self {
+            id: None,
             text: expand_tabs(&text.into()).into_owned(),
         }
     }
 }
 
 impl View for Body {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         Constraints {
             width: Dimension::Cells(crate::overrides::text_or(&self.text).chars().count() as f32),
@@ -115,18 +141,31 @@ impl View for Body {
 
 /// De-emphasized text. Uses `text_muted` color.
 pub struct Muted {
+    id: Option<String>,
     text: String,
 }
 
 impl Muted {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new(text: impl Into<String>) -> Self {
         Self {
+            id: None,
             text: expand_tabs(&text.into()).into_owned(),
         }
     }
 }
 
 impl View for Muted {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         Constraints {
             width: Dimension::Cells(crate::overrides::text_or(&self.text).chars().count() as f32),
@@ -156,18 +195,31 @@ impl View for Muted {
 
 /// Emphasized text. Uses `text_accent` color, bold.
 pub struct Accent {
+    id: Option<String>,
     text: String,
 }
 
 impl Accent {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new(text: impl Into<String>) -> Self {
         Self {
+            id: None,
             text: expand_tabs(&text.into()).into_owned(),
         }
     }
 }
 
 impl View for Accent {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         Constraints {
             width: Dimension::Cells(crate::overrides::text_or(&self.text).chars().count() as f32),

@@ -14,6 +14,7 @@ use crate::{impl_vim_ext, impl_vim_handler_accessors};
 use ultty_protocol::{AppMessage, Constraints, Display, FlexDirection, OverflowAxis, RegionId};
 
 pub struct ScrollView {
+    id: Option<String>,
     constraints: Constraints,
     child: Option<Box<dyn View>>,
     scroll_x: f32,
@@ -55,6 +56,7 @@ impl Default for ScrollView {
             ..Default::default()
         };
         Self {
+            id: None,
             constraints,
             child: None,
             scroll_x: 0.0,
@@ -72,6 +74,13 @@ impl Default for ScrollView {
 }
 
 impl ScrollView {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -275,6 +284,10 @@ impl ScrollView {
 }
 
 impl View for ScrollView {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         self.constraints.clone()
     }

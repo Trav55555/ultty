@@ -14,13 +14,22 @@ const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"
 /// Animated spinner indicator.
 #[derive(Debug, Clone)]
 pub struct Spinner {
+    id: Option<String>,
     frame: usize,
     label: Option<String>,
 }
 
 impl Spinner {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self {
+            id: None,
             frame: 0,
             label: None,
         }
@@ -48,6 +57,10 @@ impl Default for Spinner {
 }
 
 impl View for Spinner {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         Constraints {
             width: Dimension::Cells(1.0),

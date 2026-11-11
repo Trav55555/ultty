@@ -16,6 +16,7 @@ use ultty_protocol::{
 /// A tab bar widget.
 #[derive(Default)]
 pub struct Tabs {
+    id: Option<String>,
     labels: Vec<String>,
     active: usize,
 }
@@ -30,6 +31,13 @@ impl std::fmt::Debug for Tabs {
 }
 
 impl Tabs {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -80,6 +88,10 @@ impl Tabs {
 }
 
 impl View for Tabs {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         Constraints {
             display: Display::Flex,

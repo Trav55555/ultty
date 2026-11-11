@@ -12,6 +12,7 @@ use ultty_protocol::{
 /// Arranges children in a docked layout with optional top, bottom, left, right
 /// regions surrounding a center content area.
 pub struct DockLayout {
+    id: Option<String>,
     top: Option<Box<dyn View>>,
     bottom: Option<Box<dyn View>>,
     left: Option<Box<dyn View>>,
@@ -26,8 +27,16 @@ impl Default for DockLayout {
 }
 
 impl DockLayout {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new() -> Self {
         Self {
+            id: None,
             top: None,
             bottom: None,
             left: None,
@@ -83,6 +92,10 @@ impl DockLayout {
 }
 
 impl View for DockLayout {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn constraints(&self) -> Constraints {
         Constraints {
             display: Display::Flex,

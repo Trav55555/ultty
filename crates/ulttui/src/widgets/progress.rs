@@ -12,13 +12,22 @@ use ultty_protocol::{Content, ProgressWidget, WidgetContent};
 /// A horizontal progress bar.
 #[derive(Debug)]
 pub struct ProgressBar {
+    id: Option<String>,
     value: f32,
     label: Option<String>,
 }
 
 impl ProgressBar {
+    /// Give this widget an id so focus, `ulttyctl regions` and user overrides
+    /// (ADR 0023) can reach it.
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     pub fn new(value: f32) -> Self {
         Self {
+            id: None,
             value: value.clamp(0.0, 100.0),
             label: None,
         }
@@ -35,6 +44,10 @@ impl ProgressBar {
 }
 
 impl View for ProgressBar {
+    fn widget_id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
     fn content(&self) -> Content {
         Content::Widget(WidgetContent::Progress(ProgressWidget {
             value: self.value / 100.0,
