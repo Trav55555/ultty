@@ -17,7 +17,7 @@ use crate::widgets::View;
 /// Terminal restore helpers for the ANSI backend.
 pub use ansi::{install_panic_hook, restore_terminal};
 /// Native Ultty protocol backend.
-pub use native::NativeBackend;
+pub use native::{NativeBackend, OverridePush};
 
 /// Backend for rendering.
 pub enum Backend {
@@ -165,6 +165,36 @@ impl Backend {
             Backend::Ansi(b) => b.poll_event(),
             #[cfg(any(test, feature = "test-utils"))]
             Backend::Mock(b) => b.poll_event(),
+        }
+    }
+
+    /// The next override the terminal pushed into this app (ADR 0023 §9),
+    /// read ahead by [`Backend::poll_event`]. Only a native session can
+    /// carry one; an ANSI app reads its files.
+    pub fn take_override_push(&mut self) -> Option<OverridePush> {
+        match self {
+            Backend::Native(b) => b.take_override_push(),
+            Backend::Ansi(_) => None,
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(b) => b.take_override_push(),
+        }
+    }
+
+    /// Tell the terminal whether a pushed override was applied; `error` is
+    /// why not.
+    pub fn report_override_result(
+        &mut self,
+        request_id: u32,
+        error: Option<String>,
+    ) -> crate::Result<()> {
+        match self {
+            Backend::Native(b) => b.send_override_result(request_id, error),
+            Backend::Ansi(_) => Ok(()),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(b) => {
+                b.send_override_result(request_id, error);
+                Ok(())
+            }
         }
     }
 }

@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use bytes::BytesMut;
 use ultty_protocol::{
     AppMessage, ComputedRegionLayout, Content, FrameId, InputEvent, InputType, Key, Modifiers,
-    RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_INPUT_CURSOR, CAP_REGION_METADATA,
-    CAP_SEMANTICS, CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL,
-    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    PushedOverride, RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_INPUT_CURSOR,
+    CAP_REGION_METADATA, CAP_SEMANTICS, CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY, EVENT_MOUSE,
+    EVENT_SCROLL, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
 use crate::event::Event;
@@ -72,7 +72,14 @@ pub struct NativeBackend {
     /// The region last reported to the terminal as focused.
     reported_focus: Option<RegionId>,
     pending_events: VecDeque<Event>,
+    /// Overrides the terminal pushed (ADR 0023 §9), for the runner to
+    /// apply and answer.
+    pending_overrides: VecDeque<OverridePush>,
 }
+
+/// A `SetOverride` from the terminal: the request to answer and what to
+/// put in force (`None` clears the pushed override).
+pub type OverridePush = (u32, Option<PushedOverride>);
 
 impl NativeBackend {
     pub fn new() -> Self {
@@ -91,6 +98,7 @@ impl NativeBackend {
             retained: RetainedTree::new(),
             reported_focus: None,
             pending_events: VecDeque::new(),
+            pending_overrides: VecDeque::new(),
         }
     }
 
@@ -359,7 +367,22 @@ impl NativeBackend {
     /// Whether events were read ahead (with a message that carried several,
     /// or an earlier read).
     pub fn has_pending_events(&self) -> bool {
-        !self.pending_events.is_empty()
+        !self.pending_events.is_empty() || !self.pending_overrides.is_empty()
+    }
+
+    /// The next override the terminal pushed, if any (ADR 0023 §9).
+    pub fn take_override_push(&mut self) -> Option<OverridePush> {
+        self.pending_overrides.pop_front()
+    }
+
+    /// Answer a `SetOverride`: `error` is why it was not applied, if it
+    /// was not.
+    pub fn send_override_result(
+        &mut self,
+        request_id: u32,
+        error: Option<String>,
+    ) -> crate::Result<()> {
+        self.send_message(&AppMessage::OverrideResult { request_id, error })
     }
 
     /// When the next in-band heartbeat is due.
@@ -497,6 +520,9 @@ impl NativeBackend {
                     Err(crate::Error::Io(err)) if terminal_gone(&err) => {}
                     other => other?,
                 },
+                TerminalMessage::SetOverride { request_id, pushed } => {
+                    self.pending_overrides.push_back((request_id, pushed));
+                }
                 _ => {}
             }
         }

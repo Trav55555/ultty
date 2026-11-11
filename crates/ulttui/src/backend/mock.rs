@@ -4,9 +4,10 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use super::OverridePush;
 use crate::event::Event;
 use crate::widgets::{render_view_messages, View};
-use ultty_protocol::AppMessage;
+use ultty_protocol::{AppMessage, PushedOverride};
 
 /// A mock backend that replays pre-programmed events and captures render calls.
 ///
@@ -42,6 +43,10 @@ pub struct MockBackend {
     polls: Arc<AtomicUsize>,
     /// Events that were actually dispatched (for assertion).
     pub dispatched_events: Vec<Event>,
+    /// Overrides "the terminal" pushed, taken by the runner in order.
+    pushed_overrides: VecDeque<OverridePush>,
+    /// The runner's answers to them: request id and the error, if any.
+    pub override_results: Vec<(u32, Option<String>)>,
 }
 
 impl MockBackend {
@@ -58,7 +63,24 @@ impl MockBackend {
             idle_polls: 0,
             blocking: false,
             polls: Arc::new(AtomicUsize::new(0)),
+            pushed_overrides: VecDeque::new(),
+            override_results: Vec::new(),
         }
+    }
+
+    /// Queue an override as the terminal would push it (ADR 0023 §9); the
+    /// runner takes it on its next pass and records its answer in
+    /// [`MockBackend::override_results`].
+    pub fn push_override(&mut self, request_id: u32, pushed: Option<PushedOverride>) {
+        self.pushed_overrides.push_back((request_id, pushed));
+    }
+
+    pub fn take_override_push(&mut self) -> Option<OverridePush> {
+        self.pushed_overrides.pop_front()
+    }
+
+    pub fn send_override_result(&mut self, request_id: u32, error: Option<String>) {
+        self.override_results.push((request_id, error));
     }
 
     /// Once the scripted events run out, behave like an idle terminal: no
@@ -78,7 +100,10 @@ impl MockBackend {
 
     /// Whether the event loop should poll again without sleeping.
     pub fn has_pending_events(&self) -> bool {
-        !self.blocking || !self.events.is_empty() || self.pending_error.is_some()
+        !self.blocking
+            || !self.events.is_empty()
+            || self.pending_error.is_some()
+            || !self.pushed_overrides.is_empty()
     }
 
     /// Keep polling `None` after the scripted events run out instead of

@@ -524,6 +524,23 @@ impl<A: Application> App<A> {
             }
         }
 
+        // 2. Overrides pushed through the terminal (ADR 0023 §9): put each
+        // in force, or tell the terminal why not; the app never sees them.
+        while let Some((request_id, pushed)) = self.backend.take_override_push() {
+            let error = match self.overrides.push(pushed.as_ref()) {
+                Ok(changed) => {
+                    tracing::info!(cleared = pushed.is_none(), "applied pushed override");
+                    self.needs_render |= changed;
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "rejected pushed override");
+                    Some(error)
+                }
+            };
+            self.backend.report_override_result(request_id, error)?;
+        }
+
         // 3. Drain message queue (update → Cmd scheduling)
         if self.drain_messages(rt) {
             self.needs_render = true;
@@ -2385,6 +2402,92 @@ mod async_tests {
         };
         let labels = format!("{:?}", mock.rendered_messages.last().unwrap());
         assert!(labels.contains("label: \"A\"") && labels.contains("label: \"B\""));
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn toml_push(source: &str) -> Option<ultty_protocol::PushedOverride> {
+        Some(ultty_protocol::PushedOverride {
+            format: ultty_protocol::OverrideFormat::Toml,
+            source: source.to_string(),
+        })
+    }
+
+    /// The button labels of the mock's last render, in order.
+    fn rendered_labels(runner: &App<KeyLogApp>) -> Vec<String> {
+        let Backend::Mock(mock) = &runner.backend else {
+            panic!("mock backend");
+        };
+        mock.last_messages()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                ultty_protocol::AppMessage::SetContent {
+                    content:
+                        ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Button(b)),
+                    ..
+                } => Some(b.label.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn override_results(runner: &App<KeyLogApp>) -> Vec<(u32, Option<String>)> {
+        let Backend::Mock(mock) = &runner.backend else {
+            panic!("mock backend");
+        };
+        mock.override_results.clone()
+    }
+
+    /// An override the terminal pushes (ADR 0023 §9) shows on the next
+    /// frame without any event, is answered, and a clear takes it away.
+    #[test]
+    fn a_pushed_override_applies_on_the_next_frame_and_clears() {
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut mock = MockBackend::new(vec![]).blocking_when_exhausted();
+        mock.push_override(7, toml_push("[widget.b]\ntext = \"Pushed\"\n"));
+        let mut runner = App::new_with_backend(KeyLogApp { keys }, Backend::Mock(mock));
+        let rt = test_runtime();
+        runner.render().unwrap();
+        assert_eq!(rendered_labels(&runner), ["A", "B"]);
+
+        assert!(runner.run_tick(&rt).unwrap());
+        assert_eq!(rendered_labels(&runner), ["A", "Pushed"]);
+        assert_eq!(override_results(&runner), [(7, None)]);
+
+        let Backend::Mock(mock) = &mut runner.backend else {
+            panic!("mock backend");
+        };
+        mock.push_override(8, None);
+        assert!(runner.run_tick(&rt).unwrap());
+        assert_eq!(rendered_labels(&runner), ["A", "B"]);
+        assert_eq!(override_results(&runner), [(7, None), (8, None)]);
+    }
+
+    /// A push that does not parse is answered with the reason and leaves
+    /// the overrides in force, from the file and from an earlier push.
+    #[test]
+    fn a_bad_pushed_override_is_reported_and_changes_nothing() {
+        let (path, file) = override_file("pushed-base.toml", "[widget.a]\ntext = \"File\"\n");
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut mock = MockBackend::new(vec![]).blocking_when_exhausted();
+        mock.push_override(1, toml_push("[widget.b]\ntext = \"Pushed\"\n"));
+        mock.push_override(2, toml_push("[widget.b]\ntext = 3\n"));
+        let mut runner =
+            App::new_with_backend(KeyLogApp { keys }, Backend::Mock(mock)).override_file(file);
+        let rt = test_runtime();
+        runner.render().unwrap();
+
+        assert!(runner.run_tick(&rt).unwrap());
+
+        assert_eq!(rendered_labels(&runner), ["File", "Pushed"]);
+        let results = override_results(&runner);
+        assert_eq!(results[0], (1, None));
+        assert_eq!(results[1].0, 2);
+        let error = results[1].1.as_deref().expect("the bad push is reported");
+        assert!(
+            error.contains("widget.b.text") && error.contains("expected a string"),
+            "{error}"
+        );
         let _ = std::fs::remove_file(path);
     }
 }
