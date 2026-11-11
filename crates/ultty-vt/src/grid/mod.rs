@@ -42,6 +42,7 @@ pub mod proto;
 mod reference;
 mod row;
 mod row_view;
+mod screen;
 mod term_handler;
 mod terminal;
 
@@ -58,7 +59,8 @@ pub use terminal::{
     DEFAULT_TERMINAL_NAME, MAX_ANCHOR_EVENTS, MAX_QUEUED_REFUSALS,
 };
 
-use packed::{PackedCell, PackedRow, Style, StyleKey, StyleTable};
+use packed::{PackedCell, Style, StyleKey, StyleTable};
+use screen::ScreenPage;
 
 /// Maximum number of combining marks stored for a single cell.
 ///
@@ -197,9 +199,9 @@ impl ScrollRegion {
 /// Use [`Buffer`] for a grid with scrollback history.
 #[derive(Debug, Clone)]
 pub struct Grid {
-    /// Screen rows of packed cells, whose style ids are in `styles`.
-    rows: Vec<PackedRow>,
-    /// The styles `rows` use that do not fit in a cell (ADR 0022 §1).
+    /// The screen rows' packed cells, whose style ids are in `styles`.
+    page: ScreenPage,
+    /// The styles `page` uses that do not fit in a cell (ADR 0022 §1).
     styles: StyleTable,
     dims: Dimensions,
     cursor: Cursor,
@@ -257,13 +259,12 @@ struct LastPrint {
 impl Grid {
     /// Create a new grid with the given dimensions.
     pub fn new(dims: Dimensions) -> Self {
-        let rows = (0..dims.rows).map(|_| PackedRow::new(dims.cols)).collect();
         let dirty = vec![true; dims.rows as usize];
 
         let tab_stops: std::collections::BTreeSet<u16> = (0..dims.cols).step_by(8).collect();
 
         Self {
-            rows,
+            page: ScreenPage::new(dims.cols, dims.rows),
             styles: StyleTable::new(dims.area()),
             dims,
             cursor: Cursor::default(),
@@ -378,8 +379,10 @@ impl Grid {
     pub fn fill_with_char(&mut self, c: char) {
         // Every cell starts from a blank, so no wide-char, spacer, grapheme
         // or style from earlier content survives the fill.
-        for row in &mut self.rows {
-            row.fill_with_char(c);
+        for row in 0..self.dims.rows {
+            if let Some(mut row) = self.page.row_mut(row) {
+                row.fill_with_char(c);
+            }
         }
         self.mark_all_dirty();
     }
@@ -426,7 +429,7 @@ impl Grid {
     #[inline]
     fn collect_styles_if_due(&mut self) {
         if self.styles.is_due() {
-            self.styles.collect(&mut self.rows);
+            self.styles.collect(&mut self.page);
         }
     }
 
@@ -471,7 +474,7 @@ impl Grid {
 
     /// Add a combining character to a cell.
     fn add_combining_char(&mut self, row: u16, col: u16, c: char) {
-        if let Some(r) = self.rows.get_mut(row as usize) {
+        if let Some(mut r) = self.page.row_mut(row) {
             r.push_grapheme_char(col, c, MAX_COMBINING_PER_CELL);
         }
         self.mark_dirty(row);
@@ -479,12 +482,12 @@ impl Grid {
 
     /// Get combining characters for a cell.
     pub fn combining_chars(&self, row: u16, col: u16) -> Option<&[char]> {
-        self.rows.get(row as usize)?.grapheme_extra(col)
+        self.page.row(row)?.grapheme_extra(col)
     }
 
     /// Get the full grapheme for a cell (base char + combining chars).
     pub fn grapheme(&self, row: u16, col: u16) -> Option<String> {
-        self.rows.get(row as usize)?.grapheme(col)
+        self.page.row(row)?.grapheme(col)
     }
 
     /// Check the grid's structural invariants: row count and widths match
@@ -492,10 +495,11 @@ impl Grid {
     /// row is internally consistent (see [`Row::check_integrity`]).
     pub fn check_integrity(&self) -> Result<(), String> {
         let Dimensions { cols, rows } = self.dims;
-        if self.rows.len() != rows as usize {
+        if self.page.rows() != rows || self.page.cols() != cols {
             return Err(format!(
-                "grid has {} rows, dimensions say {rows}",
-                self.rows.len()
+                "screen page is {}x{}, dimensions say {cols}x{rows}",
+                self.page.cols(),
+                self.page.rows()
             ));
         }
         if self.dirty.len() != rows as usize {
@@ -522,16 +526,8 @@ impl Grid {
                 return Err(format!("scroll region {region:?} outside {rows} rows"));
             }
         }
-        for (index, row) in self.rows.iter().enumerate() {
-            if row.width() != cols {
-                return Err(format!(
-                    "row {index} is {} wide, grid is {cols}",
-                    row.width()
-                ));
-            }
-            row.check_integrity(MAX_COMBINING_PER_CELL, &self.styles)
-                .map_err(|e| format!("row {index}: {e}"))?;
-        }
+        self.page
+            .check_integrity(MAX_COMBINING_PER_CELL, &self.styles)?;
         // The cached template key, if current, names the attributes' style.
         let (key, generation) = self.attrs_key;
         if generation == self.styles.generation() {
@@ -551,8 +547,7 @@ impl Grid {
 
     /// Get a row by index.
     pub fn row(&self, index: u16) -> Option<RowView<'_>> {
-        let row = self.rows.get(index as usize)?;
-        Some(RowView::screen(row, &self.styles))
+        Some(RowView::screen(self.page.row(index)?, &self.styles))
     }
 
     /// A row to change: marked dirty, and edited through [`RowMut`].
@@ -560,7 +555,7 @@ impl Grid {
         self.mark_dirty(index);
         // The handle interns styles without collecting.
         self.collect_styles_if_due();
-        let row = self.rows.get_mut(index as usize)?;
+        let row = self.page.row_mut(index)?;
         Some(RowMut::new(row, &mut self.styles))
     }
 
@@ -595,7 +590,7 @@ impl Grid {
 
     /// Get a cell at the given position.
     pub fn cell(&self, col: u16, row: u16) -> Option<Cell> {
-        let cell = self.rows.get(row as usize)?.get(col)?;
+        let cell = self.page.row(row)?.get(col)?;
         Some(self.unpack(cell))
     }
 
@@ -696,7 +691,7 @@ impl Grid {
         use unicode_segmentation::UnicodeSegmentation;
 
         let (row, col) = (last.base_row, last.base_col);
-        let Some(r) = self.rows.get(row as usize) else {
+        let Some(r) = self.page.row(row) else {
             return false;
         };
         let Some(base) = r.get(col) else {
@@ -722,7 +717,7 @@ impl Grid {
             .map_or(cluster::Tail::Other, |last| last.tail);
         let room = col.saturating_add(1) < self.dims.cols;
         let at_cursor = !self.cursor.wrap_pending && self.cursor.position.col == col + 1;
-        let Some(r) = self.rows.get_mut(row as usize) else {
+        let Some(mut r) = self.page.row_mut(row) else {
             return;
         };
         let tail = if r.push_grapheme_char(col, c, MAX_COMBINING_PER_CELL) {
@@ -817,7 +812,7 @@ impl Grid {
             return false;
         }
         let key = self.template_key();
-        let Some(r) = self.rows.get_mut(row as usize) else {
+        let Some(mut r) = self.page.row_mut(row) else {
             return false;
         };
         if !r.write_char_in_place(col, c, width, key) {
@@ -877,7 +872,7 @@ impl Grid {
         if width > 1 && self.dims.cols < width {
             // Replace with a space to avoid infinite scroll loop
             self.mark_dirty(row);
-            if let Some(r) = self.rows.get_mut(row as usize) {
+            if let Some(mut r) = self.page.row_mut(row) {
                 if let Some(cell) = r.get(col) {
                     r.set(col, cell.with_char(' '));
                 }
@@ -912,7 +907,7 @@ impl Grid {
         };
         // Everything below touches only this row, so it is marked dirty once.
         self.mark_dirty(row);
-        let Some(r) = self.rows.get_mut(row as usize) else {
+        let Some(mut r) = self.page.row_mut(row) else {
             return;
         };
 
@@ -1002,7 +997,7 @@ impl Grid {
             let write_len = available.min(remaining.len());
             let end_col = col + write_len as u16;
             let key = self.template_key();
-            if let Some(r) = self.rows.get_mut(row as usize) {
+            if let Some(mut r) = self.page.row_mut(row) {
                 r.clear_ascii_edges(col, end_col);
                 r.write_ascii(col, &remaining[..write_len], key);
             }
@@ -1026,7 +1021,7 @@ impl Grid {
     /// move the cursor to column 0 of the next line (scrolling if needed).
     fn wrap_pending_cursor(&mut self) {
         let row = self.cursor.position.row;
-        if let Some(r) = self.rows.get_mut(row as usize) {
+        if let Some(mut r) = self.page.row_mut(row) {
             r.set_wrapped(true);
         }
 
@@ -1259,34 +1254,27 @@ impl Grid {
         }
     }
 
+    /// Erase rows `rows` with blanks in style `key`, each a change of its
+    /// own.
+    fn erase_rows_one_by_one(&mut self, rows: std::ops::RangeInclusive<u16>, key: StyleKey) {
+        for row in rows {
+            if let Some(mut r) = self.page.row_mut(row) {
+                r.erase(key);
+            }
+            self.mark_dirty(row);
+        }
+    }
+
     /// Scroll the grid up by n lines (within scroll region).
     pub fn scroll_up(&mut self, n: u16) {
         let region = self.effective_scroll_region();
         let blank = self.erase_key();
-        let n = n as usize;
-        let region_height = (region.bottom.saturating_sub(region.top) + 1) as usize;
-
-        if n >= region_height {
+        if n > region.bottom - region.top {
             // Clear the entire scroll region
-            for row_idx in region.top..=region.bottom {
-                if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                    row.erase(blank);
-                }
-                self.mark_dirty(row_idx);
-            }
+            self.erase_rows_one_by_one(region.top..=region.bottom, blank);
             return;
         }
-
-        let start = region.top as usize;
-        let end = region.bottom as usize + 1;
-        self.rows[start..end].rotate_left(n);
-
-        // Erase the bottom n rows of the region with current bg
-        for i in 0..n {
-            let row_idx = region.bottom as usize - i;
-            self.rows[row_idx].erase(blank);
-        }
-
+        self.page.rotate_up(region.top, region.bottom, n, blank);
         self.mark_rows_dirty(region.top..=region.bottom);
     }
 
@@ -1294,30 +1282,12 @@ impl Grid {
     pub fn scroll_down(&mut self, n: u16) {
         let region = self.effective_scroll_region();
         let blank = self.erase_key();
-        let n = n as usize;
-        let region_height = (region.bottom.saturating_sub(region.top) + 1) as usize;
-
-        if n >= region_height {
+        if n > region.bottom - region.top {
             // Clear the entire scroll region
-            for row_idx in region.top..=region.bottom {
-                if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                    row.erase(blank);
-                }
-                self.mark_dirty(row_idx);
-            }
+            self.erase_rows_one_by_one(region.top..=region.bottom, blank);
             return;
         }
-
-        let start = region.top as usize;
-        let end = region.bottom as usize + 1;
-        self.rows[start..end].rotate_right(n);
-
-        // Erase the top n rows of the region with current bg
-        for i in 0..n {
-            let row_idx = region.top as usize + i;
-            self.rows[row_idx].erase(blank);
-        }
-
+        self.page.rotate_down(region.top, region.bottom, n, blank);
         self.mark_rows_dirty(region.top..=region.bottom);
     }
 
@@ -1333,42 +1303,12 @@ impl Grid {
         if cursor_row < region.top || cursor_row > region.bottom {
             return;
         }
-
-        let n = n as usize;
-        let region_height = (region.bottom.saturating_sub(cursor_row) + 1) as usize;
-
-        if n >= region_height {
+        if n > region.bottom - cursor_row {
             // Clear from cursor to bottom of region
-            for row_idx in cursor_row..=region.bottom {
-                if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                    row.erase(blank);
-                }
-                self.mark_dirty(row_idx);
-            }
+            self.erase_rows_one_by_one(cursor_row..=region.bottom, blank);
             return;
         }
-
-        // Move rows down (from bottom to top to avoid overwriting)
-        for i in (0..(region_height - n)).rev() {
-            let src_row = cursor_row as usize + i;
-            let dst_row = src_row + n;
-
-            if dst_row <= region.bottom as usize {
-                let src = self.rows[src_row].clone();
-                self.rows[dst_row] = src;
-            }
-        }
-
-        // Erase the n rows at cursor position with current bg
-        for i in 0..n {
-            let row_idx = cursor_row as usize + i;
-            if row_idx <= region.bottom as usize {
-                let mut row = PackedRow::new(self.dims.cols);
-                row.erase(blank);
-                self.rows[row_idx] = row;
-            }
-        }
-
+        self.page.rotate_down(cursor_row, region.bottom, n, blank);
         self.mark_rows_dirty(cursor_row..=region.bottom);
     }
 
@@ -1384,42 +1324,12 @@ impl Grid {
         if cursor_row < region.top || cursor_row > region.bottom {
             return;
         }
-
-        let n = n as usize;
-        let region_height = (region.bottom.saturating_sub(cursor_row) + 1) as usize;
-
-        if n >= region_height {
+        if n > region.bottom - cursor_row {
             // Clear from cursor to bottom of region
-            for row_idx in cursor_row..=region.bottom {
-                if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                    row.erase(blank);
-                }
-                self.mark_dirty(row_idx);
-            }
+            self.erase_rows_one_by_one(cursor_row..=region.bottom, blank);
             return;
         }
-
-        // Move rows up
-        for i in 0..(region_height - n) {
-            let src_row = cursor_row as usize + n + i;
-            let dst_row = cursor_row as usize + i;
-
-            if src_row <= region.bottom as usize {
-                let src = self.rows[src_row].clone();
-                self.rows[dst_row] = src;
-            }
-        }
-
-        // Erase the bottom n rows of the region with current bg
-        for i in 0..n {
-            let row_idx = region.bottom as usize - i;
-            if row_idx >= cursor_row as usize {
-                let mut row = PackedRow::new(self.dims.cols);
-                row.erase(blank);
-                self.rows[row_idx] = row;
-            }
-        }
-
+        self.page.rotate_up(cursor_row, region.bottom, n, blank);
         self.mark_rows_dirty(cursor_row..=region.bottom);
     }
 
@@ -1430,11 +1340,8 @@ impl Grid {
         let blank = self.erase_key();
 
         // Erase all lines below cursor
-        for row_idx in (r + 1)..self.dims.rows {
-            if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                row.erase(blank);
-            }
-            self.mark_dirty(row_idx);
+        if r + 1 < self.dims.rows {
+            self.erase_rows_one_by_one(r + 1..=self.dims.rows - 1, blank);
         }
     }
 
@@ -1444,11 +1351,8 @@ impl Grid {
         let blank = self.erase_key();
 
         // Erase all lines above cursor
-        for row_idx in 0..r {
-            if let Some(row) = self.rows.get_mut(row_idx as usize) {
-                row.erase(blank);
-            }
-            self.mark_dirty(row_idx);
+        if r > 0 {
+            self.erase_rows_one_by_one(0..=r - 1, blank);
         }
 
         // Erase from start of current line to cursor
@@ -1466,7 +1370,7 @@ impl Grid {
             return;
         }
         let blank = self.erase_key();
-        let Some(r) = self.rows.get_mut(row as usize) else {
+        let Some(mut r) = self.page.row_mut(row) else {
             self.mark_dirty(row);
             return;
         };
@@ -1485,9 +1389,7 @@ impl Grid {
     /// Erase entire display.
     pub fn clear(&mut self) {
         let blank = self.erase_key();
-        for row in &mut self.rows {
-            row.erase(blank);
-        }
+        self.page.erase_rows(0..self.dims.rows, blank);
         self.mark_all_dirty();
     }
 
@@ -1495,7 +1397,7 @@ impl Grid {
     pub fn erase_line_right(&mut self) {
         let r = self.cursor.position.row;
         self.erase_cells(r, self.cursor.position.col, self.dims.cols);
-        if let Some(row) = self.rows.get_mut(r as usize) {
+        if let Some(mut row) = self.page.row_mut(r) {
             // Erasing to end of line means this line ends here (hard break),
             // so clear the wrapped flag. This is important for proper reflow
             // when resizing - content after an erase-to-EOL should not be
@@ -1515,7 +1417,7 @@ impl Grid {
     pub fn erase_line(&mut self) {
         let r = self.cursor.position.row;
         let blank = self.erase_key();
-        if let Some(row) = self.rows.get_mut(r as usize) {
+        if let Some(mut row) = self.page.row_mut(r) {
             row.erase(blank);
         }
         self.mark_dirty(r);
@@ -1531,19 +1433,9 @@ impl Grid {
             return;
         }
 
-        let new_cols = new_dims.cols;
-
-        if new_cols != self.dims.cols {
-            for row in &mut self.rows {
-                row.resize(new_cols);
-            }
-        }
-
-        // Add or remove rows
-        while self.rows.len() < new_dims.rows as usize {
-            self.rows.push(PackedRow::new(new_cols));
-        }
-        self.rows.truncate(new_dims.rows as usize);
+        // Rows are cut or padded at their ends, and dropped or added at
+        // the bottom.
+        self.page = self.page.resized(new_dims.cols, new_dims.rows);
 
         // Clamp cursor
         self.cursor.position.col = self
@@ -1571,26 +1463,19 @@ impl Grid {
     pub fn set_rows(&mut self, rows: Vec<Row>, new_dims: Dimensions) {
         // Every row is replaced, so no style id survives.
         self.styles.reset(new_dims.area());
-        self.rows = rows
-            .iter()
-            .take(new_dims.rows as usize)
-            .map(|row| {
-                let mut packed = PackedRow::new(0);
+        // Rows past `rows` stay blank.
+        self.page = ScreenPage::new(new_dims.cols, new_dims.rows);
+        for (index, row) in rows.iter().take(new_dims.rows as usize).enumerate() {
+            if let Some(mut packed) = self.page.row_mut(index as u16) {
                 packed.assign_row(row, &mut self.styles);
-                packed
-            })
-            .collect();
+            }
+        }
         self.resize_tab_stops(new_dims.cols);
         self.dims = new_dims;
 
         // Row indices changed, so any scroll region is meaningless now.
         // Apps that need one re-set it after SIGWINCH (xterm does the same).
         self.scroll_region = None;
-
-        // Ensure correct number of rows
-        while self.rows.len() < new_dims.rows as usize {
-            self.rows.push(PackedRow::new(new_dims.cols));
-        }
 
         // Clamp cursor position
         self.cursor.position.col = self
@@ -1617,19 +1502,23 @@ impl Grid {
             return;
         }
 
-        // Insert at beginning, then truncate from end. The rows' styles are
-        // interned without collecting, so collect first.
+        // Move every row down, dropping those that leave the bottom, and
+        // write `rows` into the top. The rows' styles are interned without
+        // collecting, so collect first.
         self.collect_styles_if_due();
-        let packed: Vec<PackedRow> = rows
-            .iter()
-            .map(|row| {
-                let mut packed = PackedRow::new(0);
-                packed.assign_row(row, &mut self.styles);
-                packed
-            })
-            .collect();
-        self.rows.splice(0..0, packed);
-        self.rows.truncate(self.dims.rows as usize);
+        let height = self.page.rows();
+        let moved = count.min(usize::from(height)) as u16;
+        if moved > 0 {
+            if moved < height {
+                self.page
+                    .rotate_down(0, height - 1, moved, StyleKey::DEFAULT);
+            }
+            for (index, row) in rows.iter().take(usize::from(moved)).enumerate() {
+                if let Some(mut packed) = self.page.row_mut(index as u16) {
+                    packed.assign_row(row, &mut self.styles);
+                }
+            }
+        }
 
         // Adjust cursor position down by the number of inserted rows
         self.cursor.position.row = self
@@ -1645,12 +1534,15 @@ impl Grid {
 
     /// Remove rows from the top (used when shrinking viewport).
     pub fn remove_top_rows(&mut self, count: usize) {
-        if count == 0 || count >= self.rows.len() {
+        let height = self.page.rows();
+        if count == 0 || count >= usize::from(height) {
             return;
         }
 
-        // Remove from the beginning
-        self.rows.drain(..count);
+        // Move the rest up; the rows that come in at the bottom are blank,
+        // and a resize that follows drops them.
+        self.page
+            .rotate_up(0, height - 1, count as u16, StyleKey::DEFAULT);
 
         // Adjust cursor position up
         self.cursor.position.row = self
@@ -1692,7 +1584,7 @@ impl Grid {
         *self.dirty.get_mut(index as usize)? = true;
         self.last_print = None;
         self.collect_styles_if_due();
-        let row = self.rows.get_mut(index as usize)?;
+        let row = self.page.row_mut(index)?;
         Some(RowMut::new(row, &mut self.styles))
     }
 
@@ -1728,7 +1620,7 @@ impl Grid {
 
     /// Iterate over all rows.
     pub fn rows(&self) -> impl Iterator<Item = RowView<'_>> {
-        self.rows
+        self.page
             .iter()
             .map(|row| RowView::screen(row, &self.styles))
     }
@@ -2731,8 +2623,8 @@ mod tests {
                 proptest::prop_assert_eq!(fast.cursor.wrap_pending, general.cursor.wrap_pending);
                 proptest::prop_assert_eq!(fast.last_char, general.last_char);
                 proptest::prop_assert_eq!(fast.last_print, general.last_print);
-                for (a, b) in fast.rows.iter().zip(&general.rows) {
-                    proptest::prop_assert!(a.cells().eq(b.cells()), "{a:?}\n!=\n{b:?}");
+                for (a, b) in fast.page.iter().zip(general.page.iter()) {
+                    proptest::prop_assert!(a.cells() == b.cells(), "{:?}\n!=\n{:?}", a.cells(), b.cells());
                     for col in 0..cols {
                         proptest::prop_assert_eq!(a.grapheme_extra(col), b.grapheme_extra(col));
                     }
