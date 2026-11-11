@@ -95,7 +95,7 @@ enum CurrentBlock {
         indent: usize,
         prefix: String,
         spans: Vec<StyledSpan>,
-        task: Option<bool>,
+        ordered: bool,
         quoted: bool,
     },
 }
@@ -279,9 +279,9 @@ impl MarkdownView {
             }
             CurrentBlock::ListItem {
                 indent,
-                prefix,
-                spans,
-                task,
+                mut prefix,
+                mut spans,
+                ordered,
                 quoted,
             } => {
                 if quoted {
@@ -290,6 +290,14 @@ impl MarkdownView {
                     content.push_str(&spans_to_plain_text(&spans));
                     Block::BlockQuote { text: content }
                 } else {
+                    let task = take_task_marker(&mut spans);
+                    if let Some(checked) = task {
+                        // The checkbox in place of a bullet, after a number.
+                        if !ordered {
+                            prefix.clear();
+                        }
+                        prefix.push_str(if checked { "[x] " } else { "[ ] " });
+                    }
                     Block::ListItem {
                         indent,
                         prefix,
@@ -319,10 +327,18 @@ impl MarkdownView {
 /// With `list`, `source` starts with an item that goes on that list.
 fn parse(source: &str, list: Option<ListState>) -> (Vec<Block>, Option<ReparsePoint>) {
     // Without metadata blocks: a reply that starts with a rule would have
-    // the text up to the next one hidden as front matter.
+    // the text up to the next one hidden as front matter. Without
+    // definition lists: pulldown-cmark 0.12 panics on one in a block quote
+    // (`> _\n> : \n\n`); they are shown as the text they are. Without
+    // heading attributes: it panics on a heading a task marker was carried
+    // into (`1. [x] # x\n[r]: http://r\n  \t\n===\n`), and `{#id}` is
+    // shown as written.
     let options = Options::all()
         - Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
-        - Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS;
+        - Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS
+        - Options::ENABLE_DEFINITION_LIST
+        - Options::ENABLE_HEADING_ATTRIBUTES
+        - Options::ENABLE_TASKLISTS;
     if may_define_footnote(source) {
         // A footnote definition reaches back to the references before it
         // like a link reference, and pulldown-cmark 0.12's offsets around
@@ -349,22 +365,14 @@ fn parse(source: &str, list: Option<ListState>) -> (Vec<Block>, Option<ReparsePo
         ..ReparsePoint::default()
     };
     let mut depth = 0usize;
-    // pulldown-cmark gives a task marker to the next paragraph, which is
-    // not the item's own when the item starts with another block
-    // (`- [ ] # x`); until it is given, parsing cannot start again. It is
-    // given where a paragraph starts, which in a tight list shows no
-    // event of its own, so right after the item's start.
-    let mut task_marker_pending = false;
-    let mut marker_given_here = false;
     // A block after a list can still turn into one of its items (`1`
     // becoming `1. x`).
     let mut after_list = false;
     let mut top_level_items = 0usize;
     for (event, range) in parser {
-        if depth == 0 && builder.current.is_none() && !task_marker_pending && !after_list {
+        if depth == 0 && builder.current.is_none() && !after_list {
             // Only a block after a blank line: one that interrupts the
-            // paragraph before it parses differently on its own (a task
-            // list item).
+            // paragraph before it may parse differently on its own.
             let line_start = source[..range.start].rfind('\n').map_or(0, |i| i + 1);
             let after_blank_line = line_start == 0
                 || source[..line_start - 1]
@@ -392,7 +400,6 @@ fn parse(source: &str, list: Option<ListState>) -> (Vec<Block>, Option<ReparsePo
         if top_level_item
             && top_level_items > 0
             && builder.current.is_none()
-            && !task_marker_pending
             && item_line_is_settled(source, range.start)
         {
             let line_start = source[..range.start].rfind('\n').map_or(0, |i| i + 1);
@@ -414,19 +421,11 @@ fn parse(source: &str, list: Option<ListState>) -> (Vec<Block>, Option<ReparsePo
         if top_level_item {
             top_level_items += 1;
         }
-        let mut item_waits = false;
         match &event {
-            Event::Start(Tag::Item) => {
-                item_waits = task_marker_waits_for_paragraph(source, range.start);
-                task_marker_pending |= item_waits;
-                depth += 1;
-            }
-            Event::TaskListMarker(_) if marker_given_here => task_marker_pending = false,
             Event::Start(_) => depth += 1,
             Event::End(_) => depth = depth.saturating_sub(1),
             _ => {}
         }
-        marker_given_here = item_waits || matches!(event, Event::Start(Tag::Paragraph));
         builder.event(event);
     }
     let blocks = builder.finish();
@@ -438,7 +437,7 @@ fn parse(source: &str, list: Option<ListState>) -> (Vec<Block>, Option<ReparsePo
 /// text after the marker (`1.` may become `1.5`), and not only `-`, `*`
 /// and `_` (`* *` may become the rule `* * *`).
 fn item_line_is_settled(source: &str, start: usize) -> bool {
-    let line = source[start..].split('\n').next().unwrap_or("");
+    let line = source[start..].split(['\n', '\r']).next().unwrap_or("");
     let after_marker = line
         .trim_start_matches([' ', '\t'])
         .trim_start_matches(|c: char| c.is_ascii_digit())
@@ -470,53 +469,41 @@ fn may_define_footnote(source: &str) -> bool {
     })
 }
 
-/// Whether the list item starting at byte `start` of `source` (at its
-/// marker) starts with a task marker as pulldown-cmark scans one
-/// (`- [ ] `, `1. [x] `) with more on its line, so that pulldown-cmark
-/// keeps the marker for the next paragraph. The `[` must come 1 to 4
-/// columns after the list marker: further, the item's text is indented
-/// code. It may say so for an item pulldown-cmark does not take as a task,
-/// which only costs parsing more again.
-fn task_marker_waits_for_paragraph(source: &str, start: usize) -> bool {
-    let item = source[start..].trim_start_matches([' ', '\t']);
-    let after_marker = match item.strip_prefix(['-', '+', '*']) {
-        Some(rest) => rest,
-        None => {
-            let digits = item.len() - item.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-            match item[digits..].strip_prefix(['.', ')']) {
-                Some(rest) if digits > 0 => rest,
-                _ => return false,
-            }
-        }
+/// Take a task marker (`[ ] `, `[x] `, `[X] `) off the start of a list
+/// item's text, and say whether it is checked. Only plain text makes one,
+/// with more text after it: `[x](url)` is a link, and `[ ]` alone stays
+/// as written.
+///
+/// pulldown-cmark finds task markers itself, but 0.12 gives the marker of
+/// an item that starts with another block (`- [ ] # x`) to whichever
+/// paragraph comes next, and panics on some of those; so its task lists
+/// are off and the item's own text is looked at instead.
+fn take_task_marker(spans: &mut Vec<StyledSpan>) -> Option<bool> {
+    let plain = Style::new();
+    let lead: String = spans
+        .iter()
+        .take_while(|span| span.style == plain)
+        .flat_map(|span| span.text.chars())
+        .take(5)
+        .collect();
+    let bytes = lead.as_bytes();
+    let checked = match bytes {
+        [b'[', b' ' | b'\t', b']', b' ' | b'\t', _, ..] => false,
+        [b'[', b'x' | b'X', b']', b' ' | b'\t', _, ..] => true,
+        _ => return None,
     };
-    let content = after_marker.trim_start_matches([' ', '\t']);
-    let marker_end = source.len() - after_marker.len();
-    let gap = column(source, source.len() - content.len()) - column(source, marker_end);
-    if !(1..=4).contains(&gap) {
-        return false;
+    let mut rest = 4;
+    while rest > 0 {
+        let first = &mut spans[0];
+        if first.text.len() <= rest {
+            rest -= first.text.len();
+            spans.remove(0);
+        } else {
+            first.text.drain(..rest);
+            rest = 0;
+        }
     }
-    let bytes = content.as_bytes();
-    bytes.len() >= 4
-        && bytes[0] == b'['
-        && matches!(bytes[1], b' ' | b'\t' | b'x' | b'X')
-        && bytes[2] == b']'
-        && matches!(bytes[3], b' ' | b'\t')
-        && !content[4..]
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim_matches([' ', '\t', '\r'])
-            .is_empty()
-}
-
-/// The column byte `at` of `source` is at on its line, a tab going on to
-/// the next multiple of 4.
-fn column(source: &str, at: usize) -> usize {
-    let line_start = source[..at].rfind('\n').map_or(0, |i| i + 1);
-    source[line_start..at].chars().fold(0, |column, c| match c {
-        '\t' => column + 4 - column % 4,
-        _ => column + 1,
-    })
+    Some(checked)
 }
 
 /// Turns parser events into blocks.
@@ -604,11 +591,12 @@ impl BlockBuilder {
                         }
                         _ => "• ".to_string(),
                     };
+                    let ordered = self.list_stack.last().is_some_and(|list| list.ordered);
                     self.current = Some(CurrentBlock::ListItem {
                         indent,
                         prefix,
                         spans: Vec::new(),
-                        task: None,
+                        ordered,
                         quoted,
                     });
                 }
@@ -649,31 +637,6 @@ impl BlockBuilder {
                 self.push_text("\n", false);
             }
             Event::Rule => self.blocks.push(Block::HorizontalRule),
-            Event::TaskListMarker(checked) => {
-                let marker = if checked { "[x] " } else { "[ ] " };
-                let ordered = self.list_stack.last().is_some_and(|list| list.ordered);
-                match &mut self.current {
-                    Some(CurrentBlock::ListItem {
-                        prefix,
-                        spans,
-                        task,
-                        ..
-                    }) if spans.is_empty() && task.is_none() => {
-                        // The checkbox in place of a bullet, after a number.
-                        if !ordered {
-                            prefix.clear();
-                        }
-                        prefix.push_str(marker);
-                        *task = Some(checked);
-                    }
-                    // pulldown-cmark gives the marker of an item that
-                    // starts with another block to the next paragraph.
-                    _ => {
-                        self.begin_tight_paragraph(quoted);
-                        self.push_text(marker, false);
-                    }
-                }
-            }
             _ => {}
         }
     }
@@ -2134,6 +2097,24 @@ mod tests {
     }
 
     #[test]
+    fn syntax_pulldown_cmark_panics_on_is_shown_as_text() {
+        // pulldown-cmark 0.12 panics on this with definition lists on.
+        let quoted = MarkdownView::new("> _\n> : \n\n");
+        assert_eq!(quoted.blocks.len(), 1);
+        // And on this with heading attributes on.
+        MarkdownView::new("1. [x] # x\n[r]: http://r\n  \t\n===\n");
+        let heading = MarkdownView::new("# Title {#id}");
+        assert!(
+            matches!(&heading.blocks[0], Block::Heading { spans, .. } if spans_to_plain_text(spans) == "TITLE {#ID}")
+        );
+        let view = MarkdownView::new("term\n: definition");
+        let Block::Paragraph { spans } = &view.blocks[0] else {
+            panic!("{:?}", view.blocks);
+        };
+        assert_eq!(spans_to_plain_text(spans), "term\n: definition");
+    }
+
+    #[test]
     fn streaming_known_hard_documents_matches_parsing_all_at_once() {
         let documents = [
             "a\n\n- [ ] x\n\nb\n\n- [x] y",
@@ -2158,6 +2139,8 @@ mod tests {
             "1. one\n\n1. [x] # x\n    indented code\n",
             "1. one\n1. 2. nested\n",
             "2) \n2) **word",
+            // A bare CR ends the line a task marker is on.
+            "1. [x] # x\n- [ ] \r-\n  \t\n- [ ]\n",
             // No front matter: the text between two rules stays.
             "---\ntitle: x\n\nbody\n---\nafter",
             "---\n\nbody\n---\n",
