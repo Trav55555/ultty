@@ -98,6 +98,8 @@ enum AppEvent {
     RuntimeReadable,
     /// A request from assistive technology, for [`ultty::a11y::Adapter`].
     Accessibility(accesskit_winit::Event),
+    /// SIGTERM, SIGHUP or SIGINT: exit as if the window were closed.
+    ShutdownSignal,
 }
 
 impl From<accesskit_winit::Event> for AppEvent {
@@ -336,6 +338,7 @@ impl App {
         let (cols, rows) = renderer.terminal_dimensions();
         tracing::info!("Terminal size: {}x{}", cols, rows);
 
+        Self::sweep_stale_runtime_files();
         // Start the native protocol server BEFORE spawning shells: each tab
         // gets its own listening socket, and the tab's shell is told about it
         // through ULTTY_SOCKET at spawn time.
@@ -631,6 +634,23 @@ impl App {
         }
     }
 
+    /// Clear out the sockets and tokens that killed or crashed instances
+    /// left where this one is about to listen. A directory that cannot be
+    /// resolved is skipped; starting the server reports it.
+    fn sweep_stale_runtime_files() {
+        let mut dirs: Vec<_> = [
+            ultty::control::paths::control_dir(),
+            ultty::platform::socket_dir(),
+        ]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+        dirs.dedup();
+        for dir in &dirs {
+            ultty::platform::runtime_files::sweep_stale_runtime_files(dir);
+        }
+    }
+
     fn start_protocol_server() -> Option<ProtocolServer> {
         let socket_dir = match ultty::platform::socket_dir() {
             Ok(dir) => dir,
@@ -710,6 +730,15 @@ impl App {
     /// Run the application.
     pub fn run() -> Result<()> {
         let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
+        let signal_proxy = event_loop.create_proxy();
+        if let Err(e) = ultty::platform::shutdown::on_shutdown_signal(move || {
+            let _ = signal_proxy.send_event(AppEvent::ShutdownSignal);
+        }) {
+            tracing::warn!(
+                "Failed to catch termination signals; one will kill Ultty without cleanup: {}",
+                e
+            );
+        }
         let mut handler = AppHandler {
             proxy: event_loop.create_proxy(),
             app: None,
@@ -1580,6 +1609,12 @@ impl ApplicationHandler<AppEvent> for AppHandler {
                         adapter.handle(&app.window, event.window_event);
                     }
                 }
+            }
+            AppEvent::ShutdownSignal => {
+                if let Some(app) = self.app.as_ref() {
+                    app.save_session();
+                }
+                event_loop.exit();
             }
         }
     }

@@ -63,6 +63,9 @@ scripts/regression-smoke.sh "$OUT/regression"
 # A second Ultty on its own display, with the accessibility adapter and no
 # session bus.
 ULTTY="$ROOT/target/debug/ultty" scripts/e2e/accessibility-no-bus.sh "$OUT/accessibility"
+# Instances stopped by signals, and one sweeping a killed instance's files,
+# on a display and runtime dir of their own.
+ULTTY="$ROOT/target/debug/ultty" scripts/e2e/runtime-file-cleanup.sh "$OUT/runtime-file-cleanup"
 # A third, for an inline surface over scrolling output (ADR 0020). It turns
 # the mouse wheel with xdotool; runners without it skip the check, loudly.
 if command -v xdotool >/dev/null 2>&1; then
