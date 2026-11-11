@@ -1,6 +1,8 @@
-//! `ulttui-lua [--exec CMD]... [--allow-exec] [--ansi] [--log FILE] SCRIPT.luau`
+//! `ulttui-lua [--exec CMD]... [--allow-exec] [--ansi] [--log FILE]
+//! [--wait-on-error] SCRIPT.luau`
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use anyhow::Context;
 use ulttui::app::App;
@@ -8,8 +10,8 @@ use ulttui::backend::Backend;
 use ulttui_lua::runner::watch_file;
 use ulttui_lua::{ExecGrant, LuaApp, ScriptOptions};
 
-const USAGE: &str =
-    "usage: ulttui-lua [--exec CMD]... [--allow-exec] [--ansi] [--log FILE] SCRIPT.luau
+const USAGE: &str = "usage: ulttui-lua [--exec CMD]... [--allow-exec] [--ansi] [--log FILE]
+                  [--wait-on-error] SCRIPT.luau
 
 Runs a Luau ulttui app and reloads it whenever the file is saved.
 
@@ -18,7 +20,11 @@ Runs a Luau ulttui app and reloads it whenever the file is saved.
                    program name allows any arguments
     --allow-exec   let the script run anything
     --ansi         draw with ANSI even inside Ultty (a split pane)
-    --log FILE     write logs (including reload timings) to FILE";
+    --log FILE     write logs (including reload timings) to FILE
+    --wait-on-error
+                   if it cannot start, show why and wait for a key before
+                   exiting (ulttyctl lua open passes this, as its pane
+                   closes when ulttui-lua exits)";
 
 #[derive(Debug, PartialEq)]
 struct Args {
@@ -41,6 +47,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             )?),
             "--allow-exec" => allow_any = true,
             "--ansi" => ansi = true,
+            // Read by `main` before parsing.
+            "--wait-on-error" => {}
             "--log" => log = Some(PathBuf::from(args.next().ok_or("--log needs a file")?)),
             "-h" | "--help" => return Err(String::new()),
             flag if flag.starts_with('-') => return Err(format!("unknown option {flag}")),
@@ -63,17 +71,48 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     })
 }
 
-fn main() -> anyhow::Result<()> {
-    let args = match parse_args(std::env::args().skip(1)) {
-        Ok(args) => args,
-        Err(message) => {
-            if !message.is_empty() {
-                eprintln!("error: {message}");
-            }
-            eprintln!("{USAGE}");
-            std::process::exit(2);
-        }
+fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // Looked for before parsing, so a bad command line is held on screen too.
+    let wait_on_error = argv.iter().any(|arg| arg == "--wait-on-error");
+    let (message, code) = match parse_args(argv.into_iter()) {
+        Ok(args) => match run(args) {
+            Ok(()) => return ExitCode::SUCCESS,
+            Err(error) => (format!("ulttui-lua: error: {error:#}"), 1),
+        },
+        Err(message) if message.is_empty() => (USAGE.to_string(), 2),
+        Err(message) => (format!("ulttui-lua: error: {message}\n{USAGE}"), 2),
     };
+    eprintln!("{message}");
+    if wait_on_error {
+        wait_for_key();
+    }
+    ExitCode::from(code)
+}
+
+/// Keep the error above on screen until a key is pressed. A pane opened by
+/// `ulttyctl lua open` closes when ulttui-lua exits, so without this its
+/// error would vanish unread. Returns at once when stdin is not a terminal.
+fn wait_for_key() {
+    use crossterm::event::{self, Event, KeyEventKind};
+    use crossterm::terminal;
+
+    if terminal::enable_raw_mode().is_err() {
+        return;
+    }
+    eprint!("\r\npress any key to close");
+    loop {
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    // Best effort: the process exits next either way.
+    let _ = terminal::disable_raw_mode();
+}
+
+fn run(args: Args) -> anyhow::Result<()> {
     // The terminal is the UI, so logs only ever go to a file.
     if let Some(log) = &args.log {
         let file = std::fs::File::create(log)
@@ -182,5 +221,42 @@ mod tests {
                 .map(str::to_string)
         )
         .is_err());
+    }
+
+    #[test]
+    fn grants_are_refused_by_the_check_ulttyctl_also_makes() {
+        // `ulttyctl lua open` refuses a grant before opening a pane with
+        // `ultty_protocol::exec_grant::parse`; ulttui-lua must refuse
+        // exactly the same ones, with the same words.
+        use ultty_protocol::exec_grant::{parse as shared, NEED_SUBCOMMAND, PROGRAM_RUNNERS};
+        for &program in PROGRAM_RUNNERS.iter().chain(NEED_SUBCOMMAND) {
+            let ours = parse_args(
+                ["--exec", program, "app.luau"]
+                    .into_iter()
+                    .map(str::to_string),
+            )
+            .unwrap_err();
+            assert_eq!(ours, shared(program).unwrap_err(), "{program}");
+        }
+        assert!(shared("ulttyctl --json panes").is_ok());
+        assert!(parse_args(
+            ["--exec", "ulttyctl --json panes", "app.luau"]
+                .into_iter()
+                .map(str::to_string)
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn wait_on_error_is_accepted_anywhere_in_the_command_line() {
+        // `main` acts on it; parsing only has to let it through.
+        assert_eq!(
+            parse("--wait-on-error app.luau").unwrap(),
+            parse("app.luau").unwrap()
+        );
+        assert_eq!(
+            parse("app.luau --wait-on-error").unwrap(),
+            parse("app.luau").unwrap()
+        );
     }
 }
