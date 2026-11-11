@@ -783,11 +783,40 @@ impl TerminalManager {
     /// Put a new pane next to the focused one. Splitting along the focused
     /// pane's own split adds a sibling; splitting across it nests.
     fn split_focused(&mut self, direction: SplitDirection) -> io::Result<Option<TerminalId>> {
+        self.split_focused_with(direction, |this, tab_id| this.create_terminal(tab_id))
+    }
+
+    /// Split the focused pane, the new pane running `command` (with the
+    /// tab's shell environment) instead of the shell. `None` without an
+    /// active tab.
+    pub fn split_with_command(
+        &mut self,
+        direction: SplitDirection,
+        command: &str,
+        args: &[String],
+        working_dir: Option<&str>,
+    ) -> io::Result<Option<TerminalId>> {
+        self.split_focused_with(direction, |this, tab_id| {
+            let env = this
+                .tabs
+                .iter()
+                .find(|tab| tab.id == tab_id)
+                .map(|tab| tab.shell_env.clone())
+                .unwrap_or_default();
+            this.create_terminal_with_command(tab_id, command, args, working_dir, &env)
+        })
+    }
+
+    fn split_focused_with(
+        &mut self,
+        direction: SplitDirection,
+        spawn: impl FnOnce(&mut Self, TabId) -> io::Result<TerminalId>,
+    ) -> io::Result<Option<TerminalId>> {
         let Some(tab) = self.active_tab() else {
             return Ok(None);
         };
         let (tab_id, target) = (tab.id, tab.focused_terminal);
-        let terminal_id = self.create_terminal(tab_id)?;
+        let terminal_id = spawn(self, tab_id)?;
         if let Some(tab) = self.active_tab_mut() {
             tab.split(target, direction, terminal_id);
         }
