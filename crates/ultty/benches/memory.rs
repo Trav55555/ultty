@@ -152,6 +152,46 @@ fn sgr_dense_lines(count: usize, cols: usize) -> Vec<u8> {
     out
 }
 
+/// Lines of CJK words and the spaces between them, about 40 wide
+/// characters (80 columns) each, as the `vt` bench's cjk corpus prints them;
+/// every third one green. Scrollback stores wide characters at more bytes a
+/// cell than ASCII (ADR 0022, Risks), which no other case covers.
+fn cjk_lines(count: usize) -> Vec<u8> {
+    const WORDS: [&str; 12] = [
+        "日本語",
+        "中文字符",
+        "한국어",
+        "東京都",
+        "ひらがな",
+        "カタカナ",
+        "漢字",
+        "終端",
+        "文字化け",
+        "表示",
+        "速度",
+        "测试",
+    ];
+    let mut out = Vec::new();
+    for i in 0..count {
+        if i % 3 == 0 {
+            out.extend_from_slice(b"\x1b[32m");
+        }
+        let (mut chars, mut word) = (0, i);
+        while chars < 27 {
+            let text = WORDS[word % WORDS.len()];
+            out.extend_from_slice(text.as_bytes());
+            out.push(b' ');
+            chars += text.chars().count() + 1;
+            word += 7;
+        }
+        if i % 3 == 0 {
+            out.extend_from_slice(b"\x1b[0m");
+        }
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
 fn scene_tree(regions: usize) -> SceneTree {
     let mut tree = SceneTree::new();
     for i in 1..=regions {
@@ -246,6 +286,18 @@ const CASES: &[Case] = &[
         peak_budget: None,
         run: || {
             let input = sgr_dense_lines(10_040, 120);
+            measure(|| filled_terminal(120, 40, &input))
+        },
+    },
+    Case {
+        name: "cjk_10k_lines_120x40",
+        // Measured 4_594_320 with `CompactRow` scrollback (before ADR 0022
+        // slice 5) + 5%, like the other budgets until slice 6 lowers them;
+        // history pages hold it in about half that.
+        budget: 4_824_000,
+        peak_budget: None,
+        run: || {
+            let input = cjk_lines(10_040);
             measure(|| filled_terminal(120, 40, &input))
         },
     },

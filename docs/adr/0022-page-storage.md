@@ -6,6 +6,8 @@ Accepted 2026-11-09, after the prototype gate in §Prototype passed in round 3 (
 
 Slice 4 (the screen page) shipped 2026-11-10 with one deviation: graphemes live in a store per slot, not one per page (§4; [perf note](../perf/2026-11-10-page-storage-slice4.md)).
 
+Slice 5 (history pages) meets every GO instruction and heap criterion on the real code, with one addition: a third history row form, Chars, for one-style rows without grapheme extras, which holds CJK in half its old memory instead of 1.7 times (§3; [perf note](../perf/2026-11-10-page-storage-slice5.md)). Its wall-clock criterion waits for slice 6's quiet-machine run.
+
 Proposed 2026-11-09. Not accepted until the prototype gate in §Prototype passes; if it fails, this ADR is recorded as Rejected together with the measurements.
 
 **Prototype measured 2026-11-09: not GO** ([2026-11-09-page-storage-prototype.md](../perf/2026-11-09-page-storage-prototype.md)). Variant C meets every GO criterion but one:
@@ -151,6 +153,8 @@ A row that scrolls off is appended to the newest page in one of two forms:
 
 - **Uniform ASCII:** its bytes, narrowed from the packed cells. Trailing spaces are trimmed when the style is the default, as today; otherwise the row is kept up to `used`. The style is interned once per row.
 - **Cells:** a memcpy of the used packed cells, then a style remap per cell (`remap[id]`, interning on a miss), then the row's grapheme extras appended after the cells as (col, count, chars).
+
+As built in slice 5, there is a third form, **Chars**: four bytes a cell (the codepoint and the width bits) in one style, for any row whose cells share a style and carry no grapheme extras. That is how CJK output arrives; as cells it would have cost 1.7 times its `CompactRow` (§9), and as chars the CJK memory case measures half of it. A non-uniform row that is still ASCII in one style (printed a character at a time) takes the ASCII form. Each page keeps its payloads in one typed vector per form, its own style list (the remap's target), and its rows' grapheme extras in a list of (column, len, start) entries; the remap is held by `History` for the newest page and keyed on the screen table's identity and generation. A row rewritten in place (an inline surface) appends its new payload and leaves the old as garbage, compacted once it outgrows the page's live payload.
 
 No per-row heap allocation happens in either case; pages come from `free` once history is full. Eviction stays per row (`front += 1`; a fully evicted page goes to `free`), so `max_history`, `evicted` and the anchor line numbering are unchanged. `row_at(i)` is O(1): page `(i + front) / 256`. `clear_history` and `set_max_history` drop pages or advance `front`.
 
@@ -310,7 +314,7 @@ Every slice is one or more small commits. After each one, all of these pass:
 ## Open questions
 
 1. Should the scrollback limit become a byte budget, as Ghostty's is, rather than a line count, now that a row's size varies by about 10x between its forms? It would change configuration semantics.
-2. Is a third history row form (UTF-8 plus one style plus a wide bitmap) worth having for CJK memory?
+2. Is a third history row form (UTF-8 plus one style plus a wide bitmap) worth having for CJK memory? Answered for CJK by slice 5's Chars form (four bytes a cell, one style); emoji rows with grapheme extras still take the Cells form.
 3. Should the renderer cache gain a (page uid, slot, row version) fast path ahead of the content comparison, and is that safe for panes and the alternate screen?
 4. History page size: 256 rows, or a byte cap? How large should the free list be, and should `clear_history` return memory to the allocator?
 5. Should the write loop use explicit SIMD if autovectorisation does not happen, or is the scalar loop enough?
