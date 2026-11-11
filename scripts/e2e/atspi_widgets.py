@@ -4,16 +4,18 @@ walk them, for scripts/e2e/accessibility-atspi.sh.
 
     atspi_widgets.py <pid> [--role ROLE --name NAME]... [--focused NAME]
                      [--selected NAME]... [--unselected NAME]...
-                     [--timeout SECONDS]
+                     [--place NAME=POS/SIZE]... [--timeout SECONDS]
 
 Finds the application with process id <pid> on the accessibility bus and
 prints one JSON line: every object under it with its role name, name and
-whether it is focused, selectable and selected, and the focused object.
+whether it is focused, selectable and selected, its `posinset` and
+`setsize` attributes, and the focused object.
 Polls until an object of each ROLE named NAME (pairs in order, e.g.
 `--role button --name +1`) exists; with --focused, until the focused
 object is named NAME; with --selected, until an object named NAME is
-selected; and with --unselected, until one named NAME is selectable but
-not selected.
+selected; with --unselected, until one named NAME is selectable but
+not selected; and with --place, until one named NAME reports posinset
+POS and setsize SIZE.
 Exits 1 if that does not happen within the timeout.
 
 Needs the system Python's GObject bindings for libatspi (python3-gi,
@@ -44,6 +46,10 @@ def walk(node, out, depth=0):
     if node is None or depth > 32:
         return
     states = node.get_state_set()
+    try:
+        attributes = node.get_attributes() or {}
+    except GLib.Error:
+        attributes = {}
     out.append(
         {
             "role": node.get_role_name(),
@@ -51,6 +57,8 @@ def walk(node, out, depth=0):
             "focused": states.contains(Atspi.StateType.FOCUSED),
             "selectable": states.contains(Atspi.StateType.SELECTABLE),
             "selected": states.contains(Atspi.StateType.SELECTED),
+            "posinset": attributes.get("posinset"),
+            "setsize": attributes.get("setsize"),
         }
     )
     for index in range(node.get_child_count()):
@@ -68,7 +76,7 @@ def read_objects(pid):
     return {"objects": objects, "focused": focused[-1] if focused else None}
 
 
-def satisfied(seen, wanted, focused, selected=(), unselected=()):
+def satisfied(seen, wanted, focused, selected=(), unselected=(), places=()):
     present = {(o["role"], o["name"]) for o in seen["objects"]}
     if any(pair not in present for pair in wanted):
         return False
@@ -79,6 +87,9 @@ def satisfied(seen, wanted, focused, selected=(), unselected=()):
         o["name"] for o in seen["objects"] if o["selectable"] and not o["selected"]
     }
     if any(name not in selectable for name in unselected):
+        return False
+    at = {(o["name"], "%s/%s" % (o["posinset"], o["setsize"])) for o in seen["objects"]}
+    if any(tuple(place.rsplit("=", 1)) not in at for place in places):
         return False
     if focused is not None:
         return seen["focused"] is not None and seen["focused"]["name"] == focused
@@ -93,6 +104,7 @@ def main():
     parser.add_argument("--focused")
     parser.add_argument("--selected", action="append", default=[])
     parser.add_argument("--unselected", action="append", default=[])
+    parser.add_argument("--place", action="append", default=[])
     parser.add_argument("--timeout", type=float, default=15.0)
     args = parser.parse_args()
     if len(args.role) != len(args.name):
@@ -107,7 +119,7 @@ def main():
         except GLib.Error as error:
             seen = {"error": str(error)}
         if seen is not None and "objects" in seen and satisfied(
-            seen, wanted, args.focused, args.selected, args.unselected
+            seen, wanted, args.focused, args.selected, args.unselected, args.place
         ):
             print(json.dumps(seen))
             return 0
