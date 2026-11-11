@@ -98,14 +98,11 @@ struct RegionSnapshot {
 struct InputKind {
     multiline: bool,
     password: bool,
-    /// The value and the caret in it (grapheme clusters before it), when
-    /// the app gave one and the value may be exposed: never a password's.
+    /// The value and the caret in it as a count of characters (`char`s)
+    /// before it, when the app gave one and the value may be exposed:
+    /// never a password's.
     caret: Option<(String, usize)>,
 }
-
-/// The longest input text a caret is exposed in: AccessKit text runs keep
-/// character indices in a `u8`.
-const MAX_CARET_CHARS: usize = 255;
 
 impl SceneSnapshot {
     /// Copy the tree under `root` of `session`'s `scene`, drawn at `at`.
@@ -179,12 +176,11 @@ impl SceneSnapshot {
             let layout = region.computed;
             let x0 = at.x + f64::from(layout.x - scroll_x) * at.cell_width;
             let y0 = at.y + f64::from(layout.y - scroll_y) * at.cell_height;
-            let input = input_kind(&region.content, semantics.value_text.as_deref());
             regions.push(RegionSnapshot {
                 id: id.0,
                 children,
                 semantics,
-                input,
+                input: input_kind(&region.content),
                 lines,
                 announcements: Vec::new(),
                 bounds: Rect {
@@ -319,10 +315,9 @@ impl SceneSnapshot {
                 out.truncated = true;
             } else if out.claim(run_id) {
                 *budget -= 1;
-                let lengths: Vec<u8> = value
-                    .graphemes(true)
-                    .map(|g| u8::try_from(g.len()).unwrap_or(u8::MAX))
-                    .collect();
+                // One AccessKit character per `char`: its length in bytes
+                // is at most 4, so the lengths always add up to the value.
+                let lengths: Vec<u8> = value.chars().map(|c| c.len_utf8() as u8).collect();
                 let mut run = Node::new(AkRole::TextRun);
                 run.set_value(value.as_str());
                 run.set_text_direction(TextDirection::LeftToRight);
@@ -332,7 +327,7 @@ impl SceneSnapshot {
                 children.push(run_id);
                 let position = TextPosition {
                     node: run_id,
-                    character_index: (*cursor).min(value.graphemes(true).count()),
+                    character_index: (*cursor).min(value.chars().count()),
                 };
                 node.set_text_selection(TextSelection {
                     anchor: position,
@@ -493,24 +488,23 @@ fn content_text(content: &Content) -> Option<Cow<'_, str>> {
 }
 
 /// An `Input` widget's flags.
-///
-/// `exposed` is the value the node will have. An app that draws a prefix
-/// before the text in `InputWidget::value` (ulttui's focus and mode marks)
-/// says so by giving a `value_text` that ends it: the caret is then
-/// counted past the prefix, so it is in the text the node exposes.
-fn input_kind(content: &Content, exposed: Option<&str>) -> Option<InputKind> {
+fn input_kind(content: &Content) -> Option<InputKind> {
     match content {
         Content::Widget(WidgetContent::Input(input)) => {
-            let text = exposed.unwrap_or(&input.value);
-            let prefix = match input.value.strip_suffix(text) {
-                Some(prefix) => prefix.graphemes(true).count(),
-                None => 0,
-            };
             let caret = input
                 .cursor
-                .filter(|_| !input.password && !text.is_empty())
-                .filter(|_| text.graphemes(true).count() <= MAX_CARET_CHARS)
-                .map(|cursor| (text.to_owned(), (cursor as usize).saturating_sub(prefix)));
+                .filter(|_| !input.password && !input.value.is_empty())
+                .map(|cursor| {
+                    // The widget's caret counts grapheme clusters; AccessKit
+                    // text runs count characters.
+                    let chars = input
+                        .value
+                        .graphemes(true)
+                        .take(cursor as usize)
+                        .map(|g| g.chars().count())
+                        .sum();
+                    (input.value.clone(), chars)
+                });
             Some(InputKind {
                 multiline: input.multiline,
                 password: input.password,
@@ -881,8 +875,8 @@ mod tests {
         assert_eq!(selection.anchor, selection.focus);
         assert_eq!(selection.focus.node, run_id);
         assert_eq!(selection.focus.character_index, 7);
-        // Characters are the clusters (é is two bytes), so the lengths
-        // add up to the text.
+        // One character per `char` (é is two bytes), so the lengths add
+        // up to the text.
         assert_eq!(run.character_lengths().len(), 11);
         assert_eq!(
             run.character_lengths()
@@ -897,30 +891,53 @@ mod tests {
         let password = region(&update, 3);
         assert!(password.text_selection().is_none() && password.children().is_empty());
 
-        // A combining accent is one character: the caret is after "ae\u{301}".
+        // The caret counts clusters, AccessKit characters are `char`s: after
+        // "ae\u{301}" is three of them.
         let combined = region(&update, 4);
-        assert_eq!(combined.text_selection().unwrap().focus.character_index, 2);
+        assert_eq!(combined.text_selection().unwrap().focus.character_index, 3);
         assert_eq!(
             node(&update, region_input_run_node_id(7, 4)).character_lengths(),
-            &[1, 3, 1]
+            &[1, 1, 2, 1]
         );
         consume(update);
     }
 
-    /// An app that draws a prefix before the value (ulttui's focus mark)
-    /// and exposes the bare value: the caret lands in the bare value.
+    /// A cluster of more than 255 bytes (a letter and a hundred combining
+    /// marks) must not break the consumer: the run's lengths add up to its
+    /// text, and the caret is where the cluster count puts it.
     #[test]
-    fn an_inputs_caret_skips_a_prefix_the_app_draws() {
-        let content = widget(WidgetContent::Input(InputWidget {
-            value: ">> [N] héllo".to_owned(),
-            cursor: Some(9),
-            ..InputWidget::default()
-        }));
-        let kind = input_kind(&content, Some("héllo")).unwrap();
-        assert_eq!(kind.caret, Some(("héllo".to_owned(), 2)));
-        // Nothing to say it is a prefix: the caret is where it was sent.
-        let kind = input_kind(&content, Some("other")).unwrap();
-        assert_eq!(kind.caret, Some(("other".to_owned(), 9)));
+    fn a_very_long_cluster_does_not_break_the_caret() {
+        let mut value = String::from("a");
+        value.extend(std::iter::repeat_n('\u{20D0}', 100));
+        value.push('b');
+        let mut scene = Scene::new();
+        scene.add(
+            1,
+            0,
+            widget(WidgetContent::Input(InputWidget {
+                value: value.clone(),
+                cursor: Some(1),
+                ..InputWidget::default()
+            })),
+        );
+        scene.focused = Some(RegionId::new(1));
+        let update = full_scene(&scene);
+
+        let run = node(&update, region_input_run_node_id(7, 1));
+        assert_eq!(
+            run.character_lengths()
+                .iter()
+                .map(|&n| usize::from(n))
+                .sum::<usize>(),
+            value.len()
+        );
+        let tree = consume(update);
+        let state = tree.state();
+        let focus = state.focus().expect("a focused node");
+        let caret = focus.text_selection_focus().expect("a caret");
+        // After "a" and its hundred marks.
+        assert_eq!(caret.to_global_usv_index(), 101);
+        assert_eq!(focus.document_range().text(), value);
     }
 
     #[test]

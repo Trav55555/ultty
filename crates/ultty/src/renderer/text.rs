@@ -968,6 +968,52 @@ impl TextRenderer {
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
     ) -> f32 {
+        self.append_text_vertices(text, x, y, fg, bold, italic, false, vertices, indices)
+    }
+
+    /// Like [`Self::build_styled_text_vertices`], but laid out on cells as
+    /// a terminal does: a grapheme cluster takes the cells of its width by
+    /// Unicode (a wide one two) and a combining mark or joiner sequence
+    /// shares its cluster's cell, instead of one cell per `char`. Used for
+    /// text a caret is placed in.
+    pub fn build_cell_text_vertices(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        fg: Rgba,
+        bold: bool,
+        italic: bool,
+    ) -> (Vec<Vertex>, Vec<u32>, f32) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let advance = self.append_text_vertices(
+            text,
+            x,
+            y,
+            fg,
+            bold,
+            italic,
+            true,
+            &mut vertices,
+            &mut indices,
+        );
+        (vertices, indices, advance)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_text_vertices(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        fg: Rgba,
+        bold: bool,
+        italic: bool,
+        by_cluster: bool,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+    ) -> f32 {
         self.styled_text_buffer
             .set_size(Some(10000.0), Some(self.cell_height * 2.0));
 
@@ -979,13 +1025,25 @@ impl TextRenderer {
         self.styled_text_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
-        fill_byte_to_char_offsets(text, &mut self.byte_to_char_offsets);
-        let total_advance = self.byte_to_char_offsets.len() as f32 * self.cell_width;
+        let clusters = by_cluster.then(|| cluster_columns(text));
+        let total_cells = match &clusters {
+            Some((_, _, total)) => *total,
+            None => {
+                fill_byte_to_char_offsets(text, &mut self.byte_to_char_offsets);
+                self.byte_to_char_offsets.len()
+            }
+        };
+        let total_advance = total_cells as f32 * self.cell_width;
 
         for run in self.styled_text_buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
-                let char_idx = byte_offset_to_char_index(&self.byte_to_char_offsets, glyph.start);
-                let glyph_x = x + char_idx as f32 * self.cell_width;
+                let column = match &clusters {
+                    Some((starts, columns, _)) => {
+                        columns[byte_offset_to_char_index(starts, glyph.start)]
+                    }
+                    None => byte_offset_to_char_index(&self.byte_to_char_offsets, glyph.start),
+                };
+                let glyph_x = x + column as f32 * self.cell_width;
 
                 let physical = glyph.physical((0.0, 0.0), 1.0);
 
@@ -1603,6 +1661,22 @@ fn fill_byte_to_char_offsets(text: &str, offsets: &mut Vec<usize>) {
     offsets.extend(text.char_indices().map(|(byte_offset, _)| byte_offset));
 }
 
+/// The start byte and the column of each grapheme cluster of `text`, and
+/// the number of columns it takes: what a terminal lays text out by.
+fn cluster_columns(text: &str) -> (Vec<usize>, Vec<usize>, usize) {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let mut starts = Vec::new();
+    let mut columns = Vec::new();
+    let mut column = 0;
+    for (start, cluster) in text.grapheme_indices(true) {
+        starts.push(start);
+        columns.push(column);
+        column += crate::scene::caret::grapheme_cells(cluster);
+    }
+    (starts, columns, column)
+}
+
 fn byte_offset_to_char_index(offsets: &[usize], byte_offset: usize) -> usize {
     match offsets.binary_search(&byte_offset) {
         Ok(index) => index,
@@ -2053,6 +2127,40 @@ mod tests {
         let metrics = Metrics::new(14.0, 18.0);
         assert_eq!(metrics.font_size, 14.0);
         assert_eq!(metrics.line_height, 18.0);
+    }
+
+    /// The column a glyph at `byte` of `text` is drawn in on the cell
+    /// layout, and the columns in all.
+    fn column_of(text: &str, byte: usize) -> (usize, usize) {
+        let (starts, columns, total) = cluster_columns(text);
+        (columns[byte_offset_to_char_index(&starts, byte)], total)
+    }
+
+    #[test]
+    fn the_cell_layout_gives_a_wide_character_two_columns() {
+        // "你" is bytes 0..3 and "好" 3..6: columns 0 and 2.
+        assert_eq!(column_of("你好", 0), (0, 4));
+        assert_eq!(column_of("你好", 3), (2, 4));
+    }
+
+    #[test]
+    fn the_cell_layout_puts_a_combining_mark_in_its_clusters_cell() {
+        // "a", "e" + U+0301 (bytes 1..4), "b" at byte 4.
+        let text = "ae\u{301}b";
+        assert_eq!(column_of(text, 1), (1, 3));
+        assert_eq!(column_of(text, 2), (1, 3));
+        assert_eq!(column_of(text, 4), (2, 3));
+    }
+
+    #[test]
+    fn the_cell_layout_keeps_a_joined_emoji_in_one_wide_cluster() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let text = format!("a{family}b");
+        let b = text.len() - 1;
+        assert_eq!(column_of(&text, 1), (1, 4));
+        // Each part of the sequence is drawn at the cluster's column.
+        assert_eq!(column_of(&text, 1 + 4 + 3), (1, 4));
+        assert_eq!(column_of(&text, b), (3, 4));
     }
 
     #[test]

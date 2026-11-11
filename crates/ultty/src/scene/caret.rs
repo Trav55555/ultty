@@ -19,23 +19,29 @@ pub(crate) fn shown_text(input: &InputWidget) -> Cow<'_, str> {
     }
 }
 
-/// The (column, row) offset in cells of the caret of `input`, from the
-/// start of its text: after the first `cursor` grapheme clusters of the
-/// text shown (the placeholder while the value is empty), a new line
-/// moving it to the next row; `None` when it has no caret.
-pub(crate) fn caret_offset(input: &InputWidget) -> Option<(usize, usize)> {
-    let cursor = input.cursor? as usize;
-    let text = shown_text(input);
-    let (mut col, mut row) = (0, 0);
-    for grapheme in text.graphemes(true).take(cursor) {
-        if grapheme.contains('\n') {
-            col = 0;
-            row += 1;
-        } else {
-            col += UnicodeWidthStr::width(grapheme);
-        }
+/// The cells a grapheme cluster takes on a line: its width by Unicode, and
+/// at least one, so a cluster of marks alone still has a cell. Both the
+/// layout of an input's text and its caret count with this.
+pub(crate) fn grapheme_cells(grapheme: &str) -> usize {
+    UnicodeWidthStr::width(grapheme).max(1)
+}
+
+/// The column in cells of the caret of `input`, from the start of its text:
+/// after the first `cursor` grapheme clusters of the text shown (the
+/// placeholder while the value is empty). `None` when it has no caret, and
+/// for a multiline input, whose lines are not laid out here.
+pub(crate) fn caret_column(input: &InputWidget) -> Option<usize> {
+    if input.multiline {
+        return None;
     }
-    Some((col, row))
+    let cursor = input.cursor? as usize;
+    Some(
+        shown_text(input)
+            .graphemes(true)
+            .take(cursor)
+            .map(grapheme_cells)
+            .sum(),
+    )
 }
 
 #[cfg(test)]
@@ -52,38 +58,46 @@ mod tests {
 
     #[test]
     fn the_caret_is_after_its_clusters_counted_in_cells() {
-        assert_eq!(caret_offset(&input("héllo", Some(2))), Some((2, 0)));
-        assert_eq!(caret_offset(&input("héllo", Some(5))), Some((5, 0)));
+        assert_eq!(caret_column(&input("héllo", Some(2))), Some(2));
+        assert_eq!(caret_column(&input("héllo", Some(5))), Some(5));
         // A combining accent is one cluster, one cell; a wide one is two.
-        assert_eq!(caret_offset(&input("ae\u{301}b", Some(2))), Some((2, 0)));
-        assert_eq!(caret_offset(&input("你好", Some(1))), Some((2, 0)));
+        assert_eq!(caret_column(&input("ae\u{301}b", Some(2))), Some(2));
+        assert_eq!(caret_column(&input("你好", Some(1))), Some(2));
+        let family = "a\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}b";
+        assert_eq!(caret_column(&input(family, Some(2))), Some(3));
     }
 
     #[test]
     fn no_cursor_no_caret_and_an_empty_input_counts_into_its_placeholder() {
-        assert_eq!(caret_offset(&input("ab", None)), None);
+        assert_eq!(caret_column(&input("ab", None)), None);
         let placeholder = InputWidget {
             placeholder: "type here".into(),
             cursor: Some(0),
             ..InputWidget::default()
         };
-        assert_eq!(caret_offset(&placeholder), Some((0, 0)));
-        let after_marker = InputWidget {
+        assert_eq!(caret_column(&placeholder), Some(0));
+        let later = InputWidget {
             cursor: Some(3),
             ..placeholder
         };
-        assert_eq!(caret_offset(&after_marker), Some((3, 0)));
+        assert_eq!(caret_column(&later), Some(3));
     }
 
     #[test]
-    fn a_password_has_one_bullet_per_cluster_and_new_lines_move_down() {
+    fn a_password_has_one_bullet_per_cluster_and_a_multiline_input_no_caret() {
         let password = InputWidget {
             value: "ae\u{301}b".into(),
             password: true,
             cursor: Some(3),
             ..InputWidget::default()
         };
-        assert_eq!(caret_offset(&password), Some((3, 0)));
-        assert_eq!(caret_offset(&input("ab\ncd", Some(4))), Some((1, 1)));
+        assert_eq!(caret_column(&password), Some(3));
+        let multiline = InputWidget {
+            value: "ab\ncd".into(),
+            multiline: true,
+            cursor: Some(4),
+            ..InputWidget::default()
+        };
+        assert_eq!(caret_column(&multiline), None);
     }
 }

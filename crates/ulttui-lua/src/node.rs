@@ -226,6 +226,11 @@ pub const CONSTRUCTORS: &[CtorSpec] = &[
                 PropKind::Num,
                 "Grapheme clusters before the cursor (default: the end)",
             ),
+            prop(
+                "edit",
+                PropKind::Bool,
+                "`false` leaves editing keys to the script as `key` messages",
+            ),
             prop("placeholder", PropKind::Str, "Shown while empty"),
         ],
         required: &[],
@@ -270,8 +275,13 @@ impl Node {
     /// The text and cursor (grapheme clusters before it) of the `input`
     /// whose id is `id`, searching this node and its descendants. Without a
     /// `cursor` prop the cursor is at the end; one past the end is clamped.
+    ///
+    /// `None` when there is no such input, or it has `edit = false`.
     pub fn input_state(&self, id: &str) -> Option<(String, usize)> {
         if self.kind == "input" && self.str("id") == Some(id) {
+            if matches!(self.props.get("edit"), Some(PropValue::Bool(false))) {
+                return None;
+            }
             let value = self.str("value").unwrap_or_default().to_string();
             let end = ulttui::edit::grapheme_count(&value);
             let cursor = self
@@ -280,6 +290,25 @@ impl Node {
             return Some((value, cursor));
         }
         self.children.iter().find_map(|child| child.input_state(id))
+    }
+
+    /// The first id given to two focusable views (`button`, `input`) in
+    /// this tree, which would make focus and edits ambiguous.
+    pub fn duplicate_focus_id(&self) -> Option<String> {
+        fn walk<'a>(
+            node: &'a Node,
+            seen: &mut std::collections::HashSet<&'a str>,
+        ) -> Option<&'a str> {
+            if matches!(node.kind, "button" | "input") {
+                if let Some(id) = node.str("id") {
+                    if !seen.insert(id) {
+                        return Some(id);
+                    }
+                }
+            }
+            node.children.iter().find_map(|child| walk(child, seen))
+        }
+        walk(self, &mut std::collections::HashSet::new()).map(str::to_string)
     }
 
     fn bool(&self, name: &str) -> bool {
@@ -901,7 +930,7 @@ pub fn build(node: &Node) -> LuaView {
             Box::new(button)
         }
         "input" => {
-            let mut input = TextInput::new();
+            let mut input = TextInput::new().without_vim_mode();
             if let Some(id) = &id {
                 input = input.id(id.clone());
             }

@@ -487,3 +487,65 @@ fn keys_that_do_not_edit_stay_key_messages_and_no_ops_send_nothing() {
         .on_event(&input_key(Key::Right, false, false, "name"))
         .is_none());
 }
+
+#[test]
+fn edit_false_and_meta_chords_leave_keys_to_the_script() {
+    let path = write(
+        "input-no-edit",
+        r#"return app {
+  init = function(prev) return prev or { text = "ab", last = "" } end,
+  update = function(s, m)
+    if m.type == "key" then s.last = m.key .. ":" .. tostring(m.ctrl) .. ":" .. tostring(m.focused) end
+    if m.type == "input" then s.text = m.value end
+    return s
+  end,
+  view = function(s)
+    return column {
+      input { id = "raw", value = s.text, edit = false },
+      input { id = "cooked", value = s.text },
+      text(s.text .. "|" .. s.last),
+    }
+  end }"#,
+    );
+    let mut app = LuaApp::new(path, ScriptOptions::default()).unwrap();
+    // edit = false: Ctrl+A and a letter are plain key messages.
+    assert_eq!(
+        press(&mut app, input_key(Key::Char('a'), true, false, "raw")),
+        "ab|a:true:raw"
+    );
+    assert_eq!(
+        press(&mut app, input_key(Key::Char('x'), false, false, "raw")),
+        "ab|x:false:raw"
+    );
+    // With editing on, a Meta chord is still a key, not text.
+    let meta = Event::Key(KeyEvent {
+        key: Key::Char('v'),
+        modifiers: Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        },
+        focused_id: Some("cooked".into()),
+    });
+    assert_eq!(press(&mut app, meta), "ab|v:false:cooked");
+    assert_eq!(
+        press(&mut app, input_key(Key::Char('x'), false, false, "cooked")),
+        "abx|v:false:cooked"
+    );
+}
+
+#[test]
+fn two_focusable_views_with_one_id_are_a_view_error() {
+    let path = write(
+        "dup-ids",
+        r#"return app { view = function()
+  return column { input { id = "a" }, button { id = "a", label = "go" } }
+end }"#,
+    );
+    let app = LuaApp::new(path, ScriptOptions::default()).unwrap();
+    let _ = app.frame();
+    let error = app.script().error().expect("the view fails");
+    assert!(
+        error.contains("id \"a\"") && error.contains("unique"),
+        "{error}"
+    );
+}

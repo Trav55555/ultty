@@ -195,6 +195,9 @@ pub struct TextInput {
     vim_config: VimConfig,
     key_parser: KeyParser,
     password: bool,
+    /// Whether the input shows (and says) its vim mode; a host that edits
+    /// insert-style, such as `ulttui-lua`, turns it off.
+    show_mode: bool,
     accessible: super::Accessible,
 }
 
@@ -213,6 +216,7 @@ impl Default for TextInput {
             vim_config: VimConfig::for_text_input(),
             key_parser: KeyParser::new(),
             password: false,
+            show_mode: true,
             accessible: super::Accessible::default(),
         }
     }
@@ -242,6 +246,15 @@ impl TextInput {
     /// the value). [`value`](Self::value) puts it at the end.
     pub fn cursor(mut self, cursor: usize) -> Self {
         self.cursor = edit::char_index_from_cursor(&self.value, cursor);
+        self
+    }
+
+    /// An input that is always in insert mode and shows no vim mode: for a
+    /// host that does its own editing, where vim's modes would be a
+    /// surprise.
+    pub fn without_vim_mode(mut self) -> Self {
+        self.show_mode = false;
+        self.vim_state.mode = VimMode::Insert;
         self
     }
 
@@ -581,7 +594,20 @@ impl TextInput {
         }
     }
 
+    fn mode_name(&self) -> &'static str {
+        match self.vim_state.mode {
+            VimMode::Normal => "normal",
+            VimMode::Insert => "insert",
+            VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock => "visual",
+            VimMode::Command => "command",
+            VimMode::Search => "search",
+        }
+    }
+
     fn mode_indicator(&self) -> &'static str {
+        if !self.show_mode {
+            return "";
+        }
         match self.vim_state.mode {
             VimMode::Normal => "[N] ",
             VimMode::Insert => "[I] ",
@@ -627,16 +653,54 @@ impl View for TextInput {
         TextInput::widget_id(self)
     }
 
-    /// An input whose value and placeholder are what was typed and asked
-    /// for, without the focus marker and vim mode drawn before them; a
-    /// password's value is never exposed.
+    /// What was typed (never a password), described by the placeholder and
+    /// the vim mode, for assistive technology.
     fn semantics(&self) -> ultty_protocol::Semantics {
+        let mut description = Vec::new();
+        if !self.placeholder.is_empty() {
+            description.push(self.placeholder.clone());
+        }
+        if self.show_mode {
+            description.push(format!("vim {} mode", self.mode_name()));
+        }
         self.accessible.apply(ultty_protocol::Semantics {
             role: ultty_protocol::Role::Input,
             value_text: (!self.password).then(|| self.value.clone()),
-            description: (!self.placeholder.is_empty()).then(|| self.placeholder.clone()),
+            description: (!description.is_empty()).then(|| description.join(". ")),
             ..Default::default()
         })
+    }
+
+    /// Focus is a bar down the input's left edge, in the focus colour and
+    /// thick in insert mode (so the mode is visible), thin in any other; an
+    /// unfocused input keeps the cell, in its own colour, so focus moving
+    /// does not move the text.
+    fn style(&self) -> ultty_protocol::Style {
+        use ultty_protocol::{BorderEdges, BorderStyle, BorderType};
+
+        let theme = Theme::current();
+        let focused = super::is_widget_focused(self.widget_id());
+        let thick = focused && self.vim_state.mode == VimMode::Insert;
+        let mut style = ultty_protocol::Style::new()
+            .bg(theme.input.bg)
+            .border(BorderStyle {
+                style: if thick {
+                    BorderType::Thick
+                } else {
+                    BorderType::Thin
+                },
+                edges: BorderEdges {
+                    left: true,
+                    ..BorderEdges::NONE
+                },
+                radius: 0,
+            });
+        style.border_color = Some(if focused {
+            theme.input.focused_border
+        } else {
+            theme.input.bg
+        });
+        style
     }
 
     fn constraints(&self) -> ultty_protocol::Constraints {
@@ -653,26 +717,17 @@ impl View for TextInput {
         }
     }
 
+    /// The value and placeholder as they are, and where the caret is while
+    /// the input has focus; the backend drops the caret for a terminal that
+    /// cannot take one.
     fn content(&self) -> ultty_protocol::Content {
         let is_focused = super::is_widget_focused(self.widget_id());
-        let focus_prefix = if is_focused { ">> " } else { "" };
-        let mode_indicator = self.mode_indicator();
-        // A focused input says where its caret is, counted from the start of
-        // the text sent, after the prefix drawn before it; the backend drops
-        // it for a terminal that cannot take one.
-        let prefix = format!("{focus_prefix}{mode_indicator}");
-        let cursor = (is_focused && !self.multiline).then(|| {
-            let in_value = edit::cursor_from_char_index(&self.value, self.cursor);
-            (edit::grapheme_count(&prefix) + in_value) as u32
-        });
+        let cursor = (is_focused && !self.multiline)
+            .then(|| edit::cursor_from_char_index(&self.value, self.cursor) as u32);
         ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(
             ultty_protocol::InputWidget {
-                value: if self.value.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}{}{}", focus_prefix, mode_indicator, self.value)
-                },
-                placeholder: format!("{}{}{}", focus_prefix, mode_indicator, self.placeholder),
+                value: self.value.clone(),
+                placeholder: self.placeholder.clone(),
                 multiline: self.multiline,
                 password: self.password,
                 cursor,
@@ -1163,33 +1218,57 @@ mod tests {
     }
 
     #[test]
-    fn native_content_includes_mode_indicator() {
-        let input = TextInput::new().placeholder("Name");
+    fn native_content_is_the_users_text_only() {
+        let input = TextInput::new().placeholder("Name").value("ann");
         match <TextInput as View>::content(&input) {
             ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(w)) => {
-                assert!(w.placeholder.starts_with("[N] "));
+                assert_eq!(w.value, "ann");
+                assert_eq!(w.placeholder, "Name");
             }
             _ => panic!("Expected input widget content"),
         }
     }
 
     #[test]
-    fn focused_native_content_includes_focus_prefix() {
+    fn the_vim_mode_is_in_the_description_and_a_bar_down_the_edge() {
+        use ultty_protocol::BorderType;
+
         let old = FocusManager::set_current(FocusManager::new());
         FocusManager::with_current_mut(|fm| {
             fm.register("name".to_string());
             fm.focus("name");
         });
+        let normal = TextInput::new().id("name").placeholder("Name");
+        assert_eq!(
+            <TextInput as View>::semantics(&normal)
+                .description
+                .as_deref(),
+            Some("Name. vim normal mode")
+        );
+        let style = <TextInput as View>::style(&normal);
+        assert_eq!(style.border.style, BorderType::Thin);
+        assert!(style.border.edges.left && !style.border.edges.right);
 
-        let input = TextInput::new().id("name").placeholder("Name");
-        match <TextInput as View>::content(&input) {
-            ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(w)) => {
-                assert!(w.placeholder.starts_with(">> [N] "));
-            }
-            _ => panic!("Expected input widget content"),
-        }
+        let mut insert = TextInput::new().id("name");
+        insert.vim_state.mode = VimMode::Insert;
+        assert_eq!(
+            <TextInput as View>::style(&insert).border.style,
+            BorderType::Thick
+        );
 
+        // An input with no vim mode says none and is always inserting.
+        let plain = TextInput::new().id("name").without_vim_mode();
+        assert_eq!(<TextInput as View>::semantics(&plain).description, None);
+        assert_eq!(
+            <TextInput as View>::style(&plain).border.style,
+            BorderType::Thick
+        );
         FocusManager::set_current(old);
+
+        // Not focused: the bar is there, in the background colour.
+        let blurred = TextInput::new().id("other");
+        let style = <TextInput as View>::style(&blurred);
+        assert_eq!(style.border_color, style.bg);
     }
 
     fn typed(input: &mut TextInput, key: Key, ctrl: bool, alt: bool) {
@@ -1264,7 +1343,7 @@ mod tests {
     }
 
     #[test]
-    fn focused_native_content_sends_the_caret_not_a_mark() {
+    fn focused_native_content_sends_the_caret_in_the_value() {
         let old = FocusManager::set_current(FocusManager::new());
         FocusManager::with_current_mut(|fm| {
             fm.register("name".to_string());
@@ -1275,24 +1354,28 @@ mod tests {
             _ => panic!("Expected input widget content"),
         };
 
-        // The caret counts the ">> [N] " drawn before the value.
+        // The caret counts clusters of the value, nothing else.
         let input = widget_of(&TextInput::new().id("name").value("héllo").cursor(2));
-        assert_eq!(input.value, ">> [N] héllo");
-        assert_eq!(input.cursor, Some(9));
+        assert_eq!((input.value.as_str(), input.cursor), ("héllo", Some(2)));
         let end = widget_of(&TextInput::new().id("name").value("hi"));
-        assert_eq!(end.value, ">> [N] hi");
-        assert_eq!(end.cursor, Some(9));
-        // Empty: the placeholder shows, the caret before its text.
+        assert_eq!(end.cursor, Some(2));
+        let accent = widget_of(&TextInput::new().id("name").value("ae\u{301}b").cursor(2));
+        assert_eq!(accent.cursor, Some(2));
+        // Empty: the placeholder shows, the caret at its start.
         let empty = widget_of(&TextInput::new().id("name").placeholder("Name"));
-        assert_eq!(empty.value, "");
-        assert_eq!(empty.placeholder, ">> [N] Name");
-        assert_eq!(empty.cursor, Some(7));
+        assert_eq!(
+            (
+                empty.value.as_str(),
+                empty.placeholder.as_str(),
+                empty.cursor
+            ),
+            ("", "Name", Some(0))
+        );
         // Not focused: no caret.
         let blurred = widget_of(&TextInput::new().id("other").value("hi"));
-        assert_eq!(blurred.value, "[N] hi");
-        assert_eq!(blurred.cursor, None);
+        assert_eq!((blurred.value.as_str(), blurred.cursor), ("hi", None));
         let secret = widget_of(&TextInput::new().id("name").password().value("pw"));
-        assert_eq!(secret.cursor, Some(9));
+        assert_eq!((secret.value.as_str(), secret.cursor), ("pw", Some(2)));
 
         FocusManager::set_current(old);
     }

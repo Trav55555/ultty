@@ -430,10 +430,7 @@ without as tag 0, so a terminal that did not negotiate `CAP_INPUT_CURSOR`
 (and rejects tag 7 as an invalid widget type) is never sent one: apps send
 a caret only when the capability was granted. The terminal draws the caret
 in the input and, for assistive technology, exposes it as the text
-selection of the input's text, which is `value` alone. An app that draws
-a prefix before the value in `value` (ulttui's focus and mode marks) and
-sets semantics `value_text` to the bare value has its caret counted past
-that prefix. A password's caret is drawn but never exposed.
+selection of the input's text, which is `value` alone. A password's caret is drawn but never exposed. A multiline input has no caret.
 
 Image scale is `Fit=0`, `Fill=1`, `Stretch=2`, `None=3`.
 

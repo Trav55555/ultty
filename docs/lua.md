@@ -91,7 +91,7 @@ missing required prop is an error that names the file and line.
 | `progress` | | `value` (required, 0 to 1), `label` | |
 | `spinner`  | | `frame`, `label` | Without `frame` the spinner follows the clock, so it moves whenever the view redraws (use a timer to redraw). |
 | `button`   | | `label` (required), `variant` | Focusable when it has an `id`. `variant`: `default`, `primary`, `danger`, `success`. |
-| `input`    | | `value`, `cursor`, `placeholder` | Focusable when it has an `id`. The script owns the text and cursor; see [Text input](#text-input). |
+| `input`    | | `value`, `cursor`, `edit`, `placeholder` | Focusable when it has an `id`. The script owns the text and cursor; see [Text input](#text-input). |
 
 Layout props, accepted by every constructor:
 
@@ -152,6 +152,16 @@ cursor (Left at the start) sends nothing.
 | Backspace, Delete | Delete the cluster before or at the cursor. |
 | Ctrl+W, Alt+Backspace | Delete back to the start of the previous word. |
 | Ctrl+U, Ctrl+K | Delete everything before, or from, the cursor. |
+
+`edit = false` on an `input` turns all of this off for it: every key arrives
+as a `key` message with `focused` set, as it did before the runtime edited
+inputs, so a script can keep Ctrl+A/E/U/K/W as shortcuts or edit by hand.
+(A script written for that behaviour, appending `msg.key` while `msg.focused`
+is the input's id, needs `edit = false` or a handler for `input` messages.)
+Chords with Super or Meta are never edits.
+
+Two buttons or inputs may not share an `id`: the view is an error, shown in
+the banner, since focus and edits would be ambiguous.
 
 Every other key (Enter, Escape, Up, Down, other Ctrl or Alt combinations),
 and any key while another widget has focus, still arrives as a `key`

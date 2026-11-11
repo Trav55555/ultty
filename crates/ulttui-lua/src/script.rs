@@ -373,14 +373,23 @@ impl Script {
         let value: Value = self
             .guarded(|| view.call(state.clone()))
             .map_err(|e| format!("view: {}", describe_error(&e)))?;
-        match value {
+        let node = match value {
             Value::UserData(ud) => node::node_from_userdata(&ud)
-                .ok_or_else(|| "view: returned a userdata that is not a view".to_string()),
-            Value::String(s) => Ok(Rc::new(Node::text(s.to_string_lossy()))),
-            other => Err(format!(
-                "view: returned {}; it must return a view such as column{{...}}",
-                other.type_name()
+                .ok_or_else(|| "view: returned a userdata that is not a view".to_string())?,
+            Value::String(s) => Rc::new(Node::text(s.to_string_lossy())),
+            other => {
+                return Err(format!(
+                    "view: returned {}; it must return a view such as column{{...}}",
+                    other.type_name()
+                ))
+            }
+        };
+        match node.duplicate_focus_id() {
+            Some(id) => Err(format!(
+                "view: more than one button or input has the id \"{id}\"; \
+                 their ids must be unique"
             )),
+            None => Ok(node),
         }
     }
 

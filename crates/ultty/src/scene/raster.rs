@@ -365,12 +365,8 @@ impl Canvas {
                     .then_some(ProtoColor::Named(NamedColor::BrightBlack));
                 let text = super::caret::shown_text(input);
                 self.put_text(cx, cy, &text, template(fg.as_ref(), &plain), clip);
-                if let Some((col, row)) = super::caret::caret_offset(input) {
-                    self.put_caret(
-                        cx.saturating_add(col as i32),
-                        cy.saturating_add(row as i32),
-                        clip,
-                    );
+                if let Some(col) = super::caret::caret_column(input) {
+                    self.put_caret(cx.saturating_add(col as i32), cy, clip);
                 }
             }
             WidgetContent::Markdown(markdown) => self.put_lines(cx, cy, &markdown.source, clip),

@@ -7,8 +7,35 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking, `ulttui-lua`:** while an `input` with an `id` has focus, its
+  editing keys (characters, arrows, Home, End, Backspace, Delete, Ctrl+A,
+  E, K, U and W, Ctrl or Alt with the arrows) no longer arrive as `key`
+  messages. The runtime applies them and sends
+  `{type = "input", id, value, cursor}`; keep the text and cursor from it
+  (see docs/lua.md, "Text input"). A script that appended `msg.key` itself
+  gets no text until it handles `input`; give the input `edit = false` to
+  keep the old behaviour, with every key as a `key` message.
+- `ultty_protocol::InputWidget` has a new public field, `cursor`. Code that
+  builds one with a struct literal needs `cursor: None` (or `..Default`).
+  `InputWidget` no longer implements `Encode` and `Decode` by itself: an
+  input with a caret is a different widget tag, so only `WidgetContent`
+  encodes it.
+- `ulttui` `TextInput` sends its text alone in `InputWidget::value` and
+  `placeholder`; the `">> "` focus mark and the `[N]`/`[I]` vim mode tags
+  that were put before them are gone from native mode. Focus and mode show
+  as a bar down the input's left edge (thick in insert mode) and the mode
+  is in the semantics description. ANSI mode is unchanged.
+
 ### Added
 
+- Text editing in `ulttui` and `ulttui-lua`: `ulttui::edit` (cursor moves,
+  word motions, deletes at the cursor, by grapheme cluster), used by
+  `TextInput`'s insert mode and by Lua `input` nodes, which take `cursor`
+  and `edit` props. A focused input shows its caret in native mode through
+  the new `CAP_INPUT_CURSOR` (`0x0400`) and widget tag 7, and exposes it
+  to assistive technology as the input's text selection.
 - `ulttui` accessibility (ADR 0021 slice 7): `View::semantics` says what a
   view is, and every built-in widget reports its role, name and state
   (checkbox and switch checked, progress value, tree items expanded and

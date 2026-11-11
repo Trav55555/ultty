@@ -452,7 +452,11 @@ mod tests {
         assert_eq!(input.role, Role::Input);
         assert_eq!(input.label.as_deref(), Some("Message"));
         assert_eq!(input.value_text.as_deref(), Some("hi"));
-        assert_eq!(input.description.as_deref(), Some("Say something"));
+        // The description carries the vim mode besides the placeholder.
+        assert_eq!(
+            input.description.as_deref(),
+            Some("Say something. vim normal mode")
+        );
         let password = TextInput::new().value("hunter2").password();
         assert_eq!(password.semantics().value_text, None);
         let ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(field)) =

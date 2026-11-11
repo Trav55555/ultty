@@ -284,7 +284,7 @@ impl Renderer {
                     self.color_scheme.foreground
                 };
 
-                let (verts, idxs, _) = self.text_renderer.build_styled_text_vertices(
+                let (verts, idxs, _) = self.text_renderer.build_cell_text_vertices(
                     &display_text,
                     x,
                     y,
@@ -298,10 +298,10 @@ impl Renderer {
 
                 // The caret is a bar at the left edge of the cell it is
                 // before, in the text colour.
-                if let Some((col, row)) = crate::scene::caret::caret_offset(input) {
+                if let Some(col) = crate::scene::caret::caret_column(input) {
                     let bar_w = (self.cell_width * 0.15).round().max(1.0);
                     let bar_x = x + col as f32 * self.cell_width;
-                    let bar_y = y + row as f32 * self.cell_height;
+                    let bar_y = y;
                     let color = self.color_scheme.foreground;
                     let base_idx = bg_vertices.len() as u32;
                     for (px, py) in [

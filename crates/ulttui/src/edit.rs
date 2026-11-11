@@ -45,9 +45,14 @@ pub enum EditOp {
 /// The edit a key press asks for, if it is an editing key: printable
 /// characters, the arrows, Home, End, Backspace, Delete, Ctrl+A/E/W/U/K,
 /// Ctrl/Alt+Left/Right, Alt+B/F and Alt+Backspace. Other keys (Enter,
-/// Escape, Up, Down, other Ctrl or Alt combinations) are not editing keys.
+/// Escape, Up, Down, other Ctrl or Alt combinations, anything with Meta) are
+/// not editing keys.
 pub fn op_for_key(event: &KeyEvent) -> Option<EditOp> {
     let m = event.modifiers;
+    // Super or Meta chords are the host's shortcuts, never text or edits.
+    if m.meta {
+        return None;
+    }
     let word = m.ctrl || m.alt;
     match &event.key {
         Key::Char(c) if m.ctrl && !m.alt => match c.to_ascii_lowercase() {
@@ -348,6 +353,12 @@ mod tests {
         assert_eq!(op_for_key(&key(Key::Char('c'), true, false)), None);
         assert_eq!(op_for_key(&key(Key::Char('x'), false, true)), None);
         assert_eq!(op_for_key(&key(Key::Char('\u{7}'), false, false)), None);
+        let mut meta = key(Key::Char('v'), false, false);
+        meta.modifiers.meta = true;
+        assert_eq!(op_for_key(&meta), None);
+        let mut meta_left = key(Key::Left, false, false);
+        meta_left.modifiers.meta = true;
+        assert_eq!(op_for_key(&meta_left), None);
     }
 
     #[test]
