@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use super::history::{CompactRow, RowPacker};
-use super::packed::PackedRow;
 use super::{AnchorTag, Cell, CellFlags, Dimensions, Grid, Row, RowMarks, RowView};
 
 /// Default scrollback buffer size (lines).
@@ -508,8 +507,8 @@ impl Buffer {
         if self.max_history == 0 {
             return;
         }
-        for index in 0..n.min(self.grid.dimensions().rows as usize) {
-            let Some(anchor) = self.grid.rows.get(index).map(PackedRow::anchor) else {
+        for index in 0..n.min(self.grid.dimensions().rows as usize) as u16 {
+            let Some(anchor) = self.grid.page.row(index).map(|row| row.anchor()) else {
                 break;
             };
             let mut row = if self.history.len() >= self.max_history {
@@ -519,7 +518,8 @@ impl Buffer {
                 CompactRow::default()
             };
             self.note_row_to_history(anchor);
-            row.encode_from(&self.grid.rows[index], &self.grid.styles);
+            let screen_row = self.grid.page.row(index).expect("the row was read above");
+            row.encode_from(screen_row, &self.grid.styles);
             self.history.push_back(row);
         }
     }
@@ -603,7 +603,10 @@ impl Buffer {
             self.history.get(absolute_index).map(CompactRow::marks)
         } else {
             let grid_index = absolute_index - history_len;
-            self.grid.rows.get(grid_index).map(PackedRow::marks)
+            let row = u16::try_from(grid_index)
+                .ok()
+                .and_then(|i| self.grid.page.row(i));
+            row.map(|row| row.marks())
         }
     }
 
@@ -700,7 +703,10 @@ impl Buffer {
             self.history.get(absolute_index).map(CompactRow::anchor)
         } else {
             let grid_index = absolute_index - history_len;
-            self.grid.rows.get(grid_index).map(PackedRow::anchor)
+            let row = u16::try_from(grid_index)
+                .ok()
+                .and_then(|i| self.grid.page.row(i));
+            row.map(|row| row.anchor())
         }
     }
 
