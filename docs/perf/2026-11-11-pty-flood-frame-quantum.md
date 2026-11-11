@@ -94,8 +94,8 @@ The rest is spawn, PTY transfer and the event loop.
   `futex_wake` system call on every `notify_all`, even with no waiter, and
   only `EventLoop::wait` waits on `changed`; the app does not. At an
   assumed 0.5–1 µs a call (not measured here), that would be 4–8 ms of a
-  ~100 ms flood. This is the next lead outside the VT core, and it is not
-  changed here.
+  ~100 ms flood. The [quiet rerun](2026-11-11-pty-flood-quiet-rerun.md)
+  removes them and measures +1.2% to +1.8%.
 - **Locks.** Two lock acquisitions per chunk (parse, then
   `flush_outbound`). These are uncontended apart from the UI's per-frame
   row copy, so they cost far less than the futex calls.
@@ -108,10 +108,12 @@ there is no cycle profile here.
 
 ## Not measured
 
-- The new bench on a quiet c7a.2xlarge. Its ascii number there will be
+- The new bench on a quiet c7a.2xlarge (measured since: ascii 120x40 ran
+  at 261.9 MiB/s, see the [quiet rerun](2026-11-11-pty-flood-quiet-rerun.md)).
+  Its ascii number there will be
   higher than 219 by an amount this note cannot predict. The true time
   was somewhere in the ninth frame, so 128 to 144 ms plus the constant,
   which is roughly 220 to 250 MiB/s. Earlier `pty_flood` ratios between
   arms that sit in different frames hold only to about a frame (11% at
   ascii's 146 ms, 4% at cjk's 371 ms).
-- The futex fix.
+- The futex fix (measured in the quiet rerun).
