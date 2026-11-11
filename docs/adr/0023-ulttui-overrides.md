@@ -187,20 +187,38 @@ characters typed into an input are not passed to `key`, keys held with meta
 match nothing, `hidden` and `text` do not apply to the root.
 
 **Cost.** `widget` is called only if the file defines it, and only for
-widgets with an id. Its results are cached by (id, role, text, focused), so
-a widget is asked again only when one of those changes; the hook must be a
-function of its arguments (it can keep state, but cached results will not
-see it). Within a frame each id is resolved once however often the walks
-ask. With 200 buttons and a hook that recolours some, a debug build
-(opt-level 1) took 0.2 ms for the native walk without overrides, 1.0 ms
-for the first frame with them (200 calls) and 0.2 ms for the next frame (no
-calls) (`two_hundred_widgets_call_luau_once_each_then_not_at_all`).
+widgets with an id. Its results, and its failures, are cached by (id, role,
+a 64-bit hash and the length of the text, focused), so a widget is asked
+again only when one of those changes, an entry does not grow with the text,
+and a hook that always fails costs one call per input rather than the frame
+budget every frame. Two texts of one length with the same hash would share
+an answer; that is accepted. The hook must be a function of its arguments
+(it can keep state, but cached results will not see it). The cache holds
+4096 entries; when full it is emptied, together with the last good results
+by id, so ids an app generates and drops do not pile up. Within a frame
+each id is resolved once however often the walks ask, which reads the
+widget's content and role once more per id'd widget per frame.
+With 200 buttons (`two_hundred_widgets_call_luau_once_each_then_not_at_all`,
+release build, median of 101 frames of the native walk, 2026-11-11): no
+overrides 65 µs, TOML 67 µs, a Luau file with only a `key` hook 64 µs (no
+widget is read for it), a warm `widget` hook (no Luau calls, all cache
+hits) 113 µs, the first frame (200 calls) 1.1 ms. Re-reading inputs costs
+about 0.23 µs a widget, under 0.3% of a 60 Hz frame for 200 widgets, so it
+is kept rather than cached by something cheaper but less exact.
 
 **Bounds.** Each call gets 2 ms of Luau time and the frame 8 ms: a call that
 runs over is stopped by the VM's interrupt (at loops and calls), and once a
 frame has spent its 8 ms the remaining widgets keep their last results until
 the next frame, so a loop that never ends costs a frame at most about 8 ms
-plus one call. Loading the file gets 200 ms and 16 MiB. A call that fails
+plus one call. The interrupt cannot stop a single library call, which can
+run past the limit by tens of milliseconds: measured with the earlier 16 MiB
+cap, `string.rep('x', 15e6)` took 33 ms, sorting 200,000 numbers 4.9 ms, a
+backtracking `string.find` 9 ms. The memory cap bounds the worst of these,
+so override scripts get 4 MiB (`ulttui-lua` apps keep 256 MiB), and the
+`string.rep` case now fails at the cap. Loading the file gets 200 ms. Values
+a hook returns are read with raw accessors only, outside the time limit:
+field names must be strings, and nothing is converted with `tostring`, so a
+`__tostring` or other metamethod cannot run unbounded. A call that fails
 (an error, the time limit, a bad return value) is logged once per loaded
 version, and the widget keeps the last result that worked (nothing, if none
 did); a failing `key` call falls through to `[keys]`.

@@ -172,10 +172,15 @@ return {
   `string`, `table`, `math`, `utf8`, `bit32`, `buffer`, `coroutine` and `os`
   (no `execute`), no `io`, `require` or `loadstring`, and it cannot start
   processes. `print` writes to the app's log.
-- Each call has 2 ms and each frame 8 ms. A call that errors, returns
-  something that is not an override, or runs out of time is logged once, and
-  the widget keeps the last answer that worked; a failing `key` call falls
-  through to `[keys]`. A loop that never ends costs a frame about 8 ms.
+- Each call has 2 ms and each frame 8 ms, and the script 4 MiB of memory. A
+  call that errors, returns something that is not an override, or runs out
+  of time is logged once, and the widget keeps the last answer that worked
+  (the hook is not asked again for the same inputs until the file is
+  reloaded); a failing `key` call falls through to `[keys]`. A loop that
+  never ends costs a frame about 8 ms. One slow library call (a huge
+  `string.rep`, a pathological pattern) can run past the limit by tens of
+  milliseconds.
+- Return plain tables with string field names: anything else is an error.
 - A file that fails to load (a syntax error, a value other than a table of
   these two functions, more than 200 ms to run) is logged and the last good
   version stays, as for TOML.

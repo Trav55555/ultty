@@ -21,9 +21,15 @@
 //! frame stops calling the script once it has spent its budget. A call that
 //! fails or runs out of time is logged once and the widget keeps the last
 //! result that worked.
+//!
+//! No Luau code runs outside a time limit: values a hook returns are read
+//! only with raw accessors (`pairs` is a raw `next`, keys must be strings,
+//! nothing is converted with `tostring`), so a metamethod cannot run after
+//! the deadline is disarmed.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -35,8 +41,11 @@ use crate::event::{Key, KeyEvent};
 use crate::lua_sandbox::Sandbox;
 use crate::widgets::View;
 
-/// Memory a script may use.
-const MEMORY_LIMIT: usize = 16 * 1024 * 1024;
+/// Memory an override script may use. Small: it bounds how long a single
+/// library call (`string.rep`, a pattern match) can run past the time limit,
+/// which the interrupt cannot stop mid-call. `ulttui-lua` apps keep their
+/// own, larger cap.
+pub const MEMORY_LIMIT: usize = 4 * 1024 * 1024;
 /// Time to run the file itself.
 const LOAD_BUDGET: Duration = Duration::from_millis(200);
 /// Time for one call of `widget` or `key`.
@@ -44,7 +53,8 @@ pub const CALL_BUDGET: Duration = Duration::from_millis(2);
 /// Luau time one frame may spend in `widget` calls; after it, widgets keep
 /// their last results until the next frame.
 pub const FRAME_BUDGET: Duration = Duration::from_millis(8);
-/// Cached `widget` results kept before the cache is emptied.
+/// Cached `widget` results kept before the cache (and the last good results)
+/// are emptied.
 const CACHE_LIMIT: usize = 4096;
 
 /// What a `widget` call said: only the fields it set.
@@ -80,13 +90,25 @@ impl WidgetPatch {
     }
 }
 
-/// What `widget` is called with; results are cached by it.
+/// What `widget` is called with; results are cached by it. The text is
+/// kept as a 64-bit hash and its length, so an entry's size does not grow
+/// with the widget's text (two texts of the same length with the same hash
+/// would share a cached result).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct WidgetInputs {
+struct WidgetKey {
     id: String,
     role: &'static str,
-    text: Option<String>,
+    text: Option<(u64, usize)>,
     focused: bool,
+}
+
+/// A cached `widget` call: what it returned, or that it failed (the widget
+/// then keeps its last good result; the hook is not asked again for these
+/// inputs until the file is reloaded).
+#[derive(Debug, Clone)]
+enum Outcome {
+    Returned(Option<WidgetPatch>),
+    Failed,
 }
 
 /// A loaded Luau override file.
@@ -95,11 +117,12 @@ pub struct OverrideScript {
     widget: Option<Function>,
     key: Option<Function>,
     /// Results by inputs, across frames.
-    cache: RefCell<HashMap<WidgetInputs, Option<WidgetPatch>>>,
+    cache: RefCell<HashMap<WidgetKey, Outcome>>,
     /// Results by id for the frame being drawn, so a widget's inputs are
     /// read once per frame however often the walks ask.
     frame: RefCell<HashMap<String, Option<WidgetPatch>>>,
     /// The last result that worked, by id: what a failed call falls back to.
+    /// Emptied with the cache, so ids that come and go do not pile up.
     last_good: RefCell<HashMap<String, Option<WidgetPatch>>>,
     /// Luau time spent in this frame's `widget` calls.
     spent: Cell<Duration>,
@@ -155,7 +178,7 @@ impl OverrideScript {
         let mut key = None;
         for pair in hooks.pairs::<Value, Value>() {
             let (field, value) = pair.map_err(|e| e.to_string())?;
-            let field = field.to_string().unwrap_or_default();
+            let field = field_name(&field)?;
             let slot = match field.as_str() {
                 "widget" => &mut widget,
                 "key" => &mut key,
@@ -215,10 +238,13 @@ impl OverrideScript {
 
     fn widget_uncached(&self, hook: &Function, id: &str, view: &dyn View) -> Option<WidgetPatch> {
         let inputs = widget_inputs(id, view);
-        if let Some(cached) = self.cache.borrow().get(&inputs) {
-            return cached.clone();
-        }
+        let key = inputs.key();
         let last_good = || self.last_good.borrow().get(id).cloned().flatten();
+        match self.cache.borrow().get(&key) {
+            Some(Outcome::Returned(patch)) => return patch.clone(),
+            Some(Outcome::Failed) => return last_good(),
+            None => {}
+        }
         if self.spent.get() >= FRAME_BUDGET {
             return last_good();
         }
@@ -236,19 +262,25 @@ impl OverrideScript {
             .map_err(|e| e.to_string())
             .and_then(|value| parse_patch(&value));
         self.spent.set(self.spent.get() + started.elapsed());
+        {
+            let mut cache = self.cache.borrow_mut();
+            if cache.len() >= CACHE_LIMIT {
+                cache.clear();
+                self.last_good.borrow_mut().clear();
+            }
+        }
         match result {
             Ok(patch) => {
-                let mut cache = self.cache.borrow_mut();
-                if cache.len() >= CACHE_LIMIT {
-                    cache.clear();
-                }
-                cache.insert(inputs, patch.clone());
+                self.cache
+                    .borrow_mut()
+                    .insert(key, Outcome::Returned(patch.clone()));
                 self.last_good
                     .borrow_mut()
                     .insert(id.to_string(), patch.clone());
                 patch
             }
             Err(error) => {
+                self.cache.borrow_mut().insert(key, Outcome::Failed);
                 self.warn_once(&format!("widget(\"{id}\"): {error}"));
                 last_good()
             }
@@ -303,6 +335,30 @@ impl OverrideScript {
     }
 }
 
+/// What `widget` is told about a widget.
+struct WidgetInputs {
+    id: String,
+    role: &'static str,
+    text: Option<String>,
+    focused: bool,
+}
+
+impl WidgetInputs {
+    fn key(&self) -> WidgetKey {
+        WidgetKey {
+            id: self.id.clone(),
+            role: self.role,
+            text: self.text.as_ref().map(|text| {
+                // Fixed keys: the same text hashes the same in every frame.
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                text.hash(&mut hasher);
+                (hasher.finish(), text.len())
+            }),
+            focused: self.focused,
+        }
+    }
+}
+
 /// What `widget` is told about `view`: its role, its text, and whether it
 /// has focus. Read without any replacement text in scope, so it is the
 /// app's own text.
@@ -336,7 +392,7 @@ fn parse_patch(value: &Value) -> Result<Option<WidgetPatch>, String> {
     let mut patch = WidgetPatch::default();
     for pair in table.pairs::<Value, Value>() {
         let (field, value) = pair.map_err(|e| e.to_string())?;
-        let field = field.to_string().unwrap_or_default();
+        let field = field_name(&field)?;
         let wrong =
             |expected: &str| format!("{field}: expected {expected}, got {}", value.type_name());
         match field.as_str() {
@@ -362,6 +418,18 @@ fn parse_patch(value: &Value) -> Result<Option<WidgetPatch>, String> {
         }
     }
     Ok(Some(patch))
+}
+
+/// A table key as a field name. Only strings: converting anything else
+/// (`tostring`) could run a `__tostring` metamethod outside the time limit.
+fn field_name(key: &Value) -> Result<String, String> {
+    match key {
+        Value::String(name) => Ok(name.to_string_lossy()),
+        other => Err(format!(
+            "field names must be strings, got {}",
+            other.type_name()
+        )),
+    }
 }
 
 fn parse_color(value: &Value) -> Result<Color, String> {
@@ -604,28 +672,52 @@ mod tests {
         let view = (0..200).fold(Column::new(), |column, i| {
             column.child(Button::new(format!("item {i}")).id(format!("w{i}")))
         });
-        let started = Instant::now();
-        let _ = buttons(&view);
-        let plain = started.elapsed();
         let frame = || {
             let started = Instant::now();
             let shown = with_overrides(overrides.clone(), || buttons(&view));
             (started.elapsed(), shown)
         };
         let (cold, shown) = frame();
-        let (warm, _) = frame();
         let yellow = shown
             .iter()
             .filter(|(_, fg)| *fg == Some(Color::Named(NamedColor::Yellow)))
             .count();
         assert_eq!(yellow, 20);
+        let _ = frame();
         assert_eq!(
             overrides.script().unwrap().widget_calls(),
             200,
             "the warm frame calls Luau for nothing"
         );
+
+        // Median frame time over 101 frames each: no overrides, TOML only
+        // (one entry), a Luau file with only a `key` hook (widgets are never
+        // asked), and the warm `widget` hook (its inputs are read per id).
+        let median = |overrides: Option<Rc<Overrides>>| {
+            let mut times: Vec<Duration> = (0..101)
+                .map(|_| {
+                    let started = Instant::now();
+                    match &overrides {
+                        Some(o) => drop(with_overrides(o.clone(), || buttons(&view))),
+                        None => drop(buttons(&view)),
+                    }
+                    started.elapsed()
+                })
+                .collect();
+            times.sort();
+            times[50]
+        };
+        let none = median(None);
+        let toml = median(Some(Rc::new(
+            Overrides::parse("[widget.w7]\nfg = \"yellow\"\n").unwrap(),
+        )));
+        let key_only = luau("return { key = function() end }");
+        let key_only_time = median(Some(key_only.clone()));
+        let warm = median(Some(overrides.clone()));
+        assert_eq!(key_only.script().unwrap().widget_calls(), 0);
         eprintln!(
-            "200 widgets, native walk: no overrides {plain:?}, Luau cold {cold:?}, warm {warm:?}"
+            "200 widgets, native walk, median of 101: no overrides {none:?}, TOML {toml:?}, \
+             Luau key hook only {key_only_time:?}, Luau widget hook warm {warm:?} (cold frame {cold:?})"
         );
     }
 
@@ -644,6 +736,69 @@ mod tests {
             overrides.remap(&key_event(Key::Char('/'), false, None), false),
             Some(Remapped::Focus(id)) if id == "search"
         ));
+    }
+
+    /// A table whose `__tostring` never returns, as Luau source.
+    const LOOPING_TOSTRING: &str =
+        "setmetatable({}, { __tostring = function() while true do end end })";
+
+    #[test]
+    fn metamethods_in_returned_values_cannot_run_without_a_time_limit() {
+        // A key with a looping __tostring, in a widget hook's answer...
+        let overrides = luau(&format!(
+            "return {{ widget = function() return {{ [{LOOPING_TOSTRING}] = 'red' }} end }}"
+        ));
+        let started = Instant::now();
+        let shown = with_overrides(overrides, || {
+            buttons(&Column::new().child(Button::new("A").id("a")))
+        });
+        assert_eq!(shown[0].0, "A", "the bad answer is ignored");
+        assert!(started.elapsed() < Duration::from_millis(500));
+
+        // ...in the hooks table itself...
+        let started = Instant::now();
+        let error = Overrides::parse_luau(
+            &format!("return {{ [{LOOPING_TOSTRING}] = function() end }}"),
+            "test.luau",
+        )
+        .unwrap_err();
+        assert!(error.contains("field names must be strings"), "{error}");
+        assert!(started.elapsed() < Duration::from_millis(500));
+
+        // ...and as the value a hook raises as its error.
+        let overrides = luau(&format!(
+            "return {{ widget = function() error({LOOPING_TOSTRING}) end, key = function() error({LOOPING_TOSTRING}) end }}"
+        ));
+        let started = Instant::now();
+        let _ = with_overrides(overrides.clone(), || {
+            buttons(&Column::new().child(Button::new("A").id("a")))
+        });
+        assert!(overrides
+            .remap(&key_event(Key::Char('q'), false, None), false)
+            .is_none());
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn a_huge_allocation_fails_at_the_memory_cap() {
+        let overrides =
+            luau("return { widget = function() return { text = string.rep('x', 15e6) } end }");
+        let started = Instant::now();
+        let shown = with_overrides(overrides, || {
+            buttons(&Column::new().child(Button::new("A").id("a")))
+        });
+        assert_eq!(shown[0].0, "A");
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn a_failure_is_remembered_and_not_retried_for_the_same_inputs() {
+        let overrides = luau("return { widget = function() error('always') end }");
+        let view = Column::new().child(Button::new("A").id("a"));
+        for _ in 0..3 {
+            let _ = with_overrides(overrides.clone(), || buttons(&view));
+        }
+        assert_eq!(overrides.script().unwrap().widget_calls(), 1);
     }
 
     #[test]
