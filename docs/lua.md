@@ -6,15 +6,21 @@ everywhere else it draws with ANSI, like any other ulttui app.
 
 ```sh
 cargo run -p ulttui-lua -- examples/lua/hello.luau
-cargo run -p ulttui-lua -- --allow-exec examples/lua/panes.luau
+cargo run -p ulttui-lua -- --exec 'ulttyctl --json panes' examples/lua/panes.luau
 ```
 
 Options:
 
 | Option         | Meaning                                                        |
 |----------------|----------------------------------------------------------------|
-| `--allow-exec` | Let the script start processes with `run{}`. Off by default.   |
+| `--exec CMD`   | Let `run{}` start command lines that begin with the words of `CMD`. Repeatable. Nothing is allowed by default. A bare program name allows it with any arguments, which for `ulttyctl`, `git`, a shell, an interpreter, `env` or `xargs` is as good as `--allow-exec`. |
+| `--allow-exec` | Let `run{}` start anything.                                     |
+| `--ansi`       | Draw with ANSI even inside Ultty (a split pane, where native scenes are not drawn). |
 | `--log FILE`   | Write logs to `FILE` (the terminal is the UI, so never stderr). |
+
+Inside Ultty, `ulttyctl lua open FILE [--split right|down] [--exec CMD]...`
+opens a script in a new tab (or a split next to the caller's pane) without a
+shell, in the caller's directory; see [ADR 0024](adr/0024-lua-in-ultty.md).
 
 This is a prototype. The API below is small on purpose and may change.
 
@@ -67,7 +73,7 @@ to the script. Ctrl+C quits.
 
 | Command | Meaning |
 |---------|---------|
-| `run { id = "panes", argv = { "ulttyctl", "--json", "panes" } }` | Start a process (no shell, stdin closed). Its output arrives as a `done` message with the same `id`. Running an `id` again cancels and kills the previous run (the process itself, not processes it started in the background). Needs `--allow-exec`: without it `run` raises an error naming the flag. |
+| `run { id = "panes", argv = { "ulttyctl", "--json", "panes" } }` | Start a process (no shell, stdin closed). Its output arrives as a `done` message with the same `id`. Running an `id` again cancels and kills the previous run (the process itself, not processes it started in the background). The command line must be granted: `--exec 'ulttyctl --json panes'` allows `argv` that begins with those words, as written (`ulttyctl`, not `/usr/bin/ulttyctl`; not `ulttyctl new-tab`), `--allow-exec` allows anything. Otherwise `run` raises an error naming the command line and the flag to add; a script can `pcall` it. |
 | `quit()` | Exit. |
 
 ## Views
@@ -133,7 +139,11 @@ Scripts run in Luau's sandbox mode: the globals and libraries are read-only,
 and each loaded version gets its own global environment, so a global set by
 one version is gone in the next. There is no `io`, no `os.execute`, no
 `require`, no `loadstring`, no `getfenv`/`setfenv` and no `debug`. The
-only way to affect the system is `run{}`, and only with `--allow-exec`. A
+only way to affect the system is `run{}`, and only the command lines granted
+with `--exec` (or any, with `--allow-exec`). The grants are fixed when the
+script starts; a reload keeps them. They bound the words of the command
+line, not what the program does with them: a grant on a program that runs
+other programs (`ulttyctl`, `git`, a shell) is as wide as `--allow-exec`. A
 call into the script (load, `init`, `update`, `view`) that runs Luau code for
 more than a second is stopped with an error; the check runs at loops and
 calls, so a single slow library call (a pathological `string.find` pattern)
@@ -229,8 +239,8 @@ return app {
 [`examples/lua/panes.luau`](../examples/lua/panes.luau) runs
 `ulttyctl --json panes` when it starts and every 2 seconds, and lists each
 pane's id, tab, program, status and working directory. Up and down (or `k`
-and `j`) move the selection, `g` refreshes now. It needs `--allow-exec`;
-without it the banner says so.
+and `j`) move the selection, `g` refreshes now. It needs
+`--exec 'ulttyctl --json panes'`; without it the banner says so.
 
 ```lua
 local function poll()
@@ -262,7 +272,7 @@ return app {
 ## Testing
 
 - `cargo test -p ulttui-lua`: constructors and props, messages, timers, the
-  `--allow-exec` gate, the sandbox, and reloads (including a broken save and
+  `--exec` grants, the sandbox, and reloads (including a broken save and
   its fix) driven through the library with script files under `target/`.
 - `scripts/e2e/lua-panes.sh`: runs `panes.luau` in a headless Ultty, checks
   `ulttyctl regions` lists a row per pane, edits a label in a copy of the

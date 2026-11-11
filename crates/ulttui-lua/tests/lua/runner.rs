@@ -8,7 +8,7 @@ use ulttui::cmd::Cmd;
 use ulttui::event::{Event, Key, KeyEvent, Modifiers};
 use ulttui::widgets::{render_view_messages, View};
 use ulttui_lua::runner::{watch_file, Msg, SETTLE};
-use ulttui_lua::{LuaApp, ScriptMsg, ScriptOptions};
+use ulttui_lua::{ExecGrant, LuaApp, ScriptMsg, ScriptOptions};
 use ultty_protocol::AppMessage;
 
 use crate::common::{ansi, texts, write};
@@ -53,7 +53,7 @@ fn key_event(key: Key) -> Event {
 
 fn exec() -> ScriptOptions {
     ScriptOptions {
-        allow_exec: true,
+        exec: ExecGrant::Any,
         ..ScriptOptions::default()
     }
 }
@@ -330,12 +330,14 @@ fn panes_example_lists_each_pane_and_moves_the_selection() {
 }
 
 #[test]
-fn panes_example_without_allow_exec_explains_the_flag() {
+fn panes_example_without_a_grant_names_the_flag_to_add() {
     let app = LuaApp::new(example("panes.luau"), ScriptOptions::default()).unwrap();
     let error = app.script().error().unwrap();
     assert!(
-        error.contains("start ulttui-lua with --allow-exec"),
+        error.contains(
+            "ulttyctl --json panes is not allowed; open the script with --exec 'ulttyctl --json panes'"
+        ),
         "{error}"
     );
-    assert!(error.contains("panes.luau:9: run:"), "{error}");
+    assert!(error.contains("panes.luau:10: run:"), "{error}");
 }

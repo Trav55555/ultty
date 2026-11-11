@@ -1,20 +1,39 @@
-//! Compact storage for scrollback rows.
+//! Scrollback in pages (ADR 0022 §3, migration slice 5).
 //!
-//! A screen row holds one 8-byte packed cell per column. Scrollback holds
-//! 10,000 rows or more, and every new line was once written into the
-//! oldest of them, so saving history stalled on memory
-//! (docs/perf/2026-11-06-scrollback-cost.md). A [`CompactRow`] keeps the
-//! same content as one UTF-8 character per cell plus runs of identical
-//! style, without trailing blank cells: about 100 bytes for a typical
-//! output line instead of one cell per column.
+//! Rows that scroll off the screen are appended to the newest of a list of
+//! pages, [`PAGE_ROWS`] rows each. A page keeps a head per row and the rows'
+//! cells in one of three forms, chosen per row:
 //!
-//! Rows are encoded when they scroll into history and decoded when
-//! something reads them, which is at most a screenful while scrolled back.
+//! - **Ascii**, one byte a cell: ASCII with no structure bits, all in one
+//!   style. A uniform screen row (`ScreenRow::is_uniform`) is a byte copy.
+//! - **Chars**, four bytes a cell (the codepoint and the width bits): any
+//!   row without grapheme extras whose cells are all in one style, which
+//!   is how CJK output arrives. Without it a CJK row costs 8 bytes a cell,
+//!   about 1.7 times what it did before pages (ADR 0022 §9, Risks, and open
+//!   question 2).
+//! - **Cells**, the packed cells themselves, with their grapheme extras.
+//!
+//! Every form stores the cells up to the last one that is not blank in the
+//! default style, so a short line on a wide screen stays short. Style keys
+//! that are not inline are table ids of the page's own style list; a cached
+//! map from the screen table's ids (`History::remap`) makes that a lookup
+//! per style run rather than per cell.
+//!
+//! Pages are append-only; eviction is per row and frees a page once its
+//! last row is gone, and a freed page is kept to be the next new one, so a
+//! full scrollback allocates nothing per row. [`HistoryRow`] reads a row in
+//! place, without decoding it.
 
-use super::cell::CellFlags;
-use super::packed::{PackedCell, Style, StyleTable};
+use std::collections::VecDeque;
+use std::fmt;
+
+use super::cell::{Cell, CellFlags};
+use super::packed::{PackedCell, Style, StyleKey, StyleTable, Summary};
 use super::row::{AnchorTag, Row, RowMarks};
 use super::screen::{ScreenPage, ScreenRow};
+
+/// Rows per history page (ADR 0022 §3; open question 4).
+pub(super) const PAGE_ROWS: usize = 256;
 
 /// The number of cells up to and including the last one that is not
 /// blank in the default style.
@@ -38,299 +57,966 @@ fn used_len(cells: &[PackedCell]) -> usize {
         .map_or(0, |last| last + 1)
 }
 
-/// `len` consecutive cells with the same style.
+/// How a row's cells are stored; see the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Run {
+enum Form {
+    Ascii,
+    Chars,
+    Cells,
+}
+
+/// A history row's head: everything but its cells.
+#[derive(Debug, Clone, Copy)]
+struct Head {
+    /// Ascii and Chars: the row's style key, in the page's ids
+    /// ([`StyleKey::bits`]). Cells: where its grapheme extras are,
+    /// `extras[start..start + count]`, as `start | count << 32`.
+    aux: u64,
+    /// Where the row's cells start in the vector its form uses.
+    offset: u32,
+    /// Cells stored; every cell from here to `width` is blank.
     len: u16,
+    width: u16,
+    flags: u8,
+    /// Shell integration marks (ADR 0019).
+    marks: RowMarks,
+    /// Inline surface anchor (ADR 0020).
+    anchor: AnchorTag,
+}
+
+impl Head {
+    const FORM: u8 = 0b11;
+    const CHARS: u8 = 1;
+    const CELLS: u8 = 2;
+    const WRAPPED: u8 = 1 << 2;
+
+    #[inline]
+    fn form(&self) -> Form {
+        match self.flags & Self::FORM {
+            0 => Form::Ascii,
+            Self::CHARS => Form::Chars,
+            _ => Form::Cells,
+        }
+    }
+
+    /// The style of a one-style row, in the page's ids.
+    #[inline]
+    fn key(&self) -> StyleKey {
+        StyleKey::from_bits(self.aux)
+    }
+
+    /// A Cells row's entries in the page's `extras`.
+    #[inline]
+    fn extras(&self) -> std::ops::Range<usize> {
+        let start = (self.aux & u64::from(u32::MAX)) as usize;
+        start..start + (self.aux >> 32) as usize
+    }
+
+    #[inline]
+    fn is_wrapped(&self) -> bool {
+        self.flags & Self::WRAPPED != 0
+    }
+}
+
+/// A Cells row's [`Head::aux`] for extras `start..start + count`; no
+/// extras point at none.
+fn extras_aux(start: usize, count: usize) -> u64 {
+    if count == 0 {
+        0
+    } else {
+        start as u64 | (count as u64) << 32
+    }
+}
+
+/// The extra codepoints of one grapheme in a Cells row:
+/// `extra_chars[start..start + len]`.
+#[derive(Debug, Clone, Copy)]
+struct Extra {
+    col: u16,
+    len: u8,
+    start: u32,
+}
+
+/// Up to [`PAGE_ROWS`] rows, appended in place.
+#[derive(Debug, Clone)]
+struct Page {
+    heads: Vec<Head>,
+    ascii: Vec<u8>,
+    chars: Vec<u32>,
+    cells: Vec<PackedCell>,
+    /// Grapheme extras of Cells rows, each row's sorted by column.
+    extras: Vec<Extra>,
+    extra_chars: Vec<char>,
+    /// The styles of the page's keys that are not inline; entry 0 is the
+    /// default style.
+    styles: Vec<Style>,
+    /// Payload bytes no head points at any more (left by rewrites and by
+    /// rows taken back off the end).
+    garbage: usize,
+}
+
+impl Page {
+    fn new() -> Self {
+        Self {
+            heads: Vec::with_capacity(PAGE_ROWS),
+            ascii: Vec::new(),
+            chars: Vec::new(),
+            cells: Vec::new(),
+            extras: Vec::new(),
+            extra_chars: Vec::new(),
+            styles: vec![Style::default()],
+            garbage: 0,
+        }
+    }
+
+    /// Empty the page for reuse, keeping its allocations.
+    fn clear(&mut self) {
+        self.heads.clear();
+        self.ascii.clear();
+        self.chars.clear();
+        self.cells.clear();
+        self.extras.clear();
+        self.extra_chars.clear();
+        self.styles.truncate(1);
+        self.garbage = 0;
+    }
+
+    /// The page is full: give back what its vectors over-allocated while
+    /// growing, and what a recycled page kept from content of another
+    /// shape.
+    fn shrink(&mut self) {
+        self.ascii.shrink_to_fit();
+        self.chars.shrink_to_fit();
+        self.cells.shrink_to_fit();
+        self.extras.shrink_to_fit();
+        self.extra_chars.shrink_to_fit();
+        self.styles.shrink_to_fit();
+    }
+
+    #[inline]
+    fn row(&self, index: usize) -> HistoryRow<'_> {
+        let head = &self.heads[index];
+        let style = match head.form() {
+            Form::Ascii | Form::Chars => head.key().style_in(&self.styles),
+            Form::Cells => Style::default(),
+        };
+        HistoryRow {
+            page: self,
+            head,
+            style,
+        }
+    }
+
+    /// Store `row`'s cells, whose keys `map` turns into this page's (it is
+    /// handed the page's style list), and return its head. The head is
+    /// not added.
+    #[inline]
+    fn append(
+        &mut self,
+        row: ScreenRow<'_>,
+        map: &mut impl FnMut(&mut Vec<Style>, StyleKey) -> StyleKey,
+    ) -> Head {
+        let mut head = Head {
+            aux: 0,
+            offset: 0,
+            len: 0,
+            width: row.width(),
+            flags: if row.is_wrapped() { Head::WRAPPED } else { 0 },
+            marks: row.marks(),
+            anchor: row.anchor(),
+        };
+        if !row.is_uniform() {
+            self.append_cells(row, &mut head, map);
+            return head;
+        }
+
+        // A uniform row is ASCII in one style, which the row has kept track
+        // of. In the default style a cell is blank exactly when it holds a
+        // space, so trimming the spaces trims the blank tail; in any other
+        // style no cell is blank.
+        let mut used = row.used_cells();
+        let key = row.uniform_key();
+        if key.is_default() {
+            while let [rest @ .., last] = used {
+                if *last != PackedCell::BLANK {
+                    break;
+                }
+                used = rest;
+            }
+        }
+        // A row with no payload points at none, so that taking later rows
+        // off the end leaves no offset past it.
+        if !used.is_empty() {
+            head.offset = self.ascii.len() as u32;
+            head.len = used.len() as u16;
+            self.ascii.extend(used.iter().map(|cell| cell.ascii_byte()));
+            if !key.is_default() {
+                head.aux = map(&mut self.styles, key).bits();
+            }
+        }
+        head
+    }
+
+    /// [`Page::append`] for a row that is not uniform: it may still be
+    /// ASCII in one style (printed a character at a time), or else it takes
+    /// the Chars or the Cells form.
+    #[inline(never)]
+    fn append_cells(
+        &mut self,
+        row: ScreenRow<'_>,
+        head: &mut Head,
+        map: &mut impl FnMut(&mut Vec<Style>, StyleKey) -> StyleKey,
+    ) {
+        let used = row.used_cells();
+        let cells = &used[..used_len(used)];
+        let summary = Summary::of(cells);
+        let key = cells.first().map_or(StyleKey::DEFAULT, |cell| cell.key());
+        head.len = cells.len() as u16;
+        if summary.one_key && summary.ascii {
+            head.offset = self.ascii.len() as u32;
+            self.ascii
+                .extend(cells.iter().map(|cell| cell.ascii_byte()));
+            if !cells.is_empty() {
+                head.aux = map(&mut self.styles, key).bits();
+            }
+        } else if summary.one_key && !summary.graphemes {
+            head.flags |= Head::CHARS;
+            head.offset = self.chars.len() as u32;
+            self.chars.extend(cells.iter().map(|cell| cell.low_bits()));
+            head.aux = map(&mut self.styles, key).bits();
+        } else {
+            head.flags |= Head::CELLS;
+            let start = self.cells.len();
+            head.offset = start as u32;
+            self.cells.extend_from_slice(cells);
+            let (mut last, mut mapped) = (StyleKey::DEFAULT, StyleKey::DEFAULT);
+            for cell in &mut self.cells[start..] {
+                let key = cell.key();
+                if key != last {
+                    last = key;
+                    mapped = map(&mut self.styles, key);
+                }
+                *cell = cell.with_key(mapped);
+            }
+            let first = self.extras.len();
+            let mut count = 0;
+            if summary.graphemes {
+                for (col, cell) in cells.iter().enumerate() {
+                    if !cell.has_grapheme() {
+                        continue;
+                    }
+                    if let Some(extra) = row.grapheme_extra(col as u16) {
+                        let extra = &extra[..extra.len().min(usize::from(u8::MAX))];
+                        if !extra.is_empty() {
+                            self.extras.push(Extra {
+                                col: col as u16,
+                                len: extra.len() as u8,
+                                start: self.extra_chars.len() as u32,
+                            });
+                            self.extra_chars.extend_from_slice(extra);
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            head.aux = extras_aux(first, count);
+        }
+        if head.len == 0 {
+            head.offset = 0;
+        }
+    }
+
+    /// The payload bytes `head` points at.
+    fn payload_bytes(&self, head: &Head) -> usize {
+        let len = usize::from(head.len);
+        match head.form() {
+            Form::Ascii => len,
+            Form::Chars => 4 * len,
+            Form::Cells => {
+                let extras = &self.extras[head.extras()];
+                8 * len
+                    + std::mem::size_of_val(extras)
+                    + extras
+                        .iter()
+                        .map(|extra| 4 * usize::from(extra.len))
+                        .sum::<usize>()
+            }
+        }
+    }
+
+    /// All payload bytes, live or not.
+    fn total_bytes(&self) -> usize {
+        self.ascii.len()
+            + 4 * self.chars.len()
+            + 8 * self.cells.len()
+            + self.extras.len() * std::mem::size_of::<Extra>()
+            + 4 * self.extra_chars.len()
+    }
+
+    /// Remove the last row. Its payload is given back when it is the last
+    /// thing stored, which it is unless a rewrite came after it.
+    fn pop_head(&mut self) {
+        let Some(head) = self.heads.pop() else {
+            return;
+        };
+        let start = head.offset as usize;
+        let end = start + usize::from(head.len);
+        let at_end = match head.form() {
+            Form::Ascii => self.ascii.len() == end,
+            Form::Chars => self.chars.len() == end,
+            Form::Cells => {
+                let extras = head.extras();
+                self.cells.len() == end && (extras.is_empty() || self.extras.len() == extras.end)
+            }
+        };
+        if !at_end {
+            self.garbage += self.payload_bytes(&head);
+            return;
+        }
+        match head.form() {
+            Form::Ascii => self.ascii.truncate(start),
+            Form::Chars => self.chars.truncate(start),
+            Form::Cells => {
+                self.cells.truncate(start);
+                let extras = head.extras();
+                if !extras.is_empty() {
+                    self.extra_chars
+                        .truncate(self.extras[extras.start].start as usize);
+                    self.extras.truncate(extras.start);
+                }
+            }
+        }
+    }
+
+    /// Make row `index` hold `row`, whose keys are ids of `screen`. The
+    /// new cells are appended and the old ones left as garbage, which is
+    /// compacted away once it outgrows the live payload.
+    fn rewrite(&mut self, index: usize, row: ScreenRow<'_>, screen: &StyleTable) {
+        let old = self.heads[index];
+        self.garbage += self.payload_bytes(&old);
+        // Not the cached remap, which belongs to the newest page and the
+        // grid's table: look each style up in the page's list, so repeated
+        // rewrites do not grow it.
+        let head = self.append(row, &mut |styles, key| match key.table_id() {
+            None | Some(0) => key,
+            Some(_) => {
+                let style = screen.style(key);
+                let id = match styles.iter().skip(1).position(|s| *s == style) {
+                    Some(at) => at + 1,
+                    None => {
+                        styles.push(style);
+                        styles.len() - 1
+                    }
+                };
+                StyleKey::from_id(id as u32)
+            }
+        });
+        self.heads[index] = head;
+        const MIN_GARBAGE: usize = 4096;
+        if self.garbage > MIN_GARBAGE && 2 * self.garbage > self.total_bytes() {
+            self.compact();
+        }
+    }
+
+    /// Copy every row's payload to fresh vectors, dropping the garbage.
+    fn compact(&mut self) {
+        let mut ascii = Vec::with_capacity(self.ascii.len());
+        let mut chars = Vec::with_capacity(self.chars.len());
+        let mut cells = Vec::with_capacity(self.cells.len());
+        let mut extras = Vec::with_capacity(self.extras.len());
+        let mut extra_chars = Vec::with_capacity(self.extra_chars.len());
+        for head in &mut self.heads {
+            let range = head.offset as usize..head.offset as usize + usize::from(head.len);
+            match head.form() {
+                Form::Ascii => {
+                    head.offset = ascii.len() as u32;
+                    ascii.extend_from_slice(&self.ascii[range]);
+                }
+                Form::Chars => {
+                    head.offset = chars.len() as u32;
+                    chars.extend_from_slice(&self.chars[range]);
+                }
+                Form::Cells => {
+                    head.offset = cells.len() as u32;
+                    cells.extend_from_slice(&self.cells[range]);
+                    let first = extras.len();
+                    for extra in &self.extras[head.extras()] {
+                        let from = extra.start as usize;
+                        extras.push(Extra {
+                            start: extra_chars.len() as u32,
+                            ..*extra
+                        });
+                        extra_chars.extend_from_slice(
+                            &self.extra_chars[from..from + usize::from(extra.len)],
+                        );
+                    }
+                    head.aux = extras_aux(first, extras.len() - first);
+                }
+            }
+        }
+        self.ascii = ascii;
+        self.chars = chars;
+        self.cells = cells;
+        self.extras = extras;
+        self.extra_chars = extra_chars;
+        self.garbage = 0;
+    }
+
+    /// Heap bytes the page holds.
+    #[cfg(test)]
+    fn heap_bytes(&self) -> usize {
+        self.heads.capacity() * std::mem::size_of::<Head>()
+            + self.ascii.capacity()
+            + self.chars.capacity() * 4
+            + self.cells.capacity() * 8
+            + self.extras.capacity() * std::mem::size_of::<Extra>()
+            + self.extra_chars.capacity() * 4
+            + self.styles.capacity() * std::mem::size_of::<Style>()
+    }
+
+    /// Every head points at a payload inside the page, in keys the page can
+    /// hand out, and every grapheme extra belongs to a cell with the bit.
+    fn check_integrity(&self, max_extra: usize) -> Result<(), String> {
+        if self.styles.first() != Some(&Style::default()) {
+            return Err("page style 0 is not the default style".into());
+        }
+        if self.garbage > self.total_bytes() {
+            return Err(format!(
+                "page counts {} bytes of garbage in {} bytes",
+                self.garbage,
+                self.total_bytes()
+            ));
+        }
+        for (index, head) in self.heads.iter().enumerate() {
+            self.check_head(head, max_extra)
+                .map_err(|e| format!("page row {index}: {e}"))?;
+        }
+        Ok(())
+    }
+
+    fn check_head(&self, head: &Head, max_extra: usize) -> Result<(), String> {
+        if head.len > head.width {
+            return Err(format!(
+                "{} cells stored in a row of {}",
+                head.len, head.width
+            ));
+        }
+        let range = head.offset as usize..head.offset as usize + usize::from(head.len);
+        let stored = match head.form() {
+            Form::Ascii => self.ascii.len(),
+            Form::Chars => self.chars.len(),
+            Form::Cells => self.cells.len(),
+        };
+        if range.end > stored {
+            return Err(format!(
+                "{:?} cells {range:?} past the page's {stored}",
+                head.form()
+            ));
+        }
+        match head.form() {
+            Form::Ascii => {
+                if !self.ascii[range].is_ascii() {
+                    return Err("Ascii row holds a byte that is not ASCII".into());
+                }
+                head.key().check_in(&self.styles)?;
+            }
+            Form::Chars => {
+                for &bits in &self.chars[range] {
+                    let cell = PackedCell::from_low_bits(bits, StyleKey::DEFAULT);
+                    if char::from_u32(cell.codepoint()).is_none() || cell.has_grapheme() {
+                        return Err(format!("Chars row holds a bad cell {bits:#x}"));
+                    }
+                }
+                head.key().check_in(&self.styles)?;
+            }
+            Form::Cells => {
+                let cells = &self.cells[range];
+                for cell in cells {
+                    cell.key().check_in(&self.styles)?;
+                }
+                let extras = head.extras();
+                if extras.end > self.extras.len() {
+                    return Err(format!(
+                        "extras {extras:?} past the page's {}",
+                        self.extras.len()
+                    ));
+                }
+                let extras = &self.extras[extras];
+                if extras.windows(2).any(|pair| pair[0].col >= pair[1].col) {
+                    return Err("grapheme extras are not sorted by column".into());
+                }
+                for extra in extras {
+                    let chars = extra.start as usize..extra.start as usize + usize::from(extra.len);
+                    if chars.end > self.extra_chars.len() {
+                        return Err(format!("extra {extra:?} runs past the page's codepoints"));
+                    }
+                    if extra.len == 0 || usize::from(extra.len) > max_extra {
+                        return Err(format!("extra {extra:?} holds a bad number of codepoints"));
+                    }
+                    if !cells
+                        .get(usize::from(extra.col))
+                        .is_some_and(|cell| cell.has_grapheme())
+                    {
+                        return Err(format!("extra {extra:?} is for a cell without the bit"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One scrollback row, read in place from its page.
+#[derive(Clone, Copy)]
+pub(super) struct HistoryRow<'a> {
+    page: &'a Page,
+    head: &'a Head,
+    /// The one-style forms' style, looked up once.
     style: Style,
 }
 
-/// A row of scrollback in compact form. See the module docs.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct CompactRow {
-    width: u16,
-    wrapped: bool,
-    /// Shell integration marks (ADR 0019); three bytes in padding.
-    row_marks: RowMarks,
-    /// Inline surface anchor (ADR 0020); two bytes in padding.
-    anchor: AnchorTag,
-    /// One character per stored cell, as UTF-8, each followed by its extra
-    /// grapheme codepoints if it has any. Bytes rather than `String` so
-    /// ASCII is a plain push; [`CompactRow::decode`] checks it.
-    text: Vec<u8>,
-    /// Style runs covering the stored cells in order.
-    runs: Vec<Run>,
-    /// The columns whose cells are wide, spacers or graphemes, in order,
-    /// each with a [`Mark`]. Keeping the codepoints in `text` saves an
-    /// allocation per cluster.
-    marks: Vec<(u16, Mark)>,
+impl fmt::Debug for HistoryRow<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HistoryRow")
+            .field("form", &self.head.form())
+            .field("len", &self.head.len)
+            .field("width", &self.head.width)
+            .finish_non_exhaustive()
+    }
 }
 
-/// A cell's structure, which styles leave out: how many extra grapheme
-/// codepoints follow its character in the text, and its width bits.
-///
-/// A wide character followed by its spacer, the way the writers leave
-/// them, is [`WIDE_MARK`] on the wide cell alone. Width bits that do not
-/// come in such a pair (only direct edits leave them) are stored as they
-/// are, and so is a grapheme bit with no codepoints, so encoding is exact
-/// for any row.
-type Mark = u16;
+impl<'a> HistoryRow<'a> {
+    #[inline]
+    pub(super) fn width(self) -> u16 {
+        self.head.width
+    }
 
-/// A wide character; the next cell is its spacer.
-const WIDE_MARK: Mark = 1 << 15;
-/// The width bits are [`RAW_WIDE`] and [`RAW_SPACER`], not implied.
-const RAW_MARK: Mark = 1 << 14;
-const RAW_WIDE: Mark = 1 << 13;
-const RAW_SPACER: Mark = 1 << 12;
-/// The grapheme bit with no extra codepoints.
-const BARE_GRAPHEME: Mark = 1 << 11;
-/// The count of extra codepoints.
-const EXTRA_COUNT: Mark = BARE_GRAPHEME - 1;
+    #[inline]
+    pub(super) fn is_wrapped(self) -> bool {
+        self.head.is_wrapped()
+    }
 
-/// Whether `cells[col]` and `cells[col + 1]` are a wide character and its
-/// spacer, with no other width bits.
-#[inline]
-fn is_pair(cells: &[PackedCell], col: usize) -> bool {
-    let wide = cells[col];
-    wide.is_wide()
-        && !wide.is_spacer()
-        && cells
-            .get(col + 1)
-            .is_some_and(|spacer| spacer.is_spacer() && !spacer.is_wide())
-}
+    #[inline]
+    pub(super) fn marks(self) -> RowMarks {
+        self.head.marks
+    }
 
-impl CompactRow {
-    /// Encode `row`, whose styles are in `styles`, reusing this value's
-    /// allocations.
-    ///
-    /// This runs for every line that scrolls off the screen, so it is one
-    /// pass over the used cells, finding style runs by comparing keys and
-    /// looking each run's style up once.
-    pub(super) fn encode_from(&mut self, row: ScreenRow<'_>, styles: &StyleTable) {
-        self.width = row.width();
-        self.wrapped = row.is_wrapped();
-        self.row_marks = row.marks();
-        self.anchor = row.anchor();
-        self.text.clear();
-        self.runs.clear();
-        self.marks.clear();
+    #[inline]
+    pub(super) fn anchor(self) -> AnchorTag {
+        self.head.anchor
+    }
 
-        // A uniform row is ASCII in one style, which the row has kept track
-        // of: its text is the whole row. In the default style a cell is
-        // blank exactly when it holds a space, so trimming the text trims
-        // the blank tail; in any other style no cell is blank.
-        if row.is_uniform() {
-            let cells = row.used_cells();
-            self.text.extend(cells.iter().map(|cell| cell.ascii_byte()));
-            let key = row.uniform_key();
-            let len = if key.is_default() {
-                self.text
-                    .iter()
-                    .rposition(|&b| b != b' ')
-                    .map_or(0, |last| last + 1)
-            } else {
-                self.text.len()
-            };
-            self.text.truncate(len);
-            if len > 0 {
-                self.runs.push(Run {
-                    len: len as u16,
-                    style: styles.style(key),
-                });
+    /// Where stored cell `col` is in its form's vector, or `None` past the
+    /// stored cells.
+    #[inline]
+    fn stored(self, col: u16) -> Option<usize> {
+        (col < self.head.len).then(|| self.head.offset as usize + usize::from(col))
+    }
+
+    /// The cell at `col`, or `None` past the end of the row.
+    #[inline]
+    pub(super) fn cell(self, col: u16) -> Option<Cell> {
+        if col >= self.head.width {
+            return None;
+        }
+        let Some(at) = self.stored(col) else {
+            return Some(Cell::default());
+        };
+        Some(match self.head.form() {
+            Form::Ascii => self
+                .style
+                .cell(char::from(self.page.ascii[at]), CellFlags::NONE),
+            Form::Chars => {
+                let cell = PackedCell::from_low_bits(self.page.chars[at], StyleKey::DEFAULT);
+                self.style.cell(cell.char(), cell.structural_flags())
             }
+            Form::Cells => {
+                let cell = self.page.cells[at];
+                cell.key()
+                    .style_in(&self.page.styles)
+                    .cell(cell.char(), cell.structural_flags())
+            }
+        })
+    }
+
+    /// The row's grapheme extras, by column.
+    #[inline]
+    fn extras(self) -> &'a [Extra] {
+        match self.head.form() {
+            Form::Cells => &self.page.extras[self.head.extras()],
+            Form::Ascii | Form::Chars => &[],
+        }
+    }
+
+    #[inline]
+    fn extra_chars(self, extra: &Extra) -> &'a [char] {
+        let start = extra.start as usize;
+        &self.page.extra_chars[start..start + usize::from(extra.len)]
+    }
+
+    /// Codepoints following the base character of the cluster at `col`, if
+    /// the cell holds a multi-codepoint grapheme.
+    #[inline]
+    pub(super) fn grapheme_extra(self, col: u16) -> Option<&'a [char]> {
+        let extras = self.extras();
+        if extras.is_empty() {
+            return None;
+        }
+        let at = extras.binary_search_by_key(&col, |extra| extra.col).ok()?;
+        Some(self.extra_chars(&extras[at]))
+    }
+
+    /// Append the row's text, one char per column plus grapheme extras.
+    pub(super) fn push_text(self, text: &mut String) {
+        let range =
+            self.head.offset as usize..self.head.offset as usize + usize::from(self.head.len);
+        match self.head.form() {
+            Form::Ascii => text.extend(self.page.ascii[range].iter().map(|&b| char::from(b))),
+            Form::Chars => text.extend(
+                self.page.chars[range]
+                    .iter()
+                    .map(|&bits| PackedCell::from_low_bits(bits, StyleKey::DEFAULT).char()),
+            ),
+            Form::Cells => {
+                let mut extras = self.extras().iter().peekable();
+                for (col, cell) in self.page.cells[range].iter().enumerate() {
+                    text.push(cell.char());
+                    if let Some(extra) = extras.next_if(|extra| usize::from(extra.col) == col) {
+                        text.extend(self.extra_chars(extra));
+                    }
+                }
+            }
+        }
+        text.extend(std::iter::repeat_n(
+            ' ',
+            usize::from(self.head.width - self.head.len),
+        ));
+    }
+
+    /// Make `dst` a copy of the row, reusing `dst`'s allocations.
+    pub(super) fn copy_into(self, dst: &mut Row) {
+        dst.assign(
+            (0..self.width()).filter_map(|col| self.cell(col)),
+            self.extras()
+                .iter()
+                .map(|extra| (extra.col, self.extra_chars(extra))),
+            self.is_wrapped(),
+            self.marks(),
+            self.anchor(),
+        );
+        dst.clear_dirty();
+    }
+}
+
+/// Scrollback: rows in pages, oldest first, with per-row eviction.
+///
+/// Every page but the last holds [`PAGE_ROWS`] rows, so row `i` is in page
+/// `(front + i) / PAGE_ROWS`. The buffer decides when to evict; this only
+/// stores.
+#[derive(Debug, Clone, Default)]
+pub(super) struct History {
+    pages: VecDeque<Page>,
+    /// Rows of `pages[0]` already evicted.
+    front: usize,
+    len: usize,
+    /// The last page freed, to be the next one started.
+    spare: Option<Page>,
+    /// Screen table id to the newest page's id (0 for none yet), for the
+    /// table and numbering in `remap_stamp`.
+    remap: Vec<u32>,
+    remap_stamp: Option<(u64, u64)>,
+}
+
+/// The newest page's key for `key`, a key of `screen`: inline keys and the
+/// default are the same everywhere; a table id is looked up in `remap`, and
+/// its style added to the page (`styles`) the first time.
+#[inline]
+fn remapped(
+    remap: &mut Vec<u32>,
+    styles: &mut Vec<Style>,
+    screen: &StyleTable,
+    key: StyleKey,
+) -> StyleKey {
+    match key.table_id() {
+        None | Some(0) => key,
+        Some(id) => match remap.get(id) {
+            Some(&mapped) if mapped != 0 => StyleKey::from_id(mapped),
+            _ => add_style(remap, styles, screen, key, id),
+        },
+    }
+}
+
+/// [`remapped`]'s miss: append the style to the page.
+#[inline(never)]
+fn add_style(
+    remap: &mut Vec<u32>,
+    styles: &mut Vec<Style>,
+    screen: &StyleTable,
+    key: StyleKey,
+    id: usize,
+) -> StyleKey {
+    let mapped = styles.len() as u32;
+    styles.push(screen.style(key));
+    if remap.len() <= id {
+        remap.resize(id + 1, 0);
+    }
+    remap[id] = mapped;
+    StyleKey::from_id(mapped)
+}
+
+/// Start a new newest page in `pages`, from `spare` if there is one, and
+/// return it.
+#[inline(never)]
+fn start_page<'a>(pages: &'a mut VecDeque<Page>, spare: &mut Option<Page>) -> &'a mut Page {
+    if let Some(full) = pages.back_mut() {
+        full.shrink();
+    }
+    pages.push_back(spare.take().unwrap_or_else(Page::new));
+    pages.back_mut().expect("a page was just added")
+}
+
+impl History {
+    /// The number of rows.
+    #[inline]
+    pub(super) fn len(&self) -> usize {
+        self.len
+    }
+
+    /// The page and the index in it of row `index`.
+    #[inline]
+    fn locate(&self, index: usize) -> Option<(usize, usize)> {
+        (index < self.len).then(|| {
+            let at = self.front + index;
+            (at / PAGE_ROWS, at % PAGE_ROWS)
+        })
+    }
+
+    #[inline]
+    fn head(&self, index: usize) -> Option<&Head> {
+        let (page, row) = self.locate(index)?;
+        Some(&self.pages[page].heads[row])
+    }
+
+    /// Row `index`, 0 being the oldest.
+    #[inline]
+    pub(super) fn row(&self, index: usize) -> Option<HistoryRow<'_>> {
+        let (page, row) = self.locate(index)?;
+        Some(self.pages[page].row(row))
+    }
+
+    /// Row `index`'s shell marks.
+    pub(super) fn marks(&self, index: usize) -> Option<RowMarks> {
+        Some(self.head(index)?.marks)
+    }
+
+    /// Row `index`'s anchor tag.
+    pub(super) fn anchor(&self, index: usize) -> Option<AnchorTag> {
+        Some(self.head(index)?.anchor)
+    }
+
+    /// Replace row `index`'s anchor tag.
+    pub(super) fn set_anchor(&mut self, index: usize, anchor: AnchorTag) {
+        if let Some((page, row)) = self.locate(index) {
+            self.pages[page].heads[row].anchor = anchor;
+        }
+    }
+
+    /// Take every anchor tag off.
+    pub(super) fn clear_anchors(&mut self) {
+        for head in self.pages.iter_mut().flat_map(|page| &mut page.heads) {
+            head.anchor = AnchorTag::NONE;
+        }
+    }
+
+    /// Append screen row `row`, whose style keys are ids of `screen`.
+    #[inline]
+    pub(super) fn push(&mut self, row: ScreenRow<'_>, screen: &StyleTable) {
+        let stamp = screen.stamp();
+        let page = match self.pages.back_mut() {
+            Some(page) if page.heads.len() < PAGE_ROWS => page,
+            _ => {
+                // The remap is for the newest page.
+                self.remap_stamp = None;
+                start_page(&mut self.pages, &mut self.spare)
+            }
+        };
+        if self.remap_stamp != Some(stamp) {
+            self.remap.clear();
+            self.remap_stamp = Some(stamp);
+        }
+        let remap = &mut self.remap;
+        let head = page.append(row, &mut |styles, key| remapped(remap, styles, screen, key));
+        page.heads.push(head);
+        self.len += 1;
+    }
+
+    /// Append an owned row, packing it with `packer` first.
+    pub(super) fn push_row(&mut self, row: &Row, packer: &mut RowPacker) {
+        let (packed, styles) = packer.pack(row);
+        self.push(packed, styles);
+    }
+
+    fn recycle(&mut self, mut page: Page) {
+        page.clear();
+        self.spare = Some(page);
+    }
+
+    /// Evict the oldest row.
+    #[inline]
+    pub(super) fn pop_front(&mut self) {
+        if self.len == 0 {
             return;
         }
-
-        let cells = row.used_cells();
-        let cells = &cells[..used_len(cells)];
-        self.text.reserve(cells.len());
-        let mut col = 0;
-        while col < cells.len() {
-            let key = cells[col].key();
-            let start = col;
-            while col < cells.len() && cells[col].key() == key {
-                let cell = cells[col];
-                self.push_cell(cell);
-                col += if cell.has_structure() {
-                    self.mark(row, cells, col)
-                } else {
-                    1
-                };
-            }
-            self.runs.push(Run {
-                len: (col - start) as u16,
-                style: styles.style(key),
-            });
+        self.front += 1;
+        self.len -= 1;
+        if self.front >= PAGE_ROWS || self.len == 0 {
+            self.free_front_page();
         }
     }
 
-    /// The rest of [`CompactRow::encode_from`] for the cell at `col`, which
-    /// has structure bits and whose character is already in the text: its
-    /// extra codepoints and its [`Mark`]. Returns how many cells it took:
-    /// a wide character takes its spacer with it when they share a style.
-    fn mark(&mut self, row: ScreenRow<'_>, cells: &[PackedCell], col: usize) -> usize {
-        let cell = cells[col];
-        let mut mark: Mark = 0;
-        if cell.has_grapheme() {
-            match row.grapheme_extra(col as u16) {
-                Some(extra) if !extra.is_empty() => mark = self.push_extra(extra),
-                _ => mark = BARE_GRAPHEME,
+    /// The first page's rows are all evicted: free it.
+    #[inline(never)]
+    fn free_front_page(&mut self) {
+        if self
+            .pages
+            .front()
+            .is_some_and(|page| self.front >= page.heads.len())
+        {
+            if let Some(page) = self.pages.pop_front() {
+                self.recycle(page);
             }
-        }
-        let mut taken = 1;
-        if is_pair(cells, col) {
-            mark |= WIDE_MARK;
-            let spacer = cells[col + 1];
-            if spacer.key() == cell.key() && !spacer.has_grapheme() {
-                self.push_cell(spacer);
-                taken = 2;
+            self.front = 0;
+            if self.pages.is_empty() {
+                self.remap_stamp = None;
             }
-        } else if cell.is_wide_part() && !(col > 0 && is_pair(cells, col - 1)) {
-            mark |= RAW_MARK;
-            if cell.is_wide() {
-                mark |= RAW_WIDE;
-            }
-            if cell.is_spacer() {
-                mark |= RAW_SPACER;
-            }
-        }
-        if mark != 0 {
-            self.marks.push((col as u16, mark));
-        }
-        taken
-    }
-
-    /// Append a cell's extra codepoints to the text; their [`Mark`].
-    fn push_extra(&mut self, extra: &[char]) -> Mark {
-        let extra = &extra[..extra.len().min(usize::from(EXTRA_COUNT))];
-        for &c in extra {
-            self.push_char(c);
-        }
-        extra.len() as Mark
-    }
-
-    /// Append a cell's character to the text. The codepoint came from a
-    /// `char`, so it is encoded as it is rather than checked again.
-    #[inline]
-    fn push_cell(&mut self, cell: PackedCell) {
-        let cp = cell.codepoint();
-        match cp {
-            0..0x80 => self.text.push(cp as u8),
-            0x80..0x800 => self
-                .text
-                .extend_from_slice(&[0xC0 | (cp >> 6) as u8, 0x80 | (cp & 0x3F) as u8]),
-            0x800..0x10000 => self.text.extend_from_slice(&[
-                0xE0 | (cp >> 12) as u8,
-                0x80 | (cp >> 6 & 0x3F) as u8,
-                0x80 | (cp & 0x3F) as u8,
-            ]),
-            _ => self.text.extend_from_slice(&[
-                0xF0 | (cp >> 18) as u8,
-                0x80 | (cp >> 12 & 0x3F) as u8,
-                0x80 | (cp >> 6 & 0x3F) as u8,
-                0x80 | (cp & 0x3F) as u8,
-            ]),
         }
     }
 
-    #[inline]
-    fn push_char(&mut self, c: char) {
-        if c.is_ascii() {
-            self.text.push(c as u8);
-        } else {
-            let mut utf8 = [0u8; 4];
-            self.text
-                .extend_from_slice(c.encode_utf8(&mut utf8).as_bytes());
+    /// Evict the oldest `count` rows.
+    pub(super) fn drop_front(&mut self, count: usize) {
+        for _ in 0..count.min(self.len) {
+            self.pop_front();
         }
     }
 
-    /// Bytes this row occupies, including its heap allocations.
+    /// Remove the newest row.
+    fn pop_back(&mut self) {
+        if self.len == 0 {
+            return;
+        }
+        let single = self.pages.len() == 1;
+        let Some(page) = self.pages.back_mut() else {
+            return;
+        };
+        page.pop_head();
+        self.len -= 1;
+        let live = page.heads.len() - if single { self.front } else { 0 };
+        if live == 0 {
+            if let Some(page) = self.pages.pop_back() {
+                self.recycle(page);
+            }
+            if single {
+                self.front = 0;
+            }
+            self.remap_stamp = None;
+        }
+    }
+
+    /// Keep the oldest `len` rows.
+    pub(super) fn truncate(&mut self, len: usize) {
+        while self.len > len {
+            self.pop_back();
+        }
+    }
+
+    /// Drop every row.
+    pub(super) fn clear(&mut self) {
+        while let Some(page) = self.pages.pop_front() {
+            self.recycle(page);
+        }
+        self.front = 0;
+        self.len = 0;
+        self.remap_stamp = None;
+    }
+
+    /// Make row `index` hold `row` (packed with `packer`), keeping its place.
+    pub(super) fn replace(&mut self, index: usize, row: &Row, packer: &mut RowPacker) {
+        let Some((page, at)) = self.locate(index) else {
+            return;
+        };
+        let (packed, styles) = packer.pack(row);
+        self.pages[page].rewrite(at, packed, styles);
+    }
+
+    /// Hand every row to `f`, oldest first, freeing each page once its
+    /// rows are done.
+    pub(super) fn drain(mut self, mut f: impl FnMut(HistoryRow<'_>)) {
+        let mut front = self.front;
+        while let Some(page) = self.pages.pop_front() {
+            for index in front..page.heads.len() {
+                f(page.row(index));
+            }
+            front = 0;
+        }
+    }
+
+    /// Heap bytes the pages hold, the spare included.
     #[cfg(test)]
-    pub(super) fn footprint(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.text.capacity()
-            + self.runs.capacity() * std::mem::size_of::<Run>()
-            + self.marks.capacity() * std::mem::size_of::<(u16, Mark)>()
+    pub(super) fn heap_bytes(&self) -> usize {
+        self.pages
+            .iter()
+            .chain(&self.spare)
+            .map(Page::heap_bytes)
+            .sum::<usize>()
+            + self.pages.capacity() * std::mem::size_of::<Page>()
+            + self.remap.capacity() * 4
     }
 
-    /// `row` in compact form.
-    #[cfg(test)]
-    pub(super) fn encode(row: &Row) -> Self {
-        let mut compact = Self::default();
-        RowPacker::new().encode(row, &mut compact);
-        compact
-    }
-
-    /// The row's shell marks, without decoding it.
-    pub(super) fn marks(&self) -> RowMarks {
-        self.row_marks
-    }
-
-    /// The row's anchor tag, without decoding it.
-    pub(super) fn anchor(&self) -> AnchorTag {
-        self.anchor
-    }
-
-    pub(super) fn set_anchor(&mut self, anchor: AnchorTag) {
-        self.anchor = anchor;
-    }
-
-    /// The full row this was encoded from.
-    pub(super) fn decode(&self) -> Row {
-        let mut row = Row::new(self.width);
-        let text = std::str::from_utf8(&self.text).unwrap_or_default();
-        let mut chars = text.chars();
-        let mut marks = self.marks.iter().peekable();
-        let mut extra = Vec::new();
-        let mut col = 0u16;
-        let mut spacer = false;
-        for run in &self.runs {
-            for _ in 0..run.len {
-                let c = chars.next().unwrap_or(' ');
-                let mut structure = CellFlags::NONE;
-                if std::mem::take(&mut spacer) {
-                    structure.set(CellFlags::WIDE_CHAR_SPACER);
-                }
-                let mark = marks.next_if(|&&(at, _)| at == col).map_or(0, |&(_, m)| m);
-                if mark & WIDE_MARK != 0 {
-                    structure.set(CellFlags::WIDE_CHAR);
-                    spacer = true;
-                }
-                if mark & RAW_WIDE != 0 {
-                    structure.set(CellFlags::WIDE_CHAR);
-                }
-                if mark & RAW_SPACER != 0 {
-                    structure.set(CellFlags::WIDE_CHAR_SPACER);
-                }
-                let len = mark & EXTRA_COUNT;
-                if len > 0 || mark & BARE_GRAPHEME != 0 {
-                    structure.set(CellFlags::HAS_COMBINING);
-                }
-                if col < self.width {
-                    row[col] = run.style.cell(c, structure);
-                }
-                if len > 0 {
-                    extra.clear();
-                    extra.extend(chars.by_ref().take(usize::from(len)));
-                    row.set_grapheme_extra(col, &extra);
-                }
-                col += 1;
-            }
+    /// Check the pages' invariants: the row count, full pages before the
+    /// last, and every page's own (see `Page::check_integrity`).
+    pub(super) fn check_integrity(&self, max_extra: usize) -> Result<(), String> {
+        let stored: usize = self.pages.iter().map(|page| page.heads.len()).sum();
+        if stored.checked_sub(self.front) != Some(self.len) && !(stored == 0 && self.len == 0) {
+            return Err(format!(
+                "history holds {stored} rows from {} on, but counts {}",
+                self.front, self.len
+            ));
         }
-        row.set_wrapped(self.wrapped);
-        row.set_marks(self.row_marks);
-        row.set_anchor(self.anchor);
-        row.clear_dirty();
-        row
+        if let Some(first) = self.pages.front() {
+            if self.front >= first.heads.len() {
+                return Err(format!(
+                    "the first page's {} rows are all evicted ({})",
+                    first.heads.len(),
+                    self.front
+                ));
+            }
+        } else if self.front != 0 {
+            return Err(format!(
+                "no pages, but {} rows evicted from the first",
+                self.front
+            ));
+        }
+        let pages = self.pages.len();
+        for (index, page) in self.pages.iter().enumerate() {
+            if index + 1 < pages && page.heads.len() != PAGE_ROWS {
+                return Err(format!(
+                    "page {index} of {pages} holds {} rows, not {PAGE_ROWS}",
+                    page.heads.len()
+                ));
+            }
+            page.check_integrity(max_extra)
+                .map_err(|e| format!("history page {index}: {e}"))?;
+        }
+        Ok(())
     }
 }
 
-/// Encodes owned [`Row`]s, which carry no style ids: each is packed into
-/// a scratch row first. Reflow encodes many rows this way, so the scratch
-/// row and its style table are reused.
+/// Packs owned [`Row`]s, which carry no style ids, into a one-row screen
+/// page, so they can be stored like screen rows. Reflow packs many rows
+/// this way, so the page and its style table are reused.
 pub(super) struct RowPacker {
     styles: StyleTable,
-    /// One row, as wide as the last row encoded.
+    /// One row, as wide as the last row packed.
     page: ScreenPage,
 }
 
@@ -342,10 +1028,10 @@ impl RowPacker {
         }
     }
 
-    /// Encode `row` into `compact`, reusing its allocations.
-    pub(super) fn encode(&mut self, row: &Row, compact: &mut CompactRow) {
-        // Ids only live for one row's encoding, so the table can be emptied
-        // whenever it grows.
+    /// `row` packed, and the table its keys are in.
+    pub(super) fn pack(&mut self, row: &Row) -> (ScreenRow<'_>, &StyleTable) {
+        // Ids only live for one row, so the table can be emptied whenever
+        // it grows.
         if self.styles.is_due() {
             self.styles.reset(0);
         }
@@ -355,15 +1041,14 @@ impl RowPacker {
         let mut packed = self.page.row_mut(0).expect("the page has one row");
         packed.assign_row(row, &mut self.styles);
         let packed = self.page.row(0).expect("the page has one row");
-        compact.encode_from(packed, &self.styles);
+        (packed, &self.styles)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::cell::{Cell, Color, UnderlineStyle};
-    use crate::grid::packed::StyleKey;
+    use crate::grid::cell::{Color, UnderlineStyle};
     use proptest::prelude::*;
 
     /// Two rows hold the same content.
@@ -507,17 +1192,60 @@ mod tests {
             )
     }
 
+    /// Row `index` of `history` as an owned row.
+    fn owned(history: &History, index: usize) -> Row {
+        let mut row = Row::new(0);
+        history.row(index).unwrap().copy_into(&mut row);
+        row
+    }
+
+    /// `row`'s text as `RowView::text` gives it for a row of the screen.
+    fn text_of(row: &Row) -> String {
+        let mut text = String::new();
+        for (col, cell) in row.cells().enumerate() {
+            text.push(cell.char());
+            if let Some(extra) = row.grapheme_extra(col as u16) {
+                text.extend(extra);
+            }
+        }
+        text
+    }
+
+    /// The form row `index` was stored in.
+    fn form(history: &History, index: usize) -> Form {
+        history.head(index).unwrap().form()
+    }
+
     proptest! {
+        /// `push(row).view().to_row() == row`, for every row the generator
+        /// makes, including the flags only direct edits leave; and the
+        /// in-place readers agree with the copy.
         #[test]
-        fn encode_then_decode_returns_the_same_row(row in row()) {
-            let decoded = CompactRow::encode(&row).decode();
-            prop_assert!(same(&row, &decoded), "{row:?}\n!=\n{decoded:?}");
+        fn a_pushed_row_reads_back_the_same(rows in prop::collection::vec(row(), 1..8)) {
+            let mut history = History::default();
+            let mut packer = RowPacker::new();
+            for row in &rows {
+                history.push_row(row, &mut packer);
+            }
+            history.check_integrity(16).unwrap();
+            for (index, row) in rows.iter().enumerate() {
+                let back = owned(&history, index);
+                prop_assert!(same(row, &back), "{row:?}\n!=\n{back:?}");
+                let view = history.row(index).unwrap();
+                for col in 0..=row.width() {
+                    prop_assert_eq!(view.cell(col), row.get(col).copied());
+                    prop_assert_eq!(view.grapheme_extra(col), row.grapheme_extra(col));
+                }
+                let mut text = String::new();
+                view.push_text(&mut text);
+                prop_assert_eq!(text, text_of(row));
+            }
         }
 
-        /// Uniform rows take a shortcut; it must give exactly what
-        /// encoding them cell by cell gives.
+        /// Uniform rows take a shortcut; it must give exactly what storing
+        /// them cell by cell gives.
         #[test]
-        fn a_uniform_row_encodes_like_any_other(
+        fn a_uniform_row_is_stored_like_any_other(
             width in 1u16..40,
             style in 0usize..3,
             writes in prop::collection::vec((0u16..40, "[ a-z]{0,40}", any::<bool>()), 0..6),
@@ -549,76 +1277,224 @@ mod tests {
                 copy.row_mut(0).unwrap().set(0, first);
                 let copy = copy.row(0).unwrap();
                 prop_assert!(!copy.is_uniform());
-                let mut compact = CompactRow::default();
-                compact.encode_from(row, &styles);
-                let mut general = CompactRow::default();
-                general.encode_from(copy, &styles);
-                prop_assert_eq!(&compact, &general);
+                let mut history = History::default();
+                history.push(row, &styles);
+                history.push(copy, &styles);
+                prop_assert_eq!(form(&history, 0), Form::Ascii);
+                prop_assert_eq!(form(&history, 1), Form::Ascii);
+                let (a, b) = (history.head(0).unwrap(), history.head(1).unwrap());
+                prop_assert_eq!(a.len, b.len);
+                prop_assert!(same(&owned(&history, 0), &owned(&history, 1)));
             }
-        }
-
-        #[test]
-        fn reusing_a_compact_row_leaves_nothing_behind(a in row(), b in row()) {
-            let mut compact = CompactRow::encode(&a);
-            RowPacker::new().encode(&b, &mut compact);
-            prop_assert_eq!(compact, CompactRow::encode(&b));
         }
     }
 
-    /// Wide characters, their spacers and combining sequences written the
-    /// way the grid writes them stay in one style run with the text around
-    /// them.
-    #[test]
-    fn wide_and_combined_cells_do_not_split_style_runs() {
-        let mut grid = crate::grid::Grid::new(crate::grid::Dimensions::new(20, 1));
-        for c in "日本 e\u{301}語 x".chars() {
+    /// A screen of `cols` by one row holding `text`, printed the way the
+    /// grid prints it.
+    fn grid_row(cols: u16, text: &str) -> crate::grid::Grid {
+        let mut grid = crate::grid::Grid::new(crate::grid::Dimensions::new(cols, 1));
+        for c in text.chars() {
             grid.write_char(c);
         }
-        let mut compact = CompactRow::default();
-        compact.encode_from(grid.page.row(0).unwrap(), &grid.styles);
-        assert_eq!(compact.runs.len(), 1);
-        assert_eq!(compact.marks.len(), 4, "{:?}", compact.marks);
-        assert!(same(&grid.row(0).unwrap().to_row(), &compact.decode()));
+        grid
+    }
+
+    fn push_grid(history: &mut History, grid: &crate::grid::Grid) {
+        history.push(grid.page.row(0).unwrap(), &grid.styles);
+    }
+
+    #[test]
+    fn each_row_takes_the_smallest_form_that_holds_it() {
+        let mut history = History::default();
+        let lines = [
+            ("the quick brown fox", Form::Ascii, 19),
+            ("日本語のテキスト", Form::Chars, 16),
+            ("日本 e\u{301}語 x", Form::Cells, 10),
+            ("", Form::Ascii, 0),
+        ];
+        for (text, ..) in lines {
+            push_grid(&mut history, &grid_row(40, text));
+        }
+        history.check_integrity(16).unwrap();
+        for (index, (text, want, len)) in lines.into_iter().enumerate() {
+            assert_eq!(form(&history, index), want, "{text:?}");
+            assert_eq!(
+                usize::from(history.head(index).unwrap().len),
+                len,
+                "{text:?}"
+            );
+            let grid = grid_row(40, text);
+            assert!(same(
+                &owned(&history, index),
+                &grid.row(0).unwrap().to_row()
+            ));
+        }
+        // Printing a character at a time clears the uniform flag, but an
+        // ASCII row in one style is still stored a byte a cell.
+        let grid = grid_row(40, "x");
+        assert!(!grid.page.row(0).unwrap().is_uniform());
+        push_grid(&mut history, &grid);
+        assert_eq!(form(&history, 4), Form::Ascii);
+    }
+
+    #[test]
+    fn rows_are_evicted_one_at_a_time_and_pages_reused() {
+        let mut history = History::default();
+        let mut packer = RowPacker::new();
+        let row_of = |n: usize| {
+            let mut row = Row::new(8);
+            row.write_ascii(0, format!("{n:>8}").as_bytes(), Cell::default());
+            row
+        };
+        for n in 0..3 * PAGE_ROWS {
+            history.push_row(&row_of(n), &mut packer);
+        }
+        assert_eq!(history.pages.len(), 3);
+        for n in 0..PAGE_ROWS + 1 {
+            history.pop_front();
+            history.check_integrity(16).unwrap();
+            assert_eq!(history.len(), 3 * PAGE_ROWS - n - 1);
+        }
+        assert_eq!(history.pages.len(), 2, "the first page went");
+        assert!(history.spare.is_some(), "and was kept for reuse");
+        let first = history.row(0).unwrap();
+        let mut text = String::new();
+        first.push_text(&mut text);
+        assert_eq!(text.trim(), (PAGE_ROWS + 1).to_string());
+
+        history.truncate(10);
+        history.check_integrity(16).unwrap();
+        assert_eq!(history.len(), 10);
+        assert_eq!(history.pages.len(), 1);
+        history.push_row(&row_of(7), &mut packer);
+        assert_eq!(owned(&history, 10).cells().nth(7).unwrap().char(), '7');
+
+        history.drop_front(4);
+        history.check_integrity(16).unwrap();
+        let mut seen = Vec::new();
+        history.clone().drain(|row| {
+            let mut text = String::new();
+            row.push_text(&mut text);
+            seen.push(text.trim().to_string());
+        });
+        let want: Vec<String> = (PAGE_ROWS + 5..PAGE_ROWS + 11)
+            .map(|n| n.to_string())
+            .chain(["7".to_string()])
+            .collect();
+        assert_eq!(seen, want);
+
+        history.clear();
+        history.check_integrity(16).unwrap();
+        assert_eq!(history.len(), 0);
+        assert!(history.row(0).is_none());
+    }
+
+    #[test]
+    fn a_full_history_scrolls_without_allocating_pages() {
+        let mut history = History::default();
+        let grid = grid_row(40, "steady state");
+        for _ in 0..4 * PAGE_ROWS {
+            if history.len() >= 2 * PAGE_ROWS {
+                history.pop_front();
+            }
+            push_grid(&mut history, &grid);
+        }
+        let bytes = history.heap_bytes();
+        for _ in 0..8 * PAGE_ROWS {
+            history.pop_front();
+            push_grid(&mut history, &grid);
+        }
+        assert_eq!(history.heap_bytes(), bytes);
+    }
+
+    #[test]
+    fn styles_are_remapped_into_each_page() {
+        let mut history = History::default();
+        let mut grid = crate::grid::Grid::new(crate::grid::Dimensions::new(10, 1));
+        grid.attrs_mut().set_fg(Color::rgb(1, 2, 3));
+        grid.write_ascii_span(b"rgb");
+        grid.attrs_mut().set_fg(Color::Indexed(9));
+        grid.write_ascii_span(b"idx");
+        for _ in 0..PAGE_ROWS + 1 {
+            push_grid(&mut history, &grid);
+        }
+        history.check_integrity(16).unwrap();
+        let want = grid.row(0).unwrap().to_row();
+        assert!(same(&owned(&history, 0), &want));
+        assert!(same(&owned(&history, PAGE_ROWS), &want));
+        // One truecolor style per page, found again through the remap.
+        assert_eq!(history.pages[0].styles.len(), 2);
+        assert_eq!(history.pages[1].styles.len(), 2);
+    }
+
+    #[test]
+    fn rewriting_a_row_keeps_its_place_and_compacts_garbage() {
+        let mut history = History::default();
+        let mut packer = RowPacker::new();
+        let wide = |c: char| {
+            let mut row = Row::new(60);
+            for col in 0..60 {
+                let mut cell = Cell::new(c);
+                cell.set_fg(Color::rgb(col as u8, 0, 0));
+                row[col] = cell;
+            }
+            row
+        };
+        for _ in 0..4 {
+            history.push_row(&wide('a'), &mut packer);
+        }
+        let page = &history.pages[0];
+        let before = page.total_bytes();
+        for round in 0..100 {
+            let c = if round % 2 == 0 { 'b' } else { 'c' };
+            history.replace(1, &wide(c), &mut packer);
+            history.check_integrity(16).unwrap();
+            assert!(same(&owned(&history, 1), &wide(c)));
+            assert!(same(&owned(&history, 2), &wide('a')));
+        }
+        let page = &history.pages[0];
+        assert!(
+            page.total_bytes() <= 3 * before,
+            "{} bytes",
+            page.total_bytes()
+        );
+        assert_eq!(
+            page.styles.len(),
+            61,
+            "rewrites find the page's styles again"
+        );
+    }
+
+    #[test]
+    fn taking_rows_back_off_the_end_gives_their_payload_back() {
+        let mut history = History::default();
+        let grid = grid_row(40, "日本 e\u{301}語 x");
+        for _ in 0..3 {
+            push_grid(&mut history, &grid);
+        }
+        let page = &history.pages[0];
+        let (cells, extras, chars) = (page.cells.len(), page.extras.len(), page.extra_chars.len());
+        history.truncate(2);
+        let page = &history.pages[0];
+        assert_eq!(page.cells.len(), cells / 3 * 2);
+        assert_eq!(page.extras.len(), extras / 3 * 2);
+        assert_eq!(page.extra_chars.len(), chars / 3 * 2);
+        assert_eq!(page.garbage, 0);
+        history.check_integrity(16).unwrap();
     }
 
     #[test]
     fn a_typical_line_is_small() {
-        let mut row = Row::new(120);
-        for (col, c) in "the quick brown fox jumps over the lazy dog"
-            .chars()
-            .enumerate()
-        {
-            row[col as u16] = Cell::new(c);
-        }
-        let compact = CompactRow::encode(&row);
-        assert_eq!(compact.runs.len(), 1);
-        assert_eq!(compact.text.len(), 43);
-        assert!(compact.marks.is_empty());
+        let mut history = History::default();
+        let grid = grid_row(120, "the quick brown fox jumps over the lazy dog");
+        push_grid(&mut history, &grid);
+        assert_eq!(history.pages[0].ascii.len(), 43);
+        assert_eq!(history.pages[0].styles.len(), 1);
     }
 
-    /// A row of one style and only ASCII base characters takes the
-    /// straight-copy path, but combining marks on those characters must
-    /// still be kept.
     #[test]
-    fn an_all_ascii_row_keeps_its_combining_marks() {
-        let mut row = Row::new(3);
-        for col in 0..3 {
-            row[col] = Cell::new('e');
-            row.set_grapheme_extra(col, &['\u{301}']);
-        }
-        let decoded = CompactRow::encode(&row).decode();
-        assert!(same(&row, &decoded), "{row:?}\n!=\n{decoded:?}");
-    }
-}
-
-#[cfg(test)]
-mod size {
-    /// Scrollback keeps up to tens of thousands of these. The shell marks
-    /// (ADR 0019) and the anchor tag (ADR 0020) fit in padding; keep it
-    /// that way. (Screen rows live in a `ScreenPage`, in `screen.rs`.)
-    #[test]
-    fn rows_do_not_grow() {
-        assert_eq!(std::mem::size_of::<super::CompactRow>(), 80);
-        assert_eq!(std::mem::size_of::<super::Row>(), 40);
+    fn heads_stay_small() {
+        // Scrollback keeps tens of thousands of these.
+        assert_eq!(std::mem::size_of::<Head>(), 24);
     }
 }

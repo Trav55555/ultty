@@ -14,7 +14,12 @@ Divider: r1 auto hidden
 Spacer: r1 auto hidden
 Image: r1 image "A red dot"
 TextInput: r1 input "Message" desc="Type" value_text=""
-Select: r1 list "Letter" expanded=Collapsed value_text="a" pos=1/2
+Select: r1 combo_box "Letter" expanded=Collapsed value_text="a"
+Select+expanded: r1 combo_box "Letter" expanded=Expanded value_text="b"
+Select+expanded: r2 option "a" pos=1/2
+Select+expanded: r3 auto hidden
+Select+expanded: r4 option "b" selected pos=2/2
+Select+expanded: r5 auto hidden
 List: r1 list "Numbers"
 List: r2 list_item selected pos=1/2
 List: r3 list_item pos=2/2
@@ -30,7 +35,16 @@ Tree: r6 tree_item "main.rs" level=2
 Tree: r7 auto hidden
 Tree: r8 auto hidden
 Tree: r9 auto hidden
-Table: r4 auto selected
+Table: r1 table
+Table: r2 row pos=1/3
+Table: r3 column_header pos=1/2
+Table: r4 column_header pos=2/2
+Table: r5 row selected pos=2/3
+Table: r6 cell pos=1/2
+Table: r7 cell pos=2/2
+Table: r8 row pos=3/3
+Table: r9 cell pos=1/2
+Table: r10 cell pos=2/2
 Collapsible: r1 tree_item expanded=Collapsed
 Collapsible: r3 auto hidden
 Modal: r1 dialog "Delete?" modal

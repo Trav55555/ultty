@@ -1,7 +1,10 @@
-//! Moving screen rows allocates nothing (ADR 0022 §2).
+//! Moving screen rows allocates nothing (ADR 0022 §2), and neither does
+//! scrolling into a full scrollback (§3).
 //!
 //! Scrolling, scroll regions, IL and DL rotate the screen page's slots and
-//! clear the rows that come in; none of them may touch the heap. A counting
+//! clear the rows that come in; none of them may touch the heap. Once
+//! scrollback is full, each row that scrolls off evicts the oldest, and the
+//! history page freed that way is the next one filled. A counting
 //! global allocator, as in `crates/ultty/benches/memory.rs`, counts the
 //! allocations made on this thread while the operations run.
 
@@ -141,4 +144,43 @@ fn line_feeds_in_a_region_below_the_top_allocate_nothing() {
             buffer.newline();
         }
     });
+}
+
+#[test]
+fn scrolling_into_a_full_scrollback_allocates_nothing() {
+    // Lines in every row form history keeps: plain ASCII, styled ASCII,
+    // one-style CJK, and cells with a truecolor style and a grapheme.
+    let lines = [
+        "plain text 0123456789".to_string(),
+        "\x1b[32mgreen text\x1b[0m".to_string(),
+        "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{30c6}\u{30ad}\u{30b9}\u{30c8}".to_string(),
+        "\x1b[38;2;1;2;3mrgb\x1b[0m \u{4e2d}\u{6587} e\u{301} \u{1F469}\u{200D}\u{1F4BB}"
+            .to_string(),
+    ];
+    let mut bytes = Vec::new();
+    for line in lines.iter().cycle().take(256) {
+        bytes.extend(line.as_bytes());
+        bytes.extend(b"\r\n");
+    }
+    let mut terminal = Terminal::new(Dimensions::new(40, 12));
+    terminal.set_scrollback_limit(1000);
+    let mut parser = AnsiParser::new();
+    let mut run = |terminal: &mut Terminal| {
+        let mut handler = TerminalHandler::new(terminal);
+        parser.feed_with_ascii_spans(&bytes, |output| match output {
+            AnsiOutput::Action(action) => handler.handle(action),
+            AnsiOutput::PrintAscii(bytes) => handler.handle_ascii_span(bytes),
+        });
+    };
+    // Fill the scrollback and go round its pages a few times.
+    for _ in 0..12 {
+        run(&mut terminal);
+    }
+    assert_eq!(terminal.buffer().history_len(), 1000);
+    assert_no_allocations("line feeds into a full scrollback", || {
+        for _ in 0..8 {
+            run(&mut terminal);
+        }
+    });
+    terminal.check_integrity().unwrap();
 }

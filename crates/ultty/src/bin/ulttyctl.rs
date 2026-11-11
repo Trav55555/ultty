@@ -8,7 +8,7 @@ use ultty::control::format_response;
 use ultty::control::paths::{control_dir, ControlEndpoint};
 use ultty_protocol::control::{
     ControlData, ControlEnvelope, ControlEvent, ControlRequest, ControlResponse, OutputFormat,
-    PaneState, PaneStatus, WaitCondition,
+    PaneState, PaneStatus, SplitDirection, WaitCondition,
 };
 use ultty_protocol::{Key, Modifiers};
 
@@ -50,13 +50,14 @@ fn main() {
     let args: Vec<String> = args.into_iter().filter(|a| a != "--json").collect();
     let args = remove_flag_with_value(args, "--read-timeout");
 
-    let request = match parse_cli_request(&args) {
+    let mut request = match parse_cli_request(&args) {
         Ok(request) => request,
         Err(e) => {
             eprintln!("error: {}", e);
             std::process::exit(2);
         }
     };
+    default_split_target(&mut request, own_pane());
     let read_timeout = read_timeout_for(&request, timeout_secs);
     let endpoint = match find_instance() {
         Ok(endpoint) => endpoint,
@@ -291,6 +292,24 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             args: rest.iter().skip(1).cloned().collect(),
             working_dir: None,
         }),
+        "split" => parse_split(rest),
+        "lua" => match rest.first().map(String::as_str) {
+            Some("open") => {
+                let open = LuaOpen::parse(&rest[1..])?;
+                let cwd = std::env::current_dir()
+                    .map_err(|e| format!("cannot find the current directory: {e}"))?;
+                if !cwd.join(&open.script).is_file() {
+                    return Err(format!("{}: no such file", open.script));
+                }
+                if open.split.is_some() {
+                    eprintln!(
+                        "note: a split pane draws with ANSI until native sessions map to panes"
+                    );
+                }
+                Ok(open.request(&lua_runner(), &cwd))
+            }
+            _ => Err(LuaOpen::USAGE.to_string()),
+        },
         "switch-tab" => {
             let index = parse_display_tab_index(
                 rest.first()
@@ -381,6 +400,128 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
         }),
         _ => Err(format!("unknown command: {}", command)),
     }
+}
+
+/// `split [right|down] [cmd args...]`: a pane next to the focused one.
+fn parse_split(args: &[String]) -> Result<ControlRequest, String> {
+    let (direction, rest) = match args.first().map(String::as_str) {
+        Some("right") => (SplitDirection::Right, &args[1..]),
+        Some("down") => (SplitDirection::Down, &args[1..]),
+        Some(flag) if flag.starts_with('-') => {
+            return Err("usage: split [right|down] [cmd] [args]".to_string())
+        }
+        _ => (SplitDirection::Right, args),
+    };
+    Ok(ControlRequest::SplitPane {
+        direction,
+        command: rest.first().cloned(),
+        args: rest.iter().skip(1).cloned().collect(),
+        working_dir: None,
+        target: None,
+    })
+}
+
+/// `lua open [--split right|down] [--exec CMD]... [--allow-exec] [--log FILE]
+/// [--] FILE`: a Luau tool in a pane of its own (ADR 0024 §2).
+#[derive(Debug, PartialEq, Default)]
+struct LuaOpen {
+    script: String,
+    split: Option<SplitDirection>,
+    /// Command-line prefixes `run{}` may start; `allow_exec` lets it start
+    /// anything.
+    exec: Vec<String>,
+    allow_exec: bool,
+    log: Option<String>,
+}
+
+impl LuaOpen {
+    const USAGE: &'static str =
+        "usage: lua open <file> [--split right|down] [--exec <cmd>]... [--allow-exec] [--log <file>]";
+
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut open = LuaOpen::default();
+        let mut script = None;
+        let mut options_over = false;
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            let mut value = |flag: &str| {
+                args.next()
+                    .cloned()
+                    .ok_or_else(|| format!("{flag} needs a value\n{}", Self::USAGE))
+            };
+            match arg.as_str() {
+                "--" if !options_over => options_over = true,
+                "--split" if !options_over => {
+                    open.split = Some(match value("--split")?.as_str() {
+                        "right" => SplitDirection::Right,
+                        "down" => SplitDirection::Down,
+                        other => return Err(format!("--split takes right or down, not {other}")),
+                    })
+                }
+                "--exec" if !options_over => open.exec.push(value("--exec")?),
+                "--allow-exec" if !options_over => open.allow_exec = true,
+                "--log" if !options_over => open.log = Some(value("--log")?),
+                flag if flag.starts_with('-') && !options_over => {
+                    return Err(format!("unknown option {flag}\n{}", Self::USAGE))
+                }
+                path if script.is_none() => script = Some(path.to_string()),
+                extra => return Err(format!("unexpected argument {extra}\n{}", Self::USAGE)),
+            }
+        }
+        open.script = script.ok_or_else(|| Self::USAGE.to_string())?;
+        Ok(open)
+    }
+
+    /// The request that opens the script with `runner` (the `ulttui-lua`
+    /// binary) in `cwd`, the caller's directory, which also makes the script
+    /// and log paths absolute.
+    fn request(&self, runner: &str, cwd: &Path) -> ControlRequest {
+        let script = cwd.join(&self.script).display().to_string();
+        let mut runner_args: Vec<String> = Vec::new();
+        for command in &self.exec {
+            runner_args.extend(["--exec".to_string(), command.clone()]);
+        }
+        if self.allow_exec {
+            runner_args.push("--allow-exec".to_string());
+        }
+        if let Some(log) = &self.log {
+            runner_args.extend(["--log".to_string(), cwd.join(log).display().to_string()]);
+        }
+        runner_args.push(script);
+        let working_dir = Some(cwd.display().to_string());
+        match self.split {
+            None => ControlRequest::NewTab {
+                title: Path::new(&self.script)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned()),
+                command: Some(runner.to_string()),
+                args: runner_args,
+                working_dir,
+            },
+            // Native scenes are drawn only in a tab of one pane, so a split
+            // pane draws ANSI.
+            Some(direction) => ControlRequest::SplitPane {
+                direction,
+                command: Some(runner.to_string()),
+                args: std::iter::once("--ansi".to_string())
+                    .chain(runner_args)
+                    .collect(),
+                working_dir,
+                target: None,
+            },
+        }
+    }
+}
+
+/// The `ulttui-lua` binary: the one next to this executable (a build or
+/// install directory), else whatever the Ultty process finds on its PATH.
+fn lua_runner() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("ulttui-lua")))
+        .filter(|path| path.is_file())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "ulttui-lua".to_string())
 }
 
 fn parse_wait_for(args: &[String]) -> Result<ControlRequest, String> {
@@ -512,12 +653,28 @@ fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
         | ControlRequest::Subscribe { target }
         | ControlRequest::SetPaneStatus { target, .. }
         | ControlRequest::LastCommand { target, .. }
-        | ControlRequest::Regions { target } => {
+        | ControlRequest::Regions { target }
+        | ControlRequest::SplitPane { target, .. } => {
             *target = Some(id);
             Ok(())
         }
-        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for, subscribe, status, last-command and regions".to_string()),
+        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for, subscribe, status, last-command, regions, split and lua open --split".to_string()),
     }
+}
+
+/// A `split` (or `lua open --split`) with no `--pane` splits the pane this
+/// ulttyctl runs in, when Ultty told it which (`ULTTY_PANE`); otherwise the
+/// server uses the focused pane.
+fn default_split_target(request: &mut ControlRequest, own_pane: Option<u64>) {
+    if let ControlRequest::SplitPane { target: None, .. } = request {
+        if let Some(pane) = own_pane {
+            let _ = set_target(request, pane);
+        }
+    }
+}
+
+fn own_pane() -> Option<u64> {
+    std::env::var("ULTTY_PANE").ok()?.trim().parse().ok()
 }
 
 fn parse_key(s: &str) -> Option<Key> {
@@ -712,7 +869,9 @@ GLOBAL FLAGS:
     --pane <id>             Act on pane <id> (from `panes`) instead of the
                             focused one. Goes before the command; applies to
                             text, selection, send-*, run, search, wait-for,
-                            subscribe, status, last-command, regions
+                            subscribe, status, last-command, regions, split
+                            and lua open --split (which otherwise split the
+                            pane ulttyctl runs in, from $ULTTY_PANE)
     -V, --version           Show ulttyctl version without connecting to Ultty
     -h, --help              Show this help
 
@@ -722,7 +881,11 @@ INPUT COMMANDS:
     send-raw <hex>          Send raw bytes (hex-encoded, e.g., send-raw 1b5b41)
 
 TAB COMMANDS:
-    new-tab [cmd] [args]    Create new tab with optional command
+    new-tab [cmd] [args]    Create new tab with optional command (prints the
+                            new pane's id)
+    split [right|down] [cmd] [args]
+                            Open a pane next to the focused one, running cmd
+                            or a shell (prints the new pane's id)
     switch-tab <n>          Switch to tab number n (1-indexed)
     close-tab [n]           Close tab n (or current if omitted)
     tabs                    List all tabs
@@ -762,6 +925,18 @@ WINDOW COMMANDS:
 
 EXECUTION:
     run <command> [args]    Run a command in current tab
+
+LUA TOOLS (docs/lua.md):
+    lua open <file> [--split right|down] [--exec <cmd>]... [--allow-exec]
+             [--log <file>]
+                            Run a Luau script with ulttui-lua in a new tab
+                            (or a split, drawn with ANSI), in this directory,
+                            and print its pane's id. run{{}} may start only
+                            command lines beginning with an --exec <cmd>,
+                            e.g. --exec 'ulttyctl --json panes'; a bare
+                            program name allows any arguments, and for
+                            ulttyctl, git, shells or interpreters that is
+                            as good as --allow-exec
 
 STATUS:
     status <state> [label] [--progress <0-1|N%>] [--attention]
@@ -821,8 +996,9 @@ EXIT STATUS:
 #[cfg(test)]
 mod tests {
     use super::{
-        exit_status, parse_cli_request, parse_response, read_response, read_timeout_for,
-        response_is_failure, should_print_version, version_output, with_auth_token,
+        default_split_target, exit_status, parse_cli_request, parse_response, read_response,
+        read_timeout_for, response_is_failure, should_print_version, version_output,
+        with_auth_token, LuaOpen,
     };
 
     use std::io::Write;
@@ -832,7 +1008,7 @@ mod tests {
 
     use ultty_protocol::control::{
         ControlData, ControlEvent, ControlRequest, ControlResponse, PaneState, PaneStatus,
-        WaitCondition,
+        SplitDirection, WaitCondition,
     };
 
     #[test]
@@ -1108,6 +1284,177 @@ mod tests {
         assert!(parse_cli_request(&args("--pane 3 tabs")).is_err());
         assert!(parse_cli_request(&args("--pane x text")).is_err());
         assert!(parse_cli_request(&args("--pane")).is_err());
+    }
+
+    #[test]
+    fn split_defaults_to_the_right_and_takes_a_command() {
+        assert_eq!(
+            parse_cli_request(&args("split")).unwrap(),
+            ControlRequest::SplitPane {
+                direction: SplitDirection::Right,
+                command: None,
+                args: Vec::new(),
+                working_dir: None,
+                target: None,
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("--pane 3 split down htop -d 10")).unwrap(),
+            ControlRequest::SplitPane {
+                direction: SplitDirection::Down,
+                command: Some("htop".to_string()),
+                args: vec!["-d".to_string(), "10".to_string()],
+                working_dir: None,
+                target: Some(3),
+            }
+        );
+        // A program called `right` would be ambiguous; a flag is an error.
+        assert!(parse_cli_request(&args("split --down")).is_err());
+    }
+
+    #[test]
+    fn split_targets_the_callers_own_pane_unless_told_otherwise() {
+        let mut request = parse_cli_request(&args("split")).unwrap();
+        default_split_target(&mut request, Some(7));
+        assert!(matches!(
+            request,
+            ControlRequest::SplitPane {
+                target: Some(7),
+                ..
+            }
+        ));
+
+        let mut request = parse_cli_request(&args("--pane 3 split")).unwrap();
+        default_split_target(&mut request, Some(7));
+        assert!(matches!(
+            request,
+            ControlRequest::SplitPane {
+                target: Some(3),
+                ..
+            }
+        ));
+
+        let mut request = parse_cli_request(&args("split")).unwrap();
+        default_split_target(&mut request, None);
+        assert!(matches!(
+            request,
+            ControlRequest::SplitPane { target: None, .. }
+        ));
+
+        // Only splits: a new tab has no pane to be next to.
+        let mut request = parse_cli_request(&args("new-tab")).unwrap();
+        default_split_target(&mut request, Some(7));
+        assert_eq!(request, parse_cli_request(&args("new-tab")).unwrap());
+    }
+
+    #[test]
+    fn lua_open_parses_its_grants_and_placement() {
+        assert_eq!(
+            LuaOpen::parse(&args("tool.luau")).unwrap(),
+            LuaOpen {
+                script: "tool.luau".to_string(),
+                ..LuaOpen::default()
+            }
+        );
+        assert_eq!(
+            LuaOpen::parse(&args(
+                "--split down --exec git --log l.log tool.luau --exec ulttyctl --allow-exec"
+            ))
+            .unwrap(),
+            LuaOpen {
+                script: "tool.luau".to_string(),
+                split: Some(SplitDirection::Down),
+                exec: vec!["git".to_string(), "ulttyctl".to_string()],
+                allow_exec: true,
+                log: Some("l.log".to_string()),
+            }
+        );
+        // A grant with spaces is one argument, kept whole for ulttui-lua.
+        let open = LuaOpen::parse(&[
+            "--exec".to_string(),
+            "ulttyctl --json panes".to_string(),
+            "tool.luau".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(open.exec, ["ulttyctl --json panes"]);
+        // `--` ends the options, so a file called `--help` can be opened.
+        assert_eq!(
+            LuaOpen::parse(&args("--exec git -- --help")).unwrap(),
+            LuaOpen {
+                script: "--help".to_string(),
+                exec: vec!["git".to_string()],
+                ..LuaOpen::default()
+            }
+        );
+        for bad in [
+            "",
+            "--exec",
+            "--exec git",
+            "--split left tool.luau",
+            "--split",
+            "--trust tool.luau",
+            "a.luau b.luau",
+            "-- a.luau b.luau",
+        ] {
+            assert!(LuaOpen::parse(&args(bad)).is_err(), "{bad:?}");
+        }
+        assert!(parse_cli_request(&args("lua")).is_err());
+        assert!(parse_cli_request(&args("lua close x.luau")).is_err());
+        assert!(parse_cli_request(&args("lua open /nonexistent/x.luau")).is_err());
+    }
+
+    #[test]
+    fn lua_open_runs_the_script_in_the_callers_directory_with_its_grants() {
+        let open = LuaOpen::parse(&args("--exec ulttyctl --log l.log tools/panes.luau")).unwrap();
+        assert_eq!(
+            open.request("/opt/ultty/ulttui-lua", std::path::Path::new("/home/me")),
+            ControlRequest::NewTab {
+                title: Some("panes.luau".to_string()),
+                command: Some("/opt/ultty/ulttui-lua".to_string()),
+                args: args("--exec ulttyctl --log /home/me/l.log /home/me/tools/panes.luau"),
+                working_dir: Some("/home/me".to_string()),
+            }
+        );
+        let open = LuaOpen::parse(&args("--allow-exec --log /var/l.log /abs/tool.luau")).unwrap();
+        assert_eq!(
+            open.request("ulttui-lua", std::path::Path::new("/home/me")),
+            ControlRequest::NewTab {
+                title: Some("tool.luau".to_string()),
+                command: Some("ulttui-lua".to_string()),
+                args: args("--allow-exec --log /var/l.log /abs/tool.luau"),
+                working_dir: Some("/home/me".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn lua_open_in_a_split_draws_ansi_and_takes_a_pane() {
+        let open = LuaOpen::parse(&args("--split right --exec git tool.luau")).unwrap();
+        assert_eq!(
+            open.request("/a=b/ulttui-lua", std::path::Path::new("/w")),
+            ControlRequest::SplitPane {
+                direction: SplitDirection::Right,
+                command: Some("/a=b/ulttui-lua".to_string()),
+                args: args("--ansi --exec git /w/tool.luau"),
+                working_dir: Some("/w".to_string()),
+                target: None,
+            }
+        );
+        // `--pane` names the pane to split next to; the file must exist for
+        // the full command line, so use this one.
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/lua/hello.luau")
+            .display()
+            .to_string();
+        match parse_cli_request(&args(&format!("--pane 5 lua open --split down {here}"))).unwrap() {
+            ControlRequest::SplitPane {
+                direction: SplitDirection::Down,
+                target: Some(5),
+                ..
+            } => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(parse_cli_request(&args(&format!("--pane 5 lua open {here}"))).is_err());
     }
 
     #[test]

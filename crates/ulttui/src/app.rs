@@ -274,14 +274,12 @@ struct SubCollectCtx<'a, M> {
 }
 
 impl<A: Application> App<A> {
-    /// Create a new app runner.
+    /// Create a new app runner on the backend [`Backend::detect`] picks.
     ///
     /// It reads the user's overrides for the app named by `argv[0]` (see
     /// [`App::app_name`] and ADR 0023).
     pub fn new(app: A) -> Self {
-        let mut runner = Self::with_backend(app, Backend::detect());
-        runner.overrides = OverrideFile::for_app(&crate::overrides::default_app_name());
-        runner
+        Self::new_with_backend(app, Backend::detect())
     }
 
     /// Look the user's overrides up under `name` instead of the binary's
@@ -297,6 +295,21 @@ impl<A: Application> App<A> {
         self.overrides = file;
         self.needs_render = true;
         self
+    }
+
+    /// Create a new app runner on `backend` instead of detecting one:
+    /// [`Backend::ansi`] to draw with ANSI inside Ultty too, or a mock in
+    /// tests.
+    ///
+    /// Like [`App::new`] it reads the user's overrides, except on a mock
+    /// backend, so tests never see the user's files.
+    pub fn new_with_backend(app: A, backend: Backend) -> Self {
+        let reads_overrides = backend.reads_user_overrides();
+        let mut runner = Self::with_backend(app, backend);
+        if reads_overrides {
+            runner.overrides = OverrideFile::for_app(&crate::overrides::default_app_name());
+        }
+        runner
     }
 
     fn with_backend(app: A, backend: Backend) -> Self {
@@ -1097,14 +1110,6 @@ impl<A: Application> Drop for App<A> {
             }
             self.backend_shutdown = true;
         }
-    }
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-impl<A: Application> App<A> {
-    /// Create an app with a specific backend (for testing).
-    pub fn new_with_backend(app: A, backend: Backend) -> Self {
-        Self::with_backend(app, backend)
     }
 }
 

@@ -36,11 +36,23 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   script returns an Elm-style app table (`init`, `update`, `view`, named
   `every` timers) and builds views from `text`, `column`, `row`, `card`,
   `scroll`, `list`, `progress`, `spinner`, `button` and `input`; unknown
-  props are errors with file and line. `run{}` starts processes only with
-  `--allow-exec`; `json.decode` reads their output. Scripts run in Luau's
-  sandbox. A broken save leaves the last good version running under an
-  error banner. Native in Ultty, ANSI elsewhere. Examples in
-  `examples/lua/`; see [Luau apps](docs/lua.md).
+  props are errors with file and line. `run{}` starts only command lines
+  beginning with a granted prefix, `--exec 'ulttyctl --json panes'` (a bare
+  program name allows any arguments; `--allow-exec` allows anything), and
+  otherwise raises an error naming the flag to add; `json.decode` reads
+  their output. Scripts run in Luau's sandbox. A broken save leaves the last
+  good version running under an error banner. Native in Ultty, ANSI
+  elsewhere (`--ansi` forces it). Examples in `examples/lua/`; see
+  [Luau apps](docs/lua.md).
+- `ulttyctl lua open FILE [--split right|down] [--exec CMD]...` runs a Luau
+  script with `ulttui-lua` in a new tab, or in a split next to the caller's
+  pane (drawn with ANSI until native sessions map to panes), in the caller's
+  directory, with the command lines it may run, and prints the pane's id.
+  `ulttyctl split [right|down] [cmd] [args]` opens a pane next to `--pane`,
+  else the pane ulttyctl runs in, else the focused one (control request
+  `SplitPane`, reply `PaneOpened`). Every pane's environment has
+  `ULTTY_PANE`, its id in `ulttyctl panes`.
+  [ADR 0024](docs/adr/0024-lua-in-ultty.md).
 - `ulttui`: `Row::padding` and `List::selected` builders.
 
 - `ulttui::inline::Console` (ADR 0020 slice 5): a command-line program
@@ -84,6 +96,9 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 - `DiffView`'s line texts are one cell high in native mode; they were laid
   out with no height.
+- `ulttui` answers the terminal's `Ping` over the socket. An app that had
+  sent nothing for 30 s was dropped 10 s later ("pong timeout"), so every
+  idle native app died about 40 s after its last frame.
 
 ## [0.2.0] - 2026-11-08
 

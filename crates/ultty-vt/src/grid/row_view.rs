@@ -5,17 +5,16 @@
 //! change without changing them (ADR 0022). Cells come out by value; a caller
 //! that truly needs an owned [`Row`] asks for one with [`RowView::to_row`].
 
-use std::borrow::Cow;
-
 use super::cell::Color;
+use super::history::HistoryRow;
 use super::packed::{Style, StyleTable};
 use super::screen::{ScreenRow, ScreenRowMut};
 use super::{AnchorTag, Cell, CellFlags, Row, RowMarks};
 
 /// One row of a buffer: a screen row, or a scrollback row.
 ///
-/// A screen row is read in place from its packed cells; a scrollback row is
-/// decoded when the view is made, so hold a view only as long as needed.
+/// Both are read in place, from the screen page or from a history page,
+/// without decoding the row.
 #[derive(Debug)]
 pub struct RowView<'a> {
     inner: Inner<'a>,
@@ -28,28 +27,31 @@ enum Inner<'a> {
         row: ScreenRow<'a>,
         styles: &'a StyleTable,
     },
-    Row(Cow<'a, Row>),
+    /// A scrollback row in its page.
+    History(HistoryRow<'a>),
+    /// An owned row snapshot.
+    Row(&'a Row),
 }
 
 /// A view of an owned [`Row`] snapshot, for code (and tests) that holds one.
 impl<'a> From<&'a Row> for RowView<'a> {
     fn from(row: &'a Row) -> Self {
         Self {
-            inner: Inner::Row(Cow::Borrowed(row)),
+            inner: Inner::Row(row),
         }
     }
 }
 
 impl<'a> RowView<'a> {
-    pub(super) fn owned(row: Row) -> Self {
-        Self {
-            inner: Inner::Row(Cow::Owned(row)),
-        }
-    }
-
     pub(super) fn screen(row: ScreenRow<'a>, styles: &'a StyleTable) -> Self {
         Self {
             inner: Inner::Screen { row, styles },
+        }
+    }
+
+    pub(super) fn history(row: HistoryRow<'a>) -> Self {
+        Self {
+            inner: Inner::History(row),
         }
     }
 
@@ -57,6 +59,7 @@ impl<'a> RowView<'a> {
     pub fn width(&self) -> u16 {
         match &self.inner {
             Inner::Screen { row, .. } => row.width(),
+            Inner::History(row) => row.width(),
             Inner::Row(row) => row.width(),
         }
     }
@@ -66,6 +69,7 @@ impl<'a> RowView<'a> {
     pub fn cell(&self, col: u16) -> Option<Cell> {
         match &self.inner {
             Inner::Screen { row, styles } => Some(styles.unpack(row.get(col)?)),
+            Inner::History(row) => row.cell(col),
             Inner::Row(row) => row.get(col).copied(),
         }
     }
@@ -75,11 +79,13 @@ impl<'a> RowView<'a> {
         (0..self.width()).filter_map(|col| self.cell(col))
     }
 
-    /// The character at each column, without the rest of the cell.
+    /// The character at each column, without the rest of the cell, for
+    /// rows that are not scrollback (which has its own text path).
     fn chars(&self) -> impl Iterator<Item = char> + '_ {
         let (packed, cells) = match &self.inner {
             Inner::Screen { row, .. } => (row.cells(), &[][..]),
             Inner::Row(row) => (&[][..], row.cells_slice()),
+            Inner::History(_) => (&[][..], &[][..]),
         };
         packed
             .iter()
@@ -92,6 +98,7 @@ impl<'a> RowView<'a> {
     pub fn grapheme_extra(&self, col: u16) -> Option<&[char]> {
         match &self.inner {
             Inner::Screen { row, .. } => row.grapheme_extra(col),
+            Inner::History(row) => row.grapheme_extra(col),
             Inner::Row(row) => row.grapheme_extra(col),
         }
     }
@@ -100,6 +107,7 @@ impl<'a> RowView<'a> {
     pub fn is_wrapped(&self) -> bool {
         match &self.inner {
             Inner::Screen { row, .. } => row.is_wrapped(),
+            Inner::History(row) => row.is_wrapped(),
             Inner::Row(row) => row.is_wrapped(),
         }
     }
@@ -108,6 +116,7 @@ impl<'a> RowView<'a> {
     pub fn marks(&self) -> RowMarks {
         match &self.inner {
             Inner::Screen { row, .. } => row.marks(),
+            Inner::History(row) => row.marks(),
             Inner::Row(row) => row.marks(),
         }
     }
@@ -116,6 +125,7 @@ impl<'a> RowView<'a> {
     pub fn anchor(&self) -> AnchorTag {
         match &self.inner {
             Inner::Screen { row, .. } => row.anchor(),
+            Inner::History(row) => row.anchor(),
             Inner::Row(row) => row.anchor(),
         }
     }
@@ -128,6 +138,10 @@ impl<'a> RowView<'a> {
     /// The row's text, one char per column plus grapheme extras.
     pub fn text(&self) -> String {
         let mut text = String::with_capacity(usize::from(self.width()));
+        if let Inner::History(row) = &self.inner {
+            row.push_text(&mut text);
+            return text;
+        }
         for (col, c) in self.chars().enumerate() {
             text.push(c);
             if let Some(extra) = self.grapheme_extra(col as u16) {
@@ -182,12 +196,12 @@ impl<'a> RowView<'a> {
     /// An owned copy of the row.
     pub fn to_row(&self) -> Row {
         match &self.inner {
-            Inner::Screen { .. } => {
+            Inner::Screen { .. } | Inner::History(_) => {
                 let mut row = Row::new(0);
                 self.copy_into(&mut row);
                 row
             }
-            Inner::Row(row) => row.as_ref().clone(),
+            Inner::Row(row) => (*row).clone(),
         }
     }
 
@@ -201,6 +215,7 @@ impl<'a> RowView<'a> {
                 row.marks(),
                 row.anchor(),
             ),
+            Inner::History(row) => row.copy_into(dst),
             Inner::Row(row) => dst.copy_from(row),
         }
     }
@@ -332,6 +347,6 @@ mod tests {
 
         let mut other = row.clone();
         other.set_grapheme_extra(0, &['\u{300}']);
-        assert!(!RowView::owned(row).eq_row(&other));
+        assert!(!RowView::from(&row).eq_row(&other));
     }
 }
