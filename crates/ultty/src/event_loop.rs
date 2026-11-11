@@ -28,7 +28,7 @@ use std::fs;
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsFd, RawFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -196,6 +196,10 @@ pub struct InBandInput {
 struct Shared {
     state: Mutex<State>,
     changed: Condvar,
+    /// Threads inside [`EventLoop::wait`]. `Condvar::notify_all` is a futex
+    /// system call even with nobody waiting, and the app never waits, so the
+    /// I/O thread skips it at zero.
+    waiters: AtomicUsize,
     /// Set when the I/O thread wakes the UI and cleared when the UI collects
     /// events, so at most one wake is outstanding per terminal.
     wake_pending: AtomicBool,
@@ -210,9 +214,19 @@ impl Shared {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Wake threads blocked in [`EventLoop::wait`], if there are any. Call it
+    /// after the state change is unlocked: a waiter registers while holding
+    /// the lock and rechecks `ready` before sleeping, so one that registers
+    /// after the load here sees the change and does not sleep.
+    fn notify_waiters(&self) {
+        if self.waiters.load(Ordering::SeqCst) > 0 {
+            self.changed.notify_all();
+        }
+    }
+
     /// Tell waiters and the UI that something changed.
     fn notify(&self) {
-        self.changed.notify_all();
+        self.notify_waiters();
         if !self.wake_pending.swap(true, Ordering::AcqRel) {
             let waker = self
                 .waker
@@ -351,6 +365,7 @@ impl EventLoop {
                 outbound: BytesMut::new(),
             }),
             changed: Condvar::new(),
+            waiters: AtomicUsize::new(0),
             wake_pending: AtomicBool::new(false),
             waker: Mutex::new(None),
             stop: AtomicBool::new(false),
@@ -626,11 +641,13 @@ impl EventLoop {
         {
             let state = self.shared.lock();
             if !state.ready() {
+                self.shared.waiters.fetch_add(1, Ordering::SeqCst);
                 let _ = self
                     .shared
                     .changed
                     .wait_timeout_while(state, timeout, |s| !s.ready())
                     .unwrap_or_else(PoisonError::into_inner);
+                self.shared.waiters.fetch_sub(1, Ordering::SeqCst);
             }
         }
         self.process()
@@ -904,7 +921,7 @@ impl WakeThrottle {
             self.wake(shared);
         } else {
             // Waiters in `EventLoop::wait` still see progress immediately.
-            shared.changed.notify_all();
+            shared.notify_waiters();
             self.pending = true;
         }
     }
@@ -1394,6 +1411,29 @@ mod tests {
                 "ChildExited reported again: {events:?}"
             );
         }
+    }
+
+    #[test]
+    fn wait_wakes_on_output_without_running_out_its_timeout() {
+        let mut event_loop = EventLoop::with_command(
+            "/bin/sh",
+            &["/bin/sh", "-c", "sleep 0.2; printf hi; sleep 5"],
+            20,
+            3,
+        )
+        .expect("create");
+        let start = Instant::now();
+        event_loop.wait(Duration::from_secs(10)).expect("wait");
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "wait slept through the output: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(
+            event_loop.terminal().grid().row(0).unwrap().text_trimmed(),
+            "hi"
+        );
+        assert_eq!(event_loop.shared.waiters.load(Ordering::SeqCst), 0);
     }
 
     #[test]
