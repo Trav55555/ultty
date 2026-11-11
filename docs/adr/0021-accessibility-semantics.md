@@ -552,21 +552,46 @@ Each slice is independently testable and mergeable.
      address was spoken when the stream ended, and a setext underline
      (`Title`, `\n`, `=====`) showed and was spoken (review probes). Now
      every `append_chunk` parses again from the line the last top-level
-     block starts on, keeping the blocks before it: O(that block) per
-     chunk, and the same blocks as parsing the whole source (a property
-     test streams random markdown in random chunks against a whole
-     parse). A restart point is taken only after a blank line, not after
-     a list (`1` can still become `1. x`, one of its items) and not while
-     pulldown-cmark keeps a task marker for a later paragraph; a source
-     with link reference or footnote definitions, which reach back, is
-     parsed whole on every chunk.
+     block starts on, or a top-level list's last item, keeping the blocks
+     before it: O(that block or item) per chunk, and the same blocks as
+     parsing the whole source (two property tests stream random markdown,
+     made of pieces and of whole lines of every kind of block, in random
+     chunks and a character at a time, against a whole parse). A restart
+     point is taken only after a blank line (spaces and tabs only, not
+     U+00A0 or U+3000), not after a list (`1` can still become `1. x`,
+     one of its items); in a list, at an item after its first once the
+     one before is done and the item's first line keeps it an item
+     (text after the marker, not only `-`, `*`, `_`), carrying the list's
+     numbering. Parsed from its last item a list can be tight where the
+     whole is loose, so text after another block of a tight item begins
+     a paragraph as it would in a loose one. A source with a link
+     reference definition, or a `[^label]:` footnote definition (not any
+     `[^`: a regex is common), is parsed whole on every chunk, as those
+     reach back to earlier blocks. Streaming in 4-byte chunks, release,
+     in all (before, parsing the whole source on most chunks): 40 KB of
+     paragraphs 13 ms (700 ms), the same with `[^a-z]` in a code span
+     10 ms (660 ms; any `[^` once parsed it whole, seconds), a 2,000-item
+     list 9 ms (6 s), ordered 15 ms (8 s). An open fenced code block is
+     one block, parsed again whole: 40 KB of code 130 ms (70 ms, when
+     code was appended without parsing).
+   - Options: pulldown-cmark's metadata blocks are off (a reply that
+     starts with `---` had the text to the next rule hidden as front
+     matter, and only in a whole parse), and so are definition lists,
+     heading attributes and its own task lists: 0.12.2 panics, in
+     release too, on a definition list in a block quote (`> _\n> : \n\n`)
+     and on a heading a task marker was carried into (it gives the marker
+     of an item that starts with another block, `- [ ] # x`, to whichever
+     paragraph comes next). Their syntax shows as the text it is; a task
+     item is a list item whose own plain text starts with `[ ] `, `[x] `
+     or `[X] ` and goes on.
    - A task list item (`- [ ] buy milk`) draws the `Checkbox` widget's
      ASCII `[ ]` / `[x]` in place of its bullet (after its number when
      ordered) and is a read-only `Checkbox` named by its text, `toggled`
      True or False: GitHub draws a task item as a disabled checkbox, and
      the region is the item, so no extra node is needed. The checkbox is
-     drawn but never announced (the walk notes an unspoken prefix for the
-     region, `FrameNotes`). While it arrives the item is an ordinary
+     drawn but never announced (the walk notes the unspoken bytes of the
+     region, `FrameNotes`); an ordered item's number is said, and is in
+     its name (`1. text`). While it arrives the item is an ordinary
      block region and becomes the checkbox in the frame it stops being
      live: the adapters announce a live node whenever its name changes,
      and a checkbox without a label is named by its growing text
