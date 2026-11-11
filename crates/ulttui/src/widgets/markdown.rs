@@ -372,7 +372,7 @@ fn parse(source: &str) -> (Vec<Block>, Option<ReparsePoint>) {
         let mut item_waits = false;
         match &event {
             Event::Start(Tag::Item) => {
-                item_waits = task_marker_waits_for_paragraph(&source[range.start..]);
+                item_waits = task_marker_waits_for_paragraph(source, range.start);
                 task_marker_pending |= item_waits;
                 depth += 1;
             }
@@ -408,13 +408,15 @@ fn may_define_footnote(source: &str) -> bool {
     })
 }
 
-/// Whether list item source `item`, from its marker on, starts with a task
-/// marker as pulldown-cmark scans one (`- [ ] `, `1. [x] `) with more on
-/// its line, so that pulldown-cmark keeps the marker for the next
-/// paragraph. It may say so for an item pulldown-cmark does not take as a
-/// task, which only costs parsing more again.
-fn task_marker_waits_for_paragraph(item: &str) -> bool {
-    let item = item.trim_start_matches([' ', '\t']);
+/// Whether the list item starting at byte `start` of `source` (at its
+/// marker) starts with a task marker as pulldown-cmark scans one
+/// (`- [ ] `, `1. [x] `) with more on its line, so that pulldown-cmark
+/// keeps the marker for the next paragraph. The `[` must come 1 to 4
+/// columns after the list marker: further, the item's text is indented
+/// code. It may say so for an item pulldown-cmark does not take as a task,
+/// which only costs parsing more again.
+fn task_marker_waits_for_paragraph(source: &str, start: usize) -> bool {
+    let item = source[start..].trim_start_matches([' ', '\t']);
     let after_marker = match item.strip_prefix(['-', '+', '*']) {
         Some(rest) => rest,
         None => {
@@ -426,7 +428,9 @@ fn task_marker_waits_for_paragraph(item: &str) -> bool {
         }
     };
     let content = after_marker.trim_start_matches([' ', '\t']);
-    if content.len() == after_marker.len() {
+    let marker_end = source.len() - after_marker.len();
+    let gap = column(source, source.len() - content.len()) - column(source, marker_end);
+    if !(1..=4).contains(&gap) {
         return false;
     }
     let bytes = content.as_bytes();
@@ -435,7 +439,22 @@ fn task_marker_waits_for_paragraph(item: &str) -> bool {
         && matches!(bytes[1], b' ' | b'\t' | b'x' | b'X')
         && bytes[2] == b']'
         && matches!(bytes[3], b' ' | b'\t')
-        && !content[4..].lines().next().unwrap_or("").trim().is_empty()
+        && !content[4..]
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim_matches([' ', '\t', '\r'])
+            .is_empty()
+}
+
+/// The column byte `at` of `source` is at on its line, a tab going on to
+/// the next multiple of 4.
+fn column(source: &str, at: usize) -> usize {
+    let line_start = source[..at].rfind('\n').map_or(0, |i| i + 1);
+    source[line_start..at].chars().fold(0, |column, c| match c {
+        '\t' => column + 4 - column % 4,
+        _ => column + 1,
+    })
 }
 
 /// Turns parser events into blocks.
@@ -1708,6 +1727,12 @@ mod tests {
         noted.append_chunk("\n\n[^1]: a note");
         assert_eq!(noted.reparse_from, None);
         assert_eq!(noted.blocks, MarkdownView::new(noted.source()).blocks);
+        // Nor does an item whose text is indented code.
+        let code = MarkdownView::new("-     [ ] a\n\npara\n\nlast");
+        assert_eq!(
+            code.reparse_from.map(|p| p.offset),
+            Some("-     [ ] a\n\npara\n\n".len())
+        );
         // A task list whose markers were given does not hold it back.
         let tasks = MarkdownView::new("- [ ] a\n- [x] b\n\npara\n\nlast");
         assert_eq!(
@@ -1898,6 +1923,10 @@ mod tests {
         "b\r",
         "\r",
         "- [ ] item\r",
+        "-\t[ ] tab task",
+        "1.\t[x]\tdone",
+        "- [ ] \u{3000}",
+        ">\t- [ ] q",
     ];
 
     fn line_document() -> impl proptest::strategy::Strategy<Value = String> {
