@@ -29,13 +29,16 @@ pub struct MarkdownView {
 }
 
 /// The start of the line the last top-level block of a source starts on,
-/// and how many blocks come before it. Markdown appended after it cannot
-/// change the blocks before it (but for reference definitions), so
-/// parsing from there gives the rest.
+/// or the last item of a top-level list, and how many blocks come before
+/// it. Markdown appended after it cannot change the blocks before it (but
+/// for reference definitions), so parsing from there gives the rest.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ReparsePoint {
     offset: usize,
     blocks: usize,
+    /// When it is a list item: the list it goes on, whose numbering the
+    /// item continues.
+    list: Option<ListState>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -104,7 +107,7 @@ enum InlineStyleMarker {
     Link,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ListState {
     ordered: bool,
     next_number: u64,
@@ -113,7 +116,7 @@ struct ListState {
 impl MarkdownView {
     pub fn new(source: impl Into<String>) -> Self {
         let source = source.into();
-        let (blocks, reparse_from) = parse(&source);
+        let (blocks, reparse_from) = parse(&source, None);
         Self {
             source,
             blocks,
@@ -139,18 +142,19 @@ impl MarkdownView {
         self.source.push_str(chunk);
 
         if let Some(from) = self.reparse_from {
-            let (tail, tail_from) = parse(&self.source[from.offset..]);
+            let (tail, tail_from) = parse(&self.source[from.offset..], from.list);
             if let Some(tail_from) = tail_from {
                 self.blocks.truncate(from.blocks);
                 self.blocks.extend(tail);
                 self.reparse_from = Some(ReparsePoint {
                     offset: from.offset + tail_from.offset,
                     blocks: from.blocks + tail_from.blocks,
+                    list: tail_from.list,
                 });
                 return;
             }
         }
-        (self.blocks, self.reparse_from) = parse(&self.source);
+        (self.blocks, self.reparse_from) = parse(&self.source, None);
     }
 
     pub fn with_appended(mut self, chunk: impl AsRef<str>) -> Self {
@@ -312,7 +316,8 @@ impl MarkdownView {
 
 /// The blocks of `source`, and where to parse again from when text is
 /// appended to it (`None` when it defines link references or footnotes).
-fn parse(source: &str) -> (Vec<Block>, Option<ReparsePoint>) {
+/// With `list`, `source` starts with an item that goes on that list.
+fn parse(source: &str, list: Option<ListState>) -> (Vec<Block>, Option<ReparsePoint>) {
     // Without metadata blocks: a reply that starts with a rule would have
     // the text up to the next one hidden as front matter.
     let options = Options::all()
@@ -323,7 +328,10 @@ fn parse(source: &str) -> (Vec<Block>, Option<ReparsePoint>) {
         // like a link reference, and pulldown-cmark 0.12's offsets around
         // one can be out of order (its debug assertion fails), so they are
         // not asked for.
-        let mut builder = BlockBuilder::default();
+        let mut builder = BlockBuilder {
+            continue_list: list,
+            ..BlockBuilder::default()
+        };
         for event in Parser::new_ext(source, options) {
             builder.event(event);
         }
@@ -331,8 +339,15 @@ fn parse(source: &str) -> (Vec<Block>, Option<ReparsePoint>) {
     }
     let parser = Parser::new_ext(source, options).into_offset_iter();
     let defines = parser.reference_definitions().iter().next().is_some();
-    let mut builder = BlockBuilder::default();
-    let mut reparse_from = ReparsePoint::default();
+    let mut builder = BlockBuilder {
+        continue_list: list,
+        ..BlockBuilder::default()
+    };
+    // From the start, `source` goes on `list` again.
+    let mut reparse_from = ReparsePoint {
+        list,
+        ..ReparsePoint::default()
+    };
     let mut depth = 0usize;
     // pulldown-cmark gives a task marker to the next paragraph, which is
     // not the item's own when the item starts with another block
@@ -344,6 +359,7 @@ fn parse(source: &str) -> (Vec<Block>, Option<ReparsePoint>) {
     // A block after a list can still turn into one of its items (`1`
     // becoming `1. x`).
     let mut after_list = false;
+    let mut top_level_items = 0usize;
     for (event, range) in parser {
         if depth == 0 && builder.current.is_none() && !task_marker_pending && !after_list {
             // Only a block after a blank line: one that interrupts the
@@ -363,11 +379,40 @@ fn parse(source: &str) -> (Vec<Block>, Option<ReparsePoint>) {
                 reparse_from = ReparsePoint {
                     offset: line_start,
                     blocks: builder.blocks.len(),
+                    // The start goes on `list` still.
+                    list: list.filter(|_| line_start == 0),
+                };
+            }
+        }
+        // An item of a top-level list after its first, once the one before
+        // it is done: the items before it are finished, and its list's
+        // numbering goes on. Not the first, which may have interrupted a
+        // paragraph.
+        let top_level_item = depth == 1 && matches!(event, Event::Start(Tag::Item));
+        if top_level_item
+            && top_level_items > 0
+            && builder.current.is_none()
+            && !task_marker_pending
+            && item_line_is_settled(source, range.start)
+        {
+            let line_start = source[..range.start].rfind('\n').map_or(0, |i| i + 1);
+            if source[line_start..range.start]
+                .chars()
+                .all(|c| c == ' ' || c == '\t')
+            {
+                reparse_from = ReparsePoint {
+                    offset: line_start,
+                    blocks: builder.blocks.len(),
+                    list: builder.list_stack.last().copied(),
                 };
             }
         }
         if depth == 0 {
             after_list = matches!(event, Event::Start(Tag::List(_) | Tag::DefinitionList));
+            top_level_items = 0;
+        }
+        if top_level_item {
+            top_level_items += 1;
         }
         let mut item_waits = false;
         match &event {
@@ -386,6 +431,23 @@ fn parse(source: &str) -> (Vec<Block>, Option<ReparsePoint>) {
     }
     let blocks = builder.finish();
     (blocks, (!defines).then_some(reparse_from))
+}
+
+/// Whether the first line of the list item starting at byte `start` of
+/// `source` (at its marker) keeps it a list item whatever follows: it has
+/// text after the marker (`1.` may become `1.5`), and not only `-`, `*`
+/// and `_` (`* *` may become the rule `* * *`).
+fn item_line_is_settled(source: &str, start: usize) -> bool {
+    let line = source[start..].split('\n').next().unwrap_or("");
+    let after_marker = line
+        .trim_start_matches([' ', '\t'])
+        .trim_start_matches(|c: char| c.is_ascii_digit())
+        .get(1..)
+        .unwrap_or("");
+    !after_marker.trim_matches([' ', '\t', '\r']).is_empty()
+        && line
+            .chars()
+            .any(|c| !matches!(c, ' ' | '\t' | '\r' | '-' | '*' | '_'))
 }
 
 /// Whether `source` may define a footnote: it has a `[^label]:`. It may
@@ -465,6 +527,10 @@ struct BlockBuilder {
     inline_style_stack: Vec<InlineStyleMarker>,
     list_stack: Vec<ListState>,
     quote_depth: usize,
+    table_depth: usize,
+    /// The list the first top-level list goes on, when parsing starts at
+    /// one of its items.
+    continue_list: Option<ListState>,
 }
 
 impl BlockBuilder {
@@ -484,6 +550,10 @@ impl BlockBuilder {
     }
 
     fn event(&mut self, event: Event<'_>) {
+        // Only the list the source starts with goes on another.
+        if !matches!(event, Event::Start(Tag::List(_))) {
+            self.continue_list = None;
+        }
         let quoted = self.quote_depth > 0;
         match event {
             Event::Start(tag) => match tag {
@@ -516,10 +586,11 @@ impl BlockBuilder {
                         Some(n) => (true, n),
                         None => (false, 1),
                     };
-                    self.list_stack.push(ListState {
+                    let list = self.continue_list.take().unwrap_or(ListState {
                         ordered,
                         next_number: first,
                     });
+                    self.list_stack.push(list);
                 }
                 Tag::Item => {
                     self.finish_current();
@@ -542,6 +613,7 @@ impl BlockBuilder {
                     });
                 }
                 Tag::BlockQuote(_) => self.quote_depth += 1,
+                Tag::Table(_) => self.table_depth += 1,
                 Tag::Strong => self.inline_style_stack.push(InlineStyleMarker::Strong),
                 Tag::Emphasis => self.inline_style_stack.push(InlineStyleMarker::Emphasis),
                 Tag::Link { .. } => self.inline_style_stack.push(InlineStyleMarker::Link),
@@ -554,6 +626,7 @@ impl BlockBuilder {
                 TagEnd::List(_) => {
                     self.list_stack.pop();
                 }
+                TagEnd::Table => self.table_depth = self.table_depth.saturating_sub(1),
                 TagEnd::BlockQuote(_) => {
                     self.quote_depth = self.quote_depth.saturating_sub(1);
                 }
@@ -562,11 +635,19 @@ impl BlockBuilder {
                 TagEnd::Link => self.pop_inline_style(InlineStyleMarker::Link),
                 _ => {}
             },
-            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
+            Event::Html(text) => self.push_text(text.as_ref(), false),
+            Event::Text(text) | Event::InlineHtml(text) => {
+                self.begin_tight_paragraph(quoted);
                 self.push_text(text.as_ref(), false);
             }
-            Event::Code(text) => self.push_text(text.as_ref(), true),
-            Event::SoftBreak | Event::HardBreak => self.push_text("\n", false),
+            Event::Code(text) => {
+                self.begin_tight_paragraph(quoted);
+                self.push_text(text.as_ref(), true);
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                self.begin_tight_paragraph(quoted);
+                self.push_text("\n", false);
+            }
             Event::Rule => self.blocks.push(Block::HorizontalRule),
             Event::TaskListMarker(checked) => {
                 let marker = if checked { "[x] " } else { "[ ] " };
@@ -587,10 +668,26 @@ impl BlockBuilder {
                     }
                     // pulldown-cmark gives the marker of an item that
                     // starts with another block to the next paragraph.
-                    _ => self.push_text(marker, false),
+                    _ => {
+                        self.begin_tight_paragraph(quoted);
+                        self.push_text(marker, false);
+                    }
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A tight list shows no paragraph events: text in an item after
+    /// another of its blocks (`- ```` ... ```` then text) begins a
+    /// paragraph, as it does in a loose list, so that the blocks do not
+    /// depend on whether a later blank line makes the list loose.
+    fn begin_tight_paragraph(&mut self, quoted: bool) {
+        if self.current.is_none() && !self.list_stack.is_empty() && self.table_depth == 0 {
+            self.current = Some(CurrentBlock::Paragraph {
+                spans: Vec::new(),
+                quoted,
+            });
         }
     }
 
@@ -1710,6 +1807,7 @@ mod tests {
             Some(ReparsePoint {
                 offset: "# One\n\n- a\n- b\n\nmiddle\n\n".len(),
                 blocks: 4,
+                list: None,
             })
         );
         view.append_chunk(" grows\n\nnext");
@@ -1717,6 +1815,32 @@ mod tests {
             view.reparse_from.map(|p| p.offset),
             Some("# One\n\n- a\n- b\n\nmiddle\n\nlast para grows\n\n".len())
         );
+        // In a long list, from its last item, which goes on its numbering.
+        let items: String = (0..2_000).map(|n| format!("1. item {n}\n")).collect();
+        let mut list = MarkdownView::new(&items);
+        let last = items.rfind("1. ").unwrap();
+        assert_eq!(
+            list.reparse_from,
+            Some(ReparsePoint {
+                offset: last,
+                blocks: 1_999,
+                list: Some(ListState {
+                    ordered: true,
+                    next_number: 2_000,
+                }),
+            })
+        );
+        list.append_chunk("1. one more\n\n- [ ] a\n- ");
+        assert_eq!(list.blocks, MarkdownView::new(list.source()).blocks);
+        // Text after another block of a tight item is a paragraph, as when
+        // a blank line later makes the list loose.
+        let tight = "- a\n- ```\n  x\n  ```\n  text\n";
+        let mut view = MarkdownView::new(tight);
+        view.append_chunk("\n- c");
+        assert_eq!(view.blocks, MarkdownView::new(view.source()).blocks);
+        assert!(MarkdownView::new(tight).blocks.iter().any(
+            |b| matches!(b, Block::Paragraph { spans } if spans_to_plain_text(spans) == "text")
+        ));
         // A regex is not a footnote definition; a definition is.
         let regex = MarkdownView::new("Use `[^a-z]` or [^1].\n\nlast");
         assert_eq!(
@@ -1927,6 +2051,13 @@ mod tests {
         "1.\t[x]\tdone",
         "- [ ] \u{3000}",
         ">\t- [ ] q",
+        "* *",
+        "- -",
+        "1. 2. nested",
+        " - one space",
+        "3. three",
+        "  text",
+        "```",
     ];
 
     fn line_document() -> impl proptest::strategy::Strategy<Value = String> {
@@ -2022,6 +2153,11 @@ mod tests {
             "\u{a0}\n<path to it",
             "Note:\u{3000}\n\u{3000}\n<p\nclass is a word",
             "intro\u{3000}\n\u{3000}\n<div\nmore",
+            // A list's items parsed from its last: tight on their own, loose
+            // in the whole, numbered on.
+            "1. one\n\n1. [x] # x\n    indented code\n",
+            "1. one\n1. 2. nested\n",
+            "2) \n2) **word",
             // No front matter: the text between two rules stays.
             "---\ntitle: x\n\nbody\n---\nafter",
             "---\n\nbody\n---\n",
