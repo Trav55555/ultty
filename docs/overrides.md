@@ -115,6 +115,8 @@ reason is logged at `warn` (path, and what is wrong and where, such as
 `widget.status.fg: 'purple' is not a colour`). If an edit breaks a file that
 was working, the last good version stays in force until the file is fixed.
 Deleting the file turns overrides off. A missing file is not an error.
+Only a regular file of at most 1 MiB is read: a directory, FIFO or device
+(`ULTTUI_OVERRIDES=/dev/zero`) or a bigger file is logged and ignored.
 
 ulttui apps log through `tracing`, so where the message goes is up to the
 app; `ulttui-lua` writes it to its `--log` file.

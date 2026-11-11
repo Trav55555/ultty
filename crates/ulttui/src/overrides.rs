@@ -377,9 +377,8 @@ impl OverrideFile {
         let Some(path) = &self.path else {
             return false;
         };
-        let stamp = std::fs::metadata(path)
-            .ok()
-            .map(|meta| (meta.modified().ok(), meta.len()));
+        let meta = std::fs::metadata(path).ok();
+        let stamp = meta.as_ref().map(|meta| (meta.modified().ok(), meta.len()));
         if stamp == self.stamp {
             return false;
         }
@@ -392,9 +391,8 @@ impl OverrideFile {
             self.current = Rc::default();
             return true;
         }
-        let parsed = std::fs::read_to_string(path)
-            .map_err(|e| e.to_string())
-            .and_then(|source| Overrides::parse(&source));
+        let is_file = meta.is_some_and(|meta| meta.is_file());
+        let parsed = read_source(path, is_file).and_then(|source| Overrides::parse(&source));
         match parsed {
             Ok(overrides) => {
                 tracing::info!(path = %path.display(), "loaded overrides");
@@ -408,6 +406,28 @@ impl OverrideFile {
             }
         }
     }
+}
+
+/// The largest override file read; a bigger one is ignored.
+pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
+
+/// The text of the override file at `path`. Only a regular file is opened
+/// (a FIFO would block, a device such as `/dev/zero` would never end), and
+/// at most [`MAX_FILE_BYTES`] of it is read.
+fn read_source(path: &Path, is_file: bool) -> Result<String, String> {
+    use std::io::Read;
+    if !is_file {
+        return Err("not a regular file".to_string());
+    }
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut source = String::new();
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_string(&mut source)
+        .map_err(|e| e.to_string())?;
+    if source.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!("larger than {MAX_FILE_BYTES} bytes"));
+    }
+    Ok(source)
 }
 
 /// The override path for app `name` given environment lookup `env`.
@@ -802,6 +822,31 @@ mod tests {
         );
         assert!(!file.refresh());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_regular_files_up_to_the_size_cap_are_read() {
+        let dir = scratch_dir("special");
+        let mut directory = OverrideFile::at(&dir);
+        assert!(directory.overrides().is_empty());
+        assert!(!directory.refresh());
+
+        // A device that never ends: ignored without being opened.
+        if Path::new("/dev/zero").exists() {
+            assert!(OverrideFile::at("/dev/zero").overrides().is_empty());
+        }
+
+        let big = dir.join("big.toml");
+        let entry = "[widget.a]\nhidden = true\n";
+        let padding = "#".repeat(MAX_FILE_BYTES as usize) + "\n";
+        std::fs::write(&big, format!("{entry}{padding}")).unwrap();
+        assert!(
+            OverrideFile::at(&big).overrides().is_empty(),
+            "a file over the cap is ignored"
+        );
+        std::fs::write(&big, entry).unwrap();
+        assert!(OverrideFile::at(&big).overrides().widget("a").is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

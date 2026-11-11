@@ -133,7 +133,9 @@ over "press a key".
 A bad override file never stops or crashes the app. A file that does not
 parse, a key that is not a key, an unknown setting or a colour that is not a
 colour is logged once with `tracing::warn!` (path and reason) and the whole
-file is ignored. A missing file is not an error. On a reload that fails, the
+file is ignored. A missing file is not an error. Only a regular file is opened (a FIFO
+would block the app, a device such as `/dev/zero` never ends), and one over
+1 MiB is ignored the same way. On a reload that fails, the
 last good overrides stay in force, as `ulttui-lua` does with a bad save.
 Ignoring the whole file rather than the bad entry keeps the rule simple and
 makes a typo visible in the log instead of half applying.
