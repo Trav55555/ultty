@@ -1,0 +1,10 @@
+---
+source: crates/ulttui/tests/snapshots.rs
+expression: output
+---
+• First item
+• Second item
+More about it.
+[x] A task done
+1. One
+2. [ ] Two
