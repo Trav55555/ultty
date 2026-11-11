@@ -113,6 +113,10 @@ Once, in the walk, so every widget gets it without knowing about overrides:
   widget (and its own `content`/`semantics`), and clears it for each child, so
   text set on a container does not leak into its children. The text-bearing
   leaves read it through one helper.
+- The app's root view: only its style is overridden, the same way in both
+  modes and beneath the toast overlay (the native root region's style; in
+  ANSI, painted after the root draws and before the toasts). `hidden` and
+  `text` on the root are ignored and logged once.
 - Focus: `FocusManager::register_view_tree` skips hidden subtrees.
 - Keys: `App::run_tick`, before the screen stack, the app and Tab navigation
   see the event.

@@ -221,6 +221,15 @@ pub fn render_view_ansi(view: &dyn View, frame: &mut Frame, area: Rect) {
         return;
     }
     crate::overrides::with_text(user.text.clone(), || view.render_ansi(frame, area));
+    paint_override(&user, frame, area);
+}
+
+/// Paint `user`'s colours and bold, if it sets any, over `area`.
+pub(crate) fn paint_override(
+    user: &crate::overrides::WidgetOverride,
+    frame: &mut Frame,
+    area: Rect,
+) {
     if let Some(style) = user.ratatui_style() {
         let buffer = frame.buffer_mut();
         let area = area.intersection(buffer.area);

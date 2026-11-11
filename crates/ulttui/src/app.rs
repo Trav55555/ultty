@@ -39,8 +39,14 @@ impl View for OverlayView<'_> {
         self.base.constraints()
     }
 
+    /// The root's style, with the user's override of the root's style
+    /// over it (ADR 0023).
     fn style(&self) -> ultty_protocol::Style {
-        self.base.style()
+        let style = self.base.style();
+        match crate::overrides::root_override(self.base) {
+            Some(user) => user.apply_style(style),
+            None => style,
+        }
     }
 
     fn content(&self) -> ultty_protocol::Content {
@@ -84,23 +90,16 @@ impl View for OverlayView<'_> {
         Ok(None)
     }
 
+    /// The root, then the user's override of the root's style painted over
+    /// it, then the toasts above both (ADR 0023).
     fn render_ansi(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         self.base.render_ansi(frame, area);
+        if let Some(user) = crate::overrides::root_override(self.base) {
+            crate::widgets::paint_override(&user, frame, area);
+        }
         if let Some(overlay) = &self.overlay {
             crate::widgets::render_view_ansi(overlay, frame, area);
         }
-    }
-
-    /// The app's root view's id, so a user override of it applies to the
-    /// root (ADR 0023).
-    fn widget_id(&self) -> Option<&str> {
-        self.base.widget_id()
-    }
-
-    /// The root region has never had a native key; the id above is only
-    /// for overrides.
-    fn native_key(&self) -> Option<&str> {
-        None
     }
 
     fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
@@ -2283,6 +2282,81 @@ mod async_tests {
         // A chord with ctrl is still remapped inside the input.
         assert_eq!(keys.last(), Some(&(Key::Down, Some("search".to_string()))));
         let _ = std::fs::remove_file(path);
+    }
+
+    /// An app root with an id: "app" on its second row.
+    struct RootView;
+
+    impl View for RootView {
+        fn widget_id(&self) -> Option<&str> {
+            Some("root")
+        }
+
+        fn content(&self) -> ultty_protocol::Content {
+            ultty_protocol::Content::Text(ultty_protocol::TextContent::new("app"))
+        }
+
+        fn render_ansi(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+            let row = ratatui::layout::Rect::new(area.x, area.y + 1, area.width, 1);
+            frame.render_widget(ratatui::widgets::Paragraph::new("app"), row);
+        }
+    }
+
+    #[test]
+    fn a_root_override_styles_the_root_only_beneath_the_toasts() {
+        use ratatui::style::Color as RColor;
+        let overrides = std::rc::Rc::new(
+            crate::overrides::Overrides::parse(
+                "[widget.root]\nfg = \"red\"\nbg = \"blue\"\nhidden = true\ntext = \"renamed\"\n",
+            )
+            .unwrap(),
+        );
+        let toast = Column::new().child(Badge::new("saved"));
+        let composed = OverlayView::new(&RootView, Some(toast));
+
+        let (native, buffer) = crate::overrides::with_overrides(overrides, || {
+            let native = crate::widgets::render_view_messages(&composed).unwrap();
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 2)).unwrap();
+            terminal
+                .draw(|frame| crate::widgets::render_view_ansi(&composed, frame, frame.area()))
+                .unwrap();
+            (native, terminal.backend().buffer().clone())
+        });
+
+        // Native: the root region takes the style, and hidden and text are
+        // ignored, as in ANSI.
+        let AppMessage::CreateRegion {
+            constraints, style, ..
+        } = &native[0]
+        else {
+            panic!("the root region comes first: {native:?}");
+        };
+        assert_ne!(constraints.display, ultty_protocol::Display::None);
+        assert_eq!(
+            style.fg,
+            Some(ultty_protocol::Color::Named(
+                ultty_protocol::NamedColor::Red
+            ))
+        );
+        let shown = format!("{native:?}");
+        assert!(
+            shown.contains("\"app\"") && !shown.contains("renamed"),
+            "{shown}"
+        );
+
+        // ANSI: the root is drawn and restyled; the toast over it keeps its
+        // own colours.
+        let app_cell = &buffer[(0, 1)];
+        assert_eq!(app_cell.symbol(), "a");
+        assert_eq!((app_cell.fg, app_cell.bg), (RColor::Red, RColor::Blue));
+        let toast_row: String = (0..12).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(toast_row.contains("saved"), "{toast_row:?}");
+        let toast_cell = (0..12)
+            .map(|x| &buffer[(x, 0)])
+            .find(|cell| cell.symbol() == "s")
+            .unwrap();
+        assert_ne!(toast_cell.fg, RColor::Red, "the toast is not restyled");
     }
 
     #[test]

@@ -64,7 +64,9 @@ A colour is a name (`black`, `red`, `green`, `yellow`, `blue`, `magenta`,
 or a palette index 0-255 written as a number. These are the colours
 `ulttui-lua` scripts use.
 
-The root of the app's view takes overrides too, if it has an id. Widgets
+The root of the app's view (if it has an id) takes `fg`, `bg` and `bold`,
+which go beneath toasts rather than over them; `hidden` and `text` on the
+root are ignored, with a warning in the log. Widgets
 without an id cannot be targeted. In Rust apps that includes plain `Text`
 and the layout containers; in `ulttui-lua` every constructor takes `id`.
 

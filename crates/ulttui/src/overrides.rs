@@ -503,6 +503,24 @@ pub(crate) fn for_view(view: &dyn View) -> Option<Option<WidgetOverride>> {
     Some(user)
 }
 
+/// The override of an app's root view `root`: its style only. Hiding or
+/// relabelling the whole app is not supported; a file that asks for it is
+/// logged (once per process) and those settings are ignored, in both modes.
+pub(crate) fn root_override(root: &dyn View) -> Option<WidgetOverride> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let mut user = for_view(root).flatten()?;
+    if (user.hidden || user.text.is_some()) && !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            id = root.widget_id().unwrap_or_default(),
+            "hidden and text do not apply to the app's root view; ignoring them"
+        );
+    }
+    user.hidden = false;
+    user.text = None;
+    Some(user)
+}
+
 /// Whether `view` is hidden by an override.
 pub(crate) fn is_hidden(view: &dyn View) -> bool {
     lookup(view, |user| user.is_some_and(|u| u.hidden)) == Some(true)

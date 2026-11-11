@@ -288,9 +288,6 @@ impl NativeBackend {
         constraints.height = ultty_protocol::Dimension::Cells(self.viewport_height as f32);
         // Opaque background so native app covers the PTY terminal content
         let mut style = view.style();
-        if let Some(Some(user)) = crate::overrides::for_view(view) {
-            style = user.apply_style(style);
-        }
         if style.bg.is_none() {
             let theme = crate::theme::Theme::current();
             style.bg = Some(theme.background);
