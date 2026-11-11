@@ -170,6 +170,19 @@ impl View for Select {
             return Ok(None);
         };
         let wire = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let under_cursor = index == self.cursor;
+        // The option under the cursor is highlighted across the row, as
+        // a `List`'s selected row is.
+        let (row_style, line_style) = if under_cursor {
+            let theme = Theme::current();
+            let highlight = ultty_protocol::Style::new()
+                .fg(theme.selection.fg)
+                .bg(theme.selection.bg)
+                .bold();
+            (highlight.clone(), highlight)
+        } else {
+            (ultty_protocol::Style::default(), self.style())
+        };
 
         let option_id = RegionId::new(*next_id);
         *next_id += 1;
@@ -184,7 +197,7 @@ impl View for Select {
                 height: Dimension::Cells(1.0),
                 ..Default::default()
             },
-            style: ultty_protocol::Style::default(),
+            style: row_style,
         })?;
         let semantics = Semantics {
             role: Role::Option,
@@ -193,7 +206,7 @@ impl View for Select {
                 index: wire(index + 1),
                 size: wire(self.options.len()),
             }),
-            selected: index == self.cursor,
+            selected: under_cursor,
             ..Semantics::default()
         };
         super::send_semantics(send_message, option_id, semantics, &Content::None)?;
@@ -205,7 +218,7 @@ impl View for Select {
             parent: option_id,
             insert_index: -1,
             constraints: Constraints::default(),
-            style: self.style(),
+            style: line_style,
         })?;
         let content = Content::Text(TextContent::new(self.option_line(index, option)));
         let hidden = Semantics {
@@ -515,6 +528,27 @@ mod tests {
         assert_eq!(combo.label.as_deref(), Some("Colour"));
         assert_eq!(combo.value_text.as_deref(), Some("Green"));
         assert_eq!(combo.expanded, Expanded::Collapsed);
+    }
+
+    #[test]
+    fn expanded_native_highlights_the_option_under_the_cursor() {
+        let theme = Theme::dark();
+        Theme::set_current(theme.clone());
+        let mut s = Select::new(sample_options());
+        s.on_key(&key(Key::Enter));
+        s.on_key(&key(Key::Down));
+        // Regions 2, 4 and 6 are the option rows (each with its line).
+        let backgrounds: Vec<_> = crate::widgets::render_view_messages(&s)
+            .unwrap()
+            .into_iter()
+            .filter_map(|message| match message {
+                AppMessage::CreateRegion { id, style, .. } if [2, 4, 6].contains(&id.0) => {
+                    Some(style.bg)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(backgrounds, [None, Some(theme.selection.bg), None]);
     }
 
     #[test]
