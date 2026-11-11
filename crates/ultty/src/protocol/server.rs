@@ -277,6 +277,82 @@ impl ProtocolServer {
             .filter(move |session| Some(session.tab_id()) == active && session.is_confirmed())
     }
 
+    /// The shown sessions (see [`Self::active_tab_sessions`]) bound to
+    /// `pane`: the ones drawn in its rectangle (ADR 0025).
+    pub fn pane_sessions(&self, pane: TerminalId) -> impl Iterator<Item = &NativeSession> {
+        self.active_tab_sessions()
+            .filter(move |session| session.pane() == Some(pane))
+    }
+
+    /// Bind the sessions that have no pane yet (ADR 0025 §1). `pane_for`
+    /// gets a session's tab and peer pid and names the pane whose PTY runs
+    /// the app, or `None` to leave it unbound for now. Returns how many
+    /// sessions were bound, so the caller can size them.
+    pub fn bind_unbound_sessions(
+        &mut self,
+        mut pane_for: impl FnMut(TabId, Option<i32>) -> Option<TerminalId>,
+    ) -> usize {
+        let mut bound = 0;
+        for session in self.sessions.values_mut() {
+            if session.pane().is_some() {
+                continue;
+            }
+            if let Some(pane) = pane_for(session.tab_id(), session.peer_pid()) {
+                info!(
+                    "Session {} bound to pane {}",
+                    session.session_id(),
+                    pane.raw()
+                );
+                session.bind_pane(pane);
+                bound += 1;
+            }
+        }
+        bound
+    }
+
+    /// Disconnect the sessions bound to a pane `alive` rejects: a closed
+    /// pane's sessions go the way a closed tab's do.
+    pub fn retain_pane_sessions(&mut self, mut alive: impl FnMut(TerminalId) -> bool) {
+        let gone: Vec<usize> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.pane().is_some_and(|pane| !alive(pane)))
+            .map(|(&key, _)| key)
+            .collect();
+        for key in gone {
+            info!("Session of a closed pane disconnected");
+            self.remove_session(key);
+        }
+    }
+
+    /// Size every session to where it is drawn: a bound session to its
+    /// pane's grid (`pane_size`), an unbound one to the window's `(cols,
+    /// rows)`. A session whose size changed gets `Resize` and, with a
+    /// scene, `LayoutComputed` (ADR 0025 §2). New sessions start at the
+    /// window's size.
+    pub fn resize_sessions(
+        &mut self,
+        (cols, rows): (u16, u16),
+        mut pane_size: impl FnMut(TerminalId) -> Option<(u16, u16)>,
+    ) {
+        self.viewport_width = f32::from(cols);
+        self.viewport_height = f32::from(rows);
+        for session in self.sessions.values_mut() {
+            let (cols, rows) = session
+                .pane()
+                .and_then(&mut pane_size)
+                .unwrap_or((cols, rows));
+            if let Err(e) = session.resize_to(cols, rows) {
+                warn!(
+                    "Failed to send resize to session {}: {}",
+                    session.session_id(),
+                    e
+                );
+            }
+        }
+        self.flush();
+    }
+
     fn allocate_key(&mut self) -> usize {
         let key = self.next_key;
         self.next_key += 1;
@@ -947,33 +1023,9 @@ impl ProtocolServer {
         }
     }
 
-    /// Send a resize event to all connected native sessions, followed by a
-    /// fresh `LayoutComputed` for every session that has a scene.
-    ///
-    /// Every tab shares the window's cell grid, so a resize applies to all
-    /// sessions regardless of which tab is visible.
+    /// Size every session to the window's grid; see [`Self::resize_sessions`].
     pub fn broadcast_resize(&mut self, width: u16, height: u16) {
-        self.viewport_width = width as f32;
-        self.viewport_height = height as f32;
-        for session in self.sessions.values_mut() {
-            session.set_viewport(width as f32, height as f32);
-            if let Err(e) = session.send_resize(width, height) {
-                warn!(
-                    "Failed to send resize to session {}: {}",
-                    session.session_id(),
-                    e
-                );
-                continue;
-            }
-            if let Err(e) = session.relayout_for_resize() {
-                warn!(
-                    "Failed to send resize layout to session {}: {}",
-                    session.session_id(),
-                    e
-                );
-            }
-        }
-        self.flush();
+        self.resize_sessions((width, height), |_| None);
     }
 }
 
@@ -1280,6 +1332,60 @@ mod tests {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
         server.broadcast_resize(120, 40);
+    }
+
+    #[test]
+    fn sessions_bind_to_the_pane_named_for_their_tab_and_peer() {
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
+        let _client = connect(&mut server, &path);
+        let pane = TerminalId::new(3);
+
+        let mut asked = Vec::new();
+        let bound = server.bind_unbound_sessions(|tab, peer| {
+            asked.push((tab, peer));
+            None
+        });
+        assert_eq!(bound, 0);
+        assert_eq!(asked, vec![(TAB_A, Some(std::process::id() as i32))]);
+        assert!(
+            server.sessions().all(|s| s.pane().is_none()),
+            "left unbound"
+        );
+        assert_eq!(server.pane_sessions(pane).count(), 0);
+
+        assert_eq!(server.bind_unbound_sessions(|_, _| Some(pane)), 1);
+        assert_eq!(server.pane_sessions(pane).count(), 1);
+        // Bound once: the resolver is not asked again.
+        assert_eq!(server.bind_unbound_sessions(|_, _| panic!("asked")), 0);
+    }
+
+    #[test]
+    fn bound_sessions_are_sized_to_their_pane_and_dropped_with_it() {
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
+        let mut client = connect(&mut server, &path);
+        let pane = TerminalId::new(3);
+        server.resize_sessions((100, 30), |_| None);
+        assert_eq!(
+            server.sessions().next().unwrap().viewport(),
+            (100.0, 30.0),
+            "an unbound session has the window's size"
+        );
+
+        server.bind_unbound_sessions(|_, _| Some(pane));
+        server.resize_sessions((100, 30), |p| (p == pane).then_some((50, 30)));
+        assert_eq!(server.sessions().next().unwrap().viewport(), (50.0, 30.0));
+        // The app hears about its pane's size.
+        client
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = std::io::Read::read(&mut client, &mut buf).expect("a Resize frame");
+        assert!(n > 0);
+
+        server.retain_pane_sessions(|p| p != pane);
+        assert_eq!(server.session_count(), 0, "a closed pane's sessions go");
     }
 
     // ---------------------------------------------------------------

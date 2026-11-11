@@ -122,6 +122,15 @@ impl<'a> Default for OverlayState<'a> {
     }
 }
 
+/// A pane as the multi-pane frame draws it: its terminal, its rectangle,
+/// and the shown native sessions bound to it (ADR 0025), whose full scenes
+/// are drawn in place of its grid text.
+pub struct PaneDraw<'a> {
+    pub terminal: &'a Terminal,
+    pub info: PaneInfo,
+    pub sessions: Vec<&'a crate::protocol::NativeSession>,
+}
+
 /// Information about a pane for rendering.
 #[derive(Debug, Clone, Copy)]
 pub struct PaneInfo {
@@ -273,13 +282,16 @@ pub struct Renderer {
     /// Where those buffers drew inline surfaces; when a surface moves
     /// (scrolling, new output) they are built again.
     cached_native_surfaces: Vec<(u64, native_render::SurfaceOrigin)>,
+    /// Which pane rectangle those buffers drew each full scene in (ADR
+    /// 0025); when a pane moves or resizes they are built again.
+    cached_native_panes: Vec<(u64, native_render::PaneBounds)>,
     /// Previous frame vertex/index counts for smarter pre-allocation
     prev_bg_count: (usize, usize),
     prev_text_count: (usize, usize),
-    /// Reused per-frame cache for native scroll adjustments.
-    scroll_adjustments_cache: std::collections::HashMap<ultty_protocol::RegionId, (f32, f32)>,
-    /// Reused per-frame cache for native clip rectangles.
-    clip_rects_cache: std::collections::HashMap<ultty_protocol::RegionId, (f32, f32, f32, f32)>,
+    /// Each full-scene session's scroll adjustments and clip rectangles,
+    /// by session id, kept between frames while its scroll state and
+    /// placement are unchanged.
+    native_geometry: std::collections::HashMap<u64, native_render::SceneGeometry>,
     /// The GPU adapter in use, recorded so benchmarks and diagnostics can
     /// say whether a number came from a real GPU or a software rasterizer.
     adapter_info: wgpu::AdapterInfo,
@@ -565,10 +577,10 @@ impl Renderer {
             cached_native_buffers: NativeBufferCache::default(),
             cached_native_atlas_epoch: 0,
             cached_native_surfaces: Vec::new(),
+            cached_native_panes: Vec::new(),
             prev_bg_count: (0, 0),
             prev_text_count: (0, 0),
-            scroll_adjustments_cache: std::collections::HashMap::new(),
-            clip_rects_cache: std::collections::HashMap::new(),
+            native_geometry: std::collections::HashMap::new(),
             adapter_info: adapter.get_info(),
         })
     }
@@ -697,10 +709,10 @@ impl Renderer {
             cached_native_buffers: NativeBufferCache::default(),
             cached_native_atlas_epoch: 0,
             cached_native_surfaces: Vec::new(),
+            cached_native_panes: Vec::new(),
             prev_bg_count: (0, 0),
             prev_text_count: (0, 0),
-            scroll_adjustments_cache: std::collections::HashMap::new(),
-            clip_rects_cache: std::collections::HashMap::new(),
+            native_geometry: std::collections::HashMap::new(),
             adapter_info: adapter.get_info(),
         })
     }
@@ -1527,12 +1539,7 @@ impl Renderer {
             self.visible_surfaces(terminal, &sessions)
         };
 
-        // Cached text quads sample the atlas; after it grows or empties
-        // their UVs point at the wrong glyphs. Cached surfaces are drawn
-        // where their anchor rows were.
-        let atlas_unchanged = self.cached_native_atlas_epoch == self.text_renderer.atlas_epoch();
-        let surfaces_unmoved = surfaces == self.cached_native_surfaces;
-        if !any_dirty && atlas_unchanged && surfaces_unmoved && self.has_cached_native_buffers() {
+        if self.native_cache_valid(any_dirty, &surfaces, &[]) {
             self.draw_cached_native_buffers(&mut encoder, view);
         } else {
             self.clear_cached_native_buffers();
@@ -1545,6 +1552,7 @@ impl Renderer {
                 native_search_matches.map(|matches| (matches, native_search_index)),
             );
             self.cached_native_surfaces = surfaces;
+            self.cached_native_panes.clear();
         }
 
         if let Some(preedit) = overlay.ime_preedit {

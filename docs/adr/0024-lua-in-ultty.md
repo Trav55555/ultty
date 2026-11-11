@@ -26,7 +26,7 @@ Facts that shape the design:
 - Native scenes are drawn only in a tab with one pane (spec §1.3,
   `render_multi_pane`): a native session in a split tab exists but is not
   drawn. Mapping sessions to panes is the A1 follow-up in
-  `docs/agent-tui-plan.md`.
+  `docs/agent-tui-plan.md`; ADR 0025 does it.
 - The only way a script reaches outside the VM is `run{}` (`docs/lua.md`
   "Sandbox"). There is no file or network API yet.
 
@@ -202,6 +202,9 @@ split panes (A1 follow-up).
 1. **Whether `lua open --split` should wait for native panes** rather than
    fall back to ANSI. The fallback is honest and useful now; it may teach
    users that splits are second class.
+
+   *2026-11-11: ADR 0025 draws native sessions in split panes; dropping the
+   forced `--ansi` is its slice 5.*
 2. **An MCP tool.** `ulttyctl mcp` serves `new_tab`; whether agents want
    `lua_open` as a tool or are fine shelling out.
 3. **Grant text.** A tool that pipes through `sh -c` needs `--exec sh`,

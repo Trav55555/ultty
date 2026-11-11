@@ -21,8 +21,21 @@ pub struct SurfaceOrigin {
     pub top: f32,
 }
 
+/// A pane's rectangle in window pixels, `(min_x, min_y, max_x, max_y)`:
+/// where a bound full scene is drawn and what it is clipped to (ADR 0025).
+pub type PaneBounds = (f32, f32, f32, f32);
+
+/// A full-scene session's scroll adjustments and clip rectangles, valid
+/// for the placement they were built for.
+#[derive(Default)]
+pub struct SceneGeometry {
+    placement: ((f32, f32), Option<PaneBounds>),
+    scroll: geometry::ScrollAdjustments,
+    clip: geometry::ClipRects,
+}
+
 /// Vertices of native regions, built before they are uploaded.
-struct NativeVertices {
+pub(super) struct NativeVertices {
     bg_vertices: Vec<Vertex>,
     bg_indices: Vec<u32>,
     text_vertices: Vec<Vertex>,
@@ -140,9 +153,24 @@ impl Renderer {
     ) {
         if sessions.iter().any(|session| session.is_full_scene()) {
             let (matches, current) = search.map_or((None, 0), |(m, i)| (Some(m), i));
+            let origin = (0.0, self.tab_bar_height);
+            let region_count: usize = sessions
+                .iter()
+                .map(|session| session.scene().iter_depth_first().count())
+                .sum();
+            let mut vertices = self.native_vertices_for(region_count);
             for session in sessions {
-                self.render_native_session(encoder, view, session, matches, current);
+                self.build_native_session_vertices(
+                    session,
+                    origin,
+                    None,
+                    matches,
+                    current,
+                    &mut vertices,
+                );
             }
+            self.retain_native_geometry(sessions.iter().map(|s| s.session_id()));
+            self.draw_native_vertices(encoder, view, vertices);
             return;
         }
         let dims = terminal.dimensions();
@@ -166,7 +194,7 @@ impl Renderer {
 
     /// Vertex buffers for `region_count` regions, sized from the last
     /// frame's use.
-    fn native_vertices_for(&self, region_count: usize) -> NativeVertices {
+    pub(super) fn native_vertices_for(&self, region_count: usize) -> NativeVertices {
         let est = region_count.saturating_mul(4);
         NativeVertices {
             bg_vertices: Vec::with_capacity(Self::next_capacity(self.prev_bg_count.0, est, 4)),
@@ -178,7 +206,7 @@ impl Renderer {
     }
 
     /// Upload, draw and cache `vertices`, then draw their images.
-    fn draw_native_vertices(
+    pub(super) fn draw_native_vertices(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
@@ -195,53 +223,79 @@ impl Renderer {
         self.render_deferred_native_images(encoder, view, &vertices.deferred_images);
     }
 
-    /// Render a native protocol session's full-scene tree (backgrounds,
-    /// text, widgets, images) over the whole pane.
-    pub fn render_native_session(
+    /// Whether the cached native buffers still draw the right frame: no
+    /// session changed, the glyph atlas is the one their UVs index (after
+    /// it grows or empties they point at the wrong glyphs), and every scene
+    /// is where it was: `surfaces` at their anchor rows, full scenes in
+    /// `panes`' rectangles.
+    pub(crate) fn native_cache_valid(
+        &self,
+        any_dirty: bool,
+        surfaces: &[(u64, SurfaceOrigin)],
+        panes: &[(u64, PaneBounds)],
+    ) -> bool {
+        !any_dirty
+            && self.cached_native_atlas_epoch == self.text_renderer.atlas_epoch()
+            && surfaces == self.cached_native_surfaces
+            && panes == self.cached_native_panes
+            && self.has_cached_native_buffers()
+    }
+
+    /// Forget the geometry of sessions other than `live`, which ended.
+    pub(super) fn retain_native_geometry(&mut self, live: impl Iterator<Item = u64>) {
+        let live: Vec<u64> = live.collect();
+        self.native_geometry.retain(|id, _| live.contains(id));
+    }
+
+    /// Append the vertices of `session`'s full-scene tree (backgrounds,
+    /// text, widgets, images), laid out from pixel `origin` and, for a pane
+    /// of a split tab, clipped to `bounds`. The session's scroll geometry is
+    /// reused from the last frame while it has not changed or moved; it is
+    /// built again when another scene in the batch made the frame.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn build_native_session_vertices(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        view: &wgpu::TextureView,
         session: &crate::protocol::NativeSession,
+        origin: (f32, f32),
+        bounds: Option<PaneBounds>,
         search_matches: Option<&[crate::scene::SearchMatch]>,
         current_match_index: usize,
+        vertices: &mut NativeVertices,
     ) {
         let scene = session.scene();
-        let mut vertices = self.native_vertices_for(scene.iter_depth_first().count());
-        let origin = (0.0, self.tab_bar_height);
+        let placement = (origin, bounds);
+        let unchanged = !session.is_scroll_dirty() && !session.is_render_dirty();
+        let geometry = match self.native_geometry.remove(&session.session_id()) {
+            Some(geometry) if unchanged && geometry.placement == placement => geometry,
+            stale => {
+                let mut geometry = stale.unwrap_or_default();
+                geometry.placement = placement;
+                geometry::rebuild_scroll_geometry(
+                    scene,
+                    ultty_protocol::RegionId::ROOT,
+                    |id| session.scroll_offset(id),
+                    self.cell_width,
+                    self.cell_height,
+                    origin,
+                    bounds,
+                    &mut geometry.scroll,
+                    &mut geometry.clip,
+                );
+                geometry
+            }
+        };
 
-        let needs_scroll_rebuild =
-            session.is_scroll_dirty() || self.scroll_adjustments_cache.is_empty();
-
-        if needs_scroll_rebuild {
-            geometry::rebuild_scroll_geometry(
-                scene,
-                ultty_protocol::RegionId::ROOT,
-                |id| session.scroll_offset(id),
-                self.cell_width,
-                self.cell_height,
-                origin,
-                None,
-                &mut self.scroll_adjustments_cache,
-                &mut self.clip_rects_cache,
-            );
-        }
-
-        let scroll_adjustments = std::mem::take(&mut self.scroll_adjustments_cache);
-        let clip_rects = std::mem::take(&mut self.clip_rects_cache);
         self.build_tree_vertices(
             session,
             ultty_protocol::RegionId::ROOT,
             origin,
-            &scroll_adjustments,
-            &clip_rects,
+            &geometry.scroll,
+            &geometry.clip,
             search_matches,
             current_match_index,
-            &mut vertices,
+            vertices,
         );
-        self.scroll_adjustments_cache = scroll_adjustments;
-        self.clip_rects_cache = clip_rects;
-
-        self.draw_native_vertices(encoder, view, vertices);
+        self.native_geometry.insert(session.session_id(), geometry);
     }
 
     /// Render `session`'s placed inline surfaces (ADR 0020): each at its

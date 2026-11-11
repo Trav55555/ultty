@@ -396,6 +396,9 @@ impl App {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
+                // The sessions drawn in the pane, plus its tab's sessions
+                // that have no pane yet (a background job in a split): still
+                // worth inspecting, drawn nowhere (ADR 0025 §5).
                 let tab = self.terminal_manager.terminal(pane).map(|t| t.tab_id);
                 let scenes = self
                     .protocol_server
@@ -403,7 +406,10 @@ impl App {
                     .map(|server| {
                         server
                             .sessions()
-                            .filter(|session| Some(session.tab_id()) == tab)
+                            .filter(|session| {
+                                Some(session.tab_id()) == tab
+                                    && session.pane().is_none_or(|p| p == pane)
+                            })
                             .map(|session| session.describe())
                             .collect()
                     })

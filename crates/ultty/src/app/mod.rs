@@ -7,6 +7,7 @@ mod control;
 mod control_events;
 mod control_wait;
 mod input;
+mod native_panes;
 mod pacing;
 mod render;
 mod update;
@@ -193,6 +194,9 @@ pub struct App {
     frames_drawn: u32,
     /// Native protocol server for TUI apps
     protocol_server: Option<ProtocolServer>,
+    /// The pane layout native sessions were last sized for
+    /// (`TerminalManager::layout_generation`).
+    native_layout_generation: u64,
     /// Control server for CLI automation (ulttyctl)
     control_server: Option<ControlServer>,
     /// Control wait requests that are checked after terminal output is drained.
@@ -445,6 +449,7 @@ impl App {
             native_search_active: false,
             native_search_query: String::new(),
             native_search_index: 0,
+            native_layout_generation: 0,
             url_row_buf: Vec::new(),
             url_hyperlink_grid: Vec::new(),
             url_hyperlink_map: std::collections::HashMap::new(),
@@ -724,6 +729,8 @@ impl App {
         for tab_id in closed {
             server.close_tab(tab_id);
         }
+        let terminal_manager = &self.terminal_manager;
+        server.retain_pane_sessions(|pane| terminal_manager.terminal(pane).is_some());
         server.set_active_tab(self.terminal_manager.active_tab().map(|tab| tab.id));
     }
 
@@ -1381,10 +1388,8 @@ impl App {
                 .resize(total_rows, rows as usize, cols as usize);
         }
 
-        if let Some(ref mut server) = self.protocol_server {
-            server.set_viewport(cols as f32, rows as f32);
-            server.broadcast_resize(cols, rows);
-        }
+        // Each session is sized to its pane, unbound ones to the window.
+        self.sync_native_viewports();
 
         self.needs_redraw = true;
     }

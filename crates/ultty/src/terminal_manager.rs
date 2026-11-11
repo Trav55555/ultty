@@ -285,6 +285,9 @@ pub struct TerminalManager {
     /// Where panes are laid out, once the window has a size. Splits,
     /// closes and divider drags re-lay panes out within it.
     pane_area: Option<PaneArea>,
+    /// Counts the pane layouts done (`layout_panes`), so a caller can tell
+    /// with one compare that pane grids may have changed since it looked.
+    layout_generation: u64,
 }
 
 impl TerminalManager {
@@ -379,6 +382,7 @@ impl TerminalManager {
             scrollback_lines: crate::grid::DEFAULT_SCROLLBACK,
             close_on_exit: true,
             pane_area: None,
+            layout_generation: 0,
         };
 
         // Create initial tab with terminal
@@ -632,6 +636,7 @@ impl TerminalManager {
     /// sized. A pane whose grid size is unchanged is left alone.
     pub fn layout_panes(&mut self, area: PaneArea) -> io::Result<()> {
         self.pane_area = Some(area);
+        self.layout_generation = self.layout_generation.wrapping_add(1);
         let (cols, rows) = crate::renderer::grid_dimensions_for(
             area.width,
             area.height,
@@ -670,6 +675,36 @@ impl TerminalManager {
             }
         }
         Ok(())
+    }
+
+    /// How many times panes have been laid out; see `layout_generation`.
+    pub fn layout_generation(&self) -> u64 {
+        self.layout_generation
+    }
+
+    /// The grid of `pane`, `(cols, rows)`. Locks the pane's terminal
+    /// briefly.
+    pub fn pane_grid_size(&self, pane: TerminalId) -> Option<(u16, u16)> {
+        let terminal = self.terminal(pane)?;
+        let dims = terminal.event_loop.terminal().dimensions();
+        Some((dims.cols, dims.rows))
+    }
+
+    /// The pane of `tab_id` a program in process group `pgrp` runs in
+    /// (ADR 0025 §1): a tab's only pane whatever the group, else the pane
+    /// whose PTY has `pgrp` in the foreground. `None` for a group in no
+    /// pane's foreground (a background job) or an unknown tab.
+    pub fn pane_for_process_group(&self, tab_id: TabId, pgrp: Option<i32>) -> Option<TerminalId> {
+        let tab = self.tabs.iter().find(|tab| tab.id == tab_id)?;
+        if let [only] = tab.terminals.as_slice() {
+            return Some(*only);
+        }
+        let pgrp = pgrp?;
+        tab.terminals.iter().copied().find(|&id| {
+            self.terminal(id)
+                .and_then(|t| t.event_loop.foreground_pgrp())
+                == Some(pgrp)
+        })
     }
 
     /// Lay panes out again after their number or ratios changed.
@@ -1205,6 +1240,7 @@ impl TerminalManager {
             scrollback_lines: crate::grid::DEFAULT_SCROLLBACK,
             close_on_exit: true,
             pane_area: None,
+            layout_generation: 0,
         };
 
         for (i, tab_data) in session.tabs.iter().enumerate() {
@@ -1565,6 +1601,78 @@ mod tests {
         for id in remaining {
             assert_eq!(grid(&manager, id), (40, 24));
         }
+    }
+
+    #[test]
+    fn layout_generation_counts_every_pane_layout() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let start = manager.layout_generation();
+        manager.layout_panes(AREA).unwrap();
+        assert_eq!(manager.layout_generation(), start + 1);
+        // A split lays panes out again; a tab switch does not.
+        manager.split_horizontal().unwrap().unwrap();
+        assert_eq!(manager.layout_generation(), start + 2);
+        manager.next_tab();
+        assert_eq!(manager.layout_generation(), start + 2);
+        assert!(manager.close_focused_pane());
+        assert_eq!(manager.layout_generation(), start + 3);
+    }
+
+    #[test]
+    fn pane_grid_size_is_the_pane_share() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let first = manager.focused_terminal_id().unwrap();
+        manager.layout_panes(AREA).unwrap();
+        let second = manager.split_horizontal().unwrap().unwrap();
+        assert_eq!(manager.pane_grid_size(first), Some((40, 24)));
+        assert_eq!(manager.pane_grid_size(second), Some((40, 24)));
+        assert_eq!(manager.pane_grid_size(TerminalId::new(999)), None);
+    }
+
+    #[test]
+    fn a_program_is_in_the_pane_whose_pty_has_its_group_in_the_foreground() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let tab = manager.active_tab().unwrap().id;
+        let first = manager.focused_terminal_id().unwrap();
+        // One pane: any group, even none, is that pane's.
+        assert_eq!(manager.pane_for_process_group(tab, None), Some(first));
+        assert_eq!(manager.pane_for_process_group(tab, Some(1)), Some(first));
+
+        let second = manager.split_horizontal().unwrap().unwrap();
+        // The shell takes its PTY as controlling terminal in the child,
+        // after spawn returns: wait for it.
+        let group_of = |manager: &TerminalManager, id: TerminalId| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(group) = manager.terminal(id).unwrap().event_loop.foreground_pgrp() {
+                    return group;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the shell never became its PTY's foreground group"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let first_group = group_of(&manager, first);
+        let second_group = group_of(&manager, second);
+        assert_ne!(first_group, second_group);
+        assert_eq!(
+            manager.pane_for_process_group(tab, Some(first_group)),
+            Some(first)
+        );
+        assert_eq!(
+            manager.pane_for_process_group(tab, Some(second_group)),
+            Some(second)
+        );
+        // A group in no pane's foreground (a background job) stays unbound,
+        // as does an unknown tab.
+        assert_eq!(manager.pane_for_process_group(tab, Some(1)), None);
+        assert_eq!(manager.pane_for_process_group(tab, None), None);
+        assert_eq!(
+            manager.pane_for_process_group(TabId::new(99), Some(first_group)),
+            None
+        );
     }
 
     #[test]
