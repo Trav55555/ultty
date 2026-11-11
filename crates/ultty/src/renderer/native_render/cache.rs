@@ -2,8 +2,8 @@
 
 use wgpu::util::DeviceExt;
 
-use super::Renderer;
-use crate::renderer::Vertex;
+use super::{Renderer, Scissor};
+use crate::renderer::{NativeBufferSet, Vertex};
 
 impl Renderer {
     pub(crate) fn has_cached_native_buffers(&self) -> bool {
@@ -14,6 +14,7 @@ impl Renderer {
         self.cached_native_buffers.clear();
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn upload_draw_and_cache_native_buffers(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -22,18 +23,19 @@ impl Renderer {
         bg_indices: &[u32],
         text_vertices: &[Vertex],
         text_indices: &[u32],
+        scissor: Option<Scissor>,
     ) {
         self.prev_bg_count = (bg_vertices.len(), bg_indices.len());
         self.prev_text_count = (text_vertices.len(), text_indices.len());
         self.cached_native_atlas_epoch = self.text_renderer.atlas_epoch();
 
         if let Some(buffer_set) =
-            self.upload_and_draw_native_bg(encoder, view, bg_vertices, bg_indices)
+            self.upload_and_draw_native_bg(encoder, view, bg_vertices, bg_indices, scissor)
         {
             self.cached_native_buffers.push_bg(buffer_set);
         }
         if let Some(buffer_set) =
-            self.upload_and_draw_native_text(encoder, view, text_vertices, text_indices)
+            self.upload_and_draw_native_text(encoder, view, text_vertices, text_indices, scissor)
         {
             self.cached_native_buffers.push_text(buffer_set);
         }
@@ -45,7 +47,8 @@ impl Renderer {
         view: &wgpu::TextureView,
         vertices: &[Vertex],
         indices: &[u32],
-    ) -> Option<(wgpu::Buffer, wgpu::Buffer, u32)> {
+        scissor: Option<Scissor>,
+    ) -> Option<NativeBufferSet> {
         if vertices.is_empty() {
             return None;
         }
@@ -72,10 +75,11 @@ impl Renderer {
             &vertex_buffer,
             &index_buffer,
             index_count,
+            scissor,
             "native_bg_pass",
         );
 
-        Some((vertex_buffer, index_buffer, index_count))
+        Some((vertex_buffer, index_buffer, index_count, scissor))
     }
 
     fn upload_and_draw_native_text(
@@ -84,7 +88,8 @@ impl Renderer {
         view: &wgpu::TextureView,
         vertices: &[Vertex],
         indices: &[u32],
-    ) -> Option<(wgpu::Buffer, wgpu::Buffer, u32)> {
+        scissor: Option<Scissor>,
+    ) -> Option<NativeBufferSet> {
         if vertices.is_empty() {
             return None;
         }
@@ -111,10 +116,11 @@ impl Renderer {
             &vertex_buffer,
             &index_buffer,
             index_count,
+            scissor,
             "native_text_pass",
         );
 
-        Some((vertex_buffer, index_buffer, index_count))
+        Some((vertex_buffer, index_buffer, index_count, scissor))
     }
 
     /// Draw native session content from cached GPU buffers without rebuilding vertices.
@@ -123,29 +129,33 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
     ) {
-        for (vertex_buffer, index_buffer, index_count) in &self.cached_native_buffers.bg {
+        for (vertex_buffer, index_buffer, index_count, scissor) in &self.cached_native_buffers.bg {
             self.draw_native_bg_buffers(
                 encoder,
                 view,
                 vertex_buffer,
                 index_buffer,
                 *index_count,
+                *scissor,
                 "native_bg_pass_cached",
             );
         }
 
-        for (vertex_buffer, index_buffer, index_count) in &self.cached_native_buffers.text {
+        for (vertex_buffer, index_buffer, index_count, scissor) in &self.cached_native_buffers.text
+        {
             self.draw_native_text_buffers(
                 encoder,
                 view,
                 vertex_buffer,
                 index_buffer,
                 *index_count,
+                *scissor,
                 "native_text_pass_cached",
             );
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_native_bg_buffers(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -153,6 +163,7 @@ impl Renderer {
         vertex_buffer: &wgpu::Buffer,
         index_buffer: &wgpu::Buffer,
         index_count: u32,
+        scissor: Option<Scissor>,
         label: &'static str,
     ) {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -172,6 +183,9 @@ impl Renderer {
             multiview_mask: None,
         });
 
+        if let Some((x, y, width, height)) = scissor {
+            render_pass.set_scissor_rect(x, y, width, height);
+        }
         render_pass.set_pipeline(self.bg_pipeline.pipeline());
         render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
@@ -179,6 +193,7 @@ impl Renderer {
         render_pass.draw_indexed(0..index_count, 0, 0..1);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_native_text_buffers(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -186,6 +201,7 @@ impl Renderer {
         vertex_buffer: &wgpu::Buffer,
         index_buffer: &wgpu::Buffer,
         index_count: u32,
+        scissor: Option<Scissor>,
         label: &'static str,
     ) {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -205,6 +221,9 @@ impl Renderer {
             multiview_mask: None,
         });
 
+        if let Some((x, y, width, height)) = scissor {
+            render_pass.set_scissor_rect(x, y, width, height);
+        }
         render_pass.set_pipeline(self.text_renderer.pipeline());
         render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         render_pass.set_bind_group(1, self.text_renderer.atlas_bind_group(), &[]);

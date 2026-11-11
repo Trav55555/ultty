@@ -40,7 +40,8 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   right <ulttui app>` therefore draws natively; `ulttyctl regions --pane N`
   lists the sessions bound to pane N (plus its tab's unbound ones), and
   screenshots of split tabs include the scenes. Mouse and scroll events go
-  to the sessions of the pane under the pointer, in that pane's cells, and
+  to the sessions of the pane under the pointer, in that pane's cells (a
+  drag stays with the pane it started in), and
   the accessibility tree puts each pane's scenes under the pane's node
   (the focused pane keeps the focus). No wire change. Inline surfaces and
   in-band sessions in split panes, and `lua open --split` without

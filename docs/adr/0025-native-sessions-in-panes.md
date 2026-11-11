@@ -74,16 +74,22 @@ the window's grid, as today.
 `encode_panes` takes, per pane, the full-scene sessions bound to it and
 draws them where it draws the pane's grid text: origin at the pane's top
 left (under the tab bar), clipped to the pane's rectangle, before the pane's
-border so borders stay on top. The one-pane frame is unchanged in effect
-(its one pane is the window) and keeps its path for now.
+border so borders stay on top. The clip is a GPU scissor rectangle per pane
+(one vertex batch per pane with scenes), so widget content (inputs,
+buttons, progress, images, markdown, code), which is built unclipped, stays
+inside the pane as well as the clipped quads and glyphs. The one-pane frame
+is unchanged in effect (its one pane is the window) and keeps its path for
+now; it draws only the sessions bound to that pane or not bound yet, so a
+session whose pane closed under it never paints over the pane that remains.
 
 Per-frame cost: the native vertex cache (`cached_native_buffers`) is kept;
-one batch covers every pane's scenes and is rebuilt only when a session is
-dirty, the atlas changed, or a pane rectangle or surface moved (the cache
-key grows from surfaces to pane rectangles plus surfaces). The scroll
-geometry cache becomes per session: today two full-scene sessions in one
-tab share one `RegionId`-keyed map and the second reuses the first's
-geometry, which splits would make common.
+each pane with scenes is one batch (two small render passes, background and
+text, plus its images), rebuilt only when a session is dirty, the atlas
+changed, or a pane rectangle or surface moved (the cache key grows from
+surfaces to pane rectangles plus surfaces). The scroll geometry cache
+becomes per session, keyed by origin, clip bounds, cell size and viewport:
+today two full-scene sessions in one tab share one `RegionId`-keyed map and
+the second reuses the first's geometry, which splits would make common.
 
 Inline surfaces (ADR 0020) in split panes stay off until pairing takes a
 pane's terminal instead of a `single_pane` flag; a separate slice.
@@ -94,7 +100,9 @@ Keys: unchanged in mechanism, now stated as a pane rule: recipients are
 full-scene sessions bound to the focused pane whose peer is in its PTY's
 foreground group. Mouse and scroll: the pane under the pointer is found
 with `pane_at`, the position becomes that pane's cells, and only sessions
-bound to it are hit-tested.
+bound to it are hit-tested. While a button is held, moves and the release
+go to the pane that took the press, with the position clamped into it, so
+a drag that leaves the pane or the window still ends where it began.
 
 ### 5. Accessibility, screenshots, `regions`
 

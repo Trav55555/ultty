@@ -155,10 +155,19 @@ wait_regions resized "$app_pane" --cols "$new_cols" --rows "$new_rows" --text 3 
     fail "the scene was not laid out to the pane's new grid ${new_cols}x${new_rows}"
 echo "native-split: resize re-lays the scene out to ${new_cols}x${new_rows}"
 
-# 4. A screenshot of the split tab shows the app in its half.
+# 4. A screenshot of the split tab shows the app in its half: the counter's
+#    card and text are ink inside the right pane (its interior, clear of the
+#    1 px border and the tab bar), while the shell's pane, which shows only
+#    a prompt and a cursor, has next to none. The second check is what
+#    keeps the first honest: a frame with no scene drawn looks like the
+#    shell's pane.
 "$ULTTYCTL" screenshot "$out/split.png" >/dev/null || fail "screenshot"
-check screenshot "$out/split.png" --width 1000 --height 700 --right-of 520 ||
-    fail "the screenshot does not show the app's pane"
+check screenshot "$out/split.png" --width 1000 --height 700 \
+    --inside 512 60 992 690 --min-ink 1000 ||
+    fail "the screenshot does not show the app in its pane"
+check screenshot "$out/split.png" --width 1000 --height 700 \
+    --inside 8 60 490 690 --max-ink 300 ||
+    fail "the shell's pane has more drawn in it than a prompt"
 echo "native-split: screenshot has the app's pane"
 
 "$ULTTYCTL" --pane "$app_pane" send-text q >/dev/null 2>&1 || true

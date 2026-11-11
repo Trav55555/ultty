@@ -2,13 +2,17 @@
 
     python3 native_split_check.py regions <dump.json> --cols N --rows N [--text T]...
     python3 native_split_check.py no-scenes <dump.json>
-    python3 native_split_check.py screenshot <file.png> --width W --height H --right-of X
+    python3 native_split_check.py screenshot <file.png> --width W --height H
+        --inside X0 Y0 X1 Y1 (--min-ink N | --max-ink N)
 
 `regions`: the dump of `ulttyctl --json regions` holds exactly one scene
 whose root is N x N cells (the pane's grid) and whose regions contain each
 `--text`. `no-scenes`: the dump holds no scene. `screenshot`: the PNG is
-W x H and, with Pillow installed, the part right of column X is not all one
-colour (the app drew there). Exits non-zero when a check fails.
+W x H and, inside the rectangle (a pane's interior, away from its border),
+the pixels that differ from the rectangle's most common colour (its
+background) number at least `--min-ink`, or at most `--max-ink`. Needs
+Pillow; without it the check fails rather than passes. Exits non-zero when
+a check fails.
 """
 
 import argparse
@@ -51,6 +55,16 @@ def check_no_scenes(args) -> list:
     return [f"{len(scenes)} scenes, expected none"] if scenes else []
 
 
+def ink_pixels(image, rect) -> int:
+    """Pixels inside `rect` that are not its most common colour."""
+    part = image.crop(rect)
+    colours = part.getcolors(maxcolors=part.width * part.height) or []
+    if not colours:
+        return 0
+    background = max(count for count, _ in colours)
+    return part.width * part.height - background
+
+
 def check_screenshot(args) -> list:
     try:
         with open(args.png, "rb") as f:
@@ -66,14 +80,15 @@ def check_screenshot(args) -> list:
     try:
         from PIL import Image
     except ImportError:
-        print("Pillow not installed; pixel check skipped")
-        return failures
+        return failures + ["Pillow is not installed; the pixel check cannot run"]
     image = Image.open(args.png).convert("RGB")
-    right = image.crop((args.right_of, 0, image.width, image.height))
-    colours = right.getcolors(maxcolors=1 << 20) or []
-    if len(colours) < 2:
-        failures.append(f"nothing drawn right of x={args.right_of}: one colour")
-    print(f"screenshot {width}x{height}, {len(colours)} colours right of x={args.right_of}")
+    rect = tuple(args.inside)
+    ink = ink_pixels(image, rect)
+    print(f"screenshot {width}x{height}: {ink} ink pixels inside {rect}")
+    if args.min_ink is not None and ink < args.min_ink:
+        failures.append(f"only {ink} ink pixels inside {rect}, expected at least {args.min_ink}")
+    if args.max_ink is not None and ink > args.max_ink:
+        failures.append(f"{ink} ink pixels inside {rect}, expected at most {args.max_ink}")
     return failures
 
 
@@ -93,9 +108,13 @@ def main() -> int:
     shot.add_argument("png")
     shot.add_argument("--width", type=int, required=True)
     shot.add_argument("--height", type=int, required=True)
-    shot.add_argument("--right-of", type=int, required=True)
+    shot.add_argument("--inside", type=int, nargs=4, required=True, metavar=("X0", "Y0", "X1", "Y1"))
+    shot.add_argument("--min-ink", type=int)
+    shot.add_argument("--max-ink", type=int)
     shot.set_defaults(run=check_screenshot)
     args = parser.parse_args()
+    if args.check == "screenshot" and (args.min_ink is None) == (args.max_ink is None):
+        parser.error("screenshot takes exactly one of --min-ink and --max-ink")
     failures = args.run(args)
     for failure in failures:
         print(f"check failed: {failure}")

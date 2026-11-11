@@ -1632,14 +1632,27 @@ mod tests {
     #[test]
     fn a_program_is_in_the_pane_whose_pty_has_its_group_in_the_foreground() {
         let mut manager = TerminalManager::new(80, 24).unwrap();
-        let tab = manager.active_tab().unwrap().id;
-        let first = manager.focused_terminal_id().unwrap();
+        // Panes running `sleep`, whose foreground group never changes once
+        // set (a starting shell's does, as its startup files run).
+        let sleep = ["30".to_string()];
+        let tab = manager
+            .create_tab_with_command("sleep", &sleep, None, None, &mut no_tab_env)
+            .unwrap();
+        let first = manager
+            .tabs
+            .iter()
+            .find(|t| t.id == tab)
+            .unwrap()
+            .focused_terminal;
         // One pane: any group, even none, is that pane's.
         assert_eq!(manager.pane_for_process_group(tab, None), Some(first));
         assert_eq!(manager.pane_for_process_group(tab, Some(1)), Some(first));
 
-        let second = manager.split_horizontal().unwrap().unwrap();
-        // The shell takes its PTY as controlling terminal in the child,
+        let second = manager
+            .split_pane_with_command(first, SplitDirection::Horizontal, "sleep", &sleep, None)
+            .unwrap()
+            .unwrap();
+        // The program takes its PTY as controlling terminal in the child,
         // after spawn returns: wait for it.
         let group_of = |manager: &TerminalManager, id: TerminalId| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1649,7 +1662,7 @@ mod tests {
                 }
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "the shell never became its PTY's foreground group"
+                    "the program never became its PTY's foreground group"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }

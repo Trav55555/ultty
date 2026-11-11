@@ -5,7 +5,7 @@
 //! tab bar / vim indicator / shortcuts overlay.
 
 use super::block_chars::block_char_rects;
-use super::native_render::PaneBounds;
+use super::native_render::{scissor_for, PaneBounds};
 use super::powerline::powerline_triangle;
 use super::{OverlayState, PaneDraw, PaneInfo, Renderer, Rgba, Vertex};
 use crate::grid::{CellFlags, CursorShape, Terminal};
@@ -36,8 +36,9 @@ impl Renderer {
     /// screenshot path both draw through this, so they stay pixel-identical.
     ///
     /// A pane with a bound full-scene session shows the scene in place of
-    /// its grid text, in its own rectangle and clipped to it, under its
-    /// border (ADR 0025 §3). Every pane's scenes go into one vertex batch,
+    /// its grid text, in its own rectangle and clipped to it by a scissor
+    /// rectangle (so widget content stays inside too), under its border
+    /// (ADR 0025 §3). Each such pane is one vertex batch; the batches are
     /// cached like the one-pane frame's until a session changes or a pane
     /// moves.
     pub(super) fn encode_panes(
@@ -193,14 +194,10 @@ impl Renderer {
             .any(|session| session.is_render_dirty());
         let native_cached =
             !native_panes.is_empty() && self.native_cache_valid(any_dirty, &[], &native_panes);
-        let mut native = (!native_panes.is_empty() && !native_cached).then(|| {
-            let regions: usize = panes
-                .iter()
-                .flat_map(|pane| pane.sessions.iter())
-                .map(|session| session.scene().iter_depth_first().count())
-                .sum();
-            self.native_vertices_for(regions)
-        });
+        if !native_panes.is_empty() && !native_cached {
+            self.clear_cached_native_buffers();
+        }
+        let surface = self.surface_size();
 
         // Render each pane
         for pane in panes {
@@ -276,10 +273,16 @@ impl Renderer {
                     cursor_blink_visible,
                     &self.uniform_bind_group,
                 );
-            } else if let Some(native) = native.as_mut() {
-                // The scenes hide the grid; built here, drawn below.
+            } else if !native_cached {
+                // The scenes hide the grid: one batch for this pane, drawn
+                // within its rectangle.
                 let bounds = pane_bounds(info);
                 let origin = (bounds.0, bounds.1);
+                let regions: usize = scenes
+                    .iter()
+                    .map(|session| session.scene().iter_depth_first().count())
+                    .sum();
+                let mut native = self.native_vertices_for(regions);
                 for session in scenes {
                     self.build_native_session_vertices(
                         session,
@@ -287,18 +290,19 @@ impl Renderer {
                         Some(bounds),
                         None,
                         0,
-                        native,
+                        &mut native,
                     );
+                }
+                if let Some(scissor) = scissor_for(bounds, surface) {
+                    self.draw_native_vertices(encoder, view, native, Some(scissor));
                 }
             }
         }
 
         if native_cached {
             self.draw_cached_native_buffers(encoder, view);
-        } else if let Some(native) = native {
-            self.clear_cached_native_buffers();
+        } else if !native_panes.is_empty() {
             self.retain_native_geometry(native_panes.iter().map(|(id, _)| *id));
-            self.draw_native_vertices(encoder, view, native);
             self.cached_native_surfaces.clear();
             self.cached_native_panes = native_panes;
         }

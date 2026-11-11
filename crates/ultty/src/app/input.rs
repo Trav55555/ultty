@@ -134,13 +134,16 @@ impl App {
 
     /// Forward a mouse event at `(x, y)`, in pixels below the tab bar, to
     /// the native sessions of the pane under it, in that pane's cells (ADR
-    /// 0025 §4). Returns true if there was a session to send it to.
+    /// 0025 §4). While a button is held, moves and the release go to the
+    /// pane that took the press, wherever the pointer is. Returns true if
+    /// there was a pane to send it to.
     fn forward_mouse_to_native_sessions(
         &mut self,
         event_type: ultty_protocol::InputType,
         x: f64,
         y: f64,
     ) -> bool {
+        use ultty_protocol::InputType;
         let modifiers = self.winit_mods_to_protocol();
         let Some(ref mut server) = self.protocol_server else {
             return false;
@@ -153,17 +156,23 @@ impl App {
             return false;
         }
         let (width, height) = self.renderer.terminal_area();
-        let (x, y) = (x as f32, y as f32);
-        let Some((pane, (left, top, _, _))) = self
-            .terminal_manager
-            .active_pane_rects(width, height)
-            .into_iter()
-            .find(|(_, (px, py, pw, ph))| x >= *px && x < px + pw && y >= *py && y < py + ph)
-        else {
+        let captured = match event_type {
+            InputType::MouseMove | InputType::MouseUp { .. } => self.native_mouse_capture,
+            _ => None,
+        };
+        let Some((pane, cell_x, cell_y)) = super::native_panes::native_mouse_target(
+            &self.terminal_manager.active_pane_rects(width, height),
+            captured,
+            (x as f32, y as f32),
+            (cell_width, cell_height),
+        ) else {
             return false;
         };
-        let cell_x = ((x - left) / cell_width).floor().max(0.0);
-        let cell_y = ((y - top) / cell_height).floor().max(0.0);
+        match event_type {
+            InputType::MouseDown { .. } => self.native_mouse_capture = Some(pane),
+            InputType::MouseUp { .. } => self.native_mouse_capture = None,
+            _ => {}
+        }
         server.broadcast_mouse(pane, event_type, cell_x, cell_y, modifiers);
         true
     }

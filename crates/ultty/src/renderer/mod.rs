@@ -297,7 +297,14 @@ pub struct Renderer {
     adapter_info: wgpu::AdapterInfo,
 }
 
-type NativeBufferSet = (wgpu::Buffer, wgpu::Buffer, u32);
+/// Uploaded native vertices: vertex buffer, index buffer, index count, and
+/// the scissor rectangle they are drawn within (a pane of a split tab).
+type NativeBufferSet = (
+    wgpu::Buffer,
+    wgpu::Buffer,
+    u32,
+    Option<native_render::Scissor>,
+);
 
 struct NativeBufferCache<T> {
     bg: Vec<T>,

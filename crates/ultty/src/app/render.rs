@@ -171,10 +171,10 @@ impl App {
         view: &wgpu::TextureView,
         cursor_cell: Option<CellRect>,
     ) -> bool {
-        let Some(terminal) = self
+        let Some((pane, terminal)) = self
             .terminal_manager
             .focused_terminal()
-            .map(|t| t.event_loop.terminal())
+            .map(|t| (t.id, t.event_loop.terminal()))
         else {
             return false;
         };
@@ -222,10 +222,12 @@ impl App {
                 }),
         };
 
-        // Only the visible tab's native sessions are drawn; a session in a
-        // background tab must not paint over the tab the user is looking at.
+        // Only the visible tab's native sessions are drawn, and only the
+        // ones of this pane or not bound yet: a session in a background
+        // tab, or bound to a pane that closed under it, must not paint over
+        // what the user is looking at.
         if let Some(ref server) = self.protocol_server {
-            if server.active_tab_sessions().next().is_some() {
+            if server.pane_or_unbound_sessions(pane).next().is_some() {
                 let search_matches =
                     if self.native_search_active && !self.native_search_matches.is_empty() {
                         Some(self.native_search_matches.as_slice())
@@ -246,7 +248,7 @@ impl App {
                     view,
                     &terminal,
                     &overlay,
-                    server.active_tab_sessions(),
+                    server.pane_or_unbound_sessions(pane),
                     search_matches,
                     self.native_search_index,
                 );

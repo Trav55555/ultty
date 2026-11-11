@@ -732,12 +732,12 @@ impl App {
                     let overlay_state = self.build_screenshot_overlay_state();
                     let overlay = overlay_state.as_overlay();
 
-                    // The visible tab's sessions, as the window draws them:
-                    // their surfaces are anchored in this terminal.
+                    // The pane's sessions, as the window draws them: their
+                    // surfaces are anchored in this terminal.
                     let native_sessions: Vec<&ultty::protocol::NativeSession> = self
                         .protocol_server
                         .as_ref()
-                        .map(|s| s.active_tab_sessions().collect())
+                        .map(|s| s.pane_or_unbound_sessions(terminal.id).collect())
                         .unwrap_or_default();
 
                     if let Some(parent) = path.parent() {

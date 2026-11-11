@@ -284,6 +284,17 @@ impl ProtocolServer {
             .filter(move |session| session.pane() == Some(pane))
     }
 
+    /// The shown sessions a one-pane tab draws over `pane`: the ones bound
+    /// to it and the ones not bound yet. A session bound to another pane
+    /// (one that closed under it) is left out.
+    pub fn pane_or_unbound_sessions(
+        &self,
+        pane: TerminalId,
+    ) -> impl Iterator<Item = &NativeSession> {
+        self.active_tab_sessions()
+            .filter(move |session| session.pane().is_none_or(|bound| bound == pane))
+    }
+
     /// Bind the sessions that have no pane yet (ADR 0025 §1). `pane_for`
     /// gets a session's tab and peer pid and names the pane whose PTY runs
     /// the app, or `None` to leave it unbound for now. Returns how many
@@ -1367,6 +1378,23 @@ mod tests {
     }
 
     #[test]
+    fn a_one_pane_tab_draws_its_own_and_unbound_sessions_only() {
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
+        let _bound = connect(&mut server, &path);
+        let (pane, other) = (TerminalId::new(3), TerminalId::new(4));
+        server.bind_unbound_sessions(|_, _| Some(other));
+        let _unbound = connect(&mut server, &path);
+
+        assert_eq!(
+            server.pane_or_unbound_sessions(pane).count(),
+            1,
+            "the unbound one"
+        );
+        assert_eq!(server.pane_or_unbound_sessions(other).count(), 2);
+    }
+
+    #[test]
     fn bound_sessions_are_sized_to_their_pane_and_dropped_with_it() {
         let dir = TempDir::new();
         let (mut server, path) = server_with_tab(&dir);
@@ -1379,16 +1407,23 @@ mod tests {
             "an unbound session has the window's size"
         );
 
+        // Take the window-size `Resize`, so what follows is the pane's.
+        let _window_size = socket_replies(&mut client);
+
         server.bind_unbound_sessions(|_, _| Some(pane));
         server.resize_sessions((100, 30), |p| (p == pane).then_some((50, 30)));
         assert_eq!(server.sessions().next().unwrap().viewport(), (50.0, 30.0));
         // The app hears about its pane's size.
-        client
-            .set_read_timeout(Some(Duration::from_millis(500)))
-            .unwrap();
-        let mut buf = vec![0u8; 4096];
-        let n = std::io::Read::read(&mut client, &mut buf).expect("a Resize frame");
-        assert!(n > 0);
+        let resizes: Vec<(u16, u16)> = socket_replies(&mut client)
+            .into_iter()
+            .filter_map(|m| match m {
+                TerminalMessage::Resize(ultty_protocol::ResizeEvent { width, height }) => {
+                    Some((width, height))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resizes, vec![(50, 30)]);
 
         server.retain_pane_sessions(|p| p != pane);
         assert_eq!(server.session_count(), 0, "a closed pane's sessions go");

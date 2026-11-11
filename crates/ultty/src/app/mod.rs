@@ -197,6 +197,9 @@ pub struct App {
     /// The pane layout native sessions were last sized for
     /// (`TerminalManager::layout_generation`).
     native_layout_generation: u64,
+    /// The pane whose native sessions took the last mouse press, while the
+    /// button is held: moves and the release go to it, wherever they are.
+    native_mouse_capture: Option<ultty::terminal_manager::TerminalId>,
     /// Control server for CLI automation (ulttyctl)
     control_server: Option<ControlServer>,
     /// Control wait requests that are checked after terminal output is drained.
@@ -450,6 +453,7 @@ impl App {
             native_search_query: String::new(),
             native_search_index: 0,
             native_layout_generation: 0,
+            native_mouse_capture: None,
             url_row_buf: Vec::new(),
             url_hyperlink_grid: Vec::new(),
             url_hyperlink_map: std::collections::HashMap::new(),
