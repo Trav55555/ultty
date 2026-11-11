@@ -180,9 +180,6 @@ fn convert_color(color: &ultty_protocol::Color) -> ratatui::style::Color {
     }
 }
 
-/// How a focused input marks its cursor in native mode.
-const CARET: char = '|';
-
 /// Text input widget with vim motion support.
 #[derive(Debug, Clone)]
 pub struct TextInput {
@@ -660,28 +657,25 @@ impl View for TextInput {
         let is_focused = super::is_widget_focused(self.widget_id());
         let focus_prefix = if is_focused { ">> " } else { "" };
         let mode_indicator = self.mode_indicator();
-        // The protocol has no caret, so a focused input draws one into its
-        // text. A password is masked terminal-side, which would turn the
-        // marker into a bullet, so it gets none.
-        let draw_caret = is_focused && !self.password && !self.multiline;
-        let shown = if draw_caret {
-            let cursor = edit::cursor_from_char_index(&self.value, self.cursor);
-            let (before, under, after) = edit::split_at_cursor(&self.value, cursor);
-            format!("{before}{CARET}{under}{after}")
-        } else {
-            self.value.clone()
-        };
-        let show_placeholder = shown.is_empty();
+        // A focused input says where its caret is, counted from the start of
+        // the text sent, after the prefix drawn before it; the backend drops
+        // it for a terminal that cannot take one.
+        let prefix = format!("{focus_prefix}{mode_indicator}");
+        let cursor = (is_focused && !self.multiline).then(|| {
+            let in_value = edit::cursor_from_char_index(&self.value, self.cursor);
+            (edit::grapheme_count(&prefix) + in_value) as u32
+        });
         ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(
             ultty_protocol::InputWidget {
-                value: if show_placeholder {
+                value: if self.value.is_empty() {
                     String::new()
                 } else {
-                    format!("{}{}{}", focus_prefix, mode_indicator, shown)
+                    format!("{}{}{}", focus_prefix, mode_indicator, self.value)
                 },
                 placeholder: format!("{}{}{}", focus_prefix, mode_indicator, self.placeholder),
                 multiline: self.multiline,
                 password: self.password,
+                cursor,
             },
         ))
     }
@@ -1270,25 +1264,35 @@ mod tests {
     }
 
     #[test]
-    fn focused_native_content_shows_the_caret_at_the_cursor() {
+    fn focused_native_content_sends_the_caret_not_a_mark() {
         let old = FocusManager::set_current(FocusManager::new());
         FocusManager::with_current_mut(|fm| {
             fm.register("name".to_string());
             fm.focus("name");
         });
-        let value_of = |input: &TextInput| match <TextInput as View>::content(input) {
-            ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(w)) => w.value,
+        let widget_of = |input: &TextInput| match <TextInput as View>::content(input) {
+            ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(w)) => w,
             _ => panic!("Expected input widget content"),
         };
 
-        let input = TextInput::new().id("name").value("héllo").cursor(2);
-        assert_eq!(value_of(&input), ">> [N] hé|llo");
-        let end = TextInput::new().id("name").value("hi");
-        assert_eq!(value_of(&end), ">> [N] hi|");
-        let empty = TextInput::new().id("name");
-        assert_eq!(value_of(&empty), ">> [N] |");
-        let blurred = TextInput::new().id("other").value("hi");
-        assert_eq!(value_of(&blurred), "[N] hi");
+        // The caret counts the ">> [N] " drawn before the value.
+        let input = widget_of(&TextInput::new().id("name").value("héllo").cursor(2));
+        assert_eq!(input.value, ">> [N] héllo");
+        assert_eq!(input.cursor, Some(9));
+        let end = widget_of(&TextInput::new().id("name").value("hi"));
+        assert_eq!(end.value, ">> [N] hi");
+        assert_eq!(end.cursor, Some(9));
+        // Empty: the placeholder shows, the caret before its text.
+        let empty = widget_of(&TextInput::new().id("name").placeholder("Name"));
+        assert_eq!(empty.value, "");
+        assert_eq!(empty.placeholder, ">> [N] Name");
+        assert_eq!(empty.cursor, Some(7));
+        // Not focused: no caret.
+        let blurred = widget_of(&TextInput::new().id("other").value("hi"));
+        assert_eq!(blurred.value, "[N] hi");
+        assert_eq!(blurred.cursor, None);
+        let secret = widget_of(&TextInput::new().id("name").password().value("pw"));
+        assert_eq!(secret.cursor, Some(9));
 
         FocusManager::set_current(old);
     }

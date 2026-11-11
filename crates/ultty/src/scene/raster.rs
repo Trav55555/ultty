@@ -359,19 +359,19 @@ impl Canvas {
                 }
             }
             WidgetContent::Input(input) => {
-                let masked;
-                let (text, fg) = if input.value.is_empty() {
-                    (
-                        &input.placeholder,
-                        Some(ProtoColor::Named(NamedColor::BrightBlack)),
-                    )
-                } else if input.password {
-                    masked = "•".repeat(input.value.chars().count());
-                    (&masked, None)
-                } else {
-                    (&input.value, None)
-                };
-                self.put_text(cx, cy, text, template(fg.as_ref(), &plain), clip);
+                let fg = input
+                    .value
+                    .is_empty()
+                    .then_some(ProtoColor::Named(NamedColor::BrightBlack));
+                let text = super::caret::shown_text(input);
+                self.put_text(cx, cy, &text, template(fg.as_ref(), &plain), clip);
+                if let Some((col, row)) = super::caret::caret_offset(input) {
+                    self.put_caret(
+                        cx.saturating_add(col as i32),
+                        cy.saturating_add(row as i32),
+                        clip,
+                    );
+                }
             }
             WidgetContent::Markdown(markdown) => self.put_lines(cx, cy, &markdown.source, clip),
             WidgetContent::Code(code) => self.put_lines(cx, cy, &code.source, clip),
@@ -402,6 +402,29 @@ impl Canvas {
                     clip,
                 );
             }
+        }
+    }
+
+    /// Draw a caret at cell `(x, y)`: the cell reversed, a blank one past
+    /// the end of the text.
+    fn put_caret(&mut self, x: i32, y: i32, clip: Clip) {
+        if x < clip.x0 || x >= clip.x1 || y < clip.y0 || y >= clip.y1 {
+            return;
+        }
+        let (Ok(col), Ok(row)) = (u16::try_from(x), usize::try_from(y)) else {
+            return;
+        };
+        let cols = self.cols;
+        let Some(line) = self.rows.get_mut(row) else {
+            return;
+        };
+        if col >= cols {
+            return;
+        }
+        line[col].set_flag(CellFlags::REVERSE);
+        // The second cell of a wide character is reversed with its first.
+        if line[col].is_wide() && col + 1 < cols {
+            line[col + 1].set_flag(CellFlags::REVERSE);
         }
     }
 
@@ -1140,6 +1163,54 @@ mod tests {
         assert_eq!(text, ["42%", "  wait", "••", "type", "   OK", "half"]);
         assert_eq!(rows[3][0].fg(), Color::BRIGHT_BLACK);
         assert!(rows[4][3].has_flag(CellFlags::BOLD));
+    }
+
+    /// An input's caret is the reversed cell after its first `cursor`
+    /// clusters; the text is the value, with nothing added.
+    #[test]
+    fn an_input_draws_its_caret_as_a_reversed_cell() {
+        let line = cells(10.0, 1.0);
+        let plain = Style::default;
+        let input = |value: &str, cursor| {
+            widget(WidgetContent::Input(InputWidget {
+                value: value.into(),
+                cursor,
+                ..InputWidget::default()
+            }))
+        };
+        let mut card = Card::new(10, 5);
+        card.add(1, SURFACE, line, plain(), input("héllo", Some(2)));
+        card.add(2, SURFACE, line, plain(), input("hi", Some(2)));
+        card.add(3, SURFACE, line, plain(), input("你好", Some(1)));
+        card.add(4, SURFACE, line, plain(), input("no caret", None));
+        card.add(
+            5,
+            SURFACE,
+            line,
+            plain(),
+            widget(WidgetContent::Input(InputWidget {
+                placeholder: "type".into(),
+                cursor: Some(1),
+                ..InputWidget::default()
+            })),
+        );
+        let rows = card.rows();
+        let reversed = |row: usize| -> Vec<u16> {
+            (0..10u16)
+                .filter(|&col| rows[row][col].has_flag(CellFlags::REVERSE))
+                .collect()
+        };
+        assert_eq!(rows[0].text_trimmed(), "héllo");
+        assert_eq!(reversed(0), [2]);
+        // Past the end: a blank cell.
+        assert_eq!(rows[1].text_trimmed(), "hi");
+        assert_eq!(reversed(1), [2]);
+        // After a wide character: its two cells are the first, so col 2.
+        assert_eq!(reversed(2), [2, 3]);
+        assert_eq!(reversed(3), Vec::<u16>::new());
+        // An empty input shows its placeholder, the caret counted into it.
+        assert_eq!(rows[4].text_trimmed(), "type");
+        assert_eq!(reversed(4), [1]);
     }
 
     /// An image is blank cells: what drew there before it is gone.

@@ -13,6 +13,10 @@
 //! value is its name), else one `Label` child per line, which Orca reads
 //! line by line in browse mode and flat review.
 //!
+//! A text input is the exception: its value is a `TextRun` child, so the
+//! caret an app sends (`InputWidget::cursor`) can be the input's text
+//! selection, without a mark in the value.
+//!
 //! Apps are not trusted: a pane shows at most [`MAX_PANE_NODES`] nodes of
 //! native scenes, and since node ids are hashes of names the app partly
 //! chooses, a node whose id is already in the tree is left out with its
@@ -22,11 +26,17 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use accesskit::{Live as AkLive, Node, NodeId, Rect, Role as AkRole, Toggled as AkToggled};
+use accesskit::{
+    Live as AkLive, Node, NodeId, Rect, Role as AkRole, TextDirection, TextPosition, TextSelection,
+    Toggled as AkToggled,
+};
 use ultty_protocol::{Content, Expanded, Live, RegionId, Role, Semantics, Toggled, WidgetContent};
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::live::{Announcement, LiveRegions};
-use super::tree::{region_announcement_node_id, region_line_node_id, region_node_id};
+use super::tree::{
+    region_announcement_node_id, region_input_run_node_id, region_line_node_id, region_node_id,
+};
 use crate::scene::semantics::{capped, effective_semantics};
 use crate::scene::tree::SceneTree;
 
@@ -84,11 +94,18 @@ struct RegionSnapshot {
     bounds: Rect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct InputKind {
     multiline: bool,
     password: bool,
+    /// The value and the caret in it (grapheme clusters before it), when
+    /// the app gave one and the value may be exposed: never a password's.
+    caret: Option<(String, usize)>,
 }
+
+/// The longest input text a caret is exposed in: AccessKit text runs keep
+/// character indices in a `u8`.
+const MAX_CARET_CHARS: usize = 255;
 
 impl SceneSnapshot {
     /// Copy the tree under `root` of `session`'s `scene`, drawn at `at`.
@@ -162,11 +179,12 @@ impl SceneSnapshot {
             let layout = region.computed;
             let x0 = at.x + f64::from(layout.x - scroll_x) * at.cell_width;
             let y0 = at.y + f64::from(layout.y - scroll_y) * at.cell_height;
+            let input = input_kind(&region.content, semantics.value_text.as_deref());
             regions.push(RegionSnapshot {
                 id: id.0,
                 children,
                 semantics,
-                input: input_kind(&region.content),
+                input,
                 lines,
                 announcements: Vec::new(),
                 bounds: Rect {
@@ -292,6 +310,34 @@ impl SceneSnapshot {
                 }
                 out.nodes.push((line_id, label));
                 children.push(line_id);
+            }
+        }
+        if let Some((value, cursor)) = region.input.as_ref().and_then(|input| input.caret.as_ref())
+        {
+            let run_id = region_input_run_node_id(self.session, region.id);
+            if *budget == 0 {
+                out.truncated = true;
+            } else if out.claim(run_id) {
+                *budget -= 1;
+                let lengths: Vec<u8> = value
+                    .graphemes(true)
+                    .map(|g| u8::try_from(g.len()).unwrap_or(u8::MAX))
+                    .collect();
+                let mut run = Node::new(AkRole::TextRun);
+                run.set_value(value.as_str());
+                run.set_text_direction(TextDirection::LeftToRight);
+                run.set_bounds(region.bounds);
+                run.set_character_lengths(lengths);
+                out.nodes.push((run_id, run));
+                children.push(run_id);
+                let position = TextPosition {
+                    node: run_id,
+                    character_index: (*cursor).min(value.graphemes(true).count()),
+                };
+                node.set_text_selection(TextSelection {
+                    anchor: position,
+                    focus: position,
+                });
             }
         }
         for child in &region.children {
@@ -447,12 +493,30 @@ fn content_text(content: &Content) -> Option<Cow<'_, str>> {
 }
 
 /// An `Input` widget's flags.
-fn input_kind(content: &Content) -> Option<InputKind> {
+///
+/// `exposed` is the value the node will have. An app that draws a prefix
+/// before the text in `InputWidget::value` (ulttui's focus and mode marks)
+/// says so by giving a `value_text` that ends it: the caret is then
+/// counted past the prefix, so it is in the text the node exposes.
+fn input_kind(content: &Content, exposed: Option<&str>) -> Option<InputKind> {
     match content {
-        Content::Widget(WidgetContent::Input(input)) => Some(InputKind {
-            multiline: input.multiline,
-            password: input.password,
-        }),
+        Content::Widget(WidgetContent::Input(input)) => {
+            let text = exposed.unwrap_or(&input.value);
+            let prefix = match input.value.strip_suffix(text) {
+                Some(prefix) => prefix.graphemes(true).count(),
+                None => 0,
+            };
+            let caret = input
+                .cursor
+                .filter(|_| !input.password && !text.is_empty())
+                .filter(|_| text.graphemes(true).count() <= MAX_CARET_CHARS)
+                .map(|cursor| (text.to_owned(), (cursor as usize).saturating_sub(prefix)));
+            Some(InputKind {
+                multiline: input.multiline,
+                password: input.password,
+                caret,
+            })
+        }
         _ => None,
     }
 }
@@ -497,7 +561,7 @@ fn region_node(region: &RegionSnapshot) -> Node {
         Role::Status => AkRole::Status,
         Role::Alert => AkRole::Alert,
         Role::Dialog => AkRole::Dialog,
-        Role::Input => match region.input {
+        Role::Input => match &region.input {
             Some(InputKind { password: true, .. }) => AkRole::PasswordInput,
             Some(InputKind {
                 multiline: true, ..
@@ -785,6 +849,78 @@ mod tests {
             assert_eq!(region(&update, id).role(), expected, "{role:?}");
         }
         consume(update);
+    }
+
+    /// The caret an app sends is the input's text selection, in a text run
+    /// under it: the value stays the real value, with no mark in it.
+    #[test]
+    fn an_inputs_caret_is_its_text_selection() {
+        let input = |value: &str, password: bool, cursor| {
+            widget(WidgetContent::Input(InputWidget {
+                value: value.to_owned(),
+                password,
+                cursor,
+                ..InputWidget::default()
+            }))
+        };
+        let mut scene = Scene::new();
+        scene.add(1, 0, input("héllo wörld", false, Some(7)));
+        scene.add(2, 0, input("no caret", false, None));
+        scene.add(3, 0, input("hunter2", true, Some(3)));
+        scene.add(4, 0, input("ae\u{301}b", false, Some(2)));
+        let update = full_scene(&scene);
+
+        let field = region(&update, 1);
+        assert_eq!(field.value(), Some("héllo wörld"));
+        let run_id = region_input_run_node_id(7, 1);
+        assert_eq!(field.children(), &[run_id]);
+        let run = node(&update, run_id);
+        assert_eq!(run.role(), AkRole::TextRun);
+        assert_eq!(run.value(), Some("héllo wörld"));
+        let selection = field.text_selection().expect("the input has a caret");
+        assert_eq!(selection.anchor, selection.focus);
+        assert_eq!(selection.focus.node, run_id);
+        assert_eq!(selection.focus.character_index, 7);
+        // Characters are the clusters (é is two bytes), so the lengths
+        // add up to the text.
+        assert_eq!(run.character_lengths().len(), 11);
+        assert_eq!(
+            run.character_lengths()
+                .iter()
+                .map(|&n| usize::from(n))
+                .sum::<usize>(),
+            "héllo wörld".len()
+        );
+
+        assert!(region(&update, 2).text_selection().is_none());
+        // A password's text never leaves the app, caret or not.
+        let password = region(&update, 3);
+        assert!(password.text_selection().is_none() && password.children().is_empty());
+
+        // A combining accent is one character: the caret is after "ae\u{301}".
+        let combined = region(&update, 4);
+        assert_eq!(combined.text_selection().unwrap().focus.character_index, 2);
+        assert_eq!(
+            node(&update, region_input_run_node_id(7, 4)).character_lengths(),
+            &[1, 3, 1]
+        );
+        consume(update);
+    }
+
+    /// An app that draws a prefix before the value (ulttui's focus mark)
+    /// and exposes the bare value: the caret lands in the bare value.
+    #[test]
+    fn an_inputs_caret_skips_a_prefix_the_app_draws() {
+        let content = widget(WidgetContent::Input(InputWidget {
+            value: ">> [N] héllo".to_owned(),
+            cursor: Some(9),
+            ..InputWidget::default()
+        }));
+        let kind = input_kind(&content, Some("héllo")).unwrap();
+        assert_eq!(kind.caret, Some(("héllo".to_owned(), 2)));
+        // Nothing to say it is a prefix: the caret is where it was sent.
+        let kind = input_kind(&content, Some("other")).unwrap();
+        assert_eq!(kind.caret, Some(("other".to_owned(), 9)));
     }
 
     #[test]

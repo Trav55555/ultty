@@ -66,6 +66,7 @@ regex = "1.10"
 open = "5.0"
 
 # Unicode
+unicode-segmentation = "1.12"
 unicode-width = { workspace = true }
 
 # Encoding

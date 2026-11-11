@@ -1165,6 +1165,7 @@ mod tests {
             placeholder: String::new(),
             multiline: false,
             password: false,
+            cursor: None,
         }));
         tree.insert(r);
 
@@ -1219,6 +1220,7 @@ mod tests {
             placeholder: String::new(),
             multiline: false,
             password: false,
+            cursor: None,
         }));
         tree.insert(r1);
 
@@ -1405,6 +1407,7 @@ mod tests {
             placeholder: String::new(),
             multiline: false,
             password: false,
+            cursor: None,
         }));
         tree.insert(r2);
 
@@ -1491,6 +1494,7 @@ mod tests {
             placeholder: "type here".into(),
             multiline: false,
             password: false,
+            cursor: None,
         }));
         tree.insert(r);
 
@@ -1510,6 +1514,7 @@ mod tests {
             placeholder: "placeholder".into(),
             multiline: false,
             password: false,
+            cursor: None,
         }));
         tree.insert(r);
 
@@ -1528,6 +1533,7 @@ mod tests {
             placeholder: "hidden placeholder".into(),
             multiline: false,
             password: false,
+            cursor: None,
         }));
         tree.insert(r);
 
@@ -1547,6 +1553,7 @@ mod tests {
             placeholder: "enter password".into(),
             multiline: false,
             password: true,
+            cursor: None,
         }));
         tree.insert(r);
 
@@ -1565,6 +1572,7 @@ mod tests {
             placeholder: "enter password".into(),
             multiline: false,
             password: true,
+            cursor: None,
         }));
         tree.insert(r);
 

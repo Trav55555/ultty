@@ -1258,6 +1258,7 @@ impl Decode for InputWidget {
             placeholder,
             multiline: flags & 1 != 0,
             password: flags & 2 != 0,
+            cursor: None,
         })
     }
 }
@@ -1492,10 +1493,19 @@ impl Decode for ButtonWidget {
 impl Encode for WidgetContent {
     fn encode(&self, buf: &mut BytesMut) {
         match self {
-            WidgetContent::Input(w) => {
-                buf.put_u8(0);
-                w.encode(buf);
-            }
+            // A caret goes in its own tag, so a terminal that did not
+            // negotiate `CAP_INPUT_CURSOR` only ever sees tag 0.
+            WidgetContent::Input(w) => match w.cursor {
+                None => {
+                    buf.put_u8(0);
+                    w.encode(buf);
+                }
+                Some(cursor) => {
+                    buf.put_u8(7);
+                    w.encode(buf);
+                    buf.put_u32_le(cursor);
+                }
+            },
             WidgetContent::Markdown(w) => {
                 buf.put_u8(1);
                 w.encode(buf);
@@ -1540,6 +1550,17 @@ impl Decode for WidgetContent {
             4 => Ok(WidgetContent::Spinner(SpinnerWidget::decode(buf)?)),
             5 => Ok(WidgetContent::Image(ImageWidget::decode(buf)?)),
             6 => Ok(WidgetContent::Button(ButtonWidget::decode(buf)?)),
+            7 => {
+                let mut input = InputWidget::decode(buf)?;
+                if buf.remaining() < 4 {
+                    return Err(ProtocolError::UnexpectedEof {
+                        needed: 4,
+                        have: buf.remaining(),
+                    });
+                }
+                input.cursor = Some(buf.get_u32_le());
+                Ok(WidgetContent::Input(input))
+            }
             v => Err(ProtocolError::InvalidData(format!(
                 "invalid widget type: {}",
                 v
@@ -3409,10 +3430,10 @@ mod tests {
     fn capability_bits_and_triggers_match_documented_table() {
         // Mirrors docs/PROTOCOL_SPEC.md section 2.1 and 7.5.
         use crate::{
-            CAP_ALL_KNOWN, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, CAP_LAYOUT_FLEXBOX,
-            CAP_REGION_METADATA, CAP_SEMANTICS, CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL,
-            MAX_SURFACES, MAX_SURFACE_ROWS, MIN_PROTOCOL_VERSION, MIN_SURFACE_ROWS,
-            PROTOCOL_VERSION,
+            CAP_ALL_KNOWN, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, CAP_INPUT_CURSOR,
+            CAP_LAYOUT_FLEXBOX, CAP_REGION_METADATA, CAP_SEMANTICS, CAP_STREAM_LIFECYCLE,
+            CAP_WIDGET_SCROLL, MAX_SURFACES, MAX_SURFACE_ROWS, MIN_PROTOCOL_VERSION,
+            MIN_SURFACE_ROWS, PROTOCOL_VERSION,
         };
         assert_eq!(CAP_LAYOUT_FLEXBOX, 0x0001);
         assert_eq!(CAP_WIDGET_SCROLL, 0x0010);
@@ -3421,7 +3442,8 @@ mod tests {
         assert_eq!(CAP_REGION_METADATA, 0x0080);
         assert_eq!(CAP_INLINE_SURFACES, 0x0100);
         assert_eq!(CAP_SEMANTICS, 0x0200);
-        assert_eq!(CAP_ALL_KNOWN, 0x03F1);
+        assert_eq!(CAP_INPUT_CURSOR, 0x0400);
+        assert_eq!(CAP_ALL_KNOWN, 0x07F1);
         assert_eq!((MIN_SURFACE_ROWS, MAX_SURFACE_ROWS), (1, 128));
         assert_eq!(MAX_SURFACES, 16);
         assert_eq!(PROTOCOL_VERSION, 1);

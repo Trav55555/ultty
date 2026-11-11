@@ -4900,6 +4900,7 @@ dependencies = [
  "ultty-bench",
  "ultty-protocol",
  "ultty-vt",
+ "unicode-segmentation",
  "unicode-width",
  "wgpu",
  "winit",

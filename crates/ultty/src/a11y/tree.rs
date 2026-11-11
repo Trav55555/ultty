@@ -596,6 +596,12 @@ pub fn region_line_node_id(session: u64, region: u32, line: usize) -> NodeId {
     node_id(&format!("s{session}:{region}l{line}"))
 }
 
+/// The `TextRun` under region `region`'s text input, which holds its text
+/// for the caret to sit in, `s<session>:<region>i`.
+pub fn region_input_run_node_id(session: u64, region: u32) -> NodeId {
+    node_id(&format!("s{session}:{region}i"))
+}
+
 /// Announcement `serial` of live region `region`,
 /// `s<session>:<region>a<serial>` ([`super::live`]).
 pub fn region_announcement_node_id(session: u64, region: u32, serial: u64) -> NodeId {

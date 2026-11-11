@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use bytes::BytesMut;
 use ultty_protocol::{
     AppMessage, ComputedRegionLayout, Content, FrameId, InputEvent, InputType, Key, Modifiers,
-    RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_REGION_METADATA, CAP_SEMANTICS,
-    CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL, MIN_PROTOCOL_VERSION,
-    PROTOCOL_VERSION,
+    RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_INPUT_CURSOR, CAP_REGION_METADATA,
+    CAP_SEMANTICS, CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL,
+    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
 use crate::event::Event;
@@ -226,6 +226,7 @@ impl NativeBackend {
             FrameCapabilities {
                 append_content: self.supports_capability(CAP_APPEND_CONTENT),
                 semantics: self.supports_capability(CAP_SEMANTICS),
+                input_cursor: self.supports_capability(CAP_INPUT_CURSOR),
             },
         );
         if self.supports_capability(CAP_REGION_METADATA) {

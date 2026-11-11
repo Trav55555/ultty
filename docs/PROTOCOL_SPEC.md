@@ -158,6 +158,7 @@ App                                          Terminal
 | `CAP_REGION_METADATA` | `0x0080` |
 | `CAP_INLINE_SURFACES` | `0x0100` |
 | `CAP_SEMANTICS` | `0x0200` |
+| `CAP_INPUT_CURSOR` | `0x0400` |
 
 `CAP_ALL_KNOWN` is the OR of those bits. Capabilities are negotiated as `requested & supported`; the version is `min(client, server)`. A version below `MIN_PROTOCOL_VERSION` is rejected with `Error` 426.
 
@@ -420,6 +421,19 @@ limits:
 | 4 | Spinner | label Option<string>, style u8 (`Braille=0`, `Dots=1`, `Line=2`, `Bounce=3`) |
 | 5 | Image | width u32, height u32, scale u8, data_len u32, bytes |
 | 6 | Button | label string, style u8 (`Default=0`, `Primary=1`, `Danger=2`, `Success=3`) |
+| 7 | Input with caret (`CAP_INPUT_CURSOR`) | the fields of tag 0, then cursor u32 |
+
+An input's caret is `InputWidget::cursor`: the number of grapheme clusters
+before it in the text the input shows, which is `value`, or `placeholder`
+while `value` is empty. An input with a caret is encoded as tag 7, one
+without as tag 0, so a terminal that did not negotiate `CAP_INPUT_CURSOR`
+(and rejects tag 7 as an invalid widget type) is never sent one: apps send
+a caret only when the capability was granted. The terminal draws the caret
+in the input and, for assistive technology, exposes it as the text
+selection of the input's text, which is `value` alone. An app that draws
+a prefix before the value in `value` (ulttui's focus and mode marks) and
+sets semantics `value_text` to the bare value has its caret counted past
+that prefix. A password's caret is drawn but never exposed.
 
 Image scale is `Fit=0`, `Fill=1`, `Stretch=2`, `None=3`.
 
@@ -657,6 +671,7 @@ Supply row and column track vectors and place children with start/end `GridLine`
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.1.0-draft | 2026-11-10 | `CAP_INPUT_CURSOR` (`0x0400`) and the input widget's caret, widget tag 7, section 8.4 |
 | 0.1.0-draft | 2026-11-08 | `CreateSurface` (`0x0015`), `CloseSurface` (`0x0016`), `SurfaceEvent` (terminal `0x0026`) and `CAP_INLINE_SURFACES` (`0x0100`), section 10.6 (ADR 0020) |
 | 0.1.0-draft | 2026-11-08 | `SetSemantics` (`0x0026`) and `CAP_SEMANTICS` (`0x0200`), section 10.5 (ADR 0021) |
 | 0.1.0-draft | 2026-09-22 | Regenerated wire-format sections from `codec.rs`; removed shared-memory/zero-copy claims |

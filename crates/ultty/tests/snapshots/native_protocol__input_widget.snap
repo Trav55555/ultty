@@ -1,6 +1,6 @@
 ---
 source: crates/ultty/tests/native_protocol.rs
-assertion_line: 1454
+assertion_line: 1675
 expression: "&region.content"
 ---
 Widget(
@@ -10,6 +10,7 @@ Widget(
             placeholder: "Enter text...",
             multiline: true,
             password: false,
+            cursor: None,
         },
     ),
 )
