@@ -220,7 +220,9 @@ is logged and the last good version stays, a removed file stops applying.
 binary. That is behind a cargo feature, `lua-overrides`, off by default for
 `ulttui`; `ulttui-lua` and the workspace examples turn it on. An app built
 without it logs that it is ignoring a `.luau` file and still applies the
-TOML one. Release `counter-app` (LTO, `panic = "abort"`): SIZE_LINE.
+TOML one. The release build of `counter-app` (LTO,
+`codegen-units = 1`) grows from 1,915,936 to 3,965,664 bytes (+2.05 MB,
+about twice the size) with it on, measured 2026-11-11.
 `porygon-tui`, which does not turn the feature on, does not link mlua.
 
 ## Consequences
