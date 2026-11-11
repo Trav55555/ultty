@@ -18,18 +18,32 @@ const STREAMING_CURSOR: &str = "|";
 pub struct MarkdownView {
     source: String,
     blocks: Vec<Block>,
+    /// Where parsing starts again when text is appended; `None` when the
+    /// source defines link references or footnotes, which reach back to
+    /// earlier blocks, so all of it is parsed again.
+    reparse_from: Option<ReparsePoint>,
     streaming: bool,
     wrap_width_cols: Option<usize>,
     accessible: super::Accessible,
 }
 
-#[derive(Debug, Clone)]
+/// The start of the line the last top-level block of a source starts on,
+/// and how many blocks come before it. Markdown appended after it cannot
+/// change the blocks before it (but for reference definitions), so
+/// parsing from there gives the rest.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ReparsePoint {
+    offset: usize,
+    blocks: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct StyledSpan {
     text: String,
     style: Style,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::enum_variant_names)]
 enum Block {
     Heading {
@@ -93,10 +107,11 @@ struct ListState {
 impl MarkdownView {
     pub fn new(source: impl Into<String>) -> Self {
         let source = source.into();
-        let blocks = Self::parse_blocks(&source);
+        let (blocks, reparse_from) = parse(&source, true);
         Self {
             source,
             blocks,
+            reparse_from,
             streaming: false,
             wrap_width_cols: None,
             accessible: super::Accessible::default(),
@@ -107,17 +122,29 @@ impl MarkdownView {
         &self.source
     }
 
+    /// Append `chunk` to the source. Only the last top-level block, the
+    /// one text can still arrive in, is parsed again, so the cost is that
+    /// block's size and the result is what parsing the whole source gives.
     pub fn append_chunk(&mut self, chunk: impl AsRef<str>) {
         let chunk = chunk.as_ref();
         if chunk.is_empty() {
             return;
         }
-
-        let was_in_open_code_block = Self::is_in_open_fenced_code_block(&self.source);
         self.source.push_str(chunk);
-        if !self.try_append_chunk_incrementally(chunk, was_in_open_code_block) {
-            self.blocks = Self::parse_blocks(&self.source);
+
+        if let Some(from) = self.reparse_from {
+            let (tail, tail_from) = parse(&self.source[from.offset..], from.offset == 0);
+            if let Some(tail_from) = tail_from {
+                self.blocks.truncate(from.blocks);
+                self.blocks.extend(tail);
+                self.reparse_from = Some(ReparsePoint {
+                    offset: from.offset + tail_from.offset,
+                    blocks: from.blocks + tail_from.blocks,
+                });
+                return;
+            }
         }
+        (self.blocks, self.reparse_from) = parse(&self.source, true);
     }
 
     pub fn with_appended(mut self, chunk: impl AsRef<str>) -> Self {
@@ -154,195 +181,6 @@ impl MarkdownView {
     pub fn wrap_width_cols(mut self, cols: usize) -> Self {
         self.wrap_width_cols = Some(cols.max(1));
         self
-    }
-
-    fn parse_blocks(source: &str) -> Vec<Block> {
-        let mut blocks = Vec::new();
-        let mut current: Option<CurrentBlock> = None;
-        let mut inline_style_stack: Vec<InlineStyleMarker> = Vec::new();
-        let mut list_stack: Vec<ListState> = Vec::new();
-        let mut quote_depth = 0usize;
-
-        let parser = Parser::new_ext(source, Options::all());
-        for event in parser {
-            match event {
-                Event::Start(tag) => match tag {
-                    Tag::Paragraph => {
-                        if let Some(done) = current.take() {
-                            blocks.push(Self::finish_block(done));
-                        }
-                        current = Some(CurrentBlock::Paragraph {
-                            spans: Vec::new(),
-                            quoted: quote_depth > 0,
-                        });
-                    }
-                    Tag::Heading { level, .. } => {
-                        if let Some(done) = current.take() {
-                            blocks.push(Self::finish_block(done));
-                        }
-                        current = Some(CurrentBlock::Heading {
-                            level,
-                            spans: Vec::new(),
-                            quoted: quote_depth > 0,
-                        });
-                    }
-                    Tag::CodeBlock(_) => {
-                        if let Some(done) = current.take() {
-                            blocks.push(Self::finish_block(done));
-                        }
-                        current = Some(CurrentBlock::CodeBlock {
-                            text: String::new(),
-                            quoted: quote_depth > 0,
-                        });
-                    }
-                    Tag::List(start) => {
-                        let (ordered, first) = match start {
-                            Some(n) => (true, n),
-                            None => (false, 1),
-                        };
-                        list_stack.push(ListState {
-                            ordered,
-                            next_number: first,
-                        });
-                    }
-                    Tag::Item => {
-                        if let Some(done) = current.take() {
-                            blocks.push(Self::finish_block(done));
-                        }
-                        let depth = list_stack.len().saturating_sub(1);
-                        let indent = depth * 2;
-                        let prefix = if let Some(last) = list_stack.last_mut() {
-                            if last.ordered {
-                                let p = format!("{}. ", last.next_number);
-                                last.next_number += 1;
-                                p
-                            } else {
-                                "• ".to_string()
-                            }
-                        } else {
-                            "• ".to_string()
-                        };
-                        current = Some(CurrentBlock::ListItem {
-                            indent,
-                            prefix,
-                            spans: Vec::new(),
-                            quoted: quote_depth > 0,
-                        });
-                    }
-                    Tag::BlockQuote(_) => {
-                        quote_depth += 1;
-                    }
-                    Tag::Strong => inline_style_stack.push(InlineStyleMarker::Strong),
-                    Tag::Emphasis => inline_style_stack.push(InlineStyleMarker::Emphasis),
-                    Tag::Link { .. } => inline_style_stack.push(InlineStyleMarker::Link),
-                    _ => {}
-                },
-                Event::End(tag) => match tag {
-                    TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::Item => {
-                        if let Some(done) = current.take() {
-                            blocks.push(Self::finish_block(done));
-                        }
-                    }
-                    TagEnd::List(_) => {
-                        list_stack.pop();
-                    }
-                    TagEnd::BlockQuote(_) => {
-                        quote_depth = quote_depth.saturating_sub(1);
-                    }
-                    TagEnd::Strong => {
-                        Self::pop_inline_style(&mut inline_style_stack, InlineStyleMarker::Strong);
-                    }
-                    TagEnd::Emphasis => {
-                        Self::pop_inline_style(
-                            &mut inline_style_stack,
-                            InlineStyleMarker::Emphasis,
-                        );
-                    }
-                    TagEnd::Link => {
-                        Self::pop_inline_style(&mut inline_style_stack, InlineStyleMarker::Link);
-                    }
-                    _ => {}
-                },
-                Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
-                    Self::push_text_span(&mut current, &inline_style_stack, text.as_ref(), false);
-                }
-                Event::Code(text) => {
-                    Self::push_text_span(&mut current, &inline_style_stack, text.as_ref(), true);
-                }
-                Event::SoftBreak | Event::HardBreak => {
-                    Self::push_text_span(&mut current, &inline_style_stack, "\n", false);
-                }
-                Event::Rule => blocks.push(Block::HorizontalRule),
-                Event::TaskListMarker(checked) => {
-                    let marker = if checked { "[x] " } else { "[ ] " };
-                    Self::push_text_span(&mut current, &inline_style_stack, marker, false);
-                }
-                _ => {}
-            }
-        }
-
-        if let Some(done) = current.take() {
-            blocks.push(Self::finish_block(done));
-        }
-
-        blocks
-    }
-
-    fn try_append_chunk_incrementally(
-        &mut self,
-        chunk: &str,
-        was_in_open_code_block: bool,
-    ) -> bool {
-        if was_in_open_code_block {
-            if Self::chunk_closes_fenced_code_block(chunk) {
-                return false;
-            }
-            if let Some(Block::CodeBlock { text }) = self.blocks.last_mut() {
-                text.push_str(chunk);
-                return true;
-            }
-        }
-
-        if Self::is_plain_paragraph_append(chunk) {
-            if let Some(Block::Paragraph { spans }) = self.blocks.last_mut() {
-                append_plain_text_span(spans, chunk);
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn is_plain_paragraph_append(chunk: &str) -> bool {
-        !chunk.is_empty()
-            && !chunk.contains('\n')
-            && !chunk.chars().any(|ch| {
-                matches!(
-                    ch,
-                    '*' | '_' | '`' | '[' | ']' | '<' | '>' | '#' | '!' | '|'
-                )
-            })
-    }
-
-    fn is_in_open_fenced_code_block(source: &str) -> bool {
-        source
-            .lines()
-            .filter(|line| line.trim_start().starts_with("```"))
-            .count()
-            % 2
-            == 1
-    }
-
-    fn chunk_closes_fenced_code_block(chunk: &str) -> bool {
-        chunk
-            .lines()
-            .any(|line| line.trim_start().starts_with("```"))
-    }
-
-    fn pop_inline_style(stack: &mut Vec<InlineStyleMarker>, marker: InlineStyleMarker) {
-        if let Some(pos) = stack.iter().rposition(|m| *m == marker) {
-            stack.remove(pos);
-        }
     }
 
     fn push_text_span(
@@ -461,6 +299,241 @@ impl MarkdownView {
             return 1;
         }
         total.max(1)
+    }
+}
+
+/// The blocks of `source`, and where to parse again from when text is
+/// appended to it (`None` when it defines link references or footnotes).
+/// `at_document_start` is false for the end of a document parsed on its
+/// own, where a `---` line cannot open a metadata block.
+fn parse(source: &str, at_document_start: bool) -> (Vec<Block>, Option<ReparsePoint>) {
+    let mut options = Options::all();
+    if !at_document_start {
+        options.remove(
+            Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+                | Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS,
+        );
+    }
+    if source.contains("[^") {
+        // Footnotes reach back to earlier blocks like link references, and
+        // pulldown-cmark 0.12's offsets around them can be out of order
+        // (its debug assertion fails), so they are not asked for.
+        let mut builder = BlockBuilder::default();
+        for event in Parser::new_ext(source, options) {
+            builder.event(event);
+        }
+        return (builder.finish(), None);
+    }
+    let parser = Parser::new_ext(source, options).into_offset_iter();
+    let defines = parser.reference_definitions().iter().next().is_some();
+    let mut builder = BlockBuilder::default();
+    let mut reparse_from = ReparsePoint::default();
+    let mut depth = 0usize;
+    // pulldown-cmark gives a task marker to the next paragraph, which is
+    // not the item's own when the item starts with another block
+    // (`- [ ] # x`); until it is given, parsing cannot start again.
+    let mut task_marker_pending = false;
+    let mut after_paragraph_start = false;
+    // A block after a list can still turn into one of its items (`1`
+    // becoming `1. x`).
+    let mut after_list = false;
+    for (event, range) in parser {
+        if depth == 0 && builder.current.is_none() && !task_marker_pending && !after_list {
+            // Only a block after a blank line: one that interrupts the
+            // paragraph before it parses differently on its own (a task
+            // list item).
+            let line_start = source[..range.start].rfind('\n').map_or(0, |i| i + 1);
+            let after_blank_line = line_start == 0
+                || source[..line_start - 1]
+                    .rsplit('\n')
+                    .next()
+                    .is_some_and(|line| line.trim().is_empty());
+            if after_blank_line
+                && source[line_start..range.start]
+                    .chars()
+                    .all(|c| c == ' ' || c == '\t')
+            {
+                reparse_from = ReparsePoint {
+                    offset: line_start,
+                    blocks: builder.blocks.len(),
+                };
+            }
+        }
+        if depth == 0 {
+            after_list = matches!(event, Event::Start(Tag::List(_) | Tag::DefinitionList));
+        }
+        match &event {
+            Event::Start(Tag::Item) => {
+                task_marker_pending |= task_marker_waits_for_paragraph(&source[range.start..]);
+                depth += 1;
+            }
+            Event::TaskListMarker(_) if after_paragraph_start => task_marker_pending = false,
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        after_paragraph_start = matches!(event, Event::Start(Tag::Paragraph));
+        builder.event(event);
+    }
+    let blocks = builder.finish();
+    (blocks, (!defines).then_some(reparse_from))
+}
+
+/// Whether list item source `item`, from its marker on, starts with a task
+/// marker as pulldown-cmark scans one (`- [ ] `, `1. [x] `) with more on
+/// its line, so that pulldown-cmark keeps the marker for the next
+/// paragraph. It may say so for an item pulldown-cmark does not take as a
+/// task, which only costs parsing more again.
+fn task_marker_waits_for_paragraph(item: &str) -> bool {
+    let item = item.trim_start_matches([' ', '\t']);
+    let after_marker = match item.strip_prefix(['-', '+', '*']) {
+        Some(rest) => rest,
+        None => {
+            let digits = item.len() - item.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            match item[digits..].strip_prefix(['.', ')']) {
+                Some(rest) if digits > 0 => rest,
+                _ => return false,
+            }
+        }
+    };
+    let content = after_marker.trim_start_matches([' ', '\t']);
+    if content.len() == after_marker.len() {
+        return false;
+    }
+    let bytes = content.as_bytes();
+    bytes.len() >= 4
+        && bytes[0] == b'['
+        && matches!(bytes[1], b' ' | b'\t' | b'x' | b'X')
+        && bytes[2] == b']'
+        && matches!(bytes[3], b' ' | b'\t')
+        && !content[4..].lines().next().unwrap_or("").trim().is_empty()
+}
+
+/// Turns parser events into blocks.
+#[derive(Default)]
+struct BlockBuilder {
+    blocks: Vec<Block>,
+    current: Option<CurrentBlock>,
+    inline_style_stack: Vec<InlineStyleMarker>,
+    list_stack: Vec<ListState>,
+    quote_depth: usize,
+}
+
+impl BlockBuilder {
+    fn finish_current(&mut self) {
+        if let Some(done) = self.current.take() {
+            self.blocks.push(MarkdownView::finish_block(done));
+        }
+    }
+
+    fn push_text(&mut self, text: &str, inline_code: bool) {
+        MarkdownView::push_text_span(
+            &mut self.current,
+            &self.inline_style_stack,
+            text,
+            inline_code,
+        );
+    }
+
+    fn event(&mut self, event: Event<'_>) {
+        let quoted = self.quote_depth > 0;
+        match event {
+            Event::Start(tag) => match tag {
+                Tag::Paragraph => {
+                    self.finish_current();
+                    self.current = Some(CurrentBlock::Paragraph {
+                        spans: Vec::new(),
+                        quoted,
+                    });
+                }
+                Tag::Heading { level, .. } => {
+                    self.finish_current();
+                    self.current = Some(CurrentBlock::Heading {
+                        level,
+                        spans: Vec::new(),
+                        quoted,
+                    });
+                }
+                Tag::CodeBlock(_) => {
+                    self.finish_current();
+                    self.current = Some(CurrentBlock::CodeBlock {
+                        text: String::new(),
+                        quoted,
+                    });
+                }
+                Tag::List(start) => {
+                    let (ordered, first) = match start {
+                        Some(n) => (true, n),
+                        None => (false, 1),
+                    };
+                    self.list_stack.push(ListState {
+                        ordered,
+                        next_number: first,
+                    });
+                }
+                Tag::Item => {
+                    self.finish_current();
+                    let depth = self.list_stack.len().saturating_sub(1);
+                    let indent = depth * 2;
+                    let prefix = match self.list_stack.last_mut() {
+                        Some(last) if last.ordered => {
+                            let p = format!("{}. ", last.next_number);
+                            last.next_number += 1;
+                            p
+                        }
+                        _ => "• ".to_string(),
+                    };
+                    self.current = Some(CurrentBlock::ListItem {
+                        indent,
+                        prefix,
+                        spans: Vec::new(),
+                        quoted,
+                    });
+                }
+                Tag::BlockQuote(_) => self.quote_depth += 1,
+                Tag::Strong => self.inline_style_stack.push(InlineStyleMarker::Strong),
+                Tag::Emphasis => self.inline_style_stack.push(InlineStyleMarker::Emphasis),
+                Tag::Link { .. } => self.inline_style_stack.push(InlineStyleMarker::Link),
+                _ => {}
+            },
+            Event::End(tag) => match tag {
+                TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::Item => {
+                    self.finish_current();
+                }
+                TagEnd::List(_) => {
+                    self.list_stack.pop();
+                }
+                TagEnd::BlockQuote(_) => {
+                    self.quote_depth = self.quote_depth.saturating_sub(1);
+                }
+                TagEnd::Strong => self.pop_inline_style(InlineStyleMarker::Strong),
+                TagEnd::Emphasis => self.pop_inline_style(InlineStyleMarker::Emphasis),
+                TagEnd::Link => self.pop_inline_style(InlineStyleMarker::Link),
+                _ => {}
+            },
+            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
+                self.push_text(text.as_ref(), false);
+            }
+            Event::Code(text) => self.push_text(text.as_ref(), true),
+            Event::SoftBreak | Event::HardBreak => self.push_text("\n", false),
+            Event::Rule => self.blocks.push(Block::HorizontalRule),
+            Event::TaskListMarker(checked) => {
+                let marker = if checked { "[x] " } else { "[ ] " };
+                self.push_text(marker, false);
+            }
+            _ => {}
+        }
+    }
+
+    fn pop_inline_style(&mut self, marker: InlineStyleMarker) {
+        if let Some(pos) = self.inline_style_stack.iter().rposition(|m| *m == marker) {
+            self.inline_style_stack.remove(pos);
+        }
+    }
+
+    fn finish(mut self) -> Vec<Block> {
+        self.finish_current();
+        self.blocks
     }
 }
 
@@ -806,21 +879,6 @@ fn spans_to_plain_text(spans: &[StyledSpan]) -> String {
         out.push_str(&span.text);
     }
     out
-}
-
-fn append_plain_text_span(spans: &mut Vec<StyledSpan>, chunk: &str) {
-    let default_style = Style::new();
-    if let Some(last) = spans.last_mut() {
-        if last.style == default_style {
-            last.text.push_str(chunk);
-            return;
-        }
-    }
-
-    spans.push(StyledSpan {
-        text: chunk.to_string(),
-        style: default_style,
-    });
 }
 
 fn spans_to_lines(
@@ -1201,6 +1259,22 @@ mod tests {
     }
 
     #[test]
+    fn a_link_or_setext_heading_streamed_in_small_chunks_is_spoken_as_shown() {
+        // Neither the address nor the brackets.
+        assert_eq!(
+            spoken(&["", "See [te", "xt](ht", "tp://x) now"]),
+            "See |text now"
+        );
+        assert_eq!(
+            spoken(&["", "See [te", "xt](ht", "tp://x \"ti", "tle\") now"]),
+            "See |text now"
+        );
+        // The underline is not said, nor the line again in capitals.
+        assert_eq!(spoken(&["", "Title", "\n", "====="]), "Title");
+        assert_eq!(spoken(&["", "Title", "\n", "-", "--"]), "Title");
+    }
+
+    #[test]
     fn code_is_not_held_back() {
         let said = spoken(&["", "```\n", "let a = [1, 2];\n", "let b = `x`;\n"]);
         assert_eq!(said.replace('|', ""), "let a = [1, 2];\nlet b = `x`;");
@@ -1394,10 +1468,9 @@ mod tests {
     }
 
     #[test]
-    fn append_chunk_incrementally_extends_plain_paragraph() {
+    fn append_chunk_extends_a_plain_paragraph() {
         let mut view = MarkdownView::new("hello");
-
-        assert!(view.try_append_chunk_incrementally(" world", false));
+        view.append_chunk(" world");
 
         match view.blocks.last().expect("paragraph should exist") {
             Block::Paragraph { spans } => {
@@ -1408,10 +1481,9 @@ mod tests {
     }
 
     #[test]
-    fn append_chunk_incrementally_extends_open_code_block() {
+    fn append_chunk_extends_an_open_code_block() {
         let mut view = MarkdownView::new("```rust\nlet x = 1;");
-
-        assert!(view.try_append_chunk_incrementally("\nlet y = 2;", true));
+        view.append_chunk("\nlet y = 2;");
 
         match view.blocks.last().expect("code block should exist") {
             Block::CodeBlock { text } => {
@@ -1467,5 +1539,181 @@ mod tests {
 
         let ansi = render_ansi_text(&view, 40, 4);
         assert!(ansi.contains("hello world"));
+    }
+
+    /// A view streamed `chunks`, one `append_chunk` each.
+    fn streamed(chunks: &[&str]) -> MarkdownView {
+        let mut view = MarkdownView::new("");
+        for chunk in chunks {
+            view.append_chunk(chunk);
+        }
+        view
+    }
+
+    #[test]
+    fn a_link_streamed_in_small_chunks_resolves() {
+        let view = streamed(&["See [te", "xt](ht", "tp://x) now"]);
+        assert_eq!(
+            view.blocks,
+            MarkdownView::new("See [text](http://x) now").blocks
+        );
+        let Block::Paragraph { spans } = &view.blocks[0] else {
+            panic!("{:?}", view.blocks);
+        };
+        assert_eq!(spans_to_plain_text(spans), "See text now");
+        assert!(spans.iter().any(|s| s.text == "text" && s.style.underline));
+    }
+
+    #[test]
+    fn a_setext_underline_streamed_after_its_line_makes_a_heading() {
+        for underline in ["=", "=====", "---"] {
+            let view = streamed(&["Title", "\n", underline]);
+            assert_eq!(view.blocks.len(), 1, "{underline:?}");
+            assert!(
+                matches!(&view.blocks[0], Block::Heading { spans, .. }
+                    if spans_to_plain_text(spans).eq_ignore_ascii_case("title")),
+                "{underline:?}: {:?}",
+                view.blocks
+            );
+        }
+    }
+
+    #[test]
+    fn appending_parses_again_from_the_last_top_level_block_only() {
+        let mut view = MarkdownView::new("# One\n\n- a\n- b\n\nmiddle\n\nlast para");
+        assert_eq!(
+            view.reparse_from,
+            Some(ReparsePoint {
+                offset: "# One\n\n- a\n- b\n\nmiddle\n\n".len(),
+                blocks: 4,
+            })
+        );
+        view.append_chunk(" grows\n\nnext");
+        assert_eq!(
+            view.reparse_from.map(|p| p.offset),
+            Some("# One\n\n- a\n- b\n\nmiddle\n\nlast para grows\n\n".len())
+        );
+        // A block after a list may still become one of its items.
+        let mut list = MarkdownView::new("- a\n\n1");
+        assert_eq!(list.reparse_from.map(|p| p.offset), Some(0));
+        list.append_chunk(". b");
+        assert_eq!(list.blocks, MarkdownView::new("- a\n\n1. b").blocks);
+        assert_eq!(view.blocks, MarkdownView::new(view.source()).blocks);
+    }
+
+    #[test]
+    fn a_reference_definition_arriving_later_resolves_earlier_links() {
+        let view = streamed(&["See [docs].\n\nMore.\n\n", "[docs]: http://x\n"]);
+        assert_eq!(view.reparse_from, None);
+        let Block::Paragraph { spans } = &view.blocks[0] else {
+            panic!("{:?}", view.blocks);
+        };
+        assert!(spans.iter().any(|s| s.text == "docs" && s.style.underline));
+        assert_eq!(view.blocks, MarkdownView::new(view.source()).blocks);
+    }
+
+    /// Markdown pieces random documents are made of: inline and block
+    /// markers, words, and the line breaks between them.
+    const PIECES: &[&str] = &[
+        "word",
+        "two words",
+        " ",
+        " ",
+        "\n",
+        "\n",
+        "\n\n",
+        "**",
+        "*",
+        "_",
+        "__",
+        "`",
+        "``",
+        "~~",
+        "[",
+        "]",
+        "](",
+        ")",
+        "(http://x.y/z)",
+        "http://x",
+        "\"title\"",
+        "# ",
+        "## ",
+        "=",
+        "===",
+        "-",
+        "---",
+        "- ",
+        "* ",
+        "+ ",
+        "1. ",
+        "2) ",
+        "[ ] ",
+        "[x] ",
+        "- [ ] ",
+        "- [x] ",
+        "```",
+        "```rust",
+        "~~~",
+        "    ",
+        "  ",
+        "\t",
+        "> ",
+        "| a | b |",
+        "|---|---|",
+        "<b>",
+        "</b>",
+        "<div>",
+        "<!--",
+        "-->",
+        "\\",
+        "&amp;",
+        "é",
+        "中文",
+        "$x$",
+        ": ",
+        "+++",
+        "[r]",
+        "[r]: http://r\n",
+        "[^1]",
+        "[^1]: note\n",
+        "![alt](i.png)",
+        "<http://a>",
+    ];
+
+    fn markdown_document() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        proptest::collection::vec(proptest::sample::select(PIECES), 0..48)
+            .prop_map(|pieces| pieces.concat())
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
+
+        /// However a document is cut into chunks, appending them one by
+        /// one gives, after each, what parsing all of it at once gives.
+        #[test]
+        fn streaming_in_any_chunks_matches_parsing_all_at_once(
+            document in markdown_document(),
+            sizes in proptest::collection::vec(1usize..8, 1..6),
+            first in 0usize..3,
+        ) {
+            let chars: Vec<(usize, char)> = document.char_indices().collect();
+            let split = |n: usize| chars.get(n).map_or(document.len(), |(i, _)| *i);
+            let start = split(first.min(chars.len()));
+            let mut view = MarkdownView::new(&document[..start]);
+            let mut at = start;
+            let mut char_at = first.min(chars.len());
+            for size in sizes.iter().cycle() {
+                if at == document.len() {
+                    break;
+                }
+                char_at = (char_at + size).min(chars.len());
+                let end = split(char_at);
+                view.append_chunk(&document[at..end]);
+                at = end;
+                let whole = MarkdownView::new(&document[..at]);
+                proptest::prop_assert_eq!(&view.blocks, &whole.blocks, "after {:?}", &document[..at]);
+            }
+        }
     }
 }
