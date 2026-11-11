@@ -8,7 +8,8 @@
 use std::borrow::Cow;
 
 use super::cell::Color;
-use super::packed::{PackedRow, Style, StyleTable};
+use super::packed::{Style, StyleTable};
+use super::screen::{ScreenRow, ScreenRowMut};
 use super::{AnchorTag, Cell, CellFlags, Row, RowMarks};
 
 /// One row of a buffer: a screen row, or a scrollback row.
@@ -24,7 +25,7 @@ pub struct RowView<'a> {
 enum Inner<'a> {
     /// A screen row and the table its style ids are in.
     Screen {
-        row: &'a PackedRow,
+        row: ScreenRow<'a>,
         styles: &'a StyleTable,
     },
     Row(Cow<'a, Row>),
@@ -46,7 +47,7 @@ impl<'a> RowView<'a> {
         }
     }
 
-    pub(super) fn screen(row: &'a PackedRow, styles: &'a StyleTable) -> Self {
+    pub(super) fn screen(row: ScreenRow<'a>, styles: &'a StyleTable) -> Self {
         Self {
             inner: Inner::Screen { row, styles },
         }
@@ -209,20 +210,20 @@ impl<'a> RowView<'a> {
 /// and out by value; styles are interned in the grid's table as they go in.
 #[derive(Debug)]
 pub struct RowMut<'a> {
-    row: &'a mut PackedRow,
+    row: ScreenRowMut<'a>,
     styles: &'a mut StyleTable,
 }
 
 impl<'a> RowMut<'a> {
     /// The caller has collected the table if it was due: the handle
     /// interns without collecting.
-    pub(super) fn new(row: &'a mut PackedRow, styles: &'a mut StyleTable) -> Self {
+    pub(super) fn new(row: ScreenRowMut<'a>, styles: &'a mut StyleTable) -> Self {
         Self { row, styles }
     }
 
     /// The row as it is now, to read.
     pub fn view(&self) -> RowView<'_> {
-        RowView::screen(self.row, self.styles)
+        RowView::screen(self.row.as_ref(), self.styles)
     }
 
     /// The number of columns.
