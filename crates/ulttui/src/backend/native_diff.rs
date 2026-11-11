@@ -113,7 +113,7 @@ pub(crate) struct FrameNotes {
     pub(crate) arriving_prose: HashSet<RegionId>,
     /// Live regions whose text starts with this many bytes drawn but not
     /// said: a task list item's checkbox, which its semantics give as
-    /// `toggled`, or a list item that may yet turn out a task.
+    /// `toggled`.
     pub(crate) unspoken_prefix: HashMap<RegionId, usize>,
 }
 

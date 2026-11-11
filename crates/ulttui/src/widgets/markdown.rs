@@ -667,51 +667,50 @@ impl View for MarkdownView {
             style,
         })?;
 
-        let content = block_content(block);
         let arriving = self.streaming && index + 1 == self.blocks.len();
+        // An item still arriving that may yet turn out a task is drawn
+        // empty until that is known: its bullet would be said, or go.
+        let content = match block {
+            Block::ListItem {
+                spans, task: None, ..
+            } if arriving && may_become_task(spans) => Content::RichText(RichText::new()),
+            _ => block_content(block),
+        };
         let live = if arriving {
             self.accessible.live.unwrap_or(Live::Polite)
         } else {
             Live::Off
         };
+        if let Block::ListItem {
+            indent,
+            prefix,
+            task: Some(_),
+            ..
+        } = block
+        {
+            // The checkbox drawn before the text is the item's state.
+            record_unspoken_prefix(region_id, indent + prefix.len());
+        }
         let block_semantics = match block {
-            // A read-only checkbox named by its text: what the glyph drawn
-            // before the text says is its state, so it is not spoken.
+            // A read-only checkbox named by its text, its state `toggled`.
+            // Only once it has stopped arriving: a live node is announced
+            // again whenever its name changes, and a checkbox not named is
+            // named by its text, which grows.
             Block::ListItem {
-                indent,
-                prefix,
                 spans,
                 task: Some(checked),
-            } => {
-                record_unspoken_prefix(region_id, indent + prefix.len());
-                Semantics {
-                    role: Role::Checkbox,
-                    label: Some(spans_to_plain_text(spans).trim().to_string()),
-                    toggled: if *checked {
-                        Toggled::True
-                    } else {
-                        Toggled::False
-                    },
-                    read_only: true,
-                    live,
-                    ..Semantics::default()
-                }
-            }
-            // An item still arriving that may yet turn out a task says
-            // nothing, its bullet included, until it is known.
-            Block::ListItem {
-                indent,
-                prefix,
-                spans,
-                task: None,
-            } if arriving && may_become_task(spans) => {
-                let text = spans_to_plain_text(spans);
-                record_unspoken_prefix(region_id, indent + prefix.len() + text.len());
-                Semantics {
-                    live,
-                    ..Semantics::default()
-                }
-            }
+                ..
+            } if !arriving => Semantics {
+                role: Role::Checkbox,
+                label: Some(spans_to_plain_text(spans).trim().to_string()),
+                toggled: if *checked {
+                    Toggled::True
+                } else {
+                    Toggled::False
+                },
+                read_only: true,
+                ..Semantics::default()
+            },
             _ => Semantics {
                 live,
                 ..Semantics::default()
@@ -1879,5 +1878,30 @@ mod tests {
         ]);
         assert!(!said.contains('['), "{said:?}");
         assert_eq!(said.replace('|', ""), "buy milkdonelast• plain", "{said:?}");
+
+        // The terminal announces a live node when it is added and when its
+        // name changes: an item is a checkbox only once it is finished, and
+        // a region created live shows nothing it has not appended.
+        let (_, _, frames) = stream(&["", "- [ ] buy", " milk\n- ", "[x", "] done"]);
+        for frame in &frames {
+            for message in frame {
+                match message {
+                    AppMessage::SetSemantics { semantics, .. } if semantics.live != Live::Off => {
+                        assert_ne!(semantics.role, Role::Checkbox, "{frame:?}");
+                    }
+                    AppMessage::CreateRegion { id, .. } => {
+                        let appended = frame.iter().any(
+                            |m| matches!(m, AppMessage::AppendContent { id: a, .. } if a == id),
+                        );
+                        let shows_text = frame.iter().any(|m| {
+                            matches!(m, AppMessage::SetContent { id: s, content: Content::RichText(r) }
+                                if s == id && r.spans.iter().any(|span| !span.text.is_empty()))
+                        });
+                        assert!(appended || !shows_text, "{frame:?}");
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }
