@@ -40,8 +40,8 @@ impl From<mlua::Error> for ScriptError {
 /// How a script may run.
 #[derive(Debug, Clone)]
 pub struct ScriptOptions {
-    /// Whether `run{}` may start processes.
-    pub allow_exec: bool,
+    /// Which programs `run{}` may start.
+    pub exec: ExecGrant,
     /// Longest one call into the script (load, init, update, view) may take
     /// before it is stopped with an error.
     pub call_budget: Duration,
@@ -50,9 +50,47 @@ pub struct ScriptOptions {
 impl Default for ScriptOptions {
     fn default() -> Self {
         Self {
-            allow_exec: false,
+            exec: ExecGrant::Deny,
             call_budget: Duration::from_secs(1),
         }
+    }
+}
+
+/// Which programs `run{}` may start (ADR 0023 §3). Fixed for the life of
+/// the script: a reload cannot widen it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ExecGrant {
+    /// None: every `run{}` is an error.
+    #[default]
+    Deny,
+    /// Only these, compared to `argv[1]` exactly as the script wrote it
+    /// (`--exec PROG`).
+    Only(Vec<String>),
+    /// Anything (`--allow-exec`).
+    Any,
+}
+
+impl ExecGrant {
+    /// Whether `run{}` may start `program` (`argv[1]` as written).
+    pub fn allows(&self, program: &str) -> bool {
+        match self {
+            ExecGrant::Deny => false,
+            ExecGrant::Only(programs) => programs.iter().any(|p| p == program),
+            ExecGrant::Any => true,
+        }
+    }
+
+    /// The error `run{}` raises for a program this grant does not allow,
+    /// naming the flag that would.
+    fn denial(&self, program: &str) -> String {
+        let mut message =
+            format!("{program} is not allowed; open the script with --exec {program}");
+        if let ExecGrant::Only(programs) = self {
+            if !programs.is_empty() {
+                message.push_str(&format!(" (allowed: {})", programs.join(", ")));
+            }
+        }
+        message
     }
 }
 
@@ -166,7 +204,7 @@ impl Script {
         // versions (or another function's), past the per-load one.
         globals.raw_set("getfenv", Value::Nil)?;
         globals.raw_set("setfenv", Value::Nil)?;
-        install_api(&lua, &globals, options.allow_exec)?;
+        install_api(&lua, &globals, options.exec)?;
         // Freezes the globals and the libraries: scripts write to their own
         // environment (see `try_load`).
         lua.sandbox(true)?;
@@ -592,7 +630,7 @@ pub fn describe_error(error: &mlua::Error) -> String {
     }
 }
 
-fn install_api(lua: &Lua, globals: &Table, allow_exec: bool) -> mlua::Result<()> {
+fn install_api(lua: &Lua, globals: &Table, exec: ExecGrant) -> mlua::Result<()> {
     node::register(lua, globals)?;
 
     // The terminal is the UI: `print` goes to the log, with where it was called.
@@ -635,15 +673,13 @@ fn install_api(lua: &Lua, globals: &Table, allow_exec: bool) -> mlua::Result<()>
     globals.set(
         "run",
         lua.create_function(move |lua, spec: Value| {
-            if !allow_exec {
-                return Err(located(
-                    lua,
-                    "run: running processes is off; start ulttui-lua with --allow-exec",
-                ));
+            let command = parse_run(spec).map_err(|e| located(lua, format!("run: {e}")))?;
+            if let Command::Run { argv, .. } = &command {
+                if !exec.allows(&argv[0]) {
+                    return Err(located(lua, format!("run: {}", exec.denial(&argv[0]))));
+                }
             }
-            parse_run(spec)
-                .map(CommandHandle)
-                .map_err(|e| located(lua, format!("run: {e}")))
+            Ok(CommandHandle(command))
         })?,
     )?;
 

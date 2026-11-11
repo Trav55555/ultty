@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use mlua::Value;
-use ulttui_lua::{Command, Reload, Script, ScriptMsg, ScriptOptions};
+use ulttui_lua::{Command, ExecGrant, Reload, Script, ScriptMsg, ScriptOptions};
 
 use crate::common::{load, messages, texts, write};
 
@@ -201,7 +201,7 @@ return app {
 "#;
 
 #[test]
-fn run_is_refused_without_allow_exec() {
+fn run_is_refused_without_a_grant() {
     let mut script = load("run-off", RUNNER, ScriptOptions::default());
     assert!(script.update(&key("r")).is_empty());
     let error = script.error().unwrap();
@@ -209,16 +209,77 @@ fn run_is_refused_without_allow_exec() {
     assert_eq!(
         error,
         format!(
-            "update: {}:6: run: running processes is off; start ulttui-lua with --allow-exec",
+            "update: {}:6: run: ls is not allowed; open the script with --exec ls",
             path.display()
         )
     );
 }
 
 #[test]
-fn run_and_quit_become_commands_with_allow_exec() {
+fn run_allows_only_the_granted_programs() {
     let options = ScriptOptions {
-        allow_exec: true,
+        exec: ExecGrant::Only(vec!["ls".into(), "ulttyctl".into()]),
+        ..ScriptOptions::default()
+    };
+    let mut script = load("run-only", RUNNER, options);
+    assert_eq!(
+        script.update(&key("r")),
+        [Command::Run {
+            id: "ls".into(),
+            argv: vec!["ls".into(), "-l".into()]
+        }]
+    );
+    assert_eq!(script.error(), None);
+    // `m` runs `true`, which was not granted: nothing runs, not even `quit()`.
+    assert!(script.update(&key("m")).is_empty());
+    let path = crate::common::script_path("run-only");
+    assert_eq!(
+        script.error().unwrap(),
+        format!(
+            "update: {}:8: run: true is not allowed; open the script with --exec true (allowed: ls, ulttyctl)",
+            path.display()
+        )
+    );
+}
+
+#[test]
+fn exec_grants_compare_the_program_as_written() {
+    let grant = ExecGrant::Only(vec!["git".into()]);
+    assert!(grant.allows("git"));
+    assert!(!grant.allows("/usr/bin/git"));
+    assert!(!grant.allows("gi"));
+    assert!(ExecGrant::Any.allows("/usr/bin/git"));
+    assert!(!ExecGrant::Deny.allows("git"));
+}
+
+#[test]
+fn a_script_can_catch_a_denied_run() {
+    let source = r#"
+return app {
+  init = function() return { err = "" } end,
+  update = function(state, msg)
+    local ok, err = pcall(run, { id = "x", argv = { "rm", "-rf", "/" } })
+    state.err = ok and "ran" or tostring(err)
+    return state
+  end,
+  view = function() return text("x") end,
+}
+"#;
+    let mut script = load("run-pcall", source, ScriptOptions::default());
+    script.update(&key("a"));
+    // Caught: no banner, and the message is the script's to show.
+    assert_eq!(script.error(), None);
+    let caught = string(&script, "state.err");
+    assert!(
+        caught.contains("run: rm is not allowed; open the script with --exec rm"),
+        "{caught}"
+    );
+}
+
+#[test]
+fn run_and_quit_become_commands_with_exec_any() {
+    let options = ScriptOptions {
+        exec: ExecGrant::Any,
         ..ScriptOptions::default()
     };
     let mut script = load("run-on", RUNNER, options);
@@ -245,7 +306,7 @@ fn run_and_quit_become_commands_with_allow_exec() {
 #[test]
 fn malformed_run_calls_are_errors() {
     let options = ScriptOptions {
-        allow_exec: true,
+        exec: ExecGrant::Any,
         ..ScriptOptions::default()
     };
     let cases = [
@@ -278,7 +339,7 @@ fn malformed_run_calls_are_errors() {
 #[test]
 fn init_can_start_commands() {
     let options = ScriptOptions {
-        allow_exec: true,
+        exec: ExecGrant::Any,
         ..ScriptOptions::default()
     };
     let mut script = Script::new(

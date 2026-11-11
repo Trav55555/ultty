@@ -1,33 +1,36 @@
-//! `ulttui-lua [--allow-exec] [--log FILE] SCRIPT.luau`
+//! `ulttui-lua [--exec PROG]... [--allow-exec] [--log FILE] SCRIPT.luau`
 
 use std::path::PathBuf;
 
 use anyhow::Context;
 use ulttui::app::App;
 use ulttui_lua::runner::watch_file;
-use ulttui_lua::{LuaApp, ScriptOptions};
+use ulttui_lua::{ExecGrant, LuaApp, ScriptOptions};
 
-const USAGE: &str = "usage: ulttui-lua [--allow-exec] [--log FILE] SCRIPT.luau
+const USAGE: &str = "usage: ulttui-lua [--exec PROG]... [--allow-exec] [--log FILE] SCRIPT.luau
 
 Runs a Luau ulttui app and reloads it whenever the file is saved.
 
-    --allow-exec   let the script run processes with run{}
+    --exec PROG    let the script run PROG with run{} (repeatable)
+    --allow-exec   let the script run any program
     --log FILE     write logs (including reload timings) to FILE";
 
 #[derive(Debug, PartialEq)]
 struct Args {
     script: PathBuf,
-    allow_exec: bool,
+    exec: ExecGrant,
     log: Option<PathBuf>,
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut script = None;
-    let mut allow_exec = false;
+    let mut programs = Vec::new();
+    let mut allow_any = false;
     let mut log = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--allow-exec" => allow_exec = true,
+            "--exec" => programs.push(args.next().ok_or("--exec needs a program")?),
+            "--allow-exec" => allow_any = true,
             "--log" => log = Some(PathBuf::from(args.next().ok_or("--log needs a file")?)),
             "-h" | "--help" => return Err(String::new()),
             flag if flag.starts_with('-') => return Err(format!("unknown option {flag}")),
@@ -35,9 +38,16 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             extra => return Err(format!("unexpected argument {extra}")),
         }
     }
+    let exec = if allow_any {
+        ExecGrant::Any
+    } else if programs.is_empty() {
+        ExecGrant::Deny
+    } else {
+        ExecGrant::Only(programs)
+    };
     Ok(Args {
         script: script.ok_or("no script given")?,
-        allow_exec,
+        exec,
         log,
     })
 }
@@ -66,10 +76,11 @@ fn main() -> anyhow::Result<()> {
             .with_ansi(false)
             .init();
     }
+    tracing::info!(script = %args.script.display(), exec = ?args.exec, "starting");
     let app = LuaApp::new(
         &args.script,
         ScriptOptions {
-            allow_exec: args.allow_exec,
+            exec: args.exec,
             ..ScriptOptions::default()
         },
     )?;
@@ -93,16 +104,29 @@ mod tests {
     }
 
     #[test]
-    fn exec_is_off_unless_asked_for() {
-        assert!(!parse("app.luau").unwrap().allow_exec);
+    fn exec_is_denied_unless_granted() {
+        assert_eq!(parse("app.luau").unwrap().exec, ExecGrant::Deny);
+        assert_eq!(
+            parse("--exec git --exec ulttyctl app.luau").unwrap(),
+            Args {
+                script: "app.luau".into(),
+                exec: ExecGrant::Only(vec!["git".into(), "ulttyctl".into()]),
+                log: None,
+            }
+        );
         let args = parse("--allow-exec --log out.log app.luau").unwrap();
         assert_eq!(
             args,
             Args {
                 script: "app.luau".into(),
-                allow_exec: true,
+                exec: ExecGrant::Any,
                 log: Some("out.log".into()),
             }
+        );
+        // The broad flag wins over named programs.
+        assert_eq!(
+            parse("--exec git --allow-exec app.luau").unwrap().exec,
+            ExecGrant::Any
         );
     }
 
@@ -110,6 +134,7 @@ mod tests {
     fn bad_command_lines_are_rejected() {
         assert!(parse("").is_err());
         assert!(parse("--exec app.luau").is_err());
+        assert!(parse("--allow app.luau").is_err());
         assert!(parse("a.luau b.luau").is_err());
         assert!(parse("app.luau --log").is_err());
     }

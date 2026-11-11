@@ -100,7 +100,7 @@ app_pane=$("$ULTTYCTL" --json panes | python3 -c '
 import json, sys
 print(next(p["id"] for p in json.load(sys.stdin)["panes"] if p["tab_index"] == 0))')
 
-"$ULTTYCTL" send-text "PATH=$out/bin:\$PATH exec $ULTTUI_LUA --allow-exec --log $out/lua.log $out/panes.luau" >/dev/null
+"$ULTTYCTL" send-text "PATH=$out/bin:\$PATH exec $ULTTUI_LUA --exec ulttyctl --log $out/lua.log $out/panes.luau" >/dev/null
 "$ULTTYCTL" send-key enter >/dev/null
 
 # `regions --json` for the app's tab, saved as $out/<name>.json.
