@@ -455,6 +455,10 @@ pub struct OverrideFile {
     /// A pushed Luau override: replaces `script` while it is in force.
     #[cfg(feature = "lua-overrides")]
     pushed_luau: Option<Rc<OverrideScript>>,
+    /// Whether overrides are on at all. Off ([`OverrideFile::disabled`]:
+    /// `ULTTUI_NO_OVERRIDES`, no usable app name, a mock backend) refuses
+    /// pushes too, as ADR 0023 §2 promises.
+    enabled: bool,
     current: Rc<Overrides>,
 }
 
@@ -479,6 +483,7 @@ impl OverrideFile {
         let mut file = Self {
             toml: toml.map(Source::new),
             luau: luau.map(Source::new),
+            enabled: true,
             ..Self::default()
         };
         file.refresh();
@@ -585,6 +590,11 @@ impl OverrideFile {
     /// its format would be, and a source that does not parse changes
     /// nothing and is the error. Returns whether the overrides changed.
     pub fn push(&mut self, pushed: Option<&PushedOverride>) -> Result<bool, String> {
+        if !self.enabled {
+            return Err(format!(
+                "overrides are off in this app ({DISABLE_ENV} is set, or it has no usable app name); nothing pushed"
+            ));
+        }
         match pushed {
             None => {
                 self.pushed_toml = None;
@@ -1247,12 +1257,37 @@ mod tests {
     #[cfg(not(feature = "lua-overrides"))]
     #[test]
     fn without_the_feature_a_pushed_luau_override_is_refused() {
-        let mut file = OverrideFile::disabled();
+        let dir = scratch_dir("push-no-luau");
+        let mut file = OverrideFile::at(dir.join("absent.toml"));
         let err = file
             .push(Some(&pushed(OverrideFormat::Luau, "return {}")))
             .unwrap_err();
         assert!(err.contains("lua-overrides"), "{err}");
         assert!(file.overrides().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Overrides that are off (`ULTTUI_NO_OVERRIDES`, no app name) stay off
+    /// for pushes too; the push is refused with a reason, not applied.
+    #[test]
+    fn a_push_into_disabled_overrides_is_refused() {
+        let mut file = OverrideFile::disabled();
+        let err = file
+            .push(Some(&pushed(
+                OverrideFormat::Toml,
+                "[widget.a]\nhidden = true\n",
+            )))
+            .unwrap_err();
+        assert!(err.contains("overrides are off"), "{err}");
+        assert!(file.overrides().is_empty());
+        let err = file.push(None).unwrap_err();
+        assert!(err.contains("overrides are off"), "{err}");
+
+        // The environment switch is what disables them.
+        let resolved = resolve_path("app", |key| {
+            (key == DISABLE_ENV).then(|| OsString::from("1"))
+        });
+        assert_eq!(resolved, None);
     }
 
     #[cfg(feature = "lua-overrides")]

@@ -11,8 +11,8 @@ use bytes::BytesMut;
 use ultty_protocol::{
     AppMessage, ComputedRegionLayout, Content, FrameId, InputEvent, InputType, Key, Modifiers,
     PushedOverride, RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_INPUT_CURSOR,
-    CAP_REGION_METADATA, CAP_SEMANTICS, CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY, EVENT_MOUSE,
-    EVENT_SCROLL, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    CAP_OVERRIDE_PUSH, CAP_REGION_METADATA, CAP_SEMANTICS, CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY,
+    EVENT_MOUSE, EVENT_SCROLL, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
 use crate::event::Event;
@@ -50,6 +50,12 @@ fn name_new_regions(messages: &mut Vec<AppMessage>, tree: &RetainedTree) {
 
 /// How long the terminal has to answer `ClientHello` with `SessionReady`.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// What this backend asks the terminal for: the client defaults, plus
+/// pushed overrides (ADR 0023 §9), which it answers through
+/// [`NativeBackend::send_override_result`]. A client that does not answer
+/// `SetOverride` must not ask for that bit.
+pub const REQUESTED_CAPABILITIES: u32 = CLIENT_DEFAULT_CAPABILITIES | CAP_OVERRIDE_PUSH;
 
 pub struct NativeBackend {
     stream: Option<UnixStream>,
@@ -158,7 +164,12 @@ impl NativeBackend {
     fn init_in_band(&mut self) -> crate::Result<()> {
         let mut tty = in_band::InBandTty::open()?;
         let mut received = Vec::new();
-        if !in_band::probe(&mut tty, &mut received, in_band::PROBE_TIMEOUT)? {
+        if !in_band::probe(
+            &mut tty,
+            &mut received,
+            in_band::PROBE_TIMEOUT,
+            REQUESTED_CAPABILITIES,
+        )? {
             return Err(crate::Error::NativeUnavailable(
                 "the terminal does not answer the in-band probe",
             ));
@@ -408,7 +419,7 @@ impl NativeBackend {
     fn send_client_hello(&mut self) -> crate::Result<()> {
         let msg = AppMessage::ClientHello {
             version: PROTOCOL_VERSION,
-            requested_capabilities: CLIENT_DEFAULT_CAPABILITIES,
+            requested_capabilities: REQUESTED_CAPABILITIES,
         };
         self.send_message(&msg)
     }
@@ -718,6 +729,16 @@ mod tests {
         let fake = std::thread::spawn(move || {
             let mut hello = [0u8; 14];
             terminal.read_exact(&mut hello).unwrap();
+            // This backend answers SetOverride, so it asks for pushes.
+            let decoded = <AppMessage as ultty_protocol::Decode>::decode(&mut &hello[..]).unwrap();
+            assert!(
+                matches!(
+                    decoded,
+                    AppMessage::ClientHello { requested_capabilities, .. }
+                        if requested_capabilities & ultty_protocol::CAP_OVERRIDE_PUSH != 0
+                ),
+                "{decoded:?}"
+            );
             for msg in [
                 TerminalMessage::ServerHello {
                     version: ultty_protocol::PROTOCOL_VERSION,

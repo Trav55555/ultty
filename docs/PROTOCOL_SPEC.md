@@ -161,7 +161,7 @@ App                                          Terminal
 | `CAP_INPUT_CURSOR` | `0x0400` |
 | `CAP_OVERRIDE_PUSH` | `0x0800` |
 
-`CAP_ALL_KNOWN` is the OR of those bits. Capabilities are negotiated as `requested & supported`; the version is `min(client, server)`. A version below `MIN_PROTOCOL_VERSION` is rejected with `Error` 426.
+`CAP_ALL_KNOWN` is the OR of those bits. `CLIENT_DEFAULT_CAPABILITIES`, what a client asks for unless it has reason not to, is `CAP_ALL_KNOWN` without `CAP_OVERRIDE_PUSH`: that bit commits the client to answering `SetOverride` (section 10.7), so only a client with that code adds it. Capabilities are negotiated as `requested & supported`; the version is `min(client, server)`. A version below `MIN_PROTOCOL_VERSION` is rejected with `Error` 426.
 
 | Response | Payload in encoding order |
 |----------|---------------------------|
@@ -632,9 +632,9 @@ A user override ([ADR 0023](adr/0023-ulttui-overrides.md) §9) is a TOML or Luau
 | `SetOverride` | terminal → app | `0x0080` | `request_id: u32`, `pushed: Option<(format: u8, source: string)>` |
 | `OverrideResult` | app → terminal | `0x0080` | `request_id: u32`, `error: Option<string>` |
 
-`format` is `Toml=0` or `Luau=1`; another value is a decode error. `source` is the file's text, at most 1 MiB (`MAX_OVERRIDE_SOURCE_LEN`, the override file limit and the string limit). `pushed` absent means: clear the pushed override.
+`format` is `Toml=0` or `Luau=1`; another value is a decode error. `source` is the file's text, at most 128 KiB (`MAX_OVERRIDE_SOURCE_LEN`): smaller than the 1 MiB override file limit because the push travels in a control request capped at 1 MiB of JSON, which escaping can grow up to six times. `pushed` absent means: clear the pushed override.
 
-The terminal sends `SetOverride` only to a session that negotiated `CAP_OVERRIDE_PUSH`, and answers the control request with an error for one that did not, so an app built before this capability never receives the message. An app that negotiated it must answer every `SetOverride` with an `OverrideResult` carrying the same `request_id`: `error` absent when the override was applied (or cleared), otherwise why it was not, in the words the app would log for a bad file (a parse error, an unknown setting, a Luau file sent to an app built without Luau). A failed push leaves the app's overrides as they were.
+The terminal sends `SetOverride` only to a session that negotiated `CAP_OVERRIDE_PUSH`, and answers the control request with an error for one that did not, so an app built before this capability never receives the message. A client asks for the bit only if it answers the message; `CLIENT_DEFAULT_CAPABILITIES` leaves it out (section 2.1). An app that negotiated it must answer every `SetOverride` with an `OverrideResult` carrying the same `request_id`: `error` absent when the override was applied (or cleared), otherwise why it was not, in the words the app would log for a bad file (a parse error, an unknown setting, a Luau file sent to an app built without Luau, an app whose overrides are off). A failed push leaves the app's overrides as they were. The terminal keeps the `request_id`s it sent a session and ignores an `OverrideResult` for any other, or a second one for the same id, so a session cannot make it hold answers nobody asked for.
 
 The app keeps one pushed override, in memory, over its files: a push replaces the previous push, the files keep reloading underneath, and a clear removes it. `ulttyctl` reports the app's `error` and exits non-zero; Ultty answers for the app when the pane has no native session or the session does not answer within 5 s. Only the terminal can start a push, so a remote host at the other end of an in-band session cannot push into the user's apps.
 

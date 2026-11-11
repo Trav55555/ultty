@@ -139,8 +139,12 @@ pub const CAP_ALL_KNOWN: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_INPUT_CURSOR
     | CAP_OVERRIDE_PUSH;
 
-/// Default capability request for current clients.
-pub const CLIENT_DEFAULT_CAPABILITIES: u32 = CAP_ALL_KNOWN;
+/// Default capability request for current clients: every known capability
+/// a client gets by decoding what the terminal sends. `CAP_OVERRIDE_PUSH`
+/// is left out, because a client that negotiates it must answer
+/// `SetOverride` with `OverrideResult`; a client with that code (`ulttui`'s
+/// native backend) adds the bit itself.
+pub const CLIENT_DEFAULT_CAPABILITIES: u32 = CAP_ALL_KNOWN & !CAP_OVERRIDE_PUSH;
 
 /// Negotiate a protocol version for a client/server pair.
 pub const fn negotiate_protocol_version(client_version: u16, server_version: u16) -> Option<u16> {

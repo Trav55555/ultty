@@ -3499,8 +3499,9 @@ mod tests {
         use crate::{
             CAP_ALL_KNOWN, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, CAP_INPUT_CURSOR,
             CAP_LAYOUT_FLEXBOX, CAP_OVERRIDE_PUSH, CAP_REGION_METADATA, CAP_SEMANTICS,
-            CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, MAX_SURFACES, MAX_SURFACE_ROWS,
-            MIN_PROTOCOL_VERSION, MIN_SURFACE_ROWS, PROTOCOL_VERSION,
+            CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, CLIENT_DEFAULT_CAPABILITIES,
+            MAX_OVERRIDE_SOURCE_LEN, MAX_SURFACES, MAX_SURFACE_ROWS, MIN_PROTOCOL_VERSION,
+            MIN_SURFACE_ROWS, PROTOCOL_VERSION,
         };
         assert_eq!(CAP_LAYOUT_FLEXBOX, 0x0001);
         assert_eq!(CAP_WIDGET_SCROLL, 0x0010);
@@ -3512,6 +3513,9 @@ mod tests {
         assert_eq!(CAP_INPUT_CURSOR, 0x0400);
         assert_eq!(CAP_OVERRIDE_PUSH, 0x0800);
         assert_eq!(CAP_ALL_KNOWN, 0x0FF1);
+        // A client must answer SetOverride to ask for the bit (section 10.7).
+        assert_eq!(CLIENT_DEFAULT_CAPABILITIES, 0x07F1);
+        assert_eq!(MAX_OVERRIDE_SOURCE_LEN, 128 * 1024);
         assert_eq!((MIN_SURFACE_ROWS, MAX_SURFACE_ROWS), (1, 128));
         assert_eq!(MAX_SURFACES, 16);
         assert_eq!(PROTOCOL_VERSION, 1);

@@ -33,11 +33,15 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 - `ulttyctl override push <file>` and `override clear` (ADR 0023 §9): try a
   user override on the native `ulttui` app in a pane without writing it
   under `~/.config`. The override applies on the app's next frame, in
-  memory over its files; a bad one is refused with the app's parse error.
-  New protocol messages `SetOverride` and `OverrideResult` (both `0x0080`)
-  behind `CAP_OVERRIDE_PUSH` (`0x0800`); apps on older `ulttui` are told
-  apart and refused cleanly. `ulttyctl mcp` serves them as
-  `ultty_push_override` and `ultty_clear_override`.
+  memory over its files; a bad one is refused with the app's parse error,
+  as is any push to an app with `ULTTUI_NO_OVERRIDES` set. A pushed file
+  is at most 128 KiB. New protocol messages `SetOverride` and
+  `OverrideResult` (both `0x0080`) behind `CAP_OVERRIDE_PUSH` (`0x0800`),
+  which `CLIENT_DEFAULT_CAPABILITIES` leaves out (a client asks for it
+  only if it answers `SetOverride`; `ulttui`'s native backend does), so
+  apps on older `ulttui` and raw `ultty-client` apps are refused cleanly.
+  `ulttyctl mcp` serves them as `ultty_push_override` and
+  `ultty_clear_override`.
 - Text editing in `ulttui` and `ulttui-lua`: `ulttui::edit` (cursor moves,
   word motions, deletes at the cursor, by grapheme cluster), used by
   `TextInput`'s insert mode and by Lua `input` nodes, which take `cursor`

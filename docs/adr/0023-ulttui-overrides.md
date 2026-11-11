@@ -277,12 +277,13 @@ cannot reach. A pane with no native app answers an error saying so.
 
 **Which session.** A push targets a pane (`--pane N`, else the focused
 one), and the sessions Ultty knows belong to a tab (spec §1.2), not a
-pane. Of the sessions in the pane's tab: one session is the one; of
-several, the one whose process is in the pane's foreground process group
-(the rule key input already uses); none in the foreground, or no session
-at all, is an error naming the pane. When sessions map to panes (the A1
-follow-up in `docs/agent-tui-plan.md`), the first rule becomes "the pane's
-session" and the rest goes.
+pane. Of the sessions in the pane's tab, the one whose process is in the
+pane's foreground process group gets it (the rule key input already
+uses), even when it is the only session: the shell pane of a split tab
+has no native app in its foreground, so a push aimed at it is refused
+rather than landing in the neighbouring pane's app. No such session is an
+error naming the pane. When sessions are bound to panes (ADR 0025), this
+becomes "the pane's session" and the group check goes.
 
 **Semantics.** A pushed override lives in the app's memory, for that
 process, and is one layer: a second push replaces the first. It sits over
@@ -303,18 +304,28 @@ to learn the app's name and config directory from the app (open question
 
 **Errors.** The app parses the source with the same code that reads its
 files (`Overrides::parse`, `OverrideScript::load`), so a push can fail for
-every reason a file can, and for one more: a Luau push to an app built
-without `lua-overrides`. The app sends the reason back in
+every reason a file can, and for two more: a Luau push to an app built
+without `lua-overrides`, and a push to an app whose overrides are off
+(`ULTTUI_NO_OVERRIDES`, or no usable app name, §2: the switch turns
+overrides off whatever their source). The app sends the reason back in
 `OverrideResult`, and `ulttyctl` prints it and exits 1. A failed push
 leaves the overrides in force unchanged, as a bad file reload does (§6).
 Ultty answers for the app when it cannot: no native app in the pane; an
 app that did not negotiate the capability; an app that does not answer
-within 5 s or disconnects first.
+within 5 s or disconnects first. An answer that arrives in the same read
+as the app's exit still counts: the server keeps a closing session's
+answers for the control plane.
 
 **Capability.** `CAP_OVERRIDE_PUSH` (`0x0800`). Ultty sends `SetOverride`
 only to a session that negotiated it, and answers the control request with
 an error otherwise, so an app built before this never sees a message it
-cannot decode. An app that negotiated it must answer every `SetOverride`.
+cannot decode. Asking for the bit is a promise to answer, so
+`CLIENT_DEFAULT_CAPABILITIES` leaves it out and only `ulttui`'s native
+backend adds it; a raw `ultty-client` app (an inline card, `hello-native`)
+is refused at once rather than timing out. Ultty remembers the request ids
+it sent each session and drops any `OverrideResult` it is not waiting for,
+so a session (an in-band one on a remote host included) cannot make it
+queue answers without end.
 
 **Security.** The control socket is in the user's runtime directory
 (mode 0700) and every request that touches a pane needs the token Ultty
@@ -323,9 +334,12 @@ who can push an override can already type into the user's shell with
 `send-text`; the push gives no power over the app the files do not. A
 pushed Luau file runs in the app's `ulttui::lua_sandbox` with the
 override budget (§8: 2 ms a call, 8 ms a frame, 4 MiB), so it cannot
-start a process or read a file. The source is at most 1 MiB, the file
-limit (§6), checked by `ulttyctl` before sending and by Ultty before
-relaying (the protocol's string limit is the same). The message travels
+start a process or read a file. The source is at most 128 KiB
+(`MAX_OVERRIDE_SOURCE_LEN`), checked by `ulttyctl` before sending and by
+Ultty before relaying: less than the 1 MiB file limit (§6) because the
+push rides in a control request capped at 1 MiB of JSON, which escaping
+can grow up to six times, so the source limit is the one a user meets,
+never the request cap. The message travels
 only terminal to app, so a remote host at the other end of an in-band
 session (spec §1.3) cannot push anything into the user's apps; it can
 receive a push, which runs in the app's sandbox on that host.

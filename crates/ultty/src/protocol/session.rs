@@ -76,6 +76,9 @@ const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_INPUT_CURSOR
     | CAP_OVERRIDE_PUSH;
 
+/// Most `SetOverride` request ids a session waits on answers for at once.
+const MAX_AWAITED_OVERRIDE_RESULTS: usize = 64;
+
 /// An in-band session with no traffic from its app for this long has ended.
 /// Clients send a heartbeat (an unsolicited `Pong`) at least every few
 /// seconds while idle. The terminal never pings in-band: if the app has
@@ -168,6 +171,13 @@ pub struct NativeSession {
     pending_clipboard_get: bool,
     /// Pending clipboard set request.
     pending_clipboard_set: Option<String>,
+    /// Request ids of `SetOverride`s sent and not yet answered, oldest
+    /// first; an `OverrideResult` for any other id is dropped, so the app
+    /// cannot make the terminal hold answers nobody asked for. At most
+    /// [`MAX_AWAITED_OVERRIDE_RESULTS`]: the control plane gives up on a
+    /// push after a few seconds, so an id that stays here is one it has
+    /// already answered for.
+    awaited_override_results: VecDeque<u32>,
     /// Answers to `SetOverride` the app sent and the control plane has not
     /// taken: request id and the app's error, if any (ADR 0023 §9).
     pending_override_results: Vec<(u32, Option<String>)>,
@@ -322,6 +332,7 @@ impl NativeSession {
             active_streams: HashMap::new(),
             pending_clipboard_get: false,
             pending_clipboard_set: None,
+            awaited_override_results: VecDeque::new(),
             pending_override_results: Vec::new(),
             style_animations: HashMap::new(),
             last_activity: std::time::Instant::now(),
@@ -1149,7 +1160,36 @@ impl NativeSession {
         request_id: u32,
         pushed: Option<PushedOverride>,
     ) -> io::Result<()> {
-        self.send_message(&TerminalMessage::SetOverride { request_id, pushed })
+        self.send_message(&TerminalMessage::SetOverride { request_id, pushed })?;
+        if self.awaited_override_results.len() >= MAX_AWAITED_OVERRIDE_RESULTS {
+            self.awaited_override_results.pop_front();
+        }
+        self.awaited_override_results.push_back(request_id);
+        Ok(())
+    }
+
+    /// Keep an `OverrideResult` the control plane is waiting for; drop one
+    /// nobody asked for, or a second answer to the same push. Returns
+    /// whether it was kept.
+    pub(super) fn accept_override_result(
+        &mut self,
+        request_id: u32,
+        error: Option<String>,
+    ) -> bool {
+        let Some(at) = self
+            .awaited_override_results
+            .iter()
+            .position(|&id| id == request_id)
+        else {
+            debug!(
+                "Session {} answered override push {} nobody is waiting for; dropped",
+                self.session_id, request_id
+            );
+            return false;
+        };
+        self.awaited_override_results.remove(at);
+        self.pending_override_results.push((request_id, error));
+        true
     }
 
     /// The app's answers to `SetOverride` since the last call.
@@ -1292,6 +1332,34 @@ mod tests {
             shown,
             "an answer changes nothing the app shows"
         );
+
+        // Answers nobody asked for, and a second answer to a push already
+        // answered, are dropped rather than queued: an app (an in-band one
+        // on a remote host too) cannot grow the terminal's memory with them.
+        for request_id in [3, 4, 99, 100, 101] {
+            session
+                .handle_message(AppMessage::OverrideResult {
+                    request_id,
+                    error: Some("x".repeat(1000)),
+                })
+                .unwrap();
+        }
+        assert!(session.take_override_results().is_empty());
+        assert!(session.pending_override_results.is_empty());
+
+        // The ids a session waits on are bounded too.
+        for request_id in 0..(MAX_AWAITED_OVERRIDE_RESULTS as u32 + 8) {
+            session.send_set_override(request_id, None).unwrap();
+        }
+        assert_eq!(
+            session.awaited_override_results.len(),
+            MAX_AWAITED_OVERRIDE_RESULTS
+        );
+        assert!(
+            !session.accept_override_result(0, None),
+            "the oldest was forgotten"
+        );
+        assert!(session.accept_override_result(8, None));
     }
 
     #[test]

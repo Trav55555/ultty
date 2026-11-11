@@ -7,9 +7,15 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Most bytes of override source one push may carry: the override file
-/// limit, which is also the protocol's string limit.
-pub const MAX_OVERRIDE_SOURCE_LEN: usize = 1024 * 1024;
+/// Most bytes of override source one push may carry.
+///
+/// Smaller than the 1 MiB override file limit because the push travels in
+/// a control request, which the control socket caps at 1 MiB of JSON. JSON
+/// escaping can grow text up to six times (a control character becomes
+/// `\u00XX`), so 128 KiB of source always fits with room for the envelope,
+/// and a push is refused for its size only by this limit, never by the
+/// request cap.
+pub const MAX_OVERRIDE_SOURCE_LEN: usize = 128 * 1024;
 
 /// The language an override source is written in.
 ///

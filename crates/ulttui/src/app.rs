@@ -2438,6 +2438,13 @@ mod async_tests {
         mock.override_results.clone()
     }
 
+    /// Overrides on, from a file that does not exist: what an app whose
+    /// user has written nothing yet runs with.
+    fn enabled_overrides() -> crate::overrides::OverrideFile {
+        let dir = std::env::temp_dir().join(format!("ulttui-app-overrides-{}", std::process::id()));
+        crate::overrides::OverrideFile::at(dir.join("absent.toml"))
+    }
+
     /// An override the terminal pushes (ADR 0023 §9) shows on the next
     /// frame without any event, is answered, and a clear takes it away.
     #[test]
@@ -2445,7 +2452,8 @@ mod async_tests {
         let keys = Arc::new(Mutex::new(Vec::new()));
         let mut mock = MockBackend::new(vec![]).blocking_when_exhausted();
         mock.push_override(7, toml_push("[widget.b]\ntext = \"Pushed\"\n"));
-        let mut runner = App::new_with_backend(KeyLogApp { keys }, Backend::Mock(mock));
+        let mut runner = App::new_with_backend(KeyLogApp { keys }, Backend::Mock(mock))
+            .override_file(enabled_overrides());
         let rt = test_runtime();
         runner.render().unwrap();
         assert_eq!(rendered_labels(&runner), ["A", "B"]);
@@ -2478,7 +2486,8 @@ mod async_tests {
                     .to_string(),
             }),
         );
-        let mut runner = App::new_with_backend(KeyLogApp { keys }, Backend::Mock(mock));
+        let mut runner = App::new_with_backend(KeyLogApp { keys }, Backend::Mock(mock))
+            .override_file(enabled_overrides());
         let rt = test_runtime();
         runner.render().unwrap();
 
@@ -2495,6 +2504,28 @@ mod async_tests {
         assert!(runner.run_tick(&rt).unwrap());
         assert_eq!(rendered_labels(&runner), ["A", "Toml"]);
         assert_eq!(override_results(&runner), [(1, None), (2, None)]);
+    }
+
+    /// An app whose overrides are off (`ULTTUI_NO_OVERRIDES`, no app name;
+    /// a mock backend reads none) refuses a push with a reason and draws
+    /// as before, so the switch holds for pushes too (ADR 0023 §2, §9).
+    #[test]
+    fn a_push_into_an_app_with_overrides_off_is_refused() {
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut mock = MockBackend::new(vec![]).blocking_when_exhausted();
+        mock.push_override(4, toml_push("[widget.b]\ntext = \"Pushed\"\n"));
+        let mut runner = App::new_with_backend(KeyLogApp { keys }, Backend::Mock(mock));
+        let rt = test_runtime();
+        runner.render().unwrap();
+
+        assert!(runner.run_tick(&rt).unwrap());
+
+        assert_eq!(rendered_labels(&runner), ["A", "B"]);
+        let results = override_results(&runner);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 4);
+        let error = results[0].1.as_deref().expect("the push is refused");
+        assert!(error.contains("overrides are off"), "{error}");
     }
 
     /// A push that does not parse is answered with the reason and leaves

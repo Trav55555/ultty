@@ -1218,6 +1218,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The source limit is the one a user meets: a file of exactly the
+    /// limit is sent, one byte more is refused here with its size.
+    #[test]
+    fn override_push_refuses_a_file_over_the_source_limit_and_sends_one_at_it() {
+        use ultty_protocol::MAX_OVERRIDE_SOURCE_LEN;
+        let dir =
+            std::env::temp_dir().join(format!("ulttyctl-override-size-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = dir.join("at.toml");
+        let over = dir.join("over.toml");
+        std::fs::write(&at, "#".repeat(MAX_OVERRIDE_SOURCE_LEN)).unwrap();
+        std::fs::write(&over, "#".repeat(MAX_OVERRIDE_SOURCE_LEN + 1)).unwrap();
+        let args = |file: &Path| {
+            vec![
+                "override".to_string(),
+                "push".to_string(),
+                file.display().to_string(),
+            ]
+        };
+
+        match parse_cli_request(&args(&at)).unwrap() {
+            ControlRequest::PushOverride { source, .. } => {
+                assert_eq!(source.len(), MAX_OVERRIDE_SOURCE_LEN)
+            }
+            other => panic!("{other:?}"),
+        }
+        let refused = parse_cli_request(&args(&over)).unwrap_err();
+        assert!(
+            refused.contains("over.toml")
+                && refused.contains(&(MAX_OVERRIDE_SOURCE_LEN + 1).to_string()),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn override_requests_wait_long_enough_for_the_app_to_answer() {
         let clear = ControlRequest::ClearOverride { target: None };

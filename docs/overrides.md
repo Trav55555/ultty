@@ -217,9 +217,12 @@ the result, put it in the app's file.
 
 A push that does not parse is refused with the same message the log would
 show for a bad file, `ulttyctl` exits 1, and the app keeps what it had. So
-does a Luau push to an app built without the `lua-overrides` feature. A pane
-with no native app (one drawing with ANSI, which reads only its files) is an
-error too. `ulttyctl regions` lists the widget ids to aim at; an agent gets
+does a Luau push to an app built without the `lua-overrides` feature, and
+any push to an app running with `ULTTUI_NO_OVERRIDES` set: the switch turns
+overrides off, pushed ones included. A pushed file is at most 128 KiB
+(files read from disk may be 1 MiB). A pane with no native app in its
+foreground (a shell, or an app drawing with ANSI, which reads only its
+files) is an error too. `ulttyctl regions` lists the widget ids to aim at; an agent gets
 the same through the `ultty_push_override` and `ultty_clear_override` MCP
 tools ([docs/agents.md](agents.md)).
 

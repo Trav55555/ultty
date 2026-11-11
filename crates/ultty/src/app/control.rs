@@ -175,10 +175,10 @@ impl App {
         None
     }
 
-    /// The session an override for `pane` goes to: the one native session
-    /// in the pane's tab, or of several the one in the pane's foreground
-    /// process group. Until sessions map to panes this is the best the
-    /// terminal knows.
+    /// The session an override for `pane` goes to: the native session in
+    /// the pane's tab whose process is in the pane's foreground process
+    /// group, as key input is routed. Until sessions are bound to panes
+    /// (ADR 0025) this is the best the terminal knows.
     fn override_target_session(
         &self,
         pane: TerminalId,
@@ -197,35 +197,23 @@ impl App {
             .sessions_with_keys()
             .filter(|(_, session)| Some(session.tab_id()) == tab)
             .collect();
-        let (key, session) = match in_tab.as_slice() {
-            [] => {
-                return Err(no_app(format!(
+        let foreground = self.pane_foreground_pgrp(pane);
+        pick_override_session(&in_tab, foreground).map_err(|reason| {
+            no_app(match reason {
+                NoOverrideTarget::NoneInForeground { in_tab: 0 } => format!(
                     "No native app in pane {}'s tab; an app drawing with ANSI reads its override files instead",
                     pane.raw()
-                )))
-            }
-            [only] => *only,
-            several => {
-                let foreground = self.pane_foreground_pgrp(pane);
-                *several
-                    .iter()
-                    .find(|(_, session)| session.is_in_foreground(foreground))
-                    .ok_or_else(|| {
-                        no_app(format!(
-                            "{} native apps in pane {}'s tab and none in its foreground",
-                            several.len(),
-                            pane.raw()
-                        ))
-                    })?
-            }
-        };
-        if !session.accepts_override_push() {
-            return Err(no_app(format!(
-                "The native app in pane {} does not take pushed overrides (it was built before CAP_OVERRIDE_PUSH)",
-                pane.raw()
-            )));
-        }
-        Ok(key)
+                ),
+                NoOverrideTarget::NoneInForeground { in_tab } => format!(
+                    "No native app in pane {}'s foreground ({in_tab} in its tab); an app drawing with ANSI reads its override files instead",
+                    pane.raw()
+                ),
+                NoOverrideTarget::CannotTakePushes => format!(
+                    "The native app in pane {} does not take pushed overrides (it was built before CAP_OVERRIDE_PUSH)",
+                    pane.raw()
+                ),
+            })
+        })
     }
 
     /// Answer the override pushes whose app has replied, whose app is gone,
@@ -1266,6 +1254,37 @@ pub(super) struct PendingOverridePush {
     expires: Instant,
 }
 
+/// Why no session in a pane's tab can take an override.
+#[derive(Debug, PartialEq, Eq)]
+enum NoOverrideTarget {
+    /// No session's process is in the pane's foreground group; `in_tab`
+    /// says how many the tab has (none at all, or only in other panes).
+    NoneInForeground { in_tab: usize },
+    /// The foreground session did not negotiate `CAP_OVERRIDE_PUSH`.
+    CannotTakePushes,
+}
+
+/// Of the sessions `in_tab` (a pane's tab), the key of the one in the
+/// pane's `foreground` process group that takes pushes. The group check
+/// applies with one session too: in a split tab the shell's pane has no
+/// native app in its foreground, and a push aimed at it must not land in
+/// the neighbouring pane's app.
+fn pick_override_session(
+    in_tab: &[(usize, &ultty::protocol::NativeSession)],
+    foreground: Option<i32>,
+) -> Result<usize, NoOverrideTarget> {
+    let (key, session) = in_tab
+        .iter()
+        .find(|(_, session)| session.is_in_foreground(foreground))
+        .ok_or(NoOverrideTarget::NoneInForeground {
+            in_tab: in_tab.len(),
+        })?;
+    if !session.accepts_override_push() {
+        return Err(NoOverrideTarget::CannotTakePushes);
+    }
+    Ok(*key)
+}
+
 fn is_override_request(request: &ultty_protocol::control::ControlRequest) -> bool {
     use ultty_protocol::control::ControlRequest;
     matches!(
@@ -1647,6 +1666,69 @@ mod tests {
 
     fn lines(text: &str) -> Vec<&str> {
         text.lines().map(str::trim_end).collect()
+    }
+
+    /// A socket session whose peer is this process, so its group is ours,
+    /// after a hello asking for `capabilities`. The peer end is returned so
+    /// the socket stays open.
+    fn own_session(
+        session_id: u64,
+        capabilities: u32,
+    ) -> (
+        ultty::protocol::NativeSession,
+        std::os::unix::net::UnixStream,
+    ) {
+        use std::io::Write;
+        use ultty_protocol::Encode;
+        let (ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut session = ultty::protocol::NativeSession::new(
+            ours,
+            session_id,
+            ultty::terminal_manager::TabId::new(0),
+        )
+        .unwrap();
+        theirs
+            .write_all(
+                &ultty_protocol::AppMessage::ClientHello {
+                    version: ultty_protocol::PROTOCOL_VERSION,
+                    requested_capabilities: capabilities,
+                }
+                .encode_to_bytes(),
+            )
+            .unwrap();
+        assert!(session.poll().unwrap());
+        (session, theirs)
+    }
+
+    /// An override goes to the session in the pane's foreground group, even
+    /// when it is the tab's only session: the shell pane of a split tab has
+    /// no native app in its foreground and is refused.
+    #[test]
+    fn override_target_needs_a_session_in_the_panes_foreground() {
+        let ours = ultty::platform::socket::process_group(std::process::id() as i32).unwrap();
+        let (takes, _peer) = own_session(1, ultty_protocol::CAP_OVERRIDE_PUSH);
+        let only = [(5usize, &takes)];
+
+        assert_eq!(pick_override_session(&only, Some(ours)), Ok(5));
+        assert_eq!(
+            pick_override_session(&only, Some(ours + 1)),
+            Err(NoOverrideTarget::NoneInForeground { in_tab: 1 }),
+            "the only session is not in the pane's foreground"
+        );
+        assert_eq!(
+            pick_override_session(&only, None),
+            Err(NoOverrideTarget::NoneInForeground { in_tab: 1 })
+        );
+        assert_eq!(
+            pick_override_session(&[], Some(ours)),
+            Err(NoOverrideTarget::NoneInForeground { in_tab: 0 })
+        );
+
+        let (raw, _peer) = own_session(2, ultty_protocol::CLIENT_DEFAULT_CAPABILITIES);
+        assert_eq!(
+            pick_override_session(&[(6, &raw)], Some(ours)),
+            Err(NoOverrideTarget::CannotTakePushes)
+        );
     }
 
     #[test]

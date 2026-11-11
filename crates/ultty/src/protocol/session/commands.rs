@@ -297,7 +297,7 @@ impl NativeSession {
                     request_id,
                     error.as_deref().unwrap_or("applied")
                 );
-                self.pending_override_results.push((request_id, error));
+                self.accept_override_result(request_id, error);
             }
 
             AppMessage::Disconnect => {

@@ -283,11 +283,16 @@ fn holds_complete_frame(buf: &[u8]) -> bool {
 /// answer only DA1. Frame bytes received are appended to `read_buf`, ready
 /// for the rest of the handshake.
 ///
+/// `requested_capabilities` goes in the hello: `CLIENT_DEFAULT_CAPABILITIES`
+/// for a client that only decodes what the terminal sends, with
+/// `CAP_OVERRIDE_PUSH` added by one that answers `SetOverride`.
+///
 /// Errors when the terminal does not answer DA1 within `timeout`, or closes.
 pub fn probe(
     tty: &mut InBandTty,
     read_buf: &mut Vec<u8>,
     timeout: Duration,
+    requested_capabilities: u32,
 ) -> Result<bool, crate::Error> {
     let deadline = Instant::now() + timeout;
     if !named_ultty(tty, deadline)? {
@@ -296,7 +301,7 @@ pub fn probe(
 
     let hello = AppMessage::ClientHello {
         version: ultty_protocol::PROTOCOL_VERSION,
-        requested_capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
+        requested_capabilities,
     };
     tty.write_frames(&hello.encode_to_bytes())?;
     tty.write_raw(b"\x1b[c")?;
@@ -474,7 +479,12 @@ mod tests {
         });
         let mut tty = InBandTty::open_on(slave.as_raw_fd(), slave.as_raw_fd()).expect("open");
         let mut read_buf = Vec::new();
-        let result = probe(&mut tty, &mut read_buf, Duration::from_secs(2));
+        let result = probe(
+            &mut tty,
+            &mut read_buf,
+            Duration::from_secs(2),
+            ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
+        );
         let (seen, _master) = terminal.join().unwrap();
         drop(tty);
         (result, seen)
