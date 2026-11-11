@@ -11,6 +11,7 @@ use crate::backend::Backend;
 use crate::cmd::{Cmd, Sub};
 use crate::event::{Event, Key, KeyEvent};
 use crate::focus::FocusManager;
+use crate::overrides::{OverrideFile, Remapped};
 use crate::screen::{Screen, ScreenAction};
 use crate::theme::Theme;
 use crate::toast::{Toast, ToastSeverity};
@@ -86,8 +87,20 @@ impl View for OverlayView<'_> {
     fn render_ansi(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         self.base.render_ansi(frame, area);
         if let Some(overlay) = &self.overlay {
-            overlay.render_ansi(frame, area);
+            crate::widgets::render_view_ansi(overlay, frame, area);
         }
+    }
+
+    /// The app's root view's id, so a user override of it applies to the
+    /// root (ADR 0023).
+    fn widget_id(&self) -> Option<&str> {
+        self.base.widget_id()
+    }
+
+    /// The root region has never had a native key; the id above is only
+    /// for overrides.
+    fn native_key(&self) -> Option<&str> {
+        None
     }
 
     fn for_each_child(&self, visit: &mut dyn FnMut(&dyn View)) {
@@ -156,6 +169,8 @@ pub struct App<A: Application> {
     focus: FocusManager,
     focus_initialized: bool,
     theme: Theme,
+    /// The user's overrides for this app (ADR 0023).
+    overrides: OverrideFile,
     /// `Sub::every` timer state keyed by timer identity (see `Sub::Every`).
     timers: HashMap<String, TimerState>,
     /// Spawned tasks (`Cmd::spawn*` / `Cmd::after`) that have not delivered
@@ -261,8 +276,28 @@ struct SubCollectCtx<'a, M> {
 
 impl<A: Application> App<A> {
     /// Create a new app runner.
+    ///
+    /// It reads the user's overrides for the app named by `argv[0]` (see
+    /// [`App::app_name`] and ADR 0023).
     pub fn new(app: A) -> Self {
-        Self::with_backend(app, Backend::detect())
+        let mut runner = Self::with_backend(app, Backend::detect());
+        runner.overrides = OverrideFile::for_app(&crate::overrides::default_app_name());
+        runner
+    }
+
+    /// Look the user's overrides up under `name` instead of the binary's
+    /// name: `~/.config/ulttui/overrides/<name>.toml`, unless the
+    /// environment says otherwise ([`OverrideFile::for_app`]).
+    pub fn app_name(self, name: &str) -> Self {
+        self.override_file(OverrideFile::for_app(name))
+    }
+
+    /// Use `file` for the user's overrides ([`OverrideFile::disabled`] for
+    /// none).
+    pub fn override_file(mut self, file: OverrideFile) -> Self {
+        self.overrides = file;
+        self.needs_render = true;
+        self
     }
 
     fn with_backend(app: A, backend: Backend) -> Self {
@@ -275,6 +310,7 @@ impl<A: Application> App<A> {
             focus: FocusManager::new(),
             focus_initialized: false,
             theme: Theme::dark(),
+            overrides: OverrideFile::disabled(),
             timers: HashMap::new(),
             spawn_handles: Vec::new(),
             task_tx,
@@ -409,7 +445,11 @@ impl<A: Application> App<A> {
     /// Returns false when the runner should stop.
     fn run_tick(&mut self, rt: &Runtime) -> crate::Result<bool> {
         // 1. Poll backend for events
-        if let Some(mut event) = self.backend.poll_event()? {
+        if let Some(event) = self
+            .backend
+            .poll_event()?
+            .and_then(|event| self.prepare_event(event))
+        {
             if matches!(&event, Event::Quit) {
                 if let Some(msg) = self.app.on_event(&event) {
                     self.msg_queue.push_back(msg);
@@ -419,10 +459,6 @@ impl<A: Application> App<A> {
                 self.poll_subscriptions();
                 self.drain_messages(rt);
                 return Ok(false);
-            }
-
-            if let Event::Key(ref mut key_event) = event {
-                key_event.focused_id = self.focus.focused_id().map(str::to_string);
             }
 
             let mut forward_to_app = true;
@@ -521,6 +557,28 @@ impl<A: Application> App<A> {
         Ok(!self.quit_requested)
     }
 
+    /// Note the focused widget on a key event and apply the user's key
+    /// remaps. `None` when a remap moved focus and used up the key.
+    fn prepare_event(&mut self, mut event: Event) -> Option<Event> {
+        let Event::Key(key_event) = &mut event else {
+            return Some(event);
+        };
+        key_event.focused_id = self.focus.focused_id().map(str::to_string);
+        match self.overrides.overrides().remap(key_event) {
+            None => Some(event),
+            Some(Remapped::Key(remapped)) => Some(Event::Key(remapped)),
+            Some(Remapped::Focus(id)) => {
+                if !self.focus.focusable_ids().contains(&id) {
+                    tracing::debug!(id, "override focus target is not focusable; key passed on");
+                    return Some(event);
+                }
+                self.focus.focus(id);
+                self.needs_render = true;
+                None
+            }
+        }
+    }
+
     fn cleanup_runtime_resources(&mut self) {
         for (_, handle) in self.cmd_subscription_handles.drain() {
             handle.abort();
@@ -608,7 +666,9 @@ impl<A: Application> App<A> {
             old_theme: Some(Theme::replace_current(self.theme.clone())),
         };
 
-        let render_result = (|| -> crate::Result<()> {
+        self.overrides.refresh();
+        let overrides = self.overrides.overrides().clone();
+        let render_result = crate::overrides::with_overrides(overrides, || -> crate::Result<()> {
             FocusManager::with_current_mut(|fm| fm.begin_frame());
             let overlay = if self.active_toasts.is_empty() {
                 None
@@ -628,7 +688,7 @@ impl<A: Application> App<A> {
             }
             FocusManager::with_current_mut(|fm| fm.end_frame());
             Ok(())
-        })();
+        });
 
         // Normal path: restore before guard drops so we recapture the values.
         self.focus = FocusManager::set_current(guard.old_focus.take().unwrap_or_default());
@@ -2094,5 +2154,115 @@ mod async_tests {
             median < Duration::from_millis(8),
             "message to frame took {median:?} (median)"
         );
+    }
+
+    /// A key and the widget focused when it arrived.
+    type KeyLog = Arc<Mutex<Vec<(Key, Option<String>)>>>;
+
+    /// Records the keys it is given, with the widget focused at the time.
+    struct KeyLogApp {
+        keys: KeyLog,
+    }
+
+    impl Application for KeyLogApp {
+        type Message = (Key, Option<String>);
+
+        fn update(&mut self, msg: Self::Message) -> Cmd<Self::Message> {
+            self.keys.lock().unwrap().push(msg);
+            Cmd::none()
+        }
+
+        fn on_event(&mut self, event: &Event) -> Option<Self::Message> {
+            match event {
+                Event::Key(key) => Some((key.key.clone(), key.focused_id.clone())),
+                _ => None,
+            }
+        }
+
+        fn view(&self) -> impl View {
+            Column::new()
+                .child(crate::widgets::Button::new("A").id("a"))
+                .child(crate::widgets::Button::new("B").id("b"))
+        }
+    }
+
+    fn key(key: Key) -> Option<Event> {
+        Some(Event::Key(KeyEvent {
+            key,
+            modifiers: crate::event::Modifiers::default(),
+            focused_id: None,
+        }))
+    }
+
+    fn override_file(
+        name: &str,
+        source: &str,
+    ) -> (std::path::PathBuf, crate::overrides::OverrideFile) {
+        let dir = std::env::temp_dir().join(format!("ulttui-app-overrides-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, source).unwrap();
+        let file = crate::overrides::OverrideFile::at(&path);
+        (path, file)
+    }
+
+    #[test]
+    fn user_key_remaps_reach_the_app_and_move_focus() {
+        let (path, file) = override_file(
+            "remap.toml",
+            "[keys]\n\"j\" = \"down\"\n\"/\" = { focus = \"b\" }\n\"g\" = { focus = \"nowhere\" }\n",
+        );
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let backend = Backend::Mock(MockBackend::new(vec![
+            key(Key::Char('j')),
+            key(Key::Char('/')),
+            key(Key::Char('j')),
+            key(Key::Char('g')),
+        ]));
+        let mut runner =
+            App::new_with_backend(KeyLogApp { keys: keys.clone() }, backend).override_file(file);
+        let rt = test_runtime();
+        runner.render().unwrap();
+        assert_eq!(runner.focus.focused_id(), Some("a"));
+
+        for _ in 0..4 {
+            assert!(runner.run_tick(&rt).unwrap());
+        }
+
+        assert_eq!(
+            *keys.lock().unwrap(),
+            vec![
+                (Key::Down, Some("a".to_string())),
+                // "/" moved focus to "b" and was used up.
+                (Key::Down, Some("b".to_string())),
+                // A focus target that is not focusable passes the key on.
+                (Key::Char('g'), Some("b".to_string())),
+            ]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_broken_override_file_leaves_the_app_running_unchanged() {
+        let (path, file) = override_file("broken.toml", "[widget.a\nhidden = true\n");
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let backend = Backend::Mock(MockBackend::new(vec![key(Key::Char('x'))]));
+        let mut runner =
+            App::new_with_backend(KeyLogApp { keys: keys.clone() }, backend).override_file(file);
+        let rt = test_runtime();
+        runner.render().unwrap();
+
+        assert!(runner.run_tick(&rt).unwrap());
+
+        assert_eq!(
+            *keys.lock().unwrap(),
+            vec![(Key::Char('x'), Some("a".to_string()))]
+        );
+        let Backend::Mock(mock) = &runner.backend else {
+            panic!("mock backend");
+        };
+        let labels = format!("{:?}", mock.rendered_messages.last().unwrap());
+        assert!(labels.contains("label: \"A\"") && labels.contains("label: \"B\""));
+        let _ = std::fs::remove_file(path);
     }
 }
