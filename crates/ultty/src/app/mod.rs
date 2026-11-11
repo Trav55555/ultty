@@ -336,6 +336,7 @@ impl App {
         let (cols, rows) = renderer.terminal_dimensions();
         tracing::info!("Terminal size: {}x{}", cols, rows);
 
+        Self::sweep_stale_runtime_files();
         // Start the native protocol server BEFORE spawning shells: each tab
         // gets its own listening socket, and the tab's shell is told about it
         // through ULTTY_SOCKET at spawn time.
@@ -628,6 +629,23 @@ impl App {
             tracing::warn!("Failed to save session: {}", e);
         } else {
             tracing::info!("Session saved");
+        }
+    }
+
+    /// Clear out the sockets and tokens that killed or crashed instances
+    /// left where this one is about to listen. A directory that cannot be
+    /// resolved is skipped; starting the server reports it.
+    fn sweep_stale_runtime_files() {
+        let mut dirs: Vec<_> = [
+            ultty::control::paths::control_dir(),
+            ultty::platform::socket_dir(),
+        ]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+        dirs.dedup();
+        for dir in &dirs {
+            ultty::platform::runtime_files::sweep_stale_runtime_files(dir);
         }
     }
 
