@@ -154,6 +154,13 @@ split panes (A1 follow-up).
    panes.luau --exec ulttyctl` draws a list with a row per pane; `lua open
    panes.luau` without grants shows the banner naming `--exec ulttyctl`;
    `lua open hello.luau --split right` draws in a split pane.
+   *Slices 1 to 4 done 2026-11-10.* As built: the first run showed every
+   idle socket-mode `ulttui` app, Luau or not, dropped by the terminal 40 s
+   after its last frame, because the native backend never answered `Ping`;
+   fixed alongside (`ulttui/src/backend/native.rs`). A denied `run{}`
+   reached through `pcall(run, ...)` carries no file and line (the caller
+   at that stack level is `pcall`); through `pcall(function() ... end)` or
+   in the banner it does.
 5. **Later, each its own slice:** `[lua]` config and keybindings with the
    grants line in the pane; header `needs:` check; `--read`; inline card.
 
