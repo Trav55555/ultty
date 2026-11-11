@@ -856,11 +856,13 @@ impl ProtocolServer {
         self.flush();
     }
 
-    /// Forward a mouse event to the active tab's sessions.
-    /// Hit-tests each session's scene tree to find the target region,
-    /// checks subscriptions, and sends the event with region-local coords.
+    /// Forward a mouse event at `(cell_x, cell_y)`, in `pane`'s cells, to
+    /// the shown sessions bound to `pane` (ADR 0025 §4). Hit-tests each
+    /// session's scene tree to find the target region, checks
+    /// subscriptions, and sends the event with region-local coords.
     pub fn broadcast_mouse(
         &mut self,
+        pane: TerminalId,
         event_type: ultty_protocol::InputType,
         cell_x: f32,
         cell_y: f32,
@@ -870,7 +872,10 @@ impl ProtocolServer {
             ultty_protocol::InputType::MouseScroll { .. } => ultty_protocol::EVENT_SCROLL,
             _ => ultty_protocol::EVENT_MOUSE,
         };
-        for session in self.active_tab_sessions_mut() {
+        for session in self
+            .active_tab_sessions_mut()
+            .filter(|session| session.pane() == Some(pane))
+        {
             let (region_id, local_x, local_y) = session.hit_test(cell_x, cell_y);
             if session.is_subscribed(region_id, event_mask)
                 || session.is_subscribed(ultty_protocol::RegionId::ROOT, event_mask)
@@ -1315,6 +1320,7 @@ mod tests {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
         server.broadcast_mouse(
+            TerminalId::new(0),
             ultty_protocol::InputType::MouseDown {
                 button: ultty_protocol::MouseButton::Left,
             },
@@ -1466,6 +1472,7 @@ mod tests {
         let _client = connect(&mut server, &path);
 
         server.broadcast_mouse(
+            TerminalId::new(0),
             ultty_protocol::InputType::MouseScroll {
                 delta_x: 0.0,
                 delta_y: -3.0,
@@ -1781,6 +1788,71 @@ mod tests {
             constraints: ultty_protocol::Constraints::default(),
             style: ultty_protocol::Style::default(),
         }
+    }
+
+    #[test]
+    fn mouse_reaches_only_the_sessions_of_the_pane_under_the_pointer() {
+        use std::io::Write;
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
+        let mut clients: Vec<UnixStream> = (0..2).map(|_| connect(&mut server, &path)).collect();
+        for client in &mut clients {
+            for msg in [
+                AppMessage::ClientHello {
+                    version: ultty_protocol::PROTOCOL_VERSION,
+                    requested_capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
+                },
+                root_child(),
+                AppMessage::Subscribe {
+                    id: ultty_protocol::RegionId::ROOT,
+                    events: ultty_protocol::EVENT_MOUSE,
+                },
+            ] {
+                client.write_all(&encode(&msg)).unwrap();
+            }
+        }
+        server.poll(Some(Duration::from_millis(100))).unwrap();
+        for client in &mut clients {
+            let _handshake = socket_replies(client);
+        }
+        // The first client's session (the lower id: accepted first) is in
+        // the left pane, the second's in the right.
+        let (left, right) = (TerminalId::new(1), TerminalId::new(2));
+        let mut ids: Vec<u64> = server.sessions().map(|s| s.session_id()).collect();
+        ids.sort_unstable();
+        for session in server.sessions_mut() {
+            session.bind_pane(if session.session_id() == ids[0] {
+                left
+            } else {
+                right
+            });
+        }
+
+        server.broadcast_mouse(
+            right,
+            ultty_protocol::InputType::MouseDown {
+                button: ultty_protocol::MouseButton::Left,
+            },
+            3.0,
+            2.0,
+            ultty_protocol::Modifiers::NONE,
+        );
+        assert!(
+            socket_replies(&mut clients[0]).is_empty(),
+            "the left pane's session sees nothing"
+        );
+        let inputs: Vec<(f32, f32)> = socket_replies(&mut clients[1])
+            .into_iter()
+            .filter_map(|m| match m {
+                TerminalMessage::Input(input) => Some((input.x, input.y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            inputs,
+            vec![(3.0, 2.0)],
+            "pane-local cells, region-local on ROOT"
+        );
     }
 
     /// An app with only inline surfaces reads keys from its tty, even if it
