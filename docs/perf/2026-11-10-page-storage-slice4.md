@@ -17,7 +17,8 @@ slot lookup: cjk +1.7%, cursor-redraw +2.1%, alt-screen +1.8%, sgr-dense
 workstation puts the cumulative ascii gain since before slice 3 at +24.7%
 (paired median, IQR +8% to +53%): the kill rule, at its strictest reading
 (half of C's +44.8%), does not fire, but the spread is too wide to call
-that confirmed.
+that confirmed. The [quiet-machine rerun](#quiet-machine-rerun) settles
+it: +33.1% (95% CI +33.0% to +33.1%), so the rule does not fire.
 
 ## What was built
 
