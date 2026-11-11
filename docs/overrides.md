@@ -53,10 +53,10 @@ the app passes to `.id(...)` (in Rust) or `id = ...` (in Luau). Inside Ultty,
 
 | Setting | Value | Effect |
 |---------|-------|--------|
-| `fg` | colour | Text colour over the widget's whole box, borders included, over what the app chose. |
+| `fg` | colour | Text colour over the widget's whole box, borders included, over what the app chose. Not applied while the widget has focus, so its focus colours stay visible (as for `bg`). |
 | `bg` | colour | Background of the widget's box. |
 | `bold` | `true` / `false` | Bold on or off. |
-| `hidden` | `true` / `false` | The widget and everything in it are not drawn. In a column or row the others close up over it; in Ultty the region gets `display: none`. Hidden widgets cannot be focused. |
+| `hidden` | `true` / `false` | The widget and everything in it are not drawn. In a column or row the others close up over it; in Ultty the region gets `display: none` and is left out of the accessibility tree. Hidden widgets cannot be focused. |
 | `text` | string | New text for `Text`, `RichText`, `Title`, `Body`, `Muted`, `Accent`, or a button's label. The widget resizes to fit. On other widgets (containers, lists, inputs) it does nothing, and it never reaches the widget's children. |
 
 A colour is a name (`black`, `red`, `green`, `yellow`, `blue`, `magenta`,

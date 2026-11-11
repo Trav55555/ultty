@@ -484,10 +484,23 @@ pub fn with_overrides<R>(overrides: Rc<Overrides>, f: impl FnOnce() -> R) -> R {
     f()
 }
 
-/// The override for `view`, or `None` when it has none or no overrides
-/// are active. The outer `None` means no overrides are active at all.
+/// The override for `view` as it applies now, or `None` when it has none
+/// or no overrides are active. The outer `None` means no overrides are
+/// active at all.
+///
+/// While the widget has focus its `fg` and `bg` are left out, so the
+/// widget's own focus colours stay visible.
 pub(crate) fn for_view(view: &dyn View) -> Option<Option<WidgetOverride>> {
-    lookup(view, |user| user.cloned())
+    let mut user = lookup(view, |user| user.cloned())?;
+    if let Some(user) = &mut user {
+        if (user.fg.is_some() || user.bg.is_some())
+            && crate::widgets::is_widget_focused(view.widget_id())
+        {
+            user.fg = None;
+            user.bg = None;
+        }
+    }
+    Some(user)
 }
 
 /// Whether `view` is hidden by an override.

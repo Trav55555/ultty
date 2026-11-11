@@ -81,7 +81,7 @@ Per widget id:
 
 | Key | Effect |
 |-----|--------|
-| `fg`, `bg` | Foreground and background colour of the widget's box, over what the app set. Same colour syntax as `ulttui-lua`. |
+| `fg`, `bg` | Foreground and background colour of the widget's box, over what the app set. Same colour syntax as `ulttui-lua`. Not applied while the widget has focus, so its focus colours stay visible. |
 | `bold` | Bold on or off. |
 | `hidden` | The widget and everything in it are not drawn, take no room in a column or row, and are not focusable. |
 | `text` | Replaces the text of a text-bearing widget: `Text`, `RichText` (one span in the first span's style), `Title`, `Body`, `Muted`, `Accent`, and a `Button`'s label (also its accessible name). On other widgets it does nothing. |
@@ -99,8 +99,8 @@ meta matches no chord.
 Once, in the walk, so every widget gets it without knowing about overrides:
 
 - Native: `render_view_to_native`, which every container already uses for its
-  children. A hidden widget is sent as a region with `display: none` and no
-  content or children; style is merged into the region's style and into the
+  children. A hidden widget is sent as a region with `display: none`, no
+  content or children, and semantics `hidden`; style is merged into the region's style and into the
   spans of rich-text content, so the override wins over colours the widget
   chose.
 - ANSI: a new `render_view_ansi` that the backend uses for the root and every

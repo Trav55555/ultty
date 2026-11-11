@@ -81,6 +81,70 @@ fn a_hidden_widget_takes_no_room_and_no_focus() {
         })
         .collect();
     assert_eq!(labels, ["One", "Three"], "a hidden widget sends no content");
+    let hidden_regions: Vec<u32> = native
+        .iter()
+        .filter_map(|m| match m {
+            AppMessage::SetSemantics { id, semantics } if semantics.hidden => Some(id.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        hidden_regions,
+        [3],
+        "the hidden region is out of the accessibility tree"
+    );
+}
+
+#[test]
+fn colour_overrides_leave_a_focused_widget_its_focus_colours() {
+    use ulttui::theme::{to_ratatui_color, Theme};
+    Theme::set_current(Theme::dark());
+    let theme = Theme::current();
+    let view = buttons();
+    let recolour = overrides(
+        "[widget.one]\nfg = \"red\"\nbg = \"blue\"\n[widget.two]\nfg = \"red\"\nbg = \"blue\"\n",
+    );
+
+    let mut focus = FocusManager::new();
+    focus.register_view_tree(&view);
+    focus.focus("one");
+    let previous = FocusManager::set_current(focus);
+    let (buffer, native) = with_overrides(recolour, || {
+        (ansi(&view, 20, 3), render_view_messages(&view).unwrap())
+    });
+    FocusManager::set_current(previous);
+
+    // ANSI: the focused button keeps the theme's focus colours, the other
+    // takes the override.
+    let focused = &buffer[(0, 0)];
+    assert_eq!(focused.fg, to_ratatui_color(theme.button.focused_fg));
+    assert_eq!(focused.bg, to_ratatui_color(theme.button.focused_bg));
+    let other = &buffer[(0, 1)];
+    assert_eq!(
+        (other.fg, other.bg),
+        (ratatui::style::Color::Red, ratatui::style::Color::Blue)
+    );
+
+    // Native: the same, in the regions' styles.
+    let styles: Vec<_> = native
+        .iter()
+        .filter_map(|m| match m {
+            AppMessage::CreateRegion { style, .. } => Some((style.fg, style.bg)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        styles[1],
+        (Some(theme.button.focused_fg), Some(theme.button.focused_bg))
+    );
+    use ultty_protocol::{Color, NamedColor};
+    assert_eq!(
+        styles[2],
+        (
+            Some(Color::Named(NamedColor::Red)),
+            Some(Color::Named(NamedColor::Blue))
+        )
+    );
 }
 
 #[test]

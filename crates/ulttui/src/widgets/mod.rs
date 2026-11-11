@@ -169,8 +169,14 @@ pub(crate) fn render_view_to_native(
     if let Some(key) = child.native_key() {
         crate::backend::native_diff::record_native_key(region_id, key);
     }
-    // A hidden widget is an empty `display: none` region.
+    // A hidden widget is an empty `display: none` region, left out of the
+    // accessibility tree too.
     let Some((content, semantics)) = shown else {
+        let hidden = ultty_protocol::Semantics {
+            hidden: true,
+            ..Default::default()
+        };
+        send_semantics(send_message, region_id, hidden, &Content::None)?;
         return Ok(region_id);
     };
 
