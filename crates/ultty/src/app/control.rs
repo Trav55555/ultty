@@ -7,7 +7,7 @@ use super::App;
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
-use ultty::terminal_manager::TerminalId;
+use ultty::terminal_manager::{SplitDirection, TerminalId};
 use winit::dpi::PhysicalSize;
 
 /// Number of random bytes in a freshly generated control auth token.
@@ -526,6 +526,62 @@ impl App {
                     Err(e) => ControlResponse::Error {
                         code: 2,
                         message: format!("Failed to create tab: {}", e),
+                    },
+                }
+            }
+
+            ControlRequest::SplitPane {
+                direction,
+                command,
+                args,
+                working_dir,
+                target,
+            } => {
+                let target = match resolve_control_target(&self.terminal_manager, target) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                let direction = match direction {
+                    ultty_protocol::control::SplitDirection::Right => SplitDirection::Horizontal,
+                    ultty_protocol::control::SplitDirection::Down => SplitDirection::Vertical,
+                };
+                let result = match command {
+                    Some(command) => self.terminal_manager.split_pane_with_command(
+                        target,
+                        direction,
+                        &command,
+                        &args,
+                        working_dir.as_deref(),
+                    ),
+                    None => self.terminal_manager.split_pane(target, direction),
+                };
+                match result {
+                    Ok(Some(pane)) => {
+                        self.needs_redraw = true;
+                        let tab_index = self
+                            .terminal_manager
+                            .tabs()
+                            .iter()
+                            .position(|tab| tab.terminals.contains(&pane));
+                        match tab_index {
+                            Some(tab_index) => ControlResponse::Data(ControlData::PaneOpened {
+                                tab_index,
+                                pane: pane.raw() as u64,
+                            }),
+                            // The command exited at once and the pane closed.
+                            None => ControlResponse::Error {
+                                code: 2,
+                                message: "The pane closed as soon as it opened".to_string(),
+                            },
+                        }
+                    }
+                    Ok(None) => ControlResponse::Error {
+                        code: PANE_NOT_FOUND,
+                        message: format!("No pane {}; `ulttyctl panes` lists them", target.raw()),
+                    },
+                    Err(e) => ControlResponse::Error {
+                        code: 2,
+                        message: format!("Failed to split: {}", e),
                     },
                 }
             }
@@ -1170,6 +1226,7 @@ fn control_request_requires_auth(request: &ultty_protocol::control::ControlReque
         | ControlRequest::SendKey { .. }
         | ControlRequest::SendRaw { .. }
         | ControlRequest::NewTab { .. }
+        | ControlRequest::SplitPane { .. }
         | ControlRequest::SwitchTab { .. }
         | ControlRequest::CloseTab { .. }
         | ControlRequest::RunCommand { .. }
@@ -1416,6 +1473,13 @@ mod tests {
         assert!(control_request_requires_auth(&ControlRequest::RunCommand {
             command: "make".to_string(),
             args: vec!["test".to_string()],
+            target: None,
+        }));
+        assert!(control_request_requires_auth(&ControlRequest::SplitPane {
+            direction: ultty_protocol::control::SplitDirection::Right,
+            command: None,
+            args: Vec::new(),
+            working_dir: None,
             target: None,
         }));
     }

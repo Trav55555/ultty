@@ -18,6 +18,16 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Where `SplitPane` puts the new pane relative to the focused one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SplitDirection {
+    /// Side by side, the new pane on the right.
+    Right,
+    /// Stacked, the new pane below.
+    Down,
+}
+
 /// Complete control socket request envelope.
 ///
 /// `ulttyctl` sends this structure so automation can preserve argument
@@ -71,6 +81,21 @@ pub enum ControlRequest {
         command: String,
         args: Vec<String>,
         /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
+
+    /// Open a pane next to `target` (the focused pane when omitted), running
+    /// `command` (the shell when omitted). Answered with
+    /// `ControlData::PaneOpened`.
+    SplitPane {
+        direction: SplitDirection,
+        command: Option<String>,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+        /// Pane to split (an id from `ListPanes`); the focused pane when omitted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<u64>,
     },
@@ -356,6 +381,11 @@ pub enum ControlData {
     Subscribed,
     /// `NewTab` opened a tab; `pane` is its pane's id.
     TabOpened {
+        tab_index: usize,
+        pane: u64,
+    },
+    /// `SplitPane` opened a pane in the tab at `tab_index`.
+    PaneOpened {
         tab_index: usize,
         pane: u64,
     },
@@ -694,6 +724,10 @@ mod tests {
                 tab_index: 2,
                 pane: 9,
             },
+            ControlData::PaneOpened {
+                tab_index: 2,
+                pane: 10,
+            },
             ControlData::LastCommand {
                 command: "make".to_string(),
                 output: "ok".to_string(),
@@ -867,6 +901,40 @@ mod tests {
         let targeted: ControlRequest =
             serde_json::from_str(r#"{"type":"get_selection","target":4}"#).unwrap();
         assert_eq!(targeted, ControlRequest::GetSelection { target: Some(4) });
+    }
+
+    #[test]
+    fn split_pane_names_its_direction_and_defaults_its_arguments() {
+        let request = ControlRequest::SplitPane {
+            direction: SplitDirection::Right,
+            command: Some("htop".to_string()),
+            args: vec!["-d".to_string()],
+            working_dir: Some("/tmp".to_string()),
+            target: Some(4),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"split_pane","direction":"right","command":"htop","args":["-d"],"working_dir":"/tmp","target":4}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ControlRequest>(&json).unwrap(),
+            request
+        );
+
+        let bare: ControlRequest =
+            serde_json::from_str(r#"{"type":"split_pane","direction":"down","command":null}"#)
+                .unwrap();
+        assert_eq!(
+            bare,
+            ControlRequest::SplitPane {
+                direction: SplitDirection::Down,
+                command: None,
+                args: Vec::new(),
+                working_dir: None,
+                target: None,
+            }
+        );
     }
 
     /// ulttyctl reads every reply as JSON, so each one must survive the trip.
