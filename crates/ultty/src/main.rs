@@ -7,17 +7,27 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod app;
 
+/// The log filter when `RUST_LOG` is unset.
+const DEFAULT_LOG_FILTER: &str = "ultty=info,wgpu=warn";
+
 fn main() -> Result<()> {
-    if should_print_version(std::env::args().skip(1)) {
-        println!("{}", version_output());
-        return Ok(());
+    match invocation(std::env::args().skip(1)) {
+        Invocation::Run => {}
+        Invocation::Version => {
+            println!("{}", version_output());
+            return Ok(());
+        }
+        Invocation::Help => {
+            print!("{}", usage());
+            return Ok(());
+        }
     }
 
     // Initialize logging
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ultty=info,wgpu=warn".into()),
+                .unwrap_or_else(|_| DEFAULT_LOG_FILTER.into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -28,9 +38,48 @@ fn main() -> Result<()> {
     app::App::run()
 }
 
-fn should_print_version(args: impl IntoIterator<Item = String>) -> bool {
-    args.into_iter()
-        .any(|arg| arg == "--version" || arg == "-V")
+/// What the command line asks for. Ultty takes no arguments besides
+/// `--help` and `--version`; anything else still starts the terminal.
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    Run,
+    Version,
+    Help,
+}
+
+/// `--help` wins over `--version` wherever either appears, so neither ever
+/// starts a window.
+fn invocation(args: impl IntoIterator<Item = String>) -> Invocation {
+    let mut found = Invocation::Run;
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => return Invocation::Help,
+            "--version" | "-V" => found = Invocation::Version,
+            _ => {}
+        }
+    }
+    found
+}
+
+fn usage() -> String {
+    format!(
+        "\
+GPU-accelerated terminal emulator. Opens a window running your shell.
+
+Usage: ultty [OPTIONS]
+
+Options:
+  -h, --help     Print this help and exit
+  -V, --version  Print the version and exit
+
+Configuration: ~/.config/ultty/config.toml
+Logging:       RUST_LOG (default \"{DEFAULT_LOG_FILTER}\")
+Control a running Ultty with ulttyctl (ulttyctl --help).
+
+{version}
+",
+        version = version_output()
+    )
 }
 
 fn version_output() -> String {
@@ -39,26 +88,47 @@ fn version_output() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_print_version, version_output};
+    use super::{invocation, usage, version_output, Invocation};
 
-    #[test]
-    fn version_flag_is_detected() {
-        assert!(should_print_version(["--version".to_string()]));
-        assert!(should_print_version(["-V".to_string()]));
-        assert!(should_print_version([
-            "--config".to_string(),
-            "path.toml".to_string(),
-            "--version".to_string()
-        ]));
+    fn args(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_owned()).collect()
     }
 
     #[test]
-    fn unrelated_args_do_not_request_version() {
-        assert!(!should_print_version(["--help".to_string()]));
-        assert!(!should_print_version([
-            "-e".to_string(),
-            "bash".to_string()
-        ]));
+    fn no_arguments_run_the_terminal() {
+        assert_eq!(invocation(args(&[])), Invocation::Run);
+    }
+
+    #[test]
+    fn version_flag_is_detected() {
+        assert_eq!(invocation(args(&["--version"])), Invocation::Version);
+        assert_eq!(invocation(args(&["-V"])), Invocation::Version);
+        assert_eq!(
+            invocation(args(&["--config", "path.toml", "--version"])),
+            Invocation::Version
+        );
+    }
+
+    #[test]
+    fn help_flag_is_detected_and_wins_over_version() {
+        assert_eq!(invocation(args(&["--help"])), Invocation::Help);
+        assert_eq!(invocation(args(&["-h"])), Invocation::Help);
+        assert_eq!(invocation(args(&["-V", "--help"])), Invocation::Help);
+        assert_eq!(invocation(args(&["--version", "-h"])), Invocation::Help);
+    }
+
+    #[test]
+    fn unrelated_args_run_the_terminal() {
+        assert_eq!(invocation(args(&["-e", "bash"])), Invocation::Run);
+    }
+
+    #[test]
+    fn usage_names_every_flag() {
+        let usage = usage();
+        for flag in ["-h, --help", "-V, --version"] {
+            assert!(usage.contains(flag), "{usage}");
+        }
+        assert!(usage.contains("Usage: ultty"), "{usage}");
     }
 
     #[test]
