@@ -4,7 +4,7 @@
 //! output, then D with the exit status.
 
 use ultty_vt::ansi::AnsiParser;
-use ultty_vt::grid::{Dimensions, LastCommand, Terminal, TerminalHandler};
+use ultty_vt::grid::{Dimensions, LastCommand, PromptJump, Terminal, TerminalHandler};
 
 fn feed(term: &mut Terminal, bytes: &[u8]) {
     let mut parser = AnsiParser::new();
@@ -185,4 +185,184 @@ fn tail_lines_keeps_the_end_of_long_output() {
     prompt(&mut term);
     let tail = term.last_command(Some(3)).unwrap().output;
     assert_eq!(tail, "line 27\nline 28\nline 29");
+}
+
+// Jumping between prompts and selecting a command's output. The prompt a
+// jump lands on is the row where its input starts (OSC 133;B).
+
+/// Text of the row at the top of the view.
+fn top_text(term: &Terminal) -> String {
+    term.buffer().visible_row(0).unwrap().text_trimmed()
+}
+
+/// Three commands of ten output lines each, on a five-row screen, then a
+/// fresh prompt: all three earlier prompts are in scrollback.
+fn three_commands() -> Terminal {
+    let mut term = Terminal::new(Dimensions::new(40, 5));
+    let (sent, _) = lines(0..10);
+    for name in ["one", "two", "three"] {
+        run(&mut term, name, &sent, 0);
+    }
+    prompt(&mut term);
+    term
+}
+
+#[test]
+fn without_any_marks_a_jump_goes_nowhere() {
+    let mut term = Terminal::new(Dimensions::new(40, 5));
+    let (sent, _) = lines(0..30);
+    feed(&mut term, sent.as_bytes());
+    term.buffer_mut().scroll_up(7);
+
+    assert!(!term.jump_to_prompt(PromptJump::Previous));
+    assert_eq!(term.buffer().scroll_offset(), 7);
+    // Forward with nothing to land on still returns to the live screen.
+    assert!(term.jump_to_prompt(PromptJump::Next));
+    assert_eq!(term.buffer().scroll_offset(), 0);
+    assert!(!term.jump_to_prompt(PromptJump::Next));
+}
+
+#[test]
+fn previous_walks_up_through_the_prompts_and_stops_at_the_first() {
+    let mut term = three_commands();
+
+    assert!(term.jump_to_prompt(PromptJump::Previous));
+    assert_eq!(top_text(&term), "$ three");
+    assert!(term.jump_to_prompt(PromptJump::Previous));
+    assert_eq!(top_text(&term), "$ two");
+    assert!(term.jump_to_prompt(PromptJump::Previous));
+    assert_eq!(top_text(&term), "$ one");
+
+    // At the oldest prompt there is nowhere further to go.
+    let offset = term.buffer().scroll_offset();
+    assert!(!term.jump_to_prompt(PromptJump::Previous));
+    assert_eq!(term.buffer().scroll_offset(), offset);
+}
+
+#[test]
+fn next_walks_back_down_and_ends_at_the_live_screen() {
+    let mut term = three_commands();
+    for _ in 0..3 {
+        term.jump_to_prompt(PromptJump::Previous);
+    }
+
+    assert!(term.jump_to_prompt(PromptJump::Next));
+    assert_eq!(top_text(&term), "$ two");
+    assert!(term.jump_to_prompt(PromptJump::Next));
+    assert_eq!(top_text(&term), "$ three");
+    // The live prompt cannot be put at the top: the view goes to the bottom.
+    assert!(term.jump_to_prompt(PromptJump::Next));
+    assert_eq!(term.buffer().scroll_offset(), 0);
+    assert!(!term.jump_to_prompt(PromptJump::Next));
+}
+
+#[test]
+fn a_prompt_already_at_the_top_is_skipped_going_back() {
+    let mut term = three_commands();
+    term.jump_to_prompt(PromptJump::Previous);
+    term.jump_to_prompt(PromptJump::Previous);
+    assert_eq!(top_text(&term), "$ two");
+
+    // Scrolling one line down leaves "$ two" just above the view.
+    term.buffer_mut().scroll_down(1);
+    assert!(term.jump_to_prompt(PromptJump::Previous));
+    assert_eq!(top_text(&term), "$ two");
+}
+
+#[test]
+fn prompts_evicted_from_scrollback_are_not_jumped_to() {
+    let mut term = Terminal::new(Dimensions::new(40, 5));
+    term.set_scrollback_limit(12);
+    let (sent, _) = lines(0..10);
+    for name in ["one", "two", "three"] {
+        run(&mut term, name, &sent, 0);
+    }
+    prompt(&mut term);
+
+    // Only the newest prompts still have rows.
+    let mut seen = Vec::new();
+    while term.jump_to_prompt(PromptJump::Previous) {
+        seen.push(top_text(&term));
+    }
+    assert!(!seen.is_empty());
+    assert!(!seen.contains(&"$ one".to_string()), "{seen:?}");
+    assert_eq!(seen.last().unwrap(), "$ three");
+}
+
+#[test]
+fn when_every_marked_row_is_evicted_a_jump_goes_nowhere() {
+    let mut term = Terminal::new(Dimensions::new(40, 5));
+    term.set_scrollback_limit(10);
+    run(&mut term, "one", "a\r\n", 0);
+    let (flood, _) = lines(0..200);
+    feed(&mut term, flood.as_bytes());
+
+    assert!(!term.jump_to_prompt(PromptJump::Previous));
+    assert_eq!(term.buffer().scroll_offset(), 0);
+}
+
+#[test]
+fn the_alternate_screen_has_no_prompts_to_jump_to() {
+    let mut term = three_commands();
+    feed(&mut term, b"\x1b[?1049h");
+    assert!(!term.jump_to_prompt(PromptJump::Previous));
+    assert!(!term.select_last_output());
+}
+
+#[test]
+fn selecting_the_last_output_picks_exactly_its_rows() {
+    let mut term = Terminal::new(Dimensions::new(40, 10));
+    run(&mut term, "ls", "a.txt\r\nb.txt\r\n", 0);
+    run(&mut term, "make", "one\r\ntwo\r\nthree\r\n", 2);
+    prompt(&mut term);
+
+    assert!(term.select_last_output());
+    assert_eq!(term.selected_text().as_deref(), Some("one\ntwo\nthree"));
+}
+
+#[test]
+fn selecting_scrolls_to_output_that_has_left_the_view() {
+    let mut term = Terminal::new(Dimensions::new(40, 5));
+    run(&mut term, "seq", "1\r\n2\r\n3\r\n", 0);
+    let (flood, _) = lines(0..20);
+    feed(&mut term, flood.as_bytes());
+    // Scroll away from the live screen.
+    term.buffer_mut().scroll_to_top();
+
+    assert!(term.select_last_output());
+    assert_eq!(term.selected_text().as_deref(), Some("1\n2\n3"));
+}
+
+#[test]
+fn output_taller_than_the_view_is_not_selected() {
+    let mut term = Terminal::new(Dimensions::new(40, 5));
+    let (sent, _) = lines(0..10);
+    run(&mut term, "seq", &sent, 0);
+    prompt(&mut term);
+
+    assert!(!term.select_last_output());
+    assert!(term.selected_text().is_none());
+}
+
+#[test]
+fn nothing_to_select_without_a_command_or_after_eviction() {
+    let mut term = Terminal::new(Dimensions::new(40, 5));
+    prompt(&mut term);
+    assert!(!term.select_last_output());
+
+    term.set_scrollback_limit(10);
+    run(&mut term, "one", "a\r\nb\r\n", 0);
+    let (flood, _) = lines(0..100);
+    feed(&mut term, flood.as_bytes());
+    assert!(!term.select_last_output());
+}
+
+#[test]
+fn a_running_command_is_selected_up_to_the_cursor() {
+    let mut term = Terminal::new(Dimensions::new(40, 10));
+    start(&mut term, "tail -f log");
+    feed(&mut term, b"x\r\ny\r\n");
+
+    assert!(term.select_last_output());
+    assert_eq!(term.selected_text().as_deref(), Some("x\ny"));
 }

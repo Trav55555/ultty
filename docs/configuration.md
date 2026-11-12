@@ -126,6 +126,42 @@ the app, so a new tab or split opens where that shell last reported, not in
 the app's own directory. Tabs and splits made from a launch profile or by
 `ulttyctl` with an explicit directory use that directory instead.
 
+## Jumping between prompts
+
+```toml
+[keybindings]
+jump_prev_prompt = "ctrl+shift+pageup"
+jump_next_prompt = "ctrl+shift+pagedown"
+select_last_output = "ctrl+shift+o"
+```
+
+With shell integration (the bash and zsh scripts in `dist/shell-integration`,
+or any shell that sends OSC 133), these move through the shell prompts in
+scrollback:
+
+- `jump_prev_prompt` scrolls so the nearest prompt above the top of the view
+  is the top row. Press it again for the one before.
+- `jump_next_prompt` does the same going down. After the last prompt it
+  returns to the bottom, the live screen.
+- `select_last_output` selects, line by line, the output of the last command,
+  from where it started to where it finished (or to the cursor, if it is still
+  running), and scrolls to it if needed. Copy it with the copy key. A
+  selection in Ultty is made of view rows, so this works only when the output
+  fits on screen; for longer output nothing is selected, and
+  `ulttyctl last-command` reads it whole.
+
+A prompt is found by its OSC 133;B mark, so a jump lands on the row where you
+type the command, which for a prompt that spans several lines is the last one.
+Prompts that have scrolled out of the scrollback limit are gone, and a pane
+without shell integration has none to jump to. The keys do nothing on the
+alternate screen (full-screen programs such as editors), where they go to the
+program.
+
+Ghostty binds its `jump_to_prompt` to Ctrl+Shift+Up and Down. Ultty already
+uses those to move between panes (`focus_pane_up`, `focus_pane_down`), so the
+defaults here are Ctrl+Shift+PageUp and PageDown, beside Shift+PageUp and
+PageDown for scrolling by a page. Set any of the three to `""` to turn it off.
+
 ## Line height
 
 ```toml

@@ -959,10 +959,12 @@ impl Terminal {
         }
     }
 
-    /// The last command the shell ran (or is running), found through the
-    /// OSC 133 marks on the main screen's rows (ADR 0019). `None` before
-    /// the first command. `tail_lines` keeps only the end of long output.
-    pub fn last_command(&self, tail_lines: Option<usize>) -> Option<LastCommand> {
+    /// The main screen's absolute rows `start..end` that hold the last
+    /// command's output, from the row its OSC 133;C mark is on to the row its
+    /// OSC 133;D mark is on (a command still running has no end yet, so
+    /// that is the end of the screen). `None` when there is no command or its
+    /// marks have left the scrollback.
+    fn last_output_rows(&self) -> Option<(usize, usize)> {
         let shell = &self.shell_integration;
         if shell.command_number == 0 {
             return None;
@@ -974,17 +976,89 @@ impl Terminal {
             buffer
                 .marks_at(index)
                 .is_some_and(|m| m.output_start == tag)
-        });
-        let end = start.and_then(|start| {
-            (start..total)
-                .find(|&index| buffer.marks_at(index).is_some_and(|m| m.command_end == tag))
-        });
-        let running = shell.command_executing;
-        let rows = match (start, end) {
-            (Some(start), Some(end)) => Some((start, end)),
-            (Some(start), None) if running => Some((start, total)),
-            _ => None,
+        })?;
+        let end = (start..total)
+            .find(|&index| buffer.marks_at(index).is_some_and(|m| m.command_end == tag));
+        match end {
+            Some(end) => Some((start, end)),
+            None if shell.command_executing => Some((start, total)),
+            None => None,
+        }
+    }
+
+    /// Scroll the view to the previous (`Direction::Back`) or next
+    /// (`Direction::Forward`) shell prompt, found through the OSC 133;B marks
+    /// on the main screen's rows. The prompt lands on the top row of the
+    /// view, except that one in the live screen cannot go higher than where
+    /// it is, so the view then goes to the bottom. Going forward past the
+    /// last prompt goes to the bottom. Returns whether the view moved. Does
+    /// nothing on the alternate screen, which has no scrollback.
+    pub fn jump_to_prompt(&mut self, direction: PromptJump) -> bool {
+        if self.using_alternate {
+            return false;
+        }
+        let before = self.main.scroll_offset();
+        match direction {
+            PromptJump::Previous => {
+                if let Some(row) = self.main.prompt_row_above_view() {
+                    self.main.scroll_to_row(row);
+                }
+            }
+            PromptJump::Next => match self.main.prompt_row_below_view() {
+                Some(row) => self.main.scroll_to_row(row),
+                None => self.main.scroll_to_bottom(),
+            },
+        }
+        self.main.scroll_offset() != before
+    }
+
+    /// Select, line by line, the output of the last command, if all of it
+    /// fits on screen: the view scrolls to show it, and the selection covers
+    /// the rows from the one its output started on to the one before its
+    /// OSC 133;D mark. A command that has not finished is selected as far as
+    /// the cursor. Returns whether a selection was made. It is not when
+    /// there is no command, its marks have left the scrollback, its output
+    /// is empty or taller than the view, or the alternate screen is shown.
+    ///
+    /// Selections are in view rows, so longer output cannot be selected;
+    /// `ulttyctl last-command` reads it whole.
+    pub fn select_last_output(&mut self) -> bool {
+        if self.using_alternate {
+            return false;
+        }
+        let Some((start, mut end)) = self.last_output_rows() else {
+            return false;
         };
+        if self.shell_integration.command_executing {
+            let cursor = self.main.history_len() + self.main.grid().cursor().position.row as usize;
+            end = end.min(cursor + 1);
+        }
+        let view_rows = usize::from(self.main.dimensions().rows);
+        if end <= start || end - start > view_rows {
+            return false;
+        }
+        let top = self.main.top_row();
+        if start < top || end > top + view_rows {
+            self.main.scroll_to_row(start);
+        }
+        let top = self.main.top_row() as i32;
+        let (first, last) = (start as i32 - top, end as i32 - 1 - top);
+        self.start_selection(SelectionPoint::new(0, first), SelectionMode::Line);
+        self.update_selection(SelectionPoint::new(0, last));
+        true
+    }
+
+    /// The last command the shell ran (or is running), found through the
+    /// OSC 133 marks on the main screen's rows (ADR 0019). `None` before
+    /// the first command. `tail_lines` keeps only the end of long output.
+    pub fn last_command(&self, tail_lines: Option<usize>) -> Option<LastCommand> {
+        let shell = &self.shell_integration;
+        if shell.command_number == 0 {
+            return None;
+        }
+        let buffer = &self.main;
+        let rows = self.last_output_rows();
+        let running = shell.command_executing;
         let mut output = rows
             .map(|(start, end)| buffer.text_of_rows(start, end, 0))
             .unwrap_or_default();
@@ -1530,6 +1604,15 @@ impl MouseModifiers {
         }
         bits
     }
+}
+
+/// Which way [`Terminal::jump_to_prompt`] goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptJump {
+    /// Towards older output.
+    Previous,
+    /// Towards the live screen.
+    Next,
 }
 
 /// Selection point (can be negative for scroll offset).

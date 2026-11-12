@@ -42,10 +42,10 @@ Ranked by how much a typical user would notice:
    substring matching, row by row, inside copy mode. Matches cannot span a
    wrapped line and there is no regex. Alacritty searches by regex, and
    Ghostty 1.3 added a dedicated search UI.
-6. **No jump-to-prompt.** Ultty records OSC 133 prompt marks and uses them
-   for `ulttyctl last-command` and command events. No keybinding scrolls to
-   the previous or next prompt, and output cannot be selected by command.
-   Ghostty has `jump_to_prompt` and command-output selection.
+6. **No jump-to-prompt.** *Fixed.* Ctrl+Shift+PageUp and PageDown scroll to
+   the previous and next prompt, and Ctrl+Shift+O selects the last command's
+   output when it fits on screen. Longer output cannot be selected, because
+   a selection is made of view rows.
 7. **Shell integration is manual.** `dist/shell-integration` has bash and zsh
    scripts that the user must source. Ghostty injects its integration into
    bash, zsh, fish, elvish and nushell automatically.
@@ -123,7 +123,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | OSC 8 hyperlinks | yes; Ctrl+click opens http, https, mailto, ftp only | yes; `link-osc8` config | yes | `scorecard_hyperlinks`; `ultty/src/url.rs` scheme allow-list |
 | OSC 52 clipboard | partial: writes (can be denied); reads always refused | yes; read `ask` by default, write `allow` | partial; copy only by default, paste opt-in | `scorecard_clipboard_write`; `ansi/osc.rs` refuses `?` |
 | OSC 7 working directory | yes: stored, used in tab titles, session save, and the directory of new tabs and splits (local host only) | yes | no; not in escape list | `scorecard_working_directory`; `inherit_dir.rs` tests; `terminal_manager.rs` `new_tab_opens_in_*` |
-| OSC 133 prompt marks | partial: A/B/C/D recorded, used by `ulttyctl last-command` and events; no jump or select-output | yes, with `click_events` and `cl=` extensions | no | `tests/command_marks.rs`; `scorecard_prompt_marks` |
+| OSC 133 prompt marks | yes: A/B/C/D recorded, used by `ulttyctl last-command`, events, jump to prompt, and select last output (only when it fits on screen) | yes, with `click_events` and `cl=` extensions | no | `tests/command_marks.rs`; `scorecard_prompt_marks` |
 | Title stack (XTWINOPS 22/23) | yes, bounded | unverified in docs | yes | `conformance.rs` `title_stack_*` |
 | DECSCUSR cursor shapes | yes: block, underline, bar, steady or blinking | yes | yes | `term_handler.rs` DECSCUSR arms; `renderer/cursor.rs` |
 | Colour queries OSC 4/10/11/12 | partial: OSC 4 query and set; 10/11/12 query only; no setting fg/bg/cursor | yes | yes; query and set | `conformance.rs` `dynamic_colour_queries_*`, `osc_4_*`; `osc.rs` |
@@ -212,7 +212,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Feature | Ultty | Ghostty 1.4 | Alacritty 0.16 | Ultty evidence |
 |---|---|---|---|---|
 | Prompt marks | partial: recorded; scripts for bash and zsh, sourced by hand | yes; auto-injected for bash, zsh, fish, elvish, nushell | no | `dist/shell-integration/`; `tests/command_marks.rs` |
-| Jump to prompt | no | yes | no | no keybinding or action |
+| Jump to prompt | yes; `jump_prev_prompt`, `jump_next_prompt` (Ctrl+Shift+PageUp/PageDown); `select_last_output` (Ctrl+Shift+O) | yes | no | `Terminal::jump_to_prompt`; `tests/command_marks.rs` |
 | cwd inheritance for new tabs and splits | yes; OSC 7 (local host), else the foreground process's `/proc` cwd on Linux; `behavior.inherit_working_directory` | yes; separate tab and split options | yes for new windows (unverified in docs) | `inherit_dir.rs`; `terminal_manager.rs` `inherited_directory` |
 | ssh and sudo helpers | partial: in-band native protocol over ssh; `xterm-ultty` terminfo copied by hand | yes; `+ssh` terminfo and env, sudo wrapper | no | `docs/configuration.md` terminal type; ADR 0018 |
 

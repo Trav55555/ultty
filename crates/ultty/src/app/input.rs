@@ -974,6 +974,38 @@ impl App {
             }
         }
 
+        // Prompt marks (OSC 133) on the main screen: jump between prompts and
+        // select the last command's output. On the alternate screen the key
+        // goes to the app, like the page keys above.
+        {
+            use ultty::grid::PromptJump;
+            let keys = &self.config.keybindings;
+            let jump = if self.check_keybinding(&event, &keys.jump_prev_prompt.clone()) {
+                Some(Some(PromptJump::Previous))
+            } else if self.check_keybinding(&event, &keys.jump_next_prompt.clone()) {
+                Some(Some(PromptJump::Next))
+            } else if self.check_keybinding(&event, &keys.select_last_output.clone()) {
+                Some(None)
+            } else {
+                None
+            };
+            if let Some(jump) = jump {
+                let handled = self
+                    .terminal_mut()
+                    .filter(|t| !t.is_alternate_screen())
+                    .map(|mut t| match jump {
+                        Some(direction) => t.jump_to_prompt(direction),
+                        None => t.select_last_output(),
+                    });
+                if let Some(changed) = handled {
+                    if changed {
+                        self.needs_redraw = true;
+                    }
+                    return;
+                }
+            }
+        }
+
         // Check for find/search (Ctrl+Shift+F)
         if self.check_keybinding(&event, &self.config.keybindings.find.clone()) {
             // If native sessions are active, also search their scene trees

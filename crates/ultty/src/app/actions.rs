@@ -144,6 +144,18 @@ impl App {
                 "Scroll forward a page".to_string(),
             ),
             (
+                keybindings.jump_prev_prompt.clone(),
+                "Jump to previous prompt".to_string(),
+            ),
+            (
+                keybindings.jump_next_prompt.clone(),
+                "Jump to next prompt".to_string(),
+            ),
+            (
+                keybindings.select_last_output.clone(),
+                "Select last command output".to_string(),
+            ),
+            (
                 keybindings.reload_config.clone(),
                 "Reload config".to_string(),
             ),

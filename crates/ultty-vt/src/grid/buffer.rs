@@ -505,6 +505,37 @@ impl Buffer {
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
     }
 
+    /// Absolute index of the row at the top of the view (0 is the oldest
+    /// scrollback row), whichever way the view is scrolled.
+    pub fn top_row(&self) -> usize {
+        self.history.len() - self.scroll_offset.min(self.history.len())
+    }
+
+    /// Scroll so that the row at `absolute_index` is at the top of the view,
+    /// or as close as the buffer allows: a row in the live screen cannot be
+    /// scrolled to the top, so the view goes to the bottom.
+    pub fn scroll_to_row(&mut self, absolute_index: usize) {
+        self.scroll_offset = self.history.len().saturating_sub(absolute_index);
+    }
+
+    /// The nearest row above the top of the view that has shell input
+    /// starting on it (OSC 133;B), if any.
+    pub fn prompt_row_above_view(&self) -> Option<usize> {
+        (0..self.top_row())
+            .rev()
+            .find(|&index| self.has_prompt_at(index))
+    }
+
+    /// The nearest row below the top of the view that has shell input
+    /// starting on it, if any.
+    pub fn prompt_row_below_view(&self) -> Option<usize> {
+        (self.top_row() + 1..self.total_lines()).find(|&index| self.has_prompt_at(index))
+    }
+
+    fn has_prompt_at(&self, index: usize) -> bool {
+        self.marks_at(index).is_some_and(|m| m.input_start != 0)
+    }
+
     /// Scroll to top of history.
     pub fn scroll_to_top(&mut self) {
         self.scroll_offset = self.history.len();
