@@ -172,7 +172,8 @@ line_height = 1.0
 The cell height as a multiple of the font size, rounded up to whole pixels.
 Values outside 0.5 to 3.0 are clamped. At 1.0, block and box-drawing
 characters in adjacent rows touch; larger values add space between lines.
-Font settings are read at start; restart Ultty after changing them.
+Font settings apply when the config is reloaded; see
+[Changing fonts without a restart](#changing-fonts-without-a-restart).
 
 ## Bold and italic families
 
@@ -218,6 +219,15 @@ programming fonts, Fira Code among them, build theirs with `calt`, so
 `["-calt"]` is what turns those off, while `["-liga"]` turns off standard
 ligatures such as `fi`.
 
+## Changing fonts without a restart
+
+`family`, `bold_family`, `italic_family`, `bold_italic_family`, `features`,
+`ligatures`, `size`, `line_height` and `emoji` all apply when the config is
+reloaded (Ctrl+Shift+R, or when the config file changes). Ultty measures the
+cell again, empties its glyph cache and resizes every pane to the new cell
+size. A `size` you did not change in the file keeps any zoom you set with the
+font size keys; changing it resets the zoom to the new value.
+
 ## Emoji and accents
 
 ```toml
@@ -239,8 +249,7 @@ change an emoji. An emoji still takes two cells.
 installed, Ultty uses the first installed of Noto Color Emoji, Apple Color
 Emoji, Segoe UI Emoji, Twemoji, Twitter Color Emoji, JoyPixels and OpenMoji
 Color. With none of them installed, emoji come from whatever installed font
-has them, often in black and white. Like the other font settings, `emoji` is
-read at start.
+has them, often in black and white.
 
 An emoji sequence (a ZWJ family, a flag, a skin tone) is drawn as one glyph
 in whatever design the emoji font gives it. Noto Color Emoji 2.051, for example, draws the family

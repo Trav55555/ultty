@@ -25,11 +25,11 @@ Ranked by how much a typical user would notice:
    Ultty used to spawn them in the directory it was started in. They now use
    the pane's last local OSC 7 directory, else its foreground process's
    directory on Linux (`behavior.inherit_working_directory`, on by default).
-2. **Font configuration is thin.** *Partly fixed.* Ultty now has separate
-   bold, italic and bold italic families (`font.bold_family` and the like) and
-   an OpenType feature list (`font.features`). It still has no variable-font
-   axes, no codepoint-to-font map and no cell offsets. Font settings need a
-   restart.
+2. **Font configuration is thin.** *Mostly fixed.* Ultty now has separate
+   bold, italic and bold italic families (`font.bold_family` and the like), an
+   OpenType feature list (`font.features`) and font changes on config reload.
+   It still has no variable-font axes, no codepoint-to-font map and no cell
+   offsets.
 3. **No Kitty graphics protocol.** Ghostty supports it (1.4 added
    animation). Programs that only speak Kitty's protocol, such as many
    image viewers and some Neovim plugins, show no images. Ultty supports
@@ -159,7 +159,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Per-style fonts (bold, italic) | yes; `font.bold_family`, `italic_family`, `bold_italic_family` | yes; `font-family-bold` etc. | yes; `font.bold`, `italic`, `bold_italic` | `renderer/text.rs` `FontSelection` |
 | Codepoint-to-font map | no | yes; `font-codepoint-map` | no | none in `config.rs` |
 | Cell or glyph offsets | partial: `line_height` only | yes; `adjust-*` options | yes; `font.offset`, `glyph_offset` | `FontConfig::line_height` |
-| Live font changes | partial: size via keys; family needs restart | yes | yes | `docs/configuration.md` "Font settings are read at start" |
+| Live font changes | yes: size via keys; family, size, features and line height on config reload | yes | yes | `renderer/text.rs` `apply_font_config`; `docs/configuration.md` "Changing fonts without a restart" |
 
 ### Input
 
@@ -192,7 +192,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Feature | Ultty | Ghostty 1.4 | Alacritty 0.16 | Ultty evidence |
 |---|---|---|---|---|
 | Format | TOML | key = value | TOML, with imports | `config.rs` |
-| Live reload | partial: file watched; font settings need restart | on request (keybind or menu) | yes; `live_config_reload` | `config_watcher.rs`; `tests/config_reload.rs` |
+| Live reload | partial: file watched; `behavior.accessibility` needs restart | on request (keybind or menu) | yes; `live_config_reload` | `config_watcher.rs`; `tests/config_reload.rs` |
 | Bundled themes | 6 | hundreds (356 added in 1.4); light/dark pairs | none bundled (separate repo) | `config.rs` `ColorConfig::default` |
 | Per-platform options | no | yes; `macos-*`, `gtk-*` | yes | none in `config.rs` |
 | CLI overrides | partial: `-e` only (added after this audit); no config overrides | yes; `--key=value` | yes; `-o`, `-e`, `--working-directory` | `main.rs` `invocation` |

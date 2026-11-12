@@ -896,6 +896,29 @@ impl TextRenderer {
         self.ligatures
     }
 
+    /// Switch to the families, size, line height, features and emoji font
+    /// of `config` without a restart. Everything derived from the old fonts
+    /// is dropped: the cell size and decoration metrics are measured again,
+    /// and the glyph atlas, the shaping caches and the cached rows are
+    /// emptied. Returns whether the cell size changed, in which case every
+    /// grid needs resizing.
+    pub fn apply_font_config(&mut self, config: &FontConfig) -> bool {
+        let old_cell = (self.cell_width, self.cell_height);
+        self.metrics = font_metrics(config);
+        self.fonts = FontSelection::new(self.font_system.db(), config);
+        self.emoji_family = installed_emoji_family(self.font_system.db(), &config.emoji);
+        self.ligatures = config.ligatures;
+        self.font_generation += 1;
+
+        let (width, height, baseline) =
+            Self::measure_cell_with_font(&mut self.font_system, self.metrics, self.fonts.family());
+        self.cell_width = width;
+        self.cell_height = height;
+        self.drop_font_caches();
+        self.decoration = self.measure_decoration_metrics(baseline);
+        (self.cell_width, self.cell_height) != old_cell
+    }
+
     /// Empty everything keyed by the fonts in use.
     fn drop_font_caches(&mut self) {
         self.atlas.clear();
