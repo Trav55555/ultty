@@ -60,10 +60,10 @@ how a tool that cannot start reports why.)
 working_dir, target }`, exposed as `ulttyctl split [right|down] [cmd
 args...]` and useful on its own. The pane split is `--pane`, else the pane
 `ulttyctl` runs in (Ultty sets `ULTTY_PANE` in every pane, next to
-`ULTTY_PID`), else the focused one. Until native sessions map to panes, a
-tool in a split draws with ANSI: `lua open --split` starts it with
-`ulttui-lua --ansi`, and says so once on stderr. A split pane that
-connected natively would be blank.
+`ULTTY_PID`), else the focused one. The tool draws natively in its split
+pane as it does in a tab (ADR 0025 binds a session to the pane that runs
+it; until then `lua open --split` started `ulttui-lua --ansi`, since a
+split pane that connected natively was blank).
 
 Keybindings and a `[lua]` config table (named tools with their file, grants
 and placement) build on the same request later; they are not in this ADR's
@@ -166,9 +166,9 @@ split panes (A1 follow-up).
   are refused in favour of that flag, the rest the docs name.
 - `ulttyctl split` exists for every program, not only Lua; every pane
   carries `ULTTY_PANE`, so a program can name its own pane to `ulttyctl`.
-- A tool in a split draws ANSI until sessions map to panes; the two modes
-  already have to agree (ADR 0013), so a tool looks the same apart from
-  `align`/`justify`.
+- A tool in a split draws natively (ADR 0025; it drew ANSI until sessions
+  mapped to panes). The two modes have to agree anyway (ADR 0013), so a
+  tool looks the same wherever it runs, apart from `align`/`justify`.
 - `ScriptOptions::allow_exec` becomes `ScriptOptions::exec: ExecGrant`.
 - A pane closes when its program exits, so an error `ulttui-lua` prints
   before it exits is lost unless something holds it; see the amendment.
@@ -212,7 +212,7 @@ same happened to an unknown flag or a `--log` path that cannot be created.
    command, `ULTTY_PANE`, `ulttyctl split`, auth and JSON round-trip tests.
 3. **`ulttyctl lua open`.** Resolution of the binary and the file, the
    caller's directory, grants forwarded, `--split` with `--ansi` and the
-   note. Parser tests.
+   note (dropped 2026-11-12 by ADR 0025 slice 5). Parser tests.
 4. **E2E.** `scripts/e2e/lua-open.sh`: a headless Ultty; `lua open
    panes.luau --exec 'ulttyctl --json panes'` draws a list with a row per
    pane in the caller's directory; `lua open panes.luau` without grants
@@ -234,8 +234,9 @@ same happened to an unknown flag or a `--log` path that cannot be created.
    fall back to ANSI. The fallback is honest and useful now; it may teach
    users that splits are second class.
 
-   *2026-11-11: ADR 0025 draws native sessions in split panes; dropping the
-   forced `--ansi` is its slice 5.*
+   *Resolved 2026-11-12: native.* ADR 0025 draws native sessions in split
+   panes; its slice 5 dropped the forced `--ansi` and the note, and
+   `scripts/e2e/lua-open.sh` checks the split pane's regions natively.
 2. **An MCP tool.** `ulttyctl mcp` serves `new_tab`; whether agents want
    `lua_open` as a tool or are fine shelling out.
 3. **Grant text.** A tool that pipes through `sh -c` needs `--exec sh`,

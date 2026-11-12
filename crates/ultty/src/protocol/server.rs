@@ -811,6 +811,92 @@ impl ProtocolServer {
         })
     }
 
+    /// Sessions that a key sent to `pane`, of `tab`, through the control
+    /// socket reaches, whether or not its tab is shown (a targeted request
+    /// may drive any pane): full-scene sessions bound to the pane (ADR
+    /// 0025), or not bound yet and of its tab, whose app is the pane's
+    /// foreground program `foreground_pgrp` (see
+    /// [`NativeSession::is_in_foreground`]).
+    fn pane_key_recipients_mut(
+        &mut self,
+        tab: TabId,
+        pane: TerminalId,
+        foreground_pgrp: Option<i32>,
+    ) -> impl Iterator<Item = &mut NativeSession> {
+        self.sessions.values_mut().filter(move |session| {
+            session.is_confirmed()
+                && session.is_full_scene()
+                && session.is_in_foreground(foreground_pgrp)
+                && match session.pane() {
+                    Some(bound) => bound == pane,
+                    None => session.tab_id() == tab,
+                }
+        })
+    }
+
+    /// True if a session that a key sent to `pane` reaches (see
+    /// [`Self::send_key_to_pane`]) subscribed to keys.
+    pub fn has_pane_key_subscribers(
+        &self,
+        tab: TabId,
+        pane: TerminalId,
+        foreground_pgrp: Option<i32>,
+    ) -> bool {
+        self.sessions.values().any(|session| {
+            session.is_confirmed()
+                && session.is_full_scene()
+                && session.is_in_foreground(foreground_pgrp)
+                && session.has_key_subscription()
+                && match session.pane() {
+                    Some(bound) => bound == pane,
+                    None => session.tab_id() == tab,
+                }
+        })
+    }
+
+    /// Send a key event to the sessions of `pane` (of `tab`) that take keys
+    /// (see `pane_key_recipients_mut`), shown or not.
+    pub fn send_key_to_pane(
+        &mut self,
+        tab: TabId,
+        pane: TerminalId,
+        key: ultty_protocol::Key,
+        modifiers: ultty_protocol::Modifiers,
+        foreground_pgrp: Option<i32>,
+    ) {
+        for session in self.pane_key_recipients_mut(tab, pane, foreground_pgrp) {
+            if let Err(e) = session.send_key(key.clone(), modifiers) {
+                warn!(
+                    "Failed to send key to session {}: {}",
+                    session.session_id(),
+                    e
+                );
+            }
+        }
+        self.flush();
+    }
+
+    /// Send a text input event to the sessions [`Self::send_key_to_pane`]
+    /// would send a key to.
+    pub fn send_text_input_to_pane(
+        &mut self,
+        tab: TabId,
+        pane: TerminalId,
+        text: String,
+        foreground_pgrp: Option<i32>,
+    ) {
+        for session in self.pane_key_recipients_mut(tab, pane, foreground_pgrp) {
+            if let Err(e) = session.send_text_input(text.clone()) {
+                warn!(
+                    "Failed to send text_input to session {}: {}",
+                    session.session_id(),
+                    e
+                );
+            }
+        }
+        self.flush();
+    }
+
     /// Send a key event to the sessions that subscribed to keys and may
     /// receive them (see `key_recipients_mut`).
     ///
@@ -1915,6 +2001,57 @@ mod tests {
 
         assert!(server.has_key_subscribers(foreground));
         server.broadcast_key(key, mods, foreground);
+        assert_eq!(key_downs(&socket_replies(&mut client)), 1);
+    }
+
+    /// A key sent to a pane through the control socket reaches the pane's
+    /// session whether or not its tab is shown, which keyboard input from
+    /// the window never does; and only that pane's session.
+    #[test]
+    fn a_targeted_key_reaches_the_panes_session_in_a_hidden_tab() {
+        use std::io::Write;
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
+        let mut client = connect(&mut server, &path);
+        for msg in [
+            AppMessage::ClientHello {
+                version: ultty_protocol::PROTOCOL_VERSION,
+                requested_capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES,
+            },
+            root_child(),
+            AppMessage::Subscribe {
+                id: ultty_protocol::RegionId::ROOT,
+                events: ultty_protocol::EVENT_KEY,
+            },
+        ] {
+            client.write_all(&encode(&msg)).unwrap();
+        }
+        server.poll(Some(Duration::from_millis(100))).unwrap();
+        let _handshake = socket_replies(&mut client);
+        let (pane, other) = (TerminalId::new(3), TerminalId::new(4));
+        assert_eq!(server.bind_unbound_sessions(|_, _| Some(pane)), 1);
+        // Another tab is in front of the session's.
+        server.set_active_tab(Some(TAB_B));
+
+        let foreground = Some(own_process_group());
+        let key = ultty_protocol::Key::Char('p');
+        let mods = ultty_protocol::Modifiers::NONE;
+
+        assert!(
+            !server.has_key_subscribers(foreground),
+            "the window's keys go to the shown tab only"
+        );
+        assert!(server.has_pane_key_subscribers(TAB_A, pane, foreground));
+        assert!(!server.has_pane_key_subscribers(TAB_A, other, foreground));
+        assert!(!server.has_pane_key_subscribers(TAB_A, pane, Some(own_process_group() + 1)));
+
+        server.send_key_to_pane(TAB_A, other, key.clone(), mods, foreground);
+        server.send_text_input_to_pane(TAB_A, other, "x".to_string(), foreground);
+        assert!(
+            socket_replies(&mut client).is_empty(),
+            "another pane's keys do not reach it"
+        );
+        server.send_key_to_pane(TAB_A, pane, key, mods, foreground);
         assert_eq!(key_downs(&socket_replies(&mut client)), 1);
     }
 

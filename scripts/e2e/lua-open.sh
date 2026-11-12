@@ -7,7 +7,8 @@
 #   - `lua open panes.luau` without a grant shows the banner naming the
 #     flag to add, and runs nothing;
 #   - `--pane 0 lua open hello.luau --split right` opens a split pane next
-#     to the shell in tab 1, drawn with ANSI, and says so on stderr;
+#     to the shell in tab 1, drawing natively in that pane (ADR 0025), with
+#     nothing on stderr;
 #   - `lua open` with `--exec sh` or a missing file fails on its own stderr
 #     and opens no pane;
 #   - an error only ulttui-lua finds (an unwritable --log) stays in its
@@ -168,32 +169,22 @@ python3 scripts/e2e/lua_regions.py "$out/denied.json" --id panes >/dev/null 2>&1
 echo "lua-open: denied tool shows the banner in pane $denied"
 
 # 3. A split next to pane 0 (the shell, in a tab that is not the visible
-#    one) draws with ANSI and says so.
+#    one) draws natively in its own pane (ADR 0025): its scene is listed
+#    for that pane and not for the shell's, and nothing is said on stderr.
 split=$("$ULTTYCTL" --pane 0 lua open "$out/hello.luau" --split right 2>"$out/note.txt") ||
     fail "lua open --split"
-grep -q "draws with ANSI" "$out/note.txt" || fail "no ANSI note for --split (got: $(cat "$out/note.txt"))"
+[ -s "$out/note.txt" ] && fail "lua open --split wrote to stderr: $(cat "$out/note.txt")"
 [ "$(tab_of "$split")" = 0 ] || fail "the split pane is not in the shell's tab"
-ok=""
-for _ in $(seq 100); do
-    if "$ULTTYCTL" --pane "$split" text 2>/dev/null | grep -q "Count: 0"; then
-        ok=1
-        break
-    fi
-    sleep 0.1
-done
-[ -n "$ok" ] || { "$ULTTYCTL" --pane "$split" text >&2 || true; fail "hello.luau did not draw in the split pane"; }
+wait_regions split "$split" --text "Count: 0" ||
+    fail "hello.luau did not draw natively in the split pane"
+regions shell 0
+python3 scripts/e2e/native_split_check.py no-scenes "$out/shell.json" ||
+    fail "the shell's pane lists the tool's scene"
 # Keys reach it through the pane: the counter goes up.
 "$ULTTYCTL" --pane "$split" send-key up >/dev/null
-ok=""
-for _ in $(seq 50); do
-    if "$ULTTYCTL" --pane "$split" text 2>/dev/null | grep -q "Count: 1"; then
-        ok=1
-        break
-    fi
-    sleep 0.1
-done
-[ -n "$ok" ] || fail "the split pane did not take a key"
-echo "lua-open: split pane $split draws hello.luau with ANSI"
+wait_regions split-up "$split" --text "Count: 1" ||
+    fail "the split pane did not take a key"
+echo "lua-open: split pane $split draws hello.luau natively; the shell's pane has no scene"
 
 # 4. From inside a pane, `split` with no --pane splits that pane (Ultty
 #    sets ULTTY_PANE), not the visible tab's focused one.

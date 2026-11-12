@@ -614,10 +614,13 @@ impl App {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
+                // The pane's native app takes it whether or not its tab is
+                // shown; else it is typed into the pane's PTY.
                 let foreground = self.pane_foreground_pgrp(pane);
-                if let Some(ref mut server) = self.protocol_server {
-                    if server.has_key_subscribers(foreground) {
-                        server.broadcast_text_input(text, foreground);
+                let tab = self.terminal_manager.terminal(pane).map(|t| t.tab_id);
+                if let (Some(server), Some(tab)) = (self.protocol_server.as_mut(), tab) {
+                    if server.has_pane_key_subscribers(tab, pane, foreground) {
+                        server.send_text_input_to_pane(tab, pane, text, foreground);
                         return ControlResponse::Ok;
                     }
                 }
@@ -643,9 +646,10 @@ impl App {
                     Err(response) => return response,
                 };
                 let foreground = self.pane_foreground_pgrp(pane);
-                if let Some(ref mut server) = self.protocol_server {
-                    if server.has_key_subscribers(foreground) {
-                        server.broadcast_key(key, modifiers, foreground);
+                let tab = self.terminal_manager.terminal(pane).map(|t| t.tab_id);
+                if let (Some(server), Some(tab)) = (self.protocol_server.as_mut(), tab) {
+                    if server.has_pane_key_subscribers(tab, pane, foreground) {
+                        server.send_key_to_pane(tab, pane, key, modifiers, foreground);
                         return ControlResponse::Ok;
                     }
                 }

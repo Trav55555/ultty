@@ -304,11 +304,6 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
                 let cwd = std::env::current_dir()
                     .map_err(|e| format!("cannot find the current directory: {e}"))?;
                 open.check(&cwd)?;
-                if open.split.is_some() {
-                    eprintln!(
-                        "note: a split pane draws with ANSI until native sessions map to panes"
-                    );
-                }
                 Ok(open.request(&lua_runner(), &cwd))
             }
             _ => Err(LuaOpen::USAGE.to_string()),
@@ -553,14 +548,11 @@ impl LuaOpen {
                 args: runner_args,
                 working_dir,
             },
-            // Native scenes are drawn only in a tab of one pane, so a split
-            // pane draws ANSI.
+            // The tool draws natively in its pane (ADR 0025), as in a tab.
             Some(direction) => ControlRequest::SplitPane {
                 direction,
                 command: Some(runner.to_string()),
-                args: std::iter::once("--ansi".to_string())
-                    .chain(runner_args)
-                    .collect(),
+                args: runner_args,
                 working_dir,
                 target: None,
             },
@@ -988,8 +980,8 @@ LUA TOOLS (docs/lua.md):
     lua open <file> [--split right|down] [--exec <cmd>]... [--allow-exec]
              [--log <file>]
                             Run a Luau script with ulttui-lua in a new tab
-                            (or a split, drawn with ANSI), in this directory,
-                            and print its pane's id. run{{}} may start only
+                            or a split pane, in this directory, and print
+                            its pane's id. run{{}} may start only
                             command lines beginning with an --exec <cmd>,
                             e.g. --exec 'ulttyctl --json panes'; a bare
                             program name allows any arguments. A grant on
@@ -1615,14 +1607,15 @@ mod tests {
     }
 
     #[test]
-    fn lua_open_in_a_split_draws_ansi_and_takes_a_pane() {
+    fn lua_open_in_a_split_draws_natively_and_takes_a_pane() {
         let open = LuaOpen::parse(&args("--split right --exec git tool.luau")).unwrap();
         assert_eq!(
             open.request("/a=b/ulttui-lua", std::path::Path::new("/w")),
             ControlRequest::SplitPane {
                 direction: SplitDirection::Right,
                 command: Some("/a=b/ulttui-lua".to_string()),
-                args: args("--ansi --wait-on-error --exec git /w/tool.luau"),
+                // No `--ansi`: the tool draws natively in its pane (ADR 0025).
+                args: args("--wait-on-error --exec git /w/tool.luau"),
                 working_dir: Some("/w".to_string()),
                 target: None,
             }
