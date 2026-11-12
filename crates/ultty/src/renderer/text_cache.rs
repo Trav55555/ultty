@@ -26,6 +26,9 @@ pub(super) struct GridTextKey {
     /// one epoch.
     pub atlas_epoch: u64,
     pub ligatures: bool,
+    /// [`super::text::TextRenderer`]'s font generation: changes with the
+    /// families, size and features the vertices were shaped with.
+    pub font_generation: u64,
 }
 
 /// The cached text vertices of one draw (one terminal or pane).
@@ -137,6 +140,7 @@ mod tests {
             origin: (0.0, 0.0),
             atlas_epoch: 0,
             ligatures: true,
+            font_generation: 0,
         }
     }
 
@@ -222,12 +226,13 @@ mod tests {
     #[test]
     fn a_changed_key_drops_every_row() {
         let row = row_of("ls");
-        let changes: [fn(&mut GridTextKey); 5] = [
+        let changes: [fn(&mut GridTextKey); 6] = [
             |k| k.scheme = k.scheme.for_screen(true).into_owned(),
             |k| k.cell_size.0 += 1.0,
             |k| k.origin.1 += 20.0,
             |k| k.atlas_epoch += 1,
             |k| k.ligatures = false,
+            |k| k.font_generation += 1,
         ];
         for change in changes {
             let mut cache = cache_with(&row);

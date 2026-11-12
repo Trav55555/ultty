@@ -174,6 +174,50 @@ Values outside 0.5 to 3.0 are clamped. At 1.0, block and box-drawing
 characters in adjacent rows touch; larger values add space between lines.
 Font settings are read at start; restart Ultty after changing them.
 
+## Bold and italic families
+
+```toml
+[font]
+family = "Fira Code"
+bold_family = "Fira Code SemiBold"
+italic_family = "Victor Mono"
+bold_italic_family = "Victor Mono Bold"
+```
+
+`bold_family`, `italic_family` and `bold_italic_family` name the font for
+bold, italic and bold italic text. Each is empty by default. An empty entry
+uses `family`: its own bold or italic face if it has one, and otherwise the
+regular face with a brighter color for bold and a slant for italic.
+`bold_italic_family` does not fall back to `bold_family` or `italic_family`.
+A style family is asked for the bold weight and italic slant too, so a family
+with several weights gives its bold one. Cells are sized from `family`, so a
+style family with a different advance width breaks the grid; use families
+meant to go together.
+
+## OpenType features
+
+```toml
+[font]
+features = ["calt", "-liga", "ss01", "zero", "cv02=2"]
+```
+
+`features` is a list of OpenType features to apply when shaping. `"calt"` or
+`"+calt"` turns a feature on, `"-liga"` turns it off, and `"cv02=2"` picks the
+second alternate of a feature that has several. Entries apply in order and a
+later entry for the same feature replaces an earlier one. An entry that is not
+four characters of tag, with an optional sign or value, is ignored with a
+warning in the log. The list applies to regular, bold and italic text alike.
+
+`ligatures` is a separate switch over whether neighbouring cells are shaped
+together at all. It defaults to `true`. With `ligatures = false` no cells are
+shaped together, so `calt` and `liga` cannot join them whatever `features`
+says; the other features, such as `zero` or `ss01`, still apply to each cell.
+With `ligatures = true`, a font's default features apply first and `features`
+adjusts them. Which feature forms a given ligature depends on the font: many
+programming fonts, Fira Code among them, build theirs with `calt`, so
+`["-calt"]` is what turns those off, while `["-liga"]` turns off standard
+ligatures such as `fi`.
+
 ## Emoji and accents
 
 ```toml

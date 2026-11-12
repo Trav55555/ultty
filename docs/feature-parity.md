@@ -25,11 +25,11 @@ Ranked by how much a typical user would notice:
    Ultty used to spawn them in the directory it was started in. They now use
    the pane's last local OSC 7 directory, else its foreground process's
    directory on Linux (`behavior.inherit_working_directory`, on by default).
-2. **Font configuration is thin.** Ultty offers a family name, a size, a line
-   height, an on/off switch for ligatures and an emoji font. It has no
-   separate bold or italic families, no OpenType feature list, no
-   variable-font axes, no codepoint-to-font map and no cell offsets. All font
-   settings need a restart.
+2. **Font configuration is thin.** *Partly fixed.* Ultty now has separate
+   bold, italic and bold italic families (`font.bold_family` and the like) and
+   an OpenType feature list (`font.features`). It still has no variable-font
+   axes, no codepoint-to-font map and no cell offsets. Font settings need a
+   restart.
 3. **No Kitty graphics protocol.** Ghostty supports it (1.4 added
    animation). Programs that only speak Kitty's protocol, such as many
    image viewers and some Neovim plugins, show no images. Ultty supports
@@ -150,13 +150,13 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Feature | Ultty | Ghostty 1.4 | Alacritty 0.16 | Ultty evidence |
 |---|---|---|---|---|
 | Font fallback | yes; system fonts via cosmic-text | yes; size-adjusted | yes; system font library | `renderer/text.rs`; `docs/configuration.md` "Emoji and accents" |
-| Ligatures | partial: on/off only, ASCII punctuation runs | yes; `font-feature` | no | `config.rs` `FontConfig::ligatures` |
+| Ligatures | yes: `font.ligatures` switch plus `font.features`; ASCII punctuation runs | yes; `font-feature` | no | `config.rs` `FontConfig::ligatures`, `features` |
 | Variable fonts | no | yes; `font-variation` axes | no | no axis config in `FontConfig` |
 | Emoji and colour fonts | yes; VS15/VS16 handling, configurable emoji font | yes; Noto emoji embedded | yes | `renderer/emoji.rs`; `font.emoji` |
 | Box drawing, blocks, Powerline drawn natively | yes | yes; also auto-sized Nerd Font symbols | yes; `font.builtin_box_drawing` | `renderer/block_chars.rs`, `renderer/powerline.rs` |
 | Anti-aliasing | partial: grayscale only; subpixel masks treated as mono | grayscale; `alpha-blending` modes | follows the platform font library (unverified) | `renderer/atlas.rs` `SwashContent::SubpixelMask` |
-| Font features config | no | yes; `font-feature` | no | `FontConfig` has no feature list |
-| Per-style fonts (bold, italic) | no | yes; `font-family-bold` etc. | yes; `font.bold`, `italic`, `bold_italic` | `FontConfig` has one `family` |
+| Font features config | yes; `font.features` | yes; `font-feature` | no | `config.rs` `parse_font_features`; `docs/configuration.md` "OpenType features" |
+| Per-style fonts (bold, italic) | yes; `font.bold_family`, `italic_family`, `bold_italic_family` | yes; `font-family-bold` etc. | yes; `font.bold`, `italic`, `bold_italic` | `renderer/text.rs` `FontSelection` |
 | Codepoint-to-font map | no | yes; `font-codepoint-map` | no | none in `config.rs` |
 | Cell or glyph offsets | partial: `line_height` only | yes; `adjust-*` options | yes; `font.offset`, `glyph_offset` | `FontConfig::line_height` |
 | Live font changes | partial: size via keys; family needs restart | yes | yes | `docs/configuration.md` "Font settings are read at start" |
