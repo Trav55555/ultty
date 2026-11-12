@@ -20,6 +20,10 @@
 use std::time::Duration;
 use ultty::event_loop::{EventLoop, TerminalEvent};
 
+#[path = "support/tmux_server.rs"]
+mod tmux_server;
+use tmux_server::TmuxServer;
+
 /// How long an app gets to start and draw. The waits below end as soon as
 /// the app is ready, so this only matters when it is slow: on a loaded
 /// machine (load average 40 and up) htop and nvim have taken more than
@@ -404,10 +408,8 @@ fn test_tmux_launches() {
         .wait_until_stable(Duration::from_millis(300), Duration::from_secs(3))
         .expect("Shell did not stabilize");
 
-    let session_name = format!("ultty_test_{}", std::process::id());
-    tester
-        .send(&format!("tmux new-session -s {}\r", session_name))
-        .expect("Failed to send");
+    let tmux = TmuxServer::new("compat");
+    tester.send(&tmux.attach_command()).expect("Failed to send");
     std::thread::sleep(Duration::from_millis(1000));
     tester.process().ok();
 
@@ -425,7 +427,7 @@ fn test_tmux_launches() {
     println!("=== tmux after echo ===\n{}", grid);
 
     assert!(
-        grid.contains("tmux") || grid.contains(&session_name) || !grid.is_empty(),
+        grid.contains("tmux") || grid.contains("[test]") || !grid.is_empty(),
         "tmux should render content"
     );
 
@@ -769,13 +771,19 @@ fn generate_compatibility_report() {
     println!("║           Terminal Compatibility Report                    ║");
     println!("╚════════════════════════════════════════════════════════════╝\n");
 
+    // tmux runs on a server of its own, never the user's.
+    let tmux = TmuxServer::new("report");
+    let tmux_argv: Vec<String> = std::iter::once("tmux".to_owned())
+        .chain(tmux.args())
+        .chain(TmuxServer::session_args().map(str::to_owned))
+        .collect();
     let apps = [
         ("htop", vec!["htop"]),
         ("nvim", vec!["nvim", "--clean"]),
         ("vim", vec!["vim", "-u", "NONE"]),
         ("nano", vec!["nano"]),
         ("top", vec!["top"]),
-        ("tmux", vec!["tmux", "new-session"]),
+        ("tmux", tmux_argv.iter().map(String::as_str).collect()),
         ("claude", vec!["claude"]),
         ("opencode", vec!["opencode"]),
     ];
@@ -788,7 +796,7 @@ fn generate_compatibility_report() {
             continue;
         }
 
-        match AppTester::new_command(args[0], &args[1..], 120, 40) {
+        match AppTester::new_command(args[0], args, 120, 40) {
             Ok(mut tester) => {
                 let stable =
                     tester.wait_until_stable(Duration::from_millis(300), Duration::from_secs(3));
