@@ -15,13 +15,15 @@ Options:
 |----------------|----------------------------------------------------------------|
 | `--exec CMD`   | Let `run{}` start command lines that begin with the words of `CMD`. Repeatable. Nothing is allowed by default. A bare program name allows it with any arguments. A grant that would allow anything is refused at startup (see below); say `--allow-exec` instead. |
 | `--allow-exec` | Let `run{}` start anything.                                     |
-| `--ansi`       | Draw with ANSI even inside Ultty (a split pane, where native scenes are not drawn). |
+| `--ansi`       | Draw with ANSI even inside Ultty.                               |
 | `--log FILE`   | Write logs to `FILE` (the terminal is the UI, so never stderr). |
 | `--wait-on-error` | If `ulttui-lua` cannot start, print why and wait for a key before exiting, instead of exiting at once. `ulttyctl lua open` passes it, since its pane closes when the tool exits. |
 
 Inside Ultty, `ulttyctl lua open FILE [--split right|down] [--exec CMD]...`
 opens a script in a new tab (or a split next to the caller's pane) without a
 shell, in the caller's directory; see [ADR 0024](adr/0024-lua-in-ultty.md).
+Either way it draws natively in its pane
+([ADR 0025](adr/0025-native-sessions-in-panes.md)).
 It checks the file and the grants before opening anything, so a refused
 grant or a missing file is an error from `ulttyctl` itself; anything else
 that stops the tool starting stays on screen in its pane until a key is

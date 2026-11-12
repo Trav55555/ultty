@@ -195,6 +195,7 @@ plus its own check.
    asserts the shell pane lists no scene. Screenshot comes with slice 1.
    *Done with slice 1.*
 5. **`lua open --split` native.** Drop `--ansi` and the note; lua-open.sh.
+   *Done 2026-11-12.*
 6. **Later, each its own slice:** in-band sessions in split panes; inline
    surfaces in split panes; A3 connected/dropped events; per-pane
    screenshot crop.
