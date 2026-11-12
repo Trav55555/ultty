@@ -399,7 +399,29 @@ impl TerminalManager {
     /// Create a new terminal manager with one tab whose shell environment
     /// comes from `tab_env`.
     pub fn with_tab_env(cols: u16, rows: u16, tab_env: TabEnvFn) -> io::Result<Self> {
-        let mut manager = Self {
+        let mut manager = Self::empty(cols, rows);
+        manager.create_tab_with_env(tab_env)?;
+        Ok(manager)
+    }
+
+    /// Create a new terminal manager whose one tab runs `command` with
+    /// `args` instead of the shell, as [`Self::create_tab_with_command`]
+    /// does with no working directory or title.
+    pub fn with_command_tab(
+        cols: u16,
+        rows: u16,
+        command: &str,
+        args: &[String],
+        tab_env: TabEnvFn,
+    ) -> io::Result<Self> {
+        let mut manager = Self::empty(cols, rows);
+        manager.create_tab_with_command(command, args, None, None, tab_env)?;
+        Ok(manager)
+    }
+
+    /// A manager with no tabs yet; every constructor adds at least one.
+    fn empty(cols: u16, rows: u16) -> Self {
+        Self {
             terminals: Vec::new(),
             tabs: Vec::new(),
             active_tab: TabId(0),
@@ -415,12 +437,7 @@ impl TerminalManager {
             hostname: crate::inherit_dir::hostname(),
             pane_area: None,
             layout_generation: 0,
-        };
-
-        // Create initial tab with terminal
-        manager.create_tab_with_env(tab_env)?;
-
-        Ok(manager)
+        }
     }
 
     /// Create a new tab with a new terminal and no extra shell environment.
@@ -1260,23 +1277,7 @@ impl TerminalManager {
             return Self::with_tab_env(cols, rows, tab_env);
         }
 
-        let mut manager = Self {
-            terminals: Vec::new(),
-            tabs: Vec::new(),
-            active_tab: TabId::new(0),
-            next_terminal_id: 0,
-            next_tab_id: 0,
-            default_cols: cols,
-            default_rows: rows,
-            waker: None,
-            theme_colors: ThemeColors::default(),
-            scrollback_lines: crate::grid::DEFAULT_SCROLLBACK,
-            close_on_exit: true,
-            inherit_working_directory: true,
-            hostname: crate::inherit_dir::hostname(),
-            pane_area: None,
-            layout_generation: 0,
-        };
+        let mut manager = Self::empty(cols, rows);
 
         for (i, tab_data) in session.tabs.iter().enumerate() {
             // Create tab
@@ -2000,6 +2001,22 @@ mod tests {
         let manager = TerminalManager::new(80, 24).unwrap();
         assert_eq!(manager.tab_count(), 1);
         assert!(manager.focused_terminal().is_some());
+    }
+
+    #[test]
+    fn a_manager_can_start_with_its_one_tab_running_a_command() {
+        let script = "printf 'started-%s' \"$0\"; sleep 5";
+        let mut manager = TerminalManager::with_command_tab(
+            80,
+            24,
+            "/bin/sh",
+            &["-c".to_string(), script.to_string(), "here".to_string()],
+            &mut no_tab_env,
+        )
+        .unwrap();
+        assert_eq!(manager.tab_count(), 1);
+        assert_eq!(manager.terminals.len(), 1);
+        assert!(wait_for_screen(&mut manager, "started-here"));
     }
 
     #[test]

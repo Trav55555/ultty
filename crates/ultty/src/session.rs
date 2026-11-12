@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Session data that can be saved and restored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +83,7 @@ impl SessionData {
     }
 
     /// Save session to a file.
-    pub fn save(&self, path: &PathBuf) -> io::Result<()> {
+    pub fn save(&self, path: &Path) -> io::Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;

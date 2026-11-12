@@ -58,6 +58,15 @@ cargo run -p ultty --bin ultty
 
 This opens Ultty as a GPU-accelerated terminal emulator. It runs existing terminal programs (vim, htop, tmux, and so on) through its xterm-compatible emulation; see [ANSI Compatibility](#ansi-compatibility) for what is and is not implemented.
 
+To open the window running a program instead of your shell, put it after `-e`. Everything after `-e` goes to the program, so its own flags need no quoting. `--` works the same way, and `ultty --help` lists the options.
+
+```bash
+ultty -e htop
+ultty -e nvim -u NONE notes.txt
+```
+
+The tab closes when the program exits, like any other tab. A window opened with `-e` does not restore or save the session, so your saved tabs stay as they were. Launchers that follow the xdg-terminal-exec convention (`dist/ultty.desktop` sets `X-TerminalArgExec=-e`) open programs this way.
+
 Platform status: Ultty is Unix-first. Release builds exist for Linux x86_64 only. Building from source on macOS is expected to work, but there are no macOS release builds and CI does not test macOS. Windows support is future work that requires a native transport and PTY platform boundary.
 
 Linux desktop packages install `dist/ultty.desktop` and the Ultty app icon from the hicolor icon set. Brand asset usage is documented in [docs/brand.md](docs/brand.md).

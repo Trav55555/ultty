@@ -34,8 +34,9 @@ Ranked by how much a typical user would notice:
    animation). Programs that only speak Kitty's protocol, such as many
    image viewers and some Neovim plugins, show no images. Ultty supports
    sixel instead, which Ghostty does not.
-4. **No command-line options.** `ultty` accepts only `--version`. There is no
-   `-e command`, `--working-directory`, `--config` or per-key override.
+4. **Few command-line options.** `ultty` accepts only `--help`, `--version`
+   and (added after this audit) `-e command`. There is no
+   `--working-directory`, `--config` or per-key override.
    Alacritty has `-e`, `--working-directory` and `-o key=value`. Ghostty has
    `-e` and `--key=value` for every config key.
 5. **Scrollback search is plain substring only.** Search is case-insensitive
@@ -194,7 +195,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Live reload | partial: file watched; font settings need restart | on request (keybind or menu) | yes; `live_config_reload` | `config_watcher.rs`; `tests/config_reload.rs` |
 | Bundled themes | 6 | hundreds (356 added in 1.4); light/dark pairs | none bundled (separate repo) | `config.rs` `ColorConfig::default` |
 | Per-platform options | no | yes; `macos-*`, `gtk-*` | yes | none in `config.rs` |
-| CLI overrides | no; only `--version` | yes; `--key=value` | yes; `-o`, `-e`, `--working-directory` | `main.rs` `should_print_version` |
+| CLI overrides | partial: `-e` only (added after this audit); no config overrides | yes; `--key=value` | yes; `-o`, `-e`, `--working-directory` | `main.rs` `invocation` |
 | Launch profiles | yes; tabs and panes with commands and directories | no | no | `config.rs` `ProfilesConfig` |
 
 ### Platforms
