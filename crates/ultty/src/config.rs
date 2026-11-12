@@ -641,6 +641,13 @@ pub struct KeybindingConfig {
     pub scroll_page_up: String,
     /// Scroll forward through history by a page
     pub scroll_page_down: String,
+    /// Scroll to the previous shell prompt (needs shell integration; main
+    /// screen only)
+    pub jump_prev_prompt: String,
+    /// Scroll to the next shell prompt, or to the bottom after the last
+    pub jump_next_prompt: String,
+    /// Select the output of the last command, when it fits on screen
+    pub select_last_output: String,
     /// Additional custom keybindings
     #[serde(flatten)]
     pub custom: HashMap<String, String>,
@@ -675,6 +682,9 @@ impl Default for KeybindingConfig {
             debug_dump: "ctrl+shift+alt+d".to_string(),
             scroll_page_up: "shift+pageup".to_string(),
             scroll_page_down: "shift+pagedown".to_string(),
+            jump_prev_prompt: "ctrl+shift+pageup".to_string(),
+            jump_next_prompt: "ctrl+shift+pagedown".to_string(),
+            select_last_output: "ctrl+shift+o".to_string(),
             custom: HashMap::new(),
         }
     }
@@ -745,6 +755,18 @@ impl KeybindingConfig {
             (
                 "scroll_page_down".to_string(),
                 self.scroll_page_down.clone(),
+            ),
+            (
+                "jump_prev_prompt".to_string(),
+                self.jump_prev_prompt.clone(),
+            ),
+            (
+                "jump_next_prompt".to_string(),
+                self.jump_next_prompt.clone(),
+            ),
+            (
+                "select_last_output".to_string(),
+                self.select_last_output.clone(),
             ),
         ];
 

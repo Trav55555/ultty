@@ -51,8 +51,8 @@ pub use row::{AnchorTag, Row, RowMarks};
 pub use row_view::{RowMut, RowView};
 pub use term_handler::TerminalHandler;
 pub use terminal::{
-    AnchorEvent, LastCommand, MouseButton, MouseEncoding, MouseMode, MouseModifiers, Selection,
-    SelectionMode, SelectionPoint, ShellIntegration, Terminal, TerminalModes,
+    AnchorEvent, LastCommand, MouseButton, MouseEncoding, MouseMode, MouseModifiers, PromptJump,
+    Selection, SelectionMode, SelectionPoint, ShellIntegration, Terminal, TerminalModes,
     DEFAULT_TERMINAL_NAME, MAX_ANCHOR_EVENTS, MAX_QUEUED_REFUSALS,
 };
 
