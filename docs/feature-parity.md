@@ -21,12 +21,10 @@ The `scorecard`, `conformance`, `command_marks` and `selection` tests in
 
 Ranked by how much a typical user would notice:
 
-1. **New tabs and splits don't open in the current directory.** Ultty stores
-   the OSC 7 directory but spawns every new tab and split in the directory
-   Ultty itself was started in (`Child::spawn_shell` uses `current_dir()`).
-   Both Ghostty and Alacritty open new terminals where the shell is. The
-   compat scorecard's OSC 7 row says this works. The test behind that row
-   only checks that the directory is parsed.
+1. **New tabs and splits open in the focused pane's directory.** *Fixed.*
+   Ultty used to spawn them in the directory it was started in. They now use
+   the pane's last local OSC 7 directory, else its foreground process's
+   directory on Linux (`behavior.inherit_working_directory`, on by default).
 2. **Font configuration is thin.** Ultty offers a family name, a size, a line
    height, an on/off switch for ligatures and an emoji font. It has no
    separate bold or italic families, no OpenType feature list, no
@@ -45,10 +43,10 @@ Ranked by how much a typical user would notice:
    substring matching, row by row, inside copy mode. Matches cannot span a
    wrapped line and there is no regex. Alacritty searches by regex, and
    Ghostty 1.3 added a dedicated search UI.
-6. **No jump-to-prompt.** Ultty records OSC 133 prompt marks and uses them
-   for `ulttyctl last-command` and command events. No keybinding scrolls to
-   the previous or next prompt, and output cannot be selected by command.
-   Ghostty has `jump_to_prompt` and command-output selection.
+6. **No jump-to-prompt.** *Fixed.* Ctrl+Shift+PageUp and PageDown scroll to
+   the previous and next prompt, and Ctrl+Shift+O selects the last command's
+   output when it fits on screen. Longer output cannot be selected, because
+   a selection is made of view rows.
 7. **Shell integration is manual.** `dist/shell-integration` has bash and zsh
    scripts that the user must source. Ghostty injects its integration into
    bash, zsh, fish, elvish and nushell automatically.
@@ -93,18 +91,19 @@ key sequences or key tables.
 
 ## Surprises
 
-- **OSC 7 claim.** The compat scorecard says OSC 7 is used for "opening a new
-  tab where the shell is". The code does not do this; see gap 1.
-- **Accessibility docs undersell the code.** `docs/configuration.md` says
-  "for now the window is all it exposes; the terminal's text follows". The
-  AccessKit tree already includes terminal rows, the caret and native-app
-  regions (`a11y/tree.rs`, `a11y/scene.rs`).
-- **Session restore exists but is off.** `behavior.restore_session`
-  (default `false`) restores tabs, split layout and working directories,
-  but not scrollback. It is undocumented in `docs/configuration.md`.
-- **Wrong shortcut in a doc comment.** The copy-mode module comment
-  (`crates/ultty/src/vim/mod.rs`) says Ctrl+Shift+V. The actual default is
-  Ctrl+Shift+Space; Ctrl+Shift+V is paste.
+- **OSC 7 claim (fixed).** The compat scorecard said OSC 7 is used for
+  "opening a new tab where the shell is" while the code did not do it. New
+  tabs and splits now open in the focused pane's directory.
+- **Accessibility docs undersold the code (fixed).** `docs/configuration.md`
+  said "for now the window is all it exposes". The AccessKit tree includes
+  terminal rows, the caret and native-app regions (`a11y/tree.rs`,
+  `a11y/scene.rs`), and the page now says so.
+- **Session restore was undocumented (fixed).** `behavior.restore_session`
+  (default `false`) restores tabs, split layout and working directories, but
+  not scrollback. `docs/configuration.md` now describes it.
+- **Wrong shortcut in a doc comment (fixed).** The copy-mode module comment
+  (`crates/ultty/src/vim/mod.rs`) said Ctrl+Shift+V. The actual default,
+  `keybindings.vim_mode`, is Ctrl+Shift+Space; Ctrl+Shift+V is paste.
 
 ## Full table
 
@@ -124,8 +123,8 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Synchronized output (2026) | yes, with DECRQM | yes | yes | `scorecard_synchronized_output` |
 | OSC 8 hyperlinks | yes; Ctrl+click opens http, https, mailto, ftp only | yes; `link-osc8` config | yes | `scorecard_hyperlinks`; `ultty/src/url.rs` scheme allow-list |
 | OSC 52 clipboard | partial: writes (can be denied); reads always refused | yes; read `ask` by default, write `allow` | partial; copy only by default, paste opt-in | `scorecard_clipboard_write`; `ansi/osc.rs` refuses `?` |
-| OSC 7 working directory | partial: stored, used in tab titles and session save; new tabs and splits ignore it | yes | no; not in escape list | `scorecard_working_directory`; `pty/child.rs` `spawn_shell` uses `current_dir()` |
-| OSC 133 prompt marks | partial: A/B/C/D recorded, used by `ulttyctl last-command` and events; no jump or select-output | yes, with `click_events` and `cl=` extensions | no | `tests/command_marks.rs`; `scorecard_prompt_marks` |
+| OSC 7 working directory | yes: stored, used in tab titles, session save, and the directory of new tabs and splits (local host only) | yes | no; not in escape list | `scorecard_working_directory`; `inherit_dir.rs` tests; `terminal_manager.rs` `new_tab_opens_in_*` |
+| OSC 133 prompt marks | yes: A/B/C/D recorded, used by `ulttyctl last-command`, events, jump to prompt, and select last output (only when it fits on screen) | yes, with `click_events` and `cl=` extensions | no | `tests/command_marks.rs`; `scorecard_prompt_marks` |
 | Title stack (XTWINOPS 22/23) | yes, bounded | unverified in docs | yes | `conformance.rs` `title_stack_*` |
 | DECSCUSR cursor shapes | yes: block, underline, bar, steady or blinking | yes | yes | `term_handler.rs` DECSCUSR arms; `renderer/cursor.rs` |
 | Colour queries OSC 4/10/11/12 | partial: OSC 4 query and set; 10/11/12 query only; no setting fg/bg/cursor | yes | yes; query and set | `conformance.rs` `dynamic_colour_queries_*`, `osc_4_*`; `osc.rs` |
@@ -214,8 +213,8 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Feature | Ultty | Ghostty 1.4 | Alacritty 0.16 | Ultty evidence |
 |---|---|---|---|---|
 | Prompt marks | partial: recorded; scripts for bash and zsh, sourced by hand | yes; auto-injected for bash, zsh, fish, elvish, nushell | no | `dist/shell-integration/`; `tests/command_marks.rs` |
-| Jump to prompt | no | yes | no | no keybinding or action |
-| cwd inheritance for new tabs and splits | no | yes; separate tab and split options | yes for new windows (unverified in docs) | `terminal_manager.rs` `create_terminal_with_env` → `spawn_shell` |
+| Jump to prompt | yes; `jump_prev_prompt`, `jump_next_prompt` (Ctrl+Shift+PageUp/PageDown); `select_last_output` (Ctrl+Shift+O) | yes | no | `Terminal::jump_to_prompt`; `tests/command_marks.rs` |
+| cwd inheritance for new tabs and splits | yes; OSC 7 (local host), else the foreground process's `/proc` cwd on Linux; `behavior.inherit_working_directory` | yes; separate tab and split options | yes for new windows (unverified in docs) | `inherit_dir.rs`; `terminal_manager.rs` `inherited_directory` |
 | ssh and sudo helpers | partial: in-band native protocol over ssh; `xterm-ultty` terminfo copied by hand | yes; `+ssh` terminfo and env, sudo wrapper | no | `docs/configuration.md` terminal type; ADR 0018 |
 
 ### Accessibility

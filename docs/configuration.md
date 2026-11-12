@@ -76,6 +76,92 @@ pane whose program exited stays open with its last output and a
 tab, or the window's close button). This is useful for launch-profile tabs
 that run a command rather than a shell.
 
+## Restoring the last session
+
+```toml
+[behavior]
+restore_session = false
+```
+
+With `true`, Ultty saves its tabs when the window closes (or when it gets a
+termination signal) and reopens them at the next start: each tab's title,
+its split layout and which pane had focus, and each pane's working
+directory, taken from the directory its shell last reported with OSC 7. The
+active tab is selected again. The file is `last.json` in the `sessions`
+directory next to `config.toml`.
+
+A restored pane is a fresh shell. Scrollback and screen contents are not
+restored, and programs that were running are not started again, including the
+commands of launch-profile tabs. A saved directory that no longer exists falls
+back to the directory Ultty was started in. A pane whose shell never sent OSC 7
+starts in its tab's saved directory (the first pane's), else in the directory
+Ultty was started in.
+If the file is missing or unreadable, Ultty starts as it would with the
+option off. A saved session takes precedence over a default launch profile.
+The default is `false`.
+
+## Where new tabs and splits open
+
+```toml
+[behavior]
+inherit_working_directory = true
+```
+
+With `true` (the default), a new tab or split starts in the directory of the
+pane it was made from: the focused pane for a new tab, the pane being split for
+a split. Ultty reads that directory from the shell's last OSC 7 report
+(`file://host/path`), which the shell integration scripts in
+`dist/shell-integration` send on every prompt. The report counts only when
+its host is empty, `localhost` or this machine's hostname (so a pane that is
+ssh'd elsewhere does not send the new shell to a path that exists only on the
+remote host) and the directory still exists. The path is percent-decoded.
+
+If the pane sent no usable OSC 7, Ultty uses the working directory of the
+pane's foreground process, read from `/proc` (Linux only). If that fails too,
+or with `false`, the new pane starts in the directory Ultty was started in.
+A config reload applies the setting to the next tab or split.
+
+A pane that runs a native-protocol app is an ordinary pane: its shell started
+the app, so a new tab or split opens where that shell last reported, not in
+the app's own directory. Tabs and splits made from a launch profile or by
+`ulttyctl` with an explicit directory use that directory instead.
+
+## Jumping between prompts
+
+```toml
+[keybindings]
+jump_prev_prompt = "ctrl+shift+pageup"
+jump_next_prompt = "ctrl+shift+pagedown"
+select_last_output = "ctrl+shift+o"
+```
+
+With shell integration (the bash and zsh scripts in `dist/shell-integration`,
+or any shell that sends OSC 133), these move through the shell prompts in
+scrollback:
+
+- `jump_prev_prompt` scrolls so the nearest prompt above the top of the view
+  is the top row. Press it again for the one before.
+- `jump_next_prompt` does the same going down. After the last prompt it
+  returns to the bottom, the live screen.
+- `select_last_output` selects, line by line, the output of the last command,
+  from where it started to where it finished (or to the cursor, if it is still
+  running), and scrolls to it if needed. Copy it with the copy key. A
+  selection in Ultty is made of view rows, so this works only when the output
+  fits on screen; for longer output nothing is selected, and
+  `ulttyctl last-command` reads it whole.
+
+A prompt is found by its OSC 133;B mark, so a jump lands on the row where you
+type the command, which for a prompt that spans several lines is the last one.
+Prompts that have scrolled out of the scrollback limit are gone, and a pane
+without shell integration has none to jump to. The keys do nothing on the
+alternate screen (full-screen programs such as editors), where they go to the
+program.
+
+Ghostty binds its `jump_to_prompt` to Ctrl+Shift+Up and Down. Ultty already
+uses those to move between panes (`focus_pane_up`, `focus_pane_down`), so the
+defaults here are Ctrl+Shift+PageUp and PageDown, beside Shift+PageUp and
+PageDown for scrolling by a page. Set any of the three to `""` to turn it off.
+
 ## Line height
 
 ```toml
@@ -180,9 +266,24 @@ it never blinks, and an idle window does not wake up at all.
 accessibility = true   # false keeps Ultty off the accessibility bus
 ```
 
-With `true` (the default), Ultty exposes its window to screen readers through
+With `true` (the default), Ultty exposes itself to screen readers through
 AccessKit: on Linux it watches the session D-Bus and joins the AT-SPI bus only
-while assistive technology is running, and an idle window does not wake up. For now the window is all it exposes; the
-terminal's text follows. With `false`, Ultty never connects to the
-accessibility bus and creates its window visible at once. Read at start; restart Ultty
-after changing it.
+while assistive technology is running, and an idle window does not wake up.
+
+What a screen reader sees:
+
+- The window, with a tab list (one tab per tab, the active one selected) and
+  a panel for the active tab.
+- The focused pane as a `Terminal` node holding one text run per screen row,
+  with the caret at the cursor. This is the live screen only; scrollback is
+  not exposed yet.
+- The other panes of the tab as groups with just their titles.
+- For a pane running a native-protocol app, the app's regions in place of the
+  grid: each region as a node with its role, name and state, and focus on the
+  app's focused region. A region that announces changes (a live region) is
+  read out when it changes.
+- An inline surface in a pane's rows, as a node described by its anchor row.
+
+With `false`, Ultty never connects to the accessibility bus and creates its
+window visible at once. Read at start; restart Ultty after changing it.
+See [accessibility-test.md](accessibility-test.md) for the manual test.

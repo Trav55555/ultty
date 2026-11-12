@@ -641,6 +641,13 @@ pub struct KeybindingConfig {
     pub scroll_page_up: String,
     /// Scroll forward through history by a page
     pub scroll_page_down: String,
+    /// Scroll to the previous shell prompt (needs shell integration; main
+    /// screen only)
+    pub jump_prev_prompt: String,
+    /// Scroll to the next shell prompt, or to the bottom after the last
+    pub jump_next_prompt: String,
+    /// Select the output of the last command, when it fits on screen
+    pub select_last_output: String,
     /// Additional custom keybindings
     #[serde(flatten)]
     pub custom: HashMap<String, String>,
@@ -675,6 +682,9 @@ impl Default for KeybindingConfig {
             debug_dump: "ctrl+shift+alt+d".to_string(),
             scroll_page_up: "shift+pageup".to_string(),
             scroll_page_down: "shift+pagedown".to_string(),
+            jump_prev_prompt: "ctrl+shift+pageup".to_string(),
+            jump_next_prompt: "ctrl+shift+pagedown".to_string(),
+            select_last_output: "ctrl+shift+o".to_string(),
             custom: HashMap::new(),
         }
     }
@@ -745,6 +755,18 @@ impl KeybindingConfig {
             (
                 "scroll_page_down".to_string(),
                 self.scroll_page_down.clone(),
+            ),
+            (
+                "jump_prev_prompt".to_string(),
+                self.jump_prev_prompt.clone(),
+            ),
+            (
+                "jump_next_prompt".to_string(),
+                self.jump_next_prompt.clone(),
+            ),
+            (
+                "select_last_output".to_string(),
+                self.select_last_output.clone(),
             ),
         ];
 
@@ -848,6 +870,11 @@ pub struct BehaviorConfig {
     pub opacity: f32,
     /// Restore previous session on startup
     pub restore_session: bool,
+    /// Open a new tab or split in the directory the focused pane is in, as
+    /// its shell reports it (OSC 7), else the directory of the pane's
+    /// foreground process. When false, or when neither is usable, a new pane
+    /// starts in the directory Ultty was started in.
+    pub inherit_working_directory: bool,
     /// Expose the window to assistive technology (screen readers) through
     /// AccessKit (the default). When false Ultty never connects to the
     /// accessibility bus. Read at start only.
@@ -867,6 +894,7 @@ impl Default for BehaviorConfig {
             close_on_exit: true,
             opacity: 1.0,
             restore_session: false, // Disabled by default
+            inherit_working_directory: true,
             accessibility: true,
         }
     }

@@ -144,6 +144,18 @@ impl App {
                 "Scroll forward a page".to_string(),
             ),
             (
+                keybindings.jump_prev_prompt.clone(),
+                "Jump to previous prompt".to_string(),
+            ),
+            (
+                keybindings.jump_next_prompt.clone(),
+                "Jump to next prompt".to_string(),
+            ),
+            (
+                keybindings.select_last_output.clone(),
+                "Select last command output".to_string(),
+            ),
+            (
                 keybindings.reload_config.clone(),
                 "Reload config".to_string(),
             ),
@@ -282,6 +294,8 @@ impl App {
             .set_scrollback_lines(new_config.behavior.scrollback_lines);
         self.terminal_manager
             .set_close_on_exit(new_config.behavior.close_on_exit);
+        self.terminal_manager
+            .set_inherit_working_directory(new_config.behavior.inherit_working_directory);
 
         // Update opacity
         self.renderer.set_opacity(new_config.behavior.opacity);
