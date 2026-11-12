@@ -99,6 +99,9 @@ impl App {
                 if focused {
                     // Clear a bell's urgency hint; X11 keeps it until cleared.
                     self.window.request_user_attention(None);
+                } else {
+                    // A button held when focus went will not be seen released.
+                    self.native_mouse_capture.clear();
                 }
                 if self.terminal().is_some_and(|t| t.modes().focus_reporting) {
                     // Send focus in/out escape sequence
@@ -143,36 +146,26 @@ impl App {
         x: f64,
         y: f64,
     ) -> bool {
-        use ultty_protocol::InputType;
         let modifiers = self.winit_mods_to_protocol();
+        let (cell_width, cell_height) = self.renderer.cell_dimensions();
+        let (width, height) = self.renderer.terminal_area();
+        // The capture is kept whatever happens below: a release always
+        // ends it, even one that goes nowhere.
+        let target = self.native_mouse_capture.route(
+            &event_type,
+            &self.terminal_manager.active_pane_rects(width, height),
+            (x as f32, y as f32),
+            (cell_width, cell_height),
+        );
         let Some(ref mut server) = self.protocol_server else {
             return false;
         };
-        if server.session_count() == 0 {
+        if server.session_count() == 0 || cell_width <= 0.0 || cell_height <= 0.0 {
             return false;
         }
-        let (cell_width, cell_height) = self.renderer.cell_dimensions();
-        if cell_width <= 0.0 || cell_height <= 0.0 {
-            return false;
-        }
-        let (width, height) = self.renderer.terminal_area();
-        let captured = match event_type {
-            InputType::MouseMove | InputType::MouseUp { .. } => self.native_mouse_capture,
-            _ => None,
-        };
-        let Some((pane, cell_x, cell_y)) = super::native_panes::native_mouse_target(
-            &self.terminal_manager.active_pane_rects(width, height),
-            captured,
-            (x as f32, y as f32),
-            (cell_width, cell_height),
-        ) else {
+        let Some((pane, cell_x, cell_y)) = target else {
             return false;
         };
-        match event_type {
-            InputType::MouseDown { .. } => self.native_mouse_capture = Some(pane),
-            InputType::MouseUp { .. } => self.native_mouse_capture = None,
-            _ => {}
-        }
         server.broadcast_mouse(pane, event_type, cell_x, cell_y, modifiers);
         true
     }

@@ -5,6 +5,7 @@ use super::App;
 use ultty::pane_layout::Rect;
 use ultty::platform::socket::process_group;
 use ultty::terminal_manager::TerminalId;
+use ultty_protocol::{InputType, MouseButton};
 
 impl App {
     /// Bind the sessions that have no pane yet to the pane running their
@@ -49,6 +50,59 @@ impl App {
     }
 }
 
+/// The pane whose native sessions took a mouse press, and the button,
+/// while that button is held (ADR 0025 §4): moves and the release go to
+/// it, wherever the pointer is.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub(super) struct MouseCapture {
+    held: Option<(TerminalId, MouseButton)>,
+}
+
+impl MouseCapture {
+    /// Where `event` at pixel `(x, y)` (below the tab bar) goes, among the
+    /// shown panes `rects`, and the position in that pane's cells; `None`
+    /// when it goes nowhere. Keeps the capture: a press captures its pane;
+    /// the release of that button ends the capture wherever it lands, even
+    /// over no pane; a capture whose pane is no longer shown (closed, or
+    /// another tab in front) is dropped first, so it never routes to a
+    /// pane that is gone or outlives the drag.
+    pub(super) fn route(
+        &mut self,
+        event: &InputType,
+        rects: &[(TerminalId, Rect)],
+        at: (f32, f32),
+        cell: (f32, f32),
+    ) -> Option<(TerminalId, f32, f32)> {
+        if let Some((pane, _)) = self.held {
+            if !rects.iter().any(|(id, _)| *id == pane) {
+                self.held = None;
+            }
+        }
+        let captured = match event {
+            InputType::MouseMove => self.held.map(|(pane, _)| pane),
+            InputType::MouseUp { button } => match self.held {
+                Some((pane, held)) if held == *button => {
+                    self.held = None;
+                    Some(pane)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let target = native_mouse_target(rects, captured, at, cell);
+        if let (InputType::MouseDown { button }, Some((pane, _, _))) = (event, target) {
+            self.held = Some((pane, *button));
+        }
+        target
+    }
+
+    /// Forget the capture: the window lost focus, so the release will
+    /// never arrive.
+    pub(super) fn clear(&mut self) {
+        self.held = None;
+    }
+}
+
 /// Where a mouse event at pixel `(x, y)` (below the tab bar) goes: the
 /// pane under it, or, while a button is held, `captured`, the pane that
 /// took the press, with the position clamped into it so a drag that leaves
@@ -76,8 +130,9 @@ pub(super) fn native_mouse_target(
 
 #[cfg(test)]
 mod tests {
-    use super::native_mouse_target;
+    use super::{native_mouse_target, MouseCapture};
     use ultty::terminal_manager::TerminalId;
+    use ultty_protocol::{InputType, MouseButton};
 
     const CELL: (f32, f32) = (10.0, 20.0);
 
@@ -121,6 +176,92 @@ mod tests {
         // A captured pane that closed: nothing.
         assert_eq!(
             native_mouse_target(&split(), Some(TerminalId::new(9)), (35.0, 45.0), CELL),
+            None
+        );
+    }
+
+    fn down(button: MouseButton) -> InputType {
+        InputType::MouseDown { button }
+    }
+
+    fn up(button: MouseButton) -> InputType {
+        InputType::MouseUp { button }
+    }
+
+    #[test]
+    fn a_press_captures_its_pane_until_that_button_is_released() {
+        let mut capture = MouseCapture::default();
+        let rects = split();
+        assert_eq!(
+            capture.route(&down(MouseButton::Left), &rects, (35.0, 45.0), CELL),
+            Some((TerminalId::new(1), 3.0, 2.0))
+        );
+        // Dragged into the right pane: still the left one.
+        assert_eq!(
+            capture.route(&InputType::MouseMove, &rects, (535.0, 45.0), CELL),
+            Some((TerminalId::new(1), 49.0, 2.0))
+        );
+        // Another button's release does not end it.
+        assert_eq!(
+            capture.route(&up(MouseButton::Right), &rects, (535.0, 45.0), CELL),
+            Some((TerminalId::new(2), 3.0, 2.0))
+        );
+        assert_eq!(
+            capture.route(&InputType::MouseMove, &rects, (535.0, 45.0), CELL),
+            Some((TerminalId::new(1), 49.0, 2.0))
+        );
+        // The press button's release, outside the window, ends it there.
+        assert_eq!(
+            capture.route(&up(MouseButton::Left), &rects, (-20.0, 700.0), CELL),
+            Some((TerminalId::new(1), 0.0, 29.0))
+        );
+        assert_eq!(
+            capture.route(&InputType::MouseMove, &rects, (535.0, 45.0), CELL),
+            Some((TerminalId::new(2), 3.0, 2.0)),
+            "after the release, hover follows the pointer again"
+        );
+    }
+
+    #[test]
+    fn a_release_over_no_pane_after_the_captured_pane_closed_still_ends_the_capture() {
+        let mut capture = MouseCapture::default();
+        capture.route(&down(MouseButton::Left), &split(), (35.0, 45.0), CELL);
+        // The left pane closed (or another tab is shown): only the right
+        // one remains, and the release lands outside every pane.
+        let right_only = vec![split()[1]];
+        assert_eq!(
+            capture.route(&up(MouseButton::Left), &right_only, (35.0, 700.0), CELL),
+            None
+        );
+        assert_eq!(
+            capture.route(&InputType::MouseMove, &right_only, (535.0, 45.0), CELL),
+            Some((TerminalId::new(2), 3.0, 2.0)),
+            "hover is not stuck on the pane that is gone"
+        );
+    }
+
+    #[test]
+    fn a_move_after_the_captured_pane_closed_follows_the_pointer() {
+        let mut capture = MouseCapture::default();
+        capture.route(&down(MouseButton::Left), &split(), (35.0, 45.0), CELL);
+        let right_only = vec![split()[1]];
+        assert_eq!(
+            capture.route(&InputType::MouseMove, &right_only, (535.0, 45.0), CELL),
+            Some((TerminalId::new(2), 3.0, 2.0))
+        );
+    }
+
+    #[test]
+    fn losing_focus_ends_the_capture() {
+        let mut capture = MouseCapture::default();
+        capture.route(&down(MouseButton::Left), &split(), (35.0, 45.0), CELL);
+        capture.clear();
+        assert_eq!(
+            capture.route(&InputType::MouseMove, &split(), (535.0, 45.0), CELL),
+            Some((TerminalId::new(2), 3.0, 2.0))
+        );
+        assert_eq!(
+            capture.route(&InputType::MouseMove, &split(), (35.0, 700.0), CELL),
             None
         );
     }

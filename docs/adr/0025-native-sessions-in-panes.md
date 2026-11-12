@@ -102,7 +102,10 @@ foreground group. Mouse and scroll: the pane under the pointer is found
 with `pane_at`, the position becomes that pane's cells, and only sessions
 bound to it are hit-tested. While a button is held, moves and the release
 go to the pane that took the press, with the position clamped into it, so
-a drag that leaves the pane or the window still ends where it began.
+a drag that leaves the pane or the window still ends where it began. The
+capture ends when that button is released, wherever that is; when its pane
+is no longer shown (closed, or another tab in front); and when the window
+loses focus, since the release will not be seen.
 
 ### 5. Accessibility, screenshots, `regions`
 
