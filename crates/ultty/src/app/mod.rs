@@ -40,12 +40,15 @@ const WINDOW_TITLE: &str = "Ultty";
 const DEFAULT_WIDTH: u32 = 800;
 const DEFAULT_HEIGHT: u32 = 600;
 
-/// The program the first tab runs instead of the login shell, from
-/// `ultty -e PROGRAM ARGS...`.
+/// An explicit startup choice, overriding automatic session restoration.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StartupCommand {
-    pub program: String,
-    pub args: Vec<String>,
+pub enum StartupCommand {
+    /// Run a program with unchanged argument boundaries.
+    Exec { program: String, args: Vec<String> },
+    /// Launch the named configured profile.
+    Profile(String),
+    /// Restore a named layout into fresh shells in a new window.
+    Workspace(String),
 }
 
 /// Time window for detecting double/triple clicks.
@@ -552,14 +555,38 @@ impl App {
         startup_command: Option<&StartupCommand>,
     ) -> Result<TerminalManager> {
         if let Some(command) = startup_command {
-            return TerminalManager::with_command_tab(
-                cols,
-                rows,
-                &command.program,
-                &command.args,
-                &mut |tab_id| tab_shell_env(protocol_server, &config.terminal.term, tab_id),
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to start '{}': {}", command.program, e));
+            return match command {
+                StartupCommand::Exec { program, args } => {
+                    TerminalManager::with_command_tab(cols, rows, program, args, &mut |tab_id| {
+                        tab_shell_env(protocol_server, &config.terminal.term, tab_id)
+                    })
+                    .map_err(|e| anyhow::anyhow!("Failed to start '{}': {}", program, e))
+                }
+                StartupCommand::Profile(name) => {
+                    let profile = config
+                        .profiles
+                        .profiles
+                        .get(name)
+                        .ok_or_else(|| anyhow::anyhow!("Unknown launch profile '{name}'"))?;
+                    Self::create_manager_from_profile(
+                        profile,
+                        &config.terminal.term,
+                        cols,
+                        rows,
+                        protocol_server,
+                    )
+                }
+                StartupCommand::Workspace(name) => {
+                    let session = ultty::session::SessionData::load_named(name)?;
+                    Self::create_manager_from_session(
+                        &session,
+                        &config.terminal.term,
+                        cols,
+                        rows,
+                        protocol_server,
+                    )
+                }
+            };
         }
 
         // Try to restore session if enabled
@@ -618,6 +645,12 @@ impl App {
         rows: u16,
         protocol_server: &mut Option<ProtocolServer>,
     ) -> Result<TerminalManager> {
+        // Validate the complete profile before spawning any process.
+        for tab in &profile.tabs {
+            for pane in &tab.panes {
+                profile_split_direction(pane.split.as_deref())?;
+            }
+        }
         // Create an empty manager first
         let mut manager = TerminalManager::with_tab_env(cols, rows, &mut |tab_id| {
             tab_shell_env(protocol_server, term, tab_id)
@@ -658,6 +691,23 @@ impl App {
                         &mut |tab_id| tab_shell_env(protocol_server, term, tab_id),
                     )
                     .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
+
+                // Each configured pane splits the previous one, in configuration
+                // order. This flat format does not describe arbitrary trees.
+                let mut target = manager
+                    .focused_terminal_id()
+                    .ok_or_else(|| anyhow::anyhow!("Profile tab has no pane"))?;
+                for pane in &tab_config.panes {
+                    target = manager
+                        .split_pane_with_command(
+                            target,
+                            profile_split_direction(pane.split.as_deref())?,
+                            pane.command.as_deref().unwrap_or(&default_shell),
+                            &pane.args,
+                            pane.working_dir.as_deref().or(working_dir),
+                        )?
+                        .ok_or_else(|| anyhow::anyhow!("Profile split target disappeared"))?;
+                }
 
                 tracing::info!(
                     "Created tab: {} (command: {})",
@@ -822,14 +872,6 @@ impl App {
         self.terminal_manager
             .focused_terminal()
             .map(|t| t.event_loop.terminal())
-    }
-
-    /// Process group in the foreground of the focused pane's PTY: the only
-    /// program whose native sessions receive what the user types.
-    fn focused_foreground_pgrp(&self) -> Option<i32> {
-        self.terminal_manager
-            .focused_terminal()
-            .and_then(|terminal| terminal.event_loop.foreground_pgrp())
     }
 
     /// Get mutable terminal state of the focused terminal.
@@ -1620,8 +1662,20 @@ fn session_file(
     last_session: Option<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
     match startup_command {
-        Some(_) => None,
-        None => last_session,
+        Some(StartupCommand::Exec { .. }) => None,
+        Some(StartupCommand::Profile(_)) | None => last_session,
+        Some(StartupCommand::Workspace(name)) => ultty::session::SessionData::named_path(name).ok(),
+    }
+}
+
+/// Configured panes split their predecessor; omitted direction means side by side.
+fn profile_split_direction(value: Option<&str>) -> Result<ultty::terminal_manager::SplitDirection> {
+    use ultty::terminal_manager::SplitDirection;
+
+    match value {
+        None | Some("horizontal") => Ok(SplitDirection::Horizontal),
+        Some("vertical") => Ok(SplitDirection::Vertical),
+        Some(value) => anyhow::bail!("Unknown profile split direction '{value}'"),
     }
 }
 
@@ -1735,12 +1789,12 @@ mod tests {
         std::fs::create_dir_all(last.parent().unwrap()).unwrap();
         std::fs::write(&last, "the user's tabs").unwrap();
 
-        let command = StartupCommand {
+        let command = StartupCommand::Exec {
             program: "sleep".to_owned(),
             args: vec!["5".to_owned()],
         };
         let manager =
-            TerminalManager::with_command_tab(80, 24, "sleep", &command.args, &mut no_tab_env)
+            TerminalManager::with_command_tab(80, 24, "sleep", &["5".to_owned()], &mut no_tab_env)
                 .unwrap();
         let file = session_file(Some(&command), Some(last.clone()));
         save_session(&manager, file.as_deref());
@@ -1751,6 +1805,104 @@ mod tests {
         save_session(&manager, file.as_deref());
         let saved = std::fs::read_to_string(&last).unwrap();
         assert!(saved.contains("\"tabs\""), "{saved}");
+    }
+
+    #[test]
+    fn test_named_profile_spawns_configured_panes_with_exact_arguments() {
+        use ultty::config::{Config, LaunchProfile, PaneConfig, TabConfig};
+
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        let arguments = |file: &std::path::Path, value: &str| {
+            vec![
+                "-c".to_owned(),
+                "printf '%s\\n' \"$2\" > \"$1\"; exec sleep 30".to_owned(),
+                "profile-test".to_owned(),
+                file.to_string_lossy().into_owned(),
+                value.to_owned(),
+            ]
+        };
+        let profile = LaunchProfile {
+            tabs: vec![TabConfig {
+                command: Some("/bin/sh".to_owned()),
+                args: arguments(&first, "first argument with spaces"),
+                panes: vec![PaneConfig {
+                    command: Some("/bin/sh".to_owned()),
+                    args: arguments(&second, "literal $HOME; 'quote'"),
+                    split: Some("vertical".to_owned()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut config = Config::default();
+        config.behavior.restore_session = true;
+        config
+            .profiles
+            .profiles
+            .insert("remote".to_owned(), profile);
+        let choice = super::StartupCommand::Profile("remote".to_owned());
+        let manager =
+            super::App::create_terminal_manager(&config, 80, 24, &mut None, Some(&choice)).unwrap();
+        assert_eq!(manager.tab_count(), 1);
+        assert_eq!(manager.pane_count(), 2);
+        let rects = manager.active_pane_rects(800.0, 600.0);
+        assert_eq!(rects[0].1, (0.0, 0.0, 800.0, 300.0));
+        assert_eq!(rects[1].1, (0.0, 300.0, 800.0, 300.0));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::fs::read_to_string(&first).ok().as_deref()
+            != Some("first argument with spaces\n")
+            || std::fs::read_to_string(&second).ok().as_deref() != Some("literal $HOME; 'quote'\n")
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "profile children did not run"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            std::fs::read_to_string(first).unwrap(),
+            "first argument with spaces\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second).unwrap(),
+            "literal $HOME; 'quote'\n"
+        );
+    }
+
+    #[test]
+    fn test_profile_validation_precedes_spawning_and_restoration() {
+        use ultty::config::{Config, LaunchProfile, PaneConfig, TabConfig};
+
+        let mut config = Config::default();
+        config.behavior.restore_session = true;
+        let missing = super::StartupCommand::Profile("missing".to_owned());
+        let result =
+            super::App::create_terminal_manager(&config, 80, 24, &mut None, Some(&missing));
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Unknown launch profile"));
+        let profile = LaunchProfile {
+            tabs: vec![TabConfig {
+                panes: vec![PaneConfig {
+                    split: Some("typo".to_owned()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let result =
+            super::App::create_manager_from_profile(&profile, "xterm-256color", 80, 24, &mut None);
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Unknown profile split direction"));
     }
 
     #[test]

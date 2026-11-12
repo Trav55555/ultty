@@ -31,6 +31,22 @@ pub enum Backend {
 }
 
 impl Backend {
+    /// Write optional status through the backend's own output, without reading input.
+    pub fn report_status(
+        &mut self,
+        report: &ultty_client::program_status::Report,
+    ) -> crate::Result<()> {
+        let wire = report
+            .encode()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        match self {
+            Backend::Native(backend) => backend.write_status(&wire),
+            Backend::Ansi(backend) => backend.write_status(&wire),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(backend) => backend.write_status(&wire),
+        }
+    }
+
     /// Detect and create the appropriate backend.
     ///
     /// This creates a backend based on environment detection, but the actual

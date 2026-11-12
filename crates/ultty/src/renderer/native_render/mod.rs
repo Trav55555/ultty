@@ -385,7 +385,9 @@ impl Renderer {
                 &mut vertices,
             );
         }
-        self.draw_native_vertices(encoder, view, vertices, None);
+        if let Some(scissor) = scissor_for(pane, self.surface_size()) {
+            self.draw_native_vertices(encoder, view, vertices, Some(scissor));
+        }
     }
 
     /// Append the vertices of the tree under `root`, laid out from pixel

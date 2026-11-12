@@ -28,19 +28,96 @@ impl App {
         let mut responses: Vec<(usize, ControlResponse)> = Vec::new();
         let mut subscriptions: Vec<(usize, Option<u64>)> = Vec::new();
 
-        for (client_key, request) in requests {
-            // `WithToken` authenticates the connection and then behaves
-            // exactly like its inner request (including wait-for deferral).
-            let request = match request {
-                ControlRequest::WithToken { token, request } => {
-                    if let Err(response) = self.authenticate_client(client_key, &token) {
+        'requests: for (client_key, request) in requests {
+            // Unwrap identity/authentication before any deferred or mutating path.
+            let mut request = request;
+            loop {
+                match request {
+                    ControlRequest::WithToken {
+                        token,
+                        request: inner,
+                    } => {
+                        if let Err(response) = self.authenticate_client(client_key, &token) {
+                            responses.push((client_key, response));
+                            continue 'requests;
+                        }
+                        request = *inner;
+                    }
+                    ControlRequest::WithOwner {
+                        owner,
+                        request: inner,
+                    } => {
+                        if let Some(response) = self.owner_error(&owner) {
+                            responses.push((client_key, response));
+                            continue 'requests;
+                        }
+                        request = *inner;
+                    }
+                    _ => break,
+                }
+            }
+
+            if let ControlRequest::SubscribeV2 { ref cursor, target } = request {
+                if let Some(response) = self.auth_error_for_request(client_key, &request) {
+                    responses.push((client_key, response));
+                    continue;
+                }
+                if cursor.is_none() && target.is_some() {
+                    if let Err(response) = resolve_control_target(&self.terminal_manager, target) {
                         responses.push((client_key, response));
                         continue;
                     }
-                    *request
                 }
-                other => other,
-            };
+                let snapshot = if cursor.is_none() {
+                    control_pane_snapshot(&self.terminal_manager, target)
+                } else {
+                    Vec::new()
+                };
+                if let Some(server) = self.control_server.as_mut() {
+                    server.start_subscription_v2(client_key, target, cursor.clone(), snapshot);
+                }
+                continue;
+            }
+
+            if let ControlRequest::WaitJob { job, timeout_ms } = request {
+                if let Some(response) = self.auth_error_for_request(client_key, &request) {
+                    responses.push((client_key, response));
+                    continue;
+                }
+                let response = job_id(job).and_then(|id| {
+                    if timeout_ms == 0 || timeout_ms > 86_400_000 {
+                        return Err(ControlResponse::Error {
+                            code: 4,
+                            message: "Job timeout must be between 1 and 86400000 ms".into(),
+                        });
+                    }
+                    let response = process_job_response(&self.terminal_manager, id);
+                    if job_is_running(&response) {
+                        self.pending_control_waits.push(PendingControlWait::new(
+                            client_key,
+                            id,
+                            Condition::ProcessJob,
+                            Duration::from_millis(timeout_ms),
+                            Instant::now(),
+                        ));
+                        Ok(None)
+                    } else {
+                        Ok(Some(response))
+                    }
+                });
+                match response {
+                    Ok(Some(response)) | Err(response) => responses.push((client_key, response)),
+                    Ok(None) => {}
+                }
+                continue;
+            }
+
+            if matches!(request, ControlRequest::RunCommandAndWait { .. }) {
+                if let Some(response) = self.defer_shell_command(client_key, &request) {
+                    responses.push((client_key, response));
+                }
+                continue;
+            }
 
             if let ControlRequest::Subscribe { target } = request {
                 match self.subscription_target(client_key, &request, target) {
@@ -90,6 +167,17 @@ impl App {
                 server.start_subscription(client_key, target);
             }
         }
+    }
+
+    fn owner_error(
+        &self,
+        owner: &ultty_protocol::control::OwnerRef,
+    ) -> Option<ultty_protocol::control::ControlResponse> {
+        let current = self.control_server.as_ref().map(|server| server.owner());
+        (current != Some(owner)).then(|| ultty_protocol::control::ControlResponse::Error {
+            code: 409,
+            message: "Control owner changed; rediscover explicitly before retrying".into(),
+        })
     }
 
     /// Check a `subscribe` request: it needs the token, and a `target` must
@@ -384,11 +472,20 @@ impl App {
             if wait.pane() != pane || !wait.observe(event, now) {
                 return true;
             }
-            if let Some(event) = super::control_events::control_event(pane, event) {
-                answered.push((
-                    wait.client_key(),
-                    ControlResponse::Data(ControlData::WaitEvent { event }),
-                ));
+            let response = match event {
+                ultty::event_loop::TerminalEvent::ShellCommandFinished {
+                    sequence,
+                    exit_code,
+                } => Some(ControlResponse::Data(ControlData::ShellCommandFinished {
+                    pane: pane.raw() as u64,
+                    sequence: *sequence,
+                    exit_code: *exit_code,
+                })),
+                event => super::control_events::control_event(pane, event)
+                    .map(|event| ControlResponse::Data(ControlData::WaitEvent { event })),
+            };
+            if let Some(response) = response {
+                answered.push((wait.client_key(), response));
             }
             false
         });
@@ -493,11 +590,76 @@ impl App {
         None
     }
 
+    fn defer_shell_command(
+        &mut self,
+        client_key: usize,
+        request: &ultty_protocol::control::ControlRequest,
+    ) -> Option<ultty_protocol::control::ControlResponse> {
+        use ultty_protocol::control::{ControlRequest, ControlResponse};
+
+        let ControlRequest::RunCommandAndWait {
+            command,
+            timeout_ms,
+            target,
+        } = request
+        else {
+            return Some(ControlResponse::Error {
+                code: 4,
+                message: "Expected a shell submission".to_string(),
+            });
+        };
+        if let Some(response) = self.auth_error_for_request(client_key, request) {
+            return Some(response);
+        }
+        if *timeout_ms == 0 || *timeout_ms > 86_400_000 {
+            return Some(ControlResponse::Error {
+                code: 4,
+                message: "Shell completion timeout must be between 1 and 86400000 ms".to_string(),
+            });
+        }
+        let pane = match resolve_control_target(&self.terminal_manager, *target) {
+            Ok(pane) => pane,
+            Err(response) => return Some(response),
+        };
+        let sequence = match submit_control_shell_command(&mut self.terminal_manager, pane, command)
+        {
+            Ok(sequence) => sequence,
+            Err(response) => return Some(response),
+        };
+        self.pending_control_waits.push(PendingControlWait::new(
+            client_key,
+            pane,
+            Condition::ShellCommand { sequence },
+            Duration::from_millis(*timeout_ms),
+            Instant::now(),
+        ));
+        None
+    }
+
     fn pending_wait_response(
         &self,
         wait: &PendingControlWait,
     ) -> Option<ultty_protocol::control::ControlResponse> {
         use ultty_protocol::control::{ControlData, ControlResponse};
+
+        if wait.is_process_job() {
+            let response = process_job_response(&self.terminal_manager, wait.pane());
+            return if !job_is_running(&response) {
+                Some(response)
+            } else if wait.is_expired(Instant::now()) {
+                Some(ControlResponse::Data(ControlData::WaitTimeout))
+            } else {
+                None
+            };
+        }
+
+        if let Some(sequence) = wait.command_sequence() {
+            if let Some(terminal) = self.terminal_manager.terminal(wait.pane()) {
+                if let Some(outcome) = terminal.event_loop.shell_command_result(sequence) {
+                    return Some(shell_command_response(wait.pane(), sequence, outcome));
+                }
+            }
+        }
 
         if self.terminal_manager.terminal(wait.pane()).is_none() {
             return Some(ControlResponse::Error {
@@ -545,6 +707,26 @@ impl App {
 
         match request {
             ControlRequest::Ping => ControlResponse::Data(ControlData::Pong),
+            ControlRequest::JobStatus { job } => match job_id(job) {
+                Ok(id) => process_job_response(&self.terminal_manager, id),
+                Err(response) => response,
+            },
+            ControlRequest::WaitJob { .. } => ControlResponse::Error {
+                code: 5,
+                message: "wait-job cannot be used inside batch requests".into(),
+            },
+            ControlRequest::Describe => self
+                .control_server
+                .as_ref()
+                .map(|server| server.description())
+                .unwrap_or_else(|| ControlResponse::Error {
+                    code: 1,
+                    message: "Control owner unavailable".into(),
+                }),
+            ControlRequest::WithOwner { owner, request } => match self.owner_error(&owner) {
+                Some(response) => response,
+                None => self.process_control_request(client_key, *request),
+            },
 
             ControlRequest::Version => ControlResponse::Data(ControlData::Version(VersionInfo {
                 version: env!("CARGO_PKG_VERSION").to_string(),
@@ -604,6 +786,30 @@ impl App {
             ControlRequest::ListPanes => ControlResponse::Data(ControlData::Panes {
                 panes: pane_infos(&self.terminal_manager),
             }),
+
+            ControlRequest::WorkspaceList => match ultty::session::SessionData::workspace_names() {
+                Ok(names) => ControlResponse::Data(ControlData::Workspaces { names }),
+                Err(error) => ControlResponse::Error {
+                    code: 2,
+                    message: format!("Cannot list workspaces: {error}"),
+                },
+            },
+            ControlRequest::WorkspaceSave { name } => {
+                match self.terminal_manager.to_session_data().save_named(&name) {
+                    Ok(()) => ControlResponse::Ok,
+                    Err(error) => ControlResponse::Error {
+                        code: 2,
+                        message: format!("Cannot save workspace: {error}"),
+                    },
+                }
+            }
+
+            ControlRequest::ProgramStatus { target } => {
+                match resolve_control_target(&self.terminal_manager, target) {
+                    Ok(pane) => program_status_response(&self.terminal_manager, pane),
+                    Err(response) => response,
+                }
+            }
 
             ControlRequest::GetText {
                 include_scrollback,
@@ -709,20 +915,13 @@ impl App {
                 let tab = self.terminal_manager.terminal(pane).map(|t| t.tab_id);
                 if let (Some(server), Some(tab)) = (self.protocol_server.as_mut(), tab) {
                     if server.has_pane_key_subscribers(tab, pane, foreground) {
-                        server.send_text_input_to_pane(tab, pane, text, foreground);
-                        return ControlResponse::Ok;
+                        return input_acceptance(
+                            server.send_text_input_to_pane(tab, pane, text, foreground),
+                        );
                     }
                 }
 
-                if let Some(terminal) = self.terminal_manager.terminal_mut(pane) {
-                    let _ = terminal.event_loop.send_input(text.as_bytes());
-                    ControlResponse::Ok
-                } else {
-                    ControlResponse::Error {
-                        code: 1,
-                        message: "No active terminal".to_string(),
-                    }
-                }
+                send_pty_input(&mut self.terminal_manager, pane, text.as_bytes())
             }
 
             ControlRequest::SendKey {
@@ -738,13 +937,13 @@ impl App {
                 let tab = self.terminal_manager.terminal(pane).map(|t| t.tab_id);
                 if let (Some(server), Some(tab)) = (self.protocol_server.as_mut(), tab) {
                     if server.has_pane_key_subscribers(tab, pane, foreground) {
-                        server.send_key_to_pane(tab, pane, key, modifiers, foreground);
-                        return ControlResponse::Ok;
+                        return input_acceptance(
+                            server.send_key_to_pane(tab, pane, key, modifiers, foreground),
+                        );
                     }
                 }
 
-                self.forward_key_to_pty(pane, &key, modifiers);
-                ControlResponse::Ok
+                self.forward_key_to_pty(pane, &key, modifiers)
             }
 
             ControlRequest::SendRaw { data, target } => {
@@ -752,15 +951,7 @@ impl App {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
-                if let Some(terminal) = self.terminal_manager.terminal_mut(pane) {
-                    let _ = terminal.event_loop.send_input(&data);
-                    ControlResponse::Ok
-                } else {
-                    ControlResponse::Error {
-                        code: 1,
-                        message: "No active terminal".to_string(),
-                    }
-                }
+                send_pty_input(&mut self.terminal_manager, pane, &data)
             }
 
             ControlRequest::NewTab {
@@ -769,6 +960,9 @@ impl App {
                 args,
                 working_dir,
             } => {
+                if command.is_none() && (!args.is_empty() || working_dir.is_some()) {
+                    return invalid_spawn_options();
+                }
                 let result = if let Some(cmd) = command {
                     self.create_tab_with_command(
                         &cmd,
@@ -816,6 +1010,9 @@ impl App {
                 working_dir,
                 target,
             } => {
+                if command.is_none() && (!args.is_empty() || working_dir.is_some()) {
+                    return invalid_spawn_options();
+                }
                 let target = match resolve_control_target(&self.terminal_manager, target) {
                     Ok(pane) => pane,
                     Err(response) => return response,
@@ -914,18 +1111,66 @@ impl App {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
-                if let Some(terminal) = self.terminal_manager.terminal_mut(pane) {
-                    let cmd_line = if args.is_empty() {
-                        format!("{}\n", command)
-                    } else {
-                        format!("{} {}\n", command, args.join(" "))
-                    };
-                    let _ = terminal.event_loop.send_input(cmd_line.as_bytes());
+                let cmd_line = build_command_line(&command, &args);
+                send_pty_input(&mut self.terminal_manager, pane, cmd_line.as_bytes())
+            }
+
+            ControlRequest::RunCommandAndWait { .. } => ControlResponse::Error {
+                code: 4,
+                message: "run-and-wait cannot be used inside a batch".to_string(),
+            },
+
+            ControlRequest::FocusPane { target } => {
+                let pane = match resolve_control_target(&self.terminal_manager, Some(target)) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                if self.terminal_manager.focus_pane_by_id(pane) {
+                    self.sync_protocol_tabs();
+                    self.update_tab_bar();
+                    self.needs_redraw = true;
                     ControlResponse::Ok
                 } else {
                     ControlResponse::Error {
-                        code: 1,
-                        message: "No active terminal".to_string(),
+                        code: PANE_NOT_FOUND,
+                        message: "The target pane is gone".to_string(),
+                    }
+                }
+            }
+            ControlRequest::ZoomPane { target, zoomed } => {
+                let pane = match resolve_control_target(&self.terminal_manager, Some(target)) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                if self.terminal_manager.set_pane_zoom(pane, zoomed) {
+                    self.sync_protocol_tabs();
+                    self.update_tab_bar();
+                    self.needs_redraw = true;
+                    ControlResponse::Ok
+                } else {
+                    ControlResponse::Error {
+                        code: 4,
+                        message: "Cannot zoom the target pane".to_string(),
+                    }
+                }
+            }
+            ControlRequest::SwapPanes { first, second } => {
+                let first = match resolve_control_target(&self.terminal_manager, Some(first)) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                let second = match resolve_control_target(&self.terminal_manager, Some(second)) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                if self.terminal_manager.swap_panes(first, second) {
+                    self.update_tab_bar();
+                    self.needs_redraw = true;
+                    ControlResponse::Ok
+                } else {
+                    ControlResponse::Error {
+                        code: 4,
+                        message: "Panes must belong to the same tab to swap".to_string(),
                     }
                 }
             }
@@ -1155,10 +1400,12 @@ impl App {
                 }
             }
 
-            ControlRequest::Subscribe { .. } => ControlResponse::Error {
-                code: 5,
-                message: "subscribe cannot be used inside batch requests".to_string(),
-            },
+            ControlRequest::Subscribe { .. } | ControlRequest::SubscribeV2 { .. } => {
+                ControlResponse::Error {
+                    code: 5,
+                    message: "subscribe cannot be used inside batch requests".to_string(),
+                }
+            }
 
             ControlRequest::WaitFor { .. } => ControlResponse::Error {
                 code: 5,
@@ -1252,9 +1499,12 @@ impl App {
         pane: TerminalId,
         key: &ultty_protocol::Key,
         modifiers: ultty_protocol::Modifiers,
-    ) {
+    ) -> ultty_protocol::control::ControlResponse {
         let Some(terminal) = self.terminal_manager.terminal_mut(pane) else {
-            return;
+            return input_acceptance(Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the target pane is gone",
+            )));
         };
 
         let ctrl = modifiers.contains(ultty_protocol::Modifiers::CTRL);
@@ -1267,9 +1517,13 @@ impl App {
 
         let bytes = key_to_bytes(key, ctrl, alt, app_cursor);
 
-        if !bytes.is_empty() {
-            let _ = terminal.event_loop.send_input(&bytes);
+        if bytes.is_empty() {
+            return ultty_protocol::control::ControlResponse::Error {
+                code: 4,
+                message: "This key has no supported PTY encoding".to_string(),
+            };
         }
+        input_acceptance(terminal.event_loop.send_input(&bytes))
     }
 
     fn auth_error_for_request(
@@ -1351,6 +1605,12 @@ const PANE_NOT_FOUND: u16 = 6;
 const NO_NATIVE_APP: u16 = 9;
 /// The app refused the pushed override, or did not answer in time.
 const OVERRIDE_REJECTED: u16 = 10;
+/// The recipient has gone or closed its input.
+const INPUT_UNAVAILABLE: u16 = 11;
+/// The recipient's bounded input queue cannot accept more bytes.
+const INPUT_QUEUE_FULL: u16 = 12;
+/// The input could not be queued for another I/O reason.
+const INPUT_FAILED: u16 = 13;
 /// How long an app has to answer `SetOverride`.
 const OVERRIDE_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1568,13 +1828,18 @@ fn control_request_requires_auth(request: &ultty_protocol::control::ControlReque
         ControlRequest::Ping
         | ControlRequest::Version
         | ControlRequest::Authenticate { .. }
-        | ControlRequest::WithToken { .. } => false,
+        | ControlRequest::WithToken { .. }
+        | ControlRequest::WithOwner { .. } => false,
         // Batch members are checked individually when they run.
         ControlRequest::Batch { .. } => false,
         // Everything that reads screen content or drives the terminal.
         ControlRequest::GetInfo
+        | ControlRequest::Describe
+        | ControlRequest::SubscribeV2 { .. }
         | ControlRequest::ListTabs
         | ControlRequest::ListPanes
+        | ControlRequest::WorkspaceList
+        | ControlRequest::WorkspaceSave { .. }
         | ControlRequest::GetText { .. }
         | ControlRequest::GetSelection { .. }
         | ControlRequest::LastCommand { .. }
@@ -1592,6 +1857,13 @@ fn control_request_requires_auth(request: &ultty_protocol::control::ControlReque
         | ControlRequest::SwitchTab { .. }
         | ControlRequest::CloseTab { .. }
         | ControlRequest::RunCommand { .. }
+        | ControlRequest::RunCommandAndWait { .. }
+        | ControlRequest::JobStatus { .. }
+        | ControlRequest::WaitJob { .. }
+        | ControlRequest::ProgramStatus { .. }
+        | ControlRequest::FocusPane { .. }
+        | ControlRequest::ZoomPane { .. }
+        | ControlRequest::SwapPanes { .. }
         | ControlRequest::FocusWindow
         | ControlRequest::ToggleFullscreen
         | ControlRequest::Resize { .. }
@@ -1767,9 +2039,8 @@ fn key_to_bytes(key: &ultty_protocol::Key, ctrl: bool, alt: bool, app_cursor: bo
     }
 }
 
-/// Format a command and its arguments into a newline-terminated string
-/// suitable for sending to a PTY (as used by RunCommand).
-#[cfg(test)]
+/// Legacy shell text for `RunCommand`: arguments are joined with spaces,
+/// without shell escaping. Use new-tab or split to preserve process argv.
 fn build_command_line(command: &str, args: &[String]) -> String {
     if args.is_empty() {
         format!("{}\n", command)
@@ -1778,9 +2049,432 @@ fn build_command_line(command: &str, args: &[String]) -> String {
     }
 }
 
+/// Queue bytes through the same PTY path used by control text, raw input,
+/// and shell typing. Success means accepted into the input queue only.
+fn send_pty_input(
+    manager: &mut ultty::terminal_manager::TerminalManager,
+    pane: TerminalId,
+    bytes: &[u8],
+) -> ultty_protocol::control::ControlResponse {
+    let result = manager
+        .terminal_mut(pane)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the target pane is gone"))
+        .and_then(|terminal| terminal.event_loop.send_input(bytes));
+    input_acceptance(result)
+}
+
+fn submit_control_shell_command(
+    manager: &mut ultty::terminal_manager::TerminalManager,
+    pane: TerminalId,
+    command: &str,
+) -> Result<u64, ultty_protocol::control::ControlResponse> {
+    let result = manager
+        .terminal_mut(pane)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the target pane is gone"))
+        .and_then(|terminal| terminal.event_loop.submit_shell_command(command));
+    result.map_err(|error| input_acceptance(Err(error)))
+}
+
+fn shell_command_response(
+    pane: TerminalId,
+    sequence: u64,
+    outcome: ultty::event_loop::ShellCommandOutcome,
+) -> ultty_protocol::control::ControlResponse {
+    use ultty::event_loop::ShellCommandOutcome;
+    use ultty_protocol::control::{ControlData, ControlResponse};
+
+    match outcome {
+        ShellCommandOutcome::Finished { exit_code } => ControlResponse::Data(
+            ControlData::ShellCommandFinished { pane: pane.raw() as u64, sequence, exit_code },
+        ),
+        ShellCommandOutcome::Cancelled => ControlResponse::Error {
+            code: 14,
+            message: format!("Shell submission {sequence} in pane {} was cancelled by prompt, reset or process exit", pane.raw()),
+        },
+    }
+}
+
+fn invalid_spawn_options() -> ultty_protocol::control::ControlResponse {
+    ultty_protocol::control::ControlResponse::Error {
+        code: 4,
+        message: "args and working_dir require an explicit command".into(),
+    }
+}
+
+fn job_id(job: u64) -> Result<TerminalId, ultty_protocol::control::ControlResponse> {
+    usize::try_from(job).map(TerminalId::new).map_err(|_| {
+        ultty_protocol::control::ControlResponse::Error {
+            code: 404,
+            message: format!("Unknown or expired job {job}"),
+        }
+    })
+}
+
+fn job_is_running(response: &ultty_protocol::control::ControlResponse) -> bool {
+    matches!(
+        response,
+        ultty_protocol::control::ControlResponse::Data(
+            ultty_protocol::control::ControlData::ProcessJob {
+                outcome: ultty_protocol::control::ProcessJobOutcome::Running,
+                ..
+            }
+        )
+    )
+}
+
+fn process_job_response(
+    manager: &ultty::terminal_manager::TerminalManager,
+    id: TerminalId,
+) -> ultty_protocol::control::ControlResponse {
+    use ultty::terminal_manager::ProcessJobOutcome as Source;
+    use ultty_protocol::control::{ControlData, ControlResponse, ProcessJobOutcome};
+    let Some(job) = manager.job(id) else {
+        return ControlResponse::Error {
+            code: 404,
+            message: format!("Unknown or expired job {}", id.raw()),
+        };
+    };
+    ControlResponse::Data(ControlData::ProcessJob {
+        job: id.raw() as u64,
+        pid: job.pid,
+        outcome: match job.outcome {
+            Source::Running => ProcessJobOutcome::Running,
+            Source::Exited { status } => ProcessJobOutcome::Exited { status },
+            Source::Closed => ProcessJobOutcome::Closed,
+        },
+    })
+}
+
+fn program_status_response(
+    manager: &ultty::terminal_manager::TerminalManager,
+    pane: TerminalId,
+) -> ultty_protocol::control::ControlResponse {
+    use ultty_protocol::control::{ControlData, ControlResponse};
+    let Some(terminal) = manager.terminal(pane) else {
+        return input_acceptance(Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the target pane is gone",
+        )));
+    };
+    let snapshot = map_program_status(terminal.event_loop.terminal().program_status_snapshot());
+    ControlResponse::Data(ControlData::ProgramStatus {
+        generation: snapshot.generation,
+        reason: snapshot.reason,
+        records: snapshot.records,
+    })
+}
+
+fn map_program_status(
+    snapshot: ultty_vt::program_status::ProgramStatusSnapshot,
+) -> ultty_protocol::control::ProgramStatusSnapshot {
+    use ultty_protocol::control::{
+        BlockedKind, ProgramState, ProgramStatusRecord, ProgramStatusSnapshot,
+    };
+    use ultty_vt::program_status::{BlockedKind as SourceKind, ProgramState as SourceState};
+    ProgramStatusSnapshot {
+        generation: snapshot.generation,
+        reason: super::control_events::status_reason(snapshot.reason),
+        records: snapshot
+            .records
+            .into_iter()
+            .map(|record| ProgramStatusRecord {
+                id: record.id,
+                state: match record.state {
+                    SourceState::Idle => ProgramState::Idle,
+                    SourceState::Working => ProgramState::Working,
+                    SourceState::Done => ProgramState::Done,
+                    SourceState::Blocked => ProgramState::Blocked,
+                    SourceState::Error => ProgramState::Error,
+                },
+                kind: record.kind.map(|kind| match kind {
+                    SourceKind::Permission => BlockedKind::Permission,
+                    SourceKind::Question => BlockedKind::Question,
+                    SourceKind::Auth => BlockedKind::Auth,
+                }),
+                progress: record.progress,
+                app: record.app,
+                title: record.title,
+                msg: record.msg,
+                updated: record.updated,
+            })
+            .collect(),
+    }
+}
+
+fn control_pane_snapshot(
+    manager: &ultty::terminal_manager::TerminalManager,
+    target: Option<u64>,
+) -> Vec<ultty_protocol::control::ControlPaneSnapshot> {
+    pane_infos(manager)
+        .into_iter()
+        .filter(|pane| target.is_none_or(|id| id == pane.id))
+        .filter_map(|pane| {
+            let terminal = manager.terminal(TerminalId::new(usize::try_from(pane.id).ok()?))?;
+            Some(ultty_protocol::control::ControlPaneSnapshot {
+                pane,
+                program_status: map_program_status(terminal.observed_program_status().clone()),
+            })
+        })
+        .collect()
+}
+
+fn input_acceptance(result: io::Result<()>) -> ultty_protocol::control::ControlResponse {
+    use ultty_protocol::control::ControlResponse;
+
+    match result {
+        Ok(()) => ControlResponse::Ok,
+        Err(error) => {
+            let code = match error.kind() {
+                io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported => 4,
+                io::ErrorKind::WouldBlock => INPUT_QUEUE_FULL,
+                io::ErrorKind::NotFound
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::NotConnected => INPUT_UNAVAILABLE,
+                _ => INPUT_FAILED,
+            };
+            ControlResponse::Error {
+                code,
+                message: format!("Input was not fully accepted: {error}"),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_direct_job_response_retains_exit_after_pane_removal() {
+        use ultty::terminal_manager::{no_tab_env, TerminalManager};
+        use ultty_protocol::control::{ControlData, ControlResponse, ProcessJobOutcome};
+        let mut manager = TerminalManager::with_command_tab(
+            80,
+            24,
+            "/bin/sleep",
+            &["10".into()],
+            &mut no_tab_env,
+        )
+        .unwrap();
+        let tab = manager
+            .create_tab_with_command(
+                "/bin/sh",
+                &["-c".into(), "exit 7".into()],
+                None,
+                None,
+                &mut no_tab_env,
+            )
+            .unwrap();
+        let job = manager
+            .tabs()
+            .iter()
+            .find(|candidate| candidate.id == tab)
+            .unwrap()
+            .focused_terminal;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while job_is_running(&process_job_response(&manager, job)) {
+            assert!(Instant::now() < deadline);
+            manager.process_all().unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(
+            process_job_response(&manager, job),
+            ControlResponse::Data(ControlData::ProcessJob {
+                outcome: ProcessJobOutcome::Exited { status: 7 },
+                ..
+            })
+        ));
+        manager.close_tab(tab);
+        assert!(manager.terminal(job).is_none());
+        assert!(matches!(
+            process_job_response(&manager, job),
+            ControlResponse::Data(ControlData::ProcessJob {
+                outcome: ProcessJobOutcome::Exited { status: 7 },
+                ..
+            })
+        ));
+        assert!(matches!(
+            process_job_response(&manager, TerminalId::new(usize::MAX)),
+            ControlResponse::Error { code: 404, .. }
+        ));
+    }
+
+    #[test]
+    fn test_program_status_query_preserves_records_and_generation() {
+        use ultty::terminal_manager::{no_tab_env, TerminalManager};
+        use ultty_protocol::control::ControlResponse;
+
+        let manager = TerminalManager::with_command_tab(
+            80,
+            24,
+            "/bin/sleep",
+            &["10".to_string()],
+            &mut no_tab_env,
+        )
+        .unwrap();
+        let pane = manager.focused_terminal().unwrap().id;
+        manager.terminal(pane).unwrap().event_loop.write_local(
+            b"\x1b]7501;state=blocked:id=task:app=build:kind=permission:progress=25:msg=QXBwcm92ZT8=\x1b\\"
+        );
+        let source = manager
+            .terminal(pane)
+            .unwrap()
+            .event_loop
+            .terminal()
+            .program_status_snapshot();
+        let response = program_status_response(&manager, pane);
+        let ControlResponse::Data(ultty_protocol::control::ControlData::ProgramStatus {
+            generation,
+            reason,
+            records,
+        }) = response
+        else {
+            panic!("expected a program status snapshot");
+        };
+        let encoded =
+            serde_json::json!({ "generation": generation, "reason": reason, "records": records });
+        assert_eq!(encoded, serde_json::to_value(source).unwrap());
+        assert_eq!(encoded["records"][0]["msg"], "Approve?");
+    }
+
+    #[test]
+    fn test_control_shell_submission_observes_real_fast_completion() {
+        use ultty::terminal_manager::{no_tab_env, TerminalManager};
+        use ultty_protocol::control::{ControlData, ControlResponse};
+
+        let script = "printf '\\033]133;A\\007\\033]133;B\\007'; IFS= read -r line; printf '\\033]133;C\\007'; eval \"$line\"; code=$?; printf '\\033]133;D;%s\\007' \"$code\"";
+        let mut manager = TerminalManager::with_command_tab(
+            80,
+            24,
+            "/bin/sh",
+            &["-c".to_string(), script.to_string()],
+            &mut no_tab_env,
+        )
+        .unwrap();
+        let pane = manager.focused_terminal().unwrap().id;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let sequence = loop {
+            match submit_control_shell_command(&mut manager, pane, "false") {
+                Ok(sequence) => break sequence,
+                Err(ControlResponse::Error {
+                    code: INPUT_QUEUE_FULL,
+                    ..
+                }) => {}
+                Err(response) => panic!("submission failed: {response:?}"),
+            }
+            manager
+                .terminal_mut(pane)
+                .unwrap()
+                .event_loop
+                .wait(Duration::from_millis(10))
+                .unwrap();
+            assert!(
+                Instant::now() < deadline,
+                "shell did not show an idle prompt"
+            );
+        };
+        let outcome = loop {
+            if let Some(outcome) = manager
+                .terminal(pane)
+                .unwrap()
+                .event_loop
+                .shell_command_result(sequence)
+            {
+                break outcome;
+            }
+            manager
+                .terminal_mut(pane)
+                .unwrap()
+                .event_loop
+                .wait(Duration::from_millis(10))
+                .unwrap();
+            assert!(Instant::now() < deadline, "shell did not report completion");
+        };
+        assert_eq!(
+            shell_command_response(pane, sequence, outcome),
+            ControlResponse::Data(ControlData::ShellCommandFinished {
+                pane: pane.raw() as u64,
+                sequence,
+                exit_code: Some(1)
+            })
+        );
+    }
+
+    #[test]
+    fn test_pty_control_input_reports_queue_acceptance_and_refusal() {
+        use ultty::terminal_manager::{no_tab_env, TerminalManager};
+        use ultty_protocol::control::ControlResponse;
+
+        let mut manager = TerminalManager::with_command_tab(
+            80,
+            24,
+            "/bin/sleep",
+            &["10".to_string()],
+            &mut no_tab_env,
+        )
+        .unwrap();
+        let pane = manager.focused_terminal().unwrap().id;
+        assert_eq!(
+            send_pty_input(&mut manager, pane, b"small"),
+            ControlResponse::Ok
+        );
+        let oversized = vec![b'x'; 16 * 1024 * 1024 + 1];
+        assert!(matches!(
+            send_pty_input(&mut manager, pane, &oversized),
+            ControlResponse::Error {
+                code: INPUT_QUEUE_FULL,
+                ..
+            }
+        ));
+        assert!(matches!(
+            send_pty_input(&mut manager, TerminalId::new(999), b"x"),
+            ControlResponse::Error {
+                code: INPUT_UNAVAILABLE,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_pty_control_input_rejects_a_closed_child() {
+        use ultty::event_loop::TerminalEvent;
+        use ultty::terminal_manager::{no_tab_env, TerminalManager};
+        use ultty_protocol::control::ControlResponse;
+
+        let mut manager = TerminalManager::with_command_tab(
+            80,
+            24,
+            "/bin/sh",
+            &["-c".to_string(), "printf finished".to_string()],
+            &mut no_tab_env,
+        )
+        .unwrap();
+        let pane = manager.focused_terminal().unwrap().id;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let events = manager
+                .terminal_mut(pane)
+                .unwrap()
+                .event_loop
+                .wait(Duration::from_millis(50))
+                .unwrap();
+            if events
+                .iter()
+                .any(|event| matches!(event, TerminalEvent::ChildExited { .. }))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "child did not finish");
+        }
+        assert!(matches!(
+            send_pty_input(&mut manager, pane, b"too late"),
+            ControlResponse::Error {
+                code: INPUT_UNAVAILABLE,
+                ..
+            }
+        ));
+    }
 
     /// A 6x2 buffer with five lines written: three in history, two on screen.
     fn buffer_with_history() -> ultty::grid::Buffer {

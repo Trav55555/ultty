@@ -19,6 +19,9 @@ use ultty_protocol::{AppMessage, PushedOverride};
 /// - Supports error injection via `inject_error()`
 /// - Tracks all events dispatched for assertion
 pub struct MockBackend {
+    /// Serialized OSC 7501 reports successfully written by the app loop.
+    pub status_reports: Vec<Vec<u8>>,
+    status_error: Option<std::io::ErrorKind>,
     events: VecDeque<Option<Event>>,
     render_count: usize,
     /// Constraints captured from each render call (newest last).
@@ -50,8 +53,23 @@ pub struct MockBackend {
 }
 
 impl MockBackend {
+    /// Fail the next status write, without affecting input or rendering.
+    pub fn fail_next_status_report(&mut self, kind: std::io::ErrorKind) {
+        self.status_error = Some(kind);
+    }
+
+    pub(super) fn write_status(&mut self, wire: &[u8]) -> crate::Result<()> {
+        if let Some(kind) = self.status_error.take() {
+            return Err(std::io::Error::from(kind).into());
+        }
+        self.status_reports.push(wire.to_vec());
+        Ok(())
+    }
+
     pub fn new(events: Vec<Option<Event>>) -> Self {
         Self {
+            status_reports: Vec::new(),
+            status_error: None,
             events: events.into(),
             render_count: 0,
             rendered_constraints: Vec::new(),

@@ -10,19 +10,20 @@
 #
 #   scripts/e2e/native-split.sh [artifact-dir]
 #
-# Needs Xvfb and a Vulkan or GL driver (Mesa's lavapipe works without a GPU).
+# Needs Xvfb, xdotool, and a Vulkan or GL driver (Mesa's lavapipe works without a GPU).
 # Uses $ULTTY, $ULTTYCTL and $COUNTER_APP, default target/debug/*, built
 # first if unset. Logs, region dumps and the screenshot are left in the
 # artifact dir. Exits non-zero when a check fails.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 command -v Xvfb >/dev/null || { echo "Xvfb is required" >&2; exit 2; }
+command -v xdotool >/dev/null || { echo "xdotool is required" >&2; exit 2; }
 
 if [ -z "${ULTTY:-}" ] || [ -z "${ULTTYCTL:-}" ] || [ -z "${COUNTER_APP:-}" ]; then
     cargo build -q --locked -p ultty --bins -p counter-app
-    ULTTY=${ULTTY:-target/debug/ultty}
-    ULTTYCTL=${ULTTYCTL:-target/debug/ulttyctl}
-    COUNTER_APP=${COUNTER_APP:-target/debug/counter-app}
+    ULTTY=${ULTTY:-${CARGO_TARGET_DIR:-target}/debug/ultty}
+    ULTTYCTL=${ULTTYCTL:-${CARGO_TARGET_DIR:-target}/debug/ulttyctl}
+    COUNTER_APP=${COUNTER_APP:-${CARGO_TARGET_DIR:-target}/debug/counter-app}
 fi
 ULTTY=$(realpath "$ULTTY")
 ULTTYCTL=$(realpath "$ULTTYCTL")
@@ -170,6 +171,38 @@ check screenshot "$out/split.png" --width 1000 --height 700 \
     --inside 8 60 490 690 --max-ink 300 ||
     fail "the shell's pane has more drawn in it than a prompt"
 echo "native-split: screenshot has the app's pane"
+
+# Two additional apps deliberately omit the local socket, so the ordinary
+# PTY probe uses the same in-band path as SSH. Both must retain independent
+# scenes and input even though their foreground groups may differ.
+first_inband=$("$ULTTYCTL" --pane "$shell_pane" split down env -u ULTTY_SOCKET "$COUNTER_APP") || fail "first in-band split"
+second_inband=$("$ULTTYCTL" --pane "$first_inband" split right env -u ULTTY_SOCKET "$COUNTER_APP") || fail "second in-band split"
+for pane in "$first_inband" "$second_inband"; do
+    cols=$(pane_field "$pane" cols)
+    rows=$(pane_field "$pane" rows)
+    wait_regions "inband-$pane" "$pane" --cols "$cols" --rows "$rows" --text Counter --text 0 ||
+        fail "in-band app did not draw in pane $pane"
+done
+"$ULTTYCTL" --pane "$first_inband" send-text + >/dev/null || fail "first in-band input"
+cols=$(pane_field "$first_inband" cols)
+rows=$(pane_field "$first_inband" rows)
+wait_regions inband-count "$first_inband" --cols "$cols" --rows "$rows" --text 1 || fail "first in-band count"
+cols=$(pane_field "$second_inband" cols)
+rows=$(pane_field "$second_inband" rows)
+wait_regions inband-isolated "$second_inband" --cols "$cols" --rows "$rows" --text 0 || fail "sibling in-band scene changed"
+# The last split is focused. Send an actual X key and verify that only
+# its in-band app advances; a tab-wide broadcast would also increment first.
+window=$(env -u WAYLAND_DISPLAY DISPLAY="$display" xdotool search --onlyvisible --pid "$ultty_pid" | head -1)
+[ -n "$window" ] || fail "could not find the Ultty window"
+env -u WAYLAND_DISPLAY DISPLAY="$display" xdotool windowfocus "$window"
+env -u WAYLAND_DISPLAY DISPLAY="$display" xdotool type --window "$window" '+'
+wait_regions inband-gui "$second_inband" --cols "$cols" --rows "$rows" --text 1 || fail "GUI key did not reach focused in-band app"
+cols=$(pane_field "$first_inband" cols)
+rows=$(pane_field "$first_inband" rows)
+wait_regions inband-gui-isolated "$first_inband" --cols "$cols" --rows "$rows" --text 1 || fail "GUI key also reached sibling"
+"$ULTTYCTL" --pane "$first_inband" send-text q >/dev/null 2>&1 || true
+"$ULTTYCTL" --pane "$second_inband" send-text q >/dev/null 2>&1 || true
+echo "native-split: independent in-band panes"
 
 "$ULTTYCTL" --pane "$app_pane" send-text q >/dev/null 2>&1 || true
 echo "native-split: ok"

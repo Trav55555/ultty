@@ -66,17 +66,46 @@ enum Invocation {
 /// `--help` wins over `--version`, and both win over a bad argument, so
 /// neither ever starts a window. Any other argument is an error.
 fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, String> {
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
     let mut version = false;
     let mut unknown = None;
     let mut command = None;
+    let mut selection_error = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => return Ok(Invocation::Help),
             "--version" | "-V" => version = true,
+            "--profile" | "--workspace" => {
+                if command.is_some() {
+                    selection_error =
+                        Some("choose one profile, workspace or -e command".to_owned());
+                }
+                command = Some(
+                    if args
+                        .peek()
+                        .is_some_and(|name| !name.is_empty() && !name.starts_with('-'))
+                    {
+                        args.next()
+                            .map(|name| {
+                                if arg == "--profile" {
+                                    StartupCommand::Profile(name)
+                                } else {
+                                    StartupCommand::Workspace(name)
+                                }
+                            })
+                            .ok_or_else(|| format!("'{arg}' needs a name"))
+                    } else {
+                        Err(format!("'{arg}' needs a name"))
+                    },
+                );
+            }
             "-e" | "--" => {
+                if command.is_some() {
+                    selection_error =
+                        Some("choose one profile, workspace or -e command".to_owned());
+                }
                 command = Some(match args.next() {
-                    Some(program) => Ok(StartupCommand {
+                    Some(program) => Ok(StartupCommand::Exec {
                         program,
                         args: args.collect(),
                     }),
@@ -94,6 +123,9 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
     }
     if let Some(arg) = unknown {
         return Err(format!("unknown argument '{arg}'"));
+    }
+    if let Some(error) = selection_error {
+        return Err(error);
     }
     Ok(Invocation::Run {
         command: command.transpose()?,
@@ -114,6 +146,8 @@ Options:
                         -- does the same.
   -h, --help            Print this help and exit
   -V, --version         Print the version and exit
+  --profile NAME        Launch configured tabs and panes instead of restoring.
+  --workspace NAME      Open a saved layout in fresh shells; does not resume jobs.
 
 Configuration: ~/.config/ultty/config.toml
 Logging:       RUST_LOG (default \"{DEFAULT_LOG_FILTER}\")
@@ -139,7 +173,7 @@ mod tests {
 
     fn run_command(program: &str, command_args: &[&str]) -> Result<Invocation, String> {
         Ok(Invocation::Run {
-            command: Some(StartupCommand {
+            command: Some(StartupCommand::Exec {
                 program: program.to_owned(),
                 args: args(command_args),
             }),
@@ -149,6 +183,27 @@ mod tests {
     #[test]
     fn no_arguments_run_the_shell() {
         assert_eq!(invocation(args(&[])), Ok(Invocation::Run { command: None }));
+    }
+
+    #[test]
+    fn test_profile_selection_and_conflicts() {
+        assert_eq!(
+            invocation(args(&["--profile", "remote"])),
+            Ok(Invocation::Run {
+                command: Some(StartupCommand::Profile("remote".to_owned())),
+            })
+        );
+        assert!(invocation(args(&["--profile"])).is_err());
+        assert_eq!(
+            invocation(args(&["--profile", "--help"])),
+            Ok(Invocation::Help)
+        );
+        assert!(invocation(args(&["--profile", "a", "--profile", "b"])).is_err());
+        assert!(invocation(args(&["--profile", "remote", "-e", "sh"])).is_err());
+        assert_eq!(
+            invocation(args(&["-e", "echo", "--profile", "remote"])),
+            run_command("echo", &["--profile", "remote"])
+        );
     }
 
     #[test]

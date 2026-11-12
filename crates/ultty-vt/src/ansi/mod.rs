@@ -46,6 +46,10 @@ pub enum Progress {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", content = "params")]
 pub enum Action {
+    /// A validated OSC 7501 record replacement or subtree clear.
+    ProgramStatus(crate::program_status::ProgramStatusReport),
+    /// OSC 7501 feature detection, answered without application text.
+    ProgramStatusQuery,
     /// Print a character to the current cursor position
     Print(char),
 
@@ -650,6 +654,8 @@ pub struct AnsiParser {
     /// Intermediate byte for CSI sequences (e.g., space in `CSI Ps SP q`)
     pub(super) intermediate: Option<u8>,
     pub(super) osc_buffer: Vec<u8>,
+    /// Consume the rest of an oversized status without printing its tail.
+    pub(super) osc_discard: bool,
     pub(super) dcs_buffer: Vec<u8>,
     pub(super) dcs_params: Vec<u16>,
     /// What the current APC string is; see [`ApcKind`].
@@ -685,6 +691,7 @@ impl AnsiParser {
             marker: None,
             intermediate: None,
             osc_buffer: Vec::new(),
+            osc_discard: false,
             dcs_buffer: Vec::new(),
             dcs_params: Vec::new(),
             apc_kind: ApcKind::Unknown,
@@ -841,6 +848,7 @@ impl AnsiParser {
         self.state = State::Ground;
         self.clear_csi();
         self.osc_buffer.clear();
+        self.osc_discard = false;
         self.dcs_buffer.clear();
         self.dcs_params.clear();
         self.utf8_remaining = 0;

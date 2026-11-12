@@ -8,9 +8,9 @@
 //! to sessions whose connecting process is in the focused pane's foreground
 //! process group.
 //!
-//! Apps can also talk in-band on a tab's PTY (ADR 0018). The app layer feeds
+//! Apps can also talk in-band on a pane's PTY (ADR 0018). The app layer feeds
 //! that data in with [`ProtocolServer::in_band_input`] and writes what
-//! [`ProtocolServer::take_in_band_output`] returns back to the PTY. A tab
+//! [`ProtocolServer::take_in_band_output`] returns back to the originating PTY. A pane
 //! has at most one in-band session. It starts only on a well-formed
 //! `ClientHello`, so stray in-band strings (a `cat`ed file, say) cannot
 //! open one. The session is not shown or sent input until the app sends
@@ -84,8 +84,8 @@ pub struct ProtocolServer {
     /// `None` withholds input from every session. The app layer keeps this
     /// in sync with the visible tab via `set_active_tab`.
     active_tab: Option<TabId>,
-    /// In-band bytes per tab that may be the start of a `ClientHello`.
-    in_band_openers: HashMap<TabId, Vec<u8>>,
+    /// In-band bytes per pane that may be the start of a `ClientHello`.
+    in_band_openers: HashMap<TerminalId, (TabId, Vec<u8>)>,
     /// Inline surface anchors of each terminal that has had any (ADR 0020).
     pairings: HashMap<TerminalId, AnchorPairing>,
     /// Whether sessions keep text appended to live regions for a screen
@@ -211,7 +211,7 @@ impl ProtocolServer {
     /// Stop listening for `tab_id`: unlink its socket and disconnect its
     /// sessions. A tab that was never opened is ignored.
     pub fn close_tab(&mut self, tab_id: TabId) {
-        self.in_band_openers.remove(&tab_id);
+        self.in_band_openers.retain(|_, (tab, _)| *tab != tab_id);
         if let Some(key) = self.listener_key(tab_id) {
             if let Some(tab) = self.listeners.remove(&key) {
                 let _ = self.poller.delete(&tab.listener);
@@ -328,6 +328,7 @@ impl ProtocolServer {
     /// Disconnect the sessions bound to a pane `alive` rejects: a closed
     /// pane's sessions go the way a closed tab's do.
     pub fn retain_pane_sessions(&mut self, mut alive: impl FnMut(TerminalId) -> bool) {
+        self.in_band_openers.retain(|pane, _| alive(*pane));
         let gone: Vec<usize> = self
             .sessions
             .iter()
@@ -528,25 +529,29 @@ impl ProtocolServer {
         Ok(())
     }
 
-    /// Feed in-band data that arrived on `tab_id`'s PTY, whose foreground
-    /// process group is now `pgrp`. `broken` means some of the stream was
-    /// malformed or lost; it ends the tab's in-band session. `pids` lists
+    /// Feed in-band data from `pane` in `tab_id`, whose foreground
+    /// process group is now `pgrp`. `size` is the pane's grid at hello.
+    /// `broken` means the stream was malformed or lost and ends that pane's
+    /// in-band session. `pids` lists
     /// the group's processes; it is called only when a session opens.
     ///
     /// Replies are queued; collect them with
     /// [`ProtocolServer::take_in_band_output`].
+    #[allow(clippy::too_many_arguments)]
     pub fn in_band_input(
         &mut self,
         tab_id: TabId,
+        pane: TerminalId,
+        size: (u16, u16),
         pgrp: Option<i32>,
         pids: impl FnOnce() -> Vec<i32>,
         bytes: &[u8],
         broken: bool,
     ) {
-        self.end_in_band_if_app_gone(tab_id, pgrp);
-        let key = self.in_band_session_key(tab_id);
+        self.end_in_band_if_app_gone(pane, pgrp);
+        let key = self.in_band_session_key(pane);
         if broken {
-            self.in_band_openers.remove(&tab_id);
+            self.in_band_openers.remove(&pane);
             if let Some(key) = key {
                 warn!(
                     "In-band stream on tab {} was malformed; ending its session",
@@ -560,17 +565,22 @@ impl ProtocolServer {
         let key = match key {
             Some(key) => key,
             None => {
-                let opener = self.in_band_openers.entry(tab_id).or_default();
+                let (_, opener) = self
+                    .in_band_openers
+                    .entry(pane)
+                    .or_insert_with(|| (tab_id, Vec::new()));
                 opener.extend_from_slice(bytes);
                 match check_client_hello(opener) {
                     HelloCheck::Partial => return,
                     HelloCheck::No => {
-                        self.in_band_openers.remove(&tab_id);
+                        self.in_band_openers.remove(&pane);
                         return;
                     }
                     HelloCheck::Complete => {}
                 }
-                let opener = self.in_band_openers.remove(&tab_id).unwrap_or_default();
+                let Some((_, opener)) = self.in_band_openers.remove(&pane) else {
+                    return;
+                };
                 let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst);
                 info!(
                     "In-band session {} started on tab {}",
@@ -578,9 +588,10 @@ impl ProtocolServer {
                     tab_id.raw()
                 );
                 let mut session = NativeSession::new_in_band(session_id, tab_id, pgrp, pids());
+                session.bind_pane(pane);
                 session.set_inline_surfaces(true);
                 session.set_live_announcements(self.live_announcements);
-                session.set_viewport(self.viewport_width, self.viewport_height);
+                session.set_viewport(f32::from(size.0), f32::from(size.1));
                 let key = self.allocate_key();
                 self.sessions.insert(key, session);
                 self.feed_session(key, &opener);
@@ -614,11 +625,11 @@ impl ProtocolServer {
         }
     }
 
-    /// End `tab_id`'s in-band session if its app no longer runs: the PTY's
+    /// End `pane`'s in-band session if its app no longer runs: the PTY's
     /// foreground process group (now `pgrp`) changed, or a process that was
     /// in it at hello has exited. See [`NativeSession::in_band_app_alive`].
-    pub fn end_in_band_if_app_gone(&mut self, tab_id: TabId, pgrp: Option<i32>) {
-        if let Some(key) = self.in_band_session_key(tab_id) {
+    pub fn end_in_band_if_app_gone(&mut self, pane: TerminalId, pgrp: Option<i32>) {
+        if let Some(key) = self.in_band_session_key(pane) {
             if !self.sessions[&key].in_band_app_alive(pgrp) {
                 info!(
                     "In-band session {} ended: its app is no longer running",
@@ -629,18 +640,18 @@ impl ProtocolServer {
         }
     }
 
-    /// Frame bytes queued for `tab_id`'s in-band app since the last call.
-    pub fn take_tab_in_band_output(&mut self, tab_id: TabId) -> Vec<u8> {
-        self.in_band_session_key(tab_id)
+    /// Frame bytes queued for `pane`'s in-band app since the last call.
+    pub fn take_pane_in_band_output(&mut self, pane: TerminalId) -> Vec<u8> {
+        self.in_band_session_key(pane)
             .and_then(|key| self.sessions.get_mut(&key))
             .map(NativeSession::take_in_band_output)
             .unwrap_or_default()
     }
 
-    /// End `tab_id`'s in-band session, if it has one.
-    pub fn end_in_band_session(&mut self, tab_id: TabId) {
-        self.in_band_openers.remove(&tab_id);
-        if let Some(key) = self.in_band_session_key(tab_id) {
+    /// End `pane`'s in-band session, if it has one.
+    pub fn end_in_band_session(&mut self, pane: TerminalId) {
+        self.in_band_openers.remove(&pane);
+        if let Some(key) = self.in_band_session_key(pane) {
             info!(
                 "In-band session {} ended by the terminal",
                 self.sessions[&key].session_id()
@@ -649,31 +660,34 @@ impl ProtocolServer {
         }
     }
 
-    /// Frame bytes queued for in-band apps, per tab, since the last call.
-    pub fn take_in_band_output(&mut self) -> Vec<(TabId, Vec<u8>)> {
+    /// Frame bytes queued for in-band apps, per pane, since the last call.
+    pub fn take_in_band_output(&mut self) -> Vec<(TerminalId, Vec<u8>)> {
         self.sessions
             .values_mut()
             .filter(|session| session.is_in_band())
             .filter_map(|session| {
                 let out = session.take_in_band_output();
-                (!out.is_empty()).then(|| (session.tab_id(), out))
+                session
+                    .pane()
+                    .filter(|_| !out.is_empty())
+                    .map(|pane| (pane, out))
             })
             .collect()
     }
 
-    /// Tabs that have an in-band session.
-    pub fn in_band_tabs(&self) -> Vec<TabId> {
+    /// Panes that have an in-band session.
+    pub fn in_band_panes(&self) -> Vec<TerminalId> {
         self.sessions
             .values()
             .filter(|session| session.is_in_band())
-            .map(NativeSession::tab_id)
+            .filter_map(NativeSession::pane)
             .collect()
     }
 
-    fn in_band_session_key(&self, tab_id: TabId) -> Option<usize> {
+    fn in_band_session_key(&self, pane: TerminalId) -> Option<usize> {
         self.sessions
             .iter()
-            .find(|(_, session)| session.is_in_band() && session.tab_id() == tab_id)
+            .find(|(_, session)| session.is_in_band() && session.pane() == Some(pane))
             .map(|(&key, _)| key)
     }
 
@@ -684,33 +698,32 @@ impl ProtocolServer {
         self.pairings
             .get(&terminal_id)
             .is_some_and(|pairing| !pairing.is_idle())
-            || self
-                .sessions
-                .values()
-                .any(|session| session.tab_id() == tab_id && session.has_surfaces())
+            || self.sessions.values().any(|session| {
+                session.tab_id() == tab_id
+                    && session.pane() == Some(terminal_id)
+                    && session.has_surfaces()
+            })
     }
 
     /// Pair the inline surfaces of `tab_id`'s sessions with the anchors in
     /// `terminal`'s output, as of `now`; see [`AnchorPairing::update`].
-    /// `single_pane` says the terminal is the tab's only pane, and
-    /// `on_screen` that it is drawn now. Returns whether a surface was
+    /// `on_screen` says whether the pane is drawn now. Returns whether a surface was
     /// written into the terminal's rows.
     pub fn pair_inline_surfaces(
         &mut self,
         tab_id: TabId,
         terminal_id: TerminalId,
         terminal: &mut Terminal,
-        single_pane: bool,
         on_screen: bool,
         now: Instant,
     ) -> bool {
         let mut sessions: Vec<&mut NativeSession> = self
             .sessions
             .values_mut()
-            .filter(|session| session.tab_id() == tab_id)
+            .filter(|session| session.tab_id() == tab_id && session.pane() == Some(terminal_id))
             .collect();
         let pairing = self.pairings.entry(terminal_id).or_default();
-        let wrote = pairing.update(terminal, &mut sessions, single_pane, on_screen, now);
+        let wrote = pairing.update(terminal, &mut sessions, true, on_screen, now);
         if pairing.is_idle() {
             self.pairings.remove(&terminal_id);
         }
@@ -825,6 +838,7 @@ impl ProtocolServer {
     ) -> impl Iterator<Item = &mut NativeSession> {
         self.sessions.values_mut().filter(move |session| {
             session.is_confirmed()
+                && session.tab_id() == tab
                 && session.is_full_scene()
                 && session.is_in_foreground(foreground_pgrp)
                 && match session.pane() {
@@ -844,6 +858,7 @@ impl ProtocolServer {
     ) -> bool {
         self.sessions.values().any(|session| {
             session.is_confirmed()
+                && session.tab_id() == tab
                 && session.is_full_scene()
                 && session.is_in_foreground(foreground_pgrp)
                 && session.has_key_subscription()
@@ -855,7 +870,9 @@ impl ProtocolServer {
     }
 
     /// Send a key event to the sessions of `pane` (of `tab`) that take keys
-    /// (see `pane_key_recipients_mut`), shown or not.
+    /// (see `pane_key_recipients_mut`), shown or not. An error after
+    /// partial fan-out reports that earlier recipients may have received it.
+    /// A full queue returns `WouldBlock`; an absent recipient returns `NotFound`.
     pub fn send_key_to_pane(
         &mut self,
         tab: TabId,
@@ -863,38 +880,71 @@ impl ProtocolServer {
         key: ultty_protocol::Key,
         modifiers: ultty_protocol::Modifiers,
         foreground_pgrp: Option<i32>,
-    ) {
-        for session in self.pane_key_recipients_mut(tab, pane, foreground_pgrp) {
-            if let Err(e) = session.send_key(key.clone(), modifiers) {
-                warn!(
-                    "Failed to send key to session {}: {}",
-                    session.session_id(),
-                    e
-                );
-            }
-        }
-        self.flush();
+    ) -> io::Result<()> {
+        self.send_to_pane(tab, pane, foreground_pgrp, |session| {
+            session.send_key(key.clone(), modifiers)
+        })
     }
 
-    /// Send a text input event to the sessions [`Self::send_key_to_pane`]
-    /// would send a key to.
+    /// Send a key release to eligible key subscribers in a pane.
+    pub fn send_key_up_to_pane(
+        &mut self,
+        tab: TabId,
+        pane: TerminalId,
+        key: ultty_protocol::Key,
+        modifiers: ultty_protocol::Modifiers,
+        foreground_pgrp: Option<i32>,
+    ) -> io::Result<()> {
+        self.send_to_pane(tab, pane, foreground_pgrp, |session| {
+            session.send_key_up(key.clone(), modifiers)
+        })
+    }
+
+    /// Send text to eligible key subscribers in a pane.
     pub fn send_text_input_to_pane(
         &mut self,
         tab: TabId,
         pane: TerminalId,
         text: String,
         foreground_pgrp: Option<i32>,
-    ) {
-        for session in self.pane_key_recipients_mut(tab, pane, foreground_pgrp) {
-            if let Err(e) = session.send_text_input(text.clone()) {
-                warn!(
-                    "Failed to send text_input to session {}: {}",
-                    session.session_id(),
-                    e
-                );
+    ) -> io::Result<()> {
+        self.send_to_pane(tab, pane, foreground_pgrp, |session| {
+            session.send_text_input(text.clone())
+        })
+    }
+
+    fn send_to_pane(
+        &mut self,
+        tab: TabId,
+        pane: TerminalId,
+        foreground_pgrp: Option<i32>,
+        mut send: impl FnMut(&mut NativeSession) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let mut delivered = 0;
+        let mut failure = None;
+        for session in self
+            .pane_key_recipients_mut(tab, pane, foreground_pgrp)
+            .filter(|session| session.has_key_subscription())
+        {
+            match send(session) {
+                Ok(()) => {
+                    // Once queued, a flush failure can follow a partial write.
+                    delivered += 1;
+                    if let Err(err) = session.flush() {
+                        failure.get_or_insert(err);
+                    }
+                }
+                Err(err) => {
+                    failure.get_or_insert(err);
+                }
             }
         }
-        self.flush();
+        match (delivered, failure) {
+            (0, None) => Err(io::Error::new(io::ErrorKind::NotFound, "no native input recipient")),
+            (0, Some(err)) => Err(err),
+            (_, Some(err)) => Err(io::Error::new(err.kind(), format!("native input partially delivered; earlier recipients may have received it: {err}"))),
+            (_, None) => Ok(()),
+        }
     }
 
     /// Send a key event to the sessions that subscribed to keys and may
@@ -1770,14 +1820,9 @@ mod tests {
 
     fn in_band_output(
         server: &mut ProtocolServer,
-        tab: TabId,
+        pane: TerminalId,
     ) -> Vec<ultty_protocol::TerminalMessage> {
-        server
-            .take_in_band_output()
-            .into_iter()
-            .filter(|(t, _)| *t == tab)
-            .flat_map(|(_, bytes)| decode_all(&bytes))
-            .collect()
+        decode_all(&server.take_pane_in_band_output(pane))
     }
 
     use ultty_protocol::{AppMessage, TerminalMessage};
@@ -1787,13 +1832,29 @@ mod tests {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
         let hello = hello_bytes();
-        server.in_band_input(TAB_A, Some(42), Vec::new, &hello[..5], false);
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &hello[..5],
+            false,
+        );
         assert_eq!(server.session_count(), 0);
-        server.in_band_input(TAB_A, Some(42), Vec::new, &hello[5..], false);
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &hello[5..],
+            false,
+        );
         assert_eq!(server.session_count(), 1);
-        assert_eq!(server.in_band_tabs(), vec![TAB_A]);
+        assert_eq!(server.in_band_panes(), vec![TerminalId::new(0)]);
 
-        let replies = in_band_output(&mut server, TAB_A);
+        let replies = in_band_output(&mut server, TerminalId::new(0));
         assert!(matches!(
             replies.first(),
             Some(TerminalMessage::ServerHello { .. })
@@ -1812,11 +1873,35 @@ mod tests {
         let begin = encode(&AppMessage::BeginFrame {
             frame_id: ultty_protocol::FrameId(1),
         });
-        server.in_band_input(TAB_A, Some(42), Vec::new, &begin, false);
-        server.in_band_input(TAB_A, Some(42), Vec::new, b"garbage", false);
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &begin,
+            false,
+        );
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            b"garbage",
+            false,
+        );
         assert_eq!(server.session_count(), 0);
         // A real hello afterwards still works.
-        server.in_band_input(TAB_A, Some(42), Vec::new, &hello_bytes(), false);
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &hello_bytes(),
+            false,
+        );
         assert_eq!(server.session_count(), 1);
     }
 
@@ -1825,9 +1910,19 @@ mod tests {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
 
-        server.in_band_input(TAB_A, Some(42), Vec::new, &hello_bytes(), false);
         server.in_band_input(
             TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &hello_bytes(),
+            false,
+        );
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
             Some(42),
             Vec::new,
             &encode(&AppMessage::Disconnect),
@@ -1835,14 +1930,38 @@ mod tests {
         );
         assert_eq!(server.session_count(), 0, "disconnect");
 
-        server.in_band_input(TAB_A, Some(42), Vec::new, &hello_bytes(), false);
-        server.in_band_input(TAB_A, Some(42), Vec::new, &[], true);
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &hello_bytes(),
+            false,
+        );
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &[],
+            true,
+        );
         assert_eq!(server.session_count(), 0, "broken stream");
 
-        server.in_band_input(TAB_A, Some(42), Vec::new, &hello_bytes(), false);
-        server.end_in_band_if_app_gone(TAB_A, Some(42));
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &hello_bytes(),
+            false,
+        );
+        server.end_in_band_if_app_gone(TerminalId::new(0), Some(42));
         assert_eq!(server.session_count(), 1, "same foreground keeps it");
-        server.end_in_band_if_app_gone(TAB_A, Some(7));
+        server.end_in_band_if_app_gone(TerminalId::new(0), Some(7));
         assert_eq!(server.session_count(), 0, "new foreground");
     }
 
@@ -1851,32 +1970,154 @@ mod tests {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
         server.open_tab(TAB_B).unwrap();
-        server.in_band_input(TAB_A, Some(1), Vec::new, &hello_bytes(), false);
-        server.in_band_input(TAB_B, Some(2), Vec::new, &hello_bytes(), false);
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(1),
+            Vec::new,
+            &hello_bytes(),
+            false,
+        );
+        server.in_band_input(
+            TAB_B,
+            TerminalId::new(1),
+            (80, 24),
+            Some(2),
+            Vec::new,
+            &hello_bytes(),
+            false,
+        );
         assert_eq!(server.session_count(), 2);
-        let mut tabs = server.in_band_tabs();
+        let mut tabs = server.in_band_panes();
         tabs.sort_by_key(|t| t.raw());
-        assert_eq!(tabs, vec![TAB_A, TAB_B]);
+        assert_eq!(tabs, vec![TerminalId::new(0), TerminalId::new(1)]);
         server.close_tab(TAB_B);
-        assert_eq!(server.in_band_tabs(), vec![TAB_A]);
+        assert_eq!(server.in_band_panes(), vec![TerminalId::new(0)]);
+    }
+
+    #[test]
+    fn two_panes_in_one_tab_keep_in_band_streams_separate() {
+        let dir = TempDir::new();
+        let (mut server, _) = server_with_tab(&dir);
+        let first = TerminalId::new(0);
+        let second = TerminalId::new(1);
+        let hello = hello_bytes();
+        server.in_band_input(
+            TAB_A,
+            first,
+            (31, 10),
+            Some(42),
+            Vec::new,
+            &hello[..5],
+            false,
+        );
+        server.in_band_input(
+            TAB_A,
+            second,
+            (47, 12),
+            Some(42),
+            Vec::new,
+            &hello[..5],
+            false,
+        );
+        server.in_band_input(
+            TAB_A,
+            first,
+            (31, 10),
+            Some(42),
+            Vec::new,
+            &hello[5..],
+            false,
+        );
+        server.in_band_input(
+            TAB_A,
+            second,
+            (47, 12),
+            Some(42),
+            Vec::new,
+            &hello[5..],
+            false,
+        );
+        assert_eq!(server.session_count(), 2);
+        let first_hello = in_band_output(&mut server, first);
+        let second_hello = in_band_output(&mut server, second);
+        assert!(first_hello.iter().any(|m| matches!(
+            m,
+            TerminalMessage::SessionReady {
+                width: 31,
+                height: 10,
+                ..
+            }
+        )));
+        assert!(second_hello.iter().any(|m| matches!(
+            m,
+            TerminalMessage::SessionReady {
+                width: 47,
+                height: 12,
+                ..
+            }
+        )));
+        let mut later = encode(&root_child());
+        later.extend(encode(&AppMessage::Subscribe {
+            id: ultty_protocol::RegionId::ROOT,
+            events: ultty_protocol::EVENT_KEY,
+        }));
+        server.in_band_input(TAB_A, first, (31, 10), Some(42), Vec::new, &later, false);
+        server.in_band_input(TAB_A, second, (47, 12), Some(42), Vec::new, &later, false);
+        let _ = in_band_output(&mut server, first);
+        let _ = in_band_output(&mut server, second);
+        server
+            .send_key_to_pane(
+                TAB_A,
+                first,
+                ultty_protocol::Key::Char('x'),
+                ultty_protocol::Modifiers::NONE,
+                Some(42),
+            )
+            .unwrap();
+        assert_eq!(key_downs(&in_band_output(&mut server, first)), 1);
+        assert_eq!(key_downs(&in_band_output(&mut server, second)), 0);
+        server.in_band_input(TAB_A, first, (31, 10), Some(42), Vec::new, &[], true);
+        assert_eq!(server.in_band_panes(), vec![second]);
+        server.in_band_input(
+            TAB_A,
+            second,
+            (47, 12),
+            Some(42),
+            Vec::new,
+            &encode(&AppMessage::Pong),
+            false,
+        );
+        assert_eq!(server.session_count(), 1);
     }
 
     #[test]
     fn in_band_sessions_may_not_read_the_clipboard() {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
-        server.in_band_input(TAB_A, Some(42), Vec::new, &hello_bytes(), false);
-        let _ = in_band_output(&mut server, TAB_A);
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &hello_bytes(),
+            false,
+        );
+        let _ = in_band_output(&mut server, TerminalId::new(0));
 
         server.in_band_input(
             TAB_A,
+            TerminalId::new(0),
+            (80, 24),
             Some(42),
             Vec::new,
             &encode(&AppMessage::ClipboardGet),
             false,
         );
         assert!(server.pending_clipboard_gets().is_empty());
-        let replies = in_band_output(&mut server, TAB_A);
+        let replies = in_band_output(&mut server, TerminalId::new(0));
         assert!(
             replies
                 .iter()
@@ -2042,16 +2283,38 @@ mod tests {
             "the window's keys go to the shown tab only"
         );
         assert!(server.has_pane_key_subscribers(TAB_A, pane, foreground));
+        assert!(!server.has_pane_key_subscribers(TAB_B, pane, foreground));
+        assert_eq!(
+            server
+                .send_key_to_pane(TAB_B, pane, key.clone(), mods, foreground)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
         assert!(!server.has_pane_key_subscribers(TAB_A, other, foreground));
         assert!(!server.has_pane_key_subscribers(TAB_A, pane, Some(own_process_group() + 1)));
 
-        server.send_key_to_pane(TAB_A, other, key.clone(), mods, foreground);
-        server.send_text_input_to_pane(TAB_A, other, "x".to_string(), foreground);
+        assert_eq!(
+            server
+                .send_key_to_pane(TAB_A, other, key.clone(), mods, foreground)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            server
+                .send_text_input_to_pane(TAB_A, other, "x".to_string(), foreground)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
         assert!(
             socket_replies(&mut client).is_empty(),
             "another pane's keys do not reach it"
         );
-        server.send_key_to_pane(TAB_A, pane, key, mods, foreground);
+        server
+            .send_key_to_pane(TAB_A, pane, key, mods, foreground)
+            .unwrap();
         assert_eq!(key_downs(&socket_replies(&mut client)), 1);
     }
 
@@ -2201,11 +2464,19 @@ mod tests {
     fn unconfirmed_in_band_session_is_not_shown_and_gets_no_keys() {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
-        server.in_band_input(TAB_A, Some(42), Vec::new, &stray_hello_burst(), false);
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &stray_hello_burst(),
+            false,
+        );
         assert_eq!(server.session_count(), 1);
 
         // Only the hello answer goes back; the probe needs it.
-        let replies = in_band_output(&mut server, TAB_A);
+        let replies = in_band_output(&mut server, TerminalId::new(0));
         assert!(
             matches!(
                 replies.as_slice(),
@@ -2226,7 +2497,7 @@ mod tests {
         );
         server.broadcast_resize(100, 30);
         assert!(
-            in_band_output(&mut server, TAB_A).is_empty(),
+            in_band_output(&mut server, TerminalId::new(0)).is_empty(),
             "nothing is typed into the shell for it"
         );
     }
@@ -2235,14 +2506,30 @@ mod tests {
     fn in_band_session_confirmed_by_later_data_is_shown_and_gets_held_replies() {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
-        server.in_band_input(TAB_A, Some(42), Vec::new, &stray_hello_burst(), false);
-        let _hello_answer = in_band_output(&mut server, TAB_A);
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &stray_hello_burst(),
+            false,
+        );
+        let _hello_answer = in_band_output(&mut server, TerminalId::new(0));
 
-        server.in_band_input(TAB_A, Some(42), Vec::new, &encode(&AppMessage::Pong), false);
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &encode(&AppMessage::Pong),
+            false,
+        );
 
         assert_eq!(server.active_tab_sessions().count(), 1);
         assert!(server.has_key_subscribers(Some(42)));
-        let held = in_band_output(&mut server, TAB_A);
+        let held = in_band_output(&mut server, TerminalId::new(0));
         assert!(
             held.iter()
                 .any(|m| matches!(m, TerminalMessage::Error { .. })),
@@ -2254,14 +2541,30 @@ mod tests {
     fn in_band_sessions_receive_keys_whatever_the_foreground() {
         let dir = TempDir::new();
         let (mut server, _path) = server_with_tab(&dir);
-        server.in_band_input(TAB_A, Some(42), Vec::new, &hello_bytes(), false);
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &hello_bytes(),
+            false,
+        );
         let mut later = encode(&root_child());
         later.extend(encode(&AppMessage::Subscribe {
             id: ultty_protocol::RegionId::ROOT,
             events: ultty_protocol::EVENT_KEY,
         }));
-        server.in_band_input(TAB_A, Some(42), Vec::new, &later, false);
-        let _ = in_band_output(&mut server, TAB_A);
+        server.in_band_input(
+            TAB_A,
+            TerminalId::new(0),
+            (80, 24),
+            Some(42),
+            Vec::new,
+            &later,
+            false,
+        );
+        let _ = in_band_output(&mut server, TerminalId::new(0));
 
         assert!(server.has_key_subscribers(Some(42)));
         server.broadcast_key(
@@ -2269,6 +2572,9 @@ mod tests {
             ultty_protocol::Modifiers::NONE,
             Some(42),
         );
-        assert_eq!(key_downs(&in_band_output(&mut server, TAB_A)), 1);
+        assert_eq!(
+            key_downs(&in_band_output(&mut server, TerminalId::new(0))),
+            1
+        );
     }
 }

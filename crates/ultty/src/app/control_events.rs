@@ -33,13 +33,36 @@ pub(super) fn control_event(pane: TerminalId, event: &TerminalEvent) -> Option<C
             pane,
             status: *status,
         },
+        TerminalEvent::ProgramStatusChanged { generation, reason } => {
+            ControlEvent::ProgramStatusChanged {
+                pane,
+                generation: *generation,
+                reason: status_reason(*reason),
+            }
+        }
         // Redraws are too frequent to be useful; clipboard contents stay
         // private to the terminal.
         // Progress shows in `list_panes` statuses.
-        TerminalEvent::Redraw | TerminalEvent::SetClipboard { .. } | TerminalEvent::Progress(_) => {
-            return None
-        }
+        TerminalEvent::Redraw
+        | TerminalEvent::SetClipboard { .. }
+        | TerminalEvent::Progress(_)
+        | TerminalEvent::ShellCommandFinished { .. } => return None,
     })
+}
+
+pub(super) fn status_reason(
+    reason: ultty_vt::program_status::StatusChangeReason,
+) -> ultty_protocol::control::StatusChangeReason {
+    use ultty_protocol::control::StatusChangeReason;
+    use ultty_vt::program_status::StatusChangeReason as Source;
+
+    match reason {
+        Source::Report => StatusChangeReason::Report,
+        Source::Clear => StatusChangeReason::Clear,
+        Source::Prompt => StatusChangeReason::Prompt,
+        Source::ProcessExit => StatusChangeReason::ProcessExit,
+        Source::Reset => StatusChangeReason::Reset,
+    }
 }
 
 /// Every open pane with the index of its tab.
@@ -138,6 +161,36 @@ mod tests {
             data: "secret".to_string(),
         };
         assert_eq!(control_event(id(1), &clipboard), None);
+    }
+
+    #[test]
+    fn test_program_status_event_is_a_pane_scoped_snapshot_notification() {
+        let event = control_event(
+            id(7),
+            &TerminalEvent::ProgramStatusChanged {
+                generation: 42,
+                reason: ultty_vt::program_status::StatusChangeReason::Reset,
+            },
+        )
+        .unwrap();
+        assert_eq!(event.pane(), 7);
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "event": "program_status_changed", "pane": 7, "generation": 42, "reason": "reset"
+            })
+        );
+        assert_eq!(
+            control_event(
+                id(7),
+                &TerminalEvent::ShellCommandFinished {
+                    sequence: 9,
+                    exit_code: Some(0)
+                }
+            ),
+            None,
+            "internal completion must not duplicate legacy command events"
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! - Pane splitting within tabs
 //! - Keyboard navigation between tabs and panes
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
@@ -56,6 +57,28 @@ pub enum SplitDirection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TerminalId(usize);
 
+/// Last observed outcome of a directly owned child process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessJobOutcome {
+    /// No exit has been observed by the runtime yet.
+    Running,
+    /// The child exited and its final output was drained.
+    Exited { status: i32 },
+    /// The pane was explicitly closed; no completion status is claimed.
+    Closed,
+}
+
+/// A process receipt retained after its pane disappears. IDs are owner-scoped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessJob {
+    /// The pane lifetime ID is also the process job ID.
+    pub id: TerminalId,
+    /// OS process ID, for observation rather than future addressing.
+    pub pid: u32,
+    /// Outcome observed by the owner.
+    pub outcome: ProcessJobOutcome,
+}
+
 impl TerminalId {
     /// Create a new terminal ID.
     pub fn new(id: usize) -> Self {
@@ -89,6 +112,48 @@ pub fn progress_status(
     })
 }
 
+/// Project the most urgent reported record into existing pane chrome.
+/// Ties prefer the latest report; complete records remain available for inspection.
+pub fn program_status_projection(
+    store: &ultty_vt::program_status::ProgramStatusStore,
+) -> Option<ultty_protocol::control::PaneStatus> {
+    use ultty_protocol::control::{PaneState, PaneStatus};
+    use ultty_vt::program_status::ProgramState;
+
+    let state = |value| match value {
+        ProgramState::Idle => PaneState::Idle,
+        ProgramState::Working => PaneState::Working,
+        ProgramState::Done => PaneState::Done,
+        ProgramState::Blocked => PaneState::Waiting,
+        ProgramState::Error => PaneState::Error,
+    };
+    let record = store.records().iter().max_by_key(|record| {
+        let urgency = match record.state {
+            ProgramState::Error => 4,
+            ProgramState::Blocked => 3,
+            ProgramState::Working => 2,
+            ProgramState::Done => 1,
+            ProgramState::Idle => 0,
+        };
+        (urgency, record.updated)
+    })?;
+    Some(
+        PaneStatus {
+            state: state(record.state),
+            label: record
+                .title
+                .as_deref()
+                .or(record.msg.as_deref())
+                .or_else(|| store.effective_app(&record.id))
+                .unwrap_or(&record.id)
+                .to_owned(),
+            progress: record.progress.map(|value| f32::from(value) / 100.0),
+            attention: record.state == ProgramState::Blocked,
+        }
+        .sanitized(),
+    )
+}
+
 /// A single terminal instance.
 pub struct ManagedTerminal {
     /// Unique ID
@@ -103,13 +168,24 @@ pub struct ManagedTerminal {
     pub status: Option<ultty_protocol::control::PaneStatus>,
     /// The status its last progress report (OSC 9;4) implies.
     pub progress: Option<ultty_protocol::control::PaneStatus>,
+    /// Cached display projection; full program records belong to the VT state.
+    program_status: Option<ultty_protocol::control::PaneStatus>,
+    program_status_snapshot: ultty_vt::program_status::ProgramStatusSnapshot,
 }
 
 impl ManagedTerminal {
     /// The status to show for the pane: what was set through the control
     /// socket, else what the program's progress reports imply.
     pub fn shown_status(&self) -> Option<&ultty_protocol::control::PaneStatus> {
-        self.status.as_ref().or(self.progress.as_ref())
+        self.status
+            .as_ref()
+            .or(self.program_status.as_ref())
+            .or(self.progress.as_ref())
+    }
+
+    /// Status last observed by the runtime event pump, for a consistent control snapshot.
+    pub fn observed_program_status(&self) -> &ultty_vt::program_status::ProgramStatusSnapshot {
+        &self.program_status_snapshot
     }
 
     /// Create a new managed terminal whose shell gets `env` on top of the
@@ -131,6 +207,9 @@ impl ManagedTerminal {
             title: format!("Terminal {}", id.0),
             status: None,
             progress: None,
+            program_status: None,
+            program_status_snapshot: ultty_vt::program_status::ProgramStatusStore::default()
+                .snapshot(),
         })
     }
 
@@ -141,12 +220,19 @@ impl ManagedTerminal {
 
     /// Process events for this terminal.
     pub fn process(&mut self) -> io::Result<Vec<TerminalEvent>> {
-        self.event_loop.process()
+        let events = self.event_loop.process()?;
+        let terminal = self.event_loop.terminal();
+        let store = terminal.program_status();
+        if self.program_status_snapshot.generation != store.generation() {
+            self.program_status = program_status_projection(store);
+            self.program_status_snapshot = store.snapshot();
+        }
+        Ok(events)
     }
 
-    /// Check if this terminal's process has exited.
+    /// Whether this terminal's exit and final output have been reported.
     pub fn has_exited(&self) -> bool {
-        self.event_loop.has_exited()
+        self.event_loop.exit_drained()
     }
 }
 
@@ -179,6 +265,8 @@ pub struct Tab {
     pub title: String,
     /// How panes are arranged: a tree of side-by-side and stacked splits.
     pub layout: PaneLayout,
+    /// The pane shown at full size without changing the saved split tree.
+    pub zoomed_pane: Option<TerminalId>,
     /// Extra environment given to every shell spawned in this tab.
     pub shell_env: TabEnv,
 }
@@ -192,6 +280,7 @@ impl Tab {
             focused_terminal: terminal_id,
             title: format!("Tab {}", id.0 + 1),
             layout: PaneLayout::new(terminal_id),
+            zoomed_pane: None,
             shell_env: Vec::new(),
         }
     }
@@ -200,12 +289,16 @@ impl Tab {
     pub fn split(&mut self, target: TerminalId, direction: SplitDirection, new: TerminalId) {
         if self.layout.split(target, direction, new) {
             self.terminals = self.layout.panes();
+            self.zoomed_pane = None;
         }
     }
 
     /// Remove a terminal from this tab.
     pub fn remove_terminal(&mut self, terminal_id: TerminalId) -> bool {
         if let Some(pos) = self.terminals.iter().position(|&id| id == terminal_id) {
+            if self.zoomed_pane == Some(terminal_id) {
+                self.zoomed_pane = None;
+            }
             self.terminals.remove(pos);
             // The layout keeps its last pane; a tab whose last pane goes is
             // empty and gets removed by its owner.
@@ -226,6 +319,23 @@ impl Tab {
     /// Check if this tab is empty.
     pub fn is_empty(&self) -> bool {
         self.terminals.is_empty()
+    }
+
+    /// Visible pane rectangles, shared by rendering, input and sizing.
+    pub fn visible_rects(&self, area: Rect) -> Vec<(TerminalId, Rect)> {
+        match self.zoomed_pane {
+            Some(id) => vec![(id, area)],
+            None => self.layout.rects(area),
+        }
+    }
+
+    fn focus(&mut self, pane: TerminalId) -> bool {
+        self.focused_terminal = pane;
+        if self.zoomed_pane.is_some_and(|old| old != pane) {
+            self.zoomed_pane = Some(pane);
+            return true;
+        }
+        false
     }
 
     fn default_title(&self) -> String {
@@ -260,6 +370,8 @@ impl PaneArea {
 pub struct TerminalManager {
     /// All managed terminals
     terminals: Vec<ManagedTerminal>,
+    /// Bounded process outcomes, independent of pane/grid retention.
+    completed_jobs: VecDeque<ProcessJob>,
     /// All tabs
     tabs: Vec<Tab>,
     /// Currently active tab
@@ -423,6 +535,7 @@ impl TerminalManager {
     fn empty(cols: u16, rows: u16) -> Self {
         Self {
             terminals: Vec::new(),
+            completed_jobs: VecDeque::new(),
             tabs: Vec::new(),
             active_tab: TabId(0),
             next_terminal_id: 0,
@@ -482,6 +595,7 @@ impl TerminalManager {
 
         // Remove all terminals in this tab
         for terminal_id in tab.terminals {
+            self.remember_closed_job(terminal_id);
             self.terminals.retain(|t| t.id != terminal_id);
         }
 
@@ -687,7 +801,7 @@ impl TerminalManager {
     pub fn layout_panes(&mut self, area: PaneArea) -> io::Result<()> {
         self.pane_area = Some(area);
         self.layout_generation = self.layout_generation.wrapping_add(1);
-        let (cols, rows) = crate::renderer::grid_dimensions_for(
+        let (cols, rows) = crate::geometry::grid_dimensions_for(
             area.width,
             area.height,
             area.cell_width,
@@ -699,9 +813,9 @@ impl TerminalManager {
         let mut sizes = Vec::new();
         for tab in &self.tabs {
             for (terminal_id, (_, _, width, height)) in
-                tab.layout.rects((0.0, 0.0, area.width, area.height))
+                tab.visible_rects((0.0, 0.0, area.width, area.height))
             {
-                let grid = crate::renderer::grid_dimensions_for(
+                let grid = crate::geometry::grid_dimensions_for(
                     width,
                     height,
                     area.cell_width,
@@ -781,9 +895,19 @@ impl TerminalManager {
     /// Returns events keyed by terminal ID.
     pub fn process_all(&mut self) -> io::Result<Vec<(TerminalId, Vec<TerminalEvent>)>> {
         let mut all_events = Vec::new();
+        let mut completed = Vec::new();
 
         for terminal in &mut self.terminals {
             let events = terminal.process()?;
+            for event in &events {
+                if let TerminalEvent::ChildExited { status } = event {
+                    completed.push(ProcessJob {
+                        id: terminal.id,
+                        pid: terminal.event_loop.child_pid(),
+                        outcome: ProcessJobOutcome::Exited { status: *status },
+                    });
+                }
+            }
             if !self.close_on_exit {
                 for event in &events {
                     if let TerminalEvent::ChildExited { status } = event {
@@ -806,7 +930,49 @@ impl TerminalManager {
             }
         }
 
+        for job in completed {
+            self.remember_job(job);
+        }
         Ok(all_events)
+    }
+
+    /// Query a running or recently completed process, even after pane cleanup.
+    /// Returns `None` for unknown IDs or results older than the 256-entry window.
+    pub fn job(&self, id: TerminalId) -> Option<ProcessJob> {
+        if let Some(job) = self.completed_jobs.iter().find(|job| job.id == id) {
+            return Some(*job);
+        }
+        self.terminal(id).map(|terminal| ProcessJob {
+            id,
+            pid: terminal.event_loop.child_pid(),
+            outcome: terminal
+                .has_exited()
+                .then(|| terminal.event_loop.exit_status())
+                .flatten()
+                .map_or(ProcessJobOutcome::Running, |status| {
+                    ProcessJobOutcome::Exited { status }
+                }),
+        })
+    }
+
+    fn remember_job(&mut self, job: ProcessJob) {
+        if self.completed_jobs.iter().any(|old| old.id == job.id) {
+            return;
+        }
+        if self.completed_jobs.len() == 256 {
+            self.completed_jobs.pop_front();
+        }
+        self.completed_jobs.push_back(job);
+    }
+
+    fn remember_closed_job(&mut self, id: TerminalId) {
+        if let Some(terminal) = self.terminal(id) {
+            self.remember_job(ProcessJob {
+                id,
+                pid: terminal.event_loop.child_pid(),
+                outcome: ProcessJobOutcome::Closed,
+            });
+        }
     }
 
     /// Remove exited terminals and their empty tabs, unless panes are set
@@ -942,7 +1108,7 @@ impl TerminalManager {
     /// `height` area, in layout order.
     pub fn active_pane_rects(&self, width: f32, height: f32) -> Vec<(TerminalId, Rect)> {
         self.active_tab()
-            .map(|tab| tab.layout.rects((0.0, 0.0, width, height)))
+            .map(|tab| tab.visible_rects((0.0, 0.0, width, height)))
             .unwrap_or_default()
     }
 
@@ -955,7 +1121,9 @@ impl TerminalManager {
             tab.layout
                 .neighbor((0.0, 0.0, width, height), tab.focused_terminal, direction)
         {
-            tab.focused_terminal = next;
+            if tab.focus(next) {
+                self.relayout();
+            }
         }
     }
 
@@ -976,7 +1144,9 @@ impl TerminalManager {
             .unwrap_or(0);
 
         let next_idx = (current_idx + 1) % tab.terminals.len();
-        tab.focused_terminal = tab.terminals[next_idx];
+        if tab.focus(tab.terminals[next_idx]) {
+            self.relayout();
+        }
     }
 
     /// Focus the previous pane in the active tab.
@@ -1000,7 +1170,9 @@ impl TerminalManager {
         } else {
             current_idx - 1
         };
-        tab.focused_terminal = tab.terminals[prev_idx];
+        if tab.focus(tab.terminals[prev_idx]) {
+            self.relayout();
+        }
     }
 
     /// Close the currently focused pane.
@@ -1025,6 +1197,7 @@ impl TerminalManager {
         }
 
         // Remove the terminal itself
+        self.remember_closed_job(focused_id);
         self.terminals.retain(|t| t.id != focused_id);
         self.relayout();
 
@@ -1045,8 +1218,9 @@ impl TerminalManager {
 
     /// Whether the pane is in the active tab, so its output shows.
     pub fn is_on_screen(&self, id: TerminalId) -> bool {
-        self.active_tab()
-            .is_some_and(|tab| tab.terminals.contains(&id))
+        self.active_tab().is_some_and(|tab| {
+            tab.terminals.contains(&id) && tab.zoomed_pane.is_none_or(|zoomed| zoomed == id)
+        })
     }
 
     /// Get the focused terminal ID in the active tab.
@@ -1108,12 +1282,12 @@ impl TerminalManager {
             full_args.push(arg);
         }
 
-        // A failed chdir in the child is tolerated: the command then starts
-        // in the directory Ultty runs in.
+        // Explicit launches confirm both directory setup and exec before
+        // publishing the pane; restored shell directories retain their fallback.
         let dir = working_dir
             .map(std::path::PathBuf::from)
             .unwrap_or_else(crate::pty::current_dir);
-        let child = Child::spawn(
+        let child = Child::spawn_checked(
             command,
             &full_args,
             &dir,
@@ -1131,6 +1305,9 @@ impl TerminalManager {
             title: format!("Terminal {}", terminal_id.0),
             status: None,
             progress: None,
+            program_status: None,
+            program_status_snapshot: ultty_vt::program_status::ProgramStatusStore::default()
+                .snapshot(),
         };
 
         self.push_terminal(terminal);
@@ -1140,10 +1317,63 @@ impl TerminalManager {
     /// Focus a pane of the active tab by its terminal ID.
     pub fn focus_terminal(&mut self, terminal_id: TerminalId) {
         if let Some(tab) = self.active_tab_mut() {
-            if tab.terminals.contains(&terminal_id) {
-                tab.focused_terminal = terminal_id;
+            if tab.terminals.contains(&terminal_id) && tab.focus(terminal_id) {
+                self.relayout();
             }
         }
+    }
+
+    /// Focus an existing pane, switching to its tab when needed.
+    pub fn focus_pane_by_id(&mut self, terminal_id: TerminalId) -> bool {
+        let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.terminals.contains(&terminal_id))
+        else {
+            return false;
+        };
+        let resized = tab.focus(terminal_id);
+        self.active_tab = tab.id;
+        if resized {
+            self.relayout();
+        }
+        true
+    }
+
+    /// Set a pane's zoom state without modifying its saved layout or siblings.
+    pub fn set_pane_zoom(&mut self, terminal_id: TerminalId, zoomed: bool) -> bool {
+        let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.terminals.contains(&terminal_id))
+        else {
+            return false;
+        };
+        if zoomed {
+            tab.focused_terminal = terminal_id;
+            tab.zoomed_pane = Some(terminal_id);
+        } else if tab.zoomed_pane == Some(terminal_id) {
+            tab.zoomed_pane = None;
+        }
+        self.relayout();
+        true
+    }
+
+    /// Swap two panes in one tab while preserving their IDs and children.
+    pub fn swap_panes(&mut self, first: TerminalId, second: TerminalId) -> bool {
+        let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.terminals.contains(&first))
+        else {
+            return false;
+        };
+        if !tab.layout.swap(first, second) {
+            return false;
+        }
+        tab.terminals = tab.layout.panes();
+        self.relayout();
+        true
     }
 
     /// Focus a specific pane by index.
@@ -1152,8 +1382,8 @@ impl TerminalManager {
             return;
         };
 
-        if index < tab.terminals.len() {
-            tab.focused_terminal = tab.terminals[index];
+        if index < tab.terminals.len() && tab.focus(tab.terminals[index]) {
+            self.relayout();
         }
     }
 
@@ -1186,8 +1416,11 @@ impl TerminalManager {
         height: f32,
         tolerance: f32,
     ) -> Option<Divider> {
-        self.active_tab()?
-            .layout
+        let tab = self.active_tab()?;
+        if tab.zoomed_pane.is_some() {
+            return None;
+        }
+        tab.layout
             .divider_at((0.0, 0.0, width, height), x, y, tolerance)
     }
 
@@ -1195,6 +1428,9 @@ impl TerminalManager {
     /// panes on either side.
     pub fn drag_divider(&mut self, divider: &Divider, delta: f32) {
         if let Some(tab) = self.active_tab_mut() {
+            if tab.zoomed_pane.is_some() {
+                return;
+            }
             tab.layout.drag(divider, delta);
         }
         self.relayout();
@@ -1346,6 +1582,7 @@ impl TerminalManager {
                 })?,
                 title: tab_data.title.clone(),
                 terminals: layout.panes(),
+                zoomed_pane: None,
                 layout,
                 shell_env: env,
             };
@@ -1508,6 +1745,9 @@ impl ManagedTerminal {
             title: format!("Terminal {}", id.0),
             status: None,
             progress: None,
+            program_status: None,
+            program_status_snapshot: ultty_vt::program_status::ProgramStatusStore::default()
+                .snapshot(),
         })
     }
 }
@@ -1732,6 +1972,148 @@ mod tests {
         let second = manager.split_vertical().unwrap().unwrap();
         assert_eq!(grid(&manager, first), (80, 12));
         assert_eq!(grid(&manager, second), (80, 12));
+    }
+
+    #[test]
+    fn test_zoom_and_swap_preserve_children_and_saved_layout() {
+        let mut manager = quiet_manager();
+        manager.layout_panes(AREA).unwrap();
+        let first = manager.focused_terminal_id().unwrap();
+        let second = manager.split_horizontal().unwrap().unwrap();
+        let first_pid = manager.terminal(first).unwrap().event_loop.child_pid();
+        let second_pid = manager.terminal(second).unwrap().event_loop.child_pid();
+        let layout = manager.active_tab().unwrap().layout.clone();
+
+        assert!(manager.set_pane_zoom(first, true));
+        assert_eq!(
+            manager.active_pane_rects(800.0, 480.0),
+            vec![(first, (0.0, 0.0, 800.0, 480.0))]
+        );
+        assert!(manager.is_on_screen(first));
+        assert!(!manager.is_on_screen(second));
+        assert_eq!(manager.pane_at(799.0, 100.0, 800.0, 480.0), Some(first));
+        assert!(manager
+            .divider_at(400.0, 100.0, 800.0, 480.0, 10.0)
+            .is_none());
+        assert_eq!(grid(&manager, first), (80, 24));
+        assert_eq!(manager.active_tab().unwrap().layout, layout);
+
+        manager.focus_next_pane();
+        assert_eq!(manager.active_tab().unwrap().zoomed_pane, Some(second));
+        assert!(!manager.is_on_screen(first));
+        assert!(manager.set_pane_zoom(second, false));
+        assert_eq!(grid(&manager, first), (40, 24));
+        assert_eq!(grid(&manager, second), (40, 24));
+        assert!(manager.swap_panes(first, second));
+        assert_eq!(manager.active_tab().unwrap().terminals, vec![second, first]);
+        assert_eq!(
+            manager.terminal(first).unwrap().event_loop.child_pid(),
+            first_pid
+        );
+        assert_eq!(
+            manager.terminal(second).unwrap().event_loop.child_pid(),
+            second_pid
+        );
+        assert!(manager.swap_panes(first, second));
+        assert_eq!(manager.active_tab().unwrap().layout, layout);
+
+        manager.create_tab().unwrap();
+        let other = manager.focused_terminal_id().unwrap();
+        assert!(!manager.swap_panes(first, other));
+        assert!(manager.focus_pane_by_id(first));
+        assert_eq!(manager.focused_terminal_id(), Some(first));
+        assert!(!manager.focus_pane_by_id(TerminalId::new(usize::MAX)));
+        assert_eq!(manager.focused_terminal_id(), Some(first));
+    }
+
+    #[test]
+    fn test_program_status_projection_preserves_explicit_override() {
+        use ultty_protocol::control::{PaneState, PaneStatus};
+        use ultty_vt::program_status::{ProgramState, ProgramStatusRecord, ProgramStatusReport};
+
+        let mut manager = quiet_manager();
+        let terminal = manager.focused_terminal_mut().unwrap();
+        terminal
+            .event_loop
+            .terminal()
+            .apply_program_status(ProgramStatusReport::Set(ProgramStatusRecord {
+                id: "build".to_owned(),
+                state: ProgramState::Blocked,
+                kind: None,
+                progress: Some(25),
+                app: None,
+                title: Some("needs input".to_owned()),
+                msg: None,
+                updated: 0,
+            }));
+        terminal.process().unwrap();
+        assert_eq!(terminal.shown_status().unwrap().state, PaneState::Waiting);
+        assert_eq!(terminal.shown_status().unwrap().progress, Some(0.25));
+        terminal.status = Some(PaneStatus {
+            state: PaneState::Error,
+            label: "override".to_owned(),
+            progress: None,
+            attention: false,
+        });
+        assert_eq!(terminal.shown_status().unwrap().label, "override");
+        terminal
+            .event_loop
+            .terminal()
+            .apply_program_status(ProgramStatusReport::Clear(String::new()));
+        terminal.process().unwrap();
+        terminal.status = None;
+        assert!(terminal.shown_status().is_none());
+    }
+
+    #[test]
+    fn test_job_result_survives_immediate_process_and_pane_exit() {
+        let mut manager = quiet_manager();
+        manager
+            .create_tab_with_command(
+                "/bin/sh",
+                &[
+                    "-c".to_owned(),
+                    "(sleep 0.05; printf FINAL; sleep 0.1) & exit 7".to_owned(),
+                ],
+                None,
+                None,
+                &mut no_tab_env,
+            )
+            .unwrap();
+        let job = manager.focused_terminal_id().unwrap();
+        let pid = manager.terminal(job).unwrap().event_loop.child_pid();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            manager.process_all().unwrap();
+            // Match the App loop: cleanup runs before the next process poll.
+            manager.cleanup_exited();
+            if manager.job(job).unwrap().outcome == (ProcessJobOutcome::Exited { status: 7 }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "process did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        manager.cleanup_exited();
+        assert!(manager.terminal(job).is_none());
+        assert_eq!(
+            manager.job(job),
+            Some(ProcessJob {
+                id: job,
+                pid,
+                outcome: ProcessJobOutcome::Exited { status: 7 }
+            })
+        );
+        assert!(manager.job(TerminalId::new(usize::MAX)).is_none());
+
+        let tab = manager
+            .create_tab_with_command("sleep", &["30".to_owned()], None, None, &mut no_tab_env)
+            .unwrap();
+        let closed = manager.focused_terminal_id().unwrap();
+        manager.close_tab(tab);
+        assert_eq!(
+            manager.job(closed).unwrap().outcome,
+            ProcessJobOutcome::Closed
+        );
     }
 
     /// A manager whose only tab runs a shell that prints nothing.

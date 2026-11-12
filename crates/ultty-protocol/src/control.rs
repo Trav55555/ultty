@@ -42,10 +42,105 @@ pub struct ControlEnvelope {
     pub request: ControlRequest,
 }
 
+/// Identity of one control owner lifetime. A reused PID has a new epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerRef {
+    /// Process hosting the owner.
+    pub pid: u32,
+    /// Random 256-bit hexadecimal lifetime identifier.
+    pub epoch: String,
+}
+
+/// Position in an owner's bounded event stream, independent of pane filters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventCursor {
+    /// Owner whose event history this cursor addresses.
+    pub owner: OwnerRef,
+    /// Last event observed; zero precedes the first event.
+    pub sequence: u64,
+}
+
+/// One sequenced notification. Status notifications require snapshot queries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControlEventRecord {
+    /// Resume position after this event.
+    pub cursor: EventCursor,
+    /// Owner-observed notification.
+    pub event: ControlEvent,
+}
+
+/// Status captured by the owner while processing a pane update.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProgramStatusSnapshot {
+    /// Generation of the authoritative record store.
+    pub generation: u64,
+    /// Reason for its most recent change.
+    pub reason: StatusChangeReason,
+    /// Complete records at the observed generation.
+    pub records: Vec<ProgramStatusRecord>,
+}
+
+/// Pane metadata and status at a control-dispatch boundary. This excludes
+/// the raw PTY grid and does not claim an atomic view of all parsers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControlPaneSnapshot {
+    /// Current owner-observed pane metadata.
+    pub pane: PaneInfo,
+    /// Latest status processed by the owner.
+    pub program_status: ProgramStatusSnapshot,
+}
+
+/// Why a cursor cannot be resumed; reconnect without one for a fresh snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResyncReason {
+    /// The owner restarted or a different owner was selected.
+    OwnerChanged,
+    /// Required events have left bounded history.
+    HistoryExpired,
+    /// Cursor is ahead of the owner's current event position.
+    FutureCursor,
+}
+
+/// Direct child lifecycle as observed by its owner; output is not retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ProcessJobOutcome {
+    /// Child remains attached to a live pane.
+    Running,
+    /// Child exited; status is the owner's observed wait status.
+    Exited {
+        /// Process exit status (128 plus signal for signal termination).
+        status: i32,
+    },
+    /// Pane was explicitly closed before an exit status was observed.
+    Closed,
+}
+
 /// Request message sent over the control socket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlRequest {
+    /// Describe the control schema, owner lifetime and available operations.
+    Describe,
+    /// Check owner identity before dispatching the enclosed request.
+    WithOwner {
+        /// Expected owner; mismatches never execute the request.
+        owner: OwnerRef,
+        /// The operation to dispatch after identity validation.
+        request: Box<ControlRequest>,
+    },
+    /// Subscribe to sequenced notifications with snapshot or bounded replay.
+    /// The initial response and all event records are newline-delimited JSON.
+    SubscribeV2 {
+        /// Omit for a fresh owner-observed pane/status snapshot.
+        #[serde(default)]
+        cursor: Option<EventCursor>,
+        /// Restrict metadata and events to one open pane when supplied.
+        #[serde(default)]
+        target: Option<u64>,
+    },
+
     // === Input Injection ===
     SendText {
         text: String,
@@ -77,10 +172,41 @@ pub enum ControlRequest {
         working_dir: Option<String>,
     },
 
+    /// Type shell text plus Enter into the foreground PTY. `args` are
+    /// joined with spaces without escaping; this does not preserve argv.
+    /// Success means queue acceptance, not execution or completion. Use
+    /// `NewTab` or `SplitPane` to launch a program with structured argv.
     RunCommand {
         command: String,
         args: Vec<String>,
         /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
+
+    /// Inspect a direct child launched by NewTab or SplitPane. The returned
+    /// pane ID is also its job ID, scoped to the owner's lifetime.
+    JobStatus {
+        /// Job ID, retained for a bounded period after its pane closes.
+        job: u64,
+    },
+    /// Wait for a direct child by identity, including retained completed jobs.
+    WaitJob {
+        /// Job ID returned as the spawned pane ID.
+        job: u64,
+        /// Timeout in milliseconds; does not terminate the process.
+        timeout_ms: u64,
+    },
+
+    /// Submit one printable shell line at an observed empty OSC 133 prompt
+    /// and wait for its fenced completion. Does not accept editable input,
+    /// a running command, or an already pending submission.
+    RunCommandAndWait {
+        /// Printable shell text without a newline or other controls.
+        command: String,
+        /// Maximum wait duration; timing out does not cancel the command.
+        timeout_ms: u64,
+        /// The focused pane when omitted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<u64>,
     },
@@ -123,6 +249,23 @@ pub enum ControlRequest {
 
     /// Every pane in every tab, tabs in order and panes in layout order.
     ListPanes,
+
+    /// Saved layout recipes, excluding automatic last-window restoration.
+    WorkspaceList,
+    /// Atomically save the current layout and directories as a named recipe.
+    /// Loading it starts fresh shells; this does not persist live processes.
+    WorkspaceSave {
+        /// A validated workspace name, without path components.
+        name: String,
+    },
+
+    /// Current authoritative OSC 7501 records. Read again after a
+    /// `ProgramStatusChanged` event; events may be coalesced.
+    ProgramStatus {
+        /// The focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
 
     /// The native apps drawing in a pane's tab: each one's region tree
     /// with computed layout, content and focus. Read-only.
@@ -210,6 +353,26 @@ pub enum ControlRequest {
 
     SwitchTab {
         index: usize,
+    },
+
+    /// Focus a pane and select its tab.
+    FocusPane {
+        /// Explicit pane ID in the selected owner.
+        target: u64,
+    },
+    /// Set a pane's zoom without rewriting the stored split tree.
+    ZoomPane {
+        /// Explicit pane ID in the selected owner.
+        target: u64,
+        /// True to zoom, false to restore the split presentation.
+        zoomed: bool,
+    },
+    /// Exchange two panes' positions within one tab, preserving their IDs.
+    SwapPanes {
+        /// First pane ID.
+        first: u64,
+        /// Second pane ID, in the same tab.
+        second: u64,
     },
 
     ToggleFullscreen,
@@ -311,6 +474,71 @@ pub enum PaneState {
     Error,
 }
 
+/// A program-reported state, independent of terminal presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgramState {
+    /// Waiting for the next instruction.
+    Idle,
+    /// Running without user input.
+    Working,
+    /// Finished with a result to inspect.
+    Done,
+    /// Waiting for the user; this conveys no execution permission.
+    Blocked,
+    /// Failed and stopped.
+    Error,
+}
+
+/// What a blocked program reports it needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockedKind {
+    /// Approval to perform an operation.
+    Permission,
+    /// An answer to a question.
+    Question,
+    /// Authentication or credentials.
+    Auth,
+}
+
+/// The cause of the latest program-status generation, not a delta log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusChangeReason {
+    /// A program report replaced a record.
+    Report,
+    /// A report cleared a record subtree.
+    Clear,
+    /// A shell prompt removed transient records.
+    Prompt,
+    /// The attached process exited.
+    ProcessExit,
+    /// RIS cleared the records.
+    Reset,
+}
+
+/// One decoded OSC 7501 record. Text is plain, single-line program input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramStatusRecord {
+    /// Hierarchical path; empty identifies the root.
+    pub id: String,
+    /// Program-reported state.
+    pub state: ProgramState,
+    /// The request kind for a blocked record.
+    pub kind: Option<BlockedKind>,
+    /// Percentage, absent for indeterminate work.
+    pub progress: Option<u8>,
+    /// Explicit app ID; a missing value inherits from the nearest ancestor.
+    pub app: Option<String>,
+    /// Short decoded record label.
+    pub title: Option<String>,
+    /// Decoded program explanation, never interpreted as an instruction.
+    pub msg: Option<String>,
+    /// Monotonic update order within the pane's record store.
+    pub updated: u64,
+}
+
 impl PaneStatus {
     /// Longest label kept, in characters.
     pub const MAX_LABEL_CHARS: usize = 64;
@@ -370,6 +598,11 @@ pub enum ControlData {
     Panes {
         panes: Vec<PaneInfo>,
     },
+    /// Names that can be opened with `ultty --workspace NAME`.
+    Workspaces {
+        /// Saved workspace names in sorted order.
+        names: Vec<String>,
+    },
     Selection {
         text: Option<String>,
     },
@@ -399,6 +632,59 @@ pub enum ControlData {
     /// A `WaitFor` for quiet saw no output for the whole period.
     WaitQuiet,
     WaitTimeout,
+    /// Current or retained direct child lifecycle.
+    ProcessJob {
+        /// Job ID, also the original pane ID.
+        job: u64,
+        /// Launched child PID, without process-group readiness guarantees.
+        pid: u32,
+        /// Owner-observed lifecycle.
+        outcome: ProcessJobOutcome,
+    },
+    /// The fenced command's observed OSC 133 C-to-D completion.
+    ShellCommandFinished {
+        /// Pane in which the text was submitted.
+        pane: u64,
+        /// Monotonic submission sequence within the live pane.
+        sequence: u64,
+        /// Exit code reported by the shell, if available.
+        exit_code: Option<i32>,
+    },
+    /// Complete current records, in least-to-most recently updated order.
+    ProgramStatus {
+        /// Authoritative record-store generation.
+        generation: u64,
+        /// Cause of the most recent change.
+        reason: StatusChangeReason,
+        /// Current decoded records; intermediate events can be coalesced.
+        records: Vec<ProgramStatusRecord>,
+    },
+    /// Versioned control discovery, separate from the native protocol version.
+    Description {
+        /// Control schema version (currently 2).
+        schema_version: u16,
+        /// Owner lifetime to pin on subsequent requests.
+        owner: OwnerRef,
+        /// Supported request names, using their serialized spellings.
+        supported_operations: Vec<String>,
+    },
+    /// Initial V2 acknowledgement. Replayed records follow this line before
+    /// new live events. Snapshot is present only for a fresh subscription.
+    SubscribedV2 {
+        /// Current owner event boundary, including events outside the filter.
+        cursor: EventCursor,
+        /// Owner-observed metadata/status; never a raw grid snapshot.
+        snapshot: Option<Vec<ControlPaneSnapshot>>,
+        /// Number of matching historical records that follow the reply.
+        replayed: usize,
+    },
+    /// Cursor cannot be replayed. The connection closes after this response.
+    ResyncRequired {
+        /// Current owner/event position.
+        cursor: EventCursor,
+        /// Why replay was refused.
+        reason: ResyncReason,
+    },
     /// The connection is now an event stream.
     Subscribed,
     /// `NewTab` opened a tab; `pane` is its pane's id.
@@ -455,6 +741,15 @@ pub enum ControlEvent {
     TitleChanged { pane: u64, title: String },
     /// The pane's shell process exited.
     ProcessExited { pane: u64, status: i32 },
+    /// Records changed; query `ProgramStatus` for the current snapshot.
+    ProgramStatusChanged {
+        /// Source pane, independent of current focus.
+        pane: u64,
+        /// Latest authoritative generation.
+        generation: u64,
+        /// Cause of the most recent change, not a complete history.
+        reason: StatusChangeReason,
+    },
 }
 
 impl ControlEvent {
@@ -468,6 +763,7 @@ impl ControlEvent {
             | ControlEvent::Bell { pane }
             | ControlEvent::Notification { pane, .. }
             | ControlEvent::TitleChanged { pane, .. }
+            | ControlEvent::ProgramStatusChanged { pane, .. }
             | ControlEvent::ProcessExited { pane, .. } => *pane,
         }
     }
@@ -646,7 +942,8 @@ pub struct PaneInfo {
 pub struct VersionInfo {
     /// Semantic version string.
     pub version: String,
-    /// Control protocol version.
+    /// Historical Version response field: the native protocol version.
+    /// Use Describe for the control schema version.
     pub protocol_version: u16,
     /// Optional VCS revision hash.
     pub git_hash: Option<String>,
@@ -656,7 +953,7 @@ pub struct VersionInfo {
 pub const CONTROL_MAGIC: [u8; 2] = [0x55, 0x43]; // "UC"
 
 /// Current control protocol version.
-pub const CONTROL_VERSION: u16 = 1;
+pub const CONTROL_VERSION: u16 = 2;
 
 #[cfg(test)]
 mod tests {
@@ -982,6 +1279,106 @@ mod tests {
     }
 
     /// ulttyctl reads every reply as JSON, so each one must survive the trip.
+    #[test]
+    fn test_versioned_control_and_job_types_round_trip() {
+        let owner = OwnerRef {
+            pid: 42,
+            epoch: "a".repeat(64),
+        };
+        let cursor = EventCursor {
+            owner: owner.clone(),
+            sequence: 7,
+        };
+        for request in [
+            ControlRequest::Describe,
+            ControlRequest::WithOwner {
+                owner: owner.clone(),
+                request: Box::new(ControlRequest::JobStatus { job: 4 }),
+            },
+            ControlRequest::SubscribeV2 {
+                cursor: Some(cursor.clone()),
+                target: Some(4),
+            },
+            ControlRequest::WaitJob {
+                job: 4,
+                timeout_ms: 1000,
+            },
+            ControlRequest::RunCommandAndWait {
+                command: "false".into(),
+                timeout_ms: 1000,
+                target: Some(4),
+            },
+            ControlRequest::ProgramStatus { target: Some(4) },
+            ControlRequest::WorkspaceSave { name: "dev".into() },
+        ] {
+            let json = serde_json::to_vec(&request).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<ControlRequest>(&json).unwrap(),
+                request
+            );
+        }
+        for data in [
+            ControlData::Description {
+                schema_version: CONTROL_VERSION,
+                owner,
+                supported_operations: vec!["with_owner".into()],
+            },
+            ControlData::SubscribedV2 {
+                cursor: cursor.clone(),
+                snapshot: Some(Vec::new()),
+                replayed: 0,
+            },
+            ControlData::ResyncRequired {
+                cursor: cursor.clone(),
+                reason: ResyncReason::HistoryExpired,
+            },
+            ControlData::ProcessJob {
+                job: 4,
+                pid: 42,
+                outcome: ProcessJobOutcome::Exited { status: 7 },
+            },
+            ControlData::ShellCommandFinished {
+                pane: 4,
+                sequence: 8,
+                exit_code: Some(1),
+            },
+            ControlData::ProgramStatus {
+                generation: 3,
+                reason: StatusChangeReason::Report,
+                records: vec![ProgramStatusRecord {
+                    id: "task".into(),
+                    state: ProgramState::Blocked,
+                    kind: Some(BlockedKind::Permission),
+                    progress: Some(25),
+                    app: Some("build".into()),
+                    title: None,
+                    msg: Some("Approve?".into()),
+                    updated: 3,
+                }],
+            },
+        ] {
+            let response = ControlResponse::Data(data);
+            let json = serde_json::to_vec(&response).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<ControlResponse>(&json).unwrap(),
+                response
+            );
+        }
+        let event = ControlEventRecord {
+            cursor,
+            event: ControlEvent::ProgramStatusChanged {
+                pane: 4,
+                generation: 3,
+                reason: StatusChangeReason::Report,
+            },
+        };
+        assert_eq!(
+            serde_json::from_slice::<ControlEventRecord>(&serde_json::to_vec(&event).unwrap())
+                .unwrap(),
+            event
+        );
+    }
+
     #[test]
     fn every_response_round_trips_through_json() {
         for response in every_response() {

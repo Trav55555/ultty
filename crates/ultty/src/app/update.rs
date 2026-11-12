@@ -46,11 +46,7 @@ impl App {
     /// Move in-band protocol data between each tab's PTY and the protocol
     /// server (ADR 0018).
     ///
-    /// Only a tab with a single pane can host an in-band session: the
-    /// native scene covers the whole tab, and a pane's app cannot own it.
-    /// Data from any other pane is answered with nothing, which releases the
-    /// held query replies so the app's probe sees DA1 first and falls back
-    /// to ANSI.
+    /// Every stream is routed to the pane whose PTY produced it.
     fn pump_in_band(&mut self) {
         let tabs: Vec<(
             ultty::terminal_manager::TabId,
@@ -62,7 +58,6 @@ impl App {
             .map(|tab| (tab.id, tab.terminals.clone()))
             .collect();
         for (tab_id, terminals) in tabs {
-            let single = terminals.len() == 1;
             for terminal_id in terminals {
                 let Some(terminal) = self.terminal_manager.terminal(terminal_id) else {
                     continue;
@@ -72,15 +67,19 @@ impl App {
                     continue;
                 };
                 let reply = match self.protocol_server.as_mut() {
-                    Some(server) if single => {
+                    Some(server) => {
                         server.in_band_input(
                             tab_id,
+                            terminal_id,
+                            self.terminal_manager
+                                .pane_grid_size(terminal_id)
+                                .unwrap_or((80, 24)),
                             event_loop.foreground_pgrp(),
                             || event_loop.foreground_pids(),
                             &input.bytes,
                             input.broken,
                         );
-                        server.take_tab_in_band_output(tab_id)
+                        server.take_pane_in_band_output(terminal_id)
                     }
                     _ => Vec::new(),
                 };
@@ -97,25 +96,17 @@ impl App {
         let Some(server) = self.protocol_server.as_mut() else {
             return;
         };
-        for tab_id in server.in_band_tabs() {
-            let terminal = self
-                .terminal_manager
-                .tabs()
-                .iter()
-                .find(|tab| tab.id == tab_id)
-                .filter(|tab| tab.terminals.len() == 1)
-                .and_then(|tab| self.terminal_manager.terminal(tab.terminals[0]));
-            let Some(terminal) = terminal else {
-                // The tab was split or closed under the session.
-                server.end_in_band_session(tab_id);
+        for pane in server.in_band_panes() {
+            let Some(terminal) = self.terminal_manager.terminal(pane) else {
+                server.end_in_band_session(pane);
                 continue;
             };
             let event_loop = &terminal.event_loop;
-            server.end_in_band_if_app_gone(tab_id, event_loop.foreground_pgrp());
-            let out = server.take_tab_in_band_output(tab_id);
+            server.end_in_band_if_app_gone(pane, event_loop.foreground_pgrp());
+            let out = server.take_pane_in_band_output(pane);
             if let Err(e) = event_loop.send_in_band(&out) {
-                tracing::warn!("Failed to send in-band data to tab {}: {}", tab_id.raw(), e);
-                server.end_in_band_session(tab_id);
+                tracing::warn!("Failed to send in-band data to pane {}: {}", pane.raw(), e);
+                server.end_in_band_session(pane);
             }
         }
     }
@@ -138,7 +129,6 @@ impl App {
         let mut focused_written = false;
         let active = self.terminal_manager.active_tab().map(|tab| tab.id);
         for tab in self.terminal_manager.tabs() {
-            let single_pane = tab.terminals.len() == 1;
             for &terminal_id in &tab.terminals {
                 if !with_output.contains(&terminal_id) && !server.needs_pairing(tab.id, terminal_id)
                 {
@@ -148,14 +138,12 @@ impl App {
                     continue;
                 };
                 let mut terminal = managed.event_loop.terminal();
-                let wrote = server.pair_inline_surfaces(
-                    tab.id,
-                    terminal_id,
-                    &mut terminal,
-                    single_pane,
-                    single_pane && Some(tab.id) == active,
-                    now,
-                );
+                let on_screen = Some(tab.id) == active
+                    && !server
+                        .pane_sessions(terminal_id)
+                        .any(|session| session.is_full_scene());
+                let wrote =
+                    server.pair_inline_surfaces(tab.id, terminal_id, &mut terminal, on_screen, now);
                 focused_written |= wrote && Some(terminal_id) == focused;
             }
         }
@@ -276,20 +264,14 @@ impl App {
                 let mut with_output = Vec::new();
                 // What a screen reader is shown changed (ADR 0021 §3).
                 let mut shown_changed = false;
-                let subscribed = self
-                    .control_server
-                    .as_ref()
-                    .is_some_and(|server| server.has_subscribers());
                 for (terminal_id, events) in all_events {
                     for event in events {
                         self.observe_control_wait_event(terminal_id, &event);
-                        if subscribed {
-                            if let (Some(server), Some(control_event)) = (
-                                self.control_server.as_mut(),
-                                super::control_events::control_event(terminal_id, &event),
-                            ) {
-                                server.publish(&control_event);
-                            }
+                        if let (Some(server), Some(control_event)) = (
+                            self.control_server.as_mut(),
+                            super::control_events::control_event(terminal_id, &event),
+                        ) {
+                            server.publish(&control_event);
                         }
                         match event {
                             TerminalEvent::Redraw => {
@@ -395,6 +377,10 @@ impl App {
                                 }
                             }
                             // Only subscribers hear of this (above).
+                            TerminalEvent::ProgramStatusChanged { .. } => {
+                                tab_titles_changed = true;
+                            }
+                            TerminalEvent::ShellCommandFinished { .. } => {}
                             TerminalEvent::CommandStarted => {}
                         }
                     }

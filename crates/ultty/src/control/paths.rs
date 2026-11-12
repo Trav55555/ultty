@@ -67,17 +67,20 @@ pub fn find_running_instance(dir: &Path) -> Option<ControlEndpoint> {
         .find(|endpoint| UnixStream::connect(&endpoint.socket).is_ok())
 }
 
-/// The instance a command should talk to: the one whose pid is `own_pid`
-/// while it still listens, else the newest running instance.
+/// The selected instance, or the newest running one when none was selected.
 ///
 /// Ultty puts its pid in `ULTTY_PID` for every shell it starts, so
 /// `ulttyctl` run inside a window controls that window, not whichever
-/// window was opened last.
+/// window was opened last. A selected instance that stopped listening is
+/// unavailable: it must never redirect an old pane target to another window.
 pub fn find_instance(dir: &Path, own_pid: Option<u32>) -> Option<ControlEndpoint> {
-    own_pid
-        .map(|pid| ControlEndpoint::for_pid(dir, pid))
-        .filter(|endpoint| UnixStream::connect(&endpoint.socket).is_ok())
-        .or_else(|| find_running_instance(dir))
+    match own_pid {
+        Some(pid) => {
+            let endpoint = ControlEndpoint::for_pid(dir, pid);
+            UnixStream::connect(&endpoint.socket).ok().map(|_| endpoint)
+        }
+        None => find_running_instance(dir),
+    }
 }
 
 fn pid_from_socket_name(name: &str) -> Option<u32> {
@@ -124,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn a_window_prefers_its_own_instance_while_it_listens() {
+    fn test_selected_window_never_falls_back_to_another_instance() {
         let dir = tempfile::tempdir().unwrap();
         let own = ControlEndpoint::for_pid(dir.path(), 100);
         let own_listener = UnixListener::bind(&own.socket).unwrap();
@@ -134,10 +137,10 @@ mod tests {
 
         assert_eq!(find_instance(dir.path(), Some(100)), Some(own.clone()));
         assert_eq!(find_instance(dir.path(), None), Some(newer.clone()));
-        // An instance that is gone falls back to the newest.
-        assert_eq!(find_instance(dir.path(), Some(300)), Some(newer.clone()));
+        assert_eq!(find_instance(dir.path(), Some(300)), None);
         drop(own_listener);
-        eventually(Some(newer), || find_instance(dir.path(), Some(100)));
+        eventually(None, || find_instance(dir.path(), Some(100)));
+        assert_eq!(find_instance(dir.path(), None), Some(newer));
     }
 
     #[test]

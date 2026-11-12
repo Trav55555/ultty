@@ -101,6 +101,28 @@ impl PaneLayout {
         &self.root
     }
 
+    /// Swap two existing leaves, preserving split weights and process identities.
+    pub fn swap(&mut self, first: TerminalId, second: TerminalId) -> bool {
+        let panes = self.panes();
+        if !panes.contains(&first) || !panes.contains(&second) {
+            return false;
+        }
+        fn replace(node: &mut PaneNode, first: TerminalId, second: TerminalId) {
+            match node {
+                PaneNode::Leaf(id) if *id == first => *id = second,
+                PaneNode::Leaf(id) if *id == second => *id = first,
+                PaneNode::Leaf(_) => {}
+                PaneNode::Split { children, .. } => {
+                    for (child, _) in children {
+                        replace(child, first, second);
+                    }
+                }
+            }
+        }
+        replace(&mut self.root, first, second);
+        true
+    }
+
     /// Panes in order: left to right, top to bottom, depth first.
     pub fn panes(&self) -> Vec<TerminalId> {
         let mut panes = Vec::new();

@@ -129,6 +129,8 @@ pub struct NativeSession {
     read_buf: BytesMut,
     /// Write buffer.
     write_buf: BytesMut,
+    /// A required outbound frame could not be queued; close rather than desynchronize.
+    output_overflow: bool,
     /// Viewport dimensions.
     viewport_width: f32,
     viewport_height: f32,
@@ -316,6 +318,7 @@ impl NativeSession {
             peer_pid: None,
             read_buf: BytesMut::with_capacity(8192),
             write_buf: BytesMut::with_capacity(8192),
+            output_overflow: false,
             viewport_width: 80.0,
             viewport_height: 24.0,
             current_frame: None,
@@ -467,6 +470,12 @@ impl NativeSession {
     /// Read and process incoming messages.
     /// Returns true if the session should continue, false if disconnected.
     pub fn poll(&mut self) -> io::Result<bool> {
+        if self.output_overflow {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "native output queue overflowed",
+            ));
+        }
         // Try to read more data
         match self.read_from_socket() {
             Ok(0) => {
@@ -493,7 +502,14 @@ impl NativeSession {
             }
         }
 
-        // Flush any pending writes
+        // Some error/report paths are best-effort; never continue after a
+        // required frame was refused due to overflow.
+        if self.output_overflow {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "native output queue overflowed",
+            ));
+        }
         self.flush_writes()?;
 
         Ok(true)
@@ -588,6 +604,9 @@ impl NativeSession {
     /// - Ping interval: 30s since last activity → send Ping
     /// - Pong timeout: 10s after ping with no pong → close
     pub fn check_keepalive(&mut self) -> io::Result<bool> {
+        if self.output_overflow {
+            return Ok(false);
+        }
         let now = std::time::Instant::now();
         let idle = now.duration_since(self.last_activity);
 

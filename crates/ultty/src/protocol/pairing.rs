@@ -6,8 +6,8 @@
 //! and their `rows` agree; whichever half waits more than
 //! [`SURFACE_PAIRING_TIMEOUT`] for the other is dropped, leaving the
 //! fallback text the app printed. An anchor pairs only with a session of
-//! the tab whose PTY carried it, and only while that PTY is the tab's one
-//! pane, so another program cannot claim or move an app's surface.
+//! pane whose PTY carried it, so another pane cannot claim or move an
+//! app's surface.
 
 use std::io;
 use std::time::Instant;

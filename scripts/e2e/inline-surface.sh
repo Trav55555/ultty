@@ -21,11 +21,11 @@ command -v xdotool >/dev/null || { echo "xdotool is required" >&2; exit 2; }
 
 if [ -z "${ULTTY:-}" ] || [ -z "${ULTTYCTL:-}" ]; then
     cargo build -q --locked -p ultty --bins
-    ULTTY=${ULTTY:-target/debug/ultty}
-    ULTTYCTL=${ULTTYCTL:-target/debug/ulttyctl}
+    ULTTY=${ULTTY:-${CARGO_TARGET_DIR:-target}/debug/ultty}
+    ULTTYCTL=${ULTTYCTL:-${CARGO_TARGET_DIR:-target}/debug/ulttyctl}
 fi
 cargo build -q --locked -p ultty-client --example inline-surface
-client="$PWD/target/debug/examples/inline-surface"
+client=$(realpath "${CARGO_TARGET_DIR:-target}/debug/examples/inline-surface")
 ULTTY=$(realpath "$ULTTY")
 ULTTYCTL=$(realpath "$ULTTYCTL")
 
@@ -33,7 +33,7 @@ out="${1:-$(mktemp -d)}"
 mkdir -p "$out/config/ultty"
 # XDG_CONFIG_HOME is ignored unless it is absolute.
 out=$(cd "$out" && pwd)
-rm -f "$out/go" "$out/close" "$out"/*.png "$out"/text-*.txt "$out/client.log"
+rm -f "$out/go" "$out/close" "$out/split-close-1" "$out/split-close-2" "$out"/*.png "$out"/text-*.txt "$out/client.log"
 # Unix socket paths are short (108 bytes), so the runtime dir must be too.
 runtime=$(mktemp -d /tmp/ultty-inline.XXXXXX)
 chmod 700 "$runtime"
@@ -175,5 +175,42 @@ grep -q "surface 9000 Placed" "$out/client.log" || fail "the app never heard Pla
 grep -q "surface 9000 Hidden" "$out/client.log" || fail "the app never heard Hidden"
 grep -q "surface 9000 Shown" "$out/client.log" || fail "the app never heard Shown"
 ! grep -q "panicked at" "$out/ultty.log" || fail "Ultty logged a panic"
+
+# Two independently owned live cards in split panes, using the same surface
+# id. A pixel check makes pairing without rendering fail this gate.
+shell_pane=$("$ULTTYCTL" --json panes | python3 -c 'import json,sys; print(json.load(sys.stdin)["panes"][0]["id"])')
+first=$("$ULTTYCTL" --pane "$shell_pane" split right "$client" 60 "$out/split-close-1") || fail "first inline split"
+second=$("$ULTTYCTL" --pane "$first" split right "$client" 60 "$out/split-close-2") || fail "second inline split"
+for pane in "$first" "$second"; do
+    placed=""
+    for _ in $(seq 100); do
+        if "$ULTTYCTL" --pane "$pane" regions 2>/dev/null | grep -q '^surface #9000 .*placed at line'; then
+            placed=1
+            break
+        fi
+        sleep 0.1
+    done
+    [ -n "$placed" ] || fail "inline surface in pane $pane not placed"
+    "$ULTTYCTL" --pane "$pane" text --scrollback | grep -q 'INLINE CARD' || fail "pane $pane has no inline copy text"
+done
+shot split-live
+python3 - "$out/split-live.png" <<'PYPIXEL' || fail "both split cards must be visible"
+from PIL import Image
+import sys
+image = Image.open(sys.argv[1]).convert("RGB")
+w, h = image.size
+for left, right in ((w // 2, 3 * w // 4), (3 * w // 4, w)):
+    pixels = image.crop((left, 0, right, h)).getdata()
+    magenta = sum(r > 130 and b > 100 and r > g * 1.5 and b > g * 1.4 for r, g, b in pixels)
+    if magenta < 30:
+        raise SystemExit(f"only {magenta} card pixels in pane at x={left}")
+PYPIXEL
+touch "$out/split-close-1"
+for _ in $(seq 100); do
+    "$ULTTYCTL" --pane "$second" regions 2>/dev/null | grep -q '^surface #9000 .*placed at line' && break
+    sleep 0.1
+done
+"$ULTTYCTL" --pane "$second" regions | grep -q '^surface #9000 .*placed at line' || fail "closing sibling lost second surface"
+touch "$out/split-close-2"
 
 echo "inline-surface: ok ($out)"

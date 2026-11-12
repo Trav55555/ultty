@@ -82,14 +82,9 @@ impl App {
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.set_ime_preedit(String::new());
-                // Forward IME committed text to native protocol sessions as TextInput
-                let foreground = self.focused_foreground_pgrp();
-                if let Some(ref mut server) = self.protocol_server {
-                    if server.session_count() > 0 {
-                        server.broadcast_text_input(text.clone(), foreground);
-                    }
+                if self.forward_text_to_native_session(&text) {
+                    return false;
                 }
-                // Also send the text to the terminal PTY
                 if let Err(e) = self.send_input(text.as_bytes()) {
                     tracing::warn!("Failed to send IME input: {}", e);
                 }
@@ -905,6 +900,9 @@ impl App {
         if let Some(clipboard) = &mut self.clipboard {
             match clipboard.get_text() {
                 Ok(text) => {
+                    if self.forward_text_to_native_session(&text) {
+                        return;
+                    }
                     let bracketed = self.terminal().is_some_and(|t| t.modes().bracketed_paste);
                     if let Err(e) = self.send_input(&paste_payload(&text, bracketed)) {
                         tracing::warn!("Failed to paste: {}", e);
@@ -935,8 +933,9 @@ impl App {
         }
         if event.state == ElementState::Released {
             // Only a program that asked for release events gets any bytes.
-            self.send_key_to_terminal(&event);
-            self.forward_key_up_to_native_sessions(&event);
+            if !self.forward_key_up_to_native_sessions(&event) {
+                self.send_key_to_terminal(&event);
+            }
             return;
         }
 
@@ -1210,9 +1209,9 @@ impl App {
             return;
         }
 
-        self.send_key_to_terminal(&event);
-
-        self.forward_key_to_native_sessions(&event);
+        if !self.forward_key_to_native_sessions(&event) {
+            self.send_key_to_terminal(&event);
+        }
     }
 
     /// Send a key to the focused terminal, encoded for its keyboard modes.
@@ -1354,30 +1353,66 @@ impl App {
         Some((protocol_key, modifiers))
     }
 
-    fn forward_key_to_native_sessions(&mut self, event: &KeyEvent) {
-        let Some((key, modifiers)) = self.convert_key_event(event) else {
-            return;
-        };
-        let foreground = self.focused_foreground_pgrp();
-        let Some(ref mut server) = self.protocol_server else {
-            return;
-        };
-        if server.session_count() > 0 {
-            server.broadcast_key(key, modifiers, foreground);
-        }
+    fn native_input_target(
+        &self,
+    ) -> Option<(
+        ultty::terminal_manager::TabId,
+        ultty::terminal_manager::TerminalId,
+        Option<i32>,
+    )> {
+        let terminal = self.terminal_manager.focused_terminal()?;
+        let foreground = terminal.event_loop.foreground_pgrp();
+        self.protocol_server
+            .as_ref()?
+            .has_pane_key_subscribers(terminal.tab_id, terminal.id, foreground)
+            .then_some((terminal.tab_id, terminal.id, foreground))
     }
 
-    fn forward_key_up_to_native_sessions(&mut self, event: &KeyEvent) {
-        let Some((key, modifiers)) = self.convert_key_event(event) else {
-            return;
+    /// A selected native recipient consumes the input even if its queue refuses it.
+    /// Retrying through the PTY could type into an unrelated shell after failure.
+    fn forward_text_to_native_session(&mut self, text: &str) -> bool {
+        let Some((tab, pane, foreground)) = self.native_input_target() else {
+            return false;
         };
-        let foreground = self.focused_foreground_pgrp();
-        let Some(ref mut server) = self.protocol_server else {
-            return;
+        let Some(server) = self.protocol_server.as_mut() else {
+            return false;
         };
-        if server.session_count() > 0 {
-            server.broadcast_key_up(key, modifiers, foreground);
+        if let Err(error) = server.send_text_input_to_pane(tab, pane, text.to_owned(), foreground) {
+            tracing::warn!(%error, "Native text input was refused");
         }
+        true
+    }
+
+    fn forward_key_to_native_sessions(&mut self, event: &KeyEvent) -> bool {
+        let Some((key, modifiers)) = self.convert_key_event(event) else {
+            return false;
+        };
+        let Some((tab, pane, foreground)) = self.native_input_target() else {
+            return false;
+        };
+        let Some(ref mut server) = self.protocol_server else {
+            return false;
+        };
+        if let Err(error) = server.send_key_to_pane(tab, pane, key, modifiers, foreground) {
+            tracing::warn!(%error, "Native key input was refused");
+        }
+        true
+    }
+
+    fn forward_key_up_to_native_sessions(&mut self, event: &KeyEvent) -> bool {
+        let Some((key, modifiers)) = self.convert_key_event(event) else {
+            return false;
+        };
+        let Some((tab, pane, foreground)) = self.native_input_target() else {
+            return false;
+        };
+        let Some(ref mut server) = self.protocol_server else {
+            return false;
+        };
+        if let Err(error) = server.send_key_up_to_pane(tab, pane, key, modifiers, foreground) {
+            tracing::warn!(%error, "Native key release was refused");
+        }
+        true
     }
 
     /// Check if a key event matches a configured keybinding.

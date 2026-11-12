@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
@@ -11,7 +11,8 @@ use polling::{Event, Events, Poller};
 use tracing::{debug, error, info, warn};
 
 use ultty_protocol::control::{
-    ControlData, ControlEnvelope, ControlEvent, ControlRequest, ControlResponse, OutputFormat,
+    ControlData, ControlEnvelope, ControlEvent, ControlEventRecord, ControlPaneSnapshot,
+    ControlRequest, ControlResponse, EventCursor, OutputFormat, OwnerRef, ResyncReason,
 };
 
 use super::paths::{control_dir, ControlEndpoint};
@@ -35,6 +36,11 @@ pub const MAX_SUBSCRIBER_BACKLOG: usize = 1024 * 1024;
 /// Most event subscriptions open at once.
 pub const MAX_SUBSCRIBERS: usize = 64;
 
+/// Event history is bounded by both record count and serialized bytes.
+pub const MAX_EVENT_HISTORY: usize = 512;
+/// Maximum bytes retained for resumable notifications.
+pub const MAX_EVENT_HISTORY_BYTES: usize = 1024 * 1024;
+
 pub struct ControlServer {
     listener: UnixListener,
     socket_path: PathBuf,
@@ -43,6 +49,10 @@ pub struct ControlServer {
     clients: HashMap<usize, ClientState>,
     next_key: usize,
     pending_requests: Vec<(usize, ControlRequest)>,
+    owner: OwnerRef,
+    event_sequence: u64,
+    history: VecDeque<(ControlEventRecord, Vec<u8>)>,
+    history_bytes: usize,
 }
 
 struct ClientState {
@@ -68,6 +78,7 @@ struct ClientState {
     /// Set once the client subscribed: the connection stays open and gets
     /// events, for this pane only when `Some(Some(pane))`.
     subscription: Option<Option<u64>>,
+    subscription_v2: bool,
 }
 
 impl ClientState {
@@ -108,6 +119,26 @@ enum ReadOutcome {
 struct ParsedControlRequest {
     request: ControlRequest,
     output_format: OutputFormat,
+}
+
+impl ParsedControlRequest {
+    fn new(request: ControlRequest, preferred: OutputFormat) -> Self {
+        let mut inner = &request;
+        while let ControlRequest::WithToken { request, .. }
+        | ControlRequest::WithOwner { request, .. } = inner
+        {
+            inner = request;
+        }
+        let output_format = if matches!(inner, ControlRequest::SubscribeV2 { .. }) {
+            OutputFormat::Json
+        } else {
+            preferred
+        };
+        Self {
+            request,
+            output_format,
+        }
+    }
 }
 
 impl ControlServer {
@@ -153,7 +184,80 @@ impl ControlServer {
             clients: HashMap::new(),
             next_key: CLIENT_KEY_BASE,
             pending_requests: Vec::new(),
+            owner: random_owner()?,
+            event_sequence: 0,
+            history: VecDeque::new(),
+            history_bytes: 0,
         })
+    }
+
+    /// Stable identity for this server lifetime.
+    pub fn owner(&self) -> &OwnerRef {
+        &self.owner
+    }
+
+    /// Authenticated discovery response for this control implementation.
+    pub fn description(&self) -> ControlResponse {
+        ControlResponse::Data(ControlData::Description {
+            schema_version: ultty_protocol::control::CONTROL_VERSION,
+            owner: self.owner.clone(),
+            supported_operations: [
+                "describe",
+                "with_owner",
+                "with_token",
+                "subscribe_v2",
+                "subscribe",
+                "ping",
+                "version",
+                "authenticate",
+                "batch",
+                "send_text",
+                "send_key",
+                "send_raw",
+                "job_status",
+                "wait_job",
+                "new_tab",
+                "run_command",
+                "run_command_and_wait",
+                "split_pane",
+                "close_tab",
+                "get_text",
+                "get_selection",
+                "list_tabs",
+                "list_panes",
+                "workspace_list",
+                "workspace_save",
+                "program_status",
+                "regions",
+                "get_info",
+                "push_override",
+                "clear_override",
+                "last_command",
+                "search",
+                "wait_for",
+                "switch_tab",
+                "focus_pane",
+                "zoom_pane",
+                "swap_panes",
+                "focus_window",
+                "toggle_fullscreen",
+                "resize",
+                "set_opacity",
+                "set_pane_status",
+                "screenshot",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        })
+    }
+
+    /// Current event boundary, including events with no connected subscribers.
+    pub fn cursor(&self) -> EventCursor {
+        EventCursor {
+            owner: self.owner.clone(),
+            sequence: self.event_sequence,
+        }
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -258,6 +362,7 @@ impl ControlServer {
                             awaiting_response: false,
                             reply: Vec::new(),
                             subscription: None,
+                            subscription_v2: false,
                         },
                     );
                     debug!("Control client connected: {}", key);
@@ -363,17 +468,97 @@ impl ControlServer {
     /// (every pane when `None`), after replying `Subscribed`. Refused with an
     /// error reply when [`MAX_SUBSCRIBERS`] are already open.
     pub fn start_subscription(&mut self, key: usize, target: Option<u64>) {
+        let response = ControlResponse::Data(ControlData::Subscribed);
+        let Some(client) = self.clients.get(&key) else {
+            return;
+        };
+        let reply = format_response(&response, client.output_format).into_bytes();
+        self.install_subscription(key, target, false, reply);
+    }
+
+    /// Register a V2 subscriber and enqueue its initial snapshot or replay at
+    /// the same owner mutation boundary. Caller must construct `snapshot`
+    /// immediately before this call without processing additional updates.
+    pub fn start_subscription_v2(
+        &mut self,
+        key: usize,
+        target: Option<u64>,
+        cursor: Option<EventCursor>,
+        snapshot: Vec<ControlPaneSnapshot>,
+    ) {
+        self.set_client_format(key, OutputFormat::Json);
+        let current = self.cursor();
+        let reason = cursor.as_ref().and_then(|cursor| {
+            if cursor.owner != self.owner {
+                Some(ResyncReason::OwnerChanged)
+            } else if cursor.sequence > self.event_sequence {
+                Some(ResyncReason::FutureCursor)
+            } else if cursor.sequence
+                < self
+                    .history
+                    .front()
+                    .map_or(self.event_sequence, |(record, _)| {
+                        record.cursor.sequence - 1
+                    })
+            {
+                Some(ResyncReason::HistoryExpired)
+            } else {
+                None
+            }
+        });
+        if let Some(reason) = reason {
+            self.send_response(
+                key,
+                &ControlResponse::Data(ControlData::ResyncRequired {
+                    cursor: current,
+                    reason,
+                }),
+            );
+            return;
+        }
+        let replay: Vec<&[u8]> = cursor
+            .as_ref()
+            .map(|cursor| {
+                self.history
+                    .iter()
+                    .filter(|(record, _)| {
+                        record.cursor.sequence > cursor.sequence
+                            && target.is_none_or(|pane| pane == record.event.pane())
+                    })
+                    .map(|(_, bytes)| bytes.as_slice())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let response = ControlResponse::Data(ControlData::SubscribedV2 {
+            cursor: current,
+            snapshot: if cursor.is_none() {
+                Some(snapshot)
+            } else {
+                None
+            },
+            replayed: replay.len(),
+        });
+        let mut reply = format_response(&response, OutputFormat::Json).into_bytes();
+        for line in replay {
+            reply.extend_from_slice(line);
+        }
+        self.install_subscription(key, target, true, reply);
+    }
+
+    fn install_subscription(&mut self, key: usize, target: Option<u64>, v2: bool, reply: Vec<u8>) {
         let open = self
             .clients
             .values()
             .filter(|client| client.subscription.is_some())
             .count();
-        if open >= MAX_SUBSCRIBERS {
+        if open >= MAX_SUBSCRIBERS || reply.len() > MAX_SUBSCRIBER_BACKLOG {
             self.send_response(
                 key,
                 &ControlResponse::Error {
                     code: 429,
-                    message: format!("at most {MAX_SUBSCRIBERS} subscriptions can be open"),
+                    message:
+                        "subscription count or initial snapshot/replay exceeds bounded capacity"
+                            .into(),
                 },
             );
             return;
@@ -382,52 +567,76 @@ impl ControlServer {
             return;
         };
         client.subscription = Some(target);
+        client.subscription_v2 = v2;
         client.awaiting_response = false;
-        client.reply.extend_from_slice(
-            format_response(
-                &ControlResponse::Data(ControlData::Subscribed),
-                client.output_format,
-            )
-            .as_bytes(),
-        );
-        // The client left the poller when its request was complete; it comes
-        // back so a disconnect (EOF) ends the subscription.
-        // SAFETY: the stream fd stays valid while the client is in
-        // self.clients, and remove_client deletes it from the poller.
+        client.reply.extend_from_slice(&reply);
+        // SAFETY: stream stays owned by the client; remove_client deletes it.
         let added = unsafe { self.poller.add(&client.stream, Event::readable(key)) };
-        if let Err(e) = added {
-            warn!("Failed to poll control subscriber {}: {}", key, e);
+        if let Err(error) = added {
+            warn!("Failed to poll control subscriber {}: {}", key, error);
             self.remove_client(key);
             return;
         }
-        debug!("Control client {} subscribed (pane {:?})", key, target);
         self.flush_subscriber(key);
     }
 
     /// Send `event` to every subscriber that wants it.
     pub fn publish(&mut self, event: &ControlEvent) {
-        let pane = event.pane();
-        let mut line = match serde_json::to_vec(event) {
-            Ok(line) => line,
-            Err(e) => {
-                warn!("Failed to serialize control event: {}", e);
-                return;
+        let Some(sequence) = self.event_sequence.checked_add(1) else {
+            // Refuse further delivery rather than reuse a cursor.
+            warn!("Control event sequence exhausted");
+            let keys: Vec<_> = self
+                .clients
+                .iter()
+                .filter(|(_, client)| client.subscription_v2)
+                .map(|(key, _)| *key)
+                .collect();
+            for key in keys {
+                self.remove_client(key);
             }
+            return;
         };
-        line.push(b'\n');
+        self.event_sequence = sequence;
+        let record = ControlEventRecord {
+            cursor: self.cursor(),
+            event: event.clone(),
+        };
+        let Ok(mut sequenced) = serde_json::to_vec(&record) else {
+            return;
+        };
+        sequenced.push(b'\n');
+        self.history_bytes += sequenced.len();
+        self.history.push_back((record, sequenced.clone()));
+        while self.history.len() > MAX_EVENT_HISTORY || self.history_bytes > MAX_EVENT_HISTORY_BYTES
+        {
+            if let Some((_, removed)) = self.history.pop_front() {
+                self.history_bytes -= removed.len();
+            }
+        }
+        let Ok(mut legacy) = serde_json::to_vec(event) else {
+            return;
+        };
+        legacy.push(b'\n');
         let keys: Vec<usize> = self
             .clients
             .iter()
             .filter(|(_, client)| {
                 client
                     .subscription
-                    .is_some_and(|target| target.is_none_or(|t| t == pane))
+                    .is_some_and(|target| target.is_none_or(|pane| pane == event.pane()))
+                    && (client.subscription_v2
+                        || !matches!(event, ControlEvent::ProgramStatusChanged { .. }))
             })
             .map(|(key, _)| *key)
             .collect();
         for key in keys {
             let Some(client) = self.clients.get_mut(&key) else {
                 continue;
+            };
+            let line = if client.subscription_v2 {
+                &sequenced
+            } else {
+                &legacy
             };
             if client.reply.len() + line.len() > MAX_SUBSCRIBER_BACKLOG {
                 warn!(
@@ -437,7 +646,7 @@ impl ControlServer {
                 self.remove_client(key);
                 continue;
             }
-            client.reply.extend_from_slice(&line);
+            client.reply.extend_from_slice(line);
             self.flush_subscriber(key);
         }
     }
@@ -551,6 +760,16 @@ impl ControlServer {
     }
 }
 
+fn random_owner() -> io::Result<OwnerRef> {
+    let mut bytes = [0u8; 32];
+    fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    let epoch = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(OwnerRef {
+        pid: std::process::id(),
+        epoch,
+    })
+}
+
 /// Read what the client has sent so far and decide whether its request is
 /// complete: it ends at the first newline, or at EOF when the client
 /// half-closes.
@@ -629,26 +848,20 @@ fn parse_request(data: &[u8]) -> Option<ParsedControlRequest> {
 
     if text.starts_with('{') {
         if let Ok(envelope) = serde_json::from_str::<ControlEnvelope>(text) {
-            return Some(ParsedControlRequest {
-                request: envelope.request,
-                output_format: envelope.output_format,
-            });
+            return Some(ParsedControlRequest::new(
+                envelope.request,
+                envelope.output_format,
+            ));
         }
 
         return serde_json::from_str::<ControlRequest>(text)
             .ok()
-            .map(|request| ParsedControlRequest {
-                request,
-                output_format: OutputFormat::Text,
-            });
+            .map(|request| ParsedControlRequest::new(request, OutputFormat::Text));
     }
 
     let request = parse_text_request(text)?;
 
-    Some(ParsedControlRequest {
-        request,
-        output_format: OutputFormat::Text,
-    })
+    Some(ParsedControlRequest::new(request, OutputFormat::Text))
 }
 
 /// Parse a text-mode command line, honouring an optional `token <hex>` prefix.
@@ -953,6 +1166,13 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                 }
                 out
             }
+            ControlData::Workspaces { names } => {
+                if names.is_empty() {
+                    "(no saved workspaces)\n".to_string()
+                } else {
+                    names.join("\n") + "\n"
+                }
+            }
             ControlData::Selection { text } => match text {
                 Some(text) => format!("{}\n", text),
                 None => "(no selection)\n".to_string(),
@@ -988,6 +1208,21 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                 format!("MATCHED at {}:{}\n", line + 1, col + 1)
             }
             ControlData::WaitTimeout => "TIMEOUT\n".to_string(),
+            ControlData::ShellCommandFinished {
+                sequence,
+                exit_code,
+                ..
+            } => match exit_code {
+                Some(code) => format!("SUBMISSION {sequence} FINISHED exit {code}\n"),
+                None => format!("SUBMISSION {sequence} FINISHED\n"),
+            },
+            ControlData::ProcessJob { .. }
+            | ControlData::Description { .. }
+            | ControlData::SubscribedV2 { .. }
+            | ControlData::ResyncRequired { .. }
+            | ControlData::ProgramStatus { .. } => serde_json::to_string(data)
+                .map(|text| text + "\n")
+                .unwrap_or_else(|error| format!("ERROR: cannot encode program status: {error}\n")),
             ControlData::Subscribed => "SUBSCRIBED\n".to_string(),
             ControlData::WaitEvent { event } => match event {
                 ControlEvent::CommandFinished {
@@ -1727,6 +1962,191 @@ mod tests {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         line
+    }
+
+    fn subscribe_v2(
+        server: &mut ControlServer,
+        cursor: Option<EventCursor>,
+        target: Option<u64>,
+    ) -> BufReader<UnixStream> {
+        let mut client = UnixStream::connect(server.socket_path()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut bytes = json_request(ControlRequest::SubscribeV2 {
+            cursor: cursor.clone(),
+            target,
+        });
+        bytes.push(b'\n');
+        client.write_all(&bytes).unwrap();
+        let pending = poll_until_pending(server);
+        server.start_subscription_v2(pending[0].0, target, cursor, Vec::new());
+        BufReader::new(client)
+    }
+
+    fn response_line(reader: &mut BufReader<UnixStream>) -> ControlResponse {
+        serde_json::from_str(&next_line(reader)).unwrap()
+    }
+
+    #[test]
+    fn test_v2_refusals_are_json_even_when_text_is_requested() {
+        let mut server = test_server("v2-text-refusal");
+        let mut stale = server.cursor();
+        stale.owner.epoch = "old".into();
+        let request = ControlRequest::WithToken {
+            token: "invalid".into(),
+            request: Box::new(ControlRequest::SubscribeV2 {
+                cursor: Some(stale.clone()),
+                target: None,
+            }),
+        };
+        let encoded = serde_json::to_vec(&ControlEnvelope {
+            output_format: OutputFormat::Text,
+            request,
+        })
+        .unwrap();
+        assert_eq!(
+            parse_request(&encoded).unwrap().output_format,
+            OutputFormat::Json
+        );
+        let mut client = UnixStream::connect(server.socket_path()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client.write_all(&encoded).unwrap();
+        client.write_all(b"\n").unwrap();
+        let pending = poll_until_pending(&mut server);
+        server.send_response(
+            pending[0].0,
+            &ControlResponse::Error {
+                code: 403,
+                message: "invalid token".into(),
+            },
+        );
+        assert!(matches!(
+            response_line(&mut BufReader::new(client)),
+            ControlResponse::Error { code: 403, .. }
+        ));
+        let mut stream = subscribe_v2(&mut server, Some(stale), None);
+        assert!(matches!(
+            response_line(&mut stream),
+            ControlResponse::Data(ControlData::ResyncRequired {
+                reason: ResyncReason::OwnerChanged,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_v2_snapshot_registration_and_disconnected_replay() {
+        let mut server = test_server("v2-replay");
+        let mut stream = subscribe_v2(&mut server, None, Some(7));
+        let ControlResponse::Data(ControlData::SubscribedV2 {
+            cursor,
+            snapshot,
+            replayed,
+        }) = response_line(&mut stream)
+        else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(snapshot, Some(Vec::new()));
+        assert_eq!(replayed, 0);
+        drop(stream);
+        server.publish(&ControlEvent::Bell { pane: 1 });
+        server.publish(&ControlEvent::ProgramStatusChanged {
+            pane: 7,
+            generation: 2,
+            reason: ultty_protocol::control::StatusChangeReason::Report,
+        });
+        let mut resumed = subscribe_v2(&mut server, Some(cursor), Some(7));
+        assert!(matches!(
+            response_line(&mut resumed),
+            ControlResponse::Data(ControlData::SubscribedV2 {
+                snapshot: None,
+                replayed: 1,
+                ..
+            })
+        ));
+        let record: ControlEventRecord = serde_json::from_str(&next_line(&mut resumed)).unwrap();
+        assert_eq!(record.cursor.sequence, 2);
+        assert!(matches!(
+            record.event,
+            ControlEvent::ProgramStatusChanged { pane: 7, .. }
+        ));
+        server.publish(&ControlEvent::Bell { pane: 7 });
+        let record: ControlEventRecord = serde_json::from_str(&next_line(&mut resumed)).unwrap();
+        assert_eq!(record.cursor.sequence, 3);
+    }
+
+    #[test]
+    fn test_v2_refuses_stale_owner_expired_and_future_cursors() {
+        let mut server = test_server("v2-resync");
+        let mut stale = server.cursor();
+        stale.owner.epoch = "old-owner".into();
+        let mut stream = subscribe_v2(&mut server, Some(stale), None);
+        assert!(matches!(
+            response_line(&mut stream),
+            ControlResponse::Data(ControlData::ResyncRequired {
+                reason: ResyncReason::OwnerChanged,
+                ..
+            })
+        ));
+        let mut future = server.cursor();
+        future.sequence = 1;
+        let mut stream = subscribe_v2(&mut server, Some(future), None);
+        assert!(matches!(
+            response_line(&mut stream),
+            ControlResponse::Data(ControlData::ResyncRequired {
+                reason: ResyncReason::FutureCursor,
+                ..
+            })
+        ));
+        let expired = server.cursor();
+        for _ in 0..=MAX_EVENT_HISTORY {
+            server.publish(&ControlEvent::Bell { pane: 1 });
+        }
+        assert_eq!(server.history.len(), MAX_EVENT_HISTORY);
+        assert!(server.history_bytes <= MAX_EVENT_HISTORY_BYTES);
+        let mut stream = subscribe_v2(&mut server, Some(expired), None);
+        assert!(matches!(
+            response_line(&mut stream),
+            ControlResponse::Data(ControlData::ResyncRequired {
+                reason: ResyncReason::HistoryExpired,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_legacy_subscribe_keeps_its_original_event_family() {
+        let mut server = test_server("legacy-status");
+        let mut stream = subscribe(&mut server, None);
+        response_line(&mut stream);
+        server.publish(&ControlEvent::ProgramStatusChanged {
+            pane: 7,
+            generation: 1,
+            reason: ultty_protocol::control::StatusChangeReason::Report,
+        });
+        server.publish(&ControlEvent::Bell { pane: 7 });
+        assert_eq!(next_line(&mut stream), "{\"event\":\"bell\",\"pane\":7}\n");
+    }
+
+    #[test]
+    fn test_describe_owner_epoch_changes_across_lifetimes() {
+        let server = test_server("owner-lifetime");
+        let before = server.owner().clone();
+        assert_eq!(before.epoch.len(), 64);
+        drop(server);
+        let server = test_server("owner-lifetime");
+        assert_eq!(before.pid, server.owner().pid);
+        assert_ne!(before.epoch, server.owner().epoch);
+        assert!(matches!(
+            server.description(),
+            ControlResponse::Data(ControlData::Description {
+                schema_version: 2,
+                ..
+            })
+        ));
     }
 
     #[test]

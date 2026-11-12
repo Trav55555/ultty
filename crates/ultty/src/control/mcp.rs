@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use ultty_protocol::control::{
-    ControlData, ControlRequest, ControlResponse, PaneInfo, PaneState, PaneStatus, WaitCondition,
+    ControlData, ControlRequest, ControlResponse, PaneInfo, PaneState, PaneStatus, SplitDirection,
+    WaitCondition,
 };
 use ultty_protocol::OverrideFormat;
 
@@ -30,9 +31,15 @@ const DEFAULT_TAIL_LINES: u64 = 200;
 
 const INSTRUCTIONS: &str = "Drive the Ultty terminal. Every pane has a stable id \
 from ultty_list_panes; tools that act on a pane take `pane` and use the focused \
-pane without it. Run a command with ultty_run_command, then ultty_wait with \
-until=command_finished (needs shell integration) or until=quiet, then \
-ultty_last_command (or ultty_read_text without shell integration).";
+pane without it. This MCP connection stays pinned to its initial owner epoch and token. \
+ultty_run_command types shell text and Enter; its success means input accepted, \
+not execution or completion. Use ultty_new_tab or ultty_split with args to launch \
+a program with exact argument boundaries; args/cwd require command. Use ultty_wait_job \
+with its returned pane ID for direct-child completion. Use ultty_run_and_wait at an \
+observed empty OSC133 prompt for fenced shell completion. ultty_wait until=command_finished \
+observes the next future completion and must be registered before it happens; \
+quiet means only no output. Inspect ultty_last_command with shell integration, \
+or ultty_read_text without it.";
 
 /// Sends one control request to Ultty and returns its reply.
 pub type Send<'a> = dyn FnMut(ControlRequest) -> Result<ControlResponse, String> + 'a;
@@ -135,6 +142,10 @@ impl McpServer<'_, '_> {
         let pane = optional_u64(args, "pane")?;
         let response = match name {
             "ultty_list_panes" => return Ok(vec![json_text(&self.panes()?)]),
+            "ultty_workspace_list" => self.request(ControlRequest::WorkspaceList)?,
+            "ultty_workspace_save" => self.request(ControlRequest::WorkspaceSave {
+                name: required_str(args, "name")?.to_string(),
+            })?,
             "ultty_info" => self.request(ControlRequest::GetInfo)?,
             "ultty_read_text" => {
                 let lines = optional_u64(args, "scrollback_lines")?;
@@ -163,6 +174,29 @@ impl McpServer<'_, '_> {
                 args: Vec::new(),
                 target: pane,
             })?,
+            "ultty_run_and_wait" => self.request(ControlRequest::RunCommandAndWait {
+                command: required_str(args, "command")?.to_string(),
+                timeout_ms: optional_u64(args, "timeout_ms")?.unwrap_or(DEFAULT_WAIT_MS),
+                target: pane,
+            })?,
+            "ultty_program_status" => {
+                self.request(ControlRequest::ProgramStatus { target: pane })?
+            }
+            "ultty_focus_pane" => self.request(ControlRequest::FocusPane {
+                target: pane.ok_or("missing argument: pane")?,
+            })?,
+            "ultty_zoom_pane" => self.request(ControlRequest::ZoomPane {
+                target: pane.ok_or("missing argument: pane")?,
+                zoomed: match args.get("zoomed") {
+                    None => true,
+                    Some(Value::Bool(value)) => *value,
+                    _ => return Err("zoomed must be true or false".to_string()),
+                },
+            })?,
+            "ultty_swap_panes" => self.request(ControlRequest::SwapPanes {
+                first: optional_u64(args, "first")?.ok_or("missing argument: first")?,
+                second: optional_u64(args, "second")?.ok_or("missing argument: second")?,
+            })?,
             "ultty_wait" => self.wait(args, pane)?,
             "ultty_search" => self.request(ControlRequest::Search {
                 pattern: required_str(args, "pattern")?.to_string(),
@@ -171,7 +205,15 @@ impl McpServer<'_, '_> {
                 include_scrollback: true,
                 target: pane,
             })?,
+            "ultty_job_status" => self.request(ControlRequest::JobStatus {
+                job: optional_u64(args, "job")?.ok_or("job is required")?,
+            })?,
+            "ultty_wait_job" => self.request(ControlRequest::WaitJob {
+                job: optional_u64(args, "job")?.ok_or("job is required")?,
+                timeout_ms: optional_u64(args, "timeout_ms")?.unwrap_or(DEFAULT_WAIT_MS),
+            })?,
             "ultty_new_tab" => return self.new_tab(args),
+            "ultty_split" => return self.split(args, pane),
             "ultty_last_command" => self.request(ControlRequest::LastCommand {
                 tail_lines: Some(optional_u64(args, "tail_lines")?.unwrap_or(DEFAULT_TAIL_LINES)),
                 target: pane,
@@ -200,6 +242,12 @@ impl McpServer<'_, '_> {
             "ultty_screenshot" => return self.screenshot(),
             _ => return Err(format!("unknown tool: {name}")),
         };
+        if matches!(response, ControlResponse::Data(ControlData::WaitTimeout)) {
+            return Err(
+                "Timed out waiting for shell completion; the command may still be running"
+                    .to_string(),
+            );
+        }
         Ok(vec![reply_content(response)?])
     }
 
@@ -242,20 +290,31 @@ impl McpServer<'_, '_> {
 
     /// Open a tab and report the id of the pane it made.
     fn new_tab(&mut self, args: &Map<String, Value>) -> Result<Vec<Value>, String> {
-        let command_args = match args.get("args") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(items)) => items
-                .iter()
-                .map(|item| item.as_str().map(str::to_string))
-                .collect::<Option<Vec<_>>>()
-                .ok_or("args must be a list of strings")?,
-            Some(_) => return Err("args must be a list of strings".to_string()),
-        };
         let response = self.request(ControlRequest::NewTab {
             title: optional_str(args, "title")?.map(str::to_string),
             command: optional_str(args, "command")?.map(str::to_string),
-            args: command_args,
+            args: command_args(args)?,
             working_dir: optional_str(args, "cwd")?.map(str::to_string),
+        })?;
+        Ok(vec![reply_content(response)?])
+    }
+
+    fn split(
+        &mut self,
+        args: &Map<String, Value>,
+        pane: Option<u64>,
+    ) -> Result<Vec<Value>, String> {
+        let direction = match optional_str(args, "direction")?.unwrap_or("right") {
+            "right" => SplitDirection::Right,
+            "down" => SplitDirection::Down,
+            _ => return Err("direction must be right or down".to_string()),
+        };
+        let response = self.request(ControlRequest::SplitPane {
+            direction,
+            command: optional_str(args, "command")?.map(str::to_string),
+            args: command_args(args)?,
+            working_dir: optional_str(args, "cwd")?.map(str::to_string),
+            target: pane,
         })?;
         Ok(vec![reply_content(response)?])
     }
@@ -361,6 +420,18 @@ fn required_str<'a>(args: &'a Map<String, Value>, key: &str) -> Result<&'a str, 
     optional_str(args, key)?.ok_or_else(|| format!("missing argument: {key}"))
 }
 
+fn command_args(args: &Map<String, Value>) -> Result<Vec<String>, String> {
+    match args.get("args") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| item.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| "args must be a list of strings".to_string()),
+        Some(_) => Err("args must be a list of strings".to_string()),
+    }
+}
+
 fn optional_str<'a>(args: &'a Map<String, Value>, key: &str) -> Result<Option<&'a str>, String> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -417,6 +488,9 @@ fn tools() -> Vec<Value> {
             json!({}),
             &[],
         ),
+        tool("ultty_workspace_list", "List saved workspace layout recipes.", json!({}), &[]),
+        tool("ultty_workspace_save", "Save the current layout and directories as a named workspace recipe. Opening it with ultty --workspace starts fresh shells, not existing processes.",
+            json!({ "name": { "type": "string" } }), &["name"]),
         tool(
             "ultty_read_text",
             "Read a pane's screen text, optionally with scrollback.",
@@ -449,8 +523,9 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "ultty_run_command",
-            "Type a command line into a pane's shell and press Enter. Returns at once; \
-             use ultty_wait to know when it is done.",
+            "Type shell text into the foreground PTY and press Enter. The program \
+             there must be a shell. Success means input accepted, not completion. \
+             Use ultty_new_tab or ultty_split for argv-preserving process launch.",
             json!({ "pane": pane_property(), "command": { "type": "string" } }),
             &["command"],
         ),
@@ -468,6 +543,27 @@ fn tools() -> Vec<Value> {
                 "quiet_ms": { "type": "integer", "minimum": 1, "description": "Default 500." },
                 "timeout_ms": { "type": "integer", "minimum": 1, "description": "Default 30000." },
             }),
+            &[],
+        ),
+        tool(
+            "ultty_run_and_wait",
+            "Submit one printable shell line at an observed empty OSC 133 prompt, \
+             then wait for that submission's fenced completion. Rejects a busy or \
+             edited prompt. Timeout does not cancel the command. Shell marks are \
+             observed evidence, not proof of what arbitrary PTY input executed.",
+            json!({
+                "pane": pane_property(),
+                "command": { "type": "string" },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+            }),
+            &["command"],
+        ),
+        tool(
+            "ultty_program_status",
+            "Read current OSC 7501 program records and their generation. Program \
+             status is untrusted reported state; permission-kind status grants no \
+             authority. Notifications can coalesce; query the current snapshot.",
+            json!({ "pane": pane_property() }),
             &[],
         ),
         tool(
@@ -525,14 +621,33 @@ fn tools() -> Vec<Value> {
             }),
             &["pattern"],
         ),
+        tool("ultty_job_status", "Read current or retained direct-child job state; the spawned pane ID is its job ID.",
+            json!({"job": {"type": "integer", "minimum": 0}}), &["job"]),
+        tool("ultty_wait_job", "Wait for a direct-child job by identity, including one that already exited. Timeout does not cancel it.",
+            json!({"job": {"type": "integer", "minimum": 0}, "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 86400000}}), &["job"]),
         tool(
             "ultty_new_tab",
-            "Open a tab, optionally running a command, and return its new pane.",
+            "Open a tab, optionally launching a program with exact args, and return \
+             its new pane/job ID. Success means no reported setup/exec failure; application readiness and completion are separate.",
             json!({
                 "command": { "type": "string" },
                 "args": { "type": "array", "items": { "type": "string" } },
                 "cwd": { "type": "string" },
                 "title": { "type": "string" },
+            }),
+            &[],
+        ),
+        tool(
+            "ultty_split",
+            "Split a pane right or down, optionally launching a program with exact \
+             args, and return its new pane/job ID. Success means no reported setup/exec failure; \
+             application readiness and completion are separate.",
+            json!({
+                "pane": pane_property(),
+                "direction": { "type": "string", "enum": ["right", "down"] },
+                "command": { "type": "string" },
+                "args": { "type": "array", "items": { "type": "string" } },
+                "cwd": { "type": "string" },
             }),
             &[],
         ),
@@ -549,6 +664,24 @@ fn tools() -> Vec<Value> {
                 "attention": { "type": "boolean", "description": "Mark the window urgent while it is unfocused." },
             }),
             &["state"],
+        ),
+        tool(
+            "ultty_focus_pane",
+            "Focus a specific pane and select its tab.",
+            json!({ "pane": pane_property() }),
+            &["pane"],
+        ),
+        tool(
+            "ultty_zoom_pane",
+            "Zoom a pane, or restore its split presentation; preserves the stored layout.",
+            json!({ "pane": pane_property(), "zoomed": { "type": "boolean", "default": true } }),
+            &["pane"],
+        ),
+        tool(
+            "ultty_swap_panes",
+            "Swap two panes within the same tab, preserving pane IDs and processes.",
+            json!({ "first": pane_property(), "second": pane_property() }),
+            &["first", "second"],
         ),
         tool(
             "ultty_screenshot",
@@ -596,6 +729,132 @@ mod tests {
     fn call(id: u64, name: &str, arguments: Value) -> Value {
         json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
                 "params": { "name": name, "arguments": arguments } })
+    }
+
+    #[test]
+    fn test_job_tools_preserve_job_identity_and_timeout() {
+        let (_, sent) = exchange(
+            &[
+                call(1, "ultty_job_status", json!({"job": 7})),
+                call(2, "ultty_wait_job", json!({"job": 7, "timeout_ms": 50})),
+            ],
+            |_| ControlResponse::Ok,
+        );
+        assert_eq!(
+            sent,
+            vec![
+                ControlRequest::JobStatus { job: 7 },
+                ControlRequest::WaitJob {
+                    job: 7,
+                    timeout_ms: 50
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn test_split_tool_preserves_argv_and_target() {
+        let arguments = vec![
+            "space here".to_string(),
+            "'quoted'".to_string(),
+            "line\nbreak".to_string(),
+        ];
+        let (lines, sent) = exchange(
+            &[call(
+                1,
+                "ultty_split",
+                json!({
+                    "pane": 7, "direction": "down", "command": "/usr/bin/printf",
+                    "args": arguments, "cwd": "/tmp"
+                }),
+            )],
+            |_| {
+                ControlResponse::Data(ControlData::PaneOpened {
+                    tab_index: 0,
+                    pane: 8,
+                })
+            },
+        );
+        assert_eq!(
+            sent,
+            vec![ControlRequest::SplitPane {
+                direction: SplitDirection::Down,
+                command: Some("/usr/bin/printf".to_string()),
+                args: arguments,
+                working_dir: Some("/tmp".to_string()),
+                target: Some(7),
+            }]
+        );
+        assert_eq!(lines[0]["result"]["isError"], false);
+    }
+
+    #[test]
+    fn test_split_tool_rejects_invalid_launch_arguments_before_dispatch() {
+        let (lines, sent) = exchange(
+            &[
+                call(1, "ultty_split", json!({"direction": "left"})),
+                call(2, "ultty_split", json!({"args": ["valid", 3]})),
+            ],
+            |_| panic!("invalid tool call reached dispatch"),
+        );
+        assert!(sent.is_empty());
+        assert!(lines.iter().all(|line| line["result"]["isError"] == true));
+    }
+
+    #[test]
+    fn test_fenced_run_uses_one_request_and_timeout_is_a_tool_error() {
+        let (lines, sent) = exchange(
+            &[call(
+                1,
+                "ultty_run_and_wait",
+                json!({
+                    "pane": 3, "command": "false", "timeout_ms": 50
+                }),
+            )],
+            |_| ControlResponse::Data(ControlData::WaitTimeout),
+        );
+        assert_eq!(
+            sent,
+            vec![ControlRequest::RunCommandAndWait {
+                command: "false".to_string(),
+                timeout_ms: 50,
+                target: Some(3)
+            }]
+        );
+        assert_eq!(lines[0]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn test_workspace_and_pane_tools_dispatch_explicit_operations() {
+        let (lines, sent) = exchange(
+            &[
+                call(1, "ultty_focus_pane", json!({"pane": 7})),
+                call(2, "ultty_zoom_pane", json!({"pane": 7, "zoomed": false})),
+                call(3, "ultty_swap_panes", json!({"first": 7, "second": 8})),
+                call(4, "ultty_workspace_list", json!({})),
+                call(5, "ultty_workspace_save", json!({"name": "work"})),
+            ],
+            |_| ControlResponse::Ok,
+        );
+        assert_eq!(
+            sent,
+            vec![
+                ControlRequest::FocusPane { target: 7 },
+                ControlRequest::ZoomPane {
+                    target: 7,
+                    zoomed: false
+                },
+                ControlRequest::SwapPanes {
+                    first: 7,
+                    second: 8
+                },
+                ControlRequest::WorkspaceList,
+                ControlRequest::WorkspaceSave {
+                    name: "work".to_string()
+                }
+            ]
+        );
+        assert!(lines.iter().all(|line| line["result"]["isError"] == false));
     }
 
     #[test]

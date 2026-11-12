@@ -232,6 +232,8 @@ const MAX_COMMAND_LINE_ROWS: usize = 256;
 /// - Inline images
 #[derive(Debug)]
 pub struct Terminal {
+    /// Program records belong to the PTY, not either screen.
+    program_status: crate::program_status::ProgramStatusStore,
     /// Main screen buffer (with scrollback)
     main: Buffer,
     /// Alternate screen buffer (no scrollback)
@@ -302,6 +304,26 @@ pub struct Terminal {
 }
 
 impl Terminal {
+    /// The authoritative per-terminal program records.
+    pub fn program_status(&self) -> &crate::program_status::ProgramStatusStore {
+        &self.program_status
+    }
+
+    /// A bounded clone for a consumer whose notifications may have been lost.
+    pub fn program_status_snapshot(&self) -> crate::program_status::ProgramStatusSnapshot {
+        self.program_status.snapshot()
+    }
+
+    /// Apply a report validated by the OSC parser.
+    pub fn apply_program_status(&mut self, report: crate::program_status::ProgramStatusReport) {
+        self.program_status.apply(report);
+    }
+
+    /// Apply process-exit cleanup after final output has been parsed.
+    pub fn process_exited(&mut self) {
+        self.program_status.on_process_exit();
+    }
+
     /// Check every structural invariant of the terminal state.
     ///
     /// Returns a description of the first violation. Nothing in normal
@@ -335,6 +357,7 @@ impl Terminal {
     /// Create a new terminal with the given dimensions.
     pub fn new(dims: Dimensions) -> Self {
         Self {
+            program_status: crate::program_status::ProgramStatusStore::default(),
             main: Buffer::new(dims),
             alternate: Buffer::with_scrollback(dims, 0), // No scrollback for alternate
             using_alternate: false,
@@ -891,6 +914,7 @@ impl Terminal {
 
     /// Mark prompt start (OSC 133;A).
     pub fn mark_prompt_start(&mut self) {
+        self.program_status.on_prompt();
         let row = self.grid().cursor().position.row;
         self.shell_integration.prompt_line = Some(row);
         self.shell_integration.command_executing = false;
@@ -1283,6 +1307,7 @@ impl Terminal {
     /// grid: the alternate screen, scrollback, images, hyperlinks, the
     /// selection and any pushed keyboard modes.
     pub fn reset_auxiliary_state(&mut self) {
+        self.program_status.on_ris();
         self.apply_pending_alternate_resize();
         self.alternate.grid_mut().clear();
         self.alternate.grid_mut().cursor_mut().position = CursorPosition::origin();

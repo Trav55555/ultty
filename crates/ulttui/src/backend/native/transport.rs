@@ -38,6 +38,22 @@ pub(super) enum FrameError {
 }
 
 impl NativeBackend {
+    /// Reports use the PTY even when native frames use a Unix socket.
+    /// The app loop is the sole caller, so in-band bytes cannot splice frames.
+    pub(in crate::backend) fn write_status(&mut self, wire: &[u8]) -> crate::Result<()> {
+        if let Some(tty) = self.in_band.as_mut() {
+            tty.write_raw(wire)?;
+        } else {
+            if self.stream.is_none() {
+                return Err(crate::Error::NotConnected);
+            }
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(wire)?;
+            stdout.flush()?;
+        }
+        Ok(())
+    }
+
     pub(super) fn send_message(&mut self, msg: &AppMessage) -> crate::Result<()> {
         let bytes = msg.encode_to_bytes();
         if let Some(tty) = self.in_band.as_mut() {
@@ -148,6 +164,60 @@ mod tests {
 
     use super::{FrameError, NativeBackend, ReadOutcome};
     use crate::event::Event;
+
+    #[test]
+    fn test_status_and_large_native_frame_serialize_on_real_pty() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use ultty_client::in_band::InBandTty;
+        use ultty_client::program_status::{Report, State};
+        use ultty_protocol::{Content, TextContent};
+
+        let (mut master_fd, mut slave_fd) = (0, 0);
+        // SAFETY: openpty fills two owned fds; optional arguments may be null.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master_fd,
+                    &mut slave_fd,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        // SAFETY: the descriptors were just created and are owned here.
+        let (mut master, slave) = unsafe {
+            (
+                std::fs::File::from(OwnedFd::from_raw_fd(master_fd)),
+                OwnedFd::from_raw_fd(slave_fd),
+            )
+        };
+        let tty = InBandTty::open_on(slave.as_raw_fd(), slave.as_raw_fd()).unwrap();
+        let frame = AppMessage::SetContent {
+            id: RegionId::new(1),
+            content: Content::Text(TextContent::new("x".repeat(70_000))),
+        };
+        let status = Report::new(State::Blocked).encode().unwrap();
+        let encoded_frame = ultty_protocol::in_band::encode_to_vec(&frame.encode_to_bytes());
+        let mut expected = encoded_frame.clone();
+        expected.extend_from_slice(&status);
+        expected.extend_from_slice(&encoded_frame);
+        let length = expected.len();
+        let reader = std::thread::spawn(move || {
+            let mut bytes = vec![0; length];
+            master.read_exact(&mut bytes).unwrap();
+            bytes
+        });
+        let mut backend = NativeBackend::new_in_band();
+        backend.in_band = Some(Box::new(tty));
+        backend.send_message(&frame).unwrap();
+        backend.write_status(&status).unwrap();
+        backend.send_message(&frame).unwrap();
+        assert_eq!(reader.join().unwrap(), expected);
+        drop(backend);
+        drop(slave);
+    }
 
     #[test]
     fn try_decode_message_waits_for_complete_frame() {

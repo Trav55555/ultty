@@ -21,6 +21,10 @@ pub(super) enum Condition {
     Text(WaitMatcher),
     /// The pane's next OSC 133;D.
     CommandFinished,
+    /// Completion of a particular atomically submitted shell line.
+    ShellCommand { sequence: u64 },
+    /// A direct child job reaching an owner-observed terminal state.
+    ProcessJob,
     /// The pane's next bell.
     Bell,
     /// No output from the pane for `period`; `until` moves on each output.
@@ -60,6 +64,17 @@ impl PendingControlWait {
         self.pane
     }
 
+    pub(super) fn is_process_job(&self) -> bool {
+        matches!(self.condition, Condition::ProcessJob)
+    }
+
+    pub(super) fn command_sequence(&self) -> Option<u64> {
+        match self.condition {
+            Condition::ShellCommand { sequence } => Some(sequence),
+            _ => None,
+        }
+    }
+
     /// The text matcher, for a wait on text.
     pub(super) fn matcher(&self) -> Option<&WaitMatcher> {
         match &self.condition {
@@ -90,6 +105,10 @@ impl PendingControlWait {
     /// event being waited for; output restarts a quiet period.
     pub(super) fn observe(&mut self, event: &TerminalEvent, now: Instant) -> bool {
         match (&mut self.condition, event) {
+            (
+                Condition::ShellCommand { sequence: expected },
+                TerminalEvent::ShellCommandFinished { sequence, .. },
+            ) => expected == sequence,
             (Condition::CommandFinished, TerminalEvent::CommandFinished { .. })
             | (Condition::Bell, TerminalEvent::Bell) => true,
             (Condition::Quiet { period, until }, TerminalEvent::Redraw) => {
@@ -210,6 +229,36 @@ mod tests {
         let mut bell = wait(Condition::Bell, now);
         assert!(!bell.observe(&TerminalEvent::Redraw, now));
         assert!(bell.observe(&TerminalEvent::Bell, now));
+    }
+
+    #[test]
+    fn test_fenced_wait_rejects_legacy_and_earlier_completion() {
+        let now = Instant::now();
+        let mut fenced = wait(Condition::ShellCommand { sequence: 2 }, now);
+        assert!(!fenced.observe(&TerminalEvent::CommandFinished { exit_code: Some(0) }, now));
+        assert!(!fenced.observe(
+            &TerminalEvent::ShellCommandFinished {
+                sequence: 1,
+                exit_code: Some(0)
+            },
+            now
+        ));
+        assert!(fenced.observe(
+            &TerminalEvent::ShellCommandFinished {
+                sequence: 2,
+                exit_code: Some(7)
+            },
+            now
+        ));
+        let mut legacy = wait(Condition::CommandFinished, now);
+        assert!(!legacy.observe(
+            &TerminalEvent::ShellCommandFinished {
+                sequence: 2,
+                exit_code: Some(7)
+            },
+            now
+        ));
+        assert!(legacy.observe(&TerminalEvent::CommandFinished { exit_code: Some(7) }, now));
     }
 
     #[test]

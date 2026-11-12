@@ -162,7 +162,6 @@ fn accessibility_snapshot(
         .map(|server| server.active_tab_sessions().collect())
         .unwrap_or_default();
     sessions.sort_by_key(|session| session.session_id());
-    let surfaces_shown = rects.len() == 1;
     let cell = (f64::from(cell_width), f64::from(cell_height));
     let panes = rects
         .into_iter()
@@ -191,7 +190,7 @@ fn accessibility_snapshot(
             let (title, grid) = {
                 let terminal = managed.event_loop.terminal();
                 let grid = (is_focused && !full_scene).then(|| {
-                    if surfaces_shown && !scrolled_back(&terminal) {
+                    if !scrolled_back(&terminal) {
                         on_screen = ultty::protocol::pairing::surfaces_on_screen(
                             &terminal,
                             sessions.iter().copied(),

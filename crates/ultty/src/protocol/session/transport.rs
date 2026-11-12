@@ -9,6 +9,8 @@ use ultty_protocol::{AppMessage, Decode, Encode, TerminalMessage, FRAME_MAGIC};
 use super::errors::NativeProtocolError;
 use super::{Link, NativeSession, MAX_READ_BUF};
 
+const MAX_WRITE_BUF: usize = 16 * 1024 * 1024;
+
 impl NativeSession {
     /// Read data from socket into the session read buffer.
     pub(super) fn read_from_socket(&mut self) -> io::Result<usize> {
@@ -115,7 +117,24 @@ impl NativeSession {
 
     /// Queue a terminal message for the client.
     pub(super) fn send_message(&mut self, msg: &TerminalMessage) -> io::Result<()> {
-        msg.encode(&mut self.write_buf);
+        let mut encoded = bytes::BytesMut::new();
+        msg.encode(&mut encoded);
+        let outgoing = match &self.link {
+            Link::InBand { outgoing, .. } => outgoing.len(),
+            Link::Socket(_) => 0,
+        };
+        if outgoing
+            .saturating_add(self.write_buf.len())
+            .saturating_add(encoded.len())
+            > MAX_WRITE_BUF
+        {
+            self.output_overflow = true;
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "native output queue is full",
+            ));
+        }
+        self.write_buf.extend_from_slice(&encoded);
         debug!("Session {} queued message: {:?}", self.session_id, msg);
         Ok(())
     }
@@ -153,5 +172,50 @@ impl NativeSession {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal_manager::TabId;
+
+    #[test]
+    fn stalled_socket_eventually_refuses_output_and_closes() {
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut session = NativeSession::new(stream, 1, TabId::new(0)).unwrap();
+        let message = TerminalMessage::ClipboardContent {
+            text: Some("x".repeat(64 * 1024)),
+        };
+        let mut refused = false;
+        for _ in 0..1024 {
+            match session.send_message(&message) {
+                Ok(()) => session.flush_writes().unwrap(),
+                Err(error) => {
+                    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+                    refused = true;
+                    break;
+                }
+            }
+        }
+        assert!(refused, "a non-reading socket must reach the queue limit");
+        assert!(!session.check_keepalive().unwrap());
+    }
+
+    #[test]
+    fn full_native_output_queue_rejects_without_partial_frame() {
+        let mut session = NativeSession::new_in_band(1, TabId::new(0), None, Vec::new());
+        let Link::InBand { outgoing, .. } = &mut session.link else {
+            unreachable!()
+        };
+        outgoing.resize(MAX_WRITE_BUF - 1, 0);
+        let error = session.send_message(&TerminalMessage::Ping).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(session.write_buf.is_empty());
+        let Link::InBand { outgoing, .. } = &session.link else {
+            unreachable!()
+        };
+        assert_eq!(outgoing.len(), MAX_WRITE_BUF - 1);
+        assert!(!session.check_keepalive().unwrap());
     }
 }
