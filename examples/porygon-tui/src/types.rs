@@ -205,7 +205,7 @@ pub struct ApprovalRequest {
     pub risk_score: f64,
     pub reasoning: String,
     pub blast_radius: String,
-    pub reversible: bool,
+    pub reversible: Option<bool>,
 }
 
 #[derive(Debug, Clone)]

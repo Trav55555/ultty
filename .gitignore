@@ -1,5 +1,7 @@
 # Rust
 **/target/
+/target-native/
+/.native-build-tmp/
 **/*.rs.bk
 
 # IDE
