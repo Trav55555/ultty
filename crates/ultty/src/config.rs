@@ -479,11 +479,30 @@ impl PaletteConfig {
 }
 
 /// Font configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct FontConfig {
     /// Font family name
     pub family: String,
+    /// Family for bold text. Empty (the default) uses `family`'s own bold
+    /// face, or a synthesized bold when it has none.
+    pub bold_family: String,
+    /// Family for italic text. Empty uses `family`'s italic face, or a
+    /// skewed regular face when it has none.
+    pub italic_family: String,
+    /// Family for bold italic text. Empty uses `family`, as for
+    /// `bold_family` and `italic_family`; it does not fall back to either.
+    pub bold_italic_family: String,
+    /// OpenType features applied when shaping, in order: `"calt"` or
+    /// `"+calt"` turns one on, `"-liga"` turns it off, `"ss01=2"` sets a
+    /// value. A later entry for the same feature wins. Entries that do not
+    /// parse are ignored with a warning (see [`parse_font_features`]).
+    pub features: Vec<String>,
+    /// Draw ranges of codepoints from a specific family, as a list of
+    /// `{ range = "U+E0A0-U+E0A3", family = "Symbols Nerd Font Mono" }`
+    /// tables. A later entry wins where ranges overlap. See
+    /// [`parse_codepoint_map`].
+    pub codepoint_map: Vec<CodepointMapEntry>,
     /// Font size in points
     pub size: f32,
     /// Line height as a multiple of the font size: the cell height is
@@ -491,6 +510,11 @@ pub struct FontConfig {
     /// [`MIN_LINE_HEIGHT`]..=[`MAX_LINE_HEIGHT`].
     pub line_height: f32,
     /// Draw font ligatures (`=>`, `!=`, `===` in fonts such as Fira Code).
+    ///
+    /// This is a switch over joining cells, not over `features`: when off,
+    /// no cells are shaped together, so `calt` and `liga` cannot join
+    /// neighbours whatever `features` says; the other features still apply
+    /// to each cell.
     ///
     /// When on, runs of printable ASCII cells that contain punctuation and
     /// share a face and foreground color are shaped together, so the font
@@ -512,6 +536,11 @@ impl Default for FontConfig {
             // A patched monospace default keeps terminal UI icons readable in
             // apps such as LazyVim. Users can override this in config.toml.
             family: DEFAULT_FONT_FAMILY.to_string(),
+            bold_family: String::new(),
+            italic_family: String::new(),
+            bold_italic_family: String::new(),
+            features: Vec::new(),
+            codepoint_map: Vec::new(),
             size: 14.0,
             // 1.0 = no extra spacing between lines, required for block characters
             // to touch (e.g., OpenCode logo). Users can increase if they prefer
@@ -550,6 +579,109 @@ impl FontConfig {
             self.size = clamped;
         }
     }
+}
+
+/// One entry of `font.codepoint_map`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct CodepointMapEntry {
+    /// `U+E0A0` or `U+E0A0-U+E0A3` (inclusive).
+    pub range: String,
+    /// The family to draw the range from.
+    pub family: String,
+}
+
+/// Parse `U+XXXX` or `U+XXXX-U+YYYY` (hex, case-insensitive) into an
+/// inclusive range of characters. `None` for anything else, including a
+/// reversed range or a value that is not a Unicode scalar value.
+pub fn parse_codepoint_range(range: &str) -> Option<std::ops::RangeInclusive<char>> {
+    fn one(text: &str) -> Option<char> {
+        let hex = text
+            .trim()
+            .strip_prefix("U+")
+            .or_else(|| text.trim().strip_prefix("u+"))?;
+        if hex.is_empty() || hex.len() > 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        char::from_u32(u32::from_str_radix(hex, 16).ok()?)
+    }
+    let (start, end) = match range.split_once('-') {
+        Some((start, end)) => (one(start)?, one(end)?),
+        None => {
+            let ch = one(range)?;
+            (ch, ch)
+        }
+    };
+    (start <= end).then_some(start..=end)
+}
+
+/// The entries of `font.codepoint_map` as ranges with their families, in
+/// order, warning about entries with a bad range or no family and skipping
+/// them.
+pub fn parse_codepoint_map(
+    entries: &[CodepointMapEntry],
+) -> Vec<(std::ops::RangeInclusive<char>, String)> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let range = parse_codepoint_range(&entry.range);
+            if range.is_none() || entry.family.is_empty() {
+                warn!(
+                    "font.codepoint_map entry {:?} -> {:?} needs a range such as \"U+E0A0-U+E0A3\" and a family; ignoring it",
+                    entry.range, entry.family
+                );
+                return None;
+            }
+            range.map(|range| (range, entry.family.clone()))
+        })
+        .collect()
+}
+
+/// One OpenType feature setting from `font.features`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FontFeature {
+    /// Four-byte feature tag, such as `*b"liga"`.
+    pub tag: [u8; 4],
+    /// 0 turns the feature off, 1 on; larger values pick an alternate in
+    /// features that have several (`ss01=2`).
+    pub value: u32,
+}
+
+impl FontFeature {
+    /// Parse `calt`, `+calt`, `-liga` or `ss01=2`. Returns `None` for
+    /// anything else: a tag must be four printable ASCII characters, and a
+    /// value may follow only an unsigned or `+` tag.
+    pub fn parse(entry: &str) -> Option<Self> {
+        let entry = entry.trim();
+        let (off, rest) = match entry.as_bytes().first()? {
+            b'-' => (true, &entry[1..]),
+            b'+' => (false, &entry[1..]),
+            _ => (false, entry),
+        };
+        let (tag, value) = match rest.split_once('=') {
+            Some((tag, value)) if !off => (tag, value.trim().parse::<u32>().ok()?),
+            Some(_) => return None,
+            None => (rest, u32::from(!off)),
+        };
+        let tag: [u8; 4] = tag.as_bytes().try_into().ok()?;
+        tag.iter()
+            .all(|b| b.is_ascii_graphic() || *b == b' ')
+            .then_some(Self { tag, value })
+    }
+}
+
+/// The settings in `font.features`, in order, warning about entries that do
+/// not parse and skipping them.
+pub fn parse_font_features(entries: &[String]) -> Vec<FontFeature> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let feature = FontFeature::parse(entry);
+            if feature.is_none() {
+                warn!("font.features entry {entry:?} is not a feature (expected e.g. \"calt\", \"-liga\", \"ss01=2\"); ignoring it");
+            }
+            feature
+        })
+        .collect()
 }
 
 /// Smallest `font.line_height` accepted.
@@ -1182,6 +1314,99 @@ mod tests {
         assert_eq!(Config::default().terminal.term, "xterm-256color");
         let config: Config = toml::from_str("[behavior]\nopacity = 1.0\n").unwrap();
         assert_eq!(config.terminal.term, "xterm-256color");
+    }
+
+    #[test]
+    fn font_style_families_and_features_are_read_from_the_font_section() {
+        let config: Config = toml::from_str(
+            "[font]\nfamily = \"Fira Code\"\nbold_family = \"Fira Code SemiBold\"\n\
+             italic_family = \"Victor Mono\"\nbold_italic_family = \"Victor Mono Bold\"\n\
+             features = [\"calt\", \"-liga\", \"ss01\", \"zero\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.font.bold_family, "Fira Code SemiBold");
+        assert_eq!(config.font.italic_family, "Victor Mono");
+        assert_eq!(config.font.bold_italic_family, "Victor Mono Bold");
+        assert_eq!(config.font.features, ["calt", "-liga", "ss01", "zero"]);
+
+        let unset: Config = toml::from_str("[font]\nfamily = \"Fira Code\"\n").unwrap();
+        assert!(unset.font.bold_family.is_empty());
+        assert!(unset.font.features.is_empty());
+    }
+
+    #[test]
+    fn font_features_parse_signs_and_values() {
+        let feature = |tag: &[u8; 4], value| Some(FontFeature { tag: *tag, value });
+        assert_eq!(FontFeature::parse("calt"), feature(b"calt", 1));
+        assert_eq!(FontFeature::parse("+calt"), feature(b"calt", 1));
+        assert_eq!(FontFeature::parse("-liga"), feature(b"liga", 0));
+        assert_eq!(FontFeature::parse(" ss01=2 "), feature(b"ss01", 2));
+        assert_eq!(FontFeature::parse("zero=0"), feature(b"zero", 0));
+        for bad in [
+            "", "-", "lig", "ligas", "-liga=1", "ss01=", "ss01=x", "ss01=-1", "a\tbc",
+        ] {
+            assert_eq!(FontFeature::parse(bad), None, "for {bad:?}");
+        }
+    }
+
+    #[test]
+    fn codepoint_ranges_parse() {
+        assert_eq!(
+            parse_codepoint_range("U+E0A0"),
+            Some('\u{E0A0}'..='\u{E0A0}')
+        );
+        assert_eq!(
+            parse_codepoint_range("u+e0a0-U+E0A3"),
+            Some('\u{E0A0}'..='\u{E0A3}')
+        );
+        assert_eq!(
+            parse_codepoint_range("U+1F600"),
+            Some('\u{1F600}'..='\u{1F600}')
+        );
+        for bad in [
+            "",
+            "E0A0",
+            "U+",
+            "U+XYZ",
+            "U+E0A3-U+E0A0",
+            "U+D800",
+            "U+110000",
+            "U+E0A0-",
+            "U+E0A0 U+E0A3",
+        ] {
+            assert_eq!(parse_codepoint_range(bad), None, "for {bad:?}");
+        }
+    }
+
+    #[test]
+    fn codepoint_map_is_read_and_bad_entries_are_skipped() {
+        let config: Config = toml::from_str(
+            "[[font.codepoint_map]]\nrange = \"U+E000-U+F8FF\"\nfamily = \"Symbols\"\n\
+             [[font.codepoint_map]]\nrange = \"nope\"\nfamily = \"X\"\n\
+             [[font.codepoint_map]]\nrange = \"U+41\"\nfamily = \"\"\n\
+             [[font.codepoint_map]]\nrange = \"U+41\"\nfamily = \"Serif\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.font.codepoint_map.len(), 4);
+        assert_eq!(
+            parse_codepoint_map(&config.font.codepoint_map),
+            [
+                ('\u{E000}'..='\u{F8FF}', "Symbols".to_string()),
+                ('A'..='A', "Serif".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn bad_font_features_are_skipped_and_the_rest_keep_their_order() {
+        let entries: Vec<String> = ["calt", "nope!", "-liga", "ss01=2"]
+            .map(String::from)
+            .into();
+        let tags: Vec<_> = parse_font_features(&entries)
+            .iter()
+            .map(|f| (f.tag, f.value))
+            .collect();
+        assert_eq!(tags, [(*b"calt", 1), (*b"liga", 0), (*b"ss01", 2)]);
     }
 
     #[test]

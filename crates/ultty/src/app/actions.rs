@@ -300,8 +300,10 @@ impl App {
         // Update opacity
         self.renderer.set_opacity(new_config.behavior.opacity);
 
-        // Update ligatures setting
-        self.renderer.set_ligatures(new_config.font.ligatures);
+        // Fonts: families, size, line height, features, ligatures, emoji.
+        if new_config.font != self.config.font {
+            self.apply_font_config(&new_config.font);
+        }
 
         // Update URL detection setting
         self.url_detector
@@ -311,6 +313,22 @@ impl App {
         self.needs_redraw = true;
 
         tracing::info!("Configuration reloaded");
+    }
+
+    /// Switch to the fonts of `font` without a restart. A size left as it
+    /// was in the config keeps any zoom set with the font-size keys; a
+    /// changed one resets the zoom to the new size.
+    fn apply_font_config(&mut self, font: &ultty::config::FontConfig) {
+        let mut scaled = font.clone();
+        scaled.size = if font.size == self.config.font.size {
+            self.renderer.font_size()
+        } else {
+            font.size * self.scale_factor
+        };
+        if self.renderer.apply_font_config(&scaled) {
+            // Cell size changed: re-size every pane's grid.
+            self.relayout_terminals();
+        }
     }
 
     /// Change font size (increase or decrease).
