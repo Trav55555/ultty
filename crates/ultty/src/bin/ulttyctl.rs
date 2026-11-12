@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use std::path::Path;
 
 use ultty::control::format_response;
-use ultty::control::paths::{control_dir, ControlEndpoint};
+use ultty::control::paths::{control_dir, ControlEndpoint, InstanceError, InstanceRequest};
 use ultty_protocol::control::{
     ControlData, ControlEnvelope, ControlEvent, ControlRequest, ControlResponse, OutputFormat,
     PaneState, PaneStatus, SplitDirection, WaitCondition,
@@ -49,6 +49,13 @@ fn main() {
 
     let args: Vec<String> = args.into_iter().filter(|a| a != "--json").collect();
     let args = remove_flag_with_value(args, "--read-timeout");
+    let (args, pid_flag) = match take_pid_flag(args) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(2);
+        }
+    };
 
     let mut request = match parse_cli_request(&args) {
         Ok(request) => request,
@@ -59,7 +66,7 @@ fn main() {
     };
     default_split_target(&mut request, own_pane());
     let read_timeout = read_timeout_for(&request, timeout_secs);
-    let endpoint = match find_instance() {
+    let endpoint = match find_instance(instance_request(pid_flag)) {
         Ok(endpoint) => endpoint,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -169,19 +176,51 @@ fn response_is_failure(response: &ControlResponse) -> bool {
     )
 }
 
-/// The Ultty this command runs inside (`ULTTY_PID`) while it is still
-/// running, else the most recently started one.
-fn find_instance() -> Result<ControlEndpoint, String> {
-    let dir = control_dir().map_err(|e| format!("cannot use the control directory: {}", e))?;
+/// The instance to ask for: `--pid` exactly, else the Ultty this command
+/// runs inside (`ULTTY_PID`), else the newest.
+fn instance_request(pid_flag: Option<u32>) -> InstanceRequest {
     let own_pid = std::env::var("ULTTY_PID")
         .ok()
         .and_then(|pid| pid.parse().ok());
-    ultty::control::paths::find_instance(&dir, own_pid).ok_or_else(|| {
-        format!(
+    match (pid_flag, own_pid) {
+        (Some(pid), _) => InstanceRequest::Exact(pid),
+        (None, Some(pid)) => InstanceRequest::Own(pid),
+        (None, None) => InstanceRequest::Newest,
+    }
+}
+
+/// Find the instance `request` names. Taking the newest instance in place
+/// of a `ULTTY_PID` that has gone is said on stderr, never done silently.
+fn find_instance(request: InstanceRequest) -> Result<ControlEndpoint, String> {
+    let dir = control_dir().map_err(|e| format!("cannot use the control directory: {}", e))?;
+    match ultty::control::paths::find_instance(&dir, request) {
+        Ok(found) => {
+            if let (Some(gone), Some(used)) = (found.replaces_gone, found.endpoint.pid()) {
+                eprintln!("ulttyctl: ULTTY_PID {gone} is not running; using ultty {used}");
+            }
+            Ok(found.endpoint)
+        }
+        Err(e) => Err(instance_error_message(e, request, &dir)),
+    }
+}
+
+fn instance_error_message(error: InstanceError, request: InstanceRequest, dir: &Path) -> String {
+    let named_by = match request {
+        InstanceRequest::Own(_) => " (ULTTY_PID)",
+        InstanceRequest::Exact(_) => " (--pid)",
+        InstanceRequest::Newest => "",
+    };
+    match error {
+        InstanceError::NotListening(pid) => format!(
+            "ultty {pid}{named_by} has no control socket yet in {}; not using another instance",
+            dir.display()
+        ),
+        InstanceError::NotRunning(pid) => format!("ultty {pid}{named_by} is not running"),
+        InstanceError::NoneRunning => format!(
             "no running ultty has a control socket in {} (is it running?)",
             dir.display()
-        )
-    })
+        ),
+    }
 }
 
 /// Read the control auth token that instance wrote at startup, if any.
@@ -215,6 +254,28 @@ fn with_auth_token(request: ControlRequest, token: Option<String>) -> ControlReq
         },
         (request, None) => request,
     }
+}
+
+/// Take `--pid <pid>` from among the global flags before the command, like
+/// `--pane`, so it is never mistaken for text a command takes.
+fn take_pid_flag(mut args: Vec<String>) -> Result<(Vec<String>, Option<u32>), String> {
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "--pid" => {
+                let pid = args
+                    .get(index + 1)
+                    .ok_or_else(|| "--pid requires the pid of a running ultty".to_string())?
+                    .parse()
+                    .map_err(|_| "--pid requires a numeric pid".to_string())?;
+                args.drain(index..index + 2);
+                return Ok((args, Some(pid)));
+            }
+            "--pane" => index += 2,
+            _ => break,
+        }
+    }
+    Ok((args, None))
 }
 
 fn remove_flag_with_value(args: Vec<String>, flag: &str) -> Vec<String> {
@@ -821,7 +882,7 @@ fn send_command(socket_path: &Path, command: &str, timeout_secs: u64) -> Result<
 fn run_mcp() -> std::io::Result<()> {
     const MCP_READ_TIMEOUT_SECS: u64 = 10;
     let mut send = |request: ControlRequest| {
-        let endpoint = find_instance()?;
+        let endpoint = find_instance(instance_request(None))?;
         let read_timeout = read_timeout_for(&request, MCP_READ_TIMEOUT_SECS);
         let envelope = ControlEnvelope {
             output_format: OutputFormat::Json,
@@ -922,6 +983,9 @@ GLOBAL FLAGS:
                             override, split and lua open --split (which
                             otherwise split the pane ulttyctl runs in, from
                             $ULTTY_PANE)
+    --pid <pid>             Talk only to the ultty with this pid; fail if it
+                            is not running or not listening yet, never use
+                            another. Goes before the command
     -V, --version           Show ulttyctl version without connecting to Ultty
     -h, --help              Show this help
 
@@ -1005,9 +1069,12 @@ MCP:
 
 AUTHENTICATION:
     Inside an ultty window, ulttyctl talks to that window's ultty (found
-    through ULTTY_PID, which ultty sets for its shells); elsewhere it talks
-    to the most recently started ultty that is running. Each
-    ultty listens on $XDG_RUNTIME_DIR/ultty-ctl-<pid>.sock (or, without
+    through ULTTY_PID, which ultty sets for its shells) and to no other:
+    while that ultty runs but has no control socket yet, commands fail.
+    Only once it has exited (say, in a tmux session that outlived it) does
+    ulttyctl use the most recently started ultty instead, and it says so on
+    stderr. Without ULTTY_PID it uses the most recently started ultty;
+    --pid <pid> names one exactly and never falls back. Each ultty listens on $XDG_RUNTIME_DIR/ultty-ctl-<pid>.sock (or, without
     XDG_RUNTIME_DIR, in a private ultty-<uid> directory under $TMPDIR or
     /tmp). Every command is authenticated automatically with the token that
     instance writes next to it, ultty-auth-<pid>.token (override with the
@@ -1050,7 +1117,7 @@ EXIT STATUS:
 mod tests {
     use super::{
         default_split_target, exit_status, parse_cli_request, parse_response, read_response,
-        read_timeout_for, response_is_failure, should_print_version, version_output,
+        read_timeout_for, response_is_failure, should_print_version, take_pid_flag, version_output,
         with_auth_token, LuaOpen,
     };
 
@@ -1283,6 +1350,25 @@ mod tests {
 
     fn args(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn pid_flag_is_taken_only_before_the_command() {
+        assert_eq!(
+            take_pid_flag(args("--pid 42 ping")),
+            Ok((args("ping"), Some(42)))
+        );
+        assert_eq!(
+            take_pid_flag(args("--pane 3 --pid 42 text")),
+            Ok((args("--pane 3 text"), Some(42)))
+        );
+        // After the command it is the command's own text.
+        assert_eq!(
+            take_pid_flag(args("send-text --pid 42")),
+            Ok((args("send-text --pid 42"), None))
+        );
+        assert!(take_pid_flag(args("--pid")).is_err());
+        assert!(take_pid_flag(args("--pid me ping")).is_err());
     }
 
     #[test]

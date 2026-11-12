@@ -125,3 +125,10 @@ scripts/e2e/run-headless.sh scripts/e2e/counter-app.sh
 
 It needs `Xvfb` and a Vulkan or GL driver; Mesa's software drivers
 (lavapipe, llvmpipe) work without a GPU. Linux only, for now.
+
+The command runs with `ULTTY_PID` naming that Ultty and a private
+`XDG_RUNTIME_DIR` holding only its control socket, so `ulttyctl` cannot
+reach a window on your desktop. A script that starts its own Ultty should do
+the same, and wait for `$XDG_RUNTIME_DIR/ultty-ctl-<pid>.sock` before its
+first command; `ulttyctl --pid <pid>` makes each command talk to that
+instance or fail, never another one.
