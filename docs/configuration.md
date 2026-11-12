@@ -76,6 +76,30 @@ pane whose program exited stays open with its last output and a
 tab, or the window's close button). This is useful for launch-profile tabs
 that run a command rather than a shell.
 
+## Restoring the last session
+
+```toml
+[behavior]
+restore_session = false
+```
+
+With `true`, Ultty saves its tabs when the window closes (or when it gets a
+termination signal) and reopens them at the next start: each tab's title,
+its split layout and which pane had focus, and each pane's working
+directory, taken from the directory its shell last reported with OSC 7. The
+active tab is selected again. The file is `last.json` in the `sessions`
+directory next to `config.toml`.
+
+A restored pane is a fresh shell. Scrollback and screen contents are not
+restored, and programs that were running are not started again, including the
+commands of launch-profile tabs. A saved directory that no longer exists falls
+back to the directory Ultty was started in. A pane whose shell never sent OSC 7
+starts in its tab's saved directory (the first pane's), else in the directory
+Ultty was started in.
+If the file is missing or unreadable, Ultty starts as it would with the
+option off. A saved session takes precedence over a default launch profile.
+The default is `false`.
+
 ## Line height
 
 ```toml
@@ -180,9 +204,24 @@ it never blinks, and an idle window does not wake up at all.
 accessibility = true   # false keeps Ultty off the accessibility bus
 ```
 
-With `true` (the default), Ultty exposes its window to screen readers through
+With `true` (the default), Ultty exposes itself to screen readers through
 AccessKit: on Linux it watches the session D-Bus and joins the AT-SPI bus only
-while assistive technology is running, and an idle window does not wake up. For now the window is all it exposes; the
-terminal's text follows. With `false`, Ultty never connects to the
-accessibility bus and creates its window visible at once. Read at start; restart Ultty
-after changing it.
+while assistive technology is running, and an idle window does not wake up.
+
+What a screen reader sees:
+
+- The window, with a tab list (one tab per tab, the active one selected) and
+  a panel for the active tab.
+- The focused pane as a `Terminal` node holding one text run per screen row,
+  with the caret at the cursor. This is the live screen only; scrollback is
+  not exposed yet.
+- The other panes of the tab as groups with just their titles.
+- For a pane running a native-protocol app, the app's regions in place of the
+  grid: each region as a node with its role, name and state, and focus on the
+  app's focused region. A region that announces changes (a live region) is
+  read out when it changes.
+- An inline surface in a pane's rows, as a node described by its anchor row.
+
+With `false`, Ultty never connects to the accessibility bus and creates its
+window visible at once. Read at start; restart Ultty after changing it.
+See [accessibility-test.md](accessibility-test.md) for the manual test.
