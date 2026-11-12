@@ -194,8 +194,9 @@ grep -q "No native app in pane 0" "$out/shell.txt" ||
 echo "override-push: a pane without a native app is refused"
 
 # 7. A shell pane split off next to the app, in the app's own tab, has no
-#    native app in its foreground: a push aimed at it is refused rather
-#    than landing in the app, which keeps drawing unchanged.
+#    native session bound to it (ADR 0025) and none in its foreground: a
+#    push aimed at it is refused rather than landing in the app, which
+#    keeps drawing unchanged.
 split=$("$ULTTYCTL" --pane "$pane" split right) || fail "split next to the app"
 [[ "$split" =~ ^[0-9]+$ ]] || fail "split printed '$split', not a pane id"
 if "$ULTTYCTL" --pane "$split" override push "$out/try.toml" >"$out/split.txt" 2>&1; then

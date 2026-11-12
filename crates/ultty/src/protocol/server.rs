@@ -1026,6 +1026,13 @@ impl ProtocolServer {
         Ok(())
     }
 
+    /// Stop waiting for session `session_key`'s answer to `request_id`.
+    pub fn forget_override_result(&mut self, session_key: usize, request_id: u32) {
+        if let Some(session) = self.sessions.get_mut(&session_key) {
+            session.forget_override_result(request_id);
+        }
+    }
+
     /// The apps' answers to `SetOverride` since the last call: session key,
     /// request id and the error, if any.
     pub fn take_override_results(&mut self) -> Vec<(usize, u32, Option<String>)> {

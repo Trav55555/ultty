@@ -276,14 +276,16 @@ message to travel on; it keeps reading its files (§5), which `ulttyctl`
 cannot reach. A pane with no native app answers an error saying so.
 
 **Which session.** A push targets a pane (`--pane N`, else the focused
-one), and the sessions Ultty knows belong to a tab (spec §1.2), not a
-pane. Of the sessions in the pane's tab, the one whose process is in the
-pane's foreground process group gets it (the rule key input already
-uses), even when it is the only session: the shell pane of a split tab
-has no native app in its foreground, so a push aimed at it is refused
-rather than landing in the neighbouring pane's app. No such session is an
-error naming the pane. When sessions are bound to panes (ADR 0025), this
-becomes "the pane's session" and the group check goes.
+one) and goes to the session bound to that pane (ADR 0025 §1). A session
+the binding has not placed yet (a background job in a split tab) is
+reached only through the rule key input uses, its process being in the
+pane's foreground process group; that is the set `regions --pane N`
+lists. A session bound to another pane is never picked, so the shell's
+pane of a split tab is refused rather than pushing into its neighbour's
+app. No such session is an error naming the pane, as is a session with
+64 pushes still unanswered (the control plane gives up on one after 5 s
+and the terminal then drops its late answer, so the count falls on its
+own).
 
 **Semantics.** A pushed override lives in the app's memory, for that
 process, and is one layer: a second push replaces the first. It sits over

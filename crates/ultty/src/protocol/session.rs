@@ -76,8 +76,9 @@ const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_INPUT_CURSOR
     | CAP_OVERRIDE_PUSH;
 
-/// Most `SetOverride` request ids a session waits on answers for at once.
-const MAX_AWAITED_OVERRIDE_RESULTS: usize = 64;
+/// Most `SetOverride`s a session may have unanswered at once; one more is
+/// refused, so an applied push is never mistaken for a lost one.
+pub const MAX_AWAITED_OVERRIDE_RESULTS: usize = 64;
 
 /// An in-band session with no traffic from its app for this long has ended.
 /// Clients send a heartbeat (an unsolicited `Pong`) at least every few
@@ -1197,12 +1198,25 @@ impl NativeSession {
         request_id: u32,
         pushed: Option<PushedOverride>,
     ) -> io::Result<()> {
-        self.send_message(&TerminalMessage::SetOverride { request_id, pushed })?;
         if self.awaited_override_results.len() >= MAX_AWAITED_OVERRIDE_RESULTS {
-            self.awaited_override_results.pop_front();
+            return Err(io::Error::other(format!(
+                "{MAX_AWAITED_OVERRIDE_RESULTS} override pushes are unanswered"
+            )));
         }
+        self.send_message(&TerminalMessage::SetOverride { request_id, pushed })?;
         self.awaited_override_results.push_back(request_id);
         Ok(())
+    }
+
+    /// How many `SetOverride`s the app has not answered yet.
+    pub fn awaiting_override_results(&self) -> usize {
+        self.awaited_override_results.len()
+    }
+
+    /// Stop waiting for the answer to `request_id` (the control plane gave
+    /// up on it); a late answer is then dropped.
+    pub fn forget_override_result(&mut self, request_id: u32) {
+        self.awaited_override_results.retain(|&id| id != request_id);
     }
 
     /// Keep an `OverrideResult` the control plane is waiting for; drop one
@@ -1384,19 +1398,35 @@ mod tests {
         assert!(session.take_override_results().is_empty());
         assert!(session.pending_override_results.is_empty());
 
-        // The ids a session waits on are bounded too.
-        for request_id in 0..(MAX_AWAITED_OVERRIDE_RESULTS as u32 + 8) {
+        // The pushes a session may have unanswered are bounded: one more is
+        // refused rather than an older one forgotten, so an applied push
+        // never looks lost. Giving up on one (the control plane's timeout)
+        // makes room and drops its late answer.
+        for request_id in 0..MAX_AWAITED_OVERRIDE_RESULTS as u32 {
             session.send_set_override(request_id, None).unwrap();
         }
         assert_eq!(
-            session.awaited_override_results.len(),
+            session.awaiting_override_results(),
             MAX_AWAITED_OVERRIDE_RESULTS
         );
+        let refused = session.send_set_override(1000, None).unwrap_err();
+        assert!(refused.to_string().contains("unanswered"), "{refused}");
+        session.take_sent_messages();
         assert!(
-            !session.accept_override_result(0, None),
-            "the oldest was forgotten"
+            session.accept_override_result(0, None),
+            "the oldest is still awaited"
         );
-        assert!(session.accept_override_result(8, None));
+
+        session.forget_override_result(1);
+        assert!(
+            !session.accept_override_result(1, None),
+            "a forgotten push's answer is dropped"
+        );
+        session.send_set_override(1000, None).unwrap();
+        assert_eq!(
+            session.awaiting_override_results(),
+            MAX_AWAITED_OVERRIDE_RESULTS - 1
+        );
     }
 
     #[test]
