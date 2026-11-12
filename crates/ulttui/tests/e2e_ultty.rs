@@ -15,10 +15,18 @@ fn ulttyctl(args: &[&str]) -> Option<String> {
     }
 }
 
+/// `tmux` on a server of this test's own: its own socket, so the user's
+/// server is never touched, and no config, so the user's `~/.tmux.conf` and
+/// its plugins never load.
+fn tmux() -> Command {
+    let socket = std::env::temp_dir().join(format!("ulttui-e2e-tmux-{}.sock", std::process::id()));
+    let mut command = Command::new("tmux");
+    command.arg("-f").arg("/dev/null").arg("-S").arg(&socket);
+    command
+}
+
 fn cleanup() {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", TMUX_SESSION])
-        .output();
+    let _ = tmux().arg("kill-server").output();
 }
 
 #[test]
@@ -26,7 +34,7 @@ fn cleanup() {
 fn counter_app_button_click_via_ulttyctl() {
     cleanup();
 
-    let status = Command::new("tmux")
+    let status = tmux()
         .args(["new-session", "-d", "-s", TMUX_SESSION, ULTTY_BIN])
         .status()
         .expect("tmux start");

@@ -18,46 +18,9 @@ fn command_exists(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// A tmux server of the test's own (`tmux -S <socket>`), so the test never
-/// touches the user's server. Dropping it kills the server and removes the
-/// socket, even when the test fails or its terminal closes before typed
-/// cleanup could run.
-struct TmuxServer {
-    socket: std::path::PathBuf,
-}
-
-impl TmuxServer {
-    fn new(test: &str) -> Self {
-        Self {
-            socket: std::env::temp_dir()
-                .join(format!("ultty-tmux-{test}-{}.sock", std::process::id())),
-        }
-    }
-
-    /// The command line, typed into the test terminal, that starts a
-    /// session on this server and attaches to it. `TMUX` is cleared so
-    /// a run inside tmux does not refuse to nest.
-    fn attach_command(&self) -> String {
-        format!(
-            "unset TMUX; tmux -S '{socket}' new-session -d -s test && tmux -S '{socket}' attach -t test\r",
-            socket = self.socket.display()
-        )
-    }
-}
-
-impl Drop for TmuxServer {
-    fn drop(&mut self) {
-        // Best effort: a server that never started has nothing to clean.
-        let _ = std::process::Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        let _ = std::fs::remove_file(&self.socket);
-    }
-}
+#[path = "support/tmux_server.rs"]
+mod tmux_server;
+use tmux_server::TmuxServer;
 
 // ============================================================================
 // NEOVIM TESTS
@@ -313,10 +276,88 @@ fn test_tmux_splits() {
         || content.contains('-');
     println!("tmux pane borders detected: {}", has_borders);
 
-    // Detach; dropping `tmux` kills the server
+    // Detaching leaves no client, so the server exits
     term.send_bytes(b"\x02d").unwrap();
     term.wait_until_stable(STABLE_WAIT, Duration::from_secs(2))
         .unwrap();
+}
+
+#[test]
+fn tmux_server_never_reads_user_config() {
+    let tmux = TmuxServer::new("config");
+    assert_eq!(tmux.args()[..2], ["-f", "/dev/null"]);
+    assert_eq!(
+        tmux.command().get_args().take(2).collect::<Vec<_>>(),
+        ["-f", "/dev/null"]
+    );
+    // The typed command line runs tmux once, with those arguments first.
+    let attach = tmux.attach_command();
+    assert_eq!(attach.matches("tmux ").count(), 1, "{attach}");
+    assert!(attach.contains("tmux '-f' '/dev/null' '-S' "), "{attach}");
+    assert!(attach.contains("'exit-unattached' 'on'"), "{attach}");
+}
+
+/// Whether the server has session `test` and no other.
+fn only_test_session(tmux: &TmuxServer) -> bool {
+    tmux.command()
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|out| out.status.success() && out.stdout == b"test\n")
+}
+
+/// Whether a server answers on the socket at all.
+fn server_running(tmux: &TmuxServer) -> bool {
+    tmux.command()
+        .arg("list-sessions")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Poll `condition` until it holds or `timeout` passes.
+fn eventually(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    condition()
+}
+
+/// A test killed before `TmuxServer`'s `Drop` runs must not leave its
+/// server behind: closing the terminal the client runs in is enough.
+#[test]
+fn tmux_server_exits_when_its_terminal_closes() {
+    if !command_exists("tmux") {
+        eprintln!("Skipping: tmux not installed");
+        return;
+    }
+
+    let mut term = TestTerminal::hermetic(80, 24).expect("Failed to create terminal");
+    term.wait_for_output(STARTUP_WAIT).unwrap();
+    let tmux = TmuxServer::new("hangup");
+    term.send(&tmux.attach_command()).unwrap();
+
+    // Generous: on a loaded machine the shell and tmux start slowly.
+    let timeout = Duration::from_secs(60);
+    assert!(
+        eventually(timeout, || {
+            let _ = term.process();
+            only_test_session(&tmux)
+        }),
+        "the session never started:\n{}",
+        term.capture_text()
+    );
+
+    drop(term);
+    assert!(
+        eventually(timeout, || !server_running(&tmux)),
+        "the tmux server outlived its terminal"
+    );
 }
 
 // ============================================================================

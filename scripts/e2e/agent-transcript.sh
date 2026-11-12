@@ -47,7 +47,7 @@ rm -f "$out/go" "$out/close" "$out"/*.png "$out"/text-*.txt "$out"/*client.log
 runtime=$(mktemp -d /tmp/ultty-agent.XXXXXX)
 chmod 700 "$runtime"
 cleanup() {
-    [ -n "$tmux_bin" ] && "$tmux_bin" -S "$runtime/tmux.sock" kill-server 2>/dev/null || true
+    [ -n "$tmux_bin" ] && "$tmux_bin" -f /dev/null -S "$runtime/tmux.sock" kill-server 2>/dev/null || true
     kill "${ultty_pid-}" "${xvfb_pid-}" 2>/dev/null || true
     wait 2>/dev/null || true
     rm -rf "$runtime"
