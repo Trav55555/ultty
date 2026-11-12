@@ -40,6 +40,14 @@ const WINDOW_TITLE: &str = "Ultty";
 const DEFAULT_WIDTH: u32 = 800;
 const DEFAULT_HEIGHT: u32 = 600;
 
+/// The program the first tab runs instead of the login shell, from
+/// `ultty -e PROGRAM ARGS...`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupCommand {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
 /// Time window for detecting double/triple clicks.
 pub(super) const CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 
@@ -250,7 +258,11 @@ pub struct App {
 
 impl App {
     /// Create a new application with window.
-    fn new(event_loop: &ActiveEventLoop, event_proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
+    fn new(
+        event_loop: &ActiveEventLoop,
+        event_proxy: EventLoopProxy<AppEvent>,
+        startup_command: Option<&StartupCommand>,
+    ) -> Result<Self> {
         // Load configuration
         let config = Config::load();
         tracing::info!("Loaded configuration");
@@ -367,8 +379,13 @@ impl App {
         let control_server = Self::start_control_server();
 
         // Create terminal manager - with launch profile if configured
-        let mut terminal_manager =
-            Self::create_terminal_manager(&config, cols, rows, &mut protocol_server)?;
+        let mut terminal_manager = Self::create_terminal_manager(
+            &config,
+            cols,
+            rows,
+            &mut protocol_server,
+            startup_command,
+        )?;
         tracing::debug!(target: "ultty::startup", "shell started");
         terminal_manager.set_theme_colors(config.colors.theme_colors());
         terminal_manager.set_scrollback_lines(config.behavior.scrollback_lines);
@@ -514,6 +531,9 @@ impl App {
 
     /// Create terminal manager, optionally using a launch profile or restoring from session.
     ///
+    /// A `startup_command` (`ultty -e`) replaces both: the window opens with
+    /// one tab running it, as `ulttyctl new-tab COMMAND` would.
+    ///
     /// Every tab created here gets a listening socket on `protocol_server`
     /// before its shell is spawned.
     fn create_terminal_manager(
@@ -521,7 +541,19 @@ impl App {
         cols: u16,
         rows: u16,
         protocol_server: &mut Option<ProtocolServer>,
+        startup_command: Option<&StartupCommand>,
     ) -> Result<TerminalManager> {
+        if let Some(command) = startup_command {
+            return TerminalManager::with_command_tab(
+                cols,
+                rows,
+                &command.program,
+                &command.args,
+                &mut |tab_id| tab_shell_env(protocol_server, &config.terminal.term, tab_id),
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to start '{}': {}", command.program, e));
+        }
+
         // Try to restore session if enabled
         if config.behavior.restore_session {
             if let Some(session) = ultty::session::SessionData::load_last() {
@@ -749,8 +781,9 @@ impl App {
         server.set_active_tab(self.terminal_manager.active_tab().map(|tab| tab.id));
     }
 
-    /// Run the application.
-    pub fn run() -> Result<()> {
+    /// Run the application. The first tab runs `startup_command`, or the
+    /// configured shell, profile or restored session when there is none.
+    pub fn run(startup_command: Option<StartupCommand>) -> Result<()> {
         let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
         let signal_proxy = event_loop.create_proxy();
         if let Err(e) = ultty::platform::shutdown::on_shutdown_signal(move || {
@@ -763,6 +796,7 @@ impl App {
         }
         let mut handler = AppHandler {
             proxy: event_loop.create_proxy(),
+            startup_command,
             app: None,
             init_error: None,
         };
@@ -1579,6 +1613,8 @@ fn control_flow(deadline: Option<Instant>) -> ControlFlow {
 /// first `resumed`, as winit 0.30 requires.
 struct AppHandler {
     proxy: EventLoopProxy<AppEvent>,
+    /// What the first tab runs instead of the shell (`ultty -e`).
+    startup_command: Option<StartupCommand>,
     app: Option<App>,
     /// A startup failure, returned from [`App::run`] after the loop exits.
     init_error: Option<anyhow::Error>,
@@ -1589,7 +1625,11 @@ impl ApplicationHandler<AppEvent> for AppHandler {
         if self.app.is_some() {
             return;
         }
-        match App::new(event_loop, self.proxy.clone()) {
+        match App::new(
+            event_loop,
+            self.proxy.clone(),
+            self.startup_command.as_ref(),
+        ) {
             Ok(mut app) => {
                 app.update_tab_bar();
                 app.relayout_terminals();

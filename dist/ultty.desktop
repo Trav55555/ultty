@@ -10,3 +10,4 @@ Categories=System;TerminalEmulator;
 Keywords=terminal;shell;console;tui;
 StartupNotify=true
 StartupWMClass=ultty
+X-TerminalArgExec=-e
