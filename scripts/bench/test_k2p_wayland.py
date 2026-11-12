@@ -130,5 +130,31 @@ class MeasureOrder(unittest.TestCase):
         self.assertEqual(requests_between_key_and_first_frame(probe.log), ["copy"])
 
 
+class AnonFdTest(unittest.TestCase):
+    def roundtrip(self):
+        fd = k2p.anon_fd("test")
+        try:
+            os.write(fd, b"keymap")
+            os.lseek(fd, 0, os.SEEK_SET)
+            self.assertEqual(os.read(fd, 16), b"keymap")
+        finally:
+            os.close(fd)
+
+    def test_memfd(self):
+        self.roundtrip()
+
+    def test_without_memfd_create(self):
+        # uv's python-build-standalone has no os.memfd_create.
+        saved = getattr(os, "memfd_create", None)
+        if saved:
+            del os.memfd_create
+        try:
+            self.assertFalse(hasattr(os, "memfd_create"))
+            self.roundtrip()
+        finally:
+            if saved:
+                os.memfd_create = saved
+
+
 if __name__ == "__main__":
     unittest.main()

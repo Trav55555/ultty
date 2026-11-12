@@ -43,6 +43,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = __file__.rsplit("/", 1)[0]
@@ -135,10 +136,29 @@ class Connection:
             raise RuntimeError(f"Wayland protocol error on object {obj} (code {code}): {message}")
 
 
+def anon_fd(name):
+    """An fd for anonymous shared memory the compositor can mmap.
+
+    os.memfd_create is missing from some CPython builds (uv's
+    python-build-standalone 3.12), so fall back to an unlinked file in
+    $XDG_RUNTIME_DIR (tmpfs) or /dev/shm.
+    """
+    if hasattr(os, "memfd_create"):
+        return os.memfd_create(name)
+    for directory in (os.environ.get("XDG_RUNTIME_DIR"), "/dev/shm", None):
+        try:
+            fd, path = tempfile.mkstemp(prefix=name + "-", dir=directory)
+        except OSError:
+            continue
+        os.unlink(path)
+        return fd
+    raise OSError("no place to create a shared-memory file")
+
+
 class ShmBuffer:
     def __init__(self, conn, shm, fmt, width, height, stride):
         size = stride * height
-        fd = os.memfd_create("k2p-wayland")
+        fd = anon_fd("k2p-wayland")
         os.ftruncate(fd, size)
         self.map = mmap.mmap(fd, size)
         pool = conn.new_id(None)
@@ -255,7 +275,7 @@ class Probe:
             f'xkb_symbols "(unnamed)" {{ {symbols}}};\n'
             "};\n"
         ).encode() + b"\0"
-        fd = os.memfd_create("k2p-keymap")
+        fd = anon_fd("k2p-keymap")
         os.write(fd, text)
         self.conn.request(self.keyboard, 0, u32(1, len(text)), fd=fd)  # keymap(XKB_V1, fd, size)
         os.close(fd)
