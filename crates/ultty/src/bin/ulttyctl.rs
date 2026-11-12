@@ -971,7 +971,8 @@ WINDOW COMMANDS:
     focus                   Focus the ultty window
     fullscreen              Toggle fullscreen
     opacity <0.0-1.0>       Set window opacity
-    resize <width> <height> Resize the window (pixels)
+    resize <width> <height> Resize the window (pixels); fails, naming the size
+                            it has, if it does not reach it within 2 s
 
 EXECUTION:
     run <command> [args]    Run a command in current tab

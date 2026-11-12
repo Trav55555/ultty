@@ -59,8 +59,8 @@ capture_resize_evidence() {
     "$ULTTYCTL" info
   } >"$evidence"
 
-  # Under X11 the platform resizes asynchronously, so ulttyctl resize can
-  # report "not applied"; record its answer and resize with xdotool instead.
+  # A window manager may clamp or refuse the size, which ulttyctl resize
+  # reports as "not applied"; record its answer and resize with xdotool too.
   {
     printf 'resize: '
     "$ULTTYCTL" resize "$width" "$height" 2>&1 || true

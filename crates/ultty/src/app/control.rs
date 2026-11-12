@@ -2,6 +2,7 @@
 //!
 //! Processes CLI automation requests from ulttyctl and other tools.
 
+use super::control_resize::{PendingResize, RESIZE_NOT_APPLIED};
 use super::control_wait::{find_ignore_case, Condition, PendingControlWait, WaitMatcher};
 use super::App;
 use std::io;
@@ -66,6 +67,17 @@ impl App {
                 continue;
             }
 
+            if let ControlRequest::Resize { width, height } = request {
+                // Answered once the window has the size, or at once when
+                // the platform resizes synchronously or refuses.
+                let requested = PhysicalSize::new(width, height);
+                if let Some(response) = self.request_window_resize(client_key, &request, requested)
+                {
+                    responses.push((client_key, response));
+                }
+                continue;
+            }
+
             let response = self.process_control_request(client_key, request);
             responses.push((client_key, response));
         }
@@ -97,14 +109,91 @@ impl App {
         Ok(target)
     }
 
-    /// The earliest instant a pending wait or override push needs the UI
-    /// awake for.
+    /// The earliest instant a pending wait, override push or resize needs
+    /// the UI awake for.
     pub(super) fn next_control_wait_deadline(&self) -> Option<Instant> {
         self.pending_control_waits
             .iter()
             .map(PendingControlWait::deadline)
             .chain(self.pending_override_pushes.iter().map(|push| push.expires))
+            .chain(self.pending_resizes.iter().map(PendingResize::deadline))
             .min()
+    }
+
+    /// Ask the platform for a window of `requested` size. `None` means the
+    /// platform resizes later and the reply waits for it (see
+    /// `control_resize`); `Some` is the answer now.
+    fn request_window_resize(
+        &mut self,
+        client_key: usize,
+        request: &ultty_protocol::control::ControlRequest,
+        requested: PhysicalSize<u32>,
+    ) -> Option<ultty_protocol::control::ControlResponse> {
+        use ultty_protocol::control::ControlResponse;
+
+        if let Some(response) = self.auth_error_for_request(client_key, request) {
+            return Some(response);
+        }
+        let result = self.window.request_inner_size(requested);
+        if result.is_some() {
+            let response = resize_control_response(result, requested, self.window.inner_size());
+            if matches!(response, ControlResponse::Ok) {
+                self.handle_resize(requested);
+            }
+            return Some(response);
+        }
+        self.pending_resizes
+            .push(PendingResize::new(client_key, requested, Instant::now()));
+        // The window may already have the size: a no-op request gets no
+        // `Resized`, and without a window manager X11 applies it at once.
+        self.answer_pending_resizes(self.window.inner_size());
+        None
+    }
+
+    /// Answer the pending resizes that a window of `current` size settles:
+    /// those it matches, and those past their deadline. A window that has
+    /// the size before its `Resized` arrives is laid out first, so the
+    /// client sees the new pane sizes once answered.
+    pub(super) fn answer_pending_resizes(&mut self, current: PhysicalSize<u32>) {
+        use ultty_protocol::control::ControlResponse;
+
+        if self.pending_resizes.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut responses = Vec::new();
+        self.pending_resizes
+            .retain(|resize| match resize.reply(current, now) {
+                Some(response) => {
+                    responses.push((resize.client_key(), response));
+                    false
+                }
+                None => true,
+            });
+        let matched = responses
+            .iter()
+            .any(|(_, response)| matches!(response, ControlResponse::Ok));
+        if matched && self.renderer.surface_size() != (current.width, current.height) {
+            self.handle_resize(current);
+        }
+        if let Some(ref mut server) = self.control_server {
+            for (client_key, response) in responses {
+                server.send_response(client_key, &response);
+            }
+        }
+    }
+
+    /// Answer the pending resizes whose deadline has passed, with the size
+    /// the window has.
+    pub(super) fn expire_pending_resizes(&mut self) {
+        let now = Instant::now();
+        if self
+            .pending_resizes
+            .iter()
+            .any(|resize| now >= resize.deadline())
+        {
+            self.answer_pending_resizes(self.window.inner_size());
+        }
     }
 
     /// Send a `PushOverride` or `ClearOverride` on to the native app in the
@@ -858,6 +947,8 @@ impl App {
                 ControlResponse::Ok
             }
 
+            // A top-level resize goes through `request_window_resize`,
+            // which can wait for the window; a batch cannot.
             ControlRequest::Resize { width, height } => {
                 let requested = PhysicalSize::new(width, height);
                 let result = self.window.request_inner_size(requested);
@@ -1556,15 +1647,19 @@ fn plain_search_match(
     }
 }
 
+/// The reply to a resize answered at once: `result` is what
+/// `request_inner_size` returned, `current` the window's size after it.
+/// `None` means the platform resizes later, which only a top-level request
+/// waits for (`request_window_resize`); a batch reports it.
 fn resize_control_response(
     result: Option<PhysicalSize<u32>>,
     requested: PhysicalSize<u32>,
     current: PhysicalSize<u32>,
 ) -> ultty_protocol::control::ControlResponse {
     match (result, current == requested) {
-        (Some(_), true) => ultty_protocol::control::ControlResponse::Ok,
+        (_, true) => ultty_protocol::control::ControlResponse::Ok,
         (Some(accepted), false) => ultty_protocol::control::ControlResponse::Error {
-            code: 8,
+            code: RESIZE_NOT_APPLIED,
             message: format!(
                 "Window resize request not applied by platform/compositor: requested {}x{}, accepted {}x{}, current {}x{}",
                 requested.width,
@@ -1575,9 +1670,12 @@ fn resize_control_response(
                 current.height
             ),
         },
-        (None, _) => ultty_protocol::control::ControlResponse::Error {
-            code: 8,
-            message: "Window resize is not supported by this platform/compositor".to_string(),
+        (None, false) => ultty_protocol::control::ControlResponse::Error {
+            code: RESIZE_NOT_APPLIED,
+            message: format!(
+                "Window resize to {}x{} requested, but the platform applies it later and a batch cannot wait for it; send resize on its own",
+                requested.width, requested.height
+            ),
         },
     }
 }
@@ -2073,10 +2171,10 @@ mod tests {
     }
 
     #[test]
-    fn resize_control_response_reports_unsupported_platform() {
+    fn resize_control_response_in_a_batch_reports_a_resize_still_to_come() {
         let response = resize_control_response(
             None,
-            PhysicalSize::new(800, 600),
+            PhysicalSize::new(1000, 700),
             PhysicalSize::new(800, 600),
         );
 
@@ -2085,8 +2183,19 @@ mod tests {
             ControlResponse::Error {
                 code: 8,
                 ref message
-            } if message.contains("not supported")
+            } if message.contains("1000x700") && message.contains("batch")
         ));
+    }
+
+    #[test]
+    fn resize_control_response_reports_ok_when_a_later_resize_already_applied() {
+        let response = resize_control_response(
+            None,
+            PhysicalSize::new(800, 600),
+            PhysicalSize::new(800, 600),
+        );
+
+        assert!(matches!(response, ControlResponse::Ok));
     }
 
     #[test]

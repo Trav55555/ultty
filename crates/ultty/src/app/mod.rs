@@ -5,6 +5,7 @@ mod actions;
 mod blink;
 mod control;
 mod control_events;
+mod control_resize;
 mod control_wait;
 mod input;
 mod native_panes;
@@ -207,6 +208,8 @@ pub struct App {
     /// Override pushes relayed to a native app and waiting for its answer
     /// (ADR 0023 §9).
     pending_override_pushes: Vec<control::PendingOverridePush>,
+    /// `resize` requests waiting for the window to reach their size.
+    pending_resizes: Vec<control_resize::PendingResize>,
     /// The `request_id` of the next override push.
     next_override_request: u32,
     /// Panes subscribers were last told about, for pane opened/closed events.
@@ -452,6 +455,7 @@ impl App {
             control_server,
             pending_control_waits: Vec::new(),
             pending_override_pushes: Vec::new(),
+            pending_resizes: Vec::new(),
             next_override_request: 1,
             published_panes,
             socket_wakeup,
