@@ -55,10 +55,12 @@ versions may break the native protocol, the `ulttui` API, and config keys.
   to the sessions of the pane under the pointer, in that pane's cells (a
   drag stays with the pane it started in), and
   the accessibility tree puts each pane's scenes under the pane's node
-  (the focused pane keeps the focus). No wire change. `ulttyctl lua open
-  --split` therefore runs the tool natively in its pane, with no forced
-  `--ansi` and no note. Inline surfaces and in-band sessions in split
-  panes are the ADR's later slices.
+  (the focused pane keeps the focus). `ulttyctl --pane N send-key` and
+  `send-text` reach pane N's native app whether or not its tab is shown
+  (they went through the shown tab only). No wire change. `ulttyctl lua
+  open --split` therefore runs the tool natively in its pane, with no
+  forced `--ansi` and no note. Inline surfaces and in-band sessions in
+  split panes are the ADR's later slices.
 - Text editing in `ulttui` and `ulttui-lua`: `ulttui::edit` (cursor moves,
   word motions, deletes at the cursor, by grapheme cluster), used by
   `TextInput`'s insert mode and by Lua `input` nodes, which take `cursor`

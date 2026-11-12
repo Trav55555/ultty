@@ -98,7 +98,11 @@ pane's terminal instead of a `single_pane` flag; a separate slice.
 
 Keys: unchanged in mechanism, now stated as a pane rule: recipients are
 full-scene sessions bound to the focused pane whose peer is in its PTY's
-foreground group. Mouse and scroll: the pane under the pointer is found
+foreground group. A key sent to a pane through the control socket
+(`ulttyctl --pane N send-key`, A2) goes to the sessions bound to that pane
+(unbound ones of its tab too) in its foreground group, whether or not the
+pane's tab is shown; before, it went through the shown tab only, so a
+native app in a hidden tab got nothing. Mouse and scroll: the pane under the pointer is found
 with `pane_at`, the position becomes that pane's cells, and only sessions
 bound to it are hit-tested. While a button is held, moves and the release
 go to the pane that took the press, with the position clamped into it, so
