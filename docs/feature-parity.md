@@ -94,16 +94,16 @@ key sequences or key tables.
 
 - **OSC 7 claim.** The compat scorecard says OSC 7 is used for "opening a new
   tab where the shell is". The code does not do this; see gap 1.
-- **Accessibility docs undersell the code.** `docs/configuration.md` says
-  "for now the window is all it exposes; the terminal's text follows". The
-  AccessKit tree already includes terminal rows, the caret and native-app
-  regions (`a11y/tree.rs`, `a11y/scene.rs`).
-- **Session restore exists but is off.** `behavior.restore_session`
-  (default `false`) restores tabs, split layout and working directories,
-  but not scrollback. It is undocumented in `docs/configuration.md`.
-- **Wrong shortcut in a doc comment.** The copy-mode module comment
-  (`crates/ultty/src/vim/mod.rs`) says Ctrl+Shift+V. The actual default is
-  Ctrl+Shift+Space; Ctrl+Shift+V is paste.
+- **Accessibility docs undersold the code (fixed).** `docs/configuration.md`
+  said "for now the window is all it exposes". The AccessKit tree includes
+  terminal rows, the caret and native-app regions (`a11y/tree.rs`,
+  `a11y/scene.rs`), and the page now says so.
+- **Session restore was undocumented (fixed).** `behavior.restore_session`
+  (default `false`) restores tabs, split layout and working directories, but
+  not scrollback. `docs/configuration.md` now describes it.
+- **Wrong shortcut in a doc comment (fixed).** The copy-mode module comment
+  (`crates/ultty/src/vim/mod.rs`) said Ctrl+Shift+V. The actual default,
+  `keybindings.vim_mode`, is Ctrl+Shift+Space; Ctrl+Shift+V is paste.
 
 ## Full table
 

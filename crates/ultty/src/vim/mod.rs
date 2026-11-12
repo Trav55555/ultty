@@ -4,7 +4,7 @@
 //! similar to tmux's copy-mode-vi. It operates independently of any TUI app
 //! running in the terminal.
 //!
-//! Activation: Ctrl+Shift+V (or configurable keybind)
+//! Activation: Ctrl+Shift+Space (`keybindings.vim_mode`; Ctrl+Shift+V is paste)
 //!
 //! Supported operations:
 //! - Navigation: h/j/k/l, w/b/e, 0/$, gg/G, Ctrl-d/u/f/b, H/M/L
