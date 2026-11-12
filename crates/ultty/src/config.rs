@@ -848,6 +848,11 @@ pub struct BehaviorConfig {
     pub opacity: f32,
     /// Restore previous session on startup
     pub restore_session: bool,
+    /// Open a new tab or split in the directory the focused pane is in, as
+    /// its shell reports it (OSC 7), else the directory of the pane's
+    /// foreground process. When false, or when neither is usable, a new pane
+    /// starts in the directory Ultty was started in.
+    pub inherit_working_directory: bool,
     /// Expose the window to assistive technology (screen readers) through
     /// AccessKit (the default). When false Ultty never connects to the
     /// accessibility bus. Read at start only.
@@ -867,6 +872,7 @@ impl Default for BehaviorConfig {
             close_on_exit: true,
             opacity: 1.0,
             restore_session: false, // Disabled by default
+            inherit_working_directory: true,
             accessibility: true,
         }
     }

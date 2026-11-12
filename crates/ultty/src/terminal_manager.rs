@@ -282,6 +282,11 @@ pub struct TerminalManager {
     /// (`behavior.close_on_exit`). When false, the pane stays, showing its
     /// last output, until it is closed by hand.
     close_on_exit: bool,
+    /// Whether a new tab or split starts in the directory of the pane it was
+    /// made from (`behavior.inherit_working_directory`).
+    inherit_working_directory: bool,
+    /// This machine's hostname, to tell a local OSC 7 URI from a remote one.
+    hostname: String,
     /// Where panes are laid out, once the window has a size. Splits,
     /// closes and divider drags re-lay panes out within it.
     pane_area: Option<PaneArea>,
@@ -337,6 +342,31 @@ impl TerminalManager {
         self.close_on_exit = close;
     }
 
+    /// Set whether a new tab or split opens in the directory of the pane it
+    /// was made from (the default) or in the directory Ultty started in.
+    pub fn set_inherit_working_directory(&mut self, inherit: bool) {
+        self.inherit_working_directory = inherit;
+    }
+
+    /// The directory a new pane made from `source` should start in: the
+    /// source's last local OSC 7 directory, else its foreground process's
+    /// directory. `None` means Ultty's own directory (or inheriting is off).
+    fn inherited_directory(&self, source: Option<TerminalId>) -> Option<String> {
+        if !self.inherit_working_directory {
+            return None;
+        }
+        let terminal = self.terminal(source?)?;
+        let state = terminal.event_loop.terminal();
+        let uri = state.working_directory_uri();
+        let dir = crate::inherit_dir::pick(uri, &self.hostname, || {
+            terminal
+                .event_loop
+                .foreground_working_directory()
+                .map(std::path::PathBuf::from)
+        });
+        dir.and_then(|dir| dir.to_str().map(str::to_string))
+    }
+
     /// Whether panes close when their program exits.
     pub fn close_on_exit(&self) -> bool {
         self.close_on_exit
@@ -381,6 +411,8 @@ impl TerminalManager {
             theme_colors: ThemeColors::default(),
             scrollback_lines: crate::grid::DEFAULT_SCROLLBACK,
             close_on_exit: true,
+            inherit_working_directory: true,
+            hostname: crate::inherit_dir::hostname(),
             pane_area: None,
             layout_generation: 0,
         };
@@ -402,7 +434,8 @@ impl TerminalManager {
         self.next_tab_id += 1;
 
         let env = tab_env(tab_id)?;
-        let terminal_id = self.create_terminal_with_env(tab_id, &env)?;
+        let source = self.focused_terminal().map(|t| t.id);
+        let terminal_id = self.create_terminal_with_env(tab_id, &env, source)?;
 
         let mut tab = Tab::new(tab_id, terminal_id);
         tab.shell_env = env;
@@ -457,32 +490,32 @@ impl TerminalManager {
 
     /// Create a new terminal (pane) in an existing tab, inheriting the
     /// tab's shell environment.
-    fn create_terminal(&mut self, tab_id: TabId) -> io::Result<TerminalId> {
+    fn create_terminal(&mut self, tab_id: TabId, source: TerminalId) -> io::Result<TerminalId> {
         let env = self
             .tabs
             .iter()
             .find(|tab| tab.id == tab_id)
             .map(|tab| tab.shell_env.clone())
             .unwrap_or_default();
-        self.create_terminal_with_env(tab_id, &env)
+        self.create_terminal_with_env(tab_id, &env, Some(source))
     }
 
-    /// Create a new terminal in `tab_id` whose shell gets `env`.
+    /// Create a new terminal in `tab_id` whose shell gets `env`, starting in
+    /// the directory of `source` when there is one to inherit.
     fn create_terminal_with_env(
         &mut self,
         tab_id: TabId,
         env: &[(OsString, OsString)],
+        source: Option<TerminalId>,
     ) -> io::Result<TerminalId> {
         let terminal_id = TerminalId(self.next_terminal_id);
         self.next_terminal_id += 1;
 
-        let terminal = ManagedTerminal::new(
-            terminal_id,
-            tab_id,
-            self.default_cols,
-            self.default_rows,
-            env,
-        )?;
+        let (cols, rows) = (self.default_cols, self.default_rows);
+        let terminal = match self.inherited_directory(source) {
+            Some(dir) => ManagedTerminal::new_with_dir(terminal_id, tab_id, cols, rows, &dir, env)?,
+            None => ManagedTerminal::new(terminal_id, tab_id, cols, rows, env)?,
+        };
 
         self.push_terminal(terminal);
         Ok(terminal_id)
@@ -842,7 +875,7 @@ impl TerminalManager {
         direction: SplitDirection,
     ) -> io::Result<Option<TerminalId>> {
         self.split_pane_with(target, direction, |this, tab_id| {
-            this.create_terminal(tab_id)
+            this.create_terminal(tab_id, target)
         })
     }
 
@@ -1239,6 +1272,8 @@ impl TerminalManager {
             theme_colors: ThemeColors::default(),
             scrollback_lines: crate::grid::DEFAULT_SCROLLBACK,
             close_on_exit: true,
+            inherit_working_directory: true,
+            hostname: crate::inherit_dir::hostname(),
             pane_area: None,
             layout_generation: 0,
         };
@@ -1814,6 +1849,150 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         };
         assert_eq!(cwd.as_deref(), dir.to_str());
+    }
+
+    /// A pane running `script` under `sh`, with nothing else touching its
+    /// OSC 7 state (an interactive shell's rc files might), made the focus.
+    fn tab_running(manager: &mut TerminalManager, script: &str, dir: Option<&str>) -> TerminalId {
+        manager
+            .create_tab_with_command(
+                "sh",
+                &["-c".to_string(), script.to_string()],
+                dir,
+                None,
+                &mut no_tab_env,
+            )
+            .unwrap();
+        manager.focused_terminal_id().unwrap()
+    }
+
+    /// Wait until the pane's shell is in `expected`. The child changes
+    /// directory between fork and exec, so poll rather than race it.
+    fn wait_for_cwd(manager: &TerminalManager, id: TerminalId, expected: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut cwd = None;
+        while Instant::now() < deadline {
+            cwd = manager
+                .terminal(id)
+                .unwrap()
+                .event_loop
+                .child_working_directory();
+            if cwd.as_deref() == expected.to_str() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("pane cwd is {cwd:?}, wanted {expected:?}");
+    }
+
+    fn wait_for_osc7(manager: &mut TerminalManager, id: TerminalId) {
+        run_until(manager, |m| {
+            m.terminal(id)
+                .unwrap()
+                .event_loop
+                .terminal()
+                .working_directory_uri()
+                .is_some()
+        });
+    }
+
+    #[test]
+    fn new_tab_opens_in_the_focused_panes_osc7_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let script = format!(
+            "printf '\\033]7;file://%s\\007' '{}'; sleep 30",
+            dir.display()
+        );
+        let source = tab_running(&mut manager, &script, None);
+        wait_for_osc7(&mut manager, source);
+
+        manager.create_tab().unwrap();
+
+        let new = manager.focused_terminal_id().unwrap();
+        wait_for_cwd(&manager, new, &dir);
+    }
+
+    #[test]
+    fn split_opens_in_the_target_panes_osc7_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let script = format!(
+            "printf '\\033]7;file://%s\\007' '{}'; sleep 30",
+            dir.display()
+        );
+        let source = tab_running(&mut manager, &script, None);
+        wait_for_osc7(&mut manager, source);
+
+        let split = manager
+            .split_pane(source, SplitDirection::Vertical)
+            .unwrap()
+            .unwrap();
+
+        wait_for_cwd(&manager, split, &dir);
+    }
+
+    #[test]
+    fn without_osc7_a_new_tab_uses_the_foreground_process_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let source = tab_running(&mut manager, "sleep 30", dir.to_str());
+        // The child needs a moment to become the terminal's foreground group.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while manager
+            .terminal(source)
+            .unwrap()
+            .event_loop
+            .foreground_working_directory()
+            .as_deref()
+            != dir.to_str()
+        {
+            assert!(Instant::now() < deadline, "source never settled");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        manager.create_tab().unwrap();
+
+        let new = manager.focused_terminal_id().unwrap();
+        wait_for_cwd(&manager, new, &dir);
+    }
+
+    #[test]
+    fn a_remote_or_missing_osc7_directory_falls_back_to_the_process() {
+        let proc_dir = tempfile::tempdir().unwrap().keep().canonicalize().unwrap();
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let script = "printf '\\033]7;file://elsewhere/etc\\007'; sleep 30";
+        let source = tab_running(&mut manager, script, proc_dir.to_str());
+        wait_for_osc7(&mut manager, source);
+
+        manager.create_tab().unwrap();
+
+        let new = manager.focused_terminal_id().unwrap();
+        wait_for_cwd(&manager, new, &proc_dir);
+        std::fs::remove_dir_all(&proc_dir).unwrap();
+    }
+
+    #[test]
+    fn inheriting_can_be_turned_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        manager.set_inherit_working_directory(false);
+        let script = format!(
+            "printf '\\033]7;file://%s\\007' '{}'; sleep 30",
+            dir.display()
+        );
+        let source = tab_running(&mut manager, &script, None);
+        wait_for_osc7(&mut manager, source);
+
+        manager.create_tab().unwrap();
+
+        let new = manager.focused_terminal_id().unwrap();
+        let started_in = std::env::current_dir().unwrap().canonicalize().unwrap();
+        wait_for_cwd(&manager, new, &started_in);
     }
 
     #[test]

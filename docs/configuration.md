@@ -100,6 +100,32 @@ If the file is missing or unreadable, Ultty starts as it would with the
 option off. A saved session takes precedence over a default launch profile.
 The default is `false`.
 
+## Where new tabs and splits open
+
+```toml
+[behavior]
+inherit_working_directory = true
+```
+
+With `true` (the default), a new tab or split starts in the directory of the
+pane it was made from: the focused pane for a new tab, the pane being split for
+a split. Ultty reads that directory from the shell's last OSC 7 report
+(`file://host/path`), which the shell integration scripts in
+`dist/shell-integration` send on every prompt. The report counts only when
+its host is empty, `localhost` or this machine's hostname (so a pane that is
+ssh'd elsewhere does not send the new shell to a path that exists only on the
+remote host) and the directory still exists. The path is percent-decoded.
+
+If the pane sent no usable OSC 7, Ultty uses the working directory of the
+pane's foreground process, read from `/proc` (Linux only). If that fails too,
+or with `false`, the new pane starts in the directory Ultty was started in.
+A config reload applies the setting to the next tab or split.
+
+A pane that runs a native-protocol app is an ordinary pane: its shell started
+the app, so a new tab or split opens where that shell last reported, not in
+the app's own directory. Tabs and splits made from a launch profile or by
+`ulttyctl` with an explicit directory use that directory instead.
+
 ## Line height
 
 ```toml

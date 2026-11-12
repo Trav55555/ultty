@@ -373,6 +373,7 @@ impl App {
         terminal_manager.set_theme_colors(config.colors.theme_colors());
         terminal_manager.set_scrollback_lines(config.behavior.scrollback_lines);
         terminal_manager.set_close_on_exit(config.behavior.close_on_exit);
+        terminal_manager.set_inherit_working_directory(config.behavior.inherit_working_directory);
         // Each terminal's I/O thread parses on its own and pokes the UI
         // through this proxy when there is something new to draw.
         let pty_proxy = std::sync::Mutex::new(event_proxy.clone());

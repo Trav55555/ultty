@@ -282,6 +282,8 @@ impl App {
             .set_scrollback_lines(new_config.behavior.scrollback_lines);
         self.terminal_manager
             .set_close_on_exit(new_config.behavior.close_on_exit);
+        self.terminal_manager
+            .set_inherit_working_directory(new_config.behavior.inherit_working_directory);
 
         // Update opacity
         self.renderer.set_opacity(new_config.behavior.opacity);

@@ -474,6 +474,13 @@ impl EventLoop {
         child_working_directory(self.child_pid())
     }
 
+    /// Best-effort working directory of the pane's foreground process (what
+    /// Alacritty opens new windows in), else of the shell itself.
+    pub fn foreground_working_directory(&self) -> Option<String> {
+        foreground_working_directory(self.child.pty_fd())
+            .or_else(|| child_working_directory(self.child_pid()))
+    }
+
     /// Get exit status if child has exited.
     pub fn exit_status(&self) -> Option<i32> {
         self.child.exit_status()
@@ -1131,6 +1138,23 @@ fn child_working_directory(pid: u32) -> Option<String> {
         .ok()
         .map(|path| path.to_string_lossy().into_owned())
         .filter(|path| !path.is_empty())
+}
+
+#[cfg(target_os = "linux")]
+fn foreground_working_directory(pty_fd: RawFd) -> Option<String> {
+    // SAFETY: `pty_fd` is an open PTY master file descriptor owned by the child
+    // wrapper. `tcgetpgrp` only queries kernel metadata for that terminal.
+    let pgrp = unsafe { nix::libc::tcgetpgrp(pty_fd) };
+    if pgrp <= 0 {
+        return None;
+    }
+    // The group leader is the pid that names the group.
+    child_working_directory(pgrp as u32)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn foreground_working_directory(_pty_fd: RawFd) -> Option<String> {
+    None
 }
 
 #[cfg(not(target_os = "linux"))]
