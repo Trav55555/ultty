@@ -491,9 +491,13 @@ impl EventLoop {
     /// The grid is resized before the PTY, so output the child produces in
     /// response to SIGWINCH is always parsed at the new size.
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
-        self.terminal().resize(Dimensions::new(cols, rows));
+        let cell = {
+            let mut terminal = self.terminal();
+            terminal.resize(Dimensions::new(cols, rows));
+            terminal.cell_pixel_size()
+        };
         self.child
-            .resize(PtySize::new(cols, rows))
+            .resize(PtySize::for_cells(cols, rows, cell))
             .map_err(io::Error::other)
     }
 
@@ -1651,6 +1655,26 @@ mod tests {
         assert!(event_loop.resize(120, 40).is_ok());
         assert_eq!(event_loop.terminal().dimensions().cols, 120);
         assert_eq!(event_loop.terminal().dimensions().rows, 40);
+    }
+
+    /// `ws_xpixel` and `ws_ypixel` as `TIOCGWINSZ` reports them on the master.
+    fn reported_pixels(event_loop: &EventLoop) -> (u16, u16) {
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        // SAFETY: the fd is the live PTY master and `size` is a valid winsize.
+        let status = unsafe { libc::ioctl(event_loop.child.pty_fd(), libc::TIOCGWINSZ, &mut size) };
+        assert_eq!(status, 0, "TIOCGWINSZ failed");
+        (size.ws_xpixel, size.ws_ypixel)
+    }
+
+    #[test]
+    fn resize_reports_the_cell_pixel_size_through_tiocgwinsz() {
+        let mut event_loop = EventLoop::with_command("/bin/cat", &["/bin/cat"], 80, 24)
+            .expect("Failed to spawn cat");
+        event_loop.terminal().set_cell_pixel_size(9, 18);
+
+        event_loop.resize(100, 30).expect("resize");
+
+        assert_eq!(reported_pixels(&event_loop), (900, 540));
     }
 
     #[test]

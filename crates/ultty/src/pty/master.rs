@@ -45,6 +45,23 @@ impl PtySize {
         }
     }
 
+    /// A `cols` x `rows` text area whose cells are `cell` pixels, when known.
+    ///
+    /// `TIOCGWINSZ` then reports the pixel size of the text area, which is
+    /// how image tools (`chafa`, `timg`, `img2sixel`) learn the cell size.
+    /// A product past `u16::MAX` saturates; the field cannot hold more.
+    pub fn for_cells(cols: u16, rows: u16, cell: Option<(u16, u16)>) -> Self {
+        match cell {
+            Some((width, height)) => Self::with_pixels(
+                cols,
+                rows,
+                width.saturating_mul(cols),
+                height.saturating_mul(rows),
+            ),
+            None => Self::new(cols, rows),
+        }
+    }
+
     fn to_winsize(self) -> Winsize {
         Winsize {
             ws_row: self.rows,
@@ -478,5 +495,15 @@ mod tests {
 
         let (pty, _slave) = Pty::open_with_size(size).unwrap();
         assert!(pty.resize(PtySize::new(80, 24)).is_ok());
+    }
+
+    #[test]
+    fn for_cells_reports_the_text_area_in_pixels() {
+        let size = PtySize::for_cells(80, 24, Some((9, 18)));
+        assert_eq!((size.pixel_width, size.pixel_height), (720, 432));
+        let unknown = PtySize::for_cells(80, 24, None);
+        assert_eq!((unknown.pixel_width, unknown.pixel_height), (0, 0));
+        let huge = PtySize::for_cells(1000, 1000, Some((100, 100)));
+        assert_eq!((huge.pixel_width, huge.pixel_height), (u16::MAX, u16::MAX));
     }
 }
