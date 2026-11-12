@@ -39,10 +39,12 @@ Ranked by how much a typical user would notice:
    `--working-directory`, `--config` or per-key override.
    Alacritty has `-e`, `--working-directory` and `-o key=value`. Ghostty has
    `-e` and `--key=value` for every config key.
-5. **Scrollback search is plain substring only.** Search is case-insensitive
-   substring matching, row by row, inside copy mode. Matches cannot span a
-   wrapped line and there is no regex. Alacritty searches by regex, and
-   Ghostty 1.3 added a dedicated search UI.
+5. **Scrollback search is plain substring only.** *Fixed.* Search joins
+   soft-wrapped rows, uses smart case, has an optional regex mode
+   (`[search] regex`, or Ctrl+R in the prompt), highlights every match, counts
+   them, and scans in 2 ms slices. It is still limited to copy mode: there is no
+   Ghostty-style search bar, and matching is per scrollback snapshot (see
+   `docs/configuration.md`).
 6. **No jump-to-prompt.** *Fixed.* Ctrl+Shift+PageUp and PageDown scroll to
    the previous and next prompt, and Ctrl+Shift+O selects the last command's
    output when it fits on screen. Longer output cannot be selected, because
@@ -178,7 +180,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Multiple windows | partial: one window per process; "New window" spawns a new process | yes | yes; `CreateNewWindow`, `msg create-window` | `app/input.rs` `MenuItem::NewWindow` |
 | Native vs self-drawn UI | self-drawn; no decorations, own tab bar | native GTK4/libadwaita and AppKit | native decorations, no chrome | `app/mod.rs` `with_decorations(false)`; `renderer/tabbar.rs` |
 | Quick terminal | no | yes; macOS and Wayland | no | none |
-| Search in scrollback | partial: case-insensitive substring per row, in copy mode; no regex | yes since 1.3 | yes; regex | `app/mod.rs` `perform_search` |
+| Search in scrollback | partial: in copy mode; smart case, optional regex, matches across wrapped lines, all matches highlighted with a count; no search bar | yes since 1.3 | yes; regex | `vim/search.rs`; `app/mod.rs` `perform_search` |
 | URL detection | yes; regex, Ctrl+click | yes; `link-url`, previews | yes; configurable regex hints | `url.rs` |
 | Vi or copy mode | yes; motions, search, char/line/block selection | no | yes | `vim/mod.rs` (tests in module) |
 | Selection: word, line, block | yes; double-click word, triple-click line, Alt for block | yes; plus select command output | yes; plus `semantic_escape_chars` | `app/input.rs` selection; `grid/terminal.rs` `SelectionMode`; `tests/selection.rs` |

@@ -71,31 +71,41 @@ impl Renderer {
                     );
                 }
 
-                // Draw search match highlights
+                // Draw search match highlights. Matches are in order, so
+                // only the ones that reach the viewport are visited.
                 let (matches, current_match) = copy_mode.search_matches();
-                if !matches.is_empty() {
-                    let match_color = Rgba::new(0.8, 0.6, 0.2, 0.4); // Yellow highlight
-                    let current_match_color = Rgba::new(1.0, 0.5, 0.0, 0.6); // Bright orange for current
-
-                    for (i, &(match_row, match_col)) in matches.iter().enumerate() {
-                        if let Some(visible_row) =
-                            viewport_row(match_row, scroll_offset, dims.rows as usize)
-                        {
-                            let color = if i == current_match {
-                                current_match_color
-                            } else {
-                                match_color
-                            };
-                            // Highlight single character for now (could extend to match length)
-                            self.emit_quad(
-                                &mut vertices,
-                                &mut indices,
-                                match_col as u16,
-                                match_col as u16 + 1,
-                                visible_row,
-                                color,
-                            );
-                        }
+                let rows = dims.rows as usize;
+                let cols = dims.cols;
+                let first = matches.partition_point(|m| m.end_row < scroll_offset);
+                let match_color = Rgba::new(0.8, 0.6, 0.2, 0.4); // Yellow highlight
+                let current_match_color = Rgba::new(1.0, 0.5, 0.0, 0.6); // Bright orange for current
+                for (i, m) in matches.iter().enumerate().skip(first) {
+                    if m.start_row >= scroll_offset + rows {
+                        break;
+                    }
+                    let color = if i == current_match {
+                        current_match_color
+                    } else {
+                        match_color
+                    };
+                    for row in
+                        m.start_row.max(scroll_offset)..=m.end_row.min(scroll_offset + rows - 1)
+                    {
+                        let Some(visible_row) = viewport_row(row, scroll_offset, rows) else {
+                            continue;
+                        };
+                        let Some((from, to)) = m.cols_on(row) else {
+                            continue;
+                        };
+                        let end = to.map_or(cols, |last| (last as u16 + 1).min(cols));
+                        self.emit_quad(
+                            &mut vertices,
+                            &mut indices,
+                            (from as u16).min(cols),
+                            end,
+                            visible_row,
+                            color,
+                        );
                     }
                 }
             }
@@ -293,16 +303,7 @@ impl Renderer {
         }
 
         let mode = copy_mode.vim_mode();
-        let text = match mode {
-            VimMode::Normal => "-- NORMAL --".to_string(),
-            VimMode::Visual => "-- VISUAL --".to_string(),
-            VimMode::VisualLine => "-- VISUAL LINE --".to_string(),
-            VimMode::VisualBlock => "-- VISUAL BLOCK --".to_string(),
-            VimMode::Search => {
-                let query = copy_mode.search_query();
-                format!("/ {}", query)
-            }
-        };
+        let text = copy_mode.status_line();
 
         // Position at bottom-left with some padding
         let padding = 8.0;

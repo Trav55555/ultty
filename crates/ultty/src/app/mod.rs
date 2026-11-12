@@ -36,6 +36,9 @@ use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 /// The window's title until the focused pane sets one.
 const WINDOW_TITLE: &str = "Ultty";
 
+/// Longest a copy-mode search holds the terminal lock per frame.
+const SEARCH_SLICE: Duration = Duration::from_millis(2);
+
 /// Default window dimensions.
 const DEFAULT_WIDTH: u32 = 800;
 const DEFAULT_HEIGHT: u32 = 600;
@@ -184,6 +187,8 @@ pub struct App {
     config: Config,
     /// Vim-style copy mode
     copy_mode: CopyMode,
+    /// The scrollback scan a copy-mode search is running, a slice per frame.
+    search_job: Option<ultty::vim::search::SearchJob>,
     /// URL detector
     url_detector: UrlDetector,
     /// Config file watcher for hot-reload
@@ -462,6 +467,7 @@ impl App {
             last_title_bar_toggle_click_time: Instant::now() - CLICK_THRESHOLD * 2,
             config,
             copy_mode: CopyMode::new(),
+            search_job: None,
             url_detector,
             config_watcher,
             bell_active_until: None,
@@ -1065,45 +1071,81 @@ impl App {
 
     /// Perform search in scrollback.
     fn perform_search(&mut self, query: &str) {
+        use ultty::vim::search::{Matcher, SearchJob, SearchOptions};
+        use ultty::vim::SearchStatus;
+
+        self.search_job = None;
         if query.is_empty() {
             return;
         }
-
-        let Some(terminal) = self.terminal() else {
-            return;
+        let options = SearchOptions {
+            regex: self.copy_mode.search_regex(),
+            ..self.config.search
         };
-        let buffer = terminal.buffer();
-        let mut matches = Vec::new();
-
-        let total_lines = buffer.total_lines();
-        for row in 0..total_lines {
-            if let Some(grid_row) = buffer.row_at(row) {
-                let text = grid_row.text_trimmed();
-                // Case-insensitive search; columns are char indices into the
-                // original row, not byte offsets into a lowercased copy.
-                let query_lower = query.to_lowercase();
-                for found in control_wait::find_ignore_case(&text, &query_lower) {
-                    matches.push((row, found.char_col));
+        match Matcher::new(query, options) {
+            Err(error) => {
+                self.copy_mode.begin_search();
+                self.copy_mode
+                    .set_search_status(SearchStatus::Invalid(error.to_string()));
+            }
+            Ok(matcher) => {
+                let job = self
+                    .terminal()
+                    .map(|terminal| SearchJob::new(matcher, terminal.buffer()));
+                if job.is_some() {
+                    self.search_job = job;
+                    self.copy_mode.begin_search();
                 }
             }
-        }
-
-        drop(terminal);
-
-        tracing::debug!("Search '{}': found {} matches", query, matches.len());
-        let has_matches = !matches.is_empty();
-        self.copy_mode.set_search_matches(matches);
-
-        // Jump to first match if any
-        if has_matches {
-            // Move cursor to first match
-            // The copy_mode's goto_next_match will handle positioning
         }
 
         // Also search native sessions if active
         if self.native_search_active {
             self.perform_native_search(query);
         }
+    }
+
+    /// Run the next slice of the copy-mode search, if one is under way, and
+    /// keep the matches clear of history the terminal has since evicted.
+    ///
+    /// The terminal lock is held for [`SEARCH_SLICE`] at most, so the
+    /// terminal keeps up with its PTY while a long scrollback is scanned.
+    fn advance_search(&mut self) {
+        use ultty::vim::SearchStatus;
+
+        if !self.copy_mode.is_active() {
+            self.search_job = None;
+            return;
+        }
+        let Some(mut job) = self.search_job.take() else {
+            // No scan: only drop matches in rows evicted since.
+            if !self.copy_mode.search_matches().0.is_empty() {
+                let evicted = self.terminal().map(|t| t.buffer().evicted_lines());
+                if let Some(evicted) = evicted {
+                    let before = self.copy_mode.search_matches().0.len();
+                    self.copy_mode.rebase_search(evicted);
+                    self.needs_redraw |= self.copy_mode.search_matches().0.len() != before;
+                }
+            }
+            return;
+        };
+        let Some(terminal) = self.terminal() else {
+            return;
+        };
+        let buffer = terminal.buffer();
+        let done = job.step(buffer, SEARCH_SLICE);
+        let percent = job.percent_done(buffer);
+        drop(terminal);
+        if done {
+            let (matches, evicted) = job.into_matches();
+            tracing::debug!("Search finished: {} matches", matches.len());
+            self.copy_mode.finish_search(matches, evicted);
+        } else {
+            self.copy_mode
+                .set_search_status(SearchStatus::Searching(percent));
+            self.search_job = Some(job);
+        }
+        self.needs_redraw = true;
     }
 
     /// Check if the visible tab has any native protocol sessions.

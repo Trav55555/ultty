@@ -31,6 +31,7 @@ impl App {
                 .as_ref()
                 .map_or(0, |server| server.session_count()),
             control_wait: self.next_control_wait_deadline(),
+            search_pending: self.search_job.is_some(),
             anchor_release: self
                 .protocol_server
                 .as_ref()
@@ -196,6 +197,8 @@ impl App {
             self.needs_redraw = true;
         }
         self.refresh_runtime_wakeup_fds();
+
+        self.advance_search();
 
         // Check for config file changes (hot-reload)
         if let Some(ref mut watcher) = self.config_watcher {
@@ -618,6 +621,8 @@ struct WakeState {
     control_wait: Option<Instant>,
     /// When an inline surface anchor that no surface claimed is released.
     anchor_release: Option<Instant>,
+    /// A scrollback search has rows left to scan.
+    search_pending: bool,
     /// When a coalesced accessibility tree is due; `None` unless a screen
     /// reader is listening and the screen changed.
     accessibility: Option<Instant>,
@@ -651,6 +656,7 @@ impl WakeState {
             self.control_wait,
             self.anchor_release,
             self.accessibility,
+            self.search_pending.then_some(now),
         ]
         .into_iter()
         .flatten()
@@ -900,8 +906,19 @@ mod tests {
             native_sessions: 0,
             control_wait: None,
             anchor_release: None,
+            search_pending: false,
             accessibility: None,
         }
+    }
+
+    #[test]
+    fn a_search_in_progress_wakes_the_loop_at_once() {
+        let now = Instant::now();
+        let state = WakeState {
+            search_pending: true,
+            ..idle(now)
+        };
+        assert_eq!(state.next_wake(now), Some(now));
     }
 
     #[test]

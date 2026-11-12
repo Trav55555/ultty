@@ -28,6 +28,8 @@ pub struct Config {
     pub terminal: TerminalConfig,
     /// Launch profiles
     pub profiles: ProfilesConfig,
+    /// Scrollback search
+    pub search: crate::vim::search::SearchOptions,
 }
 
 impl Config {
