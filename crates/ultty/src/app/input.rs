@@ -37,6 +37,7 @@ impl App {
             }
             WindowEvent::Resized(size) => {
                 self.handle_resize(size);
+                self.answer_pending_resizes(size);
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.handle_scale_factor_changed(scale_factor as f32);

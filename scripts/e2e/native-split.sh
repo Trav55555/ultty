@@ -136,10 +136,11 @@ wait_regions count "$app_pane" --cols "$cols" --rows "$rows" --text 3 ||
     fail "three presses of + did not count to 3"
 echo "native-split: keys reach the app"
 
-# 3. A window resize re-lays the scene out to the pane's new grid. On X11
-#    the new size arrives after the reply, which then reports a mismatch;
-#    the pane sizes below are the check.
-"$ULTTYCTL" resize 1000 700 >/dev/null 2>&1 || true
+# 3. A window resize re-lays the scene out to the pane's new grid. The
+#    reply waits for the window to have the size, even on X11 where the
+#    resize is applied after the request.
+"$ULTTYCTL" resize 1000 700 >"$out/resize.log" 2>&1 ||
+    fail "ulttyctl resize 1000 700 failed: $(cat "$out/resize.log")"
 ok=""
 for _ in $(seq 100); do
     new_cols=$(pane_field "$app_pane" cols)

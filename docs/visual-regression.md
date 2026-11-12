@@ -77,11 +77,13 @@ dispatch process, and artifact layout.
 Do not mix the dedicated live smoke workflow with performance thresholds until
 runner variance is measured.
 
-`ulttyctl resize` is platform/compositor dependent. On platforms where Winit
-does not accept programmatic resize requests, the control command must return a
-clear unsupported error rather than reporting success. Width-based visual
-reviews should confirm `ulttyctl info` and screenshot dimensions changed before
-treating captures as narrow/mid/wide evidence.
+`ulttyctl resize` is platform/compositor dependent. It succeeds only once the
+window has the requested size: where the platform resizes later (X11), the
+reply waits up to 2 s for the window to get there. A compositor or window
+manager that clamps or refuses the size gets a clear error naming the size the
+window has, never a success. Width-based visual reviews should confirm
+`ulttyctl info` and screenshot dimensions changed before treating captures as
+narrow/mid/wide evidence.
 
 ## Chrome Smoke
 
