@@ -56,6 +56,9 @@ The current dated evidence set is:
 - [`2026-11-08-control-latency.md`](./2026-11-08-control-latency.md) for
   control request and event delivery latency, and background tabs no longer
   redrawing the window.
+- [`2026-11-11-t4-three-way.md`](./2026-11-11-t4-three-way.md) for the
+  T4 three-way rerun (Ultty, Ghostty, Alacritty) on `main` after page
+  storage, with Wayland latency for all three.
 - [`2026-11-08-t4-comparison.md`](./2026-11-08-t4-comparison.md) for the
   T4 rerun with keypress-to-pixel latency, where startup goes, and the
   NVIDIA driver's idle wakeups.
