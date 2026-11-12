@@ -13,8 +13,13 @@ use std::time::{Duration, Instant};
 use ulttui::prelude::*;
 use ulttui::theme::{ButtonTheme, ControlTheme, DesignTokens, InputTheme, SelectionTheme, Theme};
 
+mod approval_client;
 mod commands;
+mod connection;
+mod contract_probe;
 mod daemon;
+mod native_stream;
+mod session_ui;
 mod sidebar;
 mod types;
 mod views;
@@ -110,7 +115,6 @@ pub(crate) struct PorygonTui {
     pub(crate) clock_text: String,
     pub(crate) terminal_width: u16,
     pub(crate) terminal_height: u16,
-    pub(crate) started_connection_msg: bool,
     pub(crate) command_registry: CommandRegistry,
     pub(crate) session_id: Option<String>,
     pub(crate) suggestions: Vec<(String, String)>,
@@ -127,12 +131,33 @@ pub(crate) struct PorygonTui {
     pub(crate) mcp_healthy_count: usize,
     pub(crate) mcp_last_error: Option<String>,
     pub(crate) model_last_error: Option<String>,
+    pub(crate) connection: Option<connection::Connection>,
+    pub(crate) current_run: Option<String>,
+    pub(crate) conversation_id: Option<String>,
+    pub(crate) stream_control: Option<tokio::sync::mpsc::Sender<native_stream::Control>>,
+    pub(crate) run_unresolved: bool,
+    pub(crate) stopping: bool,
+    pub(crate) approval_in_flight: bool,
+    pub(crate) approval_is_stream: bool,
+    pub(crate) tool_ids: Vec<String>,
+    pub(crate) current_response: Option<usize>,
+    pub(crate) run_can_continue: bool,
+    pub(crate) submitting_parked_run: bool,
+    pub(crate) run_epoch: u64,
+    pub(crate) queued_stream_approvals: std::collections::VecDeque<ApprovalRequest>,
 }
 
 impl PorygonTui {
     fn new() -> Self {
         let daemon_url =
             std::env::var("PORYGON_URL").unwrap_or_else(|_| "http://localhost:18789".to_string());
+        let connection = connection::Connection::from_env();
+        let connection_error = connection.as_ref().err().cloned();
+        let connection = connection.ok();
+        let client = connection
+            .as_ref()
+            .map(|c| c.client.clone())
+            .unwrap_or_default();
 
         Self {
             messages: vec![ChatMessage {
@@ -164,9 +189,9 @@ impl PorygonTui {
             chat_scroll: ScrollView::new(),
             status: AgentStatus::default(),
             daemon_url,
-            client: reqwest::Client::new(),
+            client,
             connected: false,
-            error: None,
+            error: connection_error,
             spinner_frame: 0,
             waiting_response: false,
             streaming_content: String::new(),
@@ -179,7 +204,6 @@ impl PorygonTui {
             clock_text: format_clock(),
             terminal_width: 200,
             terminal_height: 50,
-            started_connection_msg: false,
             command_registry: CommandRegistry::new(),
             session_id: None,
             suggestions: Vec::new(),
@@ -196,6 +220,20 @@ impl PorygonTui {
             mcp_healthy_count: 0,
             mcp_last_error: None,
             model_last_error: None,
+            connection,
+            current_run: None,
+            conversation_id: None,
+            stream_control: None,
+            run_unresolved: false,
+            stopping: false,
+            approval_in_flight: false,
+            approval_is_stream: false,
+            tool_ids: Vec::new(),
+            current_response: None,
+            run_can_continue: false,
+            submitting_parked_run: false,
+            run_epoch: 0,
+            queued_stream_approvals: std::collections::VecDeque::new(),
         }
     }
 }
@@ -206,9 +244,7 @@ enum Msg {
     SendMessage,
     PollConnection,
     PollStatus,
-    DaemonResponse(String),
-    DaemonError(String),
-    ConnectionChecked(bool),
+    ConnectionChecked(Result<(), String>),
     StatusUpdated(AgentStatus),
     SpinnerTick,
     ClockTick,
@@ -216,15 +252,20 @@ enum Msg {
     WeatherFetched(WeatherData),
     WeatherFailed,
     PollApprovals,
-    ApprovalReceived(ApprovalRequest),
+    ApprovalReceived(ApprovalRequest, bool),
     ApprovalDecision(bool),
-    ApprovalSubmitted,
+    ApprovalSubmitted(String, Result<(), String>),
+    ApprovalLoadFailed(String),
+    DismissApproval,
+    RefreshApproval,
+    ApprovalReconciled(String, Result<bool, String>),
     NoApprovalsPending,
     StreamToken(String),
-    StreamComplete,
-    StreamError(String),
     AbortStream,
-    StreamAbortAck(Result<(), String>),
+    NativeEvent(String, u64, native_stream::Event),
+    InspectRun,
+    RunObserved(String, u64, Result<connection::RunSnapshot, String>),
+    StopObserved(String, u64, Result<connection::RunSnapshot, String>),
     SessionsFetched(Vec<SessionInfo>),
     SessionResumed(Vec<ChatMessage>),
     SessionSaved,
@@ -304,6 +345,9 @@ impl Application for PorygonTui {
         if self.waiting_response {
             subs.push(Sub::every(Duration::from_millis(80), || Msg::SpinnerTick));
         }
+        if self.run_unresolved && !self.waiting_response {
+            subs.push(Sub::every(Duration::from_secs(3), || Msg::InspectRun));
+        }
         Sub::batch(subs)
     }
 
@@ -322,6 +366,9 @@ fn weather_enabled_from_env() -> bool {
 }
 
 fn main() -> anyhow::Result<()> {
+    if std::env::args().any(|arg| arg == "--verify-native-contract") {
+        return contract_probe::run().map_err(anyhow::Error::msg);
+    }
     PorygonTui::new().run_with_theme(porygon_theme())?;
     Ok(())
 }

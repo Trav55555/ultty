@@ -103,6 +103,10 @@ pub enum CommandAction {
     BenchmarkDiffWidget,
     /// Trigger immediate runtime reconnect checks.
     ReconnectRuntime,
+    /// Open the pending decision view.
+    ShowApprovals,
+    /// Inspect an existing durable run without submitting a turn.
+    AttachRun { id: String },
 }
 
 /// Metadata for a registered command.
@@ -140,6 +144,16 @@ impl CommandRegistry {
                     name: "sessions",
                     description: "List saved sessions",
                     usage: "/sessions",
+                },
+                Command {
+                    name: "approvals",
+                    description: "Open pending decisions",
+                    usage: "/approvals",
+                },
+                Command {
+                    name: "attach",
+                    description: "Inspect a durable run without resubmitting",
+                    usage: "/attach <run-id>",
                 },
                 Command {
                     name: "resume",
@@ -377,6 +391,13 @@ impl CommandRegistry {
                 Some(CommandAction::SaveSession { name })
             }
             "sessions" => Some(CommandAction::FetchSessions),
+            "approvals" => Some(CommandAction::ShowApprovals),
+            "attach" if args.len() == 1 => Some(CommandAction::AttachRun {
+                id: args[0].to_string(),
+            }),
+            "attach" => Some(CommandAction::SystemMessage(
+                "Usage: /attach <run-id>".into(),
+            )),
             "resume" => {
                 if args.is_empty() {
                     Some(CommandAction::SystemMessage(

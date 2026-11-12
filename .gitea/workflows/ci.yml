@@ -93,14 +93,15 @@ jobs:
           RUSTUP_TOOLCHAIN: ${{ env.RUST_MSRV }}
 
   # porygon-tui is outside the workspace (its own lockfile and a large
-  # dependency tree), so `cargo test --workspace` never builds it. Check it
-  # here so ulttui API changes cannot break it unnoticed.
+  # dependency tree), so workspace gates do not cover its daemon contracts.
   porygon-tui:
     name: porygon-tui
     runs-on: ultty
     steps:
       - uses: actions/checkout@v4
-      - run: scripts/ci-runner-step.sh cargo check --locked --manifest-path examples/porygon-tui/Cargo.toml
+      - run: cargo fmt --manifest-path examples/porygon-tui/Cargo.toml -- --check
+      - run: scripts/ci-runner-step.sh cargo clippy --locked --manifest-path examples/porygon-tui/Cargo.toml --all-targets -- -D warnings
+      - run: scripts/ci-runner-step.sh cargo test --locked --manifest-path examples/porygon-tui/Cargo.toml
 
   vt-integrity:
     name: VT integrity (deep property run)
